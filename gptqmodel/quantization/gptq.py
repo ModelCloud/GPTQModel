@@ -778,6 +778,41 @@ class GPTQ:
         if hint is not None:
             log.warn("Quantization: Module `%s` -> %s", self.name, hint)
 
+    def _run_with_accelerator_oom_cpu_fallback(
+        self,
+        compute: Callable[[], Any],
+        *,
+        source_device: torch.device,
+        stage: str,
+        prepare_cpu: Callable[[torch.device], None],
+    ) -> Tuple[Any, bool]:
+        """Run ``compute`` on the accelerator, retrying once on the host after an OOM.
+
+        GPTAQ and FOEM re-implement the block pass but used to call
+        ``hessian_inverse`` (and GPTAQ's native-delta product) without GPTQ's
+        allocation guard, so a cuSOLVER/hipSOLVER workspace failure aborted a
+        run GPTQ would have finished on CPU (issue #4604).
+
+        ``prepare_cpu`` must move every tensor the retry reads (Hessian,
+        weight, native delta, act-order permutations, static-group quantizers)
+        to the host and rebind the caller's variables through ``nonlocal``.
+        ``compute`` closes over those same variables, so its second invocation
+        runs entirely on the host.
+        """
+
+        try:
+            return compute(), False
+        except RuntimeError as exc:
+            if (
+                source_device.type != "cuda"
+                or not _is_memory_allocation_failure(exc)
+            ):
+                raise
+            self.log_cpu_fallback(stage, source_device)
+            cdu_device = torch.device("cpu")
+            prepare_cpu(cdu_device)
+            return compute(), True
+
     def _sanitize_scale_and_log(self, scale: torch.Tensor, zero: torch.Tensor):
         """Bypass zero scales and report the unstable module once per pass."""
 

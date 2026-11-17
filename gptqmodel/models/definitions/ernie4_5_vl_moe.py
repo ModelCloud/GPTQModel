@@ -13,13 +13,13 @@ from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 from transformers.masking_utils import create_causal_mask
 
-from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, get_module, move_to
 from ...utils.offload import is_meta_module, offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class Ernie4_5_VLMoeQModel(BaseQModel):
@@ -397,24 +397,28 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
     def load_processor(self) -> ProcessorMixin:
         return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=self.trust_remote_code)
 
+    def _prepare_calibration_batch(self, processor, batch):
+        text = processor.apply_chat_template(
+            batch, tokenize=False, add_generation_prompt=True
+        )
+        image_inputs = self.process_vision_info(batch)
+        return processor(
+            text=text,
+            images=image_inputs,
+            videos=None,
+            padding=True,
+            return_tensors="pt",
+        )
+
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        processor = self.load_processor()
-        calib_data = []
-        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
-            text = processor.apply_chat_template(
-                batch, tokenize=False, add_generation_prompt=True
-            )
-            image_inputs = self.process_vision_info(batch)
-            inputs = processor(
-                text=text,
-                images=image_inputs,
-                videos=None,
-                padding=True,
-                return_tensors="pt",
-            )
-            calib_data.append(inputs)
-        del processor
-        return calib_data
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_batch=self._prepare_calibration_batch,
+            preprocess_func=self.preprocess_dataset,
+        )
 
     def before_model_load(self, model_local_path: str, load_quantized_model: bool):
         from transformers.dynamic_module_utils import get_class_from_dynamic_module

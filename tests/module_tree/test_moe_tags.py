@@ -141,6 +141,9 @@ def test_registered_moe_model_tree_marks_dynamic_expert_root(model_cls, model_ty
             GraniteMoeHybridQModel,
             "block_sparse_moe",
             {
+                # The router is a checkpoint-owned 2-D weight on the MoE block
+                # input, so it is declared under the same :moe root.
+                "block_sparse_moe.router",
                 "block_sparse_moe.experts.0.gate_proj",
                 "block_sparse_moe.experts.0.up_proj",
                 "block_sparse_moe.experts.0.down_proj",

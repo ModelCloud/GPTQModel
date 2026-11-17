@@ -10,12 +10,12 @@ from typing import Dict
 
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 
-from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class InternS2PreviewQModel(BaseQModel):
@@ -184,27 +184,29 @@ class InternS2PreviewQModel(BaseQModel):
         for parent, attr_name in core_modules:
             setattr(parent, attr_name, move_to(getattr(parent, attr_name), device=CPU))
 
+    @classmethod
+    def prepare_inputs_for_conversations(
+        cls,
+        processor: ProcessorMixin,
+        conversations: list[dict] | list[list[dict]],
+    ):
+        return processor.apply_chat_template(
+            conversations,
+            tokenize=True,
+            add_generation_prompt=True,
+            processor_kwargs={"padding": True},
+            return_dict=True,
+            return_tensors="pt",
+        )
+
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        del kwargs
-        processor = self.load_processor()
-        calibration_data = []
-        for batch in batched_conversations(
+        return prepare_vlm_calibration_dataset(
+            self,
             calibration_dataset,
-            batch_size,
-            process_func=self.preprocess_dataset,
-        ):
-            calibration_data.append(
-                processor.apply_chat_template(
-                    batch,
-                    tokenize=True,
-                    add_generation_prompt=True,
-                    processor_kwargs={"padding": True},
-                    return_dict=True,
-                    return_tensors="pt",
-                )
-            )
-        del processor
-        return calibration_data
+            batch_size=batch_size,
+            options=kwargs,
+            preprocess_func=self.preprocess_dataset,
+        )
 
 
 __all__ = ["InternS2PreviewQModel"]

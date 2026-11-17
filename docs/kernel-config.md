@@ -107,6 +107,7 @@ flowchart LR
 | `env_flag("GPTQMODEL_FP32_ACCUM")` | `gemm_awq.py:30`, `gemm_awq_triton.py:32`, `quantization/awq/**/gemm.py:28`, `quantization/paroquant/**/gemm.py:32` | `KernelConfig.fp32_accum` |
 | `os.getenv("GPTQMODEL_AWQ_TRITON_SCHEDULE")` at import | `quantization/awq/modules/triton/scheduler.py:27` | `KernelConfig.awq_triton_schedule` |
 | `GPTQMODEL_GGUF_FUSED_*`, `GGUF_CPP_NATIVE_MATMUL`, `GGUF_CPP_THREADS` | `qlinear/gguf.py:1197-1215`, `qlinear/gguf_cpp.py:445,1190` | `KernelConfig.gguf_*` |
+| `GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER`, `..._TORCH_LOADER`, `..._DEQUANT_DEVICE`, `..._DEQUANT_MAX_BYTES` | `models/loader.py`, `utils/hf.py:699`, `utils/internal_gguf.py:281,314` | `KernelConfig.gguf_native_quantized_loader`, `gguf_torch_dequant_loader`, `gguf_dequant_device`, `gguf_dequant_chunk_bytes` |
 | `GPTQMODEL_PAROQUANT_*` behaviour switches | `qlinear/paroquant.py:53-66`, `paroquant_triton.py:66-70`, `quantization/paroquant/**` | `KernelConfig.paroquant_*` |
 | `GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_*` timing knobs | `gptqmodel_ext/paroquant/rotation.cu` | internal constants; `KernelConfig.paroquant_rotate_autotune` / `_cta_m` / `_row_pad` select behaviour |
 | `GPTQMODEL_BITSANDBYTES_*`, `GPTQMODEL_BNB_TRITON`, `GPTQMODEL_DISABLE_BITBLAS` | `qlinear/bitsandbytes.py:49,57`, `bitsandbytes_triton.py:109`, `bitblas.py:115` | `KernelConfig.bitsandbytes_*`, `disable_bitblas` |
@@ -138,6 +139,11 @@ mutations to the original legacy object do not change those modules. Shared
 quantization and host utilities still use a process-wide fallback installed
 before the loop or load starts. Concurrent quantization runs with different
 shared runtime settings are not isolated.
+
+Resolution snapshots the request as well: `resolve_backend_config` copies a
+caller-supplied legacy `KernelConfig`, so mutating that object after
+`resolve_quantize_backend` / `resolve_backend_config` returns does not change
+`QuantizeConfig._resolved_kernel` or any module built from it (#4615).
 
 ### Forward dispatch reads the module snapshot
 
@@ -228,11 +234,12 @@ representation, not another machine's kernel tuning.
 | `gguf_fused_cpu_min_matrix_elements` | `0` | Matrix-size floor for the fused CPU forward. |
 | `gguf_fused_chunk_blocks` | `0` | Explicit K-chunk block count. `0` uses the byte budget. |
 | `gguf_fused_chunk_bytes` | `33554432` | Transient-memory budget for one K chunk. |
-| `gguf_fused_autotune_warmup` | `1` | Warmup launches per autotune candidate. |
-| `gguf_fused_autotune_iters` | `2` | Timed launches per autotune candidate. |
-| `gguf_fused_autotune_margin` | `0.05` | Relative margin a candidate must win by. |
 | `gguf_cpp_native_matmul` | `None` | Force the native ggml matmul on or off. `None` follows capability. |
 | `gguf_cpp_threads` | `None` | Native ggml CPU thread count. `None` follows torch. |
+| `gguf_native_quantized_loader` | `True` | Parse a single-layout GGUF checkpoint with the native reader instead of the dense Transformers import. |
+| `gguf_torch_dequant_loader` | `None` | Dense import converts GGUF tensors straight to Torch. `None` follows `gguf_dequant_device`. |
+| `gguf_dequant_device` | `None` | Torch device (`cpu` or `cuda[INDEX]`) for that conversion. `None` keeps the reference NumPy path. |
+| `gguf_dequant_chunk_bytes` | `268435456` | Transient-memory budget for one sign-only NumPy conversion chunk. |
 
 ### ParoQuant
 

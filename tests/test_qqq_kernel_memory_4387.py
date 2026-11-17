@@ -1,12 +1,16 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Kernel-memory regressions for issue #4387 items 1 and 4.
+"""Kernel-memory regressions for issues #4387, #4488 and #4621.
 
-Item 1: QQQ's INT32 global-reduce scratch is one lazily grown buffer per
-device, not one per module (5.25 GiB on Llama-3-8B).  Item 4: the portable
-Torch QQQ kernel unpacks INT4 codes without the old INT64/FP32 per-forward
-temporaries.  Neither test needs the QQQ CUDA extension.
+Item 1 (#4387): QQQ's INT32 global-reduce scratch is not one persistent buffer
+per module (5.25 GiB on Llama-3-8B).  #4524 then keyed the shared buffer by
+stream to fix a race (#4488), but that cache outlived the model and pinned one
+max-width buffer for every stream ever seen (#4621).  The scratch is now
+allocated per kernel call: it carries no state across calls, and the caching
+allocator reuses the block.  Item 4 (#4387): the portable Torch QQQ kernel
+unpacks INT4 codes without the old INT64/FP32 per-forward temporaries.  These
+tests need neither the QQQ CUDA extension nor a CUDA device.
 """
 
 import pytest
@@ -89,27 +93,37 @@ def _oracle_int8_weight(module: QQQTorchLinear) -> torch.Tensor:
     return (signed * 16).to(torch.int8)
 
 
-def test_qqq_reduce_scratch_is_one_shared_per_device_buffer():
-    qqq_module._clear_reduce_scratch()
+def test_qqq_reduce_scratch_is_allocated_per_call():
+    """#4621: the reduce scratch must not be cached across forwards.
+
+    A cache keyed by device and stream outlived the model: 32 pooled streams
+    pinned 1.75 GiB on an 8B model after `del model`.  Every call now owns its
+    buffer, and the shape the kernel indexes is unchanged.
+    """
+
     device = torch.device("cpu")
+    rows = 16 * 64
 
-    narrow = qqq_module._shared_reduce_scratch(device, 128)
-    narrower = qqq_module._shared_reduce_scratch(device, 64)
-    assert narrow.shape == (1024, 128)
-    assert narrower.shape == (1024, 64)
-    assert narrow.is_contiguous() and narrower.is_contiguous()
-    assert narrow.untyped_storage().data_ptr() == narrower.untyped_storage().data_ptr()
+    first = qqq_module._allocate_reduce_scratch(device, 128)
+    second = qqq_module._allocate_reduce_scratch(device, 128)
+    assert first.shape == (rows, 128)
+    assert first.dtype == torch.int32 and first.device.type == "cpu"
+    assert first.is_contiguous()
+    assert first.untyped_storage().data_ptr() != second.untyped_storage().data_ptr()
 
-    wide = qqq_module._shared_reduce_scratch(device, 256)
-    assert wide.shape == (1024, 256)
-    assert wide.numel() == 1024 * 256
-    # Growing replaces the allocation, and later callers share the new one.
-    after_growth = qqq_module._shared_reduce_scratch(device, 128)
-    assert after_growth.untyped_storage().data_ptr() == wide.untyped_storage().data_ptr()
+    # A narrower call allocates only what it indexes instead of a wide buffer.
+    narrow = qqq_module._allocate_reduce_scratch(device, 64)
+    assert narrow.shape == (rows, 64)
 
 
-def test_qqq_linear_modules_share_the_scratch_and_register_no_reduce_buffer(monkeypatch):
-    qqq_module._clear_reduce_scratch()
+def test_qqq_module_has_no_process_wide_reduce_scratch_cache():
+    """No module-level cache may survive the last QQQLinear."""
+
+    for name in ("_REDUCE_SCRATCH", "_REDUCE_SCRATCH_LOCK", "_shared_reduce_scratch", "_clear_reduce_scratch"):
+        assert not hasattr(qqq_module, name), name
+
+
+def test_qqq_linear_modules_allocate_their_own_scratch_and_register_no_reduce_buffer(monkeypatch):
     monkeypatch.setattr(
         QQQLinear, "cached_validate_once", classmethod(lambda cls: (True, None))
     )
@@ -129,12 +143,11 @@ def test_qqq_linear_modules_share_the_scratch_and_register_no_reduce_buffer(monk
         assert "reduce_buffer" not in module._buffers
         assert all("reduce_buffer" not in name for name, _ in module.named_buffers())
     scratch = [module._reduce_scratch(torch.device("cpu")) for module in modules]
-    assert scratch[0].untyped_storage().data_ptr() == scratch[1].untyped_storage().data_ptr()
+    assert scratch[0].untyped_storage().data_ptr() != scratch[1].untyped_storage().data_ptr()
     assert scratch[0].shape == (modules[0].max_par * 64, modules[0].out_features)
 
 
-def test_qqq_native_forward_passes_the_shared_scratch_as_c(monkeypatch):
-    qqq_module._clear_reduce_scratch()
+def test_qqq_native_forward_passes_a_fresh_scratch_as_c(monkeypatch):
     monkeypatch.setattr(
         QQQLinear, "cached_validate_once", classmethod(lambda cls: (True, None))
     )
@@ -142,7 +155,10 @@ def test_qqq_native_forward_passes_the_shared_scratch_as_c(monkeypatch):
     calls = []
 
     def fake_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16):
-        calls.append((tuple(C.shape), C.untyped_storage().data_ptr()))
+        # Retain ``C`` so the allocator cannot legally reuse the block: the
+        # contract is that the two live buffers never alias, not that the two
+        # calls get different addresses over time.
+        calls.append(C)
         D.zero_()
 
     monkeypatch.setattr(qqq_module, "qqq_gemm", fake_gemm)
@@ -157,38 +173,24 @@ def test_qqq_native_forward_passes_the_shared_scratch_as_c(monkeypatch):
     wide(torch.randn(2, 128, dtype=torch.float16))
     narrow(torch.randn(2, 128, dtype=torch.float16))
 
-    assert calls == [
-        ((1024, 256), calls[0][1]),
-        ((1024, 128), calls[0][1]),
-    ]
+    # Each call gets the contiguous (max_par * 64, out_features) C the kernel
+    # indexes, and no call reuses another call's writable buffer (#4621).
+    assert [tuple(scratch.shape) for scratch in calls] == [(1024, 256), (1024, 128)]
+    assert calls[0].untyped_storage().data_ptr() != calls[1].untyped_storage().data_ptr()
 
 
-def test_qqq_reduce_scratch_is_exclusive_per_stream():
-    """Two live streams must not share the writable C reduction scratch.
+def test_qqq_reduce_scratch_is_exclusive_per_call():
+    """Two calls must never share the writable C reduction scratch.
 
-    The native kernel reads and writes ``C`` for the whole call, so an
-    allocation lock is not enough: the buffer must belong to the stream whose
-    work will use it.  ``stream`` lets this run without a CUDA device; the
-    CUDA test below exercises the real ``torch.cuda.current_stream`` lookup.
+    The native kernel reads and writes ``C`` for the whole call, so the buffer
+    belongs to the call that enqueues the kernel.  Distinct calls get distinct
+    storage whether or not they run on the same stream.
     """
 
-    qqq_module._clear_reduce_scratch()
     device = torch.device("cpu")
-
-    first = qqq_module._shared_reduce_scratch(device, 64, stream="stream-a")
-    second = qqq_module._shared_reduce_scratch(device, 64, stream="stream-b")
+    first = qqq_module._allocate_reduce_scratch(device, 64)
+    second = qqq_module._allocate_reduce_scratch(device, 64)
     assert first.untyped_storage().data_ptr() != second.untyped_storage().data_ptr()
-
-    # Calls on one stream are ordered by that stream and may reuse its buffer.
-    first_again = qqq_module._shared_reduce_scratch(device, 64, stream="stream-a")
-    assert first_again.untyped_storage().data_ptr() == first.untyped_storage().data_ptr()
-
-    # A device with no stream keeps one shared buffer, as before.
-    qqq_module._clear_reduce_scratch()
-    plain = qqq_module._shared_reduce_scratch(device, 64)
-    plain_again = qqq_module._shared_reduce_scratch(device, 64)
-    assert plain.untyped_storage().data_ptr() == plain_again.untyped_storage().data_ptr()
-    qqq_module._clear_reduce_scratch()
 
 
 @pytest.mark.cuda
@@ -199,43 +201,42 @@ def test_qqq_reduce_scratch_is_exclusive_per_stream():
 def test_qqq_reduce_scratch_is_exclusive_per_cuda_stream():
     """Concurrent CUDA streams get independent reduce scratch, not one alias."""
 
-    qqq_module._clear_reduce_scratch()
     device = torch.device("cuda", torch.cuda.current_device())
     first_stream = torch.cuda.Stream(device=device)
     second_stream = torch.cuda.Stream(device=device)
     try:
         with torch.cuda.stream(first_stream):
-            first = qqq_module._shared_reduce_scratch(device, 64)
+            first = qqq_module._allocate_reduce_scratch(device, 64)
         with torch.cuda.stream(second_stream):
-            second = qqq_module._shared_reduce_scratch(device, 64)
+            second = qqq_module._allocate_reduce_scratch(device, 64)
         with torch.cuda.stream(first_stream):
-            first_again = qqq_module._shared_reduce_scratch(device, 64)
+            first_again = qqq_module._allocate_reduce_scratch(device, 64)
 
         assert first.data_ptr() != second.data_ptr()
-        assert first_again.data_ptr() == first.data_ptr()
+        assert first_again.data_ptr() != first.data_ptr()
     finally:
         first_stream.synchronize()
         second_stream.synchronize()
-        qqq_module._clear_reduce_scratch()
 
 
 @pytest.mark.cuda
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or IS_ROCM,
-    reason="QQQ's native kernel is CUDA-only; HIP exposes CUDA streams too",
-)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA streams required")
 def test_qqq_native_forward_separates_scratch_across_streams(monkeypatch):
-    """Two eager modules on different streams must not pass the same C range."""
+    """Two eager modules on different streams must not pass the same C range.
 
-    qqq_module._clear_reduce_scratch()
+    The kernel call is mocked, so this needs CUDA streams but not the native
+    extension; HIP exposes the same stream API.
+    """
+
     monkeypatch.setattr(
         QQQLinear, "cached_validate_once", classmethod(lambda cls: (True, None))
     )
     monkeypatch.setattr(qqq_module, "qqq_runtime_available", lambda: True)
-    pointers = []
+    scratches = []
 
     def fake_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16):
-        pointers.append(C.data_ptr())
+        # Retain ``C``; a freed block may legally be handed to a later call.
+        scratches.append(C)
         D.zero_()
 
     monkeypatch.setattr(qqq_module, "qqq_gemm", fake_gemm)
@@ -261,10 +262,9 @@ def test_qqq_native_forward_separates_scratch_across_streams(monkeypatch):
     finally:
         for stream in streams:
             stream.synchronize()
-        qqq_module._clear_reduce_scratch()
 
-    assert len(pointers) == 2
-    assert pointers[0] != pointers[1]
+    assert len(scratches) == 2
+    assert scratches[0].data_ptr() != scratches[1].data_ptr()
 
 
 def test_qqq_torch_unpack_uint4_matches_int64_oracle_bitwise():

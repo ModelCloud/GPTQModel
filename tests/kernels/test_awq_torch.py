@@ -360,3 +360,295 @@ def test_awq_torch_dequantize_supports_non_half_compute_dtype(scale):
     assert torch.equal(
         weight, torch.full((16, 8), scale, dtype=torch.float32, device=_AWQ_TEST_DEVICE)
     )
+
+
+# --- AWQ decode-range contract ------------------------------------------------
+#
+# A portable AWQ checkpoint stores one scale per group and integer codes, so a
+# decoded weight is ``(code - zero) * scale``. Decoding that grid into the
+# activation dtype before the product turns a large scale into ``inf`` and a
+# tiny scale into ``0``; no later FP32 accumulation can recover either. The
+# tests below pack known codes and bytes, then compare with an independent FP64
+# oracle that decodes the words itself from the source scale value.
+
+_AWQ_DEVICES = [torch.device("cpu")] + (
+    [torch.device("cuda")] if torch.cuda.is_available() else []
+)
+_AWQ_PACK_ORDER = (0, 2, 4, 6, 1, 3, 5, 7)
+
+
+def _pack_layer(*, scale, code, zero, bits=4, in_features=128, out_features=128,
+                group_size=128, scale_dtype=torch.float32, device=None):
+    """Build an ``AwqTorchLinear`` whose codes and zero points are constant."""
+
+    device = torch.device("cpu") if device is None else device
+    codes = torch.full((in_features, out_features), code, dtype=torch.int32)
+    zeros = torch.full((in_features // group_size, out_features), zero, dtype=torch.int32)
+    module = AwqTorchLinear(
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        dtype=torch.float16,
+    )
+    module.register_buffer("qweight", _pack_awq_tensor(codes, bits).to(device))
+    module.register_buffer("qzeros", _pack_awq_tensor(zeros, bits).to(device))
+    module.register_buffer(
+        "scales",
+        torch.full((in_features // group_size, out_features), scale, dtype=scale_dtype).to(device),
+    )
+    module.bias = None
+    module.post_init()
+    return module.to(device).eval()
+
+
+def _decode_oracle(*, module, x, scale, code, zero):
+    """Decode the packed words and accumulate in FP64, independently.
+
+    ``scale`` is the checkpoint value, never ``module.scales``: the oracle must
+    not inherit a conversion the implementation applies.
+    """
+
+    order = _AWQ_PACK_ORDER
+
+    def unpack(packed):
+        packed = packed.detach().cpu().to(torch.int64) & 0xFFFFFFFF
+        codes = torch.empty((packed.shape[0], packed.shape[1] * 8), dtype=torch.float64)
+        for column in range(packed.shape[1]):
+            word = packed[:, column]
+            for lane, source_column in enumerate(order):
+                codes[:, column * 8 + source_column] = (word >> (4 * lane)) & 15
+        return codes
+
+    codes = unpack(module.qweight)
+    zeros = unpack(module.qzeros)
+    assert torch.equal(codes, torch.full_like(codes, float(code)))
+    assert torch.equal(zeros, torch.full_like(zeros, float(zero)))
+
+    groups = torch.arange(module.in_features) // module.group_size
+    group_scales = torch.full(
+        (module.in_features // module.group_size, module.out_features),
+        float(scale),
+        dtype=torch.float64,
+    )
+    weight = (codes - zeros[groups]) * group_scales[groups]
+    x64 = x.detach().cpu().to(torch.float64)
+    return x64 @ weight
+
+
+@pytest.mark.parametrize("device", _AWQ_DEVICES, ids=str)
+@pytest.mark.parametrize(
+    ("label", "scale", "code", "zero", "value", "expected"),
+    [
+        # 7 * 10000 = 70000 exceeds the FP16 maximum; the FP16 decode is `inf`
+        # for every one of the 16384 weights.
+        ("weight-overflow", 10000.0, 7, 0, 0.001, 8963.623046875),
+        # 1e-8 is below the FP16 subnormal range; the FP16 decode is `0` for
+        # every weight, so 60000 activations produce zero.
+        ("scale-underflow", 1e-8, 1, 0, 60000.0, 0.07680000000000024),
+    ],
+)
+def test_awq_torch_decode_range_matches_fp64_oracle(
+    device, label, scale, code, zero, value, expected
+):
+    module = _pack_layer(scale=scale, code=code, zero=zero, device=device)
+    x = torch.full((1, 128), value, dtype=torch.float16, device=device)
+
+    actual = module(x)
+    reference = _decode_oracle(module=module, x=x, scale=scale, code=code, zero=zero)
+
+    assert actual.dtype is torch.float16
+    assert actual.device == x.device
+    assert torch.isfinite(actual).all(), label
+    assert actual[0, 0].item() != 0.0, label
+    # Only the final FP16 output rounding may differ from the FP64 reference.
+    torch.testing.assert_close(
+        actual, reference.to(device=actual.device, dtype=actual.dtype), rtol=0, atol=0
+    )
+    assert reference[0, 0].item() == pytest.approx(expected, rel=1e-12)
+
+
+@pytest.mark.parametrize("device", _AWQ_DEVICES, ids=str)
+def test_awq_torch_decode_range_keeps_checkpoint_scale_precision(device):
+    """Each supported checkpoint scale dtype decodes against the same oracle."""
+
+    in_features = 128
+    code, zero = 3, 2
+    # Codes (3 - 2) = 1, so the weight equals the stored scale exactly.
+    scale = 0.5
+    x = torch.linspace(-1.0, 1.0, in_features, dtype=torch.float16).reshape(1, -1).to(device)
+
+    for scale_dtype in (torch.float16, torch.bfloat16, torch.float32):
+        module = _pack_layer(
+            scale=scale, code=code, zero=zero, scale_dtype=scale_dtype, device=device
+        )
+        stored = module.scales.clone()
+        qweight = module.qweight.clone()
+        qzeros = module.qzeros.clone()
+
+        actual = module(x)
+        reference = _decode_oracle(
+            module=module, x=x, scale=stored.float().max().item(), code=code, zero=zero
+        )
+
+        assert actual.dtype is torch.float16
+        torch.testing.assert_close(
+            actual, reference.to(device=device, dtype=torch.float16), rtol=0, atol=0
+        )
+        assert module.scales.dtype is scale_dtype
+        assert torch.equal(module.scales, stored)
+        assert torch.equal(module.qweight, qweight)
+        assert torch.equal(module.qzeros, qzeros)
+
+
+def _fp16_boundary_scales():
+    """FP16 decode boundary and one representable FP16 step on each side.
+
+    ``span`` is the largest INT4 code. A scale is range-safe when its FP16 cast
+    is nonzero and ``span * scale`` is still finite. The neighbours are exact
+    FP32 source values so a source that underflows to zero stays
+    distinguishable from a checkpoint that stores zero.
+    """
+
+    span = (1 << 4) - 1
+    info = torch.finfo(torch.float16)
+    # Largest FP16 scale whose product with the largest code stays finite.
+    upper_fit = float(torch.tensor(info.max / span, dtype=torch.float16))
+    while upper_fit * span > info.max:
+        upper_fit = float(torch.nextafter(
+            torch.tensor(upper_fit, dtype=torch.float16), torch.tensor(0.0, dtype=torch.float16)
+        ))
+    upper_below = float(torch.nextafter(
+        torch.tensor(upper_fit, dtype=torch.float16), torch.tensor(0.0, dtype=torch.float16)
+    ))
+    upper_above = float(torch.nextafter(
+        torch.tensor(upper_fit, dtype=torch.float16), torch.tensor(torch.inf, dtype=torch.float16)
+    ))
+    lower_fit = info.smallest_normal * info.eps  # 2**-24, smallest subnormal
+    return [
+        ("below-upper", upper_below, True),
+        ("at-upper", upper_fit, True),
+        ("above-upper", upper_above, False),
+        ("above-lower", lower_fit * 2, True),
+        ("at-lower", lower_fit, True),
+        ("below-lower", lower_fit / 2, False),
+    ]
+
+
+@pytest.mark.parametrize("device", _AWQ_DEVICES, ids=str)
+@pytest.mark.parametrize(("label", "scale", "fits_fp16"), _fp16_boundary_scales())
+def test_awq_torch_decode_range_threshold_neighbors(device, label, scale, fits_fp16):
+    """The decode dtype switches exactly at the FP16 range boundary."""
+
+    assert scale != 0.0
+    # Code 15 with zero 0 is the largest representable magnitude.
+    module = _pack_layer(
+        scale=scale, code=15, zero=0, scale_dtype=torch.float32, device=device
+    )
+    assert module._decode_dtype_for_activation(torch.float16) is (
+        torch.float16 if fits_fp16 else torch.float32
+    )
+    # BF16 keeps the FP32 exponent range, so every FP16 boundary case stays in
+    # the activation dtype there.
+    assert module._decode_dtype_for_activation(torch.bfloat16) is torch.bfloat16
+
+    # The input keeps the reduction inside the FP16 output range; the test
+    # is about decoded weights, not about an overflowing visible sum.
+    x = torch.full((1, 128), 0.001, dtype=torch.float16, device=device)
+    actual = module(x)
+    reference = _decode_oracle(module=module, x=x, scale=scale, code=15, zero=0)
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(
+        actual, reference.to(device=device, dtype=torch.float16), rtol=0, atol=0
+    )
+
+
+@pytest.mark.parametrize("device", _AWQ_DEVICES, ids=str)
+@pytest.mark.parametrize("activation_dtype", [torch.float16, torch.bfloat16])
+def test_awq_torch_decode_range_both_activation_dtypes(device, activation_dtype):
+    """The underflow case must keep a nonzero weight for both dtypes."""
+
+    scale, code, zero, value = 1e-8, 1, 0, 60000.0
+    module = _pack_layer(scale=scale, code=code, zero=zero, device=device)
+    x = torch.full((1, 128), value, dtype=activation_dtype, device=device)
+
+    actual = module(x)
+    reference = _decode_oracle(module=module, x=x, scale=scale, code=code, zero=zero)
+
+    assert actual.dtype is activation_dtype
+    assert actual[0, 0].item() != 0.0
+    torch.testing.assert_close(
+        actual, reference.to(device=device, dtype=activation_dtype), rtol=0, atol=0
+    )
+
+
+@pytest.mark.parametrize("device", _AWQ_DEVICES, ids=str)
+def test_awq_torch_decode_range_is_call_local(device):
+    """The wide decode must not leave a dense weight on the module."""
+
+    in_features = out_features = 128
+    module = _pack_layer(scale=10000.0, code=7, zero=0, device=device)
+    x = torch.full((2, in_features), 0.001, dtype=torch.float16, device=device)
+
+    with torch.inference_mode():
+        first = module(x)
+        second = module(x)
+
+    assert torch.equal(first, second)
+    assert first[0, 0] == 8960.0
+    retained = list(vars(module).values()) + list(module.buffers()) + list(module.parameters())
+    assert not any(
+        isinstance(value, torch.Tensor) and value.shape == (in_features, out_features)
+        for value in retained
+    )
+    # The decision follows the live scales: replacing them and clearing the
+    # derived cache selects the next decode without a stale result.
+    assert module._decode_dtype_for_activation(torch.float16) is torch.float32
+    module.scales = torch.full_like(module.scales, 0.5)
+    module.clear_weight_cache()
+    assert module._decode_dtype_for_activation(torch.float16) is torch.float16
+    # A stale decision must not select the narrow decode for an overflowing
+    # checkpoint: the key covers identity, version, device, dtype, and shape.
+    module.scales.data.copy_(torch.full_like(module.scales, 1e4))
+    module.clear_weight_cache()
+    assert module._decode_dtype_for_activation(torch.float16) is torch.float32
+
+
+@pytest.mark.parametrize("device", _AWQ_DEVICES, ids=str)
+def test_awq_torch_decode_range_bound_is_conservative(device):
+    """An in-range code grid may still take the wide decode."""
+
+    # The bound is 15 * 10000, so FP16 is rejected even though every code here
+    # is 1 and the actual weight, 10000, is inside the FP16 finite range.
+    module = _pack_layer(scale=10000.0, code=1, zero=0, device=device)
+    assert module._decode_dtype_for_activation(torch.float16) is torch.float32
+
+    x = torch.ones((1, 128), dtype=torch.float16, device=device)
+    reference = _decode_oracle(module=module, x=x, scale=10000.0, code=1, zero=0)
+    torch.testing.assert_close(
+        module(x), reference.to(device=device, dtype=torch.float16), rtol=0, atol=0
+    )
+
+
+@pytest.mark.parametrize("device", _AWQ_DEVICES, ids=str)
+def test_awq_torch_decode_range_widens_past_fp32(device):
+    """A BF16 scale beyond the FP32 weight range decodes in FP64."""
+
+    # 15 * 1e38 overflows FP32 but is representable in FP64; a BF16 activation
+    # would narrow the weight to `inf` and an FP32 decode would do the same.
+    scale = 1e38
+    module = _pack_layer(
+        scale=scale, code=1, zero=0, scale_dtype=torch.bfloat16, device=device
+    )
+    assert module._decode_dtype_for_activation(torch.bfloat16) is torch.float64
+
+    # A single 1.0 activation keeps the visible sum at 1e38, which BF16 still
+    # holds; the check is that the decoded weight was not narrowed to `inf`.
+    x = torch.zeros((1, 128), dtype=torch.bfloat16, device=device)
+    x[0, 0] = 1.0
+    actual = module(x)
+    assert torch.isfinite(actual).all()
+    assert actual[0, 0].item() == float(torch.tensor(scale, dtype=torch.bfloat16))

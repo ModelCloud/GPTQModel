@@ -7,10 +7,10 @@ from typing import Dict
 
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 
-from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .lfm3 import LFM3QModel
 
 
@@ -138,15 +138,17 @@ class LFM3VLQModel(LFM3QModel):
             return_tensors="pt",
             return_dict=True,
             tokenize=True,
+            padding=True,
         )
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        processor = self.load_processor()
-        calib_data = []
-        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
-            calib_data.append(self.prepare_inputs_for_conversations(processor, batch))
-        del processor
-        return calib_data
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            preprocess_func=self.preprocess_dataset,
+        )
 
 
 __all__ = ["LFM3VLQModel"]

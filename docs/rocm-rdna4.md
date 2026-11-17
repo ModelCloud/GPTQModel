@@ -54,7 +54,7 @@ table instead of a single module-level constant set.
 | ParoQuant Triton | ✅ explicit `PAROQUANT_TRITON` only | ✅ measured (per-family tiles) | ✅ (family table) | portable Triton ops; AUTO keeps the Torch `ParoLinear` kernel. Per-family, row-banded launch table; the RDNA4 tiles are 1.31-1.72x faster than the historical CUDA tile (see *ParoQuant Triton* below) |
 | GGUF | ✅ `GGUF_TRITON` (AUTO) or `GGUF_TORCH` | ✅ measured | ✅ (family table) | `GGUF_TRITON` now declares `DEVICE.ROCM` and validates there; on ROCm `_cuda_device_capability()` returns `None`, so only the generic launch configs run (no SM80/SM89 specialization). Measured 5.0-13.1x faster than `GGUF_TORCH` at decode **and** prefill, so AUTO (priority 45) selects it; `GGUF_TORCH` stays available via `BACKEND.GGUF_TORCH` |
 | FP8 Torch | ✅ (family table) | ✅ measured | ✅ (family table) | `_scaled_mm` accepts `float8_e4m3fn`/`e5m2` and rejects the `fnuz` encodings on gfx1201; a rejected dtype is logged once and falls back to dequantize + matmul |
-| VPTQ | ✅ via `VPTQ_TORCH` (`vptq_cuda` is CUDA-only and rejects ROCm explicitly) | ✅ | ✅ | |
+| VPTQ | ✅ via `VPTQ_TORCH` (`vptq_cuda` is CUDA-only and rejects ROCm explicitly) | ✅ | ✅ | `VPTQCudaLinear` ranks above `VPTQLinear` (110 vs 100) so AUTO loads the fused kernel on NVIDIA; `validate_once` rejects ROCm before any build, so AUTO still lands on `VPTQ_TORCH` here |
 | EXL3 | ✅ `EXL3_TORCH` only | ✅ | ✅ | tensor-core GEMM tables are `nullptr` on ROCm; AUTO selects `EXL3_TORCH` |
 | Marlin / Machete / Swordfish / BitBLAS / W4A-NVFP4 | ❌ | ❌ | ❌ | deliberately unsupported: NVIDIA-only kernels (Marlin `mma.sync`/`cp.async` with tile permutes, Hopper/Blackwell CUTLASS for Machete/Swordfish, BitBLAS TensorCore IR, SM12.1 FP4 tensor cores for W4A-NVFP4) with no HIP lowering. None lists `DEVICE.ROCM`, so the AUTO candidate list filters them out before validation; an explicit selection fails with an actionable error naming the portable backend. See *Deliberately unsupported backends* below |
 
@@ -98,12 +98,16 @@ identical GPTQ runs then save different checkpoints — measured on Qwen2.5-0.5B
 therefore exports `ROCBLAS_USE_HIPBLASLT=0` at import unless the caller already
 set it, so rocBLAS runs its own deterministic kernels.
 
-That pin is scoped to methods that build a Hessian. #4079 forced rocBLAS for
-every calibrated run; on gfx1201 rocBLAS has no fast fp16/bf16 kernels, so AWQ
-and RTN paid 8-14x on their GEMMs with no determinism gain. A run plan that
-contains a Hessian builder - GPTQ, QQQ, VPTQ, MACaQ, EXL3 or calibrated FP8 GSQ
-(`_needs_deterministic_hessian` in `gptqmodel/models/base.py`) - now pins
-rocBLAS, and every other method pins hipBLASLt for its whole run. #4105 gated
+That pin is scoped to methods that build a Hessian or input Gram. #4079 forced
+rocBLAS for every calibrated run; on gfx1201 rocBLAS has no fast fp16/bf16
+kernels, so AWQ and RTN paid 8-14x on their GEMMs with no determinism gain. A
+run plan that contains a Hessian/Gram builder - GPTQ, QQQ, VPTQ, MACaQ, EXL3,
+calibrated FP8 GSQ or an EoRA adapter (`_needs_deterministic_hessian` in
+`gptqmodel/models/base.py`) - now pins rocBLAS, and every other method pins
+hipBLASLt for its whole run. An AWQ plan with an EoRA adapter therefore pins
+rocBLAS for the whole run as well: EoRA's fp32 input Gram accumulates from the
+same calibration forwards, and the guard cannot switch backends for a nested
+secondary phase. #4105 gated
 this on `ProcessorStep.GPTQ` alone and therefore dropped QQQ, which does build a
 Hessian: four QQQ runs then produced three distinct checkpoints differing in
 490/627 tensors (issue #4123). The Hessian builders keep the pin for the

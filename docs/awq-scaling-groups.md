@@ -27,9 +27,13 @@ This page documents the contracts consumed by
    norm, a norm with an input-dependent gate, a `Conv1D`, or a
    `HyperConnection` has no plain gain to divide; the group is dropped and the
    layer stays quantized plainly.
+6. **An excluded projection is never a fold source.** A `:!`/`:?` Linear has
+   no compensation step: dividing its output rows would change a tensor the
+   checkpoint keeps in the source dtype. The group is dropped and the consumer
+   is quantized plainly.
 
 Introduced by the fixes for issues #4005, #4017, #4039, #4093 (items 1-6) and
-#4121 (items 6-10).
+#4121 (items 6-10). Rule 6 was added for #4651.
 
 ## Flow
 
@@ -47,7 +51,7 @@ flowchart TD
     L --> M["update tracker to block[-1]"]
     M --> N["_merge_shared_source_nodes<br/>one group per gain norm"]
     N --> O["_filter_awq_scaling_sources"]
-    O --> P{"prev_op nosrc<br/>or width mismatch?"}
+    O --> P{"prev_op nosrc,<br/>non-quantized Linear,<br/>or width mismatch?"}
     P -- "yes" --> Q["drop group<br/>consumer uses plain quantization"]
     P -- "no" --> R["keep group"]
     Q --> S["AWQProcessor._quantize_layer"]
@@ -62,6 +66,17 @@ flowchart TD
 The tracker update runs for every block, including blocks skipped because
 `prev_op is None`. That keeps the "previous linear in tree order" fallback
 available for the next block instead of leaving `last_module` unset.
+
+`_filter_awq_scaling_sources` therefore rejects a 2-D source that the plan
+declares `:!`/`:?`. Tree order alone cannot tell a sequential producer from a
+sibling declared inside a consumer's block: Jamba declares
+`mamba: ("in_proj:0", "x_proj:1", "out_proj:2", "conv1d:!", "dt_proj:!")`, so
+`block[-1]` was the excluded `mamba.dt_proj` and the next block (`mamba.x_proj`)
+folded its scale there. `x_proj` reads `silu(conv1d(in_proj(x)))`; `dt_proj`
+reads `x_proj`'s own output, so the width check passed while the data flow did
+not. `mamba.x_proj` is now quantized with no fold, and `dt_proj` keeps its
+checkpoint weights. A gain norm (1-D `weight`, divided by `scale_ln_fcs`) and a
+quantized Linear remain valid sources.
 
 ## Scale-search safety
 
@@ -182,6 +197,7 @@ The immediate repairs use existing declarations, not a graph compiler or DSL:
 | `longcat_flash` | Indexed norms and dual residual sublayers were treated as one sequential path. | Declare indexed norm owners and nested router weights; disable the ambiguous attention/output sources. |
 | `inkling_mm_model` | The norm fed unhandled native 3-D shared experts as well as routed experts. | Disable that norm's fold and explicitly exclude shared-expert, scale, convolution and relative-logit owners. |
 | `qwen` | The inferred `w2` source crosses SiLU. | Mark `w2:nosrc`. |
+| `granitemoehybrid` | Tree order folded `in_proj` into `out_proj` across the convolution and the SSM scan, and the post-attention norm was folded for the routed experts although `shared_mlp.input_linear` also reads it. | Mark `in_proj:nosrc`, `post_attention_layernorm:nosrc`; declare the router owner; `out_proj` folds the gated output `norm` (exact). |
 
 ```mermaid
 flowchart TD
@@ -207,6 +223,43 @@ quantization path for that group; this is different from rejecting a generated
 group under `fallback=None`. The safety checks are not expanded to infer an
 arbitrary graph. Raw replay exceptions (for example a native Bloom forward
 missing its residual argument) remain errors, not configured fallback.
+
+### `granitemoehybrid`: state-space path and cross-block consumer
+
+`GraniteMoeHybridDecoderLayer` runs `mamba` on the Mamba layers, then gives the
+post-attention norm to `block_sparse_moe` **and** `shared_mlp`
+(`modeling_granitemoehybrid.py` on Transformers 5.22). The Mamba mixer splits
+`in_proj` into a gate, the convolution input and `dt`; the convolution and the
+SSM scan consume those channels before the gated `norm` feeds `out_proj`.
+
+| Situation | Before | After |
+| --- | --- | --- |
+| `in_proj -> out_proj` group | emitted; a non-unit fold changed the full logits by 1.6e-1 | `in_proj:nosrc`, so the group is dropped |
+| `mamba.norm -> out_proj` group | not reachable (`norm` was undeclared) | declared `norm:!`; the fold is exact (1.6e-7) |
+| `post_attention_layernorm -> experts` group | emitted; the MoE replay boundary excludes `shared_mlp`, so logits drifted by 1.5e-2 | norm declared `nosrc`; routed and shared projections quantize plainly |
+| Router owner | `plan.find("block_sparse_moe.router")` was `None` | `router:!` under the `:moe` root keeps its checkpoint weight and is a declared consumer of the MoE input norm |
+| `conv1d`, `norm`, container parameters | undeclared / no explicit policy | `conv1d:!`, `norm:!`, container `mamba:!` |
+
+```mermaid
+flowchart LR
+    N["post_attention_layernorm:!:nosrc"] --> R["block_sparse_moe.router:!"]
+    N --> E["experts.N.gate_proj / up_proj"]
+    N --> S["shared_mlp.input_linear"]
+    E --> D["experts.N.down_proj"]
+    I["input_layernorm"] --> P["mamba.in_proj:nosrc"]
+    P --> C["mamba.conv1d:!"]
+    C --> M["SSM scan / mamba.D / A_log / dt_bias"]
+    M --> G["mamba.norm:!"]
+    G --> O["mamba.out_proj"]
+    style N fill:#fff3cd,stroke:#997404
+    style P fill:#fff3cd,stroke:#997404
+    style R fill:#e2e3e5,stroke:#41464b
+```
+
+`tests/module_tree/test_granitemoehybrid_model_tree.py` pins the owners, the
+router policy, and the exact group set from the real tiny model; its
+full-model fold invariant runs transformers' eager Torch Mamba-2 reference
+(the installed `mamba_ssm` kernels are CUDA-only).
 
 ## Issue #4175: gated, lerped and hyper-connection consumers
 

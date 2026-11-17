@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from ...utils.calibration import batched
+from transformers import ProcessorMixin
+
 from ...utils.looper_helpers import normalize_device_like
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
@@ -11,6 +12,7 @@ from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
 from ..local import LocalModelLoader
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class ApertusQModel(BaseQModel):
@@ -146,22 +148,25 @@ class Apertus1p5QModel(BaseQModel):
             tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
         )
 
+    @classmethod
+    def prepare_inputs_for_conversations(
+        cls,
+        processor: ProcessorMixin,
+        conversations: list[dict] | list[list[dict]],
+    ):
+        return processor.apply_chat_template(
+            conversations,
+            add_generation_prompt=False,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+            processor_kwargs={"padding": True},
+        )
+
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        del kwargs
-        processor = self.processor or self.load_processor()
-        calibration_data = []
-        for batch in batched(calibration_dataset, batch_size):
-            calibration_data.append(
-                processor.apply_chat_template(
-                    batch,
-                    add_generation_prompt=False,
-                    tokenize=True,
-                    return_dict=True,
-                    return_tensors="pt",
-                    processor_kwargs={"padding": True},
-                )
-            )
-        return calibration_data
+        return prepare_vlm_calibration_dataset(
+            self, calibration_dataset, batch_size=batch_size, options=kwargs
+        )
 
 
 __all__ = ["Apertus1p5QModel", "Apertus1p5TextQModel", "ApertusQModel"]

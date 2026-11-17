@@ -7,12 +7,12 @@ from typing import Dict
 
 from transformers import AutoModelForCausalLM, AutoProcessor, ProcessorMixin
 
-from ...utils.calibration import batched_conversations
 from ...utils.image import load_image_from_url
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class InternS1QModel(BaseQModel):
@@ -124,19 +124,16 @@ class InternS1QModel(BaseQModel):
 
         return sample
 
-    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        processor = self.load_processor()
-        calib_data = []
-        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
-            batched_samples = []
-            for sample in batch:
-                batched_samples.append(self.replace_image_with_pil(sample))
+    def _prepare_calibration_batch(self, processor, batch):
+        batched_samples = [self.replace_image_with_pil(sample) for sample in batch]
+        return self.prepare_inputs_for_conversations(processor, batched_samples)
 
-            calib_data.append(
-                self.prepare_inputs_for_conversations(
-                    processor,
-                    batched_samples,
-                )
-            )
-        del processor
-        return calib_data
+    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_batch=self._prepare_calibration_batch,
+            preprocess_func=self.preprocess_dataset,
+        )

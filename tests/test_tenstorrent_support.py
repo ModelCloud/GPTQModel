@@ -3068,6 +3068,190 @@ def test_gptqmodel_load_consumes_a_blockfloat_checkpoint(tmp_path):
         GPTQModel.load(out, device="xla:0")
 
 
+def _scalar_blockfloat_oracle(block, bits):
+    """Independent double-precision oracle for one block, built from scratch.
+
+    It performs its own arithmetic: ``math.frexp`` for the exact binade index,
+    ``round`` for round-to-nearest-even and Python floats for the squared error.
+    The fp32 inputs are exactly representable in double, and every scale is a
+    power of two, so each intermediate below is exact and the answer is a
+    bit-level expectation rather than a re-run of the implementation.
+    """
+
+    import math
+
+    levels = 1 << max(bits - 2, 0)
+    limit = 2.0 - 1.0 / levels
+    smallest = float(torch.finfo(torch.float32).tiny)
+    magnitude = max(abs(float(v)) for v in block)
+    safe = max(magnitude, smallest)
+    base = math.frexp(safe)[1] - 1
+
+    def round_with(exp):
+        scale = 2.0 ** exp
+        out = []
+        for value in block:
+            unit = round(float(value) / scale * levels) / levels
+            unit = min(max(unit, -limit), limit)
+            out.append(unit * scale)
+        return out
+
+    def error(values):
+        return sum((v - float(x)) ** 2 for v, x in zip(values, block))
+
+    best = round_with(base)
+    best_error = error(best)
+    best_exp = base
+    for delta in (-1, 1):
+        candidate_exp = base + delta
+        if not -127 <= candidate_exp <= 127:
+            continue
+        candidate = round_with(candidate_exp)
+        candidate_error = error(candidate)
+        if math.isfinite(candidate_error) and candidate_error < best_error:
+            best, best_error, best_exp = candidate, candidate_error, candidate_exp
+    return best, best_exp
+
+
+def test_blockfloat_largest_finite_value_uses_the_storable_exponent():
+    """``float32.max`` must quantize inside the grid, not overflow to NaN.
+
+    The shared exponent is the binade index of the block maximum. Deriving it
+    with ``floor(torch.log2(max))`` gave 128 for ``float32.max``, because
+    ``log2`` rounds to nearest and the value sits one step below ``2**128``.
+    ``2**128`` is inf, so the ``+1`` candidate produced ``0 * inf = NaN`` and
+    that NaN error also blocked the ``-1`` candidate from replacing the base.
+
+    The invariant is on the public quantizer: every finite input produces a
+    finite grid, and the chosen exponent is a storable one. The expected values
+    come from the scalar double-precision oracle, not from the implementation.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    fmax = torch.finfo(torch.float32).max
+    for width in (2, 4, 8):
+        block = torch.full((1, 16), fmax)
+        quantized, exponent = bq.quantize_blockfloat(block, width)
+
+        expected, expected_exp = _scalar_blockfloat_oracle(block.reshape(-1).tolist(), width)
+        assert int(exponent[0, 0]) == expected_exp == 127
+        assert torch.isfinite(quantized).all(), "an illegal exponent leaked a NaN"
+        assert torch.equal(quantized.reshape(-1), torch.tensor(expected, dtype=torch.float32))
+        assert int(exponent.max()) <= bq.BLOCKFLOAT_EXPONENT_MAX
+
+        # The result must still be a checkpoint-storable grid point.
+        codes, recovered = bq.decompose_blockfloat(quantized, width)
+        assert torch.equal(bq.recompose_blockfloat(codes, recovered, bits=width), quantized)
+        assert int(recovered.max()) <= bq.BLOCKFLOAT_EXPONENT_MAX
+
+    # The negative extreme takes the same path with the sign preserved.
+    negative = torch.full((1, 16), -fmax)
+    quantized, exponent = bq.quantize_blockfloat(negative, 4)
+    assert int(exponent[0, 0]) == 127
+    assert torch.isfinite(quantized).all()
+    assert quantized.min() < -1e38
+
+
+def test_blockfloat_binade_boundaries_derive_the_exact_exponent():
+    """The base exponent must be the binade index at every boundary.
+
+    ``torch.log2`` reads a value just below ``2**k`` as exactly ``k`` and then
+    ``floor`` yields ``k``, one too high; ``float32.max`` is the extreme case at
+    ``k = 128``. A bit-level extraction is exact, so it is the reference here.
+    Power-of-two neighbours, the smallest normal and the smallest subnormal all
+    have to agree, and every result has to stay finite and on the grid.
+    """
+
+    import importlib
+    import math
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    tiny = torch.finfo(torch.float32).tiny
+    smallest_subnormal = torch.tensor(2.0**-149, dtype=torch.float32)
+    fmax = torch.finfo(torch.float32).max
+
+    values = [
+        torch.tensor(0.0),
+        torch.tensor(tiny),
+        smallest_subnormal,
+        torch.tensor(fmax),
+    ]
+    for k in range(-126, 128):
+        boundary = torch.tensor(2.0**k, dtype=torch.float32)
+        below = torch.nextafter(boundary, torch.zeros((), dtype=torch.float32))
+        above = torch.nextafter(boundary, torch.tensor(math.inf, dtype=torch.float32))
+        for value in (below, boundary, above):
+            if bool(torch.isfinite(value)) and float(value) > 0:
+                values.append(value)
+
+    stacked = torch.stack(values).reshape(-1, 1).expand(-1, 16).contiguous()
+    blocks = stacked.reshape(-1, 1, 16)
+    got = bq._block_base_exponent(blocks).reshape(-1)
+
+    # Independent expectation: the exponent field of the float, with the same
+    # clamp-to-tiny convention the quantizer documents for a zero block.
+    safe = stacked[:, 0].abs().clamp_min(tiny)
+    want = ((safe.view(torch.int32) >> 23) & 0xFF) - 127
+    assert torch.equal(got.to(torch.int32), want), "base exponent is not the binade index"
+
+    # Independently, through frexp, except where the clamp changes a subnormal.
+    frexp_exp = (torch.frexp(safe)[1] - 1).to(torch.int32)
+    clamped = stacked[:, 0].abs() < tiny
+    assert torch.equal(got[~clamped].to(torch.int32), frexp_exp[~clamped])
+
+    for width in (4, 8):
+        quantized, exponent = bq.quantize_blockfloat(stacked, width)
+        assert torch.isfinite(quantized).all()
+        assert int(exponent.min()) >= bq.BLOCKFLOAT_EXPONENT_MIN
+        assert int(exponent.max()) <= bq.BLOCKFLOAT_EXPONENT_MAX
+
+    # Smallest normal and subnormal: the former is exactly representable, the
+    # latter flushes to zero on the -126 binade grid.
+    quantized, exponent = bq.quantize_blockfloat(torch.full((1, 16), tiny), 4)
+    assert int(exponent[0, 0]) == -126 and float(quantized[0, 0]) == float(tiny)
+    quantized, exponent = bq.quantize_blockfloat(
+        torch.full((1, 16), float(smallest_subnormal)), 4
+    )
+    assert int(exponent[0, 0]) == -126 and float(quantized[0, 0]) == 0.0
+
+
+def test_blockfloat_rejects_nonfinite_blocks():
+    """NaN and infinity have no block-float representation, so refuse them.
+
+    Deriving an exponent from a non-finite maximum used to produce a silently
+    finite-looking grid (or NaN codes); a checkpoint cannot store either. The
+    contract is a ``ValueError`` before any arithmetic, so the caller learns
+    that the weight must not be quantized rather than receiving poison.
+    """
+
+    import importlib
+    import math
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    for bad in (math.inf, -math.inf, math.nan):
+        with pytest.raises(ValueError, match="non-finite"):
+            bq.quantize_blockfloat(torch.full((1, 16), bad), 4)
+    # A single non-finite value in an otherwise ordinary block is still refused.
+    mixed = torch.zeros(1, 16)
+    mixed[0, 7] = math.inf
+    with pytest.raises(ValueError, match="non-finite"):
+        bq.quantize_blockfloat(mixed, 8)
+    with pytest.raises(ValueError, match="non-finite"):
+        bq._block_exponents(mixed)
+
+    # The fixed-exponent rounding entry point cannot be handed a scale that has
+    # no representation either.
+    with pytest.raises(ValueError, match="block-float exponents must lie in"):
+        bq._round_with_exponents(
+            torch.randn(1, 16), torch.tensor([[bq.BLOCKFLOAT_EXPONENT_MAX + 1]]), bits=4
+        )
+
+
 def test_blockfloat_exponent_search_beats_floor_log2():
     """Per-block exponent selection must lower error without leaving the grid.
 

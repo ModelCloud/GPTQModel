@@ -13,7 +13,7 @@ from ...quantization.awq.utils.packing_utils import dequantize_gemm, pack_awq
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
-from ._numerics import matmul_fp32_reduce
+from ._numerics import linear_wide_bias, matmul_fp32_reduce
 from ._runtime_cache import tensor_cache_key
 
 
@@ -88,6 +88,8 @@ class AwqTorchLinear(AWQuantLinear):
         self._cpu_packed_bias = None
         self._cpu_packed_key = None
         self._cpu_packed_warning_logged = False
+        self._decode_range_key = None
+        self._decode_range_fits = True
 
     def post_init(self):
         # `scales` and `bias` keep the precision they were loaded with. The
@@ -107,6 +109,8 @@ class AwqTorchLinear(AWQuantLinear):
         self._cpu_packed_bias = None
         self._cpu_packed_key = None
         self._cpu_packed_warning_logged = False
+        self._decode_range_key = None
+        self._decode_range_fits = True
 
     def extra_repr(self) -> str:
         return (
@@ -174,6 +178,84 @@ class AwqTorchLinear(AWQuantLinear):
             bias = bias.to(device=device).contiguous()
         return bias
 
+    def _stored_decode_range_fits(self, dtype: torch.dtype) -> bool:
+        """Whether every representable decoded weight stays in ``dtype``'s range.
+
+        The checkpoint stores one scale per group and integer codes in
+        ``[0, 2**bits - 1]``, so a decoded weight is ``(code - zero) * scale``
+        with magnitude at most ``(2**bits - 1) * |scale|``. Decoding into a
+        half activation dtype is range-safe only when that bound is finite in
+        the dtype and the smallest nonzero scale still produces a nonzero
+        weight. Above the largest finite value the weight becomes ``inf``;
+        below the smallest subnormal it becomes ``0``. Either corruption
+        happens inside the decoder, before any FP32 accumulation can help.
+
+        The bound is conservative: it does not decode the packed codes, so it
+        may pick a wide decode for a layer whose actual codes stay in range. A
+        false positive spends a wider decode instead of returning wrong
+        output.
+        """
+
+        scales = self.scales
+        if scales is None or scales.numel() == 0 or scales.device.type == "meta":
+            return True
+        key = (tensor_cache_key(scales), dtype, self.bits)
+        if key == self._decode_range_key:
+            return self._decode_range_fits
+
+        # A host-side value would become a data-dependent branch in a compiled
+        # graph and cannot be read during CUDA graph capture. Keep the
+        # conservative wide decode in both cases without caching the choice:
+        # the graph re-reads the live scale tensor on every replay, and an
+        # eager call after capture must still be allowed the narrow decode.
+        if torch.compiler.is_compiling() or (
+            scales.device.type == "cuda" and torch.cuda.is_current_stream_capturing()
+        ):
+            return False
+
+        # Check the actual cast the decoder will perform, in the decoder's
+        # dtype: a scale that overflows, or a nonzero scale that rounds to
+        # zero, is not representable there, and neither is a scale whose
+        # largest code (`2**bits - 1`) makes the product overflow. The three
+        # reductions run on the scale's device and synchronize only on a cache
+        # miss (a checkpoint load, move, or explicit clear).
+        span = (1 << self.bits) - 1
+        magnitude = scales.detach().abs()
+        converted = magnitude.to(dtype)
+        fits = (
+            bool(converted.isfinite().all())
+            and bool((converted * span).isfinite().all())
+            and not bool(((magnitude > 0) & (converted == 0)).any())
+        )
+        self._decode_range_key = key
+        self._decode_range_fits = fits
+        return fits
+
+    def _decode_dtype_for_activation(self, activation_dtype: torch.dtype) -> torch.dtype:
+        """Return the dtype that decodes the checkpoint without range loss.
+
+        FP32 and wider activations already decode at their own precision.
+        FP16/BF16 activations decode in their own dtype only while the stored
+        scales keep every decoded weight finite and nonzero-representable;
+        otherwise the decode uses FP32 and the product accumulates wide, so a
+        stored scale is never rounded away inside the decoder. The decision is
+        keyed by the live scale tensor, so a checkpoint load, a device/dtype
+        move, or a ``clear_weight_cache()`` selects the next decode instead of
+        reusing a stale answer.
+        """
+
+        if activation_dtype not in (torch.float16, torch.bfloat16):
+            return activation_dtype
+        if self._stored_decode_range_fits(activation_dtype):
+            return activation_dtype
+        # FP32 holds every FP16 checkpoint scale exactly and covers the whole
+        # BF16 scale range in every ordinary case. Only a checkpoint whose
+        # scale magnitude exceeds the FP32 weight range (a BF16 scale above
+        # ~2.3e37 at four bits) needs the wider decode.
+        if self._stored_decode_range_fits(torch.float32):
+            return torch.float32
+        return torch.float64
+
     def _dequantize_weight_for_inference(
         self,
         x_flat: torch.Tensor,
@@ -192,8 +274,10 @@ class AwqTorchLinear(AWQuantLinear):
             bits=self.bits,
             group_size=self.group_size,
         )
-        if weight.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-            raise AssertionError(f"weight {weight.dtype} is not float16, bfloat16, or float32")
+        if weight.dtype not in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
+            raise AssertionError(
+                f"weight {weight.dtype} is not float16, bfloat16, float32, or float64"
+            )
         if weight.dtype != dtype or weight.device != x_flat.device or not weight.is_contiguous():
             weight = weight.to(device=x_flat.device, dtype=dtype).contiguous()
         return weight
@@ -309,8 +393,19 @@ class AwqTorchLinear(AWQuantLinear):
         # must remain the dense dequantize + matmul oracle; the BF16-only
         # AVX512 path is selected explicitly through TorchCpuAvx512AwqLinear.
         # Subclasses such as ParoQuant use the shared dequantize helper.
-        weight = self._dequantize_weight_for_inference(x_flat, dtype=compute_dtype)
-        output = matmul_fp32_reduce(x_flat, weight, bias=self._bias_for_compute(device=device))
+        # The decode dtype follows the stored checkpoint range, not only the
+        # activation dtype: narrowing an overflowing or underflowing weight
+        # first produces `inf`/`0`, which no later FP32 reduction recovers.
+        decode_dtype = self._decode_dtype_for_activation(compute_dtype)
+        weight = self._dequantize_weight_for_inference(x_flat, dtype=decode_dtype)
+        bias = self._bias_for_compute(device=device)
+        if weight.dtype == x_flat.dtype:
+            output = matmul_fp32_reduce(x_flat, weight, bias=bias)
+        else:
+            # Wide decode: promote the activation for this call, accumulate in
+            # FP32, add the stored bias there, and round once at the output.
+            # The reconstructed weight stays call-local.
+            output = linear_wide_bias(x_flat, weight.t(), bias)
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)

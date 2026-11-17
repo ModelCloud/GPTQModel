@@ -108,6 +108,11 @@ class MarlinLinear(GPTQQuantLinear):
 
     REQUIRES_FORMAT_V2 = False
 
+    # The Marlin evaluator adds the bias to its FP32 accumulator before the
+    # visible cast, so the buffer keeps its checkpoint width instead of
+    # following the model dtype at load time.
+    MODEL_DTYPE_BUFFERS = ()
+
     # for transformers/optimum tests compat
     QUANT_TYPE = "marlin"
 
@@ -475,9 +480,12 @@ class MarlinLinear(GPTQQuantLinear):
         _transform_param(self, "scales", transform_w_s)
 
         if hasattr(self, "bias") and self.bias is not None:
-            self.bias.data = marlin_permute_bias(
-                marlin_pad_dim(self.bias, self.out_features, padded_n)
-            )
+            # The kernel addresses the bias in its padded tile order, so the
+            # launch operand is derived per call (``_kernel_bias``) instead of
+            # replacing the registered buffer. ``self.bias`` therefore keeps
+            # the checkpoint width and order, and a value the activation dtype
+            # cannot hold is never narrowed here.
+            self._marlin_bias_padding = (self.out_features, padded_n)
 
         # The checkpoint's GPTQ words are now Marlin-tile-permuted and the
         # original zero points are gone. Mark the module so a state-dict save
@@ -499,6 +507,30 @@ class MarlinLinear(GPTQQuantLinear):
                 )
         super()._save_to_state_dict(destination, prefix, keep_vars)
 
+    def _kernel_bias(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        """Return the FP32, tile-ordered bias operand for this call.
+
+        ``self.bias`` keeps the checkpoint width and order. The kernel reads a
+        padded, Marlin-permuted operand and adds it in FP32, so a wide stored
+        value has to reach the launch without an intermediate 16-bit cast. The
+        derivation is a temporary operand: nothing is written back to the
+        registered buffer, and no state is retained across calls.
+        """
+
+        bias = self.bias
+        if bias is None:
+            return None
+        if bias.device != x.device:
+            bias = bias.to(device=x.device)
+        source, padded = getattr(
+            self, "_marlin_bias_padding", (self.out_features, self.out_features)
+        )
+        if bias.dtype != torch.float32:
+            bias = bias.to(dtype=torch.float32)
+        if bias.shape != (source,):
+            bias = bias.reshape(-1)
+        return marlin_permute_bias(marlin_pad_dim(bias, source, padded))
+
     def forward(self, x: torch.Tensor):
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
@@ -508,8 +540,7 @@ class MarlinLinear(GPTQQuantLinear):
         # make sure scales is synced with x/input
         if x.dtype != self.scales.dtype:
             replace_parameter(self, "scales", self.scales.to(dtype=x.dtype))
-        if self.bias is not None and self.bias.dtype != x.dtype:
-            self.bias.data = self.bias.data.to(dtype=x.dtype)
+        bias = self._kernel_bias(x)
 
         # Keep aligned layers on the original decode-sensitive call path.
         if self._marlin_tile_padding is None:
@@ -525,7 +556,7 @@ class MarlinLinear(GPTQQuantLinear):
                 output_size_per_partition=self.out_features,
                 input_size_per_partition=self.in_features,
                 is_k_full=self.is_k_full,
-                bias=self.bias,
+                bias=bias,
                 use_fp32_reduce=self.fp32,
                 use_atomics=False, # reduces accuracy with slightly faster performance
             )
@@ -543,7 +574,7 @@ class MarlinLinear(GPTQQuantLinear):
                 output_size_per_partition=self.out_features,
                 input_size_per_partition=self.in_features,
                 is_k_full=self.is_k_full,
-                bias=self.bias,
+                bias=bias,
                 use_fp32_reduce=self.fp32,
                 use_atomics=False,
             )

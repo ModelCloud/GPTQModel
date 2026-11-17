@@ -87,7 +87,7 @@ def _fake_model(plan: SharedInputPlan, qcfg):
 def _named_linear(
     name: str,
     in_features: int = 64,
-    out_features: int = 8,
+    out_features: int = 256,
     seed: int = 0,
 ) -> NamedModule:
     torch.manual_seed(seed)

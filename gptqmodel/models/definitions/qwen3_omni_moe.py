@@ -23,6 +23,7 @@ from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .base_qwen3_vl import DeepStackReplayMixin
 
 
@@ -91,12 +92,12 @@ class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, BaseQModel):
     def load_processor(self) -> ProcessorMixin:
         return AutoProcessor.from_pretrained(self.model_local_path)
 
-    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+    def _prepare_calibration_batches(self, conversations, batch_size):
         processor = self.__dict__.get("processor") or self.load_processor()
         calib_data = []
         for batch_index, batch in enumerate(
             batched_conversations(
-                calibration_dataset,
+                conversations,
                 batch_size,
                 process_func=self.preprocess_dataset,
             )
@@ -135,8 +136,16 @@ class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, BaseQModel):
                     )
             calib_data.append(inputs)
 
-        del processor
         return calib_data
+
+    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=lambda rows: self._prepare_calibration_batches(rows, batch_size),
+        )
 
     def pre_quantize_generate_hook_start(self):
         spk_path = os.path.join(self.model_local_path, "spk_dict.pt")

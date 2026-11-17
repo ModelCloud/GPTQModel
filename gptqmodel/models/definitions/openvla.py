@@ -18,6 +18,7 @@ from ...utils.model import MODALITY, get_module, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class OpenVLAQModel(BaseQModel):
@@ -177,17 +178,11 @@ class OpenVLAQModel(BaseQModel):
             trust_remote_code=self.trust_remote_code,
         )
 
-    def prepare_dataset(
-        self,
-        calibration_dataset,
-        batch_size: int = 1,
-        **kwargs,
-    ) -> list[Dict[str, Any]]:
-        del kwargs
+    def _prepare_calibration_batches(self, conversations, batch_size):
         processor = self.load_processor()
         calibration_data = []
         for batch in batched_conversations(
-            calibration_dataset,
+            conversations,
             batch_size,
             process_func=self.preprocess_dataset,
         ):
@@ -206,8 +201,21 @@ class OpenVLAQModel(BaseQModel):
                         return_tensors="pt",
                     )
                 calibration_data.append(dict(inputs))
-        del processor
         return calibration_data
+
+    def prepare_dataset(
+        self,
+        calibration_dataset,
+        batch_size: int = 1,
+        **kwargs,
+    ) -> list[Dict[str, Any]]:
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=lambda rows: self._prepare_calibration_batches(rows, batch_size),
+        )
 
 
 __all__ = ["OpenVLAQModel"]

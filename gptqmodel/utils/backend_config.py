@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import ClassVar, Optional, Union
 
 from .backend import BACKEND, normalize_backend
@@ -102,7 +102,6 @@ class GGUFTorchConfig(BackendConfig):
         name: f"gguf_{name}" for name in (
             "fused_cuda_max_rows", "fused_cuda_min_matrix_elements", "fused_cpu_max_rows",
             "fused_cpu_min_matrix_elements", "fused_chunk_blocks", "fused_chunk_bytes",
-            "fused_autotune_warmup", "fused_autotune_iters", "fused_autotune_margin",
         )
     }
     fused_cuda_max_rows: int = 32
@@ -111,9 +110,6 @@ class GGUFTorchConfig(BackendConfig):
     fused_cpu_min_matrix_elements: int = 0
     fused_chunk_blocks: int = 0
     fused_chunk_bytes: int = 32 * 1024 * 1024
-    fused_autotune_warmup: int = 1
-    fused_autotune_iters: int = 2
-    fused_autotune_margin: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -205,6 +201,12 @@ class RuntimeConfig(_KernelSettings):
     floatx_cpu_simd_level: int = 2
     cpu_bf16x3_matmul: bool = True
     disable_bitblas: bool = False
+    # GGUF checkpoint load strategy, shared by every backend that can read a
+    # GGUF checkpoint (see KernelConfig for the semantics).
+    gguf_native_quantized_loader: bool = True
+    gguf_torch_dequant_loader: Optional[bool] = None
+    gguf_dequant_device: Optional[str] = None
+    gguf_dequant_chunk_bytes: int = 256 * 1024 * 1024
     gsq_disable_cuda_relaxation: bool = False
     gsq_disable_hip_relaxation: bool = False
     rocm_quant_blas: Optional[str] = None
@@ -249,7 +251,12 @@ def resolve_backend_config(
         return normalize_backend(backend.backend), KernelConfig(**options)
     resolved = normalize_backend(backend)
     if runtime is None:
-        return resolved, _coerce_kernel_config(kernel) if kernel is not None else None
+        if kernel is None:
+            return resolved, None
+        # The legacy kernel object is caller-owned and mutable. Resolution
+        # returns an independent value snapshot, so an in-place edit after the
+        # API boundary cannot retune execution (#4615).
+        return resolved, replace(_coerce_kernel_config(kernel))
     if kernel is not None:
         raise ValueError("runtime= and legacy kernel= cannot be supplied together")
     return resolved, runtime.to_kernel_config()

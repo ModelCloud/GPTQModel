@@ -77,7 +77,7 @@ Import configurations from `gptqmodel.backend` or `gptqmodel`.
 | `AwqGemmConfig` | `AWQ_GEMM` | `fp32_accum`, `fused_splitk_reduce` |
 | `AwqTritonConfig` | `AWQ_GEMM_TRITON` | `fp32_accum`, `schedule` |
 | `SwordfishConfig` | `SWORDFISH` | `dense_m`, `deterministic` |
-| `GGUFTorchConfig` | `GGUF_TORCH` | Fused CPU/CUDA row and matrix-size gates, chunk sizes and autotuning settings |
+| `GGUFTorchConfig` | `GGUF_TORCH` | Fused CPU/CUDA row and matrix-size gates and chunk sizes |
 | `GGUFCPPConfig` | `GGUF_CPP_CPU` | GGUF options plus `native_matmul`, `threads` |
 | `GGUFCUDAConfig` | `GGUF_CPP_CUDA` | Default selection; ggml-cuda runs every matmul, so the Torch fused-forward gates do not apply |
 | `ParoQuantConfig` | `PAROQUANT_CUDA` | `fp32_accum`, `fused_splitk_reduce`, runtime/rotation dtype caching, `cpu_avx512` |
