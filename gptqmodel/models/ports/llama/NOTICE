@@ -1,0 +1,31 @@
+Llama-family local port for GPT-QModel
+
+LongLLaMA configuration, modeling and memory utilities are adapted from:
+  syzymon/long_llama_3b_instruct
+  revision 8805cbd788e0c76fcd388569596e401d9590f6f5
+  https://huggingface.co/syzymon/long_llama_3b_instruct
+  https://github.com/CStanKonrad/long_llama
+
+Upstream authors: Szymon Tworkowski, Konrad Staniszewski, Mikolaj Pacek,
+Henryk Michalewski, Yuhuai Wu, Piotr Milos.
+Upstream files retain Copyright 2023 HuggingFace Inc. and EleutherAI and
+Copyright 2022 EleutherAI and the HuggingFace Inc. team, as present in source.
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+Changes adapt this implementation to Transformers 5 Cache/GenerationMixin,
+safe config dispatch, persistent FP32 rotary computation, safetensors,
+initialization and module-plan ownership. They do not use checkpoint Python.
+
+StableLM Epoch metadata semantics were inspected from Stability AI's
+japanese-stablelm-3b-4e1t-base revision
+e7d2ebdd200a28be321058be9a67514780073736. Its Apache-2.0 modeling headers credit
+EleutherAI and the HuggingFace Inc. team. No Epoch modeling source is vendored;
+the adapter uses source-matched native Transformers StableLM computation.
+
+Yi-Coder config/header metadata was inspected from 01-ai/Yi-Coder-1.5B-Chat
+revision 92fdd1b2f1539ac990e7f4a921db5601da2f0299. No Yi model or weights are
+vendored. The published config selects the native Llama architecture.
+
+Transformers modeling implementations remain dependencies under their own
+Apache-2.0 license and original notices. Source pins, SHA256 hashes and test
+scope are documented in README.md and checkpoint_inventory.json.
