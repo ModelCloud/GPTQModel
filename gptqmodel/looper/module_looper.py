@@ -2020,6 +2020,12 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         forward. The success path relies on ``post_quantize`` to move it back,
         but a ``StopMainLoop``/exception unwinds before that step, leaving every
         parameter and buffer of the layer on the accelerator (issue #4546).
+
+        A cancelled subset can also unwind while its capture hooks are still
+        installed, and the failure path never reached the stage's release. The
+        inline ``forward_hook``/``forward_hook_last`` pair would then make every
+        later forward raise ``StopForward`` (issue #5009), so clear it here as a
+        safety net for the windows the stage guard cannot see.
         """
 
         inflight = self._inflight_layer
@@ -2027,6 +2033,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         if inflight is None:
             return
         module, home_device = inflight
+        self._clear_layer_capture_hooks(module)
         try:
             rehome_module_to_device(
                 module,
@@ -2044,6 +2051,16 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 home_device,
                 exc_info=True,
             )
+
+    @staticmethod
+    def _clear_layer_capture_hooks(module: torch.nn.Module) -> None:
+        """Drop capture hooks a cancelled subset stage did not release (#5009)."""
+
+        for submodule in module.modules():
+            if getattr(submodule, "forward_hook", None) is not None:
+                submodule.forward_hook = None
+            if getattr(submodule, "forward_hook_last", False):
+                submodule.forward_hook_last = False
 
     def _fence_run_work(self) -> None:
         """Wait for work this run already submitted before tearing its state down.
