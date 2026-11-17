@@ -516,6 +516,7 @@ def prepare_calibration_dataset(
     message_examples = 0
     message_template_name = None
     message_text_fallback_examples = 0
+    ignored_source_examples = 0
 
     def _require_tokenizer(reason: str) -> None:
         if tokenizer is None:
@@ -732,6 +733,18 @@ def prepare_calibration_dataset(
         # builtin dict. Accept every mapping so the AutoGPTQ-style
         # `[tokenizer(text), ...]` calibration input reaches the input_ids path.
         if isinstance(example, Mapping):
+            # Explicit token ids win over every source column. A row carrying
+            # `input_ids` next to `text` or `messages` is the normal output of
+            # `Dataset.map(tokenizer, truncation=True, ...)` and of
+            # `dataset[:]` / `list(dataset)`, so re-tokenizing from the source
+            # silently discarded the caller's truncation, special-token, and
+            # chat choices and fed documents far past the requested length
+            # (#4635 for `text`, #4670 for `messages`).
+            if example.get("input_ids") is not None:
+                if example.get("messages") is not None or example.get("text") is not None:
+                    ignored_source_examples += 1
+                processed_examples.append(_pack_ids(example["input_ids"], example.get("attention_mask"), idx))
+                continue
             if "messages" in example:
                 apply_fn, _ = _get_message_template()
                 if apply_fn is None:
@@ -744,14 +757,6 @@ def prepare_calibration_dataset(
                         "provide `text` when using `messages`."
                     )
                 processed_examples.append(_tokenize_messages_value(example["messages"], idx))
-                continue
-            # Explicit token ids win over `text`. A row carrying both is the
-            # normal output of `Dataset.map(tokenizer, truncation=True, ...)`
-            # and of `dataset[:]`, so re-tokenizing from `text` silently
-            # discarded the caller's truncation, special-token, and chat
-            # choices and fed documents far past the requested length (#4635).
-            if "input_ids" in example and example["input_ids"] is not None:
-                processed_examples.append(_pack_ids(example["input_ids"], example.get("attention_mask"), idx))
                 continue
             if "text" in example:
                 processed_examples.append(_tokenize_text_value(example["text"], idx))
@@ -973,6 +978,12 @@ def prepare_calibration_dataset(
             "Calibration: tokenized %s `messages` examples via tokenizer.%s",
             message_examples,
             message_template_name,
+        )
+    if ignored_source_examples > 0:
+        log.info(
+            "Calibration: used the provided `input_ids` for %s examples that also carried `text`/`messages`; "
+            "the source column was not re-tokenized.",
+            ignored_source_examples,
         )
     if message_text_fallback_examples > 0:
         log.warn(
