@@ -23,6 +23,7 @@ from transformers.quantizers.auto import AutoQuantizationConfig
 
 import gptqmodel.looper.paroquant_processor as paroquant_processor_module
 import gptqmodel.utils.paroquant as paroquant_utils_module
+import gptqmodel.utils.paroquant_benchmark as paroquant_benchmark_module
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.loop_processor import CalibrationConfig
@@ -353,6 +354,80 @@ def test_paroquant_benchmark_config_preserves_opt_scope():
     assert cfg.quant_method == METHOD.PARO
     assert cfg.opt_scope == "compute_block"
     assert cfg.opt_gradient_checkpointing is False
+
+
+@pytest.mark.parametrize(
+    ("opt_scope", "requested", "expected_config", "expected_label"),
+    [
+        ("module", False, False, False),
+        ("module", True, True, True),
+        ("layer", True, True, False),
+    ],
+)
+def test_paroquant_benchmark_fused_opt_rotation_is_not_a_noop(
+    monkeypatch, opt_scope, requested, expected_config, expected_label
+):
+    """The benchmark toggle must reach the config and the reported result row."""
+    captured = {}
+
+    class _FakeTimer:
+        def snapshot(self):
+            return {}
+
+    class _FakeModel:
+        tokenizer = None
+        quant_region_timer = _FakeTimer()
+        model = torch.nn.Module()
+
+        def quantize(self, *args, **kwargs):
+            return {}
+
+        def save(self, _path):
+            pass
+
+        def named_modules(self):
+            return []
+
+    def fake_load(_path, quantize_config=None, **_kwargs):
+        captured["qcfg"] = quantize_config
+        return _FakeModel()
+
+    monkeypatch.setattr(paroquant_benchmark_module.GPTQModel, "load", fake_load)
+    monkeypatch.setattr(paroquant_benchmark_module, "load_nm_calibration", lambda _rows: [])
+    monkeypatch.setattr(
+        paroquant_benchmark_module,
+        "_run_evalution_path_eval",
+        lambda **_kwargs: ({}, 0.0),
+    )
+    monkeypatch.setattr(
+        paroquant_benchmark_module,
+        "_load_eval_helpers",
+        lambda: (None, lambda _result: "", lambda _result: {}),
+    )
+
+    result = paroquant_benchmark_module._run_paroquant_case(
+        model_path="unused",
+        dynamic={},
+        calibration_rows=1,
+        calibration_concat_size=1,
+        quant_batch_size=1,
+        eval_batch_size=1,
+        eval_max_rows=None,
+        eval_model_args=None,
+        eval_suite_kwargs=None,
+        sym=True,
+        fused_opt_rotation=requested,
+        opt_scope=opt_scope,
+        opt_rotation_epochs=1,
+        opt_finetune_epochs=1,
+        opt_train_samples=1,
+        opt_validation_samples=1,
+        opt_batch_size=1,
+        run_kernel_bench=False,
+    )
+
+    assert captured["qcfg"].opt_fused_rotation is expected_config
+    assert result["fused_opt_rotation"] is expected_label
 
 
 def test_paroquant_quantize_config_preserves_explicit_gradient_checkpointing_override():
