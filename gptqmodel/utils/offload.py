@@ -282,6 +282,19 @@ def _owns_offload_hook(module: nn.Module) -> bool:
     return False
 
 
+def has_disk_offloaded_modules(model: nn.Module) -> bool:
+    """Whether any module still reads its weights from a disk-offload bundle.
+
+    Such a module owns an accelerate disk-offload hook and points at a
+    ``module.safetensors`` inside the run's private offload directory. That
+    directory must outlive every module in this state: deleting it leaves the
+    module on meta with a dangling hook, so the next forward raises
+    ``FileNotFoundError`` (issue #4807).
+    """
+
+    return any(_owns_offload_hook(module) for module in model.modules())
+
+
 def restore_disk_offloaded_modules(
     model: nn.Module,
     *,

@@ -69,6 +69,7 @@ from ..utils.offload import (
     bind_private_offload_root,
     capture_offloaded_base_modules,
     ensure_version_counters,
+    has_disk_offloaded_modules,
     is_meta_module,
     materialize_remaining_meta_modules,
     offload_to_disk,
@@ -985,9 +986,18 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                             "failed to release processor resources while failing the weight-only run",
                             exc_info=True,
                         )
-                # A failed run cannot be saved, so its per-run offload bundles
-                # are no longer reachable (issue #4368).
-                release_private_offload_root(self.gptq_model)
+                # Finished layers stay as disk-offloaded meta shells pointing
+                # into this run's private offload root; keep it while they read
+                # from it (#4807). The model-lifetime finalizer reclaims it and
+                # the next run on this model releases it (#4368).
+                model = getattr(self.gptq_model, "model", None)
+                if model is not None and has_disk_offloaded_modules(model):
+                    log.debug(
+                        "Offload: keeping the per-run directory for the "
+                        "disk-offloaded layers of a cancelled/failed weight-only run."
+                    )
+                else:
+                    release_private_offload_root(self.gptq_model)
             raise
         self._restore_offloaded_base_modules(strict=True)
         self._restore_disk_offloaded_modules()
