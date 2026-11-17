@@ -51,7 +51,7 @@ LINE_WINDOW = 8
 SYMBOL_CITATION = "symbol"
 CONTRACT_REFS = (
     ("docs/adapter-rank-pattern-matching.md", "gptqmodel/quantization/config.py",
-     "extract_adapter_rank_patterns", 5595),
+     "extract_adapter_rank_patterns", SYMBOL_CITATION),
     ("docs/awq-scale-folding.md", "gptqmodel/models/base.py", "_select_prev_op", SYMBOL_CITATION),
     ("docs/calibration-replay.md", "gptqmodel/models/base.py",
      "capture_layer_type_replay_kwargs", SYMBOL_CITATION),
