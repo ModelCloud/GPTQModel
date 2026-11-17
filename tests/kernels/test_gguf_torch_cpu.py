@@ -225,57 +225,99 @@ def test_gguf_cpu_fused_forward_retains_only_packed_weight():
     )
 
 
-def test_gguf_fused_autotune_is_cached_per_shape(monkeypatch):
-    _, module = _build_module("q4_0", in_features=37, out_features=5)
-    module.gguf_fused_cpu_max_rows = 16
+def test_gguf_fused_decision_is_a_pure_function_of_the_static_gates():
+    """The fused/dense choice must not depend on timing, load or call order (#4590)."""
+
+    _, module = _build_module("q4_k_m", in_features=256, out_features=256, seed=17)
+    module.gguf_fused_cpu_max_rows = 32
     module.gguf_fused_cpu_min_matrix_elements = 0
-    module.autotune_enabled = True
-    module.clear_autotune()
 
-    calls = []
+    def timing_forbidden(*args, **kwargs):
+        raise AssertionError("the fused/dense choice must not time either path")
 
-    def fake_autotune(self, x_flat):
-        calls.append(tuple(x_flat.shape))
-        return x_flat.shape[0] > 1
+    original_runner = getattr(module, "_benchmark_forward_runner", None)
+    original_autotune = getattr(module, "_autotune", None)
+    if original_runner is not None:
+        module._benchmark_forward_runner = timing_forbidden
+    if original_autotune is not None:
+        module._autotune = timing_forbidden
+    try:
+        torch.manual_seed(3)
+        small = torch.randn(7, module.in_features, dtype=torch.bfloat16)
+        large = torch.randn(33, module.in_features, dtype=torch.bfloat16)
+        decisions = [
+            [module._should_use_fused_k_forward(small), module._should_use_fused_k_forward(large)]
+            for _ in range(5)
+        ]
+    finally:
+        if original_runner is not None:
+            module._benchmark_forward_runner = original_runner
+        if original_autotune is not None:
+            module._autotune = original_autotune
 
-    monkeypatch.setattr(type(module), "_autotune", fake_autotune)
-
-    single_token = torch.randn(1, module.in_features, dtype=torch.bfloat16)
-    many_tokens = torch.randn(7, module.in_features, dtype=torch.bfloat16)
-
-    assert module._should_use_fused_k_forward(single_token) is False
-    assert module._should_use_fused_k_forward(many_tokens) is True
-    assert module._should_use_fused_k_forward(single_token) is False
-    assert module._should_use_fused_k_forward(many_tokens) is True
-    assert calls == [(1, module.in_features), (7, module.in_features)]
+    # Same shape -> same answer on every call; the row ceiling still gates the
+    # larger batch out of the fused path.
+    assert decisions == [[True, False]] * 5
+    assert module.get_autotune_result() is None
 
 
-@pytest.mark.parametrize("bits", ["q4_0", "q8_0"])
-def test_gguf_forward_uses_dense_when_fused_autotune_loses(bits: str, monkeypatch):
-    _, module = _build_module(bits, in_features=64, out_features=8)
-    module.gguf_fused_cpu_max_rows = 16
+def test_gguf_fused_path_ignores_the_autotune_flag():
+    """`autotune_enabled` no longer selects the path, so it cannot flip the numerics."""
+
+    _, module = _build_module("q4_k_m", in_features=256, out_features=256, seed=19)
+    module.gguf_fused_cpu_max_rows = 32
     module.gguf_fused_cpu_min_matrix_elements = 0
-    module.autotune_enabled = True
-    module.clear_autotune()
+    torch.manual_seed(23)
     x = torch.randn(7, module.in_features, dtype=torch.bfloat16)
-    calls = []
-
-    monkeypatch.setattr(type(module), "_autotune", lambda self, x_flat: False)
-    monkeypatch.setattr(
-        module,
-        "_forward_dequant_matmul",
-        lambda x_flat, bias=None: calls.append(("dense", bias is not None)) or torch.zeros(
-            x_flat.shape[0], module.out_features, dtype=x_flat.dtype
-        ),
-    )
-    monkeypatch.setattr(
-        module,
-        "_forward_fused_k",
-        lambda x_flat: pytest.fail("losing fused path must not run"),
-    )
 
     with torch.inference_mode():
-        output = module(x)
+        module.autotune_enabled = True
+        enabled = module(x)
+        module.autotune_enabled = False
+        disabled = module(x)
+
+    assert torch.equal(enabled, disabled)
+
+
+@pytest.mark.parametrize("bits", ["q4_0", "q4_k", "q8_0"])
+def test_gguf_forward_uses_dense_when_the_row_gate_excludes_fused(bits: str):
+    linear, module = _build_module(bits, in_features=64, out_features=8)
+    module.gguf_fused_cpu_max_rows = 4
+    module.gguf_fused_cpu_min_matrix_elements = 0
+    torch.manual_seed(29)
+    x = torch.randn(7, linear.in_features, dtype=torch.bfloat16)
+    calls = []
+
+    original_dense = module._forward_dequant_matmul
+
+    def _dense(x_flat, bias=None):
+        calls.append(("dense", bias is not None))
+        return original_dense(x_flat, bias=bias)
+
+    def _fused(*args, **kwargs):
+        raise AssertionError("gate-excluded fused path must not run")
+
+    module._forward_dequant_matmul = _dense
+    module._forward_fused_k = _fused
+    try:
+        with torch.inference_mode():
+            output = module(x)
+    finally:
+        module._forward_dequant_matmul = original_dense
 
     assert calls == [("dense", True)]
     assert output.shape == (x.shape[0], module.out_features)
+
+
+def test_gguf_static_gates_match_the_measured_crossover():
+    """Pin the shipped CPU/CUDA gate defaults against silent regeneration drift."""
+
+    from gptqmodel.utils.kernel import KernelConfig
+
+    defaults = KernelConfig()
+    assert defaults.gguf_fused_cpu_max_rows == 64
+    assert defaults.gguf_fused_cpu_min_matrix_elements == 0
+    assert defaults.gguf_fused_cuda_max_rows == 32
+    assert defaults.gguf_fused_cuda_min_matrix_elements == 8_388_608
+    # `GGUFTorchLinear` must not re-enable the timing race.
+    assert GGUFTorchLinear.AUTOTUNE is False

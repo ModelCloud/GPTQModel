@@ -1964,6 +1964,38 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 exc_info=True,
             )
 
+    def _fence_run_work(self) -> None:
+        """Wait for work this run already submitted before tearing its state down.
+
+        ``loop()`` drains the device pool and the watcher threads only on the
+        success path. The failure path used to restore the model and delete the
+        per-run offload directory while already-submitted submodule finalizers
+        were still executing: those finalizers re-created the run directory
+        that ``release_private_offload_root`` had just removed (leaking one
+        layer's bundles per failed run) and kept packing/replacing modules
+        after ``quantize()`` had already raised (issue #4595).
+
+        Each wait is independent. A pool that fails to drain must not skip the
+        remaining waits, and nothing here may mask the original exception.
+        """
+
+        from ..utils.stream import STREAM_DEVICE_POOL
+
+        waits = (
+            ("device thread pool", DEVICE_THREAD_POOL.wait),
+            ("finalizer watcher threads", self.wait_dangling_threads),
+            ("stream device pool", STREAM_DEVICE_POOL.wait),
+        )
+        for label, wait in waits:
+            try:
+                wait()
+            except Exception:
+                log.warning(
+                    "failed to drain the %s while failing the quantization run",
+                    label,
+                    exc_info=True,
+                )
+
     def loop(self, fallback=None, **kwargs):
         """Run the quantization loop under the TF32 guard."""
 
@@ -1971,19 +2003,26 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             try:
                 result = self._loop_impl(fallback=fallback, **kwargs)
             except BaseException:
-                # A cancelled or failed run must also release the layer that
-                # was mid-stage: the success path moves it back only after
-                # post_quantize, which the exception skipped (#4546).
+                # Fence already-submitted work before restoring anything it may
+                # still be mutating. A finalizer that ran after the teardown
+                # re-created the deleted run directory and kept packing modules
+                # after `quantize()` had raised (issue #4595).
                 try:
-                    self._restore_inflight_layer()
+                    self._fence_run_work()
                 finally:
-                    # A failed run must not leave the base modules stranded on meta.
+                    # A cancelled or failed run must also release the layer that
+                    # was mid-stage: the success path moves it back only after
+                    # post_quantize, which the exception skipped (#4546).
                     try:
-                        self._restore_offloaded_base_modules(strict=False)
+                        self._restore_inflight_layer()
                     finally:
-                        # A failed run cannot be saved, so its per-run offload
-                        # bundles are no longer reachable (issue #4368).
-                        release_private_offload_root(self.gptq_model)
+                        # A failed run must not leave the base modules stranded on meta.
+                        try:
+                            self._restore_offloaded_base_modules(strict=False)
+                        finally:
+                            # A failed run cannot be saved, so its per-run offload
+                            # bundles are no longer reachable (issue #4368).
+                            release_private_offload_root(self.gptq_model)
                 raise
             finally:
                 # Process-wide scratch (e.g. EXL3's per-stream tile buffers)

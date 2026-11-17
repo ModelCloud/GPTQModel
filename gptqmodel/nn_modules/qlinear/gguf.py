@@ -6,7 +6,6 @@ from __future__ import annotations
 import math
 import platform
 import sys
-import time
 from contextlib import nullcontext
 from functools import lru_cache
 
@@ -1191,7 +1190,11 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16, torch.float32]
 
     REQUIRES_FORMAT_V2 = False
-    AUTOTUNE = True
+    # The fused-vs-dense forward is selected by the static shape gates alone.
+    # Timing the two implementations made the arithmetic a module used depend on
+    # unrelated CPU/GPU load, so two identical runs returned different logits
+    # (#4590). `autotune_enabled` therefore has nothing to decide here.
+    AUTOTUNE = False
 
     QUANT_TYPE = "gguf"
     # Defaults for the fused forward. Per-instance overrides come from
@@ -1203,9 +1206,6 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS = 0
     GGUF_FUSED_CHUNK_BLOCKS = 0
     GGUF_FUSED_CHUNK_BYTES = 32 * 1024 * 1024
-    GGUF_FUSED_AUTOTUNE_WARMUP = 1
-    GGUF_FUSED_AUTOTUNE_ITERS = 2
-    GGUF_FUSED_AUTOTUNE_MARGIN = 0.05
 
     def __init__(
         self,
@@ -1235,9 +1235,6 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         self.gguf_fused_chunk_bytes = kernel.gguf_fused_chunk_bytes
         self._k_scale_overflow_cache: dict[tuple, bool] = {}
         self._k_scale_overflow_cache_source_key = None
-        self.gguf_fused_autotune_warmup = kernel.gguf_fused_autotune_warmup
-        self.gguf_fused_autotune_iters = kernel.gguf_fused_autotune_iters
-        self.gguf_fused_autotune_margin = kernel.gguf_fused_autotune_margin
 
         super().__init__(
             bits=int(bits_spec),
@@ -1686,65 +1683,23 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             and x_flat.shape[0] <= max_rows
         )
 
-    @staticmethod
-    def _sync_benchmark_device(device: torch.device) -> None:
-        if device.type == "cuda":
-            torch.cuda.synchronize(device=device)
-
-    def _benchmark_forward_runner(self, fn, *, device: torch.device) -> float:
-        with torch.inference_mode():
-            for _ in range(self.gguf_fused_autotune_warmup):
-                fn()
-            self._sync_benchmark_device(device)
-
-            start = time.perf_counter()
-            for _ in range(self.gguf_fused_autotune_iters):
-                fn()
-            self._sync_benchmark_device(device)
-
-        return (time.perf_counter() - start) / self.gguf_fused_autotune_iters
-
-    def _benchmark_dense_forward(self, x_flat: torch.Tensor) -> float:
-        return self._benchmark_forward_runner(
-            lambda: self._forward_dequant_matmul(x_flat),
-            device=x_flat.device,
-        )
-
-    def _benchmark_fused_forward(self, x_flat: torch.Tensor) -> float:
-        return self._benchmark_forward_runner(
-            lambda: self._forward_fused_k(x_flat),
-            device=x_flat.device,
-        )
-
-    def _autotune(self, x_flat: torch.Tensor) -> bool:
-        try:
-            fused_time = self._benchmark_fused_forward(x_flat)
-            dense_time = self._benchmark_dense_forward(x_flat)
-            return fused_time <= dense_time * (1.0 - self.gguf_fused_autotune_margin)
-        except Exception:
-            return False
-
-    def clear_autotune(self):
-        super().clear_autotune()
-        self._gguf_fused_autotune_cache = {}
-
     def _should_use_fused_k_forward(self, x_flat: torch.Tensor) -> bool:
-        if not self._is_fused_k_forward_candidate(x_flat):
-            return False
+        """Whether this forward takes the fused K-quant path.
 
-        if not self.autotune_enabled:
-            return True
+        The decision is a pure function of the module's static shape gates and
+        the activation shape. It never times either implementation (#4590): a
+        wall-clock race made the arithmetic depend on unrelated process load,
+        so the two paths -- which are not bitwise equivalent, the CPU fused
+        reduction runs inside ``cpu_bf16x3_matmul()`` while the dense one is
+        IEEE FP32 -- produced different logits for the same input.
 
-        key = (
-            x_flat.device.type,
-            x_flat.device.index,
-            x_flat.dtype,
-            tuple(x_flat.shape),
-        )
-        if key not in self._gguf_fused_autotune_cache:
-            self._gguf_fused_autotune_cache[key] = self._autotune(x_flat)
-        self._autotune_result = bool(self._gguf_fused_autotune_cache[key])
-        return self._autotune_result
+        Both paths stay within the documented GGUF Torch tolerance of an FP64
+        dequantized-weight oracle, so picking one statically is a performance
+        decision only. The gates below are tuned offline with
+        ``scripts/benchmark_gguf_fused_thresholds.py``.
+        """
+
+        return self._is_fused_k_forward_candidate(x_flat)
 
     def _use_fp32_gguf_weight(
         self,

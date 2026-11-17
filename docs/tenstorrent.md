@@ -957,6 +957,43 @@ quantiser likewise takes its base exponent candidate unconditionally, so a block
 whose squared error overflows -- inputs near `FLT_MAX` -- still produces the
 reference codes rather than zeros.
 
+### Shared exponent derivation and its range
+
+A block's shared exponent is the binade index of its largest magnitude, which
+must be read exactly. `log2`/`log2f`/`torch.log2` round to nearest, so they
+report `128` for `FLT_MAX` (one ulp below `2**128`) and `k` for a value one ulp
+below `2**k`; `floor` then yields an unusable exponent. Every implementation
+decodes the IEEE-754 exponent field instead (`frexp` in the Torch reference),
+which cannot round.
+
+```mermaid
+flowchart TD
+    A["block values"] --> B["magnitude = max(abs(block))"]
+    B --> C{"all finite?"}
+    C -- no --> R["ValueError: block-float storage<br/>cannot represent NaN or infinity"]
+    C -- yes --> D["safe = max(magnitude, FLT_MIN)<br/>(zero block keeps binade -126)"]
+    D --> E["base = exponent field - 127<br/>exact binade index"]
+    E --> F["candidates base, base-1, base+1"]
+    F --> G{"candidate exponent in<br/>-127 .. 127?"}
+    G -- no --> H["reject candidate<br/>(no representable 2**e)"]
+    G -- yes --> I["round onto the grid,<br/>compute squared error"]
+    I --> J{"error finite and<br/>strictly lower?"}
+    J -- yes --> K["adopt candidate"]
+    J -- no --> L["keep earlier winner"]
+    H --> M["best = base candidate"]
+    K --> M
+    L --> M
+    M --> N["codes + int8 exponent"]
+    style R fill:#ffe0e0,stroke:#b00020
+    style H fill:#ffe0e0,stroke:#b00020
+```
+
+The storable range is `[-127, 127]`: the field stores `e + 127`, so `+128` is the
+all-ones pattern and `2**128` overflows, while `-128` has no normal scale. A
+candidate outside that range is rejected *before* its error is compared, so a
+NaN from `0 * inf` can never poison the per-block search, and the base candidate
+is always adopted even when its squared error overflows to `inf`.
+
 `bfloat2_b` is the third block-float width the Tensix packer understands
 (`DataFormat::Bfp2_b` in the Blackhole LLK, and Block FP2 appears among the
 Blackhole matrix-engine input formats), so the p300c silicon can hold it.  It

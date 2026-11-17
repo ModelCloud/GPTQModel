@@ -68,7 +68,7 @@ compatible deployment engine.
 | **[ParoQuant](https://github.com/ModelCloud/GPTQModel/wiki/ParoQuant)** | Low-bit weight quantization with learned rotations for accuracy recovery. [Affine fitting and optimization controls](docs/paroquant-optimization.md). [Fused rotation backward](docs/paroquant.md#fused-rotation-backward). |
 | **[MACaQ](https://github.com/ModelCloud/GPTQModel/blob/main/docs/macaq.md)** | Calibrated MXFP4 weights and activations, with native W4A4 inference and a W4A16 option. |
 | **[QQQ](https://github.com/ModelCloud/GPTQModel/wiki/QQQ)** | INT4 weights with dynamic INT8 activation quantization for W4A8 inference. |
-| **[GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF)** | Block-quantized checkpoints for GGUF-oriented workflows and native inference. [CPU zero-copy packed weights](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-kernel-selection.md#cpu-zero-copy-packed-weight). [mmap pages after the aligned copy](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-kernel-selection.md#mmap-pages-after-the-aligned-copy). |
+| **[GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF)** | Block-quantized checkpoints for GGUF-oriented workflows and native inference. [Torch fused dispatch](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-torch-fused-dispatch.md). [CPU zero-copy packed weights](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-kernel-selection.md#cpu-zero-copy-packed-weight). [mmap pages after the aligned copy](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-kernel-selection.md#mmap-pages-after-the-aligned-copy). |
 | **[FP8](https://github.com/ModelCloud/GPTQModel/wiki/FP8-and-NVFP4)** | Floating-point weight quantization with scaled E4M3/E5M2 formats. Native inference is weight-only W8A16; [W8A8 is an explicit per-token opt-in](docs/fp8-weight-only-dispatch.md). [Packed-weight load and move lifecycle](docs/fp8-packed-weight-lifecycle.md).  NVFP4 decode keeps the [effective-weight range](docs/fp4-effective-weight-range.md) instead of rounding the reconstructed weight to the activation dtype. |
 | **[EXL3](https://github.com/ModelCloud/GPTQModel/wiki/EXL3)** | Variable-rate compression with target average bits per weight and mixed-tier allocation. |
 | **[VPTQ](https://github.com/ModelCloud/GPTQModel/wiki/VPTQ)** | Vector-codebook quantization for low-bit model compression. [Runtime kernel selection](docs/vptq.md#inference-and-checkpoint-compatibility). |
@@ -103,7 +103,9 @@ Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kerne
   loading support further task adaptation; exported EoRA `rank_pattern` keys follow the [adapter rank-pattern contract](docs/adapter-rank-pattern-matching.md) so PEFT builds the trained rank per module. [Rotation model support](https://github.com/ModelCloud/GPTQModel/blob/main/docs/rotation-model-support.md) lists the exact definitions that opt in. AWQ GSQ uses the
   [packed-code scoring contract](docs/gsq-awq-code-recovery.md) to evaluate exported candidates.
   The fused relaxation kernel keeps the [eager precision contract](docs/gsq-fused-relaxation-precision.md)
-  for BF16 and FP32 logits.
+  for BF16 and FP32 logits, and per-linear refinement searches the exported
+  codes and refits scales under the [scalar refinement
+  contract](docs/gsq-scalar-refinement.md).
 - **Trust the fold.** AWQ divides a scale only into the norm that actually feeds
   a quantized block, including multimodal wrappers and hybrid layer shapes; see
   the [AWQ scaling groups](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-scaling-groups.md) contract. Scale search keeps
