@@ -3074,8 +3074,11 @@ class AWQProcessor(LoopProcessor):
 
         w = w.reshape(org_w_shape[0], 1, -1, group_size)
 
+        # Clip search owns a tile size, not a second module-shape predicate. The
+        # packer admits any width divisible by its own packing factor, so a
+        # partial final tile must be searched instead of rejected (#4474).
         oc_batch_size = 256 if org_w_shape[0] % 256 == 0 else 64  # prevent OOM
-        assert org_w_shape[0] % oc_batch_size == 0
+        oc_batch_size = min(oc_batch_size, org_w_shape[0])
         w_all = w
         best_max_val_all = []
         device = w_all.device
@@ -3145,8 +3148,11 @@ class AWQProcessor(LoopProcessor):
             device=device,
         )
 
-        for i_b in range(org_w_shape[0] // oc_batch_size):
-            w = w_all[i_b * oc_batch_size: (i_b + 1) * oc_batch_size]
+        for i_b in range(0, org_w_shape[0], oc_batch_size):
+            # The final tile may be shorter than `oc_batch_size`; every scratch
+            # slice below is cropped to this tile's row count.
+            w = w_all[i_b: i_b + oc_batch_size]
+            co = w.shape[0]
 
             org_max_val = w.abs().amax(dim=-1, keepdim=True)  # [co_batch, 1, n_group, 1]
 
@@ -3166,15 +3172,15 @@ class AWQProcessor(LoopProcessor):
 
             for t0 in range(0, n_tokens, token_chunk):
                 t1 = min(t0 + token_chunk, n_tokens)
-                prod = scratch_prod[0, :, : t1 - t0]
+                prod = scratch_prod[0, :co, : t1 - t0]
                 torch.mul(input_feat[:, t0:t1], w, out=prod)
-                torch.sum(prod, dim=-1, out=org_out[:, t0:t1])
+                torch.sum(prod, dim=-1, out=org_out[:co, t0:t1])
 
             for s0 in range(0, steps, cand_chunk):
                 tc = min(cand_chunk, steps - s0)
                 max_val = cand_max_val[s0:s0 + tc]  # [tc, co_batch, 1, n_group, 1]
-                clamp_slice = scratch_clamp[:tc]
-                quant_slice = scratch_quant[:tc]
+                clamp_slice = scratch_clamp[:tc, :co]
+                quant_slice = scratch_quant[:tc, :co]
                 torch.clamp(w.unsqueeze(0), -max_val, max_val, out=clamp_slice)
                 # `clamp(w, -max_val, max_val)` bounds every group by `max_val`, so the
                 # symmetric magnitude the quantizer needs is `min(|w|.amax(), max_val)`.
@@ -3204,22 +3210,22 @@ class AWQProcessor(LoopProcessor):
                 # so the product stays under the workspace cap. Slicing the
                 # token axis does not change any element's sum over `group_w`,
                 # and the mean below still reduces the same full token axis.
-                cur_out = scratch_out[:tc]
+                cur_out = scratch_out[:tc, :co]
                 for t0 in range(0, n_tokens, token_chunk):
                     t1 = min(t0 + token_chunk, n_tokens)
                     torch.mul(
                         input_feat[:, t0:t1],
                         quant_slice,
-                        out=scratch_prod[:tc, :, : t1 - t0],
+                        out=scratch_prod[:tc, :co, : t1 - t0],
                     )
                     torch.sum(
-                        scratch_prod[:tc, :, : t1 - t0],
+                        scratch_prod[:tc, :co, : t1 - t0],
                         dim=-1,
                         out=cur_out[:, :, t0:t1],
                     )
 
                 # `cur_out` is scratch, so the difference and square happen in place.
-                cur_out.sub_(org_out.unsqueeze(0)).pow_(2)
+                cur_out.sub_(org_out[:co].unsqueeze(0)).pow_(2)
                 err_chunks.append(cur_out.mean(dim=2).view(tc, *org_max_val.shape))
                 max_val_chunks.append(max_val)
 
@@ -3239,6 +3245,12 @@ class AWQProcessor(LoopProcessor):
             best_max_val_all.append(best_max_val)
 
         best_max_val = torch.cat(best_max_val_all, dim=0)
+        # Every output row must get a bound before the caller mutates the weight.
+        if best_max_val.shape[0] != org_w_shape[0]:
+            raise RuntimeError(
+                "AWQ clip search covered "
+                f"{best_max_val.shape[0]} of {org_w_shape[0]} output rows."
+            )
         del input_feat
         del org_out
 
