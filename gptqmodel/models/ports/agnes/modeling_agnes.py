@@ -73,6 +73,8 @@ class AgnesDynamicCache(Cache):
             for kind in config.layer_types
         ])
         self._agnes_seen_tokens = 0
+        self._agnes_valid_tokens = None
+        self._agnes_attention_mask = None
         self.rope_deltas = None
         self._in_forward = False
 
@@ -82,11 +84,17 @@ class AgnesDynamicCache(Cache):
     def reset(self):
         super().reset()
         self._agnes_seen_tokens = 0
+        self._agnes_valid_tokens = None
+        self._agnes_attention_mask = None
         self.rope_deltas = None
         self._in_forward = False
 
     def reorder_cache(self, beam_idx):
         super().reorder_cache(beam_idx)
+        if self._agnes_valid_tokens is not None:
+            self._agnes_valid_tokens = self._agnes_valid_tokens.index_select(0, beam_idx.to(self._agnes_valid_tokens.device))
+        if self._agnes_attention_mask is not None:
+            self._agnes_attention_mask = self._agnes_attention_mask.index_select(0, beam_idx.to(self._agnes_attention_mask.device))
         if self.rope_deltas is not None:
             self.rope_deltas = self.rope_deltas.index_select(0, beam_idx.to(self.rope_deltas.device))
 
@@ -621,9 +629,13 @@ class AgnesDeltaAttention(nn.Module):
             qkv = self.causal_conv1d_update(qkv, conv_state, self.conv1d.weight.squeeze(1), self.conv1d.bias, self.activation)
         else:
             if cache_params is not None:
-                qkv = cache_params.update_conv_state(
+                context = cache_params.update_conv_state(
                     qkv, self.layer_idx, conv_kernel_size=self.conv_kernel_size,
                 )
+                # A fresh short prefill returns left-padded cache storage, not
+                # current-token outputs. Only a resumed chunk needs that context.
+                if resume:
+                    qkv = context
             if self.causal_conv1d_fn is not None:
                 qkv = self.causal_conv1d_fn(
                     x=qkv, weight=self.conv1d.weight.squeeze(1), bias=self.conv1d.bias,
@@ -961,6 +973,28 @@ class AgnesCausalLMOutput(CausalLMOutputWithPast):
     rope_deltas: torch.LongTensor | None = None
 
 
+def _text_positions_and_lengths(inputs_embeds, attention_mask, cache):
+    """Current logical text positions and total valid lengths, before mutation.
+
+    Keep padding counts with the request, so either a full-prefix mask or a
+    chunk-local mask (or no subsequent mask) can extend its rotary coordinates.
+    The scalar cache length still counts physical tokens for KV/mask indexing.
+    """
+    batch, seq, _ = inputs_embeds.shape
+    past_len = 0 if cache is None else cache.get_seq_length()
+    prefix = getattr(cache, "_agnes_valid_tokens", None)
+    if prefix is None:
+        prefix = torch.full((batch, 1), past_len, device=inputs_embeds.device, dtype=torch.long)
+    if attention_mask is None:
+        mask = torch.ones((batch, seq), device=inputs_embeds.device, dtype=torch.long)
+    else:
+        mask = attention_mask[:, -seq:].long().to(inputs_embeds.device)
+        if attention_mask.shape[-1] > seq:
+            prefix = attention_mask[:, :-seq].long().sum(-1, keepdim=True).to(inputs_embeds.device)
+    positions = (mask.cumsum(-1) - 1 + prefix).masked_fill(mask == 0, 0)
+    return positions, prefix + mask.sum(-1, keepdim=True)
+
+
 # ---------------------------------------------------------------------------
 # Language model
 # ---------------------------------------------------------------------------
@@ -990,6 +1024,7 @@ class AgnesTextModel(AgnesPreTrainedModel):
         past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
+        _defer_cache_commit: bool = False,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -1003,11 +1038,16 @@ class AgnesTextModel(AgnesPreTrainedModel):
         if past_key_values is not None and past_key_values._in_forward:
             raise ValueError("Agnes cache has an incomplete forward; call reset() before retrying")
 
+        if past_key_values is not None and past_key_values.get_seq_length() > 0:
+            if attention_mask is None or attention_mask.shape[-1] == inputs_embeds.shape[1]:
+                current_mask = (torch.ones(inputs_embeds.shape[:2], device=inputs_embeds.device, dtype=torch.long)
+                                if attention_mask is None else attention_mask)
+                attention_mask = torch.cat((past_key_values._agnes_attention_mask.to(current_mask.device), current_mask), dim=-1)
+
+        text_positions, valid_lengths = _text_positions_and_lengths(inputs_embeds, attention_mask, past_key_values)
         # position ids carry four rows: plain text positions, then T / H / W
         if position_ids is None:
-            offset = past_key_values.get_seq_length() if past_key_values is not None else 0
-            position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device) + offset
-            position_ids = position_ids.view(1, 1, -1).expand(4, inputs_embeds.shape[0], -1)
+            position_ids = text_positions.unsqueeze(0).expand(4, -1, -1)
         elif position_ids.ndim == 2:
             position_ids = position_ids[None, ...].expand(4, position_ids.shape[0], -1)
 
@@ -1037,7 +1077,11 @@ class AgnesTextModel(AgnesPreTrainedModel):
         h = self.norm(h)
         if past_key_values is not None:
             past_key_values._agnes_seen_tokens += inputs_embeds.shape[1]
-            past_key_values._in_forward = False
+            past_key_values._agnes_valid_tokens = valid_lengths
+            past_key_values._agnes_attention_mask = (attention_mask.clone() if attention_mask is not None else
+                torch.ones(inputs_embeds.shape[:2], device=inputs_embeds.device, dtype=torch.long))
+            if not _defer_cache_commit:
+                past_key_values._in_forward = False
         return AgnesModelOutput(last_hidden_state=h, past_key_values=past_key_values)
 
     @staticmethod
@@ -1233,29 +1277,31 @@ class AgnesModel(AgnesPreTrainedModel):
                 "Multimodal data was passed (via `image_grid_thw` or `video_grid_thw`) but `mm_token_type_ids` is "
                 "missing. Pass `mm_token_type_ids` (returned by the processor) so the 3-D rotary positions can be built."
             )
+        text_positions, total_valid = _text_positions_and_lengths(inputs_embeds, attention_mask, past_key_values)
+        seq = inputs_embeds.shape[1]
+        current_mask = attention_mask[:, -seq:] if attention_mask is not None else None
         fresh = input_ids is not None and mm_token_type_ids is not None and has_vision
-
-        if fresh and (rope_deltas is None or past_len == 0):
-            position_ids, rope_deltas = self.get_rope_index(
+        if fresh:
+            # Media may arrive in any chunk, including after an earlier image or
+            # video. Build its local 3-D coordinates and translate by the prior
+            # rotary cursor, not the physical number of cached tokens alone.
+            position_ids, local_delta = self.get_rope_index(
                 input_ids, image_grid_thw=image_grid_thw, video_grid_thw=video_grid_thw,
-                attention_mask=attention_mask, mm_token_type_ids=mm_token_type_ids,
+                attention_mask=current_mask, mm_token_type_ids=mm_token_type_ids[:, -seq:],
             )
-            return position_ids, rope_deltas
+            previous_delta = rope_deltas if past_len and rope_deltas is not None else torch.zeros_like(local_delta)
+            current_valid = current_mask.long().sum(-1, keepdim=True) if current_mask is not None else seq
+            start = total_valid - current_valid + previous_delta
+            position_ids = position_ids + start.unsqueeze(0)
+            if current_mask is not None:
+                position_ids = position_ids.masked_fill(~current_mask.bool().unsqueeze(0), 0)
+            return position_ids, previous_delta + local_delta
         # continuing generation, or embeds-only input: reuse the stored deltas
         if rope_deltas is not None and (past_len > 0 or input_ids is None):
-            bsz, seq, _ = inputs_embeds.shape
-            if attention_mask is not None:
-                position_ids = attention_mask.long().cumsum(-1) - 1
-                position_ids = position_ids.masked_fill(attention_mask == 0, 0)
-                # The mask covers the entire prefix, but RoPE covers only the
-                # current input chunk during cached continuation.
-                position_ids = position_ids[:, -seq:]
-                position_ids = position_ids.view(1, bsz, -1).repeat(3, 1, 1).to(inputs_embeds.device)
-            else:
-                position_ids = torch.arange(past_len, past_len + seq)
-                position_ids = position_ids.view(1, 1, -1).expand(3, bsz, -1).to(inputs_embeds.device)
+            bsz = inputs_embeds.shape[0]
             delta = rope_deltas.repeat_interleave(bsz // rope_deltas.shape[0], dim=0)
-            return position_ids + delta.to(device=inputs_embeds.device), rope_deltas
+            position_ids = (text_positions + delta.to(inputs_embeds.device)).unsqueeze(0).expand(3, -1, -1)
+            return position_ids, rope_deltas
         return None, None
 
     @auto_docstring
@@ -1306,6 +1352,14 @@ class AgnesModel(AgnesPreTrainedModel):
                 inputs_embeds=inputs_embeds, attention_mask=attention_mask, past_key_values=past_key_values,
                 mm_token_type_ids=mm_token_type_ids,
             )
+        else:
+            # Explicit positions are authoritative, including when a caller
+            # supplies the full-sequence slice for newly appended media.
+            axes = position_ids[1:] if position_ids.ndim == 3 and position_ids.shape[0] == 4 else position_ids
+            if axes.ndim == 2:
+                axes = axes.unsqueeze(0)
+            _, total_valid = _text_positions_and_lengths(inputs_embeds, attention_mask, past_key_values)
+            rope_deltas = axes.amax(dim=(0, 2)).unsqueeze(1) + 1 - total_valid
 
         out = self.language_model(
             input_ids=None, position_ids=position_ids, attention_mask=attention_mask,
@@ -1355,16 +1409,20 @@ class AgnesForCausalLM(AgnesPreTrainedModel, GenerationMixin):
         out: BaseModelOutputWithPast = self.model(
             input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
             past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs,
+            _defer_cache_commit=True,
         )
         keep = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(out.last_hidden_state[:, keep, :])
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
-        return CausalLMOutputWithPast(
+        result = CausalLMOutputWithPast(
             loss=loss, logits=logits, past_key_values=out.past_key_values,
             hidden_states=out.hidden_states, attentions=out.attentions,
         )
+        if out.past_key_values is not None:
+            out.past_key_values._in_forward = False
+        return result
 
 
 class AgnesForConditionalGeneration(AgnesPreTrainedModel, GenerationMixin):
@@ -1439,16 +1497,20 @@ class AgnesForConditionalGeneration(AgnesPreTrainedModel, GenerationMixin):
             image_grid_thw=image_grid_thw, video_grid_thw=video_grid_thw, position_ids=position_ids,
             attention_mask=attention_mask, past_key_values=past_key_values, inputs_embeds=inputs_embeds,
             mm_token_type_ids=mm_token_type_ids, **kwargs,
+            _defer_cache_commit=True,
         )
         keep = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(out[0][:, keep, :])
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.text_config.vocab_size)
-        return AgnesCausalLMOutput(
+        result = AgnesCausalLMOutput(
             loss=loss, logits=logits, past_key_values=out.past_key_values,
             hidden_states=out.hidden_states, attentions=out.attentions, rope_deltas=out.rope_deltas,
         )
+        if out.past_key_values is not None:
+            out.past_key_values._in_forward = False
+        return result
 
     def prepare_inputs_for_generation(
         self,
@@ -1484,13 +1546,30 @@ class AgnesForConditionalGeneration(AgnesPreTrainedModel, GenerationMixin):
         cache = model_kwargs.get("past_key_values")
         past_len = 0 if cache is None else cache.get_seq_length()
         rope_deltas = getattr(cache, "rope_deltas", None)
-        if past_len != 0 and rope_deltas is not None:
-            return text_pos[None, ...] + rope_deltas
-
         if "input_ids" in model_kwargs and model_kwargs["input_ids"].shape[1] > 0:
             inputs_tensor = model_kwargs["input_ids"]
         is_ids = len(inputs_tensor.shape) == 2 and inputs_tensor.dtype in [torch.int, torch.long]
         has_vision = model_kwargs.get("image_grid_thw") is not None or model_kwargs.get("video_grid_thw") is not None
+        mm_types = model_kwargs.get("mm_token_type_ids")
+        if past_len and is_ids and has_vision and mm_types is not None:
+            # Generation supplies full IDs; the cache already owns the prefix.
+            # Only the unconsumed chunk carries new pixels/grids and needs fresh
+            # spatial coordinates. Keep the prefix slots for HF's later slicing.
+            current_ids = inputs_tensor[:, past_len:]
+            current_types = mm_types[:, -current_ids.shape[1]:]
+            if current_ids.shape[1] and current_types.ne(0).any():
+                current_axes, _ = self.model.compute_3d_position_ids(
+                    current_ids, self.get_input_embeddings()(current_ids),
+                    image_grid_thw=model_kwargs.get("image_grid_thw"), video_grid_thw=model_kwargs.get("video_grid_thw"),
+                    attention_mask=model_kwargs.get("attention_mask"), past_key_values=cache,
+                    mm_token_type_ids=current_types,
+                )
+                axes = text_pos.unsqueeze(0).expand(3, -1, -1).clone()
+                axes[:, :, -current_ids.shape[1]:] = current_axes
+                return torch.cat([text_pos[None, ...], axes], dim=0)
+        if past_len != 0 and rope_deltas is not None:
+            return text_pos[None, ...] + rope_deltas
+
         if is_ids and model_kwargs.get("mm_token_type_ids") is not None and has_vision:
             rest = {k: v for k, v in model_kwargs.items() if k != "input_ids"}
             axes, rope_deltas = self.model.get_rope_index(inputs_tensor, **rest)

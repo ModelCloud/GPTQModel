@@ -18,6 +18,7 @@ from gptqmodel.models.ports.agnes.configuration_agnes import AgnesConfig, AgnesT
 from gptqmodel.models.ports.agnes.image_processing_agnes import AgnesImageProcessor
 from gptqmodel.models.ports.agnes.modeling_agnes import (
     AgnesDynamicCache,
+    AgnesForCausalLM,
     AgnesForConditionalGeneration,
     _delta_rule_chunked,
     _delta_rule_stepwise,
@@ -431,3 +432,247 @@ def test_multimodal_rope_offsets_belong_to_each_request_cache():
                  use_cache=False).logits[:, -1:]
     torch.testing.assert_close(output, full, rtol=2e-5, atol=2e-6)
     assert cache.rope_deltas.item() == -2
+
+
+@pytest.mark.parametrize("head", ["causal", "conditional"])
+@pytest.mark.parametrize("layout", ["delta", "global", "mixed"])
+@pytest.mark.parametrize("length", [1, 2, 3, 4, 5, 63, 64, 65])
+@pytest.mark.parametrize("kernel", [3, 4])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@torch.no_grad()
+def test_short_prefill_and_kernel_boundaries(head, layout, length, kernel, dtype):
+    torch.manual_seed(43)
+    layers = {"delta": ["agnes_delta_attention"] * 2,
+              "global": ["agnes_global_attention"] * 2,
+              "mixed": ["agnes_delta_attention", "agnes_global_attention"]}[layout]
+    config = tiny_config(layer_types=layers)
+    config.text_config.linear_conv_kernel_dim = kernel
+    model = (AgnesForCausalLM(config.text_config) if head == "causal"
+             else AgnesForConditionalGeneration(config)).to(dtype=dtype).eval()
+    ids = (torch.arange(length) % 40 + 1)[None]
+    mask = torch.ones_like(ids)
+    cached = model(ids, attention_mask=mask, use_cache=True)
+    torch.testing.assert_close(cached.logits, model(ids, attention_mask=mask, use_cache=False).logits)
+    # Single-token update followed by a multi-token convolution continuation.
+    cache = cached.past_key_values
+    for chunk in (torch.tensor([[7]]), torch.tensor([[9, 11]])):
+        ids = torch.cat((ids, chunk), dim=1)
+        actual = model(chunk, attention_mask=torch.ones_like(ids), past_key_values=cache, use_cache=True).logits
+        expected = model(ids, attention_mask=torch.ones_like(ids), use_cache=False).logits[:, -chunk.shape[1]:]
+        tolerance = {"rtol": 2e-5, "atol": 2e-6} if dtype == torch.float32 else {"rtol": 0.03, "atol": 0.002}
+        torch.testing.assert_close(actual, expected, **tolerance)
+    for kind, layer in zip(layers, cache.layers):
+        if kind == "agnes_delta_attention":
+            assert layer.conv_states[0].shape[-1] == config.text_config.linear_conv_kernel_dim
+    prompt = ids[:, :length]
+    generated = model.generate(prompt, attention_mask=torch.ones_like(prompt), max_new_tokens=2,
+                               do_sample=False, suppress_tokens=[60, 61, 62, 63])
+    expected = model.generate(prompt, attention_mask=torch.ones_like(prompt), max_new_tokens=2,
+                              do_sample=False, suppress_tokens=[60, 61, 62, 63], use_cache=False)
+    assert torch.equal(generated, expected)
+
+
+@pytest.mark.parametrize("head", ["causal", "conditional"])
+@pytest.mark.parametrize("stage", ["head", "loss"])
+@pytest.mark.parametrize("continuation", [False, True])
+@torch.no_grad()
+def test_public_head_or_loss_failure_invalidates_cache(head, stage, continuation, monkeypatch):
+    torch.manual_seed(43)
+    config = tiny_config()
+    model = (AgnesForCausalLM(config.text_config) if head == "causal"
+             else AgnesForConditionalGeneration(config)).eval()
+    prefix = torch.tensor([[1, 3, 5]])
+    ids = torch.tensor([[7]]) if continuation else prefix
+    cache = model(prefix, use_cache=True).past_key_values if continuation else AgnesDynamicCache(config.text_config)
+    in_progress = []
+
+    def fail(*args, **kwargs):
+        in_progress.append(cache._in_forward)
+        raise RuntimeError("injected public-head failure")
+
+    with monkeypatch.context() as patch:
+        hook = None
+        if stage == "head":
+            hook = model.lm_head.register_forward_pre_hook(fail)
+        else:
+            patch.setattr(model, "_loss_function", fail, raising=False)
+        try:
+            with pytest.raises(RuntimeError, match="injected public-head failure"):
+                model(ids, past_key_values=cache, use_cache=True, labels=ids if stage == "loss" else None)
+        finally:
+            if hook is not None:
+                hook.remove()
+    assert in_progress == [True], "cache must remain incomplete until the public head/loss succeeds"
+    assert cache._in_forward
+    with pytest.raises(ValueError, match="incomplete forward.*reset"):
+        model(ids, past_key_values=cache, use_cache=True)
+    cache.reset()
+    assert cache.get_seq_length() == 0 and cache.rope_deltas is None
+    full_ids = torch.cat((prefix, ids), dim=1) if continuation else ids
+    retried = model(full_ids, labels=full_ids, past_key_values=cache, use_cache=True)
+    expected = model(full_ids, labels=full_ids, use_cache=False)
+    torch.testing.assert_close(retried.logits, expected.logits)
+    torch.testing.assert_close(retried.loss, expected.loss)
+    assert not cache._in_forward and cache.get_seq_length() == full_ids.shape[1]
+
+
+def media_chunk(spec):
+    """Independent token/grid fixture: each video frame has its own timestamp run."""
+    ids, types = [1], [0]
+    data = {}
+    for kind, grid in spec:
+        token, mm = (60, 1) if kind == "image" else (61, 2)
+        t, h, w = grid
+        for _ in range(t):
+            count = h * w // 4
+            ids += [62] + [token] * count + [63, 5]
+            types += [0] + [mm] * count + [0, 0]
+        pixel_key, grid_key = (("pixel_values", "image_grid_thw") if kind == "image"
+                               else ("pixel_values_videos", "video_grid_thw"))
+        data.setdefault(pixel_key, []).append(torch.randn(t * h * w, 12))
+        data.setdefault(grid_key, []).append(torch.tensor([grid]))
+    return torch.tensor([ids]), {**{key: torch.cat(values) for key, values in data.items()},
+                                "mm_token_type_ids": torch.tensor([types])}
+
+
+@pytest.mark.parametrize("kind", ["image", "video", "mixed"])
+@pytest.mark.parametrize("prefix_kind", ["text", "media"])
+@pytest.mark.parametrize("mask_mode", ["none", "full", "chunk"])
+@pytest.mark.parametrize("explicit_positions", [False, True])
+@torch.no_grad()
+def test_appended_media_updates_positions_and_continues_text(kind, prefix_kind, mask_mode, explicit_positions):
+    torch.manual_seed(43)
+    model = AgnesForConditionalGeneration(tiny_config()).eval()
+    first, old = media_chunk([] if prefix_kind == "text" else [("image", [1, 4, 4])])
+    if prefix_kind == "text":
+        first, old["mm_token_type_ids"] = torch.tensor([[1, 3, 5]]), torch.zeros(1, 3, dtype=torch.long)
+    spec = {"image": [("image", [1, 4, 4]), ("image", [1, 4, 6])],
+            "video": [("video", [2, 4, 4]), ("video", [1, 4, 6])],
+            "mixed": [("video", [2, 4, 4]), ("image", [1, 4, 6])]}[kind]
+    later, new = media_chunk(spec)
+    if mask_mode != "none":
+        first = torch.cat((torch.zeros(1, 2, dtype=torch.long), first), dim=1)
+        old["mm_token_type_ids"] = torch.cat((torch.zeros(1, 2, dtype=torch.long), old["mm_token_type_ids"]), dim=1)
+    all_ids = torch.cat((first, later), dim=1)
+    all_media = {key: torch.cat([data[key] for data in (old, new) if key in data], dim=0)
+                 for key in old.keys() | new.keys() if key != "mm_token_type_ids"}
+    all_media["mm_token_type_ids"] = torch.cat((old["mm_token_type_ids"], new["mm_token_type_ids"]), dim=1)
+    mask = all_ids.ne(0).long() if mask_mode != "none" else None
+    prefix_mask = mask[:, :first.shape[1]] if mask is not None else None
+    current_mask = mask if mask_mode == "full" else torch.ones_like(later) if mask is not None else None
+    cache = model(first, attention_mask=prefix_mask, **old, use_cache=True).past_key_values
+    positions, delta = model.model.compute_3d_position_ids(
+        later, model.get_input_embeddings()(later), attention_mask=current_mask, past_key_values=cache,
+        **{key: value for key, value in new.items() if not key.startswith("pixel_values")},
+    )
+    full_positions, full_delta = model.model.get_rope_index(all_ids, attention_mask=mask,
+        **{key: value for key, value in all_media.items() if not key.startswith("pixel_values")})
+    torch.testing.assert_close(positions, full_positions[:, :, -later.shape[1]:])
+    torch.testing.assert_close(delta, full_delta)
+    assert full_delta.item() == -(5 if kind == "image" else 7) - (2 if prefix_kind == "media" else 0)
+    extra = {"position_ids": full_positions[:, :, -later.shape[1]:]} if explicit_positions else {}
+    actual = model(later, attention_mask=current_mask, **new, **extra, past_key_values=cache, use_cache=True)
+    expected = model(all_ids, attention_mask=mask, **all_media, use_cache=False)
+    torch.testing.assert_close(actual.logits, expected.logits[:, -later.shape[1]:], rtol=2e-5, atol=2e-6)
+    torch.testing.assert_close(cache.rope_deltas, full_delta)
+    text = torch.tensor([[7, 9]])
+    complete = torch.cat((all_ids, text), dim=1)
+    final_mask = complete.ne(0).long() if mask_mode == "full" else torch.ones_like(text) if mask is not None else None
+    actual = model(text, attention_mask=final_mask, past_key_values=cache, use_cache=True).logits
+    all_media["mm_token_type_ids"] = torch.cat((all_media["mm_token_type_ids"], torch.zeros_like(text)), dim=1)
+    expected = model(complete, attention_mask=complete.ne(0).long() if mask is not None else None,
+                     **all_media, use_cache=False).logits[:, -2:]
+    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
+    torch.testing.assert_close(cache.rope_deltas, full_delta)
+
+
+@pytest.mark.parametrize("kind", ["image", "video"])
+@pytest.mark.parametrize("options", [
+    {"size": {"shortest_edge": 16, "longest_edge": 16}},
+    {"min_pixels": 16, "max_pixels": 16},
+    {"min_pixels": 64},
+    {"max_pixels": 16},
+    {"size": {"shortest_edge": 16, "longest_edge": 256}, "min_pixels": 128},
+    {"size": {"shortest_edge": 16, "longest_edge": 128}, "min_pixels": 16, "max_pixels": 32},
+    {"size": {"shortest_edge": 16, "longest_edge": 16}, "do_resize": False},
+    {"size": {"shortest_edge": 64, "longest_edge": 64}, "patch_size": 4, "merge_size": 1},
+])
+def test_patch_count_overrides_match_real_media_processing(kind, options):
+    processor = tiny_processor()
+    original = json.dumps(options, sort_keys=True)
+    image = torch.zeros(3, 8, 8, dtype=torch.uint8)
+    merge = options.get("merge_size", 2)
+    for _ in range(2):
+        if kind == "image":
+            predicted = processor._get_num_multimodal_tokens(image_sizes=[(8, 8)], **options).num_image_tokens
+            output = processor.image_processor([image], return_tensors="pt", **options)
+            actual = output.image_grid_thw.prod(-1) // merge**2
+        else:
+            predicted = processor._get_num_multimodal_tokens(video_sizes=[(3, 8, 8)], **options).num_video_tokens
+            output = processor.video_processor([image[None].repeat(3, 1, 1, 1)], return_tensors="pt", **options)
+            actual = output.video_grid_thw.prod(-1) // merge**2
+        assert predicted == actual.tolist()
+    assert json.dumps(options, sort_keys=True) == original
+    assert processor.image_processor.size == {"shortest_edge": 16, "longest_edge": 64}
+    assert processor.video_processor.size == {"shortest_edge": 16, "longest_edge": 64}
+
+
+@torch.no_grad()
+def test_appended_media_padding_history_follows_beam_selection_and_reset():
+    torch.manual_seed(43)
+    model = AgnesForConditionalGeneration(tiny_config()).eval()
+    first = torch.tensor([[1, 62, 60, 60, 60, 60, 63, 5], [0, 0, 0, 1, 62, 60, 63, 5]])
+    types = first.eq(60).long()
+    old_pixels = [torch.randn(16, 12), torch.randn(4, 12)]
+    old_grids = torch.tensor([[1, 4, 4], [1, 2, 2]])
+    mask = first.ne(0).long()
+    cache = model(first, pixel_values=torch.cat(old_pixels), image_grid_thw=old_grids,
+                  mm_token_type_ids=types, attention_mask=mask, use_cache=True).past_key_values
+    mask.zero_()  # cache owns the mask snapshot, not a caller-mutable alias
+    cache.batch_repeat_interleave(2)
+    cache.batch_select_indices(torch.tensor([3, 0, 1]))
+    selected = torch.tensor([1, 0, 0])
+    first = first[selected]
+    later = torch.tensor([[1, 62, 60, 60, 60, 60, 63, 5]]).repeat(3, 1)
+    pixels = torch.randn(3, 16, 12)
+    actual = model(later, pixel_values=pixels.flatten(0, 1), image_grid_thw=torch.tensor([[1, 4, 4]]).repeat(3, 1),
+                   mm_token_type_ids=later.eq(60).long(), past_key_values=cache, use_cache=True).logits
+    full = torch.cat((first, later), dim=1)
+    full_pixels = torch.cat([part for i, index in enumerate(selected.tolist()) for part in (old_pixels[index], pixels[i])])
+    full_grids = torch.cat([torch.stack((old_grids[index], torch.tensor([1, 4, 4]))) for index in selected.tolist()])
+    kwargs = {"pixel_values": full_pixels, "image_grid_thw": full_grids,
+              "mm_token_type_ids": full.eq(60).long(), "attention_mask": full.ne(0).long()}
+    expected = model(full, **kwargs, use_cache=False).logits
+    torch.testing.assert_close(actual, expected[:, -later.shape[1]:], rtol=2e-5, atol=2e-6)
+    assert cache._agnes_valid_tokens.tolist() == [[13], [16], [16]]
+    assert cache.rope_deltas.tolist() == [[-2], [-4], [-4]]
+    cache.reset()
+    assert cache._agnes_valid_tokens is None and cache._agnes_attention_mask is None
+    replay = model(full, **kwargs, past_key_values=cache, use_cache=True)
+    torch.testing.assert_close(replay.logits, expected)
+
+
+@pytest.mark.parametrize("kind", ["image", "video", "mixed"])
+@torch.no_grad()
+def test_generate_appended_media_from_existing_cache(kind):
+    torch.manual_seed(43)
+    model = AgnesForConditionalGeneration(tiny_config()).eval()
+    first, old = media_chunk([("image", [1, 4, 4])])
+    spec = {"image": [("image", [1, 4, 6])], "video": [("video", [2, 4, 4])],
+            "mixed": [("video", [2, 4, 4]), ("image", [1, 4, 6])]}[kind]
+    later, new = media_chunk(spec)
+    ids = torch.cat((first, later), dim=1)
+    mm = torch.cat((old["mm_token_type_ids"], new["mm_token_type_ids"]), dim=1)
+    cache = model(first, **old, use_cache=True).past_key_values
+    full_kwargs = {key: torch.cat([data[key] for data in (old, new) if key in data])
+                   for key in old.keys() | new.keys() if key != "mm_token_type_ids"}
+    kwargs = {"attention_mask": torch.ones_like(ids), "mm_token_type_ids": mm,
+              "max_new_tokens": 2, "do_sample": False, "suppress_tokens": [60, 61, 62, 63],
+              "return_dict_in_generate": True, "output_logits": True}
+    # Full input IDs plus a prefix cache, but only the new media's pixels/grids.
+    actual = model.generate(ids, **{key: value for key, value in new.items() if key != "mm_token_type_ids"},
+                            **kwargs, past_key_values=cache)
+    expected = model.generate(ids, **full_kwargs, **kwargs, use_cache=False)
+    assert torch.equal(actual.sequences, expected.sequences)
+    for actual_logits, expected_logits in zip(actual.logits, expected.logits):
+        torch.testing.assert_close(actual_logits, expected_logits, rtol=2e-5, atol=2e-6)
