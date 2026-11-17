@@ -23,7 +23,7 @@ from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
-from .._quant_methods import REFUSED_HF_QUANT_METHODS
+from .._quant_methods import REFUSED_HF_QUANT_METHODS, refused_hf_load_remedy
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
 from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
@@ -329,7 +329,7 @@ def hf_compat_warnings(
             "`.gguf` file. This checkpoint publishes "
             f"`quant_method: \"{GGUF_EXPORT_QUANT_METHOD}\"` so an HF loader "
             "refuses it instead of random-initializing every linear layer. Load "
-            "it with `GPTQModel.load` or vLLM."
+            "it with `GPTQModel.load`."
         )
     method = getattr(quantize_config, "method", None)
     method_name = getattr(method, "value", method)
@@ -340,7 +340,7 @@ def hf_compat_warnings(
             "only warns `Unknown quantization type` and then random-initializes "
             "every linear layer. Importing `gptqmodel` installs a refusing "
             "quantizer, so plain HF raises instead. Load this checkpoint with "
-            "`GPTQModel.load` or vLLM."
+            f"{refused_hf_load_remedy(method_name)}."
         )
     if _has_per_expert_quantized_modules(model):
         warnings.append(
