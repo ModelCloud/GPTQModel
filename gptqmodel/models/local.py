@@ -17,15 +17,19 @@ def _local_class(path: str):
 class LocalModelLoader:
     """Use as a definition's ``loader``; checkpoint ``auto_map`` is never read.
 
-    Both paths are trusted package metadata, never values from config.json.
+    Class paths are trusted package metadata, never values from config.json.
     Importing a definition does not import its optional modeling dependencies.
     """
 
     config_class: str
     model_class: str
+    processor_class: str | None = None
 
     def __post_init__(self):
-        for path in (self.config_class, self.model_class):
+        paths = (self.config_class, self.model_class)
+        if self.processor_class is not None:
+            paths += (self.processor_class,)
+        for path in paths:
             module, _, name = path.rpartition(".")
             if not module.startswith("gptqmodel.") or not name.isidentifier():
                 raise ValueError(f"Local model classes must belong to gptqmodel: {path!r}")
@@ -46,6 +50,13 @@ class LocalModelLoader:
         if kwargs.get("config") is None:
             kwargs["config"] = self.load_config(model_id_or_path, **kwargs)
         return _local_class(self.model_class).from_pretrained(model_id_or_path, **kwargs)
+
+    def load_processor(self, model_id_or_path, **kwargs):
+        if self.processor_class is None:
+            raise ValueError("This local model loader does not declare a processor class")
+        kwargs.pop("trust_remote_code", None)
+        kwargs.pop("code_revision", None)
+        return _local_class(self.processor_class).from_pretrained(model_id_or_path, **kwargs)
 
 
 def local_model_loader(model_type):
