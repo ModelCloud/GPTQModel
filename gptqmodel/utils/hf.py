@@ -1023,11 +1023,11 @@ def load_model_config(model_id_or_path, *, trust_remote_code: bool = False, **kw
     Preserve revision/subfolder/auth kwargs for both the data probe and final
     load. A model port opts in through its definition's LocalModelLoader.
     """
-    from ..models.local import local_model_loader
+    from ..models.local import local_model_loader_for_config
 
     ensure_qwen_drive_registered(model_id_or_path)
     payload, _ = PreTrainedConfig.get_config_dict(model_id_or_path, **kwargs)
-    loader = local_model_loader(payload.get("model_type"))
+    loader = local_model_loader_for_config(payload)
     if loader is not None:
         return loader.load_config(model_id_or_path, **kwargs)
     config_selection_kwargs = get_config_selection_kwargs(kwargs)
@@ -1046,7 +1046,7 @@ def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_c
     # main loader's AutoConfig call.  The probe runs very early in every public
     # GPTQModel entry point when callers explicitly pass trust_remote_code.
     ensure_qwen_drive_registered(model_id_or_path)
-    from ..models.local import local_model_loader
+    from ..models.local import local_model_loader_for_config
 
     if model_id_or_path:
         try:
@@ -1057,7 +1057,7 @@ def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_c
             if not trust_remote_code:
                 return False
             raise
-        if local_model_loader(payload.get("model_type")) is not None:
+        if local_model_loader_for_config(payload) is not None:
             return False
         # A native model_type can still advertise a remote-only layout. Never
         # silently load the incompatible native architecture when trust is off.

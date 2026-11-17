@@ -4,6 +4,7 @@
 
 import json
 import struct
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -298,3 +299,104 @@ def test_native_config_is_not_changed_by_local_definition_selection(tmp_path, mo
     )))
     assert type(load_model_config(path)) is not original
     assert type(AutoConfig.from_pretrained(path, trust_remote_code=False)) is original
+
+
+@pytest.fixture
+def legacy_owned_checkpoint(tmp_path, monkeypatch):
+    from tokenizers import Tokenizer, models
+    from transformers import TokenizersBackend
+
+    from gptqmodel.models.ports.internlm.configuration_internlm import InternLMConfig
+    from gptqmodel.models.ports.internlm.modeling_internlm import InternLMForCausalLM
+
+    # Package declarations exist independently of checkpoint metadata. The
+    # subclass lets the pre-fix loader reach the actual missing-type behavior.
+    @dataclass(frozen=True)
+    class DeclaredLoader(LocalModelLoader):
+        config_architectures: tuple[str, ...] = ("InternLMForCausalLM",)
+
+    definition = MODEL_MAP_CASEFOLD["internlm"]
+    monkeypatch.setattr(definition, "loader", DeclaredLoader(
+        definition.loader.config_class, definition.loader.model_class,
+    ))
+    model = InternLMForCausalLM(InternLMConfig(
+        vocab_size=32, hidden_size=16, intermediate_size=24,
+        num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
+        max_position_embeddings=32, attn_implementation="eager",
+    )).eval()
+    root = tmp_path / "neutral"
+    path = root / "nested"
+    model.save_pretrained(path)
+    TokenizersBackend(tokenizer_object=Tokenizer(models.WordLevel(
+        {f"t{i}": i for i in range(32)}, unk_token="t0",
+    )), unk_token="t0").save_pretrained(path)
+    payload = json.loads((path / "config.json").read_text())
+    payload.pop("model_type")
+    payload["auto_map"] = {
+        "AutoConfig": "remote_config.Config", "AutoModelForCausalLM": "remote_model.Model",
+    }
+    marker = path / "EXECUTED"
+    for name in ("remote_config.py", "remote_model.py"):
+        (path / name).write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\nraise AssertionError('checkpoint Python')\n")
+    (path / "config.json").write_text(json.dumps(payload))
+    return root, path, payload, marker, model
+
+
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("bypass", [None, "0", "1"])
+def test_public_missing_model_type_uses_only_declared_architecture_and_retries(legacy_owned_checkpoint, monkeypatch, trust, bypass):
+    root, path, payload, marker, reference = legacy_owned_checkpoint
+    if bypass is not None:
+        monkeypatch.setenv(BYPASS_ENV, bypass)
+    options = {
+        "subfolder": "nested", "local_files_only": True, "trust_remote_code": trust,
+        "device": "cpu", "dtype": torch.float32, "attn_implementation": "eager",
+    }
+    selected = load_model_config(root, subfolder="nested", trust_remote_code=trust)
+    assert type(selected) is type(reference.config)
+    assert resolve_trust_remote_code(root, subfolder="nested", trust_remote_code=trust) is False
+    loaded = GPTQModel.load(str(root), **options)
+    inputs = torch.tensor([[1, 7, 13, 19]])
+    with torch.no_grad():
+        expected = reference(inputs).logits
+        torch.testing.assert_close(loaded.model(inputs).logits, expected, atol=0, rtol=0)
+
+    # Conflicting metadata must fail even after a successful load, and repairing
+    # it must retry normally without a cached architectural guess.
+    for conflict in ("UnknownModel", None, []):
+        (path / "config.json").write_text(json.dumps({**payload, "architectures": ["InternLMForCausalLM", conflict]}))
+        with pytest.raises(ValueError, match="package.*architectures"):
+            GPTQModel.load(str(root), **options)
+    assert not marker.exists()
+    (path / "config.json").write_text(json.dumps(payload))
+    repaired = GPTQModel.load(str(root), **options)
+    with torch.no_grad():
+        torch.testing.assert_close(repaired.model(inputs).logits, expected, atol=0, rtol=0)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("model_type", [None, "", "unknown_explicit_type", "llama"])
+def test_architecture_inference_never_overrides_explicit_type(legacy_owned_checkpoint, model_type):
+    root, path, payload, marker, _ = legacy_owned_checkpoint
+    (path / "config.json").write_text(json.dumps({**payload, "model_type": model_type}))
+    if model_type == "llama":
+        assert load_model_config(root, subfolder="nested").model_type == "llama"
+    else:
+        with pytest.raises(ValueError):
+            load_model_config(root, subfolder="nested")
+    assert not marker.exists()
+
+
+def test_ambiguous_package_architecture_rejects_before_checkpoint_code(legacy_owned_checkpoint, monkeypatch):
+    root, _, _, marker, _ = legacy_owned_checkpoint
+    loader = MODEL_MAP_CASEFOLD["internlm"].loader
+    monkeypatch.setitem(MODEL_MAP_CASEFOLD, "architecture_conflict_fixture", SimpleNamespace(loader=type(loader)(
+        "gptqmodel.hf_minimax_m2.configuration_minimax_m2.MiniMaxM2Config",
+        "gptqmodel.hf_minimax_m2.modeling_minimax_m2.MiniMaxM2ForCausalLM",
+    )))
+    monkeypatch.setenv(BYPASS_ENV, "1")
+    with pytest.raises(ValueError, match="package.*architectures"):
+        load_model_config(root, subfolder="nested", trust_remote_code=True)
+    with pytest.raises(ValueError, match="package.*architectures"):
+        resolve_trust_remote_code(root, subfolder="nested", trust_remote_code=True)
+    assert not marker.exists()
