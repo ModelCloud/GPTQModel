@@ -11,6 +11,11 @@ definition ownership corrections alongside the package-owned ports.
 
 | Definition / model type | Implementation and provenance | CPU validation | AWQ policy | Limits |
 | --- | --- | --- | --- | --- |
+| `DeepSeekV2QModel` / `deepseek_v2` | [Native-derived compatibility and pinned legacy source](../gptqmodel/models/ports/deepseek_v2/README.md) | Lite/full MLA, dense/periodic/shared MoE, top-k normalization, native expert conversion, cache/generation and safetensors round trips, malicious metadata matrix | Actual CPU plain quantization and packing; no scale groups | No GPU/trained-checkpoint quality, FlashAttention, distributed experts or full packed-checkpoint round trip; expert parallelism rejected |
+| `DeepSeekV3QModel` / `deepseek_v3`, `kimi_k2` | [Native bridge, checkpoint conversion and pinned Kimi/DeepSeek provenance](../gptqmodel/models/ports/deepseek_v3/PROVENANCE.md) | Dense/split-Q MLA, published-layout grouped routing, cache/generation, MTP ownership, malicious metadata isolation and safetensors reload | Real CPU plain AWQ/INT4 packing, no scale folding | Kimi partial-group routing rejected; no GPU, trained-checkpoint accuracy or production FP8 qualification |
+| `DeepSeekV4QModel` / `deepseek_v4` | [Native Transformers 5.23 and pinned BF16 checkpoint schema](../gptqmodel/models/ports/deepseek_v4/README.md) | Six sliding/CSA/HCA and expert variants, full 34,223-key target schema, source routing oracle, cache/generation and malicious metadata isolation | Plain AWQ packs 16 tiny linears across six layouts; no scale groups | BF16 checkpoint metadata gated (HTTP 401); no trained weights, GPU, FP8/FP4, MTP accuracy or packed export qualification |
+| `DeciLMQModel` / `deci`, `nemotron-nas` | [Heterogeneous GQA, sink cache, pinned source and Apache license](../gptqmodel/models/ports/decilm/README.md) | Nine NAS attention/FFN combinations, exact published meta ownership, sink boundaries, cache failure/retry through LM output, generation and safetensors reload | Actual CPU plain AWQ pack/save/reload; no scale groups | No GPU/trained evaluation or native AWQ folding; shifted-sink continuation chunks must be shorter than window minus sinks; eager/SDPA only |
+| `DreamQModel` / `dream` | [Pinned Dream source and Apache license](../gptqmodel/models/ports/dream/README.md), [diffusion flow](../gptqmodel/models/ports/dream/docs/local-loading-and-diffusion-generation.md) | MHA/GQA/MQA, bidirectional masks, four diffusion samplers, cache and restart, 339-key published meta schema, malicious metadata isolation and safetensors reload | Actual CPU plain AWQ packing of 14 linears; no scale groups | No trained 7B evaluation, GPU, FlashAttention or sliding-window qualification; uncached Hub/tokenizer loading unverified |
 | `ChatGLMQModel` / `chatglm` | [GLM2/3/4 pinned sources and licenses](../gptqmodel/models/ports/chatglm/PROVENANCE.md), [selection/cache coverage](../gptqmodel/models/ports/chatglm/COVERAGE.md) | Published 200/200/284-key meta schemas; independent FP32/FP16/BF16 MQA/MHA equations, prefix tuning, generation, cache retry/reorder, repeated safetensors reload and public hostile metadata matrix | Eight actual CPU plain-AWQ quantize/save/reload variants; no scale groups | No trained-checkpoint quality, GPU or long-context qualification; GLM2 rotary uses GLM3-style FP32 frequencies; static/sliding caches and tokenizer-specific chat helpers unsupported; ChatGLM1 rejected |
 | `CodeGenQModel` / `codegen` | [CodeGen/CodeGen2 partition and checkpoint provenance](../gptqmodel/models/ports/codegen/PROVENANCE.md); native four partitions, package-owned eight partitions | Independent per-head equations, exact native four-partition parity, legacy metadata/mask validation, cache/generation, FP32/FP16/BF16 safetensors reload, public hostile metadata matrix and full-size meta ownership | Actual plain quantization of all four decoder linears; no scale groups | No trained multi-GB/GPU accuracy, packed quantized reload or multi-GPU concurrency qualification; ambiguous legacy metadata requires explicit `qkv_layout` |
 | `DbrxConvertedQModel` / `dbrx_converted` | [Converted DBRX sources, Databricks license and notice](../gptqmodel/models/ports/dbrx_converted/PROVENANCE.md) | Both pinned 2203-key indexes match full meta state; independent FP32/FP16/BF16 MHA/GQA/MQA and MoE equations, dynamic/static cache, beam generation, public hostile metadata matrix and safetensors reload | Public CPU plain-AWQ quantize/pack/save/reload of all 26 tiny linears; routers and norms stay dense | Eager only; no GPU, trained 132B quality, compilation, SDPA/FlashAttention, training, fusion or AWQ scale-fold/search qualification |
@@ -97,6 +102,50 @@ on quantized reload; it no longer substitutes 4096 for a published context size.
 ChatGLM preserves caller cache ownership by assembling a fresh output cache only
 after all layers succeed. Both CodeGen layouts and ChatGLM use plain AWQ, too;
 none of these ports claims qualified source folding or scale search.
+
+## Native bridges, sparse decoders and diffusion
+
+DeepSeek V2 and V3 use package-owned config/model bridges to the applicable
+Transformers 5 implementations. V4 uses the native `AutoModelForCausalLM` mapping
+directly: `DeepSeekV4QModel.loader` explicitly overrides the V3 local loader,
+which cannot construct V4 layers or read its `mlp_layer_types`. Kimi-K2
+canonicalizes its source alias for V3 checkpoint conversion and rejects
+partial-group routing. Deci/Nemotron-NAS and Dream have package-owned models;
+the former handles heterogeneous attention/FFN and sink caches, while Dream
+uses full-sequence bidirectional denoising for generation.
+
+```mermaid
+flowchart TD
+    A["load_model_config reads checkpoint model_type"] --> B{"MODEL_MAP definition"}
+    B -->|"deepseek_v2 / deepseek_v3 / kimi_k2"| C["LocalModelLoader: package config/model bridge"]
+    C --> D{"Kimi grouping valid?"}
+    D -->|no| X["ValueError before model or checkpoint Python"]
+    D -->|yes| E["Native Transformers MLA and MoE computation"]
+    B -->|"deepseek_v4"| F["AutoModelForCausalLM: native V4 config/model"]
+    B -->|"deci / nemotron-nas"| G["LocalModelLoader: DeciLMConfig / DeciLMForCausalLM"]
+    G --> H["Fork cache, run decoder, LM head, loss, output encoding"]
+    H --> I{"Entire output succeeded?"}
+    I -->|no| Y["Exception; caller cache unchanged and reusable"]
+    I -->|yes| J["Publish staged cache to caller"]
+    B -->|dream| K["LocalModelLoader: DreamConfig / DreamForCausalLM"]
+    K --> L["Bidirectional full-sequence diffusion sampler"]
+    M["Checkpoint auto_map / trust toggles"] -. cannot replace selected definition .-> B
+    classDef failure fill:#ffdddd,stroke:#cc0000
+    class X,Y failure
+```
+
+| Selection or state boundary | Before | Shipped behavior and evidence |
+| --- | --- | --- |
+| DeepSeek V4 model construction | `definitions/deepseek_v4.py:1410` inherited V3's package loader after the V3 port; a V4 config failed `mlp_layer_types` validation | `DeepSeekV4QModel.loader = AutoModelForCausalLM` selects the native V4 model; public hostile-map loading and V3/V4 sibling tests exercise both paths |
+| Kimi-K2 routing | Checkpoint alias required remote modeling code and offered partial-group semantics that differ from native V3 | `ports/deepseek_v3/configuration_deepseek_v3.py` retains the source alias while canonicalizing the native config; invalid grouping raises before model loading |
+| Deci cache ownership | Decoder could publish a warm cache before LM head, loss or tuple encoding failed | `ports/decilm/modeling_decilm.py` stages the decoder cache through the complete LM output; failures leave caller identities, tensors and counters intact |
+| Dream generation | Old checkpoint code supplied diffusion sampling and attempted a remote RoPE compatibility shim | `ports/dream/generation_utils.py` runs four local sampling algorithms over full sequences; no checkpoint Python is selected or global RoPE registry patched |
+
+The exact model plans and license/weight-provenance boundaries are recorded in
+the linked per-model references above. CPU/meta qualification and plain-AWQ
+policy vary by family; these checks do not establish GPU or trained-checkpoint
+accuracy. DeepSeek V2 router/cache/dtype follow-up is in progress and must
+pass its failure/retry regressions before those paths can be called qualified.
 
 Run the InternLM checks from the repository root:
 

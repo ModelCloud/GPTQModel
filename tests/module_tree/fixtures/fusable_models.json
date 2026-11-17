@@ -367,7 +367,7 @@
     },
     "deci": {
       "definition": "DeciLMQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Heterogeneous no-op, linear and GQA attention/MLP layouts have no qualified fused executor."
     },
     "deepseek_ocr2": {
       "definition": "DeepSeekOCR2QModel",
@@ -464,11 +464,11 @@
     },
     "deepseek_v2": {
       "definition": "DeepSeekV2QModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "MLA has normalized low-rank Q/KV stages; no dense or expert projection fusion is qualified."
     },
     "deepseek_v3": {
       "definition": "DeepSeekV3QModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Native MLA low-rank attention and routed/shared experts have no independently qualified fused executor."
     },
     "deepseek_v32": {
       "definition": "DeepSeekV32QModel",
@@ -476,7 +476,7 @@
     },
     "deepseek_v4": {
       "definition": "DeepSeekV4QModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Native sliding/compressed attention and hash/routed experts have no independently qualified fused executor."
     },
     "deepseek_vl": {
       "definition": "DeepSeekVLQModel",
@@ -659,7 +659,7 @@
     },
     "dream": {
       "definition": "DreamQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Bidirectional diffusion attention and gated MLP have no qualified fused executor."
     },
     "ernie4_5": {
       "definition": "Ernie4_5QModel",

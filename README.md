@@ -266,6 +266,8 @@ bypass. See [model loading policy](docs/trust-remote-code-isolation.md) and
 cover the package-owned GQA/MLA/recurrent variants and their qualification limits.
 [CodeGen, ChatGLM and converted DBRX loading](docs/transformers5-model-ports.md#codegen-layout-and-chatglm--converted-dbrx-loading)
 documents partition selection, cache ownership and plain AWQ qualification.
+[DeepSeek V2/V3/V4, Kimi-K2, Deci/Nemotron-NAS, and Dream](docs/transformers5-model-ports.md#native-bridges-sparse-decoders-and-diffusion)
+have model-specific compatibility boundaries, source references and CPU validation.
 Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
 Re-saving a loaded fused-expert MoE defuses the export shell and fails closed on

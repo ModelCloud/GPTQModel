@@ -440,10 +440,10 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.linear_attn"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
-        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.gate_proj", "mlp.up_proj", "mlp.linear_mlp"],
         ["mlp.down_proj"]
       ]
     },
@@ -467,10 +467,11 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.q_a_proj", "self_attn.q_proj", "self_attn.kv_a_proj_with_mqa"],
+        ["self_attn.q_a_proj", "self_attn.q_a_layernorm:!", "self_attn.q_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_a_layernorm:!"],
         ["self_attn.q_b_proj", "self_attn.kv_b_proj"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
+        ["mlp.gate:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
         ["mlp.down_proj"],
         ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
@@ -483,12 +484,13 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.q_proj", "self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa"],
+        ["self_attn.q_a_layernorm:!", "self_attn.kv_a_layernorm:!", "self_attn.q_proj", "self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa"],
         ["self_attn.q_b_proj", "self_attn.kv_b_proj"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
         ["mlp.down_proj"],
+        ["mlp.gate:!", "mlp.gate.e_score_correction_bias:!"],
         ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
         ["mlp.experts.{expert_index}.down_proj"],
         ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],

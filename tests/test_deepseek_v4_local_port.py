@@ -136,6 +136,7 @@ def test_v4_uses_exact_native_mapping_without_inherited_v3_trust():
     assert not DeepSeekV4QModel.require_trust_remote_code
     assert AutoConfig.for_model("deepseek_v4").__class__ is DeepseekV4Config
     assert AutoModelForCausalLM._model_mapping[DeepseekV4Config] is DeepseekV4ForCausalLM
+    assert isinstance(DeepSeekV4QModel.loader.from_config(tiny_config()), DeepseekV4ForCausalLM)
 
 
 @pytest.mark.parametrize("trust", [False, True])

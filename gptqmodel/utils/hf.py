@@ -2134,16 +2134,6 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
             from transformers.utils import is_flash_attn_2_available
             config.attn_implementation_new = "flash_attention_2" if is_flash_attn_2_available() else "sdpa"
 
-    if model_type_lower == "dream":
-        import transformers.modeling_rope_utils as rope_utils
-        # dream remote models expect "default"
-        if "default" not in rope_utils.ROPE_INIT_FUNCTIONS:
-            rope_utils.ROPE_INIT_FUNCTIONS["default"] = rope_utils.ROPE_INIT_FUNCTIONS["linear"]
-
-        # transformers 5.x expects rope_parameters["factor"] for linear RoPE
-        if getattr(config, "rope_parameters", None):
-            config.rope_parameters.setdefault("factor", 1.0)
-
     # transformers 5.x normalizes RoPE config to `rope_type`, but older
     # MiniCPM remote code still reads `rope_scaling["type"]` or expects `None`.
     rope_scaling = getattr(config, "rope_scaling", None)

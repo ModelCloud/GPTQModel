@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterable, Sequence
 import torch
 import torch.nn.functional as F
 from torch import nn
+from transformers import AutoModelForCausalLM
 
 from ...utils.exl3_error_ledger import (
     ZERO_ROUTE_RECOVERY_MODE_IDENTITY,
@@ -1408,6 +1409,9 @@ def deepseek_v4_mtp_source_projection_prefix(runtime_prefix: str) -> str:
 
 
 class DeepSeekV4QModel(DeepSeekV3QModel):
+    # V3 owns a package config/model bridge for Kimi-K2. V4 is natively
+    # registered in Transformers 5 and must not inherit the V3 local loader.
+    loader = AutoModelForCausalLM
     require_trust_remote_code = False
 
     dynamic_expert_index = "n_routed_experts"

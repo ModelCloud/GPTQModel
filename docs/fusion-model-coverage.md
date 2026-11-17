@@ -219,13 +219,13 @@ layout alone does not authorize it.
 | `codegen` | `CodeGenQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `dbrx` | `DbrxQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `dbrx_converted` | `DbrxConvertedQModel` | Package-owned converted DBRX eager attention; fused projection execution has not been qualified. |
-| `deci` | `DeciLMQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `deepseek_v2` | `DeepSeekV2QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `deepseek_v3` | `DeepSeekV3QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
+| `deci` | `DeciLMQModel` | Heterogeneous no-op, linear and GQA attention/MLP layouts have no qualified fused executor. |
+| `deepseek_v2` | `DeepSeekV2QModel` | MLA has normalized low-rank Q/KV stages; no dense or expert projection fusion is qualified. |
+| `deepseek_v3` | `DeepSeekV3QModel` | Native MLA low-rank attention and routed/shared experts have no independently qualified fused executor. |
 | `deepseek_v32` | `DeepSeekV32QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `deepseek_v4` | `DeepSeekV4QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
+| `deepseek_v4` | `DeepSeekV4QModel` | Native sliding/compressed attention and hash/routed experts have no independently qualified fused executor. |
 | `deepseek_vl_v2` | `DeepSeekVLV2QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `dream` | `DreamQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `dream` | `DreamQModel` | Bidirectional diffusion attention and gated MLP have no qualified fused executor. |
 | `ernie4_5_moe_vl` | `Ernie4_5_VLMoeQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `exaone` | `ExaOneQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `exaone4_5_text` | `Exaone4QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
