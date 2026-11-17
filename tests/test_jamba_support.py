@@ -153,6 +153,7 @@ def test_jamba_definition_contract_and_module_tree():
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["mamba.in_proj"],
+        ["mamba.x_proj"],
         ["mamba.out_proj"],
         [
             "feed_forward.experts.0.gate_proj",
@@ -171,9 +172,11 @@ def test_jamba_definition_contract_and_module_tree():
     assert "feed_forward.router:!" in full_names
     assert "feed_forward.experts.0.gate_proj" in full_names
     assert "feed_forward.experts.0.down_proj" in full_names
-    # The mixer consumes `dt_proj.weight` and `x_proj` output directly, so the
-    # definition intentionally leaves them dense.
-    assert not any("dt_proj" in name or "x_proj" in name for name in full_names)
+    # ``x_proj`` was declared as a quantizable mixer projection (#4245); the
+    # mixer still consumes ``conv1d``/``dt_proj`` directly, so those stay dense.
+    assert "mamba.x_proj" in full_names
+    assert "mamba.conv1d:!" in full_names
+    assert "mamba.dt_proj:!" in full_names
 
 
 def test_jamba_moe_hooks_replay_every_routed_expert(monkeypatch):

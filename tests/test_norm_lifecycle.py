@@ -67,15 +67,16 @@ def test_fresh_quantization_and_embedding_requantization_tuning_lifecycle(tmp_pa
         format=format, pack_impl="original")  # Exercise the default disk-offload lifecycle.
     model = GPTQModel.load(str(source), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
     model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
-    assert any(t.is_meta or torch.is_inference(t) for t in model.model.parameters())
-    with pytest.raises(ValueError, match="reload.*BACKEND.TORCH"):
-        model.requantize(
-            CalibrationConfig(
-                dataset=calibration,
-                min_length=1,
-            ),
-            norm=NormConfig(teacher="must-not-load", steps=1),
-        )
+    # ``quantize()`` restores and materializes the base modules (#4380/#4426);
+    # the in-session model must not be left as a lazy, disk-offloaded shell.
+    assert not any(t.is_meta or torch.is_inference(t) for t in model.model.parameters())
+    # A fresh pack keeps the v2 runtime zero layout in memory (#4063), so the
+    # reload-only norm-tuning guard no longer fires right after ``quantize()``.
+    # The validator still has to accept the materialized model; a regression to
+    # a meta/inference shell or checkpoint-format zeros would raise here.
+    from gptqmodel.quantization.norm_tuning import validate_tuning_model
+
+    validate_tuning_model(model.model)
     model.save(str(packed))
     basename = "model" if layout == "canonical" else "gptq_model-4bit-16g"
     if layout == "legacy":

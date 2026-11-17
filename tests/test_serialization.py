@@ -125,7 +125,6 @@ class TestSerialization(unittest.TestCase):
             "fallback",
             "gptaq",
             "offload_to_disk",
-            "offload_to_disk_path",
             "pack_impl",
             "mse",
             "mock_quantization",
@@ -143,7 +142,9 @@ class TestSerialization(unittest.TestCase):
         self.assertEqual(meta["gptaq"]["alpha"], cfg.gptaq.alpha)
         self.assertEqual(meta["gptaq"]["device"], cfg.gptaq.device)
         self.assertEqual(meta["offload_to_disk"], cfg.offload_to_disk)
-        self.assertEqual(meta["offload_to_disk_path"], cfg.offload_to_disk_path)
+        # The scratch path is machine-local and deliberately not published
+        # (#4327); a loader must choose its own directory.
+        self.assertNotIn("offload_to_disk_path", meta)
         self.assertEqual(meta["pack_impl"], cfg.pack_impl)
         self.assertEqual(meta["mse"], cfg.mse.norm)
         self.assertEqual(meta["mock_quantization"], cfg.mock_quantization)

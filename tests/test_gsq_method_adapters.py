@@ -45,8 +45,10 @@ def test_calibrated_fp8_installs_exact_payload_and_decodes_against_torch(method,
 
     assert torch.equal(packed.weight.view(torch.uint8), codes.view(torch.uint8))
     assert torch.equal(packed.weight_scale_inv, scales)
-    assert packed.bias.dtype == torch.float16
-    assert torch.equal(packed.bias, linear.bias)
+    # FP8 modules keep the checkpoint bias wide (FP32) so a reload builds the
+    # same GEMM as the in-session module; narrowing it here would diverge.
+    assert packed.bias.dtype == torch.float32
+    assert torch.equal(packed.bias, linear.bias.float())
     expanded_scales = (
         scales[:, None] if method == "row" else scales.repeat_interleave(2, dim=0).repeat_interleave(2, dim=1)
     )

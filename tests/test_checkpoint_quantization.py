@@ -152,7 +152,9 @@ def test_subprocess_recovery(
         "bos_token_id": 1,
         "eos_token_id": 2,
     }
-    if method in {"qqq", "exl3"} or format == "gemv_fast":
+    # LLM-AWQ only accepts group_size=128 and requires every in_features to be
+    # divisible by it, so the 64-wide attention fixture cannot be quantized.
+    if method in {"qqq", "exl3"} or format in {"gemv_fast", "llm-awq"}:
         args.update(hidden_size=128, intermediate_size=256)
     model = build_native_model(
         family,

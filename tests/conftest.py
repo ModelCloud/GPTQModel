@@ -82,15 +82,16 @@ for path in (_REPO_ROOT, _TESTS_DIR, _MODELS_TESTS_DIR):
         sys.path.insert(0, path_str)
 
 
-_OPT_IN_MARKERS = ("gptq_cuda_e2e", "gptq_cuda_eval_only")
+_OPT_IN_MARKERS = ("gptq_cuda_e2e", "gptq_cuda_eval_only", "checkpoint_recovery")
 
 
 def pytest_collection_modifyitems(config, items):
     """Apply opt-in test selection, then order native-TTNN hardware tests.
 
-    Opt-in checks quantize and evaluate a real model, so they are selected by
-    marker rather than by an environment variable. Any other ``-m`` expression
-    still leaves them skipped; only naming the marker runs them.
+    Opt-in checks quantize and evaluate a real model, or run the multi-minute
+    subprocess checkpoint-recovery matrix, so they are selected by marker
+    rather than by an environment variable. Any other ``-m`` expression still
+    leaves them skipped; only naming the marker runs them.
 
     TT-Metal allows one runtime owner per chip, and initializing the Torch/XLA
     PJRT plugin is irreversible within a process: once it has claimed the
