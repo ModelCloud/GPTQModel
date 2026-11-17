@@ -12,7 +12,11 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import DeepseekV2ForCausalLM as NativeModel
 from transformers import PreTrainedTokenizerFast
+from transformers.cache_utils import DynamicCache, DynamicLayer, StaticCache
 from transformers.models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2MLP
+from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
+    DeepseekV2RotaryEmbedding as NativeRotaryEmbedding,
+)
 
 from gptqmodel import GPTQModel
 from gptqmodel.looper.awq_processor import AWQProcessor
@@ -84,7 +88,8 @@ def test_native_numerics_conversion_and_compressed_cache(q_rank, method):
     assert cache.layers[0].keys.shape[-1] == actual.config.kv_lora_rank
     assert cache.layers[0].values.shape[-1] == actual.config.qk_rope_head_dim
     continuation = actual(ids[:, 3:], attention_mask=mask, past_key_values=cache, use_cache=True)
-    assert cache.get_seq_length() == 5
+    assert cache.get_seq_length() == 3
+    assert continuation.past_key_values.get_seq_length() == 5
     torch.testing.assert_close(continuation.logits, expected[:, 3:], rtol=2e-5, atol=2e-6)
     changed = ids.clone()
     changed[:, -1] = 19
@@ -121,6 +126,210 @@ def test_routing_matches_independent_legacy_oracle(method, normalize, top_k):
     torch.testing.assert_close(got_logits, logits, rtol=0, atol=0)
     assert torch.equal(got_indices.gather(1, order), indices)
     torch.testing.assert_close(weights.gather(1, order), expected)
+
+
+@pytest.mark.parametrize("method", ["greedy", "group_limited_greedy"])
+@pytest.mark.parametrize("scale", [1.0, 1e40, 1e-46])
+@torch.inference_mode()
+def test_normalized_routing_ignores_even_extreme_finite_scale(method, scale):
+    hf_model = model(topk_method=method, norm_topk_prob=True, routed_scaling_factor=scale)
+    router = hf_model.model.layers[1].mlp.gate
+    x = torch.randn(2, 5, 24)
+    logits = x.flatten(0, 1).float() @ router.weight.float().T
+    probabilities = logits.softmax(-1)
+    candidates = probabilities.clone()
+    if method == "group_limited_greedy":
+        selected_group = probabilities.unflatten(-1, (2, 2)).amax(-1).argmax(-1)
+        allowed = torch.arange(4)[None] // 2 == selected_group[:, None]
+        candidates[~allowed] = 0
+    indices = candidates.argsort(-1, descending=True)[:, :2]
+    expected = candidates.gather(1, indices)
+    expected /= expected.sum(-1, keepdim=True) + 1e-20
+    got_logits, weights, got_indices = router(x)
+    order = weights.argsort(-1, descending=True)
+    torch.testing.assert_close(got_logits, logits, rtol=0, atol=0)
+    assert torch.isfinite(weights).all()
+    assert torch.equal(got_indices.gather(1, order), indices)
+    torch.testing.assert_close(weights.gather(1, order), expected, rtol=0, atol=0)
+    ids = torch.tensor([[1, 4, 7, 9, 12]])
+    reference = model(topk_method=method, norm_topk_prob=True, routed_scaling_factor=1.0)
+    actual = hf_model(ids, use_cache=False).logits
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, reference(ids, use_cache=False).logits, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("return_dict", [False, True])
+@pytest.mark.parametrize("stage", ["decoder0", "decoder1", "head", "loss"])
+@torch.inference_mode()
+def test_public_cache_failure_retry_is_transactional(monkeypatch, return_dict, stage):
+    hf_model = model()
+    ids = torch.tensor([[1, 4, 7, 9, 12]])
+    prefix = hf_model(ids[:, :2], use_cache=True).past_key_values
+    before = [(layer.keys.clone(), layer.values.clone()) for layer in prefix.layers]
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected after cache update")
+
+    kwargs = {"labels": ids[:, 2:]} if stage == "loss" else {}
+    with monkeypatch.context() as patch:
+        handle = None
+        if stage == "loss":
+            patch.setattr(hf_model, "loss_function", fail)
+        else:
+            module = hf_model.lm_head if stage == "head" else hf_model.model.layers[int(stage[-1])]
+            handle = module.register_forward_hook(fail)
+        try:
+            with pytest.raises(RuntimeError, match="injected after cache update"):
+                hf_model(ids[:, 2:], past_key_values=prefix, use_cache=True, return_dict=return_dict, **kwargs)
+        finally:
+            if handle is not None:
+                handle.remove()
+    assert [layer.get_seq_length() for layer in prefix.layers] == [2, 2]
+    for layer, (keys, values) in zip(prefix.layers, before):
+        torch.testing.assert_close(layer.keys, keys, rtol=0, atol=0)
+        torch.testing.assert_close(layer.values, values, rtol=0, atol=0)
+
+    retry = hf_model(ids[:, 2:], past_key_values=prefix, use_cache=True, return_dict=return_dict, **kwargs)
+    logits = retry.logits if return_dict else retry[1 if kwargs else 0]
+    cache = retry.past_key_values if return_dict else retry[2 if kwargs else 1]
+    assert type(cache) is DynamicCache
+    assert cache is not prefix
+    assert [layer.get_seq_length() for layer in cache.layers] == [5, 5]
+    assert prefix.get_seq_length() == 2
+    full = hf_model(ids, use_cache=True)
+    torch.testing.assert_close(logits, full.logits[:, 2:], rtol=2e-5, atol=2e-6)
+    for layer, expected in zip(cache.layers, full.past_key_values.layers):
+        torch.testing.assert_close(layer.keys, expected.keys, rtol=2e-5, atol=2e-6)
+        torch.testing.assert_close(layer.values, expected.values, rtol=2e-5, atol=2e-6)
+
+
+@pytest.mark.parametrize("return_dict", [False, True])
+@torch.inference_mode()
+def test_native_cache_conversion_fork_methods_and_reset_replay(return_dict):
+    hf_model = model()
+    ids = torch.tensor([[1, 4, 7, 9, 12], [1, 3, 8, 5, 6]])
+    prefix = hf_model(ids[:, :3], use_cache=True).past_key_values
+    # Transformers' actual native DDP cache conversion, not a replacement cache.
+    cache = DynamicCache(ddp_cache_data=list(prefix))
+    assert all(type(layer) is DynamicLayer for layer in cache.layers)
+    cache.batch_repeat_interleave(2)
+    cache.reorder_cache(torch.tensor([3, 1, 2, 0]))
+    cache.batch_select_indices(torch.tensor([0, 1]))
+    cache.crop(-1)
+    reordered = ids.flip(0)
+    result = hf_model(reordered[:, 2:], past_key_values=cache, use_cache=True, return_dict=return_dict)
+    logits = result.logits if return_dict else result[0]
+    continued = result.past_key_values if return_dict else result[1]
+    torch.testing.assert_close(logits, hf_model(reordered, use_cache=False).logits[:, 2:], rtol=2e-5, atol=2e-6)
+    assert cache.get_seq_length() == 2
+    assert continued.get_seq_length() == 5
+    assert prefix.get_seq_length() == 3
+    continued.reset()
+    assert continued.get_seq_length() == 0
+    replay = hf_model(ids, past_key_values=continued, use_cache=True)
+    torch.testing.assert_close(replay.logits, hf_model(ids, use_cache=False).logits, rtol=0, atol=0)
+    assert replay.past_key_values.get_seq_length() == 5
+    assert continued.get_seq_length() == 0
+
+
+@pytest.mark.parametrize("decoder_only", [False, True])
+@torch.inference_mode()
+def test_empty_native_cache_publishes_through_public_output(decoder_only):
+    hf_model = model()
+    consumer = hf_model.model if decoder_only else hf_model
+    cache = DynamicCache()
+    ids = torch.tensor([[1, 4]])
+    output = consumer(ids, past_key_values=cache, use_cache=True)
+    assert cache.layers == []
+    assert cache.get_seq_length() == 0
+    assert type(output.past_key_values) is DynamicCache
+    assert output.past_key_values.get_seq_length() == 2
+    expected = consumer(ids, use_cache=False)
+    torch.testing.assert_close(output[0], expected[0], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("kind", ["static", "subclass", "offloaded", "layer"])
+@torch.inference_mode()
+def test_unsupported_cache_fails_before_decoder_mutation(kind):
+    hf_model = model()
+    class UnknownCache(DynamicCache):
+        pass
+    cache = DynamicCache(config=hf_model.config)
+    if kind == "static":
+        cache = StaticCache(config=hf_model.config, max_cache_len=16)
+    elif kind == "subclass":
+        cache = UnknownCache(config=hf_model.config)
+    elif kind == "offloaded":
+        cache.offloading = True
+    else:
+        class UnknownLayer(DynamicLayer):
+            pass
+        cache.layers[0] = UnknownLayer()
+    with pytest.raises(TypeError, match="DeepSeek V2.*cache"):
+        hf_model(torch.tensor([[1, 4]]), past_key_values=cache, use_cache=True)
+    assert all(layer.get_seq_length() == 0 for layer in cache.layers)
+
+
+@pytest.mark.parametrize("q_rank", [None, 8], ids=["lite", "full"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+@pytest.mark.parametrize("construction", ["cast", "from_config"])
+@pytest.mark.parametrize("rope_type", ["default", "dynamic", "yarn"])
+@torch.inference_mode()
+def test_rope_precision_cast_reload_and_generation(tmp_path, q_rank, dtype, construction, rope_type):
+    rope = {"rope_type": rope_type, "rope_theta": 10000.0}
+    if rope_type != "default":
+        rope.update(factor=3.0)
+    if rope_type == "yarn":
+        rope.update(original_max_position_embeddings=64)
+    # Nontrivial attention scores: tiny default 0.02 weights hide rotary errors
+    # below BF16 logit rounding despite materially different frequency tables.
+    cfg = config(
+        q_lora_rank=q_rank, num_hidden_layers=3, qk_rope_head_dim=8,
+        rope_parameters=rope, initializer_range=0.2,
+    )
+    torch.manual_seed(271)
+    if construction == "cast":
+        hf_model = DeepseekV2ForCausalLM(cfg).eval()
+        hf_model.half() if dtype == torch.float16 else hf_model.bfloat16()
+    else:
+        hf_model = DeepseekV2ForCausalLM._from_config(cfg, dtype=dtype).eval()
+    ids = torch.tensor([[1, 4, 7, 9, 12, 13]])
+    positions = torch.tensor([[0, 11, 127, 1024, 10000, 30000]])
+    expected = hf_model(ids, position_ids=positions, use_cache=False).logits
+    # Native computation with the same learned tensors and an uncast FP32 RoPE
+    # recipe independently qualifies long-position low-precision LM numerics.
+    reference = NativeModel(cfg).eval().to(dtype=dtype)
+    reference.load_state_dict(hf_model.state_dict())
+    reference.model.rotary_emb = NativeRotaryEmbedding(config=cfg)
+    torch.testing.assert_close(expected, reference(ids, position_ids=positions, use_cache=False).logits, rtol=0, atol=0)
+    hf_model.save_pretrained(tmp_path, safe_serialization=True)
+    restored = DeepseekV2ForCausalLM.from_pretrained(tmp_path, dtype=dtype).eval()
+    actual = restored(ids, position_ids=positions, use_cache=False).logits
+    assert torch.isfinite(expected).all()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert all(torch.equal(value, restored.state_dict()[key]) for key, value in hf_model.state_dict().items())
+    generated = hf_model.generate(ids, position_ids=positions, max_new_tokens=2, do_sample=False)
+    assert torch.equal(generated, restored.generate(ids, position_ids=positions, max_new_tokens=2, do_sample=False))
+    assert torch.equal(generated, reference.generate(ids, position_ids=positions, max_new_tokens=2, do_sample=False))
+
+    # Dynamic growth has already occurred: a cast must retain its FP32 recipe,
+    # and short-position replay must reset to the original recipe like native.
+    hf_model.float()
+    for key, value in hf_model.state_dict().items():
+        torch.testing.assert_close(value, restored.state_dict()[key].float(), rtol=0, atol=0)
+    reference.float()
+    for pos in (positions, torch.arange(6)[None]):
+        actual = hf_model(ids, position_ids=pos, use_cache=False).logits
+        torch.testing.assert_close(actual, reference(ids, position_ids=pos, use_cache=False).logits, rtol=0, atol=0)
+    rotary = hf_model.model.rotary_emb
+    native = NativeRotaryEmbedding(config=cfg)
+    x = torch.zeros(1, 6, cfg.hidden_size)
+    if rope_type == "dynamic":
+        native(x, torch.as_tensor(rotary.max_seq_len_cached - 1).reshape(1, 1))
+    for pos in (positions, torch.arange(6)[None]):
+        torch.testing.assert_close(rotary(x, pos), native(x, pos), rtol=0, atol=0)
+        assert rotary.inv_freq.dtype == torch.float32
+        assert rotary.original_inv_freq.dtype == torch.float32
 
 
 @pytest.mark.parametrize("routed,shared,freq,expected_moe", [
