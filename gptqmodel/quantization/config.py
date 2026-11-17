@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from enum import Enum
 from functools import total_ordering
 from os.path import join
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union, get_args, get_type_hints
 
 import pcre
 import torch
@@ -4129,6 +4129,70 @@ def _resolve_dynamic_group_size_error() -> str:
     return "QuantizeConfig: `group_size` must be one of `[-1, 16, 32, 64, 128, 256, 512, 1024]`."
 
 
+_TYPE_HINTS_CACHE: Dict[type, Dict[str, Any]] = {}
+
+#: Keys a ``dynamic`` per-module rule may carry beyond the config field names.
+#: ``fmt`` is the documented legacy alias for ``format``; ``nested`` is an opaque
+#: passthrough whose contents the dynamic fingerprint and defensive-copy paths
+#: preserve verbatim, so it is accepted as-is rather than inspected.
+_DYNAMIC_LEGACY_KEYS = frozenset({"fmt", "nested"})
+
+
+def _resolved_type_hints(cls) -> Dict[str, Any]:
+    """Cached ``get_type_hints`` that never raises for a forward-declared class."""
+
+    cached = _TYPE_HINTS_CACHE.get(cls)
+    if cached is None:
+        try:
+            cached = get_type_hints(cls)
+        except Exception:
+            cached = {}
+        _TYPE_HINTS_CACHE[cls] = cached
+    return cached
+
+
+def _is_optional_bool(hint) -> bool:
+    """True for an ``Optional[bool]`` / ``bool | None`` annotation."""
+
+    return hint is not bool and set(get_args(hint)) == {bool, type(None)}
+
+
+def _validate_dynamic_layer_keys(owner, layer_name: str, layer_dict: Mapping) -> None:
+    """Reject unknown keys and uncompilable patterns in one ``dynamic`` rule (#4668).
+
+    A misspelled key used to be accepted, have no effect, and be serialized into
+    the checkpoint, so the saved mixed-precision layout silently differed from
+    the requested one. The allowed set is every field of every known
+    quantization config class plus the legacy aliases, so a checkpoint that
+    carries a field belonging to another backend still loads.
+    """
+
+    allowed = _known_quantize_config_field_names() | _DYNAMIC_LEGACY_KEYS
+    unknown = sorted(key for key in layer_dict if key not in allowed)
+    if unknown:
+        details = []
+        for key in unknown:
+            matches = difflib.get_close_matches(key, sorted(allowed), n=1)
+            details.append(f"`{key}`" + (f" (did you mean `{matches[0]}`?)" if matches else ""))
+        raise TypeError(
+            f"{owner.__class__.__name__}: unknown `dynamic['{layer_name}']` key(s): "
+            + ", ".join(details)
+            + "."
+        )
+
+    # A bad pattern used to survive construction and fail only when a module was
+    # first matched, far from the config that caused it.
+    raw = layer_name[2:] if isinstance(layer_name, str) and layer_name.startswith(("-:", "+:")) else layer_name
+    if isinstance(raw, str):
+        try:
+            re.compile(raw)
+        except re.error as exc:
+            raise ValueError(
+                f"{owner.__class__.__name__}: `dynamic` key {layer_name!r} is not a valid "
+                f"regular expression: {exc}."
+            ) from exc
+
+
 def _validate_dynamic_boolean_overrides(
     layer_name: str,
     layer_dict: Mapping,
@@ -5195,20 +5259,31 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             self.sym = True
 
     def _validate_bool_fields(self) -> None:
-        for field_name in (
-            "sym",
-            "true_sequential",
-            "lm_head",
-            "compile",
-            "offload_to_disk",
-            "keep_processor_logs",
-            "auto_forward_data_parallel",
-            "wait_for_submodule_finalizers",
-        ):
-            value = getattr(self, field_name)
+        """Reject non-bool values for every bool-annotated field (#4668).
+
+        The set is derived from the dataclass annotations instead of a
+        hand-maintained list: the previous list covered 8 of the 9 base bool
+        fields and none of the per-backend ones, so ``bool("False")`` quietly
+        became ``True`` for ``static_groups``, ``mock_quantization``,
+        ``compress_statistics``, ``act_group_aware`` and the MACaQ/Paro flags,
+        changing which algorithm actually ran.
+
+        ``Optional[bool]`` fields keep ``None`` as the documented "use the
+        default" value.
+        """
+
+        hints = _resolved_type_hints(type(self))
+        for field_info in fields(self):
+            hint = hints.get(field_info.name)
+            optional = _is_optional_bool(hint)
+            if hint is not bool and not optional:
+                continue
+            value = getattr(self, field_info.name, None)
+            if value is None and optional:
+                continue
             if not isinstance(value, bool):
                 raise TypeError(
-                    f"{self.__class__.__name__}: `{field_name}` must be a bool, "
+                    f"{self.__class__.__name__}: `{field_info.name}` must be a bool, "
                     f"got {type(value).__name__} ({value!r})."
                 )
 
@@ -5279,6 +5354,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             }
 
             for layer, layer_dict in self.dynamic.items():
+                _validate_dynamic_layer_keys(self, layer, layer_dict)
                 self._normalize_dynamic_layer_config(
                     layer,
                     layer_dict,
@@ -7053,6 +7129,11 @@ class MacaqConfig(PreProcessorConfig):
         out[MACAQ_ROTATION_FIELD] = self.rotation
 
     def __post_init__(self):
+        # MACaQ forces `sym=True` below, so the shared validator in
+        # `super().__post_init__()` would only ever see the forced value. Validate
+        # the caller's input first so `sym="False"` (or any other non-bool) is
+        # rejected instead of being silently replaced (#4668).
+        self._validate_bool_fields()
         if self.dynamic is not None:
             # `dynamic={pattern: False}` is the documented exclusion form. The
             # shared normalizer only understands a `-:` rule with a dict
@@ -7192,6 +7273,7 @@ class FP8Config(PreProcessorConfig):
                 **{k: v for k, v in self.dynamic.items() if not k.startswith('-')},
             }
             for layer, layer_dict in self.dynamic.items():
+                _validate_dynamic_layer_keys(self, layer, layer_dict)
                 self._normalize_dynamic_layer_config(
                     layer,
                     layer_dict,
@@ -7493,6 +7575,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
                 **{k: v for k, v in self.dynamic.items() if not k.startswith('-')},
             }
             for layer, layer_dict in self.dynamic.items():
+                _validate_dynamic_layer_keys(self, layer, layer_dict)
                 self._normalize_dynamic_layer_config(
                     layer,
                     layer_dict,
@@ -7700,6 +7783,7 @@ class EXL3Config(PreProcessorConfig):
                 **{k: v for k, v in self.dynamic.items() if not k.startswith('-')},
             }
             for layer, layer_dict in self.dynamic.items():
+                _validate_dynamic_layer_keys(self, layer, layer_dict)
                 self._normalize_dynamic_layer_config(
                     layer,
                     layer_dict,
