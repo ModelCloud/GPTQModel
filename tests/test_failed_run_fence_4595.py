@@ -13,6 +13,7 @@ running in ``DEVICE_THREAD_POOL``. Those finalizers re-created the directory
 
 from __future__ import annotations
 
+import gc
 import shutil
 import time
 from pathlib import Path
@@ -210,6 +211,14 @@ def test_failed_quantize_does_not_leak_offload_bundles(tmp_path, monkeypatch):
             ),
             backend=BACKEND.GPTQ_TORCH,
         )
+
+    # Since #4829 the per-run directory belongs to the model's
+    # ``weakref.finalize`` while completed layers are still disk-offloaded
+    # shells that read from it.  Drop the model so that finalizer runs; the
+    # #4595 property under test is that it must not *recreate* the released
+    # run directory afterwards.
+    del qmodel
+    gc.collect()
 
     # Any finalizer still running at the raise must have been fenced before
     # the run directory was released; nothing may recreate it afterwards.
