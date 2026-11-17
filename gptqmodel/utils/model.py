@@ -3729,6 +3729,29 @@ def _restore_fp32_checkpoint_buffers(model, checkpoint, names: set[str]) -> None
     _restore_checkpoint_buffers(model, checkpoint, dict.fromkeys(names, torch.float32))
 
 
+def _int_ordinal_device_map(device_map):
+    """Return a copy of a load map with ``"cuda:N"`` spelled as the int ``N``.
+
+    ``accelerate.utils.modeling.load_state_dict`` hands the map value straight
+    to ``safetensors.safe_open(device=...)``. With a *string* device,
+    safetensors initializes the primary context of the current CUDA device in
+    addition to the requested one, so loading onto ``cuda:1`` also claimed
+    ~500 MiB on ``cuda:0`` -- a GPU the caller never asked for (#4863). An int
+    ordinal only touches the device that was requested, and Accelerate accepts
+    int ordinals everywhere it accepts a device map entry.
+    """
+
+    converted = {}
+    for name, device in device_map.items():
+        if isinstance(device, str):
+            prefix, _, ordinal = device.partition(":")
+            if prefix == "cuda" and ordinal.isdigit():
+                converted[name] = int(ordinal)
+                continue
+        converted[name] = device
+    return converted
+
+
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     checkpoint = kwargs.get("checkpoint")
     if checkpoint is None and args:
@@ -3740,6 +3763,11 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
         kwargs.pop("restore_checkpoint_buffer_dtypes", False)
     )
     fp8_weight_names = set(packed_fp8_buffer_dtypes)
+    device_map = kwargs.get("device_map")
+    if isinstance(device_map, dict):
+        # Read every shard with the int ordinal so the checkpoint read does not
+        # initialize a context on cuda:0 for a `cuda:N` placement (#4863).
+        kwargs["device_map"] = _int_ordinal_device_map(device_map)
     converted_checkpoint = None
     restore_checkpoint = checkpoint
     restore_name_map = None
