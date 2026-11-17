@@ -22,10 +22,10 @@ import torch
 
 from gptqmodel.looper import loop_processor as loop_processor_module
 from gptqmodel.looper.loop_processor import (
-    CalibrationConfig,
     LoopProcessor,
     _calibration_dataset_length,
 )
+from gptqmodel.quantization.config import CalibrationConfig
 from gptqmodel.utils.calibration import prepare_calibration_dataset
 
 
@@ -248,10 +248,7 @@ def test_loop_processor_size_warning_counts_rows_not_columns(monkeypatch, tmp_pa
     LoopProcessor(
         tokenizer=None,
         qcfg=MagicMock(),
-        calibration=CalibrationConfig(
-            dataset=columns,
-            prepare_dataset=lambda **kwargs: prepared,
-        ),
+        calibration=CalibrationConfig(dataset=columns).bind(lambda **kwargs: prepared),
     )
 
     size_warnings = [message for message in warnings if "size should be more than" in message]

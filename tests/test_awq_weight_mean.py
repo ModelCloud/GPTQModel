@@ -20,7 +20,6 @@ from gptqmodel.looper.awq_processor import (
     _AWQScaleGroupError,
     _compute_awq_weight_mean,
 )
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.base import generate_node_for_awq_scaling
 from gptqmodel.models.definitions.minimax_m2 import MiniMaxM2GPTQ
@@ -28,7 +27,7 @@ from gptqmodel.models.definitions.mixtral import MixtralQModel
 from gptqmodel.models.definitions.qwen3 import Qwen3QModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
 from gptqmodel.models.definitions.qwen3_next import Qwen3NextGPTQ
-from gptqmodel.quantization.config import FORMAT, METHOD, AWQConfig, QuantizeConfig
+from gptqmodel.quantization.config import FORMAT, METHOD, AWQConfig, CalibrationConfig, QuantizeConfig
 
 
 QWEN3_HIDDEN_SIZE = 3584

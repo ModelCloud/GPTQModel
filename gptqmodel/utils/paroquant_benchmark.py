@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 import torch
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
 from gptqmodel.quantization import FORMAT, METHOD
@@ -634,10 +634,12 @@ def _run_paroquant_case(
     try:
         quant_start = time.perf_counter()
         quant_logs = model.quantize(
-            calibration_dataset,
-            calibration_concat_size=calibration_concat_size,
-            calibration_sort="desc",
-            batch_size=quant_batch_size,
+            CalibrationConfig(
+                dataset=calibration_dataset,
+                concat_size=calibration_concat_size,
+                sort="desc",
+                batch_size=quant_batch_size,
+            ),
         )
         quant_wall_s = time.perf_counter() - quant_start
 

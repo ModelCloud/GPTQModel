@@ -504,8 +504,7 @@ def test_awq_token_row_replay_uses_the_layer_attention_type():
     """
 
     from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState
-    from gptqmodel.looper.loop_processor import CalibrationConfig
-    from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
+    from gptqmodel.quantization.config import FORMAT, METHOD, CalibrationConfig, QuantizeConfig
 
     model, qmodel_cls = _gemma3_text()
     qmodel = object.__new__(qmodel_cls)

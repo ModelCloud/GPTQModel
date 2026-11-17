@@ -12,7 +12,7 @@ from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.looper import gptq_processor
 from gptqmodel.models import writer
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
@@ -114,7 +114,7 @@ def test_quantize_save_reload_without_activation_policy(tmp_path, monkeypatch, l
 
     monkeypatch.setattr(wrapper, "shell_module_materialize", record_materialize)
     calibration = ["a fox runs under the moon " * 3, "the moon a fox " * 5]
-    wrapper.quantize(None if method == "rtn" else calibration, batch_size=1, backend=backend)
+    wrapper.quantize(CalibrationConfig(dataset=None if method == "rtn" else calibration, batch_size=1), backend=backend)
     if lazy:
         assert materialized
         if method != "rtn":  # RTN materializes weights without StageInputsCapture.

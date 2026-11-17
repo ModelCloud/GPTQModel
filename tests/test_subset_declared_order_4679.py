@@ -26,13 +26,13 @@ import pytest
 import torch
 from module_tree.looper_doubles import no_auto_dtype_cast_forward
 
-from gptqmodel.looper.loop_processor import CalibrationConfig, ForwardConfig, LoopProcessor
+from gptqmodel.looper.loop_processor import ForwardConfig, LoopProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_subset import build_subset_plan, run_subset_stage
 from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from gptqmodel.quantization import FORMAT, METHOD, QuantizeConfig
-from gptqmodel.quantization.config import VramStrategy
+from gptqmodel.quantization.config import CalibrationConfig, VramStrategy
 from gptqmodel.utils.model import find_modules
 
 
@@ -52,10 +52,7 @@ class _StubProcessor(LoopProcessor):
         super().__init__(
             tokenizer=None,
             qcfg=qcfg,
-            calibration=CalibrationConfig(
-                dataset=[{"input_ids": torch.tensor([1, 2, 3])}],
-                prepare_dataset=_prepare_dataset_func,
-            ),
+            calibration=CalibrationConfig(dataset=[{"input_ids": torch.tensor([1, 2, 3])}]).bind(_prepare_dataset_func),
             forward=ForwardConfig(
                 required=True,
                 replay_after_process=False,

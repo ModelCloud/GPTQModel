@@ -18,6 +18,7 @@ from .config import (
                      BasePreProcessorConfig,
                      BaseQuantizeConfig,
                      BitsAndBytesConfig,
+                     CalibrationConfig,
                      EXL3Config,
                      Fallback,
                      FallbackStrategy,

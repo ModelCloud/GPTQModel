@@ -23,7 +23,7 @@ from typing import Optional  # noqa: E402
 
 from models.model_test import ModelTest  # noqa: E402
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from tests.eval import evaluate, format_eval_result_table  # noqa: E402
@@ -73,7 +73,7 @@ class TestQuantAndEORA(ModelTest):
     )
     def test_quant_and_eora(self, quant_method: METHOD, format: FORMAT):
         rank = 128
-        calibration_dataset_concat_size = 0  # disable
+        calibration_dataset_concat_size = None  # disable
         adapter_path = "eora"
         calibration_dataset_size = self._mode_specific_test_setting("DATASET_SIZE")
 
@@ -103,10 +103,11 @@ class TestQuantAndEORA(ModelTest):
             calibration_dataset = self.load_dataset(model.tokenizer, calibration_dataset_size)
 
             model.quantize(
-                calibration=calibration_dataset,
-                # calibration_sort="desc",
-                batch_size=self.QUANT_BATCH_SIZE,
-                calibration_concat_size=calibration_dataset_concat_size,
+                CalibrationConfig(
+                    dataset=calibration_dataset,
+                    batch_size=self.QUANT_BATCH_SIZE,
+                    concat_size=calibration_dataset_concat_size,
+                ),
             )  #
 
             # EoRA adapter is saved according to Lora.path property

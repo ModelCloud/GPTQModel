@@ -16,11 +16,11 @@ from torch import nn
 
 from gptqmodel.looper import stage_subset
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig, LoopProcessor
+from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.shared_input import SharedInputPlan, build_shared_input_plan
 from gptqmodel.quantization import GPTQ
-from gptqmodel.quantization.config import METHOD, HessianConfig, QuantizeConfig
+from gptqmodel.quantization.config import METHOD, CalibrationConfig, HessianConfig, QuantizeConfig
 
 
 _IN = 8

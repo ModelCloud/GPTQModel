@@ -156,7 +156,7 @@ flowchart TD
 
 For `support_batch_quantize=False`, `prepare_calibration_dataset` emitted only
 `input_ids` (`gptqmodel/utils/calibration.py:680`). A padded tail block from
-`calibration_dataset_concat_size`, and any user row that already carried padding,
+`CalibrationConfig.concat_size`, and any user row that already carried padding,
 therefore entered the Hessian as real activations. The non-batched branch now
 keeps the normalized `attention_mask`
 (`gptqmodel/utils/calibration.py:684`). Batch size stays 1; downstream capture
@@ -238,4 +238,4 @@ and `::test_replay_kwargs_match_native_layer_type`).
 
 - `stage_subset.py:1341` removes hooks outside a `finally`; a failed quantization
   already leaves the model unusable, so this is unchanged.
-- `calibration_data_min_length` still checks the padded length of the first row.
+- `CalibrationConfig.min_length` still checks the padded length of the first row.

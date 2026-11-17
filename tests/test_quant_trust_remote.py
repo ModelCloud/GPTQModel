@@ -16,7 +16,10 @@ import pytest  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel import (
+    CalibrationConfig,
+    GPTQModel,  # noqa: E402
+)
 from gptqmodel.quantization import FORMAT, QuantizeConfig  # noqa: E402
 
 
@@ -49,7 +52,7 @@ class TestQuantWithTrustRemoteTrue(ModelTest):
             **args,
         )
 
-        model.quantize(self.calibration_dataset, batch_size=64)
+        model.quantize(CalibrationConfig(dataset=self.calibration_dataset, batch_size=64))
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save(tmp_dir)

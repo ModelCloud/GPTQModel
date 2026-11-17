@@ -260,7 +260,7 @@ def _timed(device: torch.device, fn) -> tuple[float, Any]:
 def run(args: argparse.Namespace) -> int:
     from transformers import AutoTokenizer
 
-    from gptqmodel import GPTQModel
+    from gptqmodel import CalibrationConfig, GPTQModel
     from gptqmodel.utils.backend import BACKEND
 
     device = torch.device(args.device)
@@ -318,7 +318,7 @@ def run(args: argparse.Namespace) -> int:
     )
     record("model_load", seconds)
 
-    seconds, _ = _timed(device, lambda: model.quantize(calibration, batch_size=1, backend=BACKEND.AUTO))
+    seconds, _ = _timed(device, lambda: model.quantize(CalibrationConfig(dataset=calibration, batch_size=1), backend=BACKEND.AUTO))
     record("quantize", seconds)
     blas_during = _blas_report()
 

@@ -11,11 +11,11 @@ from torch import nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor, _compute_awq_weight_mean
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import (
     FORMAT,
     METHOD,
+    CalibrationConfig,
     ExpertsRoutingBypass,
     HessianConfig,
     MoEConfig,

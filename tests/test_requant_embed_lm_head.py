@@ -191,6 +191,10 @@ def test_updates_only_selected_runtime_embedding_paths(
 
     assert set(model.quantize_config.dynamic) == expected_targets
     assert model.requantize_kwargs["embed_quant_mode"] is QuantizeEmbed(mode)
+    calibration = model.requantize_kwargs["calibration"]
+    assert (calibration.dataset, calibration.concat_size, calibration.concat_separator, calibration.sort) == (
+        ["calibration"], 128, "\n", "desc",
+    )
     assert model.saved_to == args.output
     assert output == tmp_path / mode
 

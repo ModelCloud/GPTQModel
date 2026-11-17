@@ -4,8 +4,7 @@ import torch
 from torch import nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig
-from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
+from gptqmodel.quantization.config import FORMAT, METHOD, CalibrationConfig, QuantizeConfig
 
 
 class _TrackingRotary(nn.Module):

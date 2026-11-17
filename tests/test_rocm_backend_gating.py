@@ -14,6 +14,7 @@ import pytest
 import torch
 
 import gptqmodel.quantization.awq.modules.triton.scheduler as awq_scheduler
+from gptqmodel import CalibrationConfig
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import exllamav2 as exllamav2_module
 from gptqmodel.nn_modules.qlinear import exllamav2_awq as exllamav2_awq_module
@@ -294,7 +295,7 @@ def test_qqq_quantize_actually_packs_modules_on_rocm(tmp_path):
     )
     calib = [("the quick brown fox jumps over the lazy dog quantize weights")] * 8
     model = GPTQModel.load(fixture, qcfg)
-    model.quantize(calib, batch_size=1)
+    model.quantize(CalibrationConfig(dataset=calib, batch_size=1))
 
     packed = [m for _, m in model.model.named_modules() if isinstance(m, QQQTorchLinear)]
     assert packed, "QQQ packed no modules"

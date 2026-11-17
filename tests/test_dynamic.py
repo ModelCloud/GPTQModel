@@ -19,7 +19,7 @@ from parameterized import parameterized  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.looper.gptq_processor import GPTQProcessor  # noqa: E402
-from gptqmodel.looper.loop_processor import CalibrationConfig, LoopProcessor  # noqa: E402
+from gptqmodel.looper.loop_processor import LoopProcessor  # noqa: E402
 from gptqmodel.looper.named_module import NamedModule  # noqa: E402
 from gptqmodel.looper.native_processor import NATIVE_INPUTS_STATE_KEY  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
@@ -27,6 +27,7 @@ from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear  # noqa: E402
 from gptqmodel.quantization import Fallback, QuantizeConfig  # noqa: E402
+from gptqmodel.quantization.config import CalibrationConfig  # noqa: E402
 from gptqmodel.utils import safetensor  # noqa: E402
 
 
@@ -76,7 +77,7 @@ class TestDynamic(ModelTest):
         cls.tokenizer = model.tokenizer
         cls.calibration = cls.load_dataset(cls.tokenizer, rows=128)
 
-        model.quantize(cls.calibration, batch_size=2)
+        model.quantize(CalibrationConfig(dataset=cls.calibration, batch_size=2))
 
         print(f"Model: {model.model}")
 
@@ -128,7 +129,7 @@ class TestDynamic(ModelTest):
             self.NATIVE_MODEL_ID,
             quantize_config=QuantizeConfig(dynamic=dynamic),
         )
-        model.quantize(self.calibration, batch_size=2)
+        model.quantize(CalibrationConfig(dataset=self.calibration, batch_size=2))
 
         for name, submodule in model.named_modules():
             if name == 'model.model.layers.0.self_attn.q_proj' and isinstance(submodule, BaseQuantLinear):  # module 0 was skipped
@@ -149,10 +150,7 @@ def _make_processor(qcfg: QuantizeConfig) -> GPTQProcessor:
     return GPTQProcessor(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=CalibrationConfig(
-            dataset=[{"input_ids": [0], "attention_mask": [1]}],
-            prepare_dataset=lambda calibration_dataset, **_kwargs: calibration_dataset,
-        ),
+        calibration=CalibrationConfig(dataset=[{"input_ids": [0], "attention_mask": [1]}]).bind(lambda calibration_dataset, **_kwargs: calibration_dataset),
     )
 
 

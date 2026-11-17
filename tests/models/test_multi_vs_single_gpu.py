@@ -17,7 +17,7 @@ import torch
 from model_test import ModelTest
 from transformers.utils import is_flash_attn_2_available
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.looper.module_looper import StopMainLoop
 from gptqmodel.models.writer import (
     PROCESS_LOG_LAYER,
@@ -207,10 +207,12 @@ class TestMultiVsSingleGPU(ModelTest):
             stack.enter_context(self._capture_primary_handles(primary_handles))
             stack.enter_context(self._capture_batches(batch_debug, primary_handles))
             model.quantize(
-                dataset,
-                calibration_sort=self.DATASET_SORT,
+                CalibrationConfig(
+                    dataset=dataset,
+                    sort=self.DATASET_SORT,
+                    batch_size=self.QUANT_BATCH_SIZE,
+                ),
                 backend=self.QUANT_BACKEND,
-                batch_size=self.QUANT_BATCH_SIZE,
             )
 
         layer_stats = self._extract_layer_metrics(

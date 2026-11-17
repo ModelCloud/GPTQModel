@@ -21,7 +21,7 @@ model = GPTQModel.load("org/model", backend=MarlinConfig(fp32=False))
 qcfg = QuantizeConfig(bits=4, runtime=RuntimeConfig(max_packers=2))
 model = GPTQModel.load("org/unquantized-model", quantize_config=qcfg,
                       backend=MarlinConfig(fp32=False))
-# model.quantize(calibration_dataset) retains that typed backend selection.
+# model.quantize(CalibrationConfig(dataset=calibration_dataset)) retains that typed backend selection.
 ```
 
 `GPTQModel.from_pretrained`, `GPTQModel.from_quantized`, and `model.quantize`

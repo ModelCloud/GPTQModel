@@ -1,7 +1,7 @@
 # Calibration attention-sink exclusion
 
-`quantize(..., calibration_exclude_attention_sinks=True)` removes the BOS
-attention-sink tokens from every calibration statistic: Hessians (GPTQ,
+`quantize(CalibrationConfig(dataset=..., exclude_attention_sinks=True))`
+removes the BOS attention-sink tokens from every calibration statistic: Hessians (GPTQ,
 GPTAQ/FOEM `H` and `dXXT`, QQQ, MACaQ, the EXL3 capture), AWQ activation
 features (token-row sample, `x_mean`, scale-search loss), calibrated FP8 GSQ,
 and the token totals used for averaging and the zero-sample fallback threshold.
@@ -21,7 +21,7 @@ Measured at the input of `layers.1.mlp.down_proj` (fp32, 8 C4 documents,
 | Qwen2.5-0.5B-Instruct (no BOS token) | - | 10.5 | - | 5.9 |
 
 A BOS token is a sink wherever it appears. Concatenated calibration
-(`calibration_concat_size`) tokenizes every document with its own BOS: on 32 C4
+(`CalibrationConfig.concat_size`) tokenizes every document with its own BOS: on 32 C4
 documents packed into 2048-token windows with the Llama tokenizer, 1 of 8
 windows starts with BOS and the windows hold 31 more BOS tokens at document
 boundaries. The excluded set is therefore every attended position whose token
@@ -38,7 +38,7 @@ raised GPTQ wikitext-2 perplexity from 21.17 to 23.26 (issue #4459).
 
 ```mermaid
 flowchart TD
-    Q["BaseQModel.quantize(calibration_exclude_attention_sinks)"] --> C["BaseQModel._build_calibration_config<br/>CalibrationConfig.exclude_attention_sinks"]
+    Q["BaseQModel.quantize(CalibrationConfig(exclude_attention_sinks=True))"] --> C["BaseQModel._quantize_with_calibration<br/>CalibrationConfig.bind(prepare_dataset)"]
     C --> P["LoopProcessor.__init__<br/>_compute_attention_sink_positions: per-batch [B,S] BOS positions<br/>total_calibration_tokens -= excluded"]
     P --> F["ForwardExecutor / forward_batch_worker<br/>keep_mask = normalize_seq_mask(attention_mask)"]
     F --> K["LoopProcessor.calibration_keep_mask<br/>utils.attn_mask.exclude_attention_sinks"]
@@ -94,8 +94,8 @@ nothing.
 * **Rejected methods.** VPTQ raises a `ValueError`: dropping the sink rows from
   its Hessian made perplexity 4.5-4.7x worse (table below). ParoQuant optimizes
   whole replayed layer outputs, not per-token rows, and raises too. Staged GSQ
-  rejects it with its other unsupported `quantize()` arguments. EoRA builds its
-  own calibration config and is unaffected; weight-only methods warn that it has
+  rejects it with its other unsupported `quantize()` arguments. The EoRA pass
+  binds a copy with `exclude_attention_sinks=False` and is unaffected; weight-only methods warn that it has
   no effect.
 * **Natively routed MoE experts** see `[routed_rows, H]` inputs whose rows
   cannot be mapped back to a sequence position, so their statistics keep the
@@ -137,7 +137,7 @@ excludes exactly the same tokens on these unconcatenated rows; the GPTQ cells
 were re-measured with the shipped code (Llama-3.2-1B-Instruct reproduced to
 every digit).
 
-Concatenated calibration (`calibration_concat_size=2048`, GPTQ 4-bit, CUDA):
+Concatenated calibration (`CalibrationConfig(concat_size=2048)`, GPTQ 4-bit, CUDA):
 
 | model | off | on (every BOS) |
 | --- | --- | --- |

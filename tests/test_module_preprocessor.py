@@ -3,11 +3,11 @@
 
 import torch
 
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.module_preprocessor import ModulePreProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import (
     AutoModuleDecoderConfig,
+    CalibrationConfig,
     QuantizeConfig,
     SmootherConfig,
     SmoothMAD,

@@ -136,13 +136,13 @@ hipBLASLt remains available as an explicit experiment. Attach it to the
 quantization config so each quantization run installs it:
 
 ```python
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.backend import RuntimeConfig
 from gptqmodel.quantization import QuantizeConfig
 
 qcfg = QuantizeConfig(bits=4, runtime=RuntimeConfig(rocm_quant_blas="hipblaslt"))
 model = GPTQModel.load("org/model", quantize_config=qcfg)
-model.quantize(calibration_dataset)
+model.quantize(CalibrationConfig(dataset=calibration_dataset))
 ```
 
 A bare `configure_kernel(KernelConfig(rocm_quant_blas="hipblaslt"))` call does

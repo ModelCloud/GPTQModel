@@ -12,7 +12,6 @@ from torch.nn import Module
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
-    CalibrationConfig,
     CalibrationTypes,
     ForwardConfig,
     ProcessorLifecycleConfig,
@@ -33,7 +32,7 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..nn_modules.qlinear.vptq_torch import VPTQLinear
-from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
+from ..quantization.config import FORMAT, METHOD, CalibrationConfig, QuantizeConfig, resolve_quant_format
 from ..quantization.vptq import VPTQ
 from ..utils.backend import BACKEND
 from ..utils.fallback import normalize_fallback
@@ -73,7 +72,7 @@ class VPTQProcessor(SharedInputCaptureProcessor):
             # 4.5-4.7x worse on Llama-3.2-1B and Llama-3.2-1B-Instruct, so
             # refuse instead of producing a much worse checkpoint.
             raise ValueError(
-                "VPTQ does not support `calibration_exclude_attention_sinks`; leave it False."
+                "VPTQ does not support `CalibrationConfig.exclude_attention_sinks`; leave it False."
             )
         super().__init__(
             tokenizer=tokenizer,

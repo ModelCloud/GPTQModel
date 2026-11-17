@@ -25,7 +25,7 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCa
 from gptqmodel import GPTQModel
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.quantization.config import AWQConfig
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 from tests.tiny_remote_models import build_wordlevel_tokenizer
 
 
@@ -221,7 +221,7 @@ def test_awq_quantizes_tiny_deepseek_v4_with_decoupled_rope_types(tmp_path):
         for _ in range(2)
     ]
 
-    model.quantize(calibration, batch_size=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1))
 
     assert any(
         isinstance(module, AwqTorchLinear) for module in model.model.modules()

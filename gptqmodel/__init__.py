@@ -851,6 +851,7 @@ from .quantization import (
     AutoDtypeCast,
     AWQConfig,
     BaseQuantizeConfig,
+    CalibrationConfig,
     FOEMConfig,
     GGUFConfig,
     GPTAQConfig,

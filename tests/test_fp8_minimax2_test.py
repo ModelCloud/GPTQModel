@@ -17,9 +17,9 @@ import sys
 from typing import Dict, List
 
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig, ForwardConfig
+from gptqmodel.looper.loop_processor import ForwardConfig
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.quantization.config import QuantizeConfig
+from gptqmodel.quantization.config import CalibrationConfig, QuantizeConfig
 
 
 class _DummyProgressBar:

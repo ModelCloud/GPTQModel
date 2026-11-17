@@ -243,7 +243,7 @@ def test_quantization_is_reproducible_across_processes(tmp_path, method):
         import hashlib, json, os, sys
         import torch
         import gptqmodel  # noqa: F401  installs the deterministic rocBLAS default
-        from gptqmodel import GPTQModel, QuantizeConfig
+        from gptqmodel import CalibrationConfig, GPTQModel, QuantizeConfig
 
         out_path = sys.argv[1]
         method = sys.argv[2]
@@ -258,7 +258,7 @@ def test_quantization_is_reproducible_across_processes(tmp_path, method):
         model = GPTQModel.load(
             os.environ["REPRO_MODEL_ID"], QuantizeConfig(**kwargs)
         )
-        model.quantize(samples, batch_size=1)
+        model.quantize(CalibrationConfig(dataset=samples, batch_size=1))
 
         hashes = {}
         for name, tensor in model.model.state_dict().items():

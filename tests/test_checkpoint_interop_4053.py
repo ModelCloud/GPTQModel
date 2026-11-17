@@ -28,7 +28,7 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
@@ -320,10 +320,12 @@ def test_save_pretrained_key_set_matches_save(tmp_path):
             }
         )
     model.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.GPTQ_TORCH,
-        calibration_data_min_length=1,
     )
     reference = _logits(model.model)
 

@@ -7,7 +7,7 @@ import torch
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.hf import get_hf_config_dtype
 
@@ -93,15 +93,17 @@ def test_loaded_quantized_resave_preserves_bf16_non_quantized_bits(tmp_path):
         backend=BACKEND.TORCH,
     )
     model.quantize(
-        [
+        CalibrationConfig(
+            dataset=[
             {
                 "input_ids": torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]]),
                 "attention_mask": torch.ones((1, 8), dtype=torch.long),
             }
         ],
-        batch_size=1,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.GPTQ_TORCH,
-        calibration_data_min_length=1,
     )
     model.save(str(quantized_dir))
     del model

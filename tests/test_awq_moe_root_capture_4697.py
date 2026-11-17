@@ -16,7 +16,7 @@ import pytest
 import torch
 
 from gptqmodel import GPTQModel
-from gptqmodel.quantization.config import FORMAT, AWQConfig
+from gptqmodel.quantization.config import FORMAT, AWQConfig, CalibrationConfig
 
 
 CALIBRATION_ROWS = 32
@@ -135,7 +135,7 @@ def test_declared_moe_root_capture_drives_gate_up_group(
         quantize_config=quantize_config,
         dtype=torch.float16,
     )
-    model.quantize(_calibration(), batch_size=4, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=_calibration(), batch_size=4, min_length=1))
 
     rows = {
         (int(row["layer"]), str(row["module"])): row

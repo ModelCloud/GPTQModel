@@ -24,7 +24,7 @@ from test_resave_preserves_checkpoint_dtypes_4379 import (
     _tiny_source,
 )
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear._fused_train_state import checkpoint_layout_tensor
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
@@ -63,10 +63,12 @@ def _quantized_tiny_model(tmp_path):
         backend=BACKEND.TORCH,
     )
     model.quantize(
-        CALIBRATION,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=CALIBRATION,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.GPTQ_TORCH,
-        calibration_data_min_length=1,
     )
     model.save(str(quantized))
     del model

@@ -32,7 +32,7 @@ from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.exllamav3_processor import EXL3Processor
 from gptqmodel.looper.fp8_gsq_processor import FP8GSQProcessor
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig, LoopProcessor, active_padding_mask
+from gptqmodel.looper.loop_processor import LoopProcessor, active_padding_mask
 from gptqmodel.looper.macaq_processor import MacaqProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
@@ -42,6 +42,7 @@ from gptqmodel.looper.qqq_processor import QQQProcessor
 from gptqmodel.looper.vptq_processor import VPTQProcessor
 from gptqmodel.quantization.config import (
     META_FIELD_CALIBRATION_EXCLUDE_ATTENTION_SINKS,
+    CalibrationConfig,
     FOEMConfig,
     GPTAQConfig,
     GPTQConfig,
@@ -236,11 +237,7 @@ def _loop_processor(*, exclude: bool, bos_token_id=BOS, dataset=None) -> _Proces
     return _Processor(
         tokenizer=SimpleNamespace(bos_token_id=bos_token_id),
         qcfg=QuantizeConfig(bits=4, group_size=8),
-        calibration=CalibrationConfig(
-            dataset=dataset,
-            prepare_dataset=_identity_prepare,
-            exclude_attention_sinks=exclude,
-        ),
+        calibration=CalibrationConfig(dataset=dataset, exclude_attention_sinks=exclude).bind(_identity_prepare),
     )
 
 
@@ -561,9 +558,7 @@ def test_real_llama_bos_rows_are_excluded_after_the_dataset_is_released():
     processor = GPTQProcessor(
         tokenizer=tokenizer,
         qcfg=qcfg,
-        calibration=CalibrationConfig(
-            dataset=dataset, prepare_dataset=_identity_prepare, exclude_attention_sinks=True
-        ),
+        calibration=CalibrationConfig(dataset=dataset, exclude_attention_sinks=True).bind(_identity_prepare),
     )
     attended = sum(int(row["attention_mask"].sum()) for row in dataset)
     assert processor.total_calibration_tokens == attended - 3
@@ -629,7 +624,7 @@ def test_gptq_config_no_longer_accepts_the_option():
 def test_methods_that_cannot_use_the_option_reject_it(cls):
     kwargs = {"gptq_model": None, "model": None} if cls is ParoQuantProcessor else {}
     qcfg = VPTQConfig() if cls is VPTQProcessor else QuantizeConfig(method="paroquant", bits=4, group_size=128)
-    with pytest.raises(ValueError, match="calibration_exclude_attention_sinks"):
+    with pytest.raises(ValueError, match=r"CalibrationConfig\.exclude_attention_sinks"):
         cls(
             tokenizer=SimpleNamespace(bos_token_id=BOS),
             qcfg=qcfg,
@@ -638,24 +633,25 @@ def test_methods_that_cannot_use_the_option_reject_it(cls):
         )
 
 
-def test_quantize_exposes_the_calibration_option():
+def test_calibration_config_carries_the_sink_option():
     import inspect
 
     from gptqmodel.models.base import BaseQModel
 
-    parameter = inspect.signature(BaseQModel.quantize).parameters["calibration_exclude_attention_sinks"]
-    assert parameter.default is False
-    config = BaseQModel._build_calibration_config(
-        None, _identity_prepare, None, None, None, 1, exclude_attention_sinks=True
-    )
+    parameters = inspect.signature(BaseQModel.quantize).parameters
+    assert "calibration_exclude_attention_sinks" not in parameters
+    assert "CalibrationConfig" in str(parameters["calibration"].annotation)
+    assert CalibrationConfig().exclude_attention_sinks is False
+    config = CalibrationConfig(exclude_attention_sinks=True).bind(_identity_prepare, batch_size=2)
     assert config.exclude_attention_sinks is True
+    assert config.batch_size == 2
 
 
 def test_rejects_a_per_module_sink_rule():
     from gptqmodel.models.base import BaseQModel
 
     # Construction rejects the rule, before any module is matched.
-    with pytest.raises(ValueError, match="calibration_exclude_attention_sinks"):
+    with pytest.raises(ValueError, match=r"CalibrationConfig\(exclude_attention_sinks=True\)"):
         GPTQConfig(
             bits=4,
             group_size=128,
@@ -666,8 +662,8 @@ def test_rejects_a_per_module_sink_rule():
     model = object.__new__(BaseQModel)
     model.quantize_config = GPTQConfig(bits=4, group_size=128)
     model.quantize_config.dynamic = {r"+:.*down_proj.*": {"exclude_attention_sinks": True}}
-    with pytest.raises(ValueError, match="calibration_exclude_attention_sinks"):
-        model.quantize(None)
+    with pytest.raises(ValueError, match=r"CalibrationConfig\(exclude_attention_sinks=True\)"):
+        model.quantize()
 
 
 def test_provenance_meta_round_trips():
