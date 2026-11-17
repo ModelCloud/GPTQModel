@@ -53,7 +53,14 @@ from ..models.writer import (
 )
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, METHOD, CalibrationConfig, EXL3Config, GPTQConfig
+from ..quantization.config import (
+    FORMAT,
+    METHOD,
+    CalibrationConfig,
+    EXL3Config,
+    FallbackStrategy,
+    GPTQConfig,
+)
 from ..quantization.gptq import GPTQ
 from ..utils.device import get_device
 from ..utils.exl3_capture_batch_spool import (
@@ -115,6 +122,11 @@ from ..utils.exl3_router_candidates import (
     learned_router_ranked_choices,
 )
 from ..utils.exllamav3 import _resolve_linear_shape, create_exllamav3_module
+from ..utils.fallback import (
+    resolve_fallback_strategy,
+    resolve_threshold,
+    should_use_fallback,
+)
 from ..utils.host_memory import malloc_trim
 from ..utils.kernel import get_kernel_config
 from ..utils.logger import setup_logger
@@ -203,13 +215,98 @@ def resolve_hessian_owner_device(
     raise AssertionError("validated Hessian owner weights did not select a device")
 
 
+_EXL3_STARVED_MODULE_REMEDIES = (
+    "provide more calibration data so the router selects the expert",
+    "force the expert to be routed with `MoEConfig(routing=ExpertsRoutingOverride(...))`",
+    "enable zero-route recovery",
+    "configure a fallback threshold, for example "
+    '`EXL3Config(fallback=Fallback(strategy=FallbackStrategy.RTN, threshold="0.5%"))`',
+)
+
+
+def resolve_exl3_hessian_fallback(
+    capture: GPTQ,
+    *,
+    fallback: Any = None,
+    expected_nsamples: Optional[int] = None,
+) -> Optional[str]:
+    """Decide whether EXL3 must quantize a module without a captured Hessian.
+
+    Returns ``"zero_samples"`` or ``"below_threshold"`` when the module has no
+    usable curvature and must take EXL3's uncalibrated ``fallback_quant`` path,
+    and ``None`` when the capture is usable.
+
+    A zero-sample capture is always quantized data-free: a zero Hessian has no
+    curvature, and EXL3's uncalibrated grid is the only data-independent one,
+    so it is used even when the configured threshold fallback is disabled --
+    the same choice GPTQ makes in ``quantization/gptq.py``. EXL3 used to abort
+    the whole run for such an expert (#4995).
+    """
+
+    nsamples = int(getattr(capture, "nsamples", 0) or 0)
+    if nsamples <= 0:
+        return "zero_samples"
+    if should_use_fallback(fallback, float(nsamples), expected_nsamples):
+        return "below_threshold"
+    return None
+
+
+def _release_exl3_capture_partials(capture: GPTQ) -> None:
+    """Drop a starved capture's partials instead of reducing them into a zero H.
+
+    Mirrors GPTQ's fallback path: the Hessian is not read, so the fp32 X^T X
+    partials must not stay resident through the EXL3 solve.
+    """
+
+    lock = getattr(capture, "lock", None)
+    if lock is not None:
+        with lock:
+            for attribute in (
+                "_device_hessian_partials",
+                "_device_hessian_partial_ready",
+                "_device_sample_counts",
+            ):
+                mapping = getattr(capture, attribute, None)
+                if mapping is not None:
+                    mapping.clear()
+            capture._hessian_dirty = False
+    release = getattr(capture, "_release_deferred_hessian_sources", None)
+    if callable(release):
+        release()
+
+
 def prepare_exl3_hessian(
     capture: GPTQ,
     *,
     target_device: torch.device,
     module_full_name: str,
+    fallback: Any = None,
+    expected_nsamples: Optional[int] = None,
 ) -> torch.Tensor:
-    """Restore GPTQ's normalized capture to EXL3's raw X^T X contract."""
+    """Restore GPTQ's normalized capture to EXL3's raw X^T X contract.
+
+    A starved module (no calibration activations, or fewer than the configured
+    fallback threshold) gets a data-free identity proxy Hessian instead of
+    aborting the run. The caller passes ``count=0`` to EXL3 for that module, so
+    the quantizer takes its uncalibrated ``fallback_quant`` path -- the
+    RTN-equivalent trellis grid (#4995). Modules with enough samples keep the
+    captured Hessian, bit for bit.
+    """
+
+    fallback_reason = resolve_exl3_hessian_fallback(
+        capture,
+        fallback=fallback,
+        expected_nsamples=expected_nsamples,
+    )
+    if fallback_reason is not None:
+        _release_exl3_capture_partials(capture)
+        columns = int(getattr(capture, "columns", 0) or 0)
+        if columns <= 0:
+            raise RuntimeError(
+                f"EXL3 cannot build a data-free proxy Hessian for module "
+                f"`{module_full_name}`: the capture reports no input width."
+            )
+        return torch.eye(columns, dtype=torch.float32, device=target_device)
 
     capture.finalize_hessian(target_device=target_device)
     # ``materialize_global_hessian`` has already reduced every per-device
@@ -241,6 +338,19 @@ def prepare_exl3_hessian(
         )
     hessian.mul_(float(capture.nsamples) / 2.0)
     return hessian
+
+
+def exl3_hessian_count(capture: GPTQ, fallback_reason: Optional[str]) -> int:
+    """Return the sample count handed to EXL3 with a projection's Hessian.
+
+    ``count=0`` selects EXL3's uncalibrated ``fallback_quant`` path, which is
+    how a starved module gets the RTN-equivalent grid (#4995). A calibrated
+    projection keeps its captured count so the quantizer divides by it.
+    """
+
+    if fallback_reason is not None:
+        return 0
+    return int(getattr(capture, "nsamples", 0) or 0)
 
 
 def _router_recovery_candidates(
@@ -2150,11 +2260,19 @@ class EXL3Processor(SharedInputCaptureProcessor):
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Builds the capture task and resolved EXL3 config for one module."""
 
-        del fallback, kwargs
+        del kwargs
 
         module_qcfg = clone_exllamav3_config_for_module(self.qcfg, module.full_name)
         if module_qcfg is None:
             return
+        # The fallback is honoured for starved modules at quantization time
+        # (#4995); EXL3 used to discard it here. An explicitly passed fallback
+        # wins over the (deep-copied) module config.
+        resolved_fallback = (
+            fallback
+            if fallback is not None
+            else getattr(module_qcfg, "fallback", None)
+        )
 
         in_features, out_features = _resolve_linear_shape(module)
         validate_exl3_quantization_geometry(
@@ -2248,6 +2366,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
             "capture": task,
             "qcfg": module_qcfg,
             "hessian_capture": capture_contract,
+            "fallback": resolved_fallback,
         }
         remote_client = self._remote_client_for_run(self._ledger_provenance())
         if remote_client is not None:
@@ -2880,6 +2999,82 @@ class EXL3Processor(SharedInputCaptureProcessor):
             if execution_lease is not None:
                 execution_lease.release()
 
+    def _log_calibration_fallback(
+        self,
+        module: NamedModule,
+        capture: GPTQ,
+        fallback: Any,
+        reason: str,
+    ) -> None:
+        """Report a starved module the way GPTQ's fallback path does (#4995)."""
+
+        strategy = resolve_fallback_strategy(fallback)
+        threshold, _ = resolve_threshold(
+            fallback, getattr(capture, "expected_nsamples", None)
+        )
+        if reason == "zero_samples":
+            log.warn(
+                "EXL3: Module `%s` -> no calibration samples reached this module; "
+                "quantizing with a data-free proxy Hessian (EXL3's uncalibrated, "
+                "RTN-equivalent grid) instead of quantizing a zero Hessian.",
+                module.full_name,
+            )
+        else:
+            log.warn(
+                "EXL3: Module `%s` -> %d calibration samples are below the configured "
+                "fallback threshold; quantizing with a data-free proxy Hessian "
+                "(EXL3's uncalibrated, RTN-equivalent grid).",
+                module.full_name,
+                int(getattr(capture, "nsamples", 0) or 0),
+            )
+        if threshold is None:
+            log.warn(
+                "EXL3: Module `%s` -> `EXL3Config.fallback` disables the threshold "
+                "fallback, but a zero-sample module cannot use a captured Hessian. "
+                "Remedies: %s.",
+                module.full_name,
+                "; ".join(_EXL3_STARVED_MODULE_REMEDIES),
+            )
+        if strategy is not FallbackStrategy.RTN:
+            log.warn(
+                "EXL3: Module `%s` -> the configured `%s` fallback strategy has no "
+                "data-free EXL3 equivalent; the RTN-equivalent proxy grid is used.",
+                module.full_name,
+                strategy.value,
+            )
+
+    def _hessian_for_module(
+        self,
+        module: NamedModule,
+        capture: GPTQ,
+        task_entry: dict[str, Any],
+        staging_device: torch.device,
+    ) -> tuple[torch.Tensor, Optional[str]]:
+        """Prepare a projection's Hessian, honouring the starved-module fallback.
+
+        Returns the Hessian and the fallback reason (``None`` for a calibrated
+        projection). The reason decides the ``count`` handed to EXL3 and the
+        Hessian-metric contract the packed result must satisfy (#4995).
+        """
+
+        fallback = task_entry.get("fallback")
+        expected_nsamples = getattr(capture, "expected_nsamples", None)
+        fallback_reason = resolve_exl3_hessian_fallback(
+            capture,
+            fallback=fallback,
+            expected_nsamples=expected_nsamples,
+        )
+        if fallback_reason is not None:
+            self._log_calibration_fallback(module, capture, fallback, fallback_reason)
+        hessian = prepare_exl3_hessian(
+            capture,
+            target_device=staging_device,
+            module_full_name=module.full_name,
+            fallback=fallback,
+            expected_nsamples=expected_nsamples,
+        )
+        return hessian, fallback_reason
+
     def _process_on_slot(
         self,
         *,
@@ -2930,12 +3125,12 @@ class EXL3Processor(SharedInputCaptureProcessor):
             target_device=staging_device,
             retain_for_inline=candidate_pass,
         )
-        hessian = prepare_exl3_hessian(
+        hessian, fallback_reason = self._hessian_for_module(
+            module,
             capture,
-            target_device=staging_device,
-            module_full_name=module.full_name,
+            task_entry,
+            staging_device,
         )
-
         remote_endpoint = None
         execution_contract = None
         projection_provenance = ledger_provenance
@@ -3006,6 +3201,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
                 family_join=family_join,
                 route_evidence=task_entry.get("route_evidence"),
                 zero_route_recovery=task_entry.get("zero_route_recovery"),
+                uncalibrated=fallback_reason is not None,
             )
             checkpoint_store.reserve_module_request(checkpoint_request)
             loaded_checkpoint = checkpoint_store.load(checkpoint_request)
@@ -3085,8 +3281,11 @@ class EXL3Processor(SharedInputCaptureProcessor):
                     torch.cuda.synchronize(target_device)
                     h_data = {
                         "H": hessian,
+                        # A starved module is quantized against the data-free
+                        # proxy with count=0, which selects EXL3's uncalibrated
+                        # `fallback_quant` path (#4995).
+                        "count": exl3_hessian_count(capture, fallback_reason),
                         "single_use": True,
-                        "count": capture.nsamples,
                         "finalized": False,
                     }
                     quant_started = time.perf_counter()
@@ -3137,6 +3336,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
                     quantizer_metrics,
                     sample_count=capture.nsamples,
                     sigma_reg=float(quant_args["sigma_reg"]),
+                    uncalibrated=fallback_reason is not None,
                 )
             except RuntimeError as error:
                 raise RuntimeError(

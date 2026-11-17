@@ -42,7 +42,10 @@ is not a level. A declaration records the torch version it was measured on.
 
 `SUPPORTS_COMPILE` remains the separate #4669 policy answer to "is compiling
 this forward not a pessimization for static-cache `generate()`". A traceable
-kernel can still keep it `False` when eager is faster.
+kernel can still keep it `False` when eager is faster, but then it has to
+record the measured loss in `SUPPORTS_COMPILE_EAGER_REASON` (the "Policy
+reason" column): a level at or above `INDUCTOR` is the documented bar for a
+compiled win, so the two declarations cannot drift apart silently (#4984).
 
 Two MLX kernels (`AwqMlxQuantLinear`, `AWQMarlinMlxQuantLinear`) inherit
 `SUPPORTS_COMPILE = True` from `AwqTorchLinear`. That flag is not consulted on
@@ -52,15 +55,16 @@ policy flag for completeness.
 
 `tests/kernels/test_kernel_compile_protocol.py` enforces that every registered
 kernel declares both attributes, that a capture claim has no host-sync
-construct in its own `forward`, and that this table matches the code.
+construct in its own `forward`, that a compile-capable opt-out records its
+reason, and that this table matches the code.
 Regenerate with:
 
 ```bash
 python -m tests.kernels.gen_compile_matrix
 ```
 
-| Kernel | Module | Level | Graph capture | Compiled generation |
-| --- | --- | --- | --- | --- |
+| Kernel | Module | Level | Graph capture | Compiled generation | Policy reason |
+| --- | --- | --- | --- | --- | --- |
 """
 
 
@@ -69,10 +73,11 @@ def render() -> str:
     for cls in protocol_kernels():
         row = describe_kernel(cls)
         module = row["module"].replace("gptqmodel.nn_modules.qlinear.", "")
+        reason = (row["compiled_generation_reason"] or "-").replace("|", "\\|")
         rows.append(
             f"| `{row['kernel']}` | `{module}` | `{row['compile_level']}` | "
             f"{'yes' if row['graph_capture'] else 'no'} | "
-            f"{'yes' if row['compiled_generation'] else 'no'} |"
+            f"{'yes' if row['compiled_generation'] else 'no'} | {reason} |"
         )
     return HEADER + "\n".join(rows) + "\n"
 

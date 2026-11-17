@@ -2020,6 +2020,12 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         forward. The success path relies on ``post_quantize`` to move it back,
         but a ``StopMainLoop``/exception unwinds before that step, leaving every
         parameter and buffer of the layer on the accelerator (issue #4546).
+
+        A cancelled subset can also unwind while its capture hooks are still
+        installed, and the failure path never reached the stage's release. The
+        inline ``forward_hook``/``forward_hook_last`` pair would then make every
+        later forward raise ``StopForward`` (issue #5009), so clear it here as a
+        safety net for the windows the stage guard cannot see.
         """
 
         inflight = self._inflight_layer
@@ -2027,6 +2033,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         if inflight is None:
             return
         module, home_device = inflight
+        self._clear_layer_capture_hooks(module)
         try:
             rehome_module_to_device(
                 module,
@@ -2044,6 +2051,16 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 home_device,
                 exc_info=True,
             )
+
+    @staticmethod
+    def _clear_layer_capture_hooks(module: torch.nn.Module) -> None:
+        """Drop capture hooks a cancelled subset stage did not release (#5009)."""
+
+        for submodule in module.modules():
+            if getattr(submodule, "forward_hook", None) is not None:
+                submodule.forward_hook = None
+            if getattr(submodule, "forward_hook_last", False):
+                submodule.forward_hook_last = False
 
     def _fence_run_work(self) -> None:
         """Wait for work this run already submitted before tearing its state down.
@@ -2117,6 +2134,22 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                             # them to a kernel this device can run before the
                             # next forward (#4947).
                             rehome_failed_run_kernels(self.gptq_model)
+                            # A cancelled run must return the same ordinary
+                            # tensors a completed one does: the norms, biases
+                            # and buffers `pre_quantize` materialized under
+                            # inference mode otherwise stay inference tensors,
+                            # and a plain grad-mode forward raises "Inference
+                            # tensors cannot be saved for backward" (#5012).
+                            # The repair is best-effort so it can never mask
+                            # the failure that got us here.
+                            try:
+                                ensure_version_counters(self.gptq_model.model)
+                            except Exception:
+                                log.warning(
+                                    "failed to repair tensor version counters while "
+                                    "failing the quantization run",
+                                    exc_info=True,
+                                )
                             # Layers that finished before the cancel stay as
                             # disk-offloaded meta shells pointing into this run's
                             # private offload root. Deleting that root now would

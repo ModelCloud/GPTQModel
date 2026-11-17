@@ -817,8 +817,8 @@ def _dense_asymmetric_gptq_reference(
     reason="NVIDIA CUDA required (Machete has no HIP kernel)",
 )
 def test_machete_cuda_smoke_build_only_with_forced_arch_override(tmp_path):
-    if shutil.which("nvcc") is None:
-        pytest.skip("nvcc required")
+    if not cpp_module.cuda_toolkit_available():
+        pytest.skip("nvcc required (no CUDA toolkit resolvable for the JIT build)")
     if shutil.which("ninja") is None:
         # Torch's JIT extension builder shells out to ninja; without it the
         # build fails with a toolchain error rather than an unavailable kernel.

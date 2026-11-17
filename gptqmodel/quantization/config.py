@@ -1483,6 +1483,38 @@ def _validate_smooth_percentile(owner: str, field: str, value: Any) -> float:
     return number
 
 
+def _validate_asymmetric_percentile_bounds(owner: str, low: float, high: float) -> None:
+    """Reject fraction bounds for the asymmetric percentile clip (#5005).
+
+    ``SmoothPercentileAsymmetric`` reads the same 0-100 scale as
+    ``SmoothPercentile`` through ``fallback_smooth._quantile``. A ``high`` at or
+    below 1 puts the upper bound next to the row minimum, so ``_clamp_block``
+    pins almost every weight to the bottom tail and the model is destroyed with
+    no error: ``high=0.995`` is the fraction form of 99.5 (#4953, #4970).
+
+    ``low`` legitimately sits below 1 (the documented default is the 0.5th
+    percentile), so it cannot use the same rule. A non-zero ``low`` below 0.1
+    clips nothing at any realistic group size (0.1% of a 4096-wide block is 4
+    elements, and the smoother normally runs at ``group_size >= 128``), so it is
+    either a fraction typo or dead configuration; ``0`` stays the explicit "no
+    lower clip".
+    """
+
+    if high <= 1.0:
+        raise ValueError(
+            f"{owner}: `high` is on a 0-100 scale (99.5 = 99.5th percentile), "
+            f"got {high!r}; a value <= 1 looks like a fraction and clamps almost "
+            "every weight to the row minimum. Valid range is (1, 100]."
+        )
+    if 0.0 < low < 0.1:
+        raise ValueError(
+            f"{owner}: `low` is on a 0-100 scale (0.5 = 0.5th percentile), "
+            f"got {low!r}; a lower percentile below 0.1 clips nothing and looks "
+            "like a fraction. Use 0 to disable the lower clip, or a value in "
+            "[0.1, high)."
+        )
+
+
 @dataclass
 class SmoothMethod:
     """Base smoother descriptor shared by all smoothing strategies."""
@@ -1559,6 +1591,7 @@ class SmoothPercentileAsymmetric(SmoothMethod):
             raise ValueError(
                 f"{owner}: `low` must be < `high`, got low={low!r}, high={high!r}."
             )
+        _validate_asymmetric_percentile_bounds(owner, self.low, self.high)
 
 
 @dataclass
@@ -4511,6 +4544,42 @@ def _validate_dynamic_boolean_overrides(owner, layer_name: str, layer_dict: Mapp
         )
 
 
+# Keys of one `dynamic` rule that can carry a smoother. Each is normalized
+# through the same helper the runtime uses, so an invalid smoother fails at
+# construction instead of when quantization first reaches a matching module.
+_DYNAMIC_SMOOTHER_KEYS = ("fallback", "preprocessors", "smoother", "smooth")
+
+
+def _validate_dynamic_smoothers(owner, layer_name: str, layer_dict: Mapping) -> None:
+    """Validate the smoothers inside one per-module ``dynamic`` rule (#5005).
+
+    A ``dynamic`` rule is merged into a per-module config only when the module
+    is first matched, so ``{"fallback": {"smooth": {"type": "mad", "k": 0}}}``
+    used to construct cleanly and then raise from ``normalize_fallback`` in the
+    middle of ``quantize()``, after the model had already been mutated, with no
+    module name in the message. Run the same normalizers here -- without
+    mutating the rule, so serialization and runtime normalization are unchanged
+    -- and name the offending pattern.
+    """
+
+    for key in _DYNAMIC_SMOOTHER_KEYS:
+        if key not in layer_dict:
+            continue
+        value = layer_dict[key]
+        try:
+            if key == "fallback":
+                _normalize_fallback(value)
+            elif key == "preprocessors":
+                _normalize_preprocessors(value)
+            else:
+                _normalize_smoother_config(value)
+        except (TypeError, ValueError) as exc:
+            raise type(exc)(
+                f"{owner.__class__.__name__}: `dynamic['{layer_name}'].{key}` is not a valid "
+                f"smoother: {exc}"
+            ) from exc
+
+
 def _default_damp_percent(method: METHOD) -> float:
     # QQQ has no activation-group-aware calibration, so a single massive
     # activation (Llama's BOS token) can dominate the Hessian. The previous
@@ -5564,6 +5633,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
             for layer, layer_dict in self.dynamic.items():
                 _validate_dynamic_layer_keys(self, layer, layer_dict)
+                _validate_dynamic_smoothers(self, layer, layer_dict)
                 self._normalize_dynamic_layer_config(
                     layer,
                     layer_dict,
@@ -7410,6 +7480,7 @@ class FP8Config(PreProcessorConfig):
             }
             for layer, layer_dict in self.dynamic.items():
                 _validate_dynamic_layer_keys(self, layer, layer_dict)
+                _validate_dynamic_smoothers(self, layer, layer_dict)
                 self._normalize_dynamic_layer_config(
                     layer,
                     layer_dict,
@@ -7712,6 +7783,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
             }
             for layer, layer_dict in self.dynamic.items():
                 _validate_dynamic_layer_keys(self, layer, layer_dict)
+                _validate_dynamic_smoothers(self, layer, layer_dict)
                 self._normalize_dynamic_layer_config(
                     layer,
                     layer_dict,
@@ -7918,6 +7990,7 @@ class EXL3Config(PreProcessorConfig):
             }
             for layer, layer_dict in self.dynamic.items():
                 _validate_dynamic_layer_keys(self, layer, layer_dict)
+                _validate_dynamic_smoothers(self, layer, layer_dict)
                 self._normalize_dynamic_layer_config(
                     layer,
                     layer_dict,

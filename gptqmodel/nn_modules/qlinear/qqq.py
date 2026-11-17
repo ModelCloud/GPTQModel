@@ -164,6 +164,12 @@ def mul(
 
 
 class QQQLinear(GroupedQuantLinear):
+    # The AVX512 CPU forward drops these after building its packed cache, so
+    # they have to be materialized before an export and required on load
+    # (#5010). `s_group` is legitimately empty when `group_size` spans the whole
+    # input, so only its presence is checked.
+    CHECKPOINT_REQUIRED_BUFFERS = ("B", "s_group", "s_channel")
+
     # The native Marlin W4A8 `qqq_gemm` custom op has no fake impl and the
     # per-call reduce scratch/locks allocation is host-side; the JIT extension
     # is also unbuildable here (no CUDA toolkit). Static: EAGER.
@@ -674,6 +680,15 @@ class QQQTorchLinear(QQQLinear):
     # fails: forward copies the CPU `_scale_perm_single_i` table to the device.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
     SUPPORTS_GRAPH_CAPTURE = False
+    # ... and the static-cache `generate()` is still a loss: the QQQ decode
+    # recompiles per step (172 graphs, 24-115 breaks) and measures 1.3-8x
+    # slower than eager on RTX 4090/5090, so the #4669 policy stays off
+    # (#4984). Re-measure the model-level decode before opting in.
+    SUPPORTS_COMPILE = False
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate recompiles per step (172 graphs, 24-115 breaks) "
+        "and is 1.3-8x slower than eager (#4984)"
+    )
 
     SUPPORTS_BACKENDS = [BACKEND.QQQ_TORCH]
     SUPPORTS_METHODS = [METHOD.QQQ]
@@ -969,6 +984,11 @@ class QQQTorchLinear(QQQLinear):
             if getattr(self, "_torch_packed_cache", None) is not None:
                 self._torch_packed_cache_key = self._torch_weight_state_key()
             return True
+
+    def materialize_checkpoint_layout_for_export(self) -> bool:
+        """Publish the dropped checkpoint buffers so an export can see them."""
+
+        return self._materialize_dropped_checkpoint()
 
     def _maybe_drop_checkpoint_tensors(self) -> bool:
         """Release the checkpoint copy once the cache proves it is rebuildable.

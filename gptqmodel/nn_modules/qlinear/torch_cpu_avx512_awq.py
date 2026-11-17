@@ -16,7 +16,7 @@ from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
 from . import AWQuantLinear, detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
-from ._fused_train_state import capture_fused_train_state
+from ._fused_train_state import capture_fused_train_state, finalize_fused_train_state
 from ._numerics import matmul_fp32_reduce
 from .torch_aten_kernel import TorchAtenLinear
 from .torch_cpu_avx512 import unpack_hf_int4
@@ -35,9 +35,10 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
     # ``transform_cpu`` widens scales *and* bias to FP32 in place, so both must
     # be restored before a checkpoint load or save.
     _FUSED_TRAIN_STATE_NAMES = ("qweight", "qzeros", "scales", "bias")
-    # The AVX512 extension packs a different layout with no verified inverse;
-    # keep the full checkpoint snapshot.
-    _FUSED_TRAIN_STATE_REBUILD = None
+    # ``pack_awq_int4`` is a pure nibble permutation whose inverse is
+    # ``rebuild_avx512_awq_qweight`` (pure Torch), so the checkpoint ``qweight``
+    # is rebuilt on save instead of kept resident (#5013).
+    _FUSED_TRAIN_STATE_REBUILD = "avx512_awq"
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [16, 32, 64, 128, 256, 512]
     SUPPORTS_DESC_ACT = [True, False]
@@ -172,6 +173,10 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
         # shard even though ``qweight``/``qzeros`` are now private (#4785).
         self.g_idx = detach_cpu_operand(getattr(self, "g_idx", None))
         self._cpu_transformed = True
+        # ``qweight`` now holds the extension's packed nibbles: drop the
+        # checkpoint clone if the pure-Torch inverse reproduces exactly the
+        # bytes captured before the pack (#5013).
+        finalize_fused_train_state(self)
 
     def _apply(self, fn, recurse: bool = True):
         """Keep the FP32 affine operands exact across dtype/device moves.
