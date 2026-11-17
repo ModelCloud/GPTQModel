@@ -49,7 +49,10 @@ def _row_blocks(rows, out_features):
     blocks per threadgroup divides the per-step activation loads. The price is
     ``rows * blocks`` accumulator pairs per thread, so the wide token counts
     keep fewer blocks and stay out of a register spill, and a short output grid
-    keeps one block so the GPU still has a full wave of threadgroups.
+    keeps one block so the GPU still has a full wave of threadgroups. The block
+    count must divide the 16-column block count: the launch covers exactly
+    ``out_features // (16 * blocks)`` groups, so a non-divisor would floor the
+    grid and leave the trailing columns unwritten.
     """
     if rows > 12:
         return 1
@@ -57,7 +60,11 @@ def _row_blocks(rows, out_features):
     # One wave is 32 threadgroups; a shorter grid costs more than the shared
     # activation loads save, so the block count shrinks with the output width.
     blocks = min(cap, out_features // 512)
-    return 1 if blocks < 2 else (2 if blocks < 4 else 4)
+    blocks = 1 if blocks < 2 else (2 if blocks < 4 else 4)
+    column_blocks = out_features // 16
+    while blocks > 1 and column_blocks % blocks:
+        blocks //= 2
+    return blocks
 
 
 @lru_cache(maxsize=1)

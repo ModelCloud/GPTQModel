@@ -92,3 +92,66 @@ without the capture observing the change. Tests:
 `tests/test_gptq_hessian_accumulation.py::test_gptq_snapshot_hessian_survives_later_finalization`,
 `::test_gptq_snapshot_hessian_embedding_survives_later_finalization`, and
 `::test_gptq_snapshot_hessian_is_writable_without_touching_the_capture`.
+
+## Shared-input dedup for calibrated quantizers
+
+`SharedInputPlan` already groups sibling projections that read the same
+activation (`:in=<tag>`). `GPTQProcessor` turned that plan into a leader/
+follower capture; `SharedInputCaptureMixin` gives QQQ, VPTQ, MACaQ and EXL3 the
+same election, and GPTAQ/FOEM now participate in `GPTQProcessor`'s election
+instead of being excluded.
+
+```mermaid
+flowchart TD
+    A["stage_subset: subset_names"] --> B["processor.begin_shared_input_capture"]
+    B --> C["_resolve_shared_input_plan(model)"]
+    C --> D{"SharedInputPlan has explicit groups?"}
+    D -- No --> Z["No followers; every module captures"]
+    D -- Yes --> E["elect_shared_input_leaders(signature_for, enabled_for)"]
+    E --> F{"signatures equal?"}
+    F -- No --> G["warn; follower captures independently"]
+    F -- Yes --> H["_shared_input_leaders = follower -> leader"]
+    H --> I["pre_process_fwd_hook: follower hook is a no-op"]
+    I --> J["end_shared_input_capture"]
+    J --> K["follower.adopt_hessian_from(leader)"]
+    K --> L["copy leader H (+ dXXT for GPTAQ/FOEM)"]
+    classDef fail fill:#fdd,stroke:#c33
+    classDef ok fill:#dfd,stroke:#060
+    class G fail
+    class L ok
+```
+
+The quantizer owns the copy because each keeps a different statistic:
+`QQQ` a token-normalized float32 mean (`gptqmodel/quantization/qqq.py:705`),
+`VPTQ` a float64 mean (`gptqmodel/quantization/vptq.py:414`), `MACaQ` a
+float64 sum (`gptqmodel/quantization/macaq.py:740`), and `GPTAQ`/`FOEM` an
+`H` plus `dXXT` (`gptqmodel/quantization/gptaq.py:310`,
+`gptqmodel/quantization/foem.py:384`). `EXL3Processor` exposes its plain
+`GPTQ` capture tasks through `_shared_input_task_enabled`
+(`gptqmodel/looper/exllamav3_processor.py:2298`) and excludes `w3` aliases
+already deduplicated by `share_hessian_state_from`.
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| QQQ / VPTQ / MACaQ election | no plan; every sibling accumulated `H` | `SharedInputCaptureMixin.begin_shared_input_capture` (`gptqmodel/looper/shared_input.py:153`) |
+| EXL3 election | plain `GPTQ` capture per projection | same mixin over `tasks[name]["capture"]` |
+| GPTAQ / FOEM election | excluded by `type(task) is GPTQ` | `_hessian_capture_signature` (`gptqmodel/looper/gptq_processor.py:435`) admits them with `dXXT` |
+| QQQ GSQ | n/a | excluded: its moments, not `H`, drive quantization |
+| Follower capture | one `add_batch`/`addmm_` per sibling | hook is a no-op; leader copy is bitwise equal |
+
+Measured on the synthetic 2-layer Llama fixture used by
+`tests/test_shared_input_hessian_dedup_methods.py`, `batch_size=2`:
+
+| Method | Captures per layer before | Captures per layer after | Checkpoint vs `origin/main` |
+| --- | --- | --- | --- |
+| QQQ | 7 (`q,k,v,o,g,u,d`) | 4 (`q,o,g,d`) | bitwise equal, 36 tensors |
+| VPTQ | 7 | 4 | bitwise equal, 49 tensors |
+| MACaQ | 7 | 4 | bitwise equal, 35 tensors |
+| GPTAQ | 7 `H` + `dXXT` | 4 | bitwise equal, 63 tensors |
+| FOEM | 7 `H` + `dXXT` | 4 | bitwise equal, 63 tensors |
+
+The two follower matrices per group are the same storage the independent path
+would have held (leader statistic plus the follower's private copy), so peak
+allocated memory does not grow with the group size. CUDA peak measured on the
+same fixture stayed within 0.02% of `origin/main` for every method (allocator
+noise; no directional regression).

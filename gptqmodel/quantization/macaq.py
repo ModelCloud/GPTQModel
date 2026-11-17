@@ -49,6 +49,7 @@ import transformers
 from ..looper.named_module import NamedModule
 from ..utils.arch import rocm_arch
 from ..utils.logger import setup_logger
+from ..utils.p2p import safe_move_to
 from ..utils.rocm import IS_ROCM
 
 
@@ -713,6 +714,13 @@ class Macaq:
             target_device = self.dev
         target_device = torch.device(target_device)
         if not self._device_hessian_partials:
+            # A repeat materialization with no new batches returns the existing
+            # Hessian unchanged.  ``adopt_hessian_from`` installs an adopted
+            # Hessian here so ``quantize`` consumes it instead of zeroes.
+            if self.H2 is not None:
+                if self.H2.device == target_device and self.H2.dtype == _HESSIAN_DTYPE:
+                    return self.H2
+                return safe_move_to(self.H2, target_device, dtype=_HESSIAN_DTYPE)
             self.H2 = torch.zeros(
                 (self.columns, self.columns), dtype=_HESSIAN_DTYPE, device=target_device
             )
@@ -728,6 +736,41 @@ class Macaq:
             del partial
         self.H2 = merged
         return self.H2
+
+    def adopt_hessian_from(self, leader: "Macaq") -> None:
+        """Replace this task's Hessian with a private copy of ``leader``'s.
+
+        Sibling projections of one ``:in=<tag>`` group see the same activation
+        tensor, so their float64 sums are bitwise identical.  The leader's
+        partials are folded into ``H2`` first; the follower's copy is
+        independent because the quantizer consumes the metric in place.
+        """
+
+        if leader is self:
+            return
+        if leader.columns != self.columns:
+            raise ValueError(
+                f"MACaQ: cannot share Hessian from `{leader.name}` ({leader.columns} columns) "
+                f"with `{self.name}` ({self.columns} columns)."
+            )
+
+        source = leader.materialize_hessian(self.dev)
+        with leader.lock:
+            nsamples = leader.nsamples
+            fwd_counter = leader.fwd_counter
+            copy = safe_move_to(
+                source.detach(),
+                self.dev,
+                dtype=_HESSIAN_DTYPE,
+                copy=True,
+            )
+
+        with self.lock:
+            self.H2 = copy
+            self.nsamples = nsamples
+            self.fwd_counter = fwd_counter
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
 
     def _layer_weight(self) -> torch.Tensor:
         weight = self.layer.weight.data

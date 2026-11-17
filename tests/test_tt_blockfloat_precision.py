@@ -123,6 +123,52 @@ def test_tied_head_fallback_does_not_narrow_the_shared_grid():
     assert torch.equal(got, expected)
 
 
+def test_tied_head_cuda_branch_reads_a_defined_execution_policy():
+    """Regression for #4482: the CUDA branch read an undefined policy.
+
+    A tied head delegates to the embedding's ``_kernel_linear``, which read
+    ``self.kernel.blockfloat_cublas``.  The embedding is a plain ``nn.Module``
+    and never defined ``kernel``, so the supported CUDA tied-head path raised
+    ``AttributeError`` before the native matmul.  The storage owner must hold a
+    policy and forward it to the binding.
+    """
+
+    from unittest import mock
+
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    from gptqmodel.utils import tt_blockfloat_cuda as bf_cuda
+    from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+
+    calls = []
+
+    def fake_linear(x, *args, **kwargs):
+        calls.append(kwargs.get("cublas"))
+        return x.new_zeros(x.shape[0], 16)
+
+    # A non-default value proves the embedding snapshots and forwards its own
+    # policy rather than reading whatever the process default happens to be.
+    configure_kernel(KernelConfig(blockfloat_cublas=False))
+    try:
+        with FakeTensorMode():
+            # Force the CUDA branch so the regression is exercised on a HIP
+            # build too; the policy under test is the CUDA one.
+            with mock.patch.object(
+                TTBlockfloatEmbedding, "hip_dispatch", return_value=False
+            ), mock.patch.object(bf_cuda, "ready", return_value=True), mock.patch.object(
+                bf_cuda, "linear", side_effect=fake_linear
+            ):
+                embedding = TTBlockfloatEmbedding(16, 32, bits=4, block=16).to("cuda:0")
+                head = TTBlockfloatTiedHead(embedding)
+                out = head(torch.ones(1, 32, device="cuda:0"))
+    finally:
+        configure_kernel(KernelConfig())
+
+    assert tuple(out.shape) == (1, 16)
+    assert embedding.kernel.blockfloat_cublas is False
+    assert calls == [False]
+
+
 @pytest.mark.skipif(
     not _cuda_kernel_available(),
     reason="block-float CUDA kernels need a loadable or buildable extension on sm_80+",
