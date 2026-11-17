@@ -91,7 +91,7 @@ and the number of calibration batches cannot change a token's weight.
 | Mechanism at `origin/main` (`00163850`) | Old location | New location | Failure removed |
 | --- | --- | --- | --- |
 | `Lora.apply` used the adapter delta at implicit scale 1 | `gptqmodel/adapter/adapter.py:203-227` | `gptqmodel/adapter/adapter.py:328-357` resolves alpha/rank and folds the scale once | Global alpha, `alpha_pattern`, and rsLoRA were ignored |
-| `_eora_save` wrote `rank_pattern` without matching alphas | `gptqmodel/models/writer.py:1565-1578` | `gptqmodel/models/writer.py:1565-1579` mirrors ranks into `alpha_pattern` | PEFT applied `global_alpha / module_rank` |
+| `_eora_save` wrote `rank_pattern` without matching alphas | `gptqmodel/models/writer.py:1565-1578` | `gptqmodel/models/writer.py:1978-1998` mirrors ranks into `alpha_pattern` | PEFT applied `global_alpha / module_rank` |
 | `eora_process_input` divided by `sample_size` and returned a geometric decay factor | `gptqmodel/eora/eora.py:28-56` | `gptqmodel/eora/eora.py:26-51` returns raw `XᵀX` and token count | Earlier batches decayed exponentially |
 | `_accumulate_eora_contribution` rescaled the running total by `N / (N + batch)` | `gptqmodel/looper/eora_processor.py:170-227` | `gptqmodel/looper/eora_processor.py:167-203` adds raw sums and token counts | Effective use of only the last batches |
 | `merge_eora_segments` combined scaled segment products | `gptqmodel/eora/eora.py:59-80` and `gptqmodel/looper/eora_processor.py:229-257` | `_finalize_eigen_scaling_matrix` at `gptqmodel/looper/eora_processor.py:205-237` normalizes the total once | Segment order became numerically significant |
