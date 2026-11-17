@@ -124,7 +124,7 @@ def test_concurrent_cold_builds_match_the_serial_reference():
     streams = [torch.cuda.Stream() for _ in range(threads_n)]
     outputs: list[torch.Tensor | None] = [None] * threads_n
     barrier = threading.Barrier(threads_n)
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
 
     def work(index: int) -> None:
         try:
@@ -132,7 +132,7 @@ def test_concurrent_cold_builds_match_the_serial_reference():
                 barrier.wait()
                 outputs[index] = module(x).clone()
                 streams[index].synchronize()
-        except BaseException as exc:  # pragma: no cover - surfaced below
+        except Exception as exc:  # pragma: no cover - surfaced below
             errors.append(exc)
 
     workers = [threading.Thread(target=work, args=(i,)) for i in range(threads_n)]
