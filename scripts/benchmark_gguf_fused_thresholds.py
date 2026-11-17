@@ -1,8 +1,25 @@
 #!/usr/bin/env python3
 
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+
+"""Measure the GGUF Torch fused-vs-dense crossover used by the static gates.
+
+``GGUFTorchLinear`` picks between ``_forward_fused_k`` and
+``_forward_dequant_matmul`` with the static ``KernelConfig.gguf_fused_*`` shape
+gates only; it never times the two paths at run time (#4590). This script is
+the offline tool that produced the defaults: it interleaves the two paths on
+one module and reports both timings so the row ceiling and matrix-size floor
+can be re-derived after an arithmetic change.
+
+The shipped CPU and CUDA defaults were derived with this script on the target
+hardware; re-run it after any arithmetic change to the two paths.
+"""
+
 from __future__ import annotations
 
 import argparse
+import statistics
 import time
 from dataclasses import dataclass
 
@@ -39,14 +56,7 @@ def _ascii_table(headers: list[str], rows: list[list[str]]) -> str:
     return "\n".join(out)
 
 
-def _build_module(
-    case: BenchCase,
-    *,
-    dtype: torch.dtype,
-    device: str,
-    autotune: bool,
-    force_candidate: bool,
-) -> GGUFTorchLinear:
+def _build_module(case: BenchCase, *, dtype: torch.dtype, device: str) -> GGUFTorchLinear:
     linear = nn.Linear(case.in_features, case.out_features, bias=False, dtype=dtype).cpu().eval()
     torch.manual_seed(0)
     with torch.no_grad():
@@ -64,15 +74,13 @@ def _build_module(
     )
     module.pack_original(linear, scales=torch.empty(0), zeros=torch.empty(0), g_idx=None)
     module.post_init()
-    if force_candidate:
-        module.gguf_fused_cuda_max_rows = max(case.rows, 1)
-        module.gguf_fused_cuda_min_matrix_elements = 0
-        module.gguf_fused_cpu_max_rows = max(case.rows, 1)
-        module.gguf_fused_cpu_min_matrix_elements = 0
-    module.autotune_enabled = autotune
-    module.clear_autotune()
-    module = module.to(device).eval()
-    return module
+    # Every case must be gate-eligible, otherwise the measurement compares a
+    # static gate with itself.
+    module.gguf_fused_cuda_max_rows = max(case.rows, 1)
+    module.gguf_fused_cuda_min_matrix_elements = 0
+    module.gguf_fused_cpu_max_rows = max(case.rows, 1)
+    module.gguf_fused_cpu_min_matrix_elements = 0
+    return module.to(device).eval()
 
 
 def _bench_once(fn, *, sync_cuda: bool) -> float:
@@ -85,13 +93,8 @@ def _bench_once(fn, *, sync_cuda: bool) -> float:
     return (time.perf_counter() - t0) * 1000.0
 
 
-def _plan_label(module: GGUFTorchLinear, x: torch.Tensor) -> str:
-    if not module.autotune_enabled:
-        return "fused" if module._is_fused_k_forward_candidate(x) else "none"
-    decision = module.get_autotune_result()
-    if decision is None:
-        return "none"
-    return "fused" if decision else "dense"
+def _measure(fn, *, sync_cuda: bool, trials: int) -> list[float]:
+    return [_bench_once(fn, sync_cuda=sync_cuda) for _ in range(trials)]
 
 
 def _run_case(
@@ -101,80 +104,52 @@ def _run_case(
     device: str,
     trials: int,
     warmup: int,
-    force_candidate: bool,
 ) -> None:
     sync_cuda = device == "cuda"
     x = torch.randn(case.rows, case.in_features, device=device, dtype=dtype)
+    module = _build_module(case, dtype=dtype, device=device)
 
-    static_module = _build_module(case, dtype=dtype, device=device, autotune=False, force_candidate=force_candidate)
-    autotune_module = _build_module(case, dtype=dtype, device=device, autotune=True, force_candidate=force_candidate)
+    with torch.inference_mode():
+        for _ in range(warmup):
+            module._forward_dequant_matmul(x)
+            module._forward_fused_k(x)
 
-    for _ in range(warmup):
-        static_module(x)
-        autotune_module(x)
+        # Alternate the two paths in one loop: a load spike that hits both
+        # samples equally cancels out instead of biasing the comparison.
+        fused_trials: list[float] = []
+        dense_trials: list[float] = []
+        for _ in range(trials):
+            fused_trials.append(_bench_once(lambda: module._forward_fused_k(x), sync_cuda=sync_cuda))
+            dense_trials.append(_bench_once(lambda: module._forward_dequant_matmul(x), sync_cuda=sync_cuda))
 
-    # Untimed warmup to settle dispatch decisions before measurement.
-    static_module(x)
-    autotune_module(x)
+        fused_out = module._forward_fused_k(x)
+        dense_out = module._forward_dequant_matmul(x)
+    diff = (fused_out.to(torch.float32) - dense_out.to(torch.float32)).abs()
 
-    static_plan = _plan_label(static_module, x)
-    autotune_plan = _plan_label(autotune_module, x)
-
-    static_trials: list[float] = []
-    autotune_trials: list[float] = []
-    for _ in range(trials):
-        static_trials.append(_bench_once(lambda: static_module(x), sync_cuda=sync_cuda))
-        autotune_trials.append(_bench_once(lambda: autotune_module(x), sync_cuda=sync_cuda))
-
-    static_out = static_module(x)
-    autotune_out = autotune_module(x)
-    diff = (static_out.to(torch.float32) - autotune_out.to(torch.float32)).abs()
-    mae = diff.mean().item()
-    max_abs = diff.max().item()
-
-    trial_rows: list[list[str]] = []
-    for idx, (static_ms, autotune_ms) in enumerate(zip(static_trials, autotune_trials), start=1):
-        speedup = static_ms / autotune_ms if autotune_ms > 0 else float("inf")
-        delta_pct = ((static_ms - autotune_ms) / static_ms * 100.0) if static_ms > 0 else 0.0
-        trial_rows.append(
-            [
-                str(idx),
-                f"{static_ms:.3f}",
-                f"{autotune_ms:.3f}",
-                f"{speedup:.2f}x",
-                f"{delta_pct:.1f}%",
-            ]
-        )
-
-    static_mean = sum(static_trials) / len(static_trials)
-    autotune_mean = sum(autotune_trials) / len(autotune_trials)
-    summary_rows = [
-        [
-            "static",
-            static_plan,
-            f"{static_mean:.3f}",
-            f"{min(static_trials):.3f}",
-            f"{max(static_trials):.3f}",
-            "-",
-        ],
-        [
-            "autotune",
-            autotune_plan,
-            f"{autotune_mean:.3f}",
-            f"{min(autotune_trials):.3f}",
-            f"{max(autotune_trials):.3f}",
-            f"{static_mean / autotune_mean:.2f}x",
-        ],
-    ]
-
+    fused_median = statistics.median(fused_trials)
+    dense_median = statistics.median(dense_trials)
     print()
     print(
         f"CASE {case.name} device={device} bits={case.bits} rows={case.rows} "
         f"shape={case.out_features}x{case.in_features} dtype={str(dtype).removeprefix('torch.')}"
     )
-    print(_ascii_table(["trial", "static_ms", "autotune_ms", "speedup", "delta_pct"], trial_rows))
-    print(_ascii_table(["mode", "plan", "mean_ms", "min_ms", "max_ms", "speedup_vs_static"], summary_rows))
-    print(f"correctness: mae={mae:.6f} max_abs={max_abs:.6f}")
+    print(
+        _ascii_table(
+            ["path", "median_ms", "min_ms", "max_ms", "speedup_vs_fused"],
+            [
+                ["fused", f"{fused_median:.3f}", f"{min(fused_trials):.3f}", f"{max(fused_trials):.3f}", "-"],
+                [
+                    "dense",
+                    f"{dense_median:.3f}",
+                    f"{min(dense_trials):.3f}",
+                    f"{max(dense_trials):.3f}",
+                    f"{fused_median / dense_median:.2f}x",
+                ],
+            ],
+        )
+    )
+    print(f"path_drift: mae={diff.mean().item():.6f} max_abs={diff.max().item():.6f}")
+    print(f"selected_path: {'fused' if module._should_use_fused_k_forward(x) else 'dense'}")
 
 
 def _parse_case(spec: str) -> BenchCase:
@@ -196,7 +171,7 @@ def _parse_case(spec: str) -> BenchCase:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="A/B benchmark GGUF static dispatch vs autotuned dispatch, excluding autotune setup cost."
+        description="Measure the GGUF Torch fused-vs-dense crossover behind the static dispatch gates."
     )
     parser.add_argument(
         "--case",
@@ -205,14 +180,9 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Benchmark case as name:bits:in_features:out_features:rows[:group_size].",
     )
-    parser.add_argument("--trials", type=int, default=5, help="Measured trials per case.")
-    parser.add_argument("--warmup", type=int, default=2, help="Untimed warmup forwards before the measured warmup call.")
-    parser.add_argument("--dtype", choices=("fp16", "bf16", "fp32"), default="fp16", help="Benchmark dtype.")
-    parser.add_argument(
-        "--force-candidate",
-        action="store_true",
-        help="Override thresholds so every case is eligible for fused-vs-dense dispatch tuning.",
-    )
+    parser.add_argument("--trials", type=int, default=9, help="Measured trials per path.")
+    parser.add_argument("--warmup", type=int, default=3, help="Untimed warmup forwards per path.")
+    parser.add_argument("--dtype", choices=("fp16", "bf16", "fp32"), default="bf16", help="Benchmark dtype.")
     parser.add_argument(
         "--device",
         choices=("auto", "cpu", "cuda", "both"),
@@ -240,8 +210,6 @@ def main() -> None:
 
     if "cuda" in devices and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but no CUDA device is available.")
-    if "cpu" in devices and dtype == torch.float16:
-        raise RuntimeError("CPU benchmarks should use --dtype bf16 or --dtype fp32.")
 
     cases = (
         [_parse_case(spec) for spec in args.cases]
@@ -258,18 +226,11 @@ def main() -> None:
 
     print(
         f"devices={','.join(devices)} dtype={str(dtype).removeprefix('torch.')} "
-        f"trials={args.trials} warmup={args.warmup} force_candidate={args.force_candidate}"
+        f"trials={args.trials} warmup={args.warmup}"
     )
     for device in devices:
         for case in cases:
-            _run_case(
-                case,
-                dtype=dtype,
-                device=device,
-                trials=args.trials,
-                warmup=args.warmup,
-                force_candidate=args.force_candidate,
-            )
+            _run_case(case, dtype=dtype, device=device, trials=args.trials, warmup=args.warmup)
 
 
 if __name__ == "__main__":

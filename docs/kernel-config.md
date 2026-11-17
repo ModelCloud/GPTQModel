@@ -228,9 +228,6 @@ representation, not another machine's kernel tuning.
 | `gguf_fused_cpu_min_matrix_elements` | `0` | Matrix-size floor for the fused CPU forward. |
 | `gguf_fused_chunk_blocks` | `0` | Explicit K-chunk block count. `0` uses the byte budget. |
 | `gguf_fused_chunk_bytes` | `33554432` | Transient-memory budget for one K chunk. |
-| `gguf_fused_autotune_warmup` | `1` | Warmup launches per autotune candidate. |
-| `gguf_fused_autotune_iters` | `2` | Timed launches per autotune candidate. |
-| `gguf_fused_autotune_margin` | `0.05` | Relative margin a candidate must win by. |
 | `gguf_cpp_native_matmul` | `None` | Force the native ggml matmul on or off. `None` follows capability. |
 | `gguf_cpp_threads` | `None` | Native ggml CPU thread count. `None` follows torch. |
 

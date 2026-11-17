@@ -70,8 +70,6 @@ _MIN_INT_FIELDS = {
     "gguf_fused_cpu_min_matrix_elements": 0,
     "gguf_fused_chunk_blocks": 0,
     "gguf_fused_chunk_bytes": 1,
-    "gguf_fused_autotune_warmup": 0,
-    "gguf_fused_autotune_iters": 1,
     "paroquant_triton_autotune_warmup": 0,
     "paroquant_triton_autotune_iters": 1,
     "paroquant_triton_decode_max_rows": 1,
@@ -92,7 +90,6 @@ _OPTIONAL_MIN_INT_FIELDS = {
 }
 
 _MIN_FLOAT_FIELDS = {
-    "gguf_fused_autotune_margin": 0.0,
     "paroquant_triton_autotune_margin": 0.0,
 }
 
@@ -191,9 +188,6 @@ class KernelConfig:
     gguf_fused_cpu_min_matrix_elements: int = 0
     gguf_fused_chunk_blocks: int = 0
     gguf_fused_chunk_bytes: int = 32 * 1024 * 1024
-    gguf_fused_autotune_warmup: int = 1
-    gguf_fused_autotune_iters: int = 2
-    gguf_fused_autotune_margin: float = 0.05
     gguf_cpp_native_matmul: Optional[bool] = None
     gguf_cpp_threads: Optional[int] = None
 
