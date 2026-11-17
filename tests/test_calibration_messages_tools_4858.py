@@ -268,6 +268,13 @@ def test_hub_tool_layouts_render_exactly_like_inference():
         "HF Dataset rows with JSON-string tools": dataset,
         "HF Dataset[:] columnar mapping": dataset[:],
     }
+    # `dataset.with_format(...)[:]` hands the row over as a NumPy object array,
+    # a pandas Series, or a pyarrow table; the schema must survive all three.
+    for display_format in ("numpy", "pandas", "arrow"):
+        try:
+            cases[f"HF Dataset with_format({display_format!r})[:]"] = dataset.with_format(display_format)[:]
+        except Exception:
+            continue
 
     for label, calibration_data in cases.items():
         prepared = prepare_calibration_dataset(
