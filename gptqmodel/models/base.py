@@ -128,6 +128,7 @@ from ..utils.structure import (
     alias_from_turtle_for_submodule,
     restore_init_owned_rotary_buffers,
 )
+from ..utils.tied_weights import lm_head_is_tied, word_embeddings_tied
 from ..utils.torch import (
     TORCH_HAS_COMPILE,
     as_torch_device,
@@ -846,6 +847,19 @@ class BaseQModel(nn.Module):
 
     # some models require Processor? For example, Qwen2VLImageProcessor.
     require_load_processor = False
+
+    # Some checkpoints ship no tokenizer at all (Decision Transformer offline-RL
+    # models). A definition that sets this to False is loaded without one; the
+    # text models keep the default so a missing tokenizer still fails loudly.
+    require_load_tokenizer: bool = True
+
+    # How prepared calibration rows reach the model forward:
+    #   "token_ids"     - normalise every row to `input_ids`/`attention_mask`
+    #                     and collate by token length (default, text models).
+    #   "tensor_kwargs" - pass a row whose values are all tensors straight
+    #                     through as keyword arguments (Decision Transformer's
+    #                     `states`/`actions`/`returns_to_go`/`timesteps`).
+    calibration_inputs: str = "token_ids"
 
     # TODO: use a better name and what if the value is not at the config root?
     # allow dynamic expert n-count layer extraction
@@ -2857,7 +2871,10 @@ class BaseQModel(nn.Module):
         checkpoint: Optional["CheckpointConfig"] = None,
         run_plan: Optional[QuantizationRunPlan] = None,
     ):
-        from ..looper.loop_processor import _reusable_calibration_dataset
+        from ..looper.loop_processor import (
+            _reusable_calibration_dataset,
+            release_failed_run_processors,
+        )
         from ..looper.module_looper import ModuleLooper
 
         # The native and EoRA steps each prepare their calibration input, so a
@@ -2910,85 +2927,94 @@ class BaseQModel(nn.Module):
         )
 
         processors = []
-        for step in run_plan.processors:
-            factory = processor_class(step)
-            if step is ProcessorStep.NATIVE:
-                native_args = dict(args)
-                native_args.pop("calculate_w_wq_diff")
-                processors.append(factory(**native_args))
-            elif step is ProcessorStep.PREPROCESSOR:
-                processors.append(
-                    factory(
+        try:
+            for step in run_plan.processors:
+                factory = processor_class(step)
+                if step is ProcessorStep.NATIVE:
+                    native_args = dict(args)
+                    native_args.pop("calculate_w_wq_diff")
+                    processors.append(factory(**native_args))
+                elif step is ProcessorStep.PREPROCESSOR:
+                    processors.append(
+                        factory(
+                            tokenizer=self.tokenizer,
+                            qcfg=self.quantize_config,
+                            calibration=CalibrationConfig(),
+                        )
+                    )
+                elif step is ProcessorStep.EORA:
+                    # EoRA prepares its samples with the same policy; its rows are
+                    # not quantizer statistics, so the attention-sink row policy
+                    # does not apply to them.
+                    eora_calibration = calibration_config.bind(
+                        self.prepare_dataset,
+                        dataset=adapter_dataset if adapter_dataset is not None else dataset,
+                        exclude_attention_sinks=False,
+                    )
+                    processors.append(factory(
                         tokenizer=self.tokenizer,
                         qcfg=self.quantize_config,
-                        calibration=CalibrationConfig(),
-                    )
-                )
-            elif step is ProcessorStep.EORA:
-                # EoRA prepares its samples with the same policy; its rows are
-                # not quantizer statistics, so the attention-sink row policy
-                # does not apply to them.
-                eora_calibration = calibration_config.bind(
-                    self.prepare_dataset,
-                    dataset=adapter_dataset if adapter_dataset is not None else dataset,
-                    exclude_attention_sinks=False,
-                )
-                processors.append(factory(
-                    tokenizer=self.tokenizer,
-                    qcfg=self.quantize_config,
-                    calibration=eora_calibration,
-                ))
-            elif step is ProcessorStep.EXL3:
-                exl3_args = {key: value for key, value in args.items() if key != "calculate_w_wq_diff"}
-                processors.append(factory(**exl3_args, lm_head_name=self.lm_head))
-            elif step is ProcessorStep.FP8_GSQ:
-                fp8_args = {key: value for key, value in args.items() if key != "calculate_w_wq_diff"}
-                processors.append(factory(**fp8_args))
-            elif step is ProcessorStep.QQQ:
-                processors.append(factory(**args, backend=run_plan.loop_backend))
-            elif step is ProcessorStep.MACAQ:
-                processors.append(factory(**args, backend=run_plan.pack_backend))
-            elif step in (ProcessorStep.AWQ, ProcessorStep.PARO):
-                processors.append(factory(
-                    **args, gptq_model=self, model=self.model,
-                ))
-            else:
-                processors.append(factory(**args))
+                        calibration=eora_calibration,
+                    ))
+                elif step is ProcessorStep.EXL3:
+                    exl3_args = {key: value for key, value in args.items() if key != "calculate_w_wq_diff"}
+                    processors.append(factory(**exl3_args, lm_head_name=self.lm_head))
+                elif step is ProcessorStep.FP8_GSQ:
+                    fp8_args = {key: value for key, value in args.items() if key != "calculate_w_wq_diff"}
+                    processors.append(factory(**fp8_args))
+                elif step is ProcessorStep.QQQ:
+                    processors.append(factory(**args, backend=run_plan.loop_backend))
+                elif step is ProcessorStep.MACAQ:
+                    processors.append(factory(**args, backend=run_plan.pack_backend))
+                elif step in (ProcessorStep.AWQ, ProcessorStep.PARO):
+                    processors.append(factory(
+                        **args, gptq_model=self, model=self.model,
+                    ))
+                else:
+                    processors.append(factory(**args))
 
-        gc_context = (
-            DEVICE_THREAD_POOL.no_auto_gc()
-            if self.quantize_config.gc_mode == GcMode.ON_STAGE_END
-            else nullcontext()
-        )
-
-        from ..looper.gptq_checkpoint import checkpoint_session
-
-        checkpoint_context = checkpoint_session(checkpoint, self) if checkpoint is not None else nullcontext()
-        with gc_context, checkpoint_context as extension:
-            if self.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
-                from ..nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
-
-                install_w4a_llama_replay(self.model, self.quantize_config)
-            module_looper = ModuleLooper(
-                self, processors=processors, embed_quant_config=embed_quant_config,
-                extensions=(extension,) if extension is not None else (),
-                disk_write_expected=(
-                    bool(self.quantize_config.offload_to_disk) or checkpoint is not None
-                ),
+            gc_context = (
+                DEVICE_THREAD_POOL.no_auto_gc()
+                if self.quantize_config.gc_mode == GcMode.ON_STAGE_END
+                else nullcontext()
             )
-            use_cache = getattr(self.model.config, "use_cache", False)
-            try:
-                return module_looper.loop(backend=run_plan.loop_backend, fallback=self.quantize_config.fallback)
-            finally:
-                module_looper.layer_module_coverage.report(type(self).__name__)
-                # Keep the run lease until every worker has stopped accessing
-                # the attempt directory, including exceptional/stop exits.
-                if extension is not None:
-                    try:
-                        DEVICE_THREAD_POOL.wait()
-                        module_looper.wait_dangling_threads()
-                    finally:
-                        self.model.config.use_cache = use_cache
+
+            from ..looper.gptq_checkpoint import checkpoint_session
+
+            checkpoint_context = checkpoint_session(checkpoint, self) if checkpoint is not None else nullcontext()
+            with gc_context, checkpoint_context as extension:
+                if self.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
+                    from ..nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
+
+                    install_w4a_llama_replay(self.model, self.quantize_config)
+                module_looper = ModuleLooper(
+                    self, processors=processors, embed_quant_config=embed_quant_config,
+                    extensions=(extension,) if extension is not None else (),
+                    disk_write_expected=(
+                        bool(self.quantize_config.offload_to_disk) or checkpoint is not None
+                    ),
+                )
+                use_cache = getattr(self.model.config, "use_cache", False)
+                try:
+                    return module_looper.loop(backend=run_plan.loop_backend, fallback=self.quantize_config.fallback)
+                finally:
+                    module_looper.layer_module_coverage.report(type(self).__name__)
+                    # Keep the run lease until every worker has stopped accessing
+                    # the attempt directory, including exceptional/stop exits.
+                    if extension is not None:
+                        try:
+                            DEVICE_THREAD_POOL.wait()
+                            module_looper.wait_dangling_threads()
+                        finally:
+                            self.model.config.use_cache = use_cache
+        except BaseException:
+            # A failure before or around ``ModuleLooper.loop()`` never reaches
+            # ``finalize()``, so the processors already built must release
+            # their per-run resources (Device-SMI sampler threads, workspace)
+            # here or they outlive the attempt (#4862). The loop's own failure
+            # branch releases again; that is idempotent.
+            release_failed_run_processors(processors)
+            raise
 
     def _quantize_weight_only(
         self,
@@ -2999,6 +3025,7 @@ class BaseQModel(nn.Module):
         embed_quant_config: Optional[QuantizeEmbedConfig],
         run_plan: Optional[QuantizationRunPlan] = None,
     ):
+        from ..looper.loop_processor import release_failed_run_processors
         from ..looper.weight_only_looper import WeightOnlyLooper
 
         if run_plan is None:
@@ -3018,30 +3045,37 @@ class BaseQModel(nn.Module):
         if calibration.dataset is not None:
             log.info("Weight-only quantization selected; ignoring provided calibration dataset.")
 
-        processor = processor_class(ProcessorStep.WEIGHT_ONLY)(
-            tokenizer=self.tokenizer,
-            qcfg=self.quantize_config,
-        )
-
-        gc_context = (
-            DEVICE_THREAD_POOL.no_auto_gc()
-            if self.quantize_config.gc_mode == GcMode.ON_STAGE_END
-            else nullcontext()
-        )
-
-        from ..looper.gptq_checkpoint import checkpoint_session
-
-        with gc_context, (checkpoint_session(checkpoint, self) if checkpoint else nullcontext()) as extension:
-            module_looper = WeightOnlyLooper(
-                model=self, processor=processor, embed_quant_config=embed_quant_config,
-                extensions=(extension,) if extension else (),
+        processor = None
+        try:
+            processor = processor_class(ProcessorStep.WEIGHT_ONLY)(
+                tokenizer=self.tokenizer,
+                qcfg=self.quantize_config,
             )
-            try:
-                return module_looper.loop(backend=run_plan.loop_backend)
-            finally:
-                module_looper.layer_module_coverage.report(type(self).__name__)
-                if checkpoint:
-                    DEVICE_THREAD_POOL.wait()
+
+            gc_context = (
+                DEVICE_THREAD_POOL.no_auto_gc()
+                if self.quantize_config.gc_mode == GcMode.ON_STAGE_END
+                else nullcontext()
+            )
+
+            from ..looper.gptq_checkpoint import checkpoint_session
+
+            with gc_context, (checkpoint_session(checkpoint, self) if checkpoint else nullcontext()) as extension:
+                module_looper = WeightOnlyLooper(
+                    model=self, processor=processor, embed_quant_config=embed_quant_config,
+                    extensions=(extension,) if extension else (),
+                )
+                try:
+                    return module_looper.loop(backend=run_plan.loop_backend)
+                finally:
+                    module_looper.layer_module_coverage.report(type(self).__name__)
+                    if checkpoint:
+                        DEVICE_THREAD_POOL.wait()
+        except BaseException:
+            # The weight-only processor also owns Device-SMI sampler threads;
+            # a failure before ``loop()`` never reaches ``finalize()`` (#4862).
+            release_failed_run_processors((processor,))
+            raise
 
     def _eora_generate(
         self,
@@ -3083,6 +3117,7 @@ class BaseQModel(nn.Module):
         from ..adapter.adapter import Lora
         from ..looper.dequantize_processor import DequantizeProcessor
         from ..looper.eora_processor import EoraProcessor
+        from ..looper.loop_processor import release_failed_run_processors
         from ..looper.module_looper import ModuleLooper
         from ..looper.module_preprocessor import ModulePreProcessor
 
@@ -3108,37 +3143,43 @@ class BaseQModel(nn.Module):
         # init processor with EoRA processor
         calibration_config = calibration.bind(self.prepare_dataset)
         processors = []
-        if getattr(self.quantize_config, "preprocessors", None):
-            processors.append(
-                ModulePreProcessor(
-                    tokenizer=self.tokenizer,
-                    qcfg=self.quantize_config,
-                ),
-            )
-        processors.extend(
-            [
-                DequantizeProcessor(
-                    quantized_modules=quantized_modules,
-                    qcfg=self.quantize_config,
-                ),
-                EoraProcessor(
-                    tokenizer=self.tokenizer,
-                    qcfg=self.quantize_config,
-                    calibration=calibration_config,
-                ),
-            ]
-        )
-
-        # prepare processor worker (looper)
-        module_looper = ModuleLooper(model=self, processors=processors)
-
         try:
-            module_looper.loop()
-        finally:
-            # The other two looper entry points report coverage in a `finally`
-            # too; EoRA generation could otherwise skip every routed expert
-            # without a warning.
-            module_looper.layer_module_coverage.report(type(self).__name__)
+            if getattr(self.quantize_config, "preprocessors", None):
+                processors.append(
+                    ModulePreProcessor(
+                        tokenizer=self.tokenizer,
+                        qcfg=self.quantize_config,
+                    ),
+                )
+            processors.extend(
+                [
+                    DequantizeProcessor(
+                        quantized_modules=quantized_modules,
+                        qcfg=self.quantize_config,
+                    ),
+                    EoraProcessor(
+                        tokenizer=self.tokenizer,
+                        qcfg=self.quantize_config,
+                        calibration=calibration_config,
+                    ),
+                ]
+            )
+
+            # prepare processor worker (looper)
+            module_looper = ModuleLooper(model=self, processors=processors)
+
+            try:
+                module_looper.loop()
+            finally:
+                # The other two looper entry points report coverage in a `finally`
+                # too; EoRA generation could otherwise skip every routed expert
+                # without a warning.
+                module_looper.layer_module_coverage.report(type(self).__name__)
+        except BaseException:
+            # EoRA generation builds processors before its looper; a rejected
+            # calibration there must release them too (#4862).
+            release_failed_run_processors(processors)
+            raise
 
         self.eora_save(save_dir=adapter.path, model_save_dir=self.model_local_path)
         return
@@ -3742,6 +3783,15 @@ class BaseQModel(nn.Module):
         return self.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+        """Compile the quantized kernels and the model ``forward``.
+
+        The ``forward`` is compiled in place so ``generate()`` enters the
+        compiled path; wrapping ``self.model`` did not, because transformers'
+        ``generate`` calls the original module's own ``forward`` (#4669). The
+        first ``generate()`` after this call pays the compile cost, and a
+        graph-breaking kernel runs slower compiled than eager.
+        """
+
         if not self.quantized:
             log.warn("model is not quantized, skip compiling...")
             return self
@@ -3767,7 +3817,26 @@ class BaseQModel(nn.Module):
         # torch._dynamo.config.suppress_errors = True
         log.info(f"Compiling model with backend: `{backend}`, mode: `{mode}`")
 
-        self.model = torch_compile(self.model, fullgraph=fullgraph, backend=backend, mode=mode)
+        # ``generate()`` resolves to the original module's ``generate``, which
+        # calls the original eager ``forward``. Replacing ``self.model`` with a
+        # ``torch.compile`` wrapper (an ``OptimizedModule``) therefore compiled
+        # nothing that ``generate()`` ran: its ``__getattr__`` hands ``generate``
+        # back to the unwrapped module (#4669). Compile the forward in place so
+        # both a direct ``model(...)`` call and ``generate()`` enter the compiled
+        # path, and keep the compile fallback for a deferred backend failure.
+        model = getattr(self.model, "_orig_mod", self.model)
+        # A repeated ``optimize()`` must not stack compile wrappers: the
+        # fallback proxy records the eager callable it wraps, so compile that
+        # one again and let dynamo reuse its cache.
+        eager_forward = getattr(
+            model.forward, "_torchdynamo_orig_callable", model.forward
+        )
+        compiled_forward = torch_compile(
+            eager_forward, fullgraph=fullgraph, backend=backend, mode=mode
+        )
+        if compiled_forward is not eager_forward:
+            model.forward = compiled_forward
+        self.model = model
 
         #trigger kernel compilation hooks
         # if self.compiled:
@@ -6772,7 +6841,13 @@ class BaseQModel(nn.Module):
         return node
 
     def tied_word_embedding(self) -> bool:
-        return getattr(self.model.config, "tie_word_embeddings", False)
+        # The load-time snapshot resolves tying from the decoder config and the
+        # checkpoint, so a composite wrapper's default flag cannot claim a tie
+        # the checkpoint does not have (#4799).
+        resolved = lm_head_is_tied(self.model, self.lm_head)
+        if resolved is not None:
+            return resolved
+        return word_embeddings_tied(getattr(self.model, "config", None))
 
     # Direct children that carry the token embedding or the language head. The
     # structural `nn.Module` check is the real guard; these names only break

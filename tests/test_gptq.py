@@ -1083,13 +1083,13 @@ def test_gptaq_quantize_uses_token_normalized_loss(monkeypatch):
 class TestGPTQAddBatchCPU(ModelTest):
     ######### test_gptq_add_batch_cpu.py ###########
     pytestmark = pytest.mark.skipif(
-        (not torch.cuda.is_available()) or torch.cuda.device_count() <= 6,
-        reason="CUDA device 6 is required for this benchmark test",
+        not torch.cuda.is_available(),
+        reason="CUDA is required for this benchmark test",
         )
 
 
     def test_gptq_add_batch_cpu_vs_gpu_queue(self):
-        device = torch.device("cuda", 6)
+        device = torch.device("cuda", torch.cuda.current_device())
         torch.cuda.set_device(device)
 
         configs: List[Tuple[str, int]] = [
@@ -1142,8 +1142,8 @@ class TestGPTQAddBatchCPU(ModelTest):
 class TestGPTQHessianChunking(ModelTest):
     ######### test_gptq_hessian_chunking.py ###########
     pytestmark = pytest.mark.skipif(
-        (not torch.cuda.is_available()) or torch.cuda.device_count() <= 6,
-        reason="CUDA device 6 is required for this benchmark test",
+        not torch.cuda.is_available(),
+        reason="CUDA is required for this benchmark test",
         )
 
 
@@ -1203,7 +1203,7 @@ class TestGPTQHessianChunking(ModelTest):
 
 
     def test_hessian_chunking_vram_vs_latency(self):
-        device = torch.device("cuda", 6)
+        device = torch.device("cuda", torch.cuda.current_device())
         torch.cuda.set_device(device)
 
         configs: List[Tuple[str, int]] = [

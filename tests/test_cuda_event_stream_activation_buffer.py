@@ -190,7 +190,7 @@ def _run_variant(
     return forward_latencies, drain_latencies, captured_outputs
 
 
-@pytest.mark.skipif(torch.cuda.device_count() <= 6, reason="CUDA device 6 is required for this benchmark")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for this benchmark")
 def test_cuda_event_stream_activation_buffer_benchmarks():
     """
     Benchmarks three capture strategies that mirror GPTQ forward hooks:
@@ -199,7 +199,7 @@ def test_cuda_event_stream_activation_buffer_benchmarks():
     - sync: copy to CPU immediately via blocking `.cpu()`.
     - async: enqueue D2H on a dedicated CUDA stream and wait only once drained.
     """
-    device = torch.device("cuda", 6)
+    device = torch.device("cuda", torch.cuda.current_device())
     torch.cuda.set_device(device)
 
     batch = 4

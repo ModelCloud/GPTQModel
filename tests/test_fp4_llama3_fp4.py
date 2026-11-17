@@ -48,16 +48,29 @@ def test_fp4_llama3_module_dequant_matches_nvfp4_tensor():
     assert torch.allclose(dequant, expected, atol=1e-3, rtol=1e-3), diff
 
 
+def _visible_device_indices():
+    """Every visible device index; two entries only when a second GPU exists."""
+
+    if not torch.cuda.is_available():
+        return [0]
+    current = torch.cuda.current_device()
+    indices = [current]
+    last = torch.cuda.device_count() - 1
+    if last != current:
+        indices.append(last)
+    return indices
+
+
 @pytest.mark.skipif(NVFP4Tensor is None, reason="torchao NVFP4 support required")
 @pytest.mark.skipif(not MODEL_DIR.exists(), reason="Llama-3.3 FP4 model not available")
-@pytest.mark.parametrize("device", ["cuda:7", "cuda:8"], ids=["A100", "RTX5090"])
-def test_fp4_llama3_module_gpu_consistency(device):
+@pytest.mark.parametrize("device_index", _visible_device_indices(), ids=lambda index: f"cuda:{index}")
+def test_fp4_llama3_module_gpu_consistency(device_index):
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
-    dev = torch.device(device)
+    dev = torch.device("cuda", device_index)
     if dev.index is not None and dev.index >= torch.cuda.device_count():
-        pytest.skip(f"CUDA device {device} not accessible")
+        pytest.skip(f"CUDA device {dev} not accessible")
 
     index = json.loads((MODEL_DIR / "model.safetensors.index.json").read_text())
     shard = sorted(set(index["weight_map"].values()))[0]

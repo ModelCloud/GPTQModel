@@ -23,7 +23,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
@@ -84,6 +84,7 @@ from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_corre
 from .p2p import safe_module_to, safe_move_to
 from .packing import _auto_pack_impl
 from .tensor import tensor_buffer
+from .tied_weights import tied_weights_keys
 from .torch import HAS_CUDA, as_torch_device, release_pinned_host_cache, torch_empty_cache
 
 
@@ -1685,6 +1686,107 @@ def apply_no_placement_to_device_map(model: nn.Module, device_map: Dict[str, Uni
     return result
 
 
+def _is_offload_device(device) -> bool:
+    """Whether a device-map value names an offload target rather than an accelerator."""
+
+    if isinstance(device, str):
+        return device in ("cpu", "disk")
+    return getattr(device, "type", None) == "cpu"
+
+
+def _module_has_parameters(module: nn.Module) -> bool:
+    return any(True for _ in module.parameters())
+
+
+def _device_map_entry_for_parameter(device_map, parameter_name: str):
+    """Return the device-map key that governs one parameter name."""
+
+    name = parameter_name
+    while True:
+        if name in device_map:
+            return name
+        if "." not in name:
+            return "" if "" in device_map else None
+        name = name.rsplit(".", 1)[0]
+
+
+def _parameter_by_name(model: nn.Module, parameter_name: str):
+    module = model
+    parts = parameter_name.split(".")
+    for part in parts[:-1]:
+        module = getattr(module, part)
+    return getattr(module, parts[-1])
+
+
+def _keep_tied_groups_on_one_device(device_map, tied_params) -> None:
+    """Give every really-tied parameter group a single placement.
+
+    ``retie_parameters`` rebinds a whole tied group to one tensor, so a map that
+    splits the group across devices puts that shared tensor on whichever member
+    comes first and leaves the other member's hook moving inputs to a device
+    that no longer holds the weight (#4866). Tied groups therefore follow the
+    accelerator of their GPU member, like ``accelerate.dispatch_model``.
+    """
+
+    for group in tied_params:
+        entries = {
+            entry
+            for name in group
+            if (entry := _device_map_entry_for_parameter(device_map, name)) is not None
+        }
+        # The root entry describes the whole model; never collapse it onto a member.
+        entries.discard("")
+        if len(entries) < 2:
+            continue
+        target = next(
+            (
+                device_map[entry]
+                for entry in sorted(entries)
+                if not _is_offload_device(device_map[entry])
+            ),
+            None,
+        )
+        if target is None:
+            continue
+        for entry in entries:
+            device_map[entry] = target
+
+
+def _single_resident_device(model: nn.Module, device_map: Dict[str, Union[str, int]]) -> Optional[torch.device]:
+    """Return the map's one device when every tensor is already resident there.
+
+    ``add_hook_to_module`` rebinds ``module.forward`` to ``partial(new_forward, module)``
+    and keeps the previous bound method on ``module._old_forward``.  Both point back
+    at the module, so a hooked model is a reference cycle: a GPU model keeps its VRAM
+    allocated after the last user reference is dropped, until a full ``gc.collect()``
+    (#4847).  A layer-wise map whose entries all name the same device does not need
+    the hooks at all -- accelerate's own ``dispatch_model`` only attaches them when
+    the map spans more than one device or offloads to disk -- so skip them whenever
+    nothing is left to materialise or offload.
+    """
+
+    devices = {d for d in device_map.values() if d is not None}
+    if len(devices) != 1:
+        return None
+    raw_device = next(iter(devices))
+    if isinstance(raw_device, str) and raw_device in ("cpu", "mps", "disk"):
+        return None
+    try:
+        device = torch.device(raw_device)
+    except (TypeError, RuntimeError):
+        return None
+    for parameter in model.parameters():
+        if parameter.device.type != device.type:
+            return None
+        if device.index is not None and parameter.device.index != device.index:
+            return None
+    # Buffers may legitimately stay on the CPU (a scalar format flag, a rotary
+    # ``inv_freq`` cache), but a meta buffer still has to be materialised.
+    if any(buffer.device.type == "meta" for buffer in model.buffers()):
+        return None
+    return device
+
+
 def simple_dispatch_model(model, device_map):
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
@@ -1700,6 +1802,13 @@ def simple_dispatch_model(model, device_map):
         model.hf_device_map = device_map
         return model
 
+    # One device and nothing to materialise: the per-entry hooks would only pin the
+    # model in a reference cycle, so place nothing and keep the tensors where the
+    # checkpoint loader already put them.
+    if _single_resident_device(model, device_map) is not None:
+        model.hf_device_map = device_map
+        return model
+
     # Avoid eagerly materialising the full model on a single device when the map
     # provides finer-grained placements; rely on accelerate hooks instead.
     tied_params = accelerate.utils.modeling.find_tied_parameters(model)
@@ -1711,14 +1820,33 @@ def simple_dispatch_model(model, device_map):
     else:
         main_device = [d for d in device_map.values() if d not in ["cpu", "disk"]][0]
 
+    # A tied group must not be split across devices: `retie_parameters` below
+    # collapses it onto one member's tensor, and the other member's hook would
+    # then move its inputs to a device that no longer holds the weight (#4866).
+    _keep_tied_groups_on_one_device(device_map, tied_params)
+    # Accelerate reuses one materialized copy per device for a tied parameter.
+    # Without it each hooked module would move its own copy and break the tie.
+    tied_params_map = {}
+    for group in tied_params:
+        for name in group:
+            parameter = _parameter_by_name(model, name)
+            if parameter.device.type != "meta":
+                tied_params_map[parameter.data_ptr()] = {}
+
     # These modules perform their own CPU lookup and must remain resident;
     # a normal CPU-offload hook would move their full weights back to the GPU.
     resident_cpu_modules = no_placement_module_names(model)
     module_names = dict(model.named_modules())
+    # `CpuOffload.pre_forward` reads `next(module.parameters())`, so a
+    # parameterless structural module (rotary embeddings) cannot carry an
+    # offload hook; it stays on the accelerator instead (#4866).
     cpu_offload_group = [
         (n, d)
         for n, d in device_map.items()
-        if d == "cpu" and n not in resident_cpu_modules and n in module_names
+        if d == "cpu"
+        and n not in resident_cpu_modules
+        and n in module_names
+        and _module_has_parameters(module_names[n])
     ]
     prev_hook = None
     for idx, (n, d) in enumerate(cpu_offload_group):
@@ -1735,6 +1863,10 @@ def simple_dispatch_model(model, device_map):
         if m is None:
             # Fine-grained maps can contain direct parameter entries.
             continue
+        if d == "cpu" and n not in resident_cpu_modules and not _module_has_parameters(m):
+            # Parameterless structural modules follow the max_memory builder:
+            # keep them on an accelerator so they never need an offload hook.
+            d = main_device
         if d != "cpu":
             d = torch.device(d)
             has_other_device_child = any(
@@ -1742,7 +1874,12 @@ def simple_dispatch_model(model, device_map):
                 for child_name, child_device in device_map.items()
             )
             # A mixed-device child means the parent hook may move inputs, but not descendants.
-            hook = AlignDevicesHook(d, io_same_device=True, place_submodules=not has_other_device_child)
+            hook = AlignDevicesHook(
+                d,
+                io_same_device=True,
+                place_submodules=not has_other_device_child,
+                tied_params_map=tied_params_map or None,
+            )
             add_hook_to_module(m, hook)
     accelerate.utils.modeling.retie_parameters(model, tied_params)
 
@@ -2820,12 +2957,28 @@ def get_state_dict_for_save(
             key = ("other", id(source))
         ptrs[key].append(name)
 
+    # Only a pair the checkpoint really ties may be collapsed to one tensor.
+    # `_tied_weights_keys` is derived from the model config alone, and a
+    # composite wrapper can leave its top-level `tie_word_embeddings` at the
+    # default `True` while the checkpoint stores a distinct `lm_head` (#4799).
+    # The stamped snapshot records what the checkpoint really ties.
+    snapshot = tied_weights_keys(model)
+    tied_targets = set(snapshot) if snapshot is not None else None
+
     shared_ptrs = {ptr: names for ptr, names in ptrs.items() if len(names) > 1}
     warn_names = set()
+    separated_names = set()
     for names in shared_ptrs.values():
         # Removing the keys which are declared as known duplicates on
         # load. This allows to make sure the name which is kept is consistent.
-        if model._tied_weights_keys is not None:
+        if tied_targets is not None:
+            found = 0
+            for name in sorted(names):
+                if name in tied_targets and name in state_dict:
+                    found += 1
+                    if found < len(names):
+                        del state_dict[name]
+        elif model._tied_weights_keys is not None:
             found = 0
             for name in sorted(names):
                 matches_pattern = any(pcre.compile(pat).search(name) for pat in model._tied_weights_keys)
@@ -2844,11 +2997,29 @@ def get_state_dict_for_save(
             if name in state_dict:
                 found += 1
                 if found > 1:
+                    entry = state_dict[name]
+                    if (
+                        tied_targets is not None
+                        and name not in tied_targets
+                        and isinstance(entry.source, torch.Tensor)
+                    ):
+                        # The checkpoint does not tie this tensor, so it must
+                        # not be dropped: give it its own storage and keep it.
+                        state_dict[name] = replace(
+                            entry, source=entry.source.clone()
+                        )
+                        separated_names.add(name)
+                        continue
                     del state_dict[name]
                     warn_names.add(name)
     if len(warn_names) > 0:
         log.warn.once(
             f"Removed shared tensor {warn_names} while saving. This should be OK, but check by verifying that you don't receive any warning while reloading",
+        )
+    if len(separated_names) > 0:
+        log.warn.once(
+            f"Separated shared storage for {separated_names} while saving: the checkpoint does "
+            "not tie these tensors, so both are written.",
         )
     return state_dict
 
@@ -3677,6 +3848,28 @@ def _native_fp32_checkpoint_names(model, dtype) -> set[str]:
                 names.add(full_name)
     return names
 
+def _int_ordinal_device_map(device_map):
+    """Return a copy of a load map with ``"cuda:N"`` spelled as the int ``N``.
+
+    ``accelerate.utils.modeling.load_state_dict`` hands the map value straight
+    to ``safetensors.safe_open(device=...)``. With a *string* device,
+    safetensors initializes the primary context of the current CUDA device in
+    addition to the requested one, so loading onto ``cuda:1`` also claimed
+    ~500 MiB on ``cuda:0`` -- a GPU the caller never asked for (#4863). An int
+    ordinal only touches the device that was requested, and Accelerate accepts
+    int ordinals everywhere it accepts a device map entry.
+    """
+
+    converted = {}
+    for name, device in device_map.items():
+        if isinstance(device, str):
+            prefix, _, ordinal = device.partition(":")
+            if prefix == "cuda" and ordinal.isdigit():
+                converted[name] = int(ordinal)
+                continue
+        converted[name] = device
+    return converted
+
 
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     checkpoint = kwargs.get("checkpoint")
@@ -3694,6 +3887,11 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
         kwargs.pop("restore_checkpoint_buffer_dtypes", False)
     )
     fp8_weight_names = set(packed_fp8_buffer_dtypes)
+    device_map = kwargs.get("device_map")
+    if isinstance(device_map, dict):
+        # Read every shard with the int ordinal so the checkpoint read does not
+        # initialize a context on cuda:0 for a `cuda:N` placement (#4863).
+        kwargs["device_map"] = _int_ordinal_device_map(device_map)
     converted_checkpoint = None
     restore_checkpoint = checkpoint
     restore_name_map = None

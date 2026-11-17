@@ -39,11 +39,7 @@ def test_gpu_cpu_gpu_roundtrip_lossless(dtype, pin_memory):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for this test.")
 
-    gpu_index = 6
-    if torch.cuda.device_count() <= gpu_index:
-        pytest.skip(f"Need at least {gpu_index + 1} CUDA devices to exercise GPU {gpu_index}.")
-
-    device = torch.device(f"cuda:{gpu_index}")
+    device = torch.device("cuda", torch.cuda.current_device())
 
     # A mix of common activation shapes, including one large 2D tensor to stress memory copies.
     shapes = [
@@ -75,7 +71,7 @@ def test_gpu_cpu_gpu_roundtrip_lossless(dtype, pin_memory):
 
     for r in results:
         print(
-            f"GPU6 round-trip dtype={r['dtype']} shape={r['shape']} pin_memory={r['pin_memory']}: "
+            f"GPU{device.index} round-trip dtype={r['dtype']} shape={r['shape']} pin_memory={r['pin_memory']}: "
             f"max_abs_diff={r['max_abs_diff']} mean_abs_diff={r['mean_abs_diff']} "
             f"nonzero_elements={r['nonzero_elements']}"
         )

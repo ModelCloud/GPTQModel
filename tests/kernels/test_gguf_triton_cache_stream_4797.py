@@ -142,3 +142,70 @@ def test_warm_cache_on_the_same_stream_is_unchanged():
     torch.cuda.synchronize()
 
     torch.testing.assert_close(first, second, rtol=0, atol=0)
+
+
+@requires_cuda
+@pytest.mark.cuda
+def test_ready_event_is_retired_once_the_build_completes():
+    """A completed build needs no ordering event on any later stream (#4867)."""
+
+    module = _build_module()
+    x = torch.randn(1, IN_FEATURES, device="cuda", dtype=torch.float16)
+
+    with torch.inference_mode():
+        module(x)
+        torch.cuda.synchronize()
+
+    cached = list(module._gguf_triton_cache.values())
+    assert cached, "the first forward must publish a cache"
+    assert all("ready_event" in entry for entry in cached)
+
+    consumer = torch.cuda.Stream()
+    with torch.inference_mode():
+        with torch.cuda.stream(consumer):
+            module(x)
+        torch.cuda.synchronize()
+
+    # The build is long finished, so the consumer retired the event instead of
+    # waiting on it, and every later forward is a plain kernel launch.
+    assert all("ready_event" not in entry for entry in cached)
+
+
+@requires_cuda
+@pytest.mark.cuda
+def test_capture_in_a_cuda_graph_after_a_warm_forward_matches_eager():
+    """``SUPPORTS_GRAPH_CAPTURE`` must stay true after a normal forward (#4867).
+
+    ``torch.cuda.graph`` captures on its own side stream, so a cross-stream
+    ``wait_event`` on the cache builder's event fails the capture with
+    ``CUDA_ERROR_STREAM_CAPTURE_ISOLATION``.
+    """
+
+    module = _build_module()
+    x = torch.randn(1, IN_FEATURES, device="cuda", dtype=torch.float16)
+
+    with torch.inference_mode():
+        module(x)
+        torch.cuda.synchronize()
+        reference = module(x).clone()
+        torch.cuda.synchronize()
+
+    # Warm up on a side stream the way the torch docs recommend.
+    warmup = torch.cuda.Stream()
+    warmup.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup):
+        with torch.inference_mode():
+            module(x)
+            module(x)
+    torch.cuda.current_stream().wait_stream(warmup)
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.inference_mode():
+        with torch.cuda.graph(graph):
+            captured = module(x)
+
+    graph.replay()
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(captured, reference, rtol=0, atol=0)

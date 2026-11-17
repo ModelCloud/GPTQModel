@@ -484,6 +484,71 @@ def marlin_make_workspace_new(device: torch.device,
                        requires_grad=False)
 
 
+def marlin_stream_key(device: torch.device) -> int:
+    """Identify the CUDA stream currently active on ``device``.
+
+    ``torch.cuda.current_stream()`` builds a Python wrapper on every call
+    (~6 us), which is a large fraction of a decode-sized Marlin launch. The
+    raw handle is the same identity the kernel sees and costs a C call.
+    """
+
+    index = device.index
+    if index is None:
+        index = torch.cuda.current_device()
+    raw_stream = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+    if raw_stream is not None:
+        try:
+            return int(raw_stream(index))
+        except Exception:  # pragma: no cover - fallback for other torch builds
+            pass
+    return int(torch.cuda.current_stream(index).cuda_stream)
+
+
+def marlin_stream_workspace(module) -> torch.Tensor:
+    """Return the Marlin lock workspace that belongs to the calling stream.
+
+    ``gptq_marlin.cu`` spins on, advances, and resets the ``int32`` counters in
+    this buffer (``locks_off = blockIdx.x``). One buffer per module therefore
+    lets two streams serving the same module consume each other's counter
+    values: the launches either deadlock in ``barrier_acquire`` or fold a
+    partial sum, so an identical input can return a different result depending
+    on what else is running (#4683). ``QQQLinear._split_k_locks`` allocates per
+    call for the same reason (#4665); Marlin keeps one buffer per stream, so
+    the steady state costs a dictionary lookup instead of an allocation.
+
+    Every launch returns the counters to zero, so a cached buffer is reused
+    as-is. ``module.workspace`` stays the canonical, checkpoint-visible buffer
+    (``models/fusion.py`` validates and clones it); it is simply no longer the
+    one a launch borrows.
+    """
+
+    workspace = getattr(module, "workspace", None)
+    if workspace is None or workspace.numel() == 0:
+        # ``forward`` asserts on this with an actionable message.
+        return workspace
+
+    device = workspace.device
+    key = marlin_stream_key(device)
+    cache = getattr(module, "_marlin_stream_workspaces", None)
+    if cache is None:
+        cache = {}
+        module._marlin_stream_workspaces = cache
+
+    cached = cache.get(key)
+    if (
+        cached is not None
+        and cached.device == device
+        and cached.numel() == workspace.numel()
+    ):
+        return cached
+
+    # A fresh zeroed buffer on this stream: the memset and the launch are
+    # ordered on the same stream, so the counters are visible as zero.
+    cached = torch.zeros_like(workspace)
+    cache[key] = cached
+    return cached
+
+
 def _round_up(value: int, multiple: int) -> int:
     """Round value up to the next multiple."""
     return ((value + multiple - 1) // multiple) * multiple

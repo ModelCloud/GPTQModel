@@ -20,6 +20,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Cohere 1 / 2 / 2 MoE / Compass (North Mini / Micro Vision) | `cohere`, `cohere2`, `cohere2_moe`, `cohere_compass` |
 | DBRX / DBRX Converted | `dbrx`, `dbrx_converted` |
 | DeciLM | `deci` |
+| Decision Transformer | `decision_transformer` |
 | DeepSeek V2 / V3 / V3.2 / V4 / VL / VL2 / OCR2 | `deepseek_v2`, `deepseek_v3`, `deepseek_v32`, `deepseek_v4`, `deepseek_vl`, `deepseek_vl_v2`, `deepseek_ocr2` |
 | KRAFTON Raon-1 mini | `raon1_mini` |
 | DiffusionGemma | `diffusion_gemma` |
@@ -92,6 +93,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | RefinedWeb | `refinedWeb`, `refinedWebModel` |
 | [Ricursive Ripple](https://huggingface.co/ricursiveAI/Ripple-65B-Preview) ([cached generation](ricursive-cached-generation.md)) | `ricursive` |
 | Seed-OSS | `seed_oss` |
+| [SenseNova-Loop 9B](https://github.com/OpenSenseNova/SenseNova-Loop) (`trust_remote_code`) | `sensenova_loop` |
 | SmolLM3 | `smollm3` |
 | SmolVLM | `smolvlm` |
 | Solar Open / Open 2 | `solar_open`, `solar_open2` |

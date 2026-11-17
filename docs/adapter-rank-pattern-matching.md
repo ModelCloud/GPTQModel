@@ -108,9 +108,9 @@ adding `^` would disable that prefix, and the adapter weights are keyed as
 | Trained rank differs from `dynamic_get` | silently wrong export | `ValueError` |
 | `dynamic` has no adapter rank rule | `{}` | `{}` (unchanged) |
 
-`extract_adapter_rank_patterns` (`gptqmodel/quantization/config.py:5569`) owns
+`extract_adapter_rank_patterns` (`gptqmodel/quantization/config.py:5595`) owns
 the resolution; `_exact_rank_pattern` (`:3276`) owns the key encoding;
-`_eora_save` (`gptqmodel/models/writer.py:1897`) supplies the trained ranks.
+`_eora_save` (`gptqmodel/models/writer.py:1946`) supplies the trained ranks.
 
 ## Failure and ambiguity contract
 

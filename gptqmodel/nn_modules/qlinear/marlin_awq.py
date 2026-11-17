@@ -33,6 +33,7 @@ from ...utils.marlin import (
     marlin_permute_scales,
     marlin_runtime_available,
     marlin_runtime_error,
+    marlin_stream_workspace,
     marlin_validate_runtime_device,
     replace_parameter,
 )
@@ -286,8 +287,10 @@ class AwqMarlinLinear(AWQuantLinear):
                 + marlin_runtime_error(self.compute_dtype)
             )
 
-        # Allocate marlin workspace
+        # Allocate marlin workspace. Each CUDA stream that runs this module
+        # gets its own zeroed copy of these lock counters (#4683).
         self.workspace = marlin_make_workspace_new(device)
+        self._marlin_stream_workspaces = {}
 
         # group_size=K and group_size=-1 both mean one channelwise group.
         marlin_group_size = (
@@ -422,6 +425,7 @@ class AwqMarlinLinear(AWQuantLinear):
             self.scales.data = self.scales.data.to(x.dtype)
 
         bias = self._kernel_bias(x)
+        workspace = marlin_stream_workspace(self)
 
         # Aligned layers retain the original decode-sensitive call path.
         if self._marlin_tile_padding is None:
@@ -432,7 +436,7 @@ class AwqMarlinLinear(AWQuantLinear):
                 weight_zp=self.qzeros,
                 g_idx=self.g_idx,
                 g_idx_sort_indices=self.g_idx_sort_indices,
-                workspace=self.workspace,
+                workspace=workspace,
                 quant_type=self.weight_type,
                 output_size_per_partition=self.out_features,
                 input_size_per_partition=self.in_features,
@@ -448,7 +452,7 @@ class AwqMarlinLinear(AWQuantLinear):
                 weight_zp=self.qzeros,
                 g_idx=self.g_idx,
                 g_idx_sort_indices=self.g_idx_sort_indices,
-                workspace=self.workspace,
+                workspace=workspace,
                 quant_type=self.weight_type,
                 output_size_per_partition=self.out_features,
                 input_size_per_partition=self.in_features,

@@ -26,7 +26,7 @@ flowchart TD
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| Save-time shell generation config | `get_model_with_quantize()` shell retained defaults from `config.json` (`gptqmodel/models/writer.py:2218`) | Live `self.model.generation_config` is deep-copied to the shell before config serialization (`gptqmodel/models/writer.py:2223`) |
+| Save-time shell generation config | `get_model_with_quantize()` shell retained defaults from `config.json` (`gptqmodel/models/writer.py:2218`) | Live `self.model.generation_config` is deep-copied to the shell before config serialization (`gptqmodel/models/writer.py:2150`) |
 | Output fields | Sampling fields and generation-only EOS lists could be dropped or reset | The loaded checkpoint's live generation settings are serialized |
 | Caller state | Serialization could observe shell state | The live object is copied, so attention-field cleanup and serialization do not mutate it |
 

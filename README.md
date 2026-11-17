@@ -43,7 +43,7 @@
 - **Configuration:** Typed [backend configurations](https://github.com/ModelCloud/GPTQModel/blob/main/docs/backend-selection.md) unify backend selection and tuning, with explicit numerical and worker controls instead of environment switches.
 - **Calibration:** Broader [dataset input support](https://github.com/ModelCloud/GPTQModel/blob/main/docs/vlm-calibration-input-normalization.md), document-isolated [AWQ replay](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-calibration-aggregation.md), and opt-in [attention-sink exclusion](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md#gptq-w8a16-or-another-integer-weight-width) improve calibration coverage and control.
 - **Memory:** Reduced packed-weight duplication, bounded EXL3 scratch, and shorter-lived [inference workspaces](https://github.com/ModelCloud/GPTQModel/blob/main/docs/kernel-scratch-lifecycle.md) lower memory use.
-- **Models:** Added OLMo Hybrid, Granite SWA/MoE SWA, and Dots3 Note quantization, plus broader decoder-weight coverage and Transformers 5.22 compatibility. [Model notes](https://github.com/ModelCloud/GPTQModel/blob/main/docs/supported-models.md)
+- **Models:** Added OLMo Hybrid, Granite SWA/MoE SWA, and Dots3 Note quantization, plus broader decoder-weight coverage and Transformers 5.22 compatibility. [Model notes](https://github.com/ModelCloud/GPTQModel/blob/main/docs/supported-models.md) · [Decision Transformer calibration](https://github.com/ModelCloud/GPTQModel/blob/main/docs/decision-transformer-calibration.md)
 - **Compat:** Major fixes across dense/MoE calibration, multimodal replay, checkpoint round trips, Transformers model loading, multi-GPU memory use, and ROCm execution. Unsupported combinations fail clearly rather than loading incomplete weights. [Full notes](https://github.com/ModelCloud/GPTQModel/blob/main/docs/changelog/recent.md#7110)
 - **Security:** Runtime checks for vulnerable PyTorch versions, explicit checkpoint-code trust, stronger checkpoint validation, and bounded server/media requests. [Runtime safety](https://github.com/ModelCloud/GPTQModel/blob/main/docs/torch-runtime-safety-gate.md) · [Serving security](https://github.com/ModelCloud/GPTQModel/blob/main/docs/openai-server-exposure.md)
 
@@ -151,6 +151,11 @@ Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kerne
   measured on their real tokens, not their padded width, so a left-padded row
   cannot lose real tokens to its own padding. See
   [calibration row trimming](https://github.com/ModelCloud/GPTQModel/blob/main/docs/calibration-row-trimming.md).
+- **Pack before filtering when concatenating.** With `concat_size` set, the
+  per-row minimum-length filter and position trim run on the packed windows
+  instead, so short documents are combined rather than discarded and a long
+  document is not cut before it is windowed. See
+  [calibration row trimming](https://github.com/ModelCloud/GPTQModel/blob/main/docs/calibration-row-trimming.md#concat_size-reverses-the-order-pack-then-filter).
 - **Keep VLM calibration rows intact.** Pre-tokenized rows (`input_ids`) take the
   base text path instead of a chat template, columnar mappings are unpacked, and
   conversations reject `CalibrationConfig.concat_size`. See

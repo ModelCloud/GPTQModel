@@ -369,6 +369,10 @@
       "definition": "DeciLMQModel",
       "reason": "Heterogeneous no-op, linear and GQA attention/MLP layouts have no qualified fused executor."
     },
+    "decision_transformer": {
+      "definition": "DecisionTransformerQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
     "deepseek_ocr2": {
       "definition": "DeepSeekOCR2QModel",
       "profiles": {
@@ -5627,6 +5631,10 @@
           "parent_type": "transformers.models.smollm3.modeling_smollm3.SmolLM3MLP"
         }
       ]
+    },
+    "sensenova_loop": {
+      "definition": "SenseNovaLoopQModel",
+      "reason": "Custom/remote looped implementation: the mHC decoder layer runs the remote forward, so QKV and gate/up fusion needs its own native-forward qualification."
     },
     "smolvlm": {
       "definition": "SmolVLMQModel",

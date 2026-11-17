@@ -20,6 +20,7 @@
     "dbrx": "DbrxQModel",
     "dbrx_converted": "DbrxConvertedQModel",
     "deci": "DeciLMQModel",
+    "decision_transformer": "DecisionTransformerQModel",
     "deepseek_ocr2": "DeepSeekOCR2QModel",
     "deepseek_v2": "DeepSeekV2QModel",
     "deepseek_v3": "DeepSeekV3QModel",
@@ -185,6 +186,7 @@
     "refinedWebModel": "RwgQModel",
     "ricursive": "RicursiveQModel",
     "seed_oss": "LlamaQModel",
+    "sensenova_loop": "SenseNovaLoopQModel",
     "smollm3": "LlamaQModel",
     "smolvlm": "SmolVLMQModel",
     "solar_open": "SolarOpenQModel",
@@ -1056,6 +1058,17 @@
         ["post_attention_layernorm:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
         ["mlp.down_proj"]
+      ]
+    },
+    "DecisionTransformerQModel/gptq": {
+      "layers": ["encoder.h"],
+      "blocks": [
+        ["ln_1:!"],
+        ["attn.c_attn"],
+        ["attn.c_proj"],
+        ["ln_2:!"],
+        ["mlp.c_fc"],
+        ["mlp.c_proj"]
       ]
     },
     "GPT2QModel/gptq": {
@@ -2502,6 +2515,21 @@
         ["mlp.gate_proj", "mlp.up_proj"],
         ["mlp.down_proj"],
         ["post_feedforward_layernorm:!"]
+      ]
+    },
+    "SenseNovaLoopQModel/gptq": {
+      "layers": ["model.language_model.layers"],
+      "blocks": [
+        ["input_layernorm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["linear_attn:!"],
+        ["linear_attn.norm:!", "linear_attn.conv1d:!", "linear_attn.in_proj_qkv"],
+        ["linear_attn.in_proj_z", "linear_attn.in_proj_b:!", "linear_attn.in_proj_a:!"],
+        ["linear_attn.out_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
       ]
     },
     "SmolVLMQModel/gptq": {

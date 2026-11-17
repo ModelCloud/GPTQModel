@@ -24,6 +24,8 @@ import torch
 
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_cpu_avx512 import TorchCpuAvx512Linear
+from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
+from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqLinear
 from gptqmodel.quantization import FORMAT
 from gptqmodel.utils.packing import hf_pack_layer
 
@@ -78,7 +80,7 @@ def _packed_module(cls, dtype=torch.bfloat16):
     return module.eval()
 
 
-def _bind_file_views(module, tmp_path):
+def _bind_file_views(module, tmp_path, names=CHECKPOINT_TENSORS):
     """Point every checkpoint tensor at a real ``mmap`` of a file.
 
     A loader hands the module tensors that alias the shard mapping; binding
@@ -87,7 +89,7 @@ def _bind_file_views(module, tmp_path):
 
     mappings = []
     ranges = []
-    for name in CHECKPOINT_TENSORS:
+    for name in names:
         tensor = getattr(module, name, None)
         if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
             continue
@@ -127,7 +129,9 @@ def _file_backed_names(module, ranges):
     return names
 
 
-def _run(module, tmp_path):
+def _run(module, tmp_path, transform=None):
+    if transform is None:
+        transform = lambda m: m.transform_cpu()  # noqa: E731 - tiny local default
     mappings, ranges = _bind_file_views(module, tmp_path)
     try:
         # Precondition: the setup really did leave operands inside the mapping,
@@ -139,7 +143,7 @@ def _run(module, tmp_path):
             for name in CHECKPOINT_TENSORS
             if isinstance(getattr(module, name, None), torch.Tensor)
         }
-        module.transform_cpu()
+        transform(module)
         pinned = _file_backed_names(module, ranges)
 
         # Values survive the detach: it is a copy, not a recompute.
@@ -167,3 +171,65 @@ def test_avx512_repack_detaches_every_checkpoint_view(tmp_path):
 @pytest.mark.skipif(not _aten_available(), reason="ATen CPU int4pack ops are unavailable")
 def test_aten_repack_detaches_every_checkpoint_view(tmp_path):
     _run(_packed_module(TorchAtenLinear), tmp_path)
+
+@pytest.mark.skipif(not _aten_available(), reason="ATen CPU int4pack ops are unavailable")
+def test_fused_repack_detaches_every_checkpoint_view(tmp_path):
+    _run(
+        _packed_module(TorchFusedLinear),
+        tmp_path,
+        lambda module: module.transform_cpu(torch.bfloat16),
+    )
+
+
+@pytest.mark.skipif(not _aten_available(), reason="ATen CPU int4pack ops are unavailable")
+def test_fused_awq_repack_detaches_every_checkpoint_view(tmp_path):
+    from tests.test_checkpoint_state_invariant import _awq_cases
+
+    build = next(build for name, build, _device, _dtype in _awq_cases() if name == "awq_torch_fused")
+    module = build()
+    assert isinstance(module, TorchFusedAwqLinear)
+    _run(module, tmp_path, lambda m: m.transform_cpu_awq(torch.bfloat16))
+
+def test_paro_cpu_layout_detaches_checkpoint_views(tmp_path):
+    """Paro keeps `scales`/`theta`/`pairs`/`channel_scales` after the repack (#4873)."""
+
+    from gptqmodel.nn_modules.qlinear.paro import ParoLinear
+    from tests.kernels.test_paro import _pack_awq_tensor
+
+    layout = "avx512" if _avx512_available() else ("aten" if _aten_available() else None)
+    if layout is None:
+        pytest.skip("no CPU int4 layout available for Paro")
+
+    module = ParoLinear(
+        bits=4,
+        group_size=GROUP_SIZE,
+        sym=True,
+        desc_act=False,
+        in_features=IN_FEATURES,
+        out_features=OUT_FEATURES,
+        bias=False,
+        register_buffers=True,
+        krot=1,
+    )
+    torch.manual_seed(4873)
+    module.qweight.copy_(
+        _pack_awq_tensor(torch.randint(0, 16, (IN_FEATURES, OUT_FEATURES), dtype=torch.int32), 4)
+    )
+    module.qzeros.zero_()
+    module.scales = torch.rand((IN_FEATURES // GROUP_SIZE, OUT_FEATURES), dtype=torch.float16)
+    module.post_init()
+    module.eval()
+
+    names = ("qweight", "qzeros", "scales", "theta", "pairs", "channel_scales")
+    mappings, ranges = _bind_file_views(module, tmp_path, names)
+    try:
+        assert _file_backed_names(module, ranges), "test setup did not alias a mapping"
+        assert module._ensure_cpu_layout(layout), "the CPU layout could not be built"
+        pinned = _file_backed_names(module, ranges)
+        assert pinned == [], (
+            f"ParoLinear still keeps {pinned} inside the checkpoint mapping; the whole "
+            "shard stays resident (#4873)"
+        )
+    finally:
+        for mapping in mappings:
+            mapping.close()

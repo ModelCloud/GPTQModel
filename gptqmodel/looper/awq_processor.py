@@ -4467,9 +4467,8 @@ class AWQProcessor(LoopProcessor):
             return None
         return rotary(x, position_ids, **selector_kwargs)
 
-    @classmethod
     def _rotary_layer_type_kwargs(
-            cls, rotary: nn.Module, module: torch.nn.Module
+            self, rotary: nn.Module, module: torch.nn.Module
     ) -> Optional[Dict[str, Any]]:
         """Return the per-layer-type selector a typed rotary needs.
 
@@ -4486,10 +4485,10 @@ class AWQProcessor(LoopProcessor):
         Returns ``None`` when no valid selector can be resolved.
         """
 
-        parameter_name = cls._rotary_layer_type_parameter(rotary)
+        parameter_name = self._rotary_layer_type_parameter(rotary)
         if parameter_name is None:
             return {}
-        valid_types = set(cls._rotary_layer_types(rotary))
+        valid_types = set(self._rotary_layer_types(rotary))
         # `module` is normally the attention block, but a later AWQ group whose
         # root was already consumed (for example `o_proj`) falls back to the
         # decoder layer. Look through both shapes.
@@ -4510,7 +4509,33 @@ class AWQProcessor(LoopProcessor):
                 if valid_types and value not in valid_types:
                     continue
                 return {parameter_name: value}
+        # Some attentions expose the selector only through the model config:
+        # `LagunaAttention` keeps `is_local_attention`/`sliding_window` and the
+        # `full_attention`/`sliding_attention` label lives in
+        # `config.layer_types[layer_idx]` (#4874). Resolve it for the layer that
+        # is being scaled, and still only pass a label the rotary declares.
+        config_layer_type = self._config_layer_type()
+        if config_layer_type is not None and (
+                not valid_types or config_layer_type in valid_types
+        ):
+            return {parameter_name: config_layer_type}
         return None
+
+    def _config_layer_type(self) -> Optional[str]:
+        """``config.layer_types[layer_idx]`` for the layer being scaled."""
+
+        scale_context = getattr(self, "_scale_context", None)
+        layer_index = getattr(scale_context, "layer_index", None)
+        if not isinstance(layer_index, int):
+            return None
+        config = getattr(getattr(self, "model", None), "config", None)
+        layer_types = getattr(config, "layer_types", None)
+        if not isinstance(layer_types, (list, tuple)) or not layer_types:
+            return None
+        if not 0 <= layer_index < len(layer_types):
+            return None
+        value = layer_types[layer_index]
+        return value if isinstance(value, str) else None
 
     def _scale_search_replay_batch_size(self, x: torch.Tensor) -> Optional[int]:
         """Rows per scale-search replay forward.
