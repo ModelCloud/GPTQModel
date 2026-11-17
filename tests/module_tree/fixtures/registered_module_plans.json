@@ -2166,10 +2166,18 @@
       "blocks": [
         ["input_layernorm:!"],
         ["self_attn.qkv_proj.base_layer"],
+        ["self_attn.qkv_proj.lora_A.vision:!", "self_attn.qkv_proj.lora_A.speech:!"],
+        ["self_attn.qkv_proj.lora_B.vision:!", "self_attn.qkv_proj.lora_B.speech:!"],
         ["self_attn.o_proj.base_layer"],
+        ["self_attn.o_proj.lora_A.vision:!", "self_attn.o_proj.lora_A.speech:!"],
+        ["self_attn.o_proj.lora_B.vision:!", "self_attn.o_proj.lora_B.speech:!"],
         ["post_attention_layernorm:!"],
         ["mlp.gate_up_proj.base_layer"],
-        ["mlp.down_proj.base_layer"]
+        ["mlp.gate_up_proj.lora_A.vision:!", "mlp.gate_up_proj.lora_A.speech:!"],
+        ["mlp.gate_up_proj.lora_B.vision:!", "mlp.gate_up_proj.lora_B.speech:!"],
+        ["mlp.down_proj.base_layer"],
+        ["mlp.down_proj.lora_A.vision:!", "mlp.down_proj.lora_A.speech:!"],
+        ["mlp.down_proj.lora_B.vision:!", "mlp.down_proj.lora_B.speech:!"]
       ]
     },
     "PhiMoEGPTQForCausalLM/gptq": {

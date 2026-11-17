@@ -332,6 +332,10 @@ Next text decoders, with explicit ownership and image-calibrated plain AWQ.
 [Qwen3 and Marin selection](docs/transformers5-model-ports.md#qwen3-and-marin-native-selection)
 uses exact native Qwen3 classes and tokenizers for the verified release layouts;
 unqualified raw `marin` metadata fails explicitly.
+[Original Qwen and legacy Phi-4 multimodal selection](docs/transformers5-model-ports.md#original-qwen-and-legacy-phi-4-multimodal-selection)
+preserves source Qwen attention/tokenizer behavior and Phi-4's image/audio LoRAs,
+media calibration and checkpoint owners. Original Qwen release-specific license
+and research restrictions remain separate from the port's Apache code license.
 [Shared checkpoint ownership](docs/checkpoint-owned-materialization.md)
 explains generated device maps for tied aliases and native FP32 destinations
 during lazy offload, including the exclusions for packed weights.

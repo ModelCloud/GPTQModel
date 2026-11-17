@@ -59,6 +59,8 @@ quality coverage on this checkout.
 | `Ovis2_6_MoeQModel`, `Ovis2_6_NextQModel` | [Owned NaViT/visual-vocabulary wrapper and native Qwen3 MoE/Next decoders](../gptqmodel/models/ports/ovis2_6_moe/README.md) | Independent checkpoint inventories and media equations, hostile metadata, tokenizer/processor, dtype/cache/generation and repeated safetensors reloads | Public image-calibrated plain AWQ, native expert ownership and dense exclusions; linear-attention containers and routers excluded | No trained-payload quality, GPU, optimized FLA, fusion, concurrency or foreign-cache qualification |
 | `OvisQModel` / `ovis` | [Package-owned Ovis 1.0/1.5/1.6 visual vocabulary and pinned Apache notices](../gptqmodel/models/ports/ovis/README.md) | Eight release indexes and four full header inventories, independent vision/media merge equations, native Llama/Qwen2/Gemma2 decoders, released generation policy, hostile metadata, cache and safetensors reload | Eight public image-calibrated plain-AWQ cases, all 14 decoder linears, dense exclusions and two exact reloads; no scale groups | Native Ovis2 is separate; no trained weights, GPU, fusion, concurrent execution, foreign cache or AWQ fold/search qualification |
 | `Qwen3QModel` / `qwen3`, released Marin-32B | [Exact native Qwen3 and pinned Qwen/Marin assets and licenses](../gptqmodel/models/ports/qwen3/README.md) | All 1,018 released key/shapes, exact native tokenizer IDs, hostile model/tokenizer/custom-generation maps, independent Q/K norm/RoPE equations, cache/generation and repeated safetensors cycles | Twelve public plain-AWQ cases, all 14 decoder linears and dense exclusions, offload false/true and two exact reloads; existing Qwen3 fusion contract retained | Raw `marin` fails explicitly; no trained weights, GPU, new fusion, foreign cache, parallel or full-context qualification |
+| `QwenQModel` / original `qwen` | [Owned fused-QKV/TikToken port, pinned sources and separate code/release licenses](../gptqmodel/models/ports/qwen/README.md) | Five full checkpoint header inventories, 1,679 exact key/shapes; independent rotary/attention equations, cache-owned NTK/logn, actual token IDs/ChatML, hostile metadata and repair/retry | Four public plain-AWQ variants, all ten decoder linears and dense exclusions, offload false/true and two exact safetensors cycles | Code Apache; separate Tongyi release and 1.8B research terms retained. No trained weights, GPU, fusion, foreign caches or parallel execution qualification |
+| `Phi4MMGPTQ` / legacy `phi4mm` | [Owned LoRA/vision/audio binding, pinned MIT source and assets](../gptqmodel/models/ports/phi4/README.md) | All 2,047 released key/shapes; independent decoder/vision/Conformer/media equations, real BPE/PIL/audio, grouped beam generation, cache and hostile metadata | Six public image/audio/mixed plain-AWQ cases, all eight decoder base linears, dense LoRAs/media, independent first-layer capture and two exact reloads | Native `phi4_multimodal` remains distinct; no trained weights, GPU, fusion, foreign caches, whole-model offload or parallel execution qualification |
 | `KlearQModel` / `klear` | [Package-owned dense/MoE port, pinned Base/Instruct sources and Apache notices](../gptqmodel/models/ports/klear/README.md) | Full 25,059-key meta inventory, independent attention/routing equations, requested-dtype loading, cache/generation, hostile metadata and safetensors reload | Real public plain AWQ dense/MoE/mixed packing and two save/reload cycles; no scale groups | No trained-weight, GPU, FlashAttention, fusion, parallel or compiler qualification |
 | `KimiK3QModel`, `KimiLinearQModel` / AttnRes variants | [Package-owned MLA/KDA, vision and K3 TikToken/XTML; exact native delegation for ordinary KimiLinear](../gptqmodel/models/ports/kimi_k3/README.md) | Independent float64 MLA/KDA and MoE oracles, CPU/meta owners, exact tokenizer IDs, image-conditioned logits, cache/generation, failure/retry and public loads | AttnRes rejects ordinary GPTQ/AWQ before mutation; existing bounded runner retained | No trained-weight, GPU, fused FLA, FlashAttention, MTP, video, parallel or compiler qualification |
 | `DeepSeekV2QModel` / `deepseek_v2` | [Native-derived compatibility and pinned legacy source](../gptqmodel/models/ports/deepseek_v2/README.md) | Lite/full MLA, dense/periodic/shared MoE, top-k normalization, native expert conversion, cache/generation and safetensors round trips, malicious metadata matrix | Actual CPU plain quantization and packing; no scale groups | No GPU/trained-checkpoint quality, FlashAttention, distributed experts or full packed-checkpoint round trip; expert parallelism rejected |
@@ -1201,3 +1203,100 @@ OMP_NUM_THREADS=1 PYTHON_GIL=0 python -m pytest -q \
   tests/test_qwen3_local_port.py tests/module_tree/test_qwen3_local_port.py \
   --tb=short -ra -o addopts= -o log_cli=false
 ```
+
+## Original Qwen and legacy Phi-4 multimodal selection
+
+Original Qwen uses an owned fused-QKV decoder and TikToken vocabulary reader.
+The native Qwen2/Qwen3 implementations do not reproduce its NTK/logn/cache
+contract. Legacy `phi4mm` keeps its exact flat decoder, modality LoRAs and
+image/audio owners while reusing matching native Phi-4 multimodal components.
+It remains distinct from native `phi4_multimodal`.
+
+```mermaid
+flowchart TD
+    A["GPTQModel.load: model_type=qwen"] --> B["QwenQModel.loader: LocalModelLoader"]
+    B --> C["QWenConfig: package-owned geometry"]
+    C --> D{"Supported original-Qwen layout?"}
+    D -->|yes| E["QWenLMHeadModel: fused QKV, RMSNorm, gated MLP"]
+    D -->|no| X["Explicit error; repair config and retry"]
+    B --> F["QWenTokenizer: local TikToken BPE data"]
+    F --> G{"Required vocabulary valid?"}
+    G -->|yes| H["Tokenicer: one normal normalization pass"]
+    G -->|no| Y["Contextual vocabulary error; repair asset and retry"]
+    E --> I["Safetensors state under transformer.h / wte / ln_f / lm_head"]
+    B -.-> J["auto_map, trust_remote_code and code_revision do not select checkpoint code"]
+    classDef failure fill:#fee,stroke:#b22
+    class X,Y failure
+```
+
+```mermaid
+flowchart TD
+    A["Phi4MMProcessor: text / PIL image / waveform"] --> B["Expanded token ids + media tensors + input_mode"]
+    B --> C["Phi4MMGPTQ.prepare_dataset preserves media batches"]
+    C --> D{Batching or concatenation breaks alignment?}
+    D -->|yes| E["ValueError"]
+    D -->|no| F["FeatureEmbedding: image/audio features replace placeholders"]
+    F --> G["DecoderLayer / ModalityLinear"]
+    G --> H{input_mode}
+    H -->|0| I["base_layer only"]
+    H -->|2| J["base_layer + speech LoRA"]
+    H -->|1 or 3| K["base_layer + vision LoRA"]
+    I --> L["Native attention / DynamicCache / generation"]
+    J --> L
+    K --> L
+    C --> M["AWQ policy: zero scaling groups"]
+    M --> N["Plain quantization: four base_layer projections per layer"]
+    N --> O["Pack -> infer -> safetensors -> exact reload"]
+    B --> P["Group media by per-row budgets before beam expansion"]
+    P --> F
+    classDef error fill:#fdd,stroke:#a00
+    class E error
+```
+
+| Mechanism | Before (parent `022031ba2`) | Current source |
+| --- | --- | --- |
+| Original Qwen selection | `definitions/qwen.py:8`: inherited generic loader | `definitions/qwen.py:11-15`: package model/config/tokenizer; checkpoint Python cannot override them |
+| Rotary/cache state | Checkpoint implementation and mutable rotary alpha | `ports/qwen/modeling_qwen.py:22-51,213-305`: `QWenCache.ntk_alpha` stays with its sequence and cache operations |
+| Phi-4 selection and adapters | `definitions/phi4.py:10-14,43-57`: generic loader, obsolete requirements and quantize-only mutable monkeypatch | Owned loader and call-local `ModalityLinear`; defaults work before and after quantization |
+| Phi-4 decoder ownership | `definitions/phi4.py:17-41`: base projections alone | Base projections plus every excluded vision/speech LoRA A/B owner in the 14-block registry plan |
+| Phi-4 media capture | Generic text preparation loses media | `definitions/phi4.py:61-81`: preserve processor batches and reject misaligned rebatching |
+| Phi-4 beam expansion | Individual media repetition mixes ragged rows | `ports/phi4/modeling_phi4.py:443`: group media using per-row placeholder budgets |
+
+The parent combined run passes **1,170 tests, 465 skipped, six warnings in
+106.42 seconds** on Python 3.14.6t, GIL disabled, Transformers 5.23.0, Torch
+2.15.0 CPU and published Tokenicer 0.0.19. It includes all 90 original-Qwen and
+90 Phi-4 owned tests plus actual central registry/fusion/shared-input plans.
+Skips: 460 NVIDIA Marlin hardware checks, three unavailable Pangu fixtures,
+and non-buildable OPT350/Muse CausalLM cases. Skips do not qualify those paths.
+The previously reported generic fixed-expert and nested-config failures are
+repaired and pass in this parent run.
+
+Qwen covers all 1,679 released key/shapes from five full inventories and four
+public plain-AWQ cases. Phi-4 covers all 2,047 released key/shapes and six public
+image/audio/mixed plain-AWQ cases. Both use `fallback=None`, offload false/true,
+quantize every declared decoder linear, preserve all excluded dense tensors,
+and perform two exact packed/dense safetensors cycles. Independent first-layer
+media capture and grouped-beam oracles detect the original Phi-4 failures.
+Neither port claims AWQ fold/search or fusion qualification.
+
+```bash
+OMP_NUM_THREADS=1 PYTHON_GIL=0 python -m pytest -q \
+  tests/test_qwen_local_port.py tests/module_tree/test_qwen_local_port.py \
+  tests/test_phi4_local_port.py tests/module_tree/test_phi4_local_port.py \
+  tests/module_tree/test_registered_module_plans.py \
+  tests/module_tree/test_fusable_models.py \
+  tests/module_tree/test_definition_subset_ordering.py \
+  tests/module_tree/test_explicit_module_plan.py \
+  tests/module_tree/test_shared_input.py tests/test_awq_scaling_groups.py \
+  tests/module_tree/test_awq_fold_safety_4175.py \
+  --tb=short -ra -o addopts= -o log_cli=false
+```
+
+Source pins, byte-preserved license texts, tokenizer/checkpoint inventories,
+strong red/green results and further reproduction commands are in each port's
+README. Original Qwen's separate Tongyi release terms and 1.8B research
+restrictions remain packaged alongside its Apache code attribution; GPT-QModel
+does not relicense those releases. Phi-4 preserves MIT notices. Neither claims
+trained-payload quality, GPU/FlashAttention, multi-GPU, threaded execution,
+compile/training, foreign caches or extended-context qualification. Phi-4 audio
+qualification covers 8/16 kHz; optional resampling at other rates is unverified.

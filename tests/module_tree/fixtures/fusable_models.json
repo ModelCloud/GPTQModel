@@ -4269,7 +4269,7 @@
     },
     "phi4mm": {
       "definition": "Phi4MMGPTQ",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Package-owned legacy Phi-4 multimodal LoRA/vision/audio binding with packed QKV and gate-up; fusion executor has not been qualified."
     },
     "phimoe": {
       "definition": "PhiMoEGPTQForCausalLM",
@@ -4312,7 +4312,7 @@
     },
     "qwen": {
       "definition": "QwenQModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Package-owned original Qwen fused-QKV decoder with cache-owned NTK/logn attention; fusion executor has not been qualified."
     },
     "qwen2": {
       "definition": "Qwen2QModel",
