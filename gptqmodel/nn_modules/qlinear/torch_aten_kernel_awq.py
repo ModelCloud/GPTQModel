@@ -342,26 +342,28 @@ class TorchAtenAwqLinear(AWQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        if (
-            not self.training
-            and not x.requires_grad
-            and self.linear_mode is None
-            and _has_local_int4pack_cpu_ops()
-            and x.device.type == "cpu"
-            and self._fused_input_dtype(x)
-            # FP16 can overflow before a cancelling bias. BF16 has FP32's
-            # range, so it can use the fused kernel and add the bias once. The
-            # CPU fused op returns an FP32 product for a biased FP16 layer.
-            and (
-                self.bias is None
-                or x.dtype in (torch.bfloat16, torch.float16)
-            )
-        ):
-            capture_fused_train_state(self)
-            self.transform(x.device.type, dtype=x.dtype)
-            self.linear_mode = "inference"
-        elif self.linear_mode is None:
-            self.linear_mode = "train"
+        with self._cpu_transform_lock:
+            if (
+                not self.training
+                and not x.requires_grad
+                and self.linear_mode is None
+                and _has_local_int4pack_cpu_ops()
+                and x.device.type == "cpu"
+                and self._fused_input_dtype(x)
+                # FP16 can overflow before a cancelling bias. BF16 has FP32's
+                # range, so it can use the fused kernel and add the bias once.
+                # The CPU fused op returns an FP32 product for a biased FP16
+                # layer.
+                and (
+                    self.bias is None
+                    or x.dtype in (torch.bfloat16, torch.float16)
+                )
+            ):
+                capture_fused_train_state(self)
+                self.transform(x.device.type, dtype=x.dtype)
+                self.linear_mode = "inference"
+            elif self.linear_mode is None:
+                self.linear_mode = "train"
 
         if self.linear_mode == "inference":
             if not self._fused_input_dtype(x):

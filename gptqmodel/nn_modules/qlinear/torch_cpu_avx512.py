@@ -74,6 +74,10 @@ def unpack_hf_int4(
 
 
 class TorchCpuAvx512Linear(TorchAtenLinear):
+    # The AVX512 kernel consumes the ragged final group; unlike ATen's
+    # int4pack op it does not require in_features % group_size == 0.
+    CPU_INT4PACK_REQUIRES_DIVISIBLE_IN_FEATURES = False
+
     """CPU GPTQ W4A16 kernel using AVX512-BF16."""
 
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH_CPU_AVX512]
