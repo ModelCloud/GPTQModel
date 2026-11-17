@@ -432,6 +432,23 @@ class GPTQProcessor(LoopProcessor):
         hessian = task.qcfg.hessian
         return (str(hessian.staging_dtype), hessian.chunk_size, hessian.chunk_bytes)
 
+    def _hessian_capture_signature(self, task: Any) -> Optional[Tuple[Any, ...]]:
+        """Numerical capture contract; ``None`` excludes the task from sharing.
+
+        GPTQ, GPTAQ and FOEM each accumulate ``H`` differently, so a group may
+        only share within one quantizer kind.  GPTAQ/FOEM additionally require
+        the same native-delta mode because ``dXXT`` must be adopted together
+        with ``H``.
+        """
+
+        if type(task) is GPTQ:
+            return ("gptq", task.columns, *self._hessian_accumulation_settings(task))
+        if type(task) is GPTAQ:
+            return ("gptaq", task.columns, bool(task._use_native_delta))
+        if type(task) is FOEM:
+            return ("foem", task.columns, bool(task.gptaq))
+        return None
+
     def begin_shared_input_capture(
         self,
         model,
@@ -440,8 +457,10 @@ class GPTQProcessor(LoopProcessor):
     ) -> Dict[str, str]:
         """Elects one Hessian capture leader per explicit shared-input group present in this subset.
 
-        Only plain `GPTQ` tasks participate (GPTAQ/FOEM also consume outputs). Groups that
-        are split across subsets dedup only among the members captured in this pass.
+        Plain `GPTQ`, `GPTAQ` and `FOEM` tasks participate; a group only shares
+        within one quantizer kind (GPTAQ/FOEM also adopt ``dXXT``).  Groups that
+        are split across subsets dedup only among the members captured in this
+        pass.
         """
 
         with self.lock:
@@ -467,29 +486,26 @@ class GPTQProcessor(LoopProcessor):
         for group in plan.shared_groups:
             if not group.explicit:
                 continue
-            members = [
-                name for name in subset_names
-                if name in group.modules
-                and type(tasks.get(name)) is GPTQ
-                and tasks[name].qcfg.hessian.dedup_shared_inputs
-            ]
+            members: List[Tuple[str, Tuple[Any, ...]]] = []
+            for name in subset_names:
+                if name not in group.modules:
+                    continue
+                task = tasks.get(name)
+                if task is None or not task.qcfg.hessian.dedup_shared_inputs:
+                    continue
+                signature = self._hessian_capture_signature(task)
+                if signature is None:
+                    continue
+                members.append((name, signature))
             if len(members) < 2:
                 continue
-            leader = members[0]
-            columns = tasks[leader].columns
-            leader_settings = self._hessian_accumulation_settings(tasks[leader])
-            for follower in members[1:]:
-                if tasks[follower].columns != columns:
+            leader, leader_signature = members[0]
+            for follower, follower_signature in members[1:]:
+                if follower_signature != leader_signature:
                     log.warn(
-                        f"Quantization: shared-input group `{group.key}` mixes input widths "
-                        f"({leader}={columns}, {follower}={tasks[follower].columns}); not sharing Hessian."
-                    )
-                    continue
-                follower_settings = self._hessian_accumulation_settings(tasks[follower])
-                if follower_settings != leader_settings:
-                    log.warn(
-                        f"Quantization: shared-input group `{group.key}` mixes Hessian accumulation settings "
-                        f"({leader}={leader_settings}, {follower}={follower_settings}); not sharing Hessian."
+                        f"Quantization: shared-input group `{group.key}` mixes Hessian capture "
+                        f"settings ({leader}={leader_signature}, {follower}={follower_signature}); "
+                        "not sharing Hessian."
                     )
                     continue
                 leaders[follower] = leader
@@ -514,17 +530,18 @@ class GPTQProcessor(LoopProcessor):
             if follower_task is None or leader_task is None:
                 continue
             follower_task.adopt_hessian_from(leader_task)
-            # Publish the factor cache only after the follower owns its Hessian copy.
-            cache = caches.get(leader)
-            if cache is None:
-                cache = SharedHessianFactorCache(
-                    self._shared_input_capture_generation,
-                    leader,
-                    leader=leader,
-                )
-                caches[leader] = cache
-                leader_task.attach_shared_hessian_cache(cache)
-            follower_task.attach_shared_hessian_cache(cache)
+            if type(leader_task) is GPTQ and type(follower_task) is GPTQ:
+                # Publish the factor cache only after the follower owns its Hessian copy.
+                cache = caches.get(leader)
+                if cache is None:
+                    cache = SharedHessianFactorCache(
+                        self._shared_input_capture_generation,
+                        leader,
+                        leader=leader,
+                    )
+                    caches[leader] = cache
+                    leader_task.attach_shared_hessian_cache(cache)
+                follower_task.attach_shared_hessian_cache(cache)
             adopted += 1
 
         with self.lock:

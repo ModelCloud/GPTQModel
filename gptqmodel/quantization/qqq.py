@@ -705,6 +705,45 @@ class QQQ:
         self._device_sample_counts.clear()
         return self.H
 
+    def adopt_hessian_from(self, leader: "QQQ") -> None:
+        """Replace this task's Hessian with a private copy of ``leader``'s.
+
+        Both modules must consume the identical input tensor (see ``:in=<tag>``
+        in ``module_tree``).  ``quantize`` mutates ``H`` in place, so the copy
+        must be independent.  The leader's per-device partials are already
+        folded into ``H`` by :meth:`materialize_hessian`, which keeps the peak
+        at the same two matrices the independent path holds (leader ``H`` plus
+        the follower's copy).
+        """
+
+        if leader is self:
+            return
+        if leader.columns != self.columns:
+            raise ValueError(
+                f"QQQ: cannot share Hessian from `{leader.name}` ({leader.columns} columns) "
+                f"with `{self.name}` ({self.columns} columns)."
+            )
+
+        source = leader.materialize_hessian(self.dev)
+        with leader.lock:
+            nsamples = leader.nsamples
+            fwd_counter = leader.fwd_counter
+            materialized_samples = leader._materialized_samples
+            copy = safe_move_to(
+                source.detach(),
+                self.dev,
+                dtype=torch.float32,
+                copy=True,
+            )
+
+        with self.lock:
+            self.H = copy
+            self.nsamples = nsamples
+            self.fwd_counter = fwd_counter
+            self._materialized_samples = materialized_samples
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+
     @torch.inference_mode()
     def quantize(self, blocksize=128):
         if not self._gsq_enabled:

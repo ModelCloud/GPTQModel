@@ -15,12 +15,12 @@ from ..looper.loop_processor import (
     CalibrationConfig,
     CalibrationTypes,
     ForwardConfig,
-    LoopProcessor,
     ProcessorLifecycleConfig,
     bind_resolved_module_config,
     get_resolved_module_config,
 )
 from ..looper.named_module import NamedModule
+from ..looper.shared_input import SharedInputCaptureProcessor
 from ..models import BaseQModel
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
@@ -45,7 +45,7 @@ from ..utils.torch import CPU
 log = setup_logger()
 
 
-class VPTQProcessor(LoopProcessor):
+class VPTQProcessor(SharedInputCaptureProcessor):
     """Captures activations and quantizes modules with the VPTQ workflow.
 
     The calibration forward passes feed the same Hessian accumulator used by
@@ -74,6 +74,7 @@ class VPTQProcessor(LoopProcessor):
             calibration=calibration,
             forward=forward,
         )
+        self._init_shared_input_capture()
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
@@ -116,6 +117,13 @@ class VPTQProcessor(LoopProcessor):
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that feeds captured batches into the VPTQ task."""
+
+        if self.shared_input_leader(name) is not None:
+            def skip(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
+                """Follower of a shared-input group: the leader collects this Hessian."""
+
+                del inp, out
+            return skip
 
         def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             """Records one activation batch for the module Hessian."""

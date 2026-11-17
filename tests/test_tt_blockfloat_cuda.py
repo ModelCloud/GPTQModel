@@ -284,6 +284,45 @@ def test_embedding_module_routes_through_the_kernel():
     assert torch.count_nonzero(out_of_range) == 0
 
 
+@pytest.mark.parametrize(
+    "dtype", [torch.float16, torch.bfloat16, torch.float32], ids=["fp16", "bf16", "fp32"]
+)
+def test_tied_head_routes_through_the_kernel(dtype):
+    """The tied head's CUDA branch must own a policy and reach the native matmul.
+
+    Regression for #4482: the head delegates to the embedding's
+    ``_kernel_linear``, which read ``self.kernel.blockfloat_cublas`` off a
+    storage owner that never defined one.  Compare against an independent
+    float64 GEMM over the exact grid, never against the path under test.
+    """
+
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import (
+        TTBlockfloatEmbedding,
+        TTBlockfloatTiedHead,
+    )
+
+    torch.manual_seed(22)
+    module = TTBlockfloatEmbedding(48, 64, bits=8).cuda()
+    module.codes.copy_(
+        torch.randint(0, 256, module.codes.shape, device="cuda", dtype=torch.uint8)
+    )
+    module.exponents.copy_(
+        torch.randint(-8, 4, module.exponents.shape, device="cuda", dtype=torch.int8)
+    )
+    head = TTBlockfloatTiedHead(module)
+
+    hidden = torch.randn(2, 3, 64, device="cuda", dtype=dtype)
+    assert module._kernel_linear(hidden) is not None
+    got = head(hidden)
+
+    grid = module.dequantize(dtype=torch.float32).to(torch.float64)
+    expected = (hidden.to(torch.float64) @ grid.T).to(dtype)
+    assert got.dtype is dtype
+    torch.testing.assert_close(
+        got.to(torch.float64), expected.to(torch.float64), rtol=2e-3, atol=2e-3
+    )
+
+
 def _constant_bf8(value: float) -> int:
     """The ``bf8_b`` code for a constant at exponent 0 (levels 64, offset 127)."""
 
