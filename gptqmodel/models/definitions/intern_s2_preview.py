@@ -3,17 +3,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from functools import wraps
-from importlib import import_module
-from inspect import signature
 from typing import Dict
 
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 
@@ -21,11 +19,14 @@ from ._vlm_calibration import prepare_vlm_calibration_dataset
 class InternS2PreviewQModel(BaseQModel):
     require_pkgs = ["sentencepiece>=0.2.0"]
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.intern_s2_preview.configuration_interns2_preview.InternS2PreviewConfig",
+        model_class="gptqmodel.models.ports.intern_s2_preview.modeling_interns2_preview.InternS2PreviewForConditionalGeneration",
+        processor_class="gptqmodel.models.ports.intern_s2_preview.processing_interns2_preview.InternS2PreviewProcessor",
+        tokenizer_class="gptqmodel.models.ports.intern_s2_preview.tokenization_interns1.InternS1Tokenizer",
+    )
 
     require_load_processor = True
-    require_trust_remote_code = True
-    require_monkeypatch = True
     layer_modules_strict = False
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
@@ -59,7 +60,7 @@ class InternS2PreviewQModel(BaseQModel):
                 "v_proj:0:in=x",
                 "o_proj:1",
             ),
-            "linear_attn": (
+            "linear_attn:!": (
                 "norm:!",
                 "conv1d:!",
                 "in_proj_qkv:0:in=x",
@@ -87,68 +88,10 @@ class InternS2PreviewQModel(BaseQModel):
     def preprocess_dataset(self, sample: Dict) -> Dict:
         return sample
 
-    def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(
-            self.model_local_path,
-            trust_remote_code=self.trust_remote_code,
-        )
-
-    def monkey_patch(self):
-        modeling_module = import_module(
-            type(self.model.model.language_model).__module__
-        )
-
-        # Intern-S2's remote code owns a legacy stateful cache with top-level
-        # conv_states/recurrent_states. Newer Transformers versions otherwise
-        # pre-create their generic DynamicCache, whose state lives per layer.
-        # Let the remote model create InternS2PreviewDynamicCache in forward.
-        model_cls = type(self.model)
-        legacy_cache_cls = getattr(
-            modeling_module,
-            "InternS2PreviewDynamicCache",
-            None,
-        )
-        if legacy_cache_cls is not None and getattr(model_cls, "_is_stateful", False):
-            model_cls._supports_default_dynamic_cache = classmethod(
-                lambda cls: False
-            )
-
-            if not hasattr(legacy_cache_cls, "get_query_offset"):
-                def get_query_offset(cache_self, layer_idx=0):
-                    return cache_self.get_seq_length(layer_idx)
-
-                legacy_cache_cls.get_query_offset = get_query_offset
-
-            get_mask_sizes = legacy_cache_cls.get_mask_sizes
-            if (
-                "cache_position" in signature(get_mask_sizes).parameters
-                and not getattr(get_mask_sizes, "_gptqmodel_accepts_query_length", False)
-            ):
-                @wraps(get_mask_sizes)
-                def get_mask_sizes_compat(cache_self, query_length, layer_idx):
-                    if hasattr(query_length, "shape"):
-                        return get_mask_sizes(cache_self, query_length, layer_idx)
-
-                    past_seen_tokens = cache_self.get_seq_length(layer_idx)
-                    return query_length + past_seen_tokens, 0
-
-                get_mask_sizes_compat._gptqmodel_accepts_query_length = True
-                legacy_cache_cls.get_mask_sizes = get_mask_sizes_compat
-
-        create_causal_mask = modeling_module.create_causal_mask
-
-        if "cache_position" in signature(create_causal_mask).parameters or getattr(
-            create_causal_mask, "_gptqmodel_accepts_cache_position", False
-        ):
-            return
-
-        @wraps(create_causal_mask)
-        def create_causal_mask_compat(*args, cache_position=None, **kwargs):
-            del cache_position
-            return create_causal_mask(*args, **kwargs)
-
-        create_causal_mask_compat._gptqmodel_accepts_cache_position = True
-        modeling_module.create_causal_mask = create_causal_mask_compat
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Hybrid recurrence, gated full attention and packed MoE are not
+        # qualified for complete AWQ search/replay. Quantize without folding.
+        return []
 
     def _materialize_core_module(self, parent, attr_name: str):
         module = getattr(parent, attr_name)
