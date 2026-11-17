@@ -48,6 +48,12 @@ EXCLUDED = {
     "AwqSwordfishLinear": "Swordfish requires Blackwell",
     "W4ANVFP4Linear": "NVFP4 requires SM121+",
     "TorchInt8AwqLinear": "Retired INT4-to-INT8 expanded-weight backend",
+    # Portable CPU readers for layouts whose native kernel is CUDA-only
+    # (#4554, #4736). They dequantize to a dense tile per forward, so no
+    # fused executor group can consume their packed storage.
+    "AwqGEMVTorchLinear": "CPU-only portable GEMV reader (#4554); no fusion adapter",
+    "AwqGEMVFastTorchLinear": "CPU-only portable GEMV_FAST reader (#4736); no fusion adapter",
+    "LLMAwqTorchLinear": "CPU-only portable LLM_AWQ reader (#4736); no fusion adapter",
 }
 
 
