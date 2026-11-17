@@ -1935,6 +1935,12 @@ class GGUFCudaKernel(GGUFTorchLinear):
 
     def forward(self, x: torch.Tensor):
         original_shape = x.shape[:-1] + (self.out_features,)
+        # An empty batch (MoE experts that receive no tokens, empty batch
+        # slices) must not build a ggml plan: the plan would contain
+        # zero-sized tensors and the arena allocation refuses it (#4743).
+        # Every other kernel returns an empty output for M=0.
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
         x_flat = x.reshape(-1, x.shape[-1])
         if x_flat.device.type != "cuda":
             raise RuntimeError(

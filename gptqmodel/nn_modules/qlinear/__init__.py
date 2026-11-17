@@ -174,9 +174,10 @@ def input_rows(x: t.Tensor) -> int:
     batch dimension, so a 4D input has ``B * S * T`` matrix rows.
     """
 
-    if x.ndim == 0:
+    shape = x.shape
+    if len(shape) == 0:
         raise ValueError("Linear input must have at least one dimension")
-    return math.prod(x.shape[:-1])
+    return math.prod(shape[:-1])
 
 
 def empty_linear_output(x: t.Tensor, out_features: int) -> t.Tensor:
