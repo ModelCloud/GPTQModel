@@ -16,6 +16,7 @@ from transformers import CodeGenConfig as NativeCodeGenConfig
 from transformers import CodeGenForCausalLM as NativeCodeGenForCausalLM
 from transformers import PreTrainedTokenizerFast
 from transformers.models.codegen.modeling_codegen import CodeGenModel as NativeCodeGenModel
+from transformers.models.codegen.modeling_codegen import create_sinusoidal_positions
 
 from gptqmodel import GPTQModel
 from gptqmodel.models.definitions.codegen import CodeGenQModel
@@ -249,10 +250,11 @@ def test_cache_generation_and_safetensors_roundtrips(tmp_path, partitions, dtype
         torch.testing.assert_close(again(ids, use_cache=False).logits, full, rtol=0, atol=0)
 
 
-def write_checkpoint(path, partitions):
-    model = CodeGenForCausalLM(tiny_config(partitions)).eval()
+def write_checkpoint(path, partitions, model=None):
+    if model is None:
+        model = CodeGenForCausalLM(tiny_config(partitions)).eval()
     model.save_pretrained(path)
-    tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel({f"t{i}": i for i in range(41)}, unk_token="t0")),
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel({f"t{i}": i for i in range(model.config.vocab_size)}, unk_token="t0")),
                                         unk_token="t0", pad_token="t0", bos_token="t1", eos_token="t2")
     tokenizer.save_pretrained(path)
     payload = json.loads((path / "config.json").read_text())
@@ -261,6 +263,134 @@ def write_checkpoint(path, partitions):
     marker = path / "EXECUTED"
     (path / "evil.py").write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\nraise RuntimeError('checkpoint Python executed')\n")
     return model, marker
+
+
+@pytest.mark.parametrize("partitions", [4, 8])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_postconstruction_cast_save_public_reload_and_cast_back(tmp_path, partitions, dtype):
+    # Long rotary positions amplify rounding that short-position smoke tests
+    # miss. The derived table is absent from state_dict(), unlike the weights.
+    torch.manual_seed(2027)
+    config = tiny_config(partitions, n_embd=128, n_inner=192, rotary_dim=16,
+                         n_positions=2048, n_ctx=2048, vocab_size=47, initializer_range=.1)
+    model = CodeGenForCausalLM(config).eval()
+    original_tables = [layer.attn.embed_positions.clone() for layer in model.transformer.h]
+    original_weights = {name: tensor.clone() for name, tensor in model.state_dict().items()}
+    model.half() if dtype == torch.float16 else model.bfloat16()
+    ids = torch.tensor([[18, 14, 17]])
+    positions = torch.tensor([[1900, 1901, 1902]])
+    with torch.inference_mode():
+        before = model(ids, position_ids=positions, use_cache=False).logits
+        tokens = model.generate(ids, position_ids=positions, max_new_tokens=3, do_sample=False)
+    _, marker = write_checkpoint(tmp_path, partitions, model)
+    restored = CodeGenQModel.loader.from_pretrained(tmp_path, dtype=dtype).eval()
+    # Equal checkpoint weights must imply equal execution, including the
+    # nonpersistent FP32 positional state regenerated during reload.
+    for name, tensor in restored.state_dict().items():
+        torch.testing.assert_close(tensor, original_weights[name].to(dtype), rtol=0, atol=0)
+        torch.testing.assert_close(tensor, model.state_dict()[name], rtol=0, atol=0)
+    with torch.inference_mode():
+        torch.testing.assert_close(restored(ids, position_ids=positions, use_cache=False).logits,
+                                   before, rtol=0, atol=0)
+        torch.testing.assert_close(restored.generate(ids, position_ids=positions, max_new_tokens=3, do_sample=False), tokens)
+    public = GPTQModel.load(str(tmp_path), device="cpu", dtype=dtype, trust_remote_code=False)
+    with torch.inference_mode():
+        torch.testing.assert_close(public.model(ids, position_ids=positions, use_cache=False).logits,
+                                   before, rtol=0, atol=0)
+    assert not marker.exists()
+    for layer, original in zip(model.transformer.h, original_tables):
+        torch.testing.assert_close(layer.attn.embed_positions, original, rtol=0, atol=0)
+    if partitions == 4:
+        assert type(model.transformer) is NativeCodeGenModel
+    # Restoring only the derived FP32 tables is the independent reference: no
+    # trained tensor may be replaced or widened to recover numerical parity.
+    for layer, original in zip(restored.transformer.h, original_tables):
+        layer.attn.embed_positions = original.clone()
+    model.float()
+    restored.float()
+    with torch.inference_mode():
+        torch.testing.assert_close(model(ids, position_ids=positions, use_cache=False).logits,
+                                   restored(ids, position_ids=positions, use_cache=False).logits, rtol=0, atol=0)
+    model.to(device="cpu", dtype=dtype)
+    for layer, original in zip(model.transformer.h, original_tables):
+        torch.testing.assert_close(layer.attn.embed_positions, original, rtol=0, atol=0)
+    with torch.inference_mode():
+        torch.testing.assert_close(model(ids, position_ids=positions, use_cache=False).logits, before, rtol=0, atol=0)
+    model.save_pretrained(tmp_path / "second")
+    again = CodeGenQModel.loader.from_pretrained(tmp_path / "second", dtype=dtype).eval()
+    with torch.inference_mode():
+        torch.testing.assert_close(again(ids, position_ids=positions, use_cache=False).logits, before, rtol=0, atol=0)
+    assert not list(tmp_path.rglob("*.bin"))
+
+
+@pytest.mark.parametrize("partitions", [4, 8])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_low_dtype_construction_uses_original_fp32_rotary_math(partitions, dtype):
+    config = tiny_config(partitions, n_embd=128, n_inner=192, rotary_dim=16,
+                         n_positions=2048, n_ctx=2048, vocab_size=47, initializer_range=.1)
+    # Native formula evaluated outside the low-default-dtype HF constructor.
+    original = create_sinusoidal_positions(2048, 16)
+    assert original.dtype == torch.float32
+    model = CodeGenForCausalLM._from_config(config, dtype=dtype).eval()
+    ids = torch.tensor([[18, 14, 17]])
+    positions = torch.tensor([[1900, 1901, 1902]])
+    with torch.inference_mode():
+        actual = model(ids, position_ids=positions, use_cache=False).logits
+        for layer in model.transformer.h:
+            torch.testing.assert_close(layer.attn.embed_positions, original, rtol=0, atol=0)
+            layer.attn.embed_positions = original.clone()
+        expected = model(ids, position_ids=positions, use_cache=False).logits
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("partitions", [4, 8])
+@pytest.mark.parametrize("assign", [False, True])
+def test_meta_move_materialization_rebuilds_fp32_rotary(partitions, assign):
+    torch.manual_seed(2027)
+    model = CodeGenForCausalLM(tiny_config(partitions, n_positions=2048)).eval().bfloat16()
+    state = {name: tensor.clone() for name, tensor in model.state_dict().items()}
+    original = [layer.attn.embed_positions.clone() for layer in model.transformer.h]
+    ids = torch.tensor([[18, 14, 17]])
+    positions = torch.tensor([[1900, 1901, 1902]])
+    with torch.inference_mode():
+        before = model(ids, position_ids=positions, use_cache=False).logits
+    model.to("meta")
+    assert all(layer.attn.embed_positions.is_meta for layer in model.transformer.h)
+    model.to_empty(device="cpu")
+    model.load_state_dict(state, assign=assign, strict=True)
+    for layer, table in zip(model.transformer.h, original):
+        assert layer.attn.embed_positions.device.type == "cpu"
+        torch.testing.assert_close(layer.attn.embed_positions, table, rtol=0, atol=0)
+    with torch.inference_mode():
+        torch.testing.assert_close(model(ids, position_ids=positions, use_cache=False).logits, before, rtol=0, atol=0)
+    assert all("embed_positions" not in key for key in model.state_dict())
+
+
+@pytest.mark.parametrize("partitions", [4, 8])
+def test_failed_dtype_conversion_preserves_rotary_and_retry(partitions):
+    model = CodeGenForCausalLM(tiny_config(partitions)).eval()
+    original = [layer.attn.embed_positions.clone() for layer in model.transformer.h]
+    tables_seen = []
+
+    def interrupted_cast(tensor):
+        if tensor.shape == original[0].shape:
+            tables_seen.append(tensor)
+            if len(tables_seen) == 2:
+                raise RuntimeError("injected failure after first rotary table cast")
+        return tensor.bfloat16() if tensor.is_floating_point() else tensor
+
+    with pytest.raises(RuntimeError, match="injected failure"):
+        model._apply(interrupted_cast)
+    assert len(tables_seen) == 2
+    for layer, table in zip(model.transformer.h, original):
+        torch.testing.assert_close(layer.attn.embed_positions, table, rtol=0, atol=0)
+    model.bfloat16()
+    state = model.state_dict()
+    reference = CodeGenForCausalLM._from_config(tiny_config(partitions), dtype=torch.bfloat16).eval()
+    reference.load_state_dict(state, strict=True)
+    ids = torch.tensor([[1, 7, 4, 9]])
+    with torch.inference_mode():
+        torch.testing.assert_close(model(ids, use_cache=False).logits, reference(ids, use_cache=False).logits, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("partitions", [4, 8])
