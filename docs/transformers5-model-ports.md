@@ -61,6 +61,9 @@ quality coverage on this checkout.
 | `Qwen3QModel` / `qwen3`, released Marin-32B | [Exact native Qwen3 and pinned Qwen/Marin assets and licenses](../gptqmodel/models/ports/qwen3/README.md) | All 1,018 released key/shapes, exact native tokenizer IDs, hostile model/tokenizer/custom-generation maps, independent Q/K norm/RoPE equations, cache/generation and repeated safetensors cycles | Twelve public plain-AWQ cases, all 14 decoder linears and dense exclusions, offload false/true and two exact reloads; existing Qwen3 fusion contract retained | Raw `marin` fails explicitly; no trained weights, GPU, new fusion, foreign cache, parallel or full-context qualification |
 | `QwenQModel` / original `qwen` | [Owned fused-QKV/TikToken port, pinned sources and separate code/release licenses](../gptqmodel/models/ports/qwen/README.md) | Five full checkpoint header inventories, 1,679 exact key/shapes; independent rotary/attention equations, cache-owned NTK/logn, actual token IDs/ChatML, hostile metadata and repair/retry | Four public plain-AWQ variants, all ten decoder linears and dense exclusions, offload false/true and two exact safetensors cycles | Code Apache; separate Tongyi release and 1.8B research terms retained. No trained weights, GPU, fusion, foreign caches or parallel execution qualification |
 | `Phi4MMGPTQ` / legacy `phi4mm` | [Owned LoRA/vision/audio binding, pinned MIT source and assets](../gptqmodel/models/ports/phi4/README.md) | All 2,047 released key/shapes; independent decoder/vision/Conformer/media equations, real BPE/PIL/audio, grouped beam generation, cache and hostile metadata | Six public image/audio/mixed plain-AWQ cases, all eight decoder base linears, dense LoRAs/media, independent first-layer capture and two exact reloads | Native `phi4_multimodal` remains distinct; no trained weights, GPU, fusion, foreign caches, whole-model offload or parallel execution qualification |
+| `Qwen2VLQModel` / `qwen2_vl`, `qwen2_vl_text` | [Exact native composite/headless selection and Apache provenance](../gptqmodel/models/ports/qwen2_vl/README.md) | All 729 composite and 26 published headless key/shapes; native three-axis rotary, real tokenizer/processor, media/cache/generation and hostile metadata | Six public image-calibrated plain-AWQ cases with two exact packed/dense reloads | Headless feature extraction rejects generation; no trained weights, GPU, new fusion, foreign-cache or fold/search qualification |
+| `Qwen2_5_VLQModel` / `qwen2_5_vl`, `qwen2_5_vl_text` | [Exact native composite/headless selection, Apache source and retained Qwen3B research license](../gptqmodel/models/ports/qwen2_5_vl/README.md) | All 824 composite and 26 independently published headless key/shapes; actual root schema, native hidden states, public hostile metadata and two dense cycles | Six aligned headless public plain-AWQ cases with two exact packed/dense reloads | Headless generation rejected; published width 37 cannot satisfy TorchAWQ packing. No trained weights, GPU or new fusion qualification |
+| `QwenDriveQModel` / `qwen_drive` | [Owned root VLM wrapper over native Qwen3.5, Apache source and pinned assets](../gptqmodel/models/ports/qwen_drive/README.md) | All 723 released key/shapes plus native tied-head alias; hybrid/full attention, media/cache/generation, real BPE and hostile metadata | Four public image-calibrated plain-AWQ cases, hybrid/full × offload, exact first-decoder capture and two packed/dense reloads | VLM only; planner, perception and official scene processor unqualified. No trained weights, GPU, fold/search or fusion qualification; two static protocol diagnostics remain |
 | `KlearQModel` / `klear` | [Package-owned dense/MoE port, pinned Base/Instruct sources and Apache notices](../gptqmodel/models/ports/klear/README.md) | Full 25,059-key meta inventory, independent attention/routing equations, requested-dtype loading, cache/generation, hostile metadata and safetensors reload | Real public plain AWQ dense/MoE/mixed packing and two save/reload cycles; no scale groups | No trained-weight, GPU, FlashAttention, fusion, parallel or compiler qualification |
 | `KimiK3QModel`, `KimiLinearQModel` / AttnRes variants | [Package-owned MLA/KDA, vision and K3 TikToken/XTML; exact native delegation for ordinary KimiLinear](../gptqmodel/models/ports/kimi_k3/README.md) | Independent float64 MLA/KDA and MoE oracles, CPU/meta owners, exact tokenizer IDs, image-conditioned logits, cache/generation, failure/retry and public loads | AttnRes rejects ordinary GPTQ/AWQ before mutation; existing bounded runner retained | No trained-weight, GPU, fused FLA, FlashAttention, MTP, video, parallel or compiler qualification |
 | `DeepSeekV2QModel` / `deepseek_v2` | [Native-derived compatibility and pinned legacy source](../gptqmodel/models/ports/deepseek_v2/README.md) | Lite/full MLA, dense/periodic/shared MoE, top-k normalization, native expert conversion, cache/generation and safetensors round trips, malicious metadata matrix | Actual CPU plain quantization and packing; no scale groups | No GPU/trained-checkpoint quality, FlashAttention, distributed experts or full packed-checkpoint round trip; expert parallelism rejected |
@@ -1300,3 +1303,92 @@ does not relicense those releases. Phi-4 preserves MIT notices. Neither claims
 trained-payload quality, GPU/FlashAttention, multi-GPU, threaded execution,
 compile/training, foreign caches or extended-context qualification. Phi-4 audio
 qualification covers 8/16 kHz; optional resampling at other rates is unverified.
+
+### Qwen VL task and Qwen-Drive wrapper selection
+
+[Qwen2-VL](../gptqmodel/models/ports/qwen2_vl/README.md) and
+[Qwen2.5-VL](../gptqmodel/models/ports/qwen2_5_vl/README.md) select exact native
+Transformers 5 classes for each task. Composite artifacts retain their vision
+model, processor and trained-head schema. Standalone `*_vl_text` artifacts use
+the native headless text model: their keys start at `embed_tokens`, `layers`
+and `norm`. Generation raises `NotImplementedError`; no random head is added.
+The independent published tiny checkpoints establish this schema, not trained
+quality. The Qwen2.5-VL publication's intermediate width 37 remains intact and
+fails the existing TorchAWQ packing constraint; aligned synthetic widths qualify
+the headless quantization lifecycle separately.
+
+```mermaid
+flowchart TD
+    A["load_model_config: LocalModelLoader reads selected config"] --> B{"Exact model_type?"}
+    B -->|qwen2_vl or qwen2_5_vl| C["Qwen2VLModelLoader or Qwen2_5_VLModelLoader: native conditional generation"]
+    B -->|qwen2_vl_text or qwen2_5_vl_text| D["Same selector: native Qwen2VLTextModel or Qwen2_5_VLTextModel"]
+    B -->|Unknown| X["ValueError: no alternative checkpoint Python dispatch"]
+    C --> E["Native processor and decoder; public media generation"]
+    D --> F["Root layers module plan; feature extraction and safetensors reload"]
+    F --> G{"Definition.generate requested?"}
+    G -->|Yes| Y["NotImplementedError: checkpoint has no trained LM head"]
+    G -->|No| H["Native last_hidden_state; plain AWQ for aligned widths"]
+    classDef fail fill:#fee,stroke:#b00
+    class X,Y fail
+```
+
+[Qwen-Drive](../gptqmodel/models/ports/qwen_drive/README.md) owns its released
+root VLM wrapper and fixed nested Qwen3.5 config. `QwenDriveForConditionalGeneration`
+instantiates only native `Qwen3_5ForConditionalGeneration` under `vlm`.
+Definition ownership precedes optional official-package registration. Checkpoint
+`auto_map`, trust flags and the security bypass cannot replace these classes.
+The root's generation policy reaches native delegation. Native tensor media
+calibration keeps image/video data through first-layer capture.
+
+```mermaid
+flowchart TD
+    A["GPTQModel.load: root or selected subfolder"] --> B["load_model_config: LocalModelLoader for qwen_drive"]
+    B --> C{"QwenDriveConfig: exact Qwen3_5Config and nested types?"}
+    C -->|No| X["ValueError; repair metadata and retry"]
+    C -->|Yes| D["QwenDriveForConditionalGeneration: vlm = native Qwen3_5ForConditionalGeneration"]
+    D --> E["VLM-only forward/generate; root generation_config forwarded"]
+    D --> F["QwenDriveQModel.prepare_dataset preserves native media tensors"]
+    F --> G{"batch_size=1 and native tensor rows?"}
+    G -->|No| Y["ValueError before calibration"]
+    G -->|Yes| H["StageInputsCapture: exact image-expanded decoder inputs"]
+    H --> I["Plain AWQ; recurrent controls excluded by linear_attn:!"]
+    I --> J["Pack, inference, safetensors save/load/re-save/reload"]
+    classDef fail fill:#fee,stroke:#b00
+    class X,Y fail
+```
+
+| Mechanism before the port | Shipped selection and consumer |
+| --- | --- |
+| `22bea1201:definitions/qwen2_vl.py:9-12` and `definitions/qwen2_5_vl.py:10-13`: inherited image-text AutoModel selection also served text aliases | Exact native composite/text model selectors; root-only text tree and explicit generation rejection |
+| `22bea1201:definitions/qwen_drive.py:21-30`: optional official-package registration and AutoModel | Definition-owned `QwenDriveConfig` and `QwenDriveForConditionalGeneration`; no official stack import |
+| `22bea1201:definitions/qwen_drive.py:72-85`: construct then delete an unreleased planner and replace the wrapper forward | Construct only the released `vlm.*` schema; forward through the owned wrapper |
+| Generic repeated processor discovery or text-only media preparation | Qwen2-VL reuses its selected normalized processor; Qwen-Drive validates and retains native media batches |
+
+The Qwen-Drive registry explicitly excludes recurrent `A_log` and `dt_bias`
+through `linear_attn:!`, in addition to its norm, convolution and gate exclusions.
+The Qwen VL headless fusion reasons state the unsupported generation contract.
+Composite fusion admission remains its existing independently declared policy.
+No new fusion executor or AWQ folding/search relationship is admitted here.
+
+Public tests cover root and selected-subfolder loading, hostile model/config/
+tokenizer/custom-generation maps, trust false/true and bypass absent/0/1,
+repair/retry, cache and safetensors cycles. Qwen2-VL's parent integration run
+passed 897 tests with 463 hardware/fixture skips in 27.99 seconds; its 92 owned
+cases are included. The corresponding commands, independent source equations,
+token IDs, checkpoint/license hashes and isolated red/green probes are retained
+in each linked port README. All measured execution is CPU on free-threaded
+Python 3.14.6 with GIL disabled, Transformers 5.23.0, Torch 2.15.0 and published
+Tokenicer 0.0.19. This does not qualify trained quality, GPU/FlashAttention,
+multi-GPU, threaded PyTorch, compilation, training, extended context or foreign
+caches. Qwen-Drive planner/perception/actions and its official scene processor
+remain outside the VLM task. Apache source notices and the separate Qwen3B
+research license are retained in package data.
+
+Before main's `CalibrationConfig` API integration, the combined parent run at
+`0a7b644cc` passed **1,082 tests, 463 skips and 17 warnings in 57.75 seconds**.
+This included all three ports, public root/subfolder registration-precedence
+cases and the shared loader/processor/tokenizer/security/AWQ/registry/fusion
+suites. Skips were 460 NVIDIA Marlin cases and three absent DeciLM/EXAONE/
+Nanbeige fixtures. The migrated Qwen-Drive support suite separately passed all
+13 cases in 3.89 seconds; five old assertions had failed because they required
+optional registration, AutoModel and deleting an instantiated planner.

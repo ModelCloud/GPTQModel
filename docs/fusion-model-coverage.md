@@ -286,9 +286,9 @@ layout alone does not authorize it.
 | `phi3` | `Phi3QModel` | No compatible native projection forward: projections already combined, conditional, or preprocessed. |
 | `phi4mm` | `Phi4MMGPTQ` | Package-owned legacy Phi-4 multimodal LoRA/vision/audio binding with packed QKV and gate-up; fusion executor has not been qualified. |
 | `qwen` | `QwenQModel` | Package-owned original Qwen fused-QKV decoder with cache-owned NTK/logn attention; fusion executor has not been qualified. |
-| `qwen2_5_vl_text` | `Qwen2_5_VLQModel` | Installed native layout does not resolve the definition decoder prefix; needs separate layout validation. |
-| `qwen2_vl_text` | `Qwen2VLQModel` | Installed native layout does not resolve the definition decoder prefix; needs separate layout validation. |
-| `qwen_drive` | `QwenDriveQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `qwen2_5_vl_text` | `Qwen2_5_VLQModel` | Native Transformers 5 Qwen2.5-VL headless text backbone; generation is unsupported and fusion executor has not been qualified. |
+| `qwen2_vl_text` | `Qwen2VLQModel` | Native Transformers 5 headless Qwen2VLTextModel feature extraction; generation is unsupported and fusion executor has not been qualified. |
+| `qwen_drive` | `QwenDriveQModel` | Package-owned Qwen-Drive root VLM wrapper with native Qwen3.5 hybrid recurrent/full attention; fusion executor has not been qualified. |
 | `raon1_mini` | `Raon1MiniQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `refinedWeb` | `RwgQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `refinedWebModel` | `RwgQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |

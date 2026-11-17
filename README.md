@@ -336,6 +336,10 @@ unqualified raw `marin` metadata fails explicitly.
 preserves source Qwen attention/tokenizer behavior and Phi-4's image/audio LoRAs,
 media calibration and checkpoint owners. Original Qwen release-specific license
 and research restrictions remain separate from the port's Apache code license.
+[Qwen VL task and Qwen-Drive wrapper selection](docs/transformers5-model-ports.md#qwen-vl-task-and-qwen-drive-wrapper-selection)
+binds Qwen2/2.5-VL to exact native composite or headless text models and Qwen-Drive
+to its package-owned root VLM wrapper. Headless text artifacts support feature
+extraction and explicitly reject generation; Qwen-Drive support covers the VLM.
 [Shared checkpoint ownership](docs/checkpoint-owned-materialization.md)
 explains generated device maps for tied aliases and native FP32 destinations
 during lazy offload, including the exclusions for packed weights.
