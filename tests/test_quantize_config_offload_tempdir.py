@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import pytest
 import torch
 
 import gptqmodel.quantization.config as quant_config_module
@@ -46,9 +45,6 @@ def test_exl3_config_offload_path_defaults_to_tempdir(monkeypatch):
     assert isinstance(cfg._offload_temp_dir, FakeTemporaryDirectory)
 
 
-@pytest.mark.skip(
-    reason="EXL3 shared hessian-state wiring lands in a later stack layer"
-)
 def test_exl3_projection_capture_does_not_allocate_an_offload_tempdir(
     monkeypatch,
     tmp_path,
@@ -76,7 +72,7 @@ def test_exl3_projection_capture_does_not_allocate_an_offload_tempdir(
     processor._remote_client = None
 
     module = NamedModule(
-        torch.nn.Linear(16, 16, bias=False),
+        torch.nn.Linear(128, 16, bias=False),
         name="gate_proj",
         full_name="model.layers.0.mlp.experts.0.gate_proj",
         layer_index=0,
@@ -91,9 +87,6 @@ def test_exl3_projection_capture_does_not_allocate_an_offload_tempdir(
     )
 
 
-@pytest.mark.skip(
-    reason="EXL3 shared hessian-state wiring lands in a later stack layer"
-)
 def test_exl3_gate_up_preprocess_shares_one_owned_hessian(tmp_path):
     qcfg = EXL3Config(
         bits=2.0,
@@ -115,7 +108,7 @@ def test_exl3_gate_up_preprocess_shares_one_owned_hessian(tmp_path):
     for projection in ("gate_proj", "up_proj"):
         processor.preprocess(
             NamedModule(
-                torch.nn.Linear(16, 8, bias=False),
+                torch.nn.Linear(128, 8, bias=False),
                 name=projection,
                 full_name=(
                     f"model.layers.0.mlp.experts.7.{projection}"
