@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import copy
+import gc
 from types import MethodType
 from typing import Callable, Dict, Optional, Tuple
 
@@ -352,6 +353,10 @@ class MacaqProcessor(SharedInputCaptureProcessor):
         model.quantize_config.method = METHOD.MACAQ
         model.quantize_config.format = model.quantize_config.checkpoint_format_for_settings()
         super().finalize(model=model, **kwargs)
+        # The compiled flip sweep leaves Dynamo resume frames holding the last
+        # weights' working set; collect so `quantize()` returns with no
+        # quantizer memory resident (#4801, the contract #4747/#4757 set).
+        gc.collect()
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         if self.calibration_dataset is None:
