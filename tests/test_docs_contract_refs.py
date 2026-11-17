@@ -80,6 +80,15 @@ CONTRACT_REFS = (
      "compute_hessian_xtx", 1207),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
      "hessian_inverse", 2108),
+    # `calibration.py` grew a 70-line payload normalizer above
+    # `prepare_calibration_dataset` (#4934); these three citations are symbol
+    # anchored so an unrelated edit cannot drift them again.
+    ("docs/decision-transformer-calibration.md", "gptqmodel/utils/calibration.py",
+     "_CALIBRATION_COLUMNS", SYMBOL_CITATION),
+    ("docs/decision-transformer-calibration.md", "gptqmodel/utils/calibration.py",
+     "prepare_calibration_dataset", SYMBOL_CITATION),
+    ("docs/decision-transformer-calibration.md", "gptqmodel/utils/calibration.py",
+     "_is_tensor_kwargs_row", SYMBOL_CITATION),
 )
 
 PYTHON_BLOCK = re.compile(r"```python\n(.*?)```", re.S)

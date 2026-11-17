@@ -270,11 +270,22 @@ def projection_score(record: dict[str, Any]) -> float:
 
     metrics = record.get("quantizer_metrics")
     routes = record.get("route_evidence")
-    error = (
-        metrics.get("hessian_weighted_relative_error")
-        if isinstance(metrics, dict)
-        else None
+    uncalibrated = (
+        isinstance(metrics, dict)
+        and metrics.get("quantizer_path") == "fallback"
+        and metrics.get("hessian_metric_status") == "not_applicable_fallback"
     )
+    if uncalibrated:
+        # A starved projection is quantized data-free (#4995), so it has no
+        # Hessian-weighted error. There is no curvature evidence that one more
+        # bit would help, so it scores zero and is never upgraded.
+        error: Any = 0.0
+    else:
+        error = (
+            metrics.get("hessian_weighted_relative_error")
+            if isinstance(metrics, dict)
+            else None
+        )
     gate_mass = (
         routes.get("expert_gate_squared_mass_fraction")
         if isinstance(routes, dict)

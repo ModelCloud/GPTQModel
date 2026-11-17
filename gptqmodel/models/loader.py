@@ -2668,13 +2668,17 @@ def ModelLoader(cls):
         # constructor raises. VLLM/SGLang are explicit passthrough engines and
         # consume their own runtime options.
         if backend not in (BACKEND.VLLM, BACKEND.SGLANG):
-            leftover = set(kwargs_without_internal)
+            accepted = _accepted_quantized_load_kwargs(cls, kwargs_without_internal.consumed)
+            # The Hub staging options (`token`, `max_workers`, `local_dir`,
+            # `endpoint`, ...) are forwarded un-popped to `snapshot_download`
+            # above, so they are consumed by the load even though they never
+            # reach `pop`. Comparing against the accepted set keeps the check
+            # and its message consistent: rejecting a keyword the message lists
+            # as accepted made `GPTQModel.load(repo, token=...)` always fail
+            # (#5007).
+            leftover = set(kwargs_without_internal) - accepted
             if leftover:
-                _raise_unexpected_quantized_load_kwargs(
-                    cls,
-                    leftover,
-                    _accepted_quantized_load_kwargs(cls, kwargs_without_internal.consumed),
-                )
+                _raise_unexpected_quantized_load_kwargs(cls, leftover, accepted)
 
         # A native block-float checkpoint carries none of the GPTQ keys this
         # loader binds (qweight/qzeros/scales/g_idx): it stores packed mantissa

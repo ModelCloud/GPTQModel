@@ -49,7 +49,7 @@ tensor-input model can set either flag without the other, and an unknown
 | `from_pretrained` tokenizer | unconditional `load_hf_tokenizer`, `gptqmodel/models/loader.py:2053` | gated by `cls.require_load_tokenizer`, `gptqmodel/models/loader.py:2051` |
 | `from_quantized` tokenizer | unconditional `load_hf_tokenizer`, `gptqmodel/models/loader.py:2685` | gated by `cls.require_load_tokenizer`, `gptqmodel/models/loader.py:2686` |
 | Non-causal embedding accessors | `model.get_input_embeddings()` raised `NotImplementedError`, `gptqmodel/models/loader.py:2966` | `try/except NotImplementedError` treats them as absent, same line |
-| Accepted calibration rows | `_CALIBRATION_COLUMNS` only, `gptqmodel/utils/calibration.py:137`; else raise at `:812` | `calibration_inputs == "tensor_kwargs"` branch in `prepare_calibration_dataset`, `gptqmodel/utils/calibration.py:481`, validator at `:173` |
+| Accepted calibration rows | `_CALIBRATION_COLUMNS` only, `gptqmodel/utils/calibration.py::_CALIBRATION_COLUMNS`; else raise in `gptqmodel/utils/calibration.py::prepare_calibration_dataset` | `calibration_inputs == "tensor_kwargs"` branch in `gptqmodel/utils/calibration.py::prepare_calibration_dataset`, validator `gptqmodel/utils/calibration.py::_is_tensor_kwargs_row` |
 | Token-length accounting | `avg = total_input_ids_length / len(calibration_dataset)`, `gptqmodel/looper/loop_processor.py:651` | divides by `token_rows`, the rows that actually carry `input_ids`, `gptqmodel/looper/loop_processor.py:650` |
 | Registry | no `decision_transformer` entry | `MODEL_MAP["decision_transformer"]`, `gptqmodel/models/auto.py:293` |
 

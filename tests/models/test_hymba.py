@@ -24,7 +24,6 @@ class TestHymba(ModelTest):
 
     # Keep the existing no-act-order calibration recipe.
     DESC_ACT = False
-    OFFLOAD_TO_DISK = False  # trained-checkpoint/offload integration is not qualified
     LOAD_BACKEND = BACKEND.AUTO
     USE_FLASH_ATTN = False  # package-owned SDPA/portable SSM reference implementation
 

@@ -29,11 +29,22 @@ class HymbaQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
+            # The conv/SSM path between `in_proj` and `out_proj` is not
+            # homogeneous, so `in_proj` must never become a fold source:
+            # folding a scale into it would scale that path's output. Same
+            # guard as Falcon-H1's mixer (#4674). The mixer's dense leaves are
+            # declared `:!` so the fold source resolution cannot skip over
+            # them and land on `in_proj`.
             "mamba": (
                 "in_proj:0:nosrc", "out_proj:1:nosrc", "conv1d:!", "x_proj.0:!", "dt_proj.0:!",
                 "A_log:!", "D:!", "dt_layernorm:!", "B_layernorm:!", "C_layernorm:!",
                 "pre_avg_layernorm1:!", "pre_avg_layernorm2:!", "self_attn.q_norm:!", "self_attn.k_norm:!",
             ),
+            # Hymba's MoE reads `pre_moe_layernorm`; it has no
+            # `post_attention_layernorm`. Declaring a norm the layer does not
+            # own left the routed-expert gate/up block without a producer of
+            # its own, so it was folded into `input_layernorm` and every
+            # layer's experts were scaled by the wrong norm (#4891).
             "pre_moe_layernorm": ("pre_moe_layernorm:!",),
             "moe:moe": {
                 "router:!": (),

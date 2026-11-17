@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import threading
+import weakref
 from typing import Any, Callable, Optional, Tuple
 
 import torch
@@ -1849,6 +1850,41 @@ def _wait_for_triton_cache_ready(cache: dict[str, Any], device: torch.device) ->
 # (#4879).
 _PACKED_WEIGHT_PERMUTE_LOCK = threading.Lock()
 
+# One cold-build lock per module. A published cache entry owns the
+# ``scale``/``min`` tensors that every consumer stream reads, so replacing it
+# while a consumer is still running drops the last reference and hands those
+# blocks back to the allocator under a pending kernel (#5008). Serializing the
+# cold build makes the entry a once-per-module decision, and it also removes
+# the N redundant builds of an N-thread cold burst.
+#
+# The lock lives in a weak map keyed by the module instead of on the module:
+# a ``threading.Lock`` attribute would make ``copy.deepcopy``/``torch.save`` of
+# a quantized model raise ``cannot pickle '_thread.lock' object``, while a
+# deep-copied replica (data-parallel forward) still gets its own lock here.
+_TRITON_CACHE_BUILD_LOCKS: "weakref.WeakKeyDictionary[torch.nn.Module, threading.Lock]" = (
+    weakref.WeakKeyDictionary()
+)
+_TRITON_CACHE_BUILD_LOCKS_GUARD = threading.Lock()
+# Fallback for a module that cannot be a weak key; never
+# ``_PACKED_WEIGHT_PERMUTE_LOCK``, which the build itself acquires.
+_TRITON_CACHE_BUILD_FALLBACK_LOCK = threading.Lock()
+
+
+def _triton_cache_build_lock(module: torch.nn.Module) -> threading.Lock:
+    """Return the cold-build lock that belongs to ``module``."""
+
+    try:
+        with _TRITON_CACHE_BUILD_LOCKS_GUARD:
+            lock = _TRITON_CACHE_BUILD_LOCKS.get(module)
+            if lock is None:
+                lock = threading.Lock()
+                _TRITON_CACHE_BUILD_LOCKS[module] = lock
+            return lock
+    except TypeError:
+        # Not weak-referenceable (a test double built without ``__init__``):
+        # fall back to one lock for the process rather than fail the forward.
+        return _TRITON_CACHE_BUILD_FALLBACK_LOCK
+
 
 class GGUFTritonKernel(GGUFTorchLinear):
     # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager runs and an explicit
@@ -1951,7 +1987,10 @@ class GGUFTritonKernel(GGUFTorchLinear):
         return True, None
 
     def clear_weight_cache(self) -> None:
-        self._gguf_triton_cache.clear()
+        # Mutate the cache only under the build lock: a concurrent cold build
+        # would otherwise re-publish an entry into the dict this just cleared.
+        with _triton_cache_build_lock(self):
+            self._gguf_triton_cache.clear()
         return super().clear_weight_cache()
 
     def _packed_weight_is_permuted(self) -> bool:
@@ -2172,6 +2211,14 @@ class GGUFTritonKernel(GGUFTorchLinear):
         raise NotImplementedError(f"Unsupported GGUF Triton qtype: {self.gguf_tensor_qtype}")
 
     def _get_triton_cache(self, device: torch.device, wide_dot: bool = False) -> dict[str, Any]:
+        """Return this module's published metadata cache, building it once.
+
+        The hit path is the steady state: a dict read, a key compare and a
+        retired handshake (#4956). A miss (cold build, or an invalidation that
+        changed ``qweight_key``) is serialized per module so a concurrent burst
+        cannot replace the entry a peer is already reading (#5008).
+        """
+
         key = self._triton_cache_key(device, wide_dot)
         qweight_key = tensor_cache_key(self.qweight)
         cached = self._gguf_triton_cache.get(key)
@@ -2179,13 +2226,29 @@ class GGUFTritonKernel(GGUFTorchLinear):
             _wait_for_triton_cache_ready(cached, device)
             return cached
 
-        cached = self._build_triton_cache(device, wide_dot)
-        # The first build re-lays out ``qweight`` (#4811), so key the cache by
-        # the tensor that is actually resident now or every forward rebuilds it.
-        cached["qweight_key"] = tensor_cache_key(self.qweight)
-        _publish_triton_cache_ready(cached, device)
-        self._gguf_triton_cache[key] = cached
-        return cached
+        # Cold build, or a genuine invalidation: a weight write, a reload or a
+        # device/dtype move changed ``qweight_key``. Serialize it per module so
+        # two threads can never both build: the second store used to replace the
+        # entry a peer had already picked up, dropping the last reference to that
+        # entry's ``scale``/``min`` while a consumer stream was still reading
+        # them -- NaN/garbage from the first concurrent forward (#5008).
+        with _triton_cache_build_lock(self):
+            # Double-check under the lock: a peer may have published while this
+            # thread waited, and the first build re-lays out ``qweight`` (#4811),
+            # which changes the key it was resolved against above.
+            qweight_key = tensor_cache_key(self.qweight)
+            cached = self._gguf_triton_cache.get(key)
+            if cached is not None and cached.get("qweight_key") == qweight_key:
+                _wait_for_triton_cache_ready(cached, device)
+                return cached
+
+            cached = self._build_triton_cache(device, wide_dot)
+            # The first build re-lays out ``qweight`` (#4811), so key the cache by
+            # the tensor that is actually resident now or every forward rebuilds it.
+            cached["qweight_key"] = tensor_cache_key(self.qweight)
+            _publish_triton_cache_ready(cached, device)
+            self._gguf_triton_cache[key] = cached
+            return cached
 
     def _forward_triton(
         self, x_flat: torch.Tensor, output_dtype: torch.dtype | None = None,

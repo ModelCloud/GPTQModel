@@ -414,6 +414,12 @@ class BaseQuantLinear(nn.Module):
     # fail to trace. Every concrete kernel declares it explicitly.
     SUPPORTS_GRAPH_CAPTURE: bool = False
 
+    # Checkpoint tensor suffixes this kernel cannot rebuild without them.
+    # ``validate_checkpoint_qweights`` fails a load when one is missing, so a
+    # truncated checkpoint raises instead of leaving uninitialized buffers
+    # (#5010). Empty means this kernel does not publish a payload of its own.
+    CHECKPOINT_REQUIRED_BUFFERS: Tuple[str, ...] = ()
+
     SUPPORTS_AUTO_PADDING: bool = None
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
@@ -604,6 +610,18 @@ class BaseQuantLinear(nn.Module):
         clear = getattr(self, "clear_weight_cache", None)
         if callable(clear):
             clear()
+
+    def materialize_checkpoint_layout_for_export(self) -> bool:
+        """Restore checkpoint buffers a derived cache replaced; True if restored.
+
+        A kernel may drop its checkpoint buffers once the first forward has
+        built a packed cache (QQQ does, #4856). ``named_buffers`` skips a
+        ``None`` buffer, so a save that walks the module tree instead of
+        calling ``state_dict()`` would silently omit the quantized weights
+        (#5010). The export path calls this first.
+        """
+
+        return False
 
     def _load_from_state_dict(self, *args, **kwargs):
         """Restore checkpoint layout, then load, then invalidate derived caches.
@@ -1246,6 +1264,10 @@ class GroupedQuantLinear(BaseQuantLinear):
 
 
 class PackedGroupedQuantLinear(GroupedQuantLinear):
+    # GPTQ/AWQ/Marlin/BitBLAS-family checkpoints all publish the packed weight
+    # as `qweight`; a checkpoint without it loads uninitialized buffers.
+    CHECKPOINT_REQUIRED_BUFFERS = ("qweight",)
+
     def __init__(self, *args, pack_dtype: t.dtype, **kwargs):
         super().__init__(*args, pack_dtype=pack_dtype, **kwargs)
 
