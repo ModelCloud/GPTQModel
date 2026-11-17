@@ -460,6 +460,12 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
     # hit came from a comment, not an executed call.)
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
     SUPPORTS_GRAPH_CAPTURE = True
+    # ... and the #4669 policy flag follows the capability: a static-cache
+    # `generate()` compiles this forward to one graph with zero breaks and the
+    # compiled decode is 2.2-3.5x faster than eager on the same hardware
+    # (#4984). AUTO selects this kernel for every BitsAndBytes checkpoint on
+    # CUDA, so opting out here made the default 3.5x slower.
+    SUPPORTS_COMPILE = True
 
     @staticmethod
     def _weight_to_matrix(linear: nn.Module) -> torch.Tensor:

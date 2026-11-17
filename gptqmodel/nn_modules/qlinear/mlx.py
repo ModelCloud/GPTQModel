@@ -1062,6 +1062,10 @@ class BitsAndBytesMlxQuantLinear(_MlxDenseContract, BitsAndBytesLinear):
     # MLX arrays; mx.compile owns the graph
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
     SUPPORTS_GRAPH_CAPTURE = False
+    # The Torch BnB declaration covers the CUDA 4/8-bit dequant+matmul forward.
+    # This holder runs native Metal matmuls, which were never traced or timed,
+    # so it does not inherit the Torch opt-in (#4984).
+    SUPPORTS_COMPILE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.BITSANDBYTES]
@@ -1136,6 +1140,10 @@ class MacaqMlxQuantLinear(_MlxDenseContract, MacaqLinear):
     # MLX arrays; mx.compile owns the graph
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
     SUPPORTS_GRAPH_CAPTURE = False
+    # The Torch MACaQ declaration covers the MXFP4 dequant/Hadamard forward.
+    # This holder runs native Metal matmuls, which were never traced or timed,
+    # so it does not inherit the Torch opt-in (#4984).
+    SUPPORTS_COMPILE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.MACAQ]

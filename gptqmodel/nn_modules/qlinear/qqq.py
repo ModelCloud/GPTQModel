@@ -674,6 +674,15 @@ class QQQTorchLinear(QQQLinear):
     # fails: forward copies the CPU `_scale_perm_single_i` table to the device.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
     SUPPORTS_GRAPH_CAPTURE = False
+    # ... and the static-cache `generate()` is still a loss: the QQQ decode
+    # recompiles per step (172 graphs, 24-115 breaks) and measures 1.3-8x
+    # slower than eager on RTX 4090/5090, so the #4669 policy stays off
+    # (#4984). Re-measure the model-level decode before opting in.
+    SUPPORTS_COMPILE = False
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate recompiles per step (172 graphs, 24-115 breaks) "
+        "and is 1.3-8x slower than eager (#4984)"
+    )
 
     SUPPORTS_BACKENDS = [BACKEND.QQQ_TORCH]
     SUPPORTS_METHODS = [METHOD.QQQ]
