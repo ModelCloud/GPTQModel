@@ -2965,6 +2965,12 @@ def load_hf_tokenizer(
     from tokenicer import Tokenicer
 
     trust_remote_code = bool(trust_remote_code and safety_checks_bypassed())
+    if isinstance(model_config, PreTrainedConfig):
+        # Tokenicer's model_config controls normalization; AutoTokenizer uses
+        # the separate `config` argument for class selection. Reuse the config
+        # already selected by our policy so tokenizer initialization cannot
+        # import checkpoint AutoConfig code behind a definition-owned port.
+        kwargs["config"] = model_config
     tokenicer = Tokenicer.load(
         tokenizer_or_path,
         model_config=model_config,
