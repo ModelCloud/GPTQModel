@@ -1,3 +1,4 @@
+import json
 import sys
 from enum import Enum
 from types import ModuleType, SimpleNamespace
@@ -504,7 +505,7 @@ def test_normalize_hf_config_compat_supports_legacy_custom_generation_cache_mapp
     assert model_kwargs["past_key_values"].kwargs["device"] == torch.device("cpu")
 
 
-def test_prepare_remote_model_init_compat_patches_phi4_scalar_tensors(monkeypatch):
+def test_prepare_remote_model_init_compat_patches_phi4_scalar_tensors(monkeypatch, tmp_path):
     calls = []
 
     def fake_tensor(data, *args, **kwargs):
@@ -528,7 +529,9 @@ def test_prepare_remote_model_init_compat_patches_phi4_scalar_tensors(monkeypatc
         auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
     )
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "compat_remote_fixture"}))
+    prepare_remote_model_init_compat(str(tmp_path), config, trust_remote_code=True)
     monkeypatch.setattr(
         "gptqmodel.utils.hf.inspect.stack",
         lambda context=0: [SimpleNamespace(filename="/tmp/speech_conformer_encoder.py", lineno=1426)],
@@ -541,7 +544,7 @@ def test_prepare_remote_model_init_compat_patches_phi4_scalar_tensors(monkeypatc
     assert getattr(speech_module, "_gptqmodel_scalar_tensor_meta_patch", False) is True
 
 
-def test_prepare_remote_model_init_compat_wraps_legacy_tie_weights_signature(monkeypatch):
+def test_prepare_remote_model_init_compat_wraps_legacy_tie_weights_signature(monkeypatch, tmp_path):
     calls = []
 
     class DummyRemoteModel:
@@ -560,7 +563,9 @@ def test_prepare_remote_model_init_compat_wraps_legacy_tie_weights_signature(mon
         auto_map={"AutoModelForCausalLM": "modeling_ovis.Ovis"},
     )
 
-    prepare_remote_model_init_compat("/tmp/ovis", config, trust_remote_code=True)
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "compat_remote_fixture"}))
+    prepare_remote_model_init_compat(str(tmp_path), config, trust_remote_code=True)
 
     DummyRemoteModel().tie_weights(missing_keys={"lm_head.weight"}, recompute_mapping=False)
 
@@ -568,7 +573,7 @@ def test_prepare_remote_model_init_compat_wraps_legacy_tie_weights_signature(mon
     assert getattr(DummyRemoteModel, "_gptqmodel_tie_weights_kwargs_patch", False) is True
 
 
-def test_prepare_remote_model_init_compat_backfills_legacy_flash_attn_flag(monkeypatch):
+def test_prepare_remote_model_init_compat_backfills_legacy_flash_attn_flag(monkeypatch, tmp_path):
     class DummyRemoteBase:
         _supports_flash_attn_2 = True
 
@@ -587,13 +592,15 @@ def test_prepare_remote_model_init_compat_backfills_legacy_flash_attn_flag(monke
 
     assert "_supports_flash_attn" not in DummyRemoteBase.__dict__
 
-    prepare_remote_model_init_compat("/tmp/ling", config, trust_remote_code=True)
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "compat_remote_fixture"}))
+    prepare_remote_model_init_compat(str(tmp_path), config, trust_remote_code=True)
 
     assert DummyRemoteBase._supports_flash_attn is True
     assert DummyRemoteModel._supports_flash_attn is True
 
 
-def test_prepare_remote_model_init_compat_accepts_tokenizers_backend_for_ovis(monkeypatch):
+def test_prepare_remote_model_init_compat_accepts_tokenizers_backend_for_ovis(monkeypatch, tmp_path):
     class DummyRemoteModel:
         __module__ = "transformers_modules.fake_ovis.modeling_ovis"
 
@@ -615,13 +622,15 @@ def test_prepare_remote_model_init_compat_accepts_tokenizers_backend_for_ovis(mo
         auto_map={"AutoModelForCausalLM": "modeling_ovis.Ovis"},
     )
 
-    prepare_remote_model_init_compat("/tmp/ovis", config, trust_remote_code=True)
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "compat_remote_fixture"}))
+    prepare_remote_model_init_compat(str(tmp_path), config, trust_remote_code=True)
 
     assert "TokenizersBackend" in Llama3ConversationFormatter.support_tokenizer_types
     assert getattr(Llama3ConversationFormatter, "_gptqmodel_tokenizer_backend_patch", False) is True
 
 
-def test_prepare_remote_model_init_compat_bridges_ovis_visual_tokenizer_registration(monkeypatch):
+def test_prepare_remote_model_init_compat_bridges_ovis_visual_tokenizer_registration(monkeypatch, tmp_path):
     captured = {}
 
     class RuntimeVisualConfig:
@@ -673,7 +682,9 @@ def test_prepare_remote_model_init_compat_bridges_ovis_visual_tokenizer_registra
         visual_tokenizer_config=RuntimeVisualConfig(),
     )
 
-    prepare_remote_model_init_compat("/tmp/ovis", config, trust_remote_code=True)
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "compat_remote_fixture"}))
+    prepare_remote_model_init_compat(str(tmp_path), config, trust_remote_code=True)
 
     assert captured["config_class"] is RuntimeVisualConfig
     assert captured["model_class"] is DummyVisualModel
@@ -681,7 +692,7 @@ def test_prepare_remote_model_init_compat_bridges_ovis_visual_tokenizer_registra
     assert DummyVisualModel.config_class is RuntimeVisualConfig
 
 
-def test_prepare_remote_model_init_compat_bridges_ovis2_5_vit_registration(monkeypatch):
+def test_prepare_remote_model_init_compat_bridges_ovis2_5_vit_registration(monkeypatch, tmp_path):
     captured = {}
 
     class RuntimeVitConfig:
@@ -725,7 +736,9 @@ def test_prepare_remote_model_init_compat_bridges_ovis2_5_vit_registration(monke
         vit_config=RuntimeVitConfig(),
     )
 
-    prepare_remote_model_init_compat("/tmp/ovis2_5", config, trust_remote_code=True)
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "compat_remote_fixture"}))
+    prepare_remote_model_init_compat(str(tmp_path), config, trust_remote_code=True)
 
     assert captured["config_class"] is RuntimeVitConfig
     assert captured["model_class"] is DummyVitModel
@@ -733,7 +746,7 @@ def test_prepare_remote_model_init_compat_bridges_ovis2_5_vit_registration(monke
     assert DummyVitModel.config_class is RuntimeVitConfig
 
 
-def test_prepare_remote_model_init_compat_promotes_phi4_positional_seed_to_meta(monkeypatch):
+def test_prepare_remote_model_init_compat_promotes_phi4_positional_seed_to_meta(monkeypatch, tmp_path):
     seen_devices = []
 
     class AbsolutePositionalEncoding:
@@ -757,7 +770,9 @@ def test_prepare_remote_model_init_compat_promotes_phi4_positional_seed_to_meta(
         auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
     )
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "compat_remote_fixture"}))
+    prepare_remote_model_init_compat(str(tmp_path), config, trust_remote_code=True)
     monkeypatch.setattr(
         "gptqmodel.utils.hf.inspect.stack",
         lambda context=0: [SimpleNamespace(filename="/tmp/speech_conformer_encoder.py", lineno=895)],
@@ -768,7 +783,7 @@ def test_prepare_remote_model_init_compat_promotes_phi4_positional_seed_to_meta(
     assert seen_devices == ["meta"]
 
 
-def test_prepare_remote_model_init_compat_tightens_peft_awq_probe(monkeypatch):
+def test_prepare_remote_model_init_compat_tightens_peft_awq_probe(monkeypatch, tmp_path):
     fake_torch = SimpleNamespace(tensor=lambda data, *args, **kwargs: (data, kwargs))
     speech_module_name = "transformers_modules.fake_phi4_awq.speech_conformer_encoder"
     speech_module = SimpleNamespace(torch=fake_torch)
@@ -795,7 +810,9 @@ def test_prepare_remote_model_init_compat_tightens_peft_awq_probe(monkeypatch):
 
     monkeypatch.setattr("importlib.util.find_spec", fake_find_spec)
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "compat_remote_fixture"}))
+    prepare_remote_model_init_compat(str(tmp_path), config, trust_remote_code=True)
 
     peft_awq = pytest.importorskip("peft.tuners.lora.awq")
 
@@ -803,7 +820,7 @@ def test_prepare_remote_model_init_compat_tightens_peft_awq_probe(monkeypatch):
     assert peft_awq.is_auto_awq_available() is False
 
 
-def test_prepare_remote_model_init_compat_adds_phi4_inner_prepare_inputs_hook(monkeypatch):
+def test_prepare_remote_model_init_compat_adds_phi4_inner_prepare_inputs_hook(monkeypatch, tmp_path):
     class Phi4MMModel:
         pass
 
@@ -827,7 +844,9 @@ def test_prepare_remote_model_init_compat_adds_phi4_inner_prepare_inputs_hook(mo
         auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
     )
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "compat_remote_fixture"}))
+    prepare_remote_model_init_compat(str(tmp_path), config, trust_remote_code=True)
 
     model_inputs = Phi4MMModel().prepare_inputs_for_generation(input_ids="ids", past_key_values="cache")
 
@@ -835,7 +854,7 @@ def test_prepare_remote_model_init_compat_adds_phi4_inner_prepare_inputs_hook(mo
     assert model_inputs["past_key_values"] == "cache"
 
 
-def test_prepare_remote_model_init_compat_defaults_phi4_forward_input_mode(monkeypatch):
+def test_prepare_remote_model_init_compat_defaults_phi4_forward_input_mode(monkeypatch, tmp_path):
     class InputMode(Enum):
         LANGUAGE = 0
         VISION = 1
@@ -864,7 +883,9 @@ def test_prepare_remote_model_init_compat_defaults_phi4_forward_input_mode(monke
         auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
     )
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "compat_remote_fixture"}))
+    prepare_remote_model_init_compat(str(tmp_path), config, trust_remote_code=True)
 
     model = Phi4MMForCausalLM()
 
@@ -873,7 +894,7 @@ def test_prepare_remote_model_init_compat_defaults_phi4_forward_input_mode(monke
     assert model.forward(input_image_embeds="image") is InputMode.VISION
 
 
-def test_prepare_remote_model_init_compat_skips_input_mode_patch_without_forward(monkeypatch):
+def test_prepare_remote_model_init_compat_skips_input_mode_patch_without_forward(monkeypatch, tmp_path):
     class Phi4MMForCausalLM:
         pass
 
@@ -895,12 +916,16 @@ def test_prepare_remote_model_init_compat_skips_input_mode_patch_without_forward
         auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
     )
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "compat_remote_fixture"}))
+    prepare_remote_model_init_compat(str(tmp_path), config, trust_remote_code=True)
 
     assert not hasattr(Phi4MMForCausalLM, "_gptqmodel_input_mode_patch")
 
 
-def test_resolve_trust_remote_code_overrides_when_native_support_exists(monkeypatch, caplog):
+def test_resolve_trust_remote_code_overrides_when_native_support_exists(monkeypatch, caplog, tmp_path):
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "phi3"}))
     hf_utils._TRUST_REMOTE_CODE_OVERRIDE_WARNED.clear()
     monkeypatch.setattr(
         hf_utils,
@@ -912,13 +937,15 @@ def test_resolve_trust_remote_code_overrides_when_native_support_exists(monkeypa
     # handler bound at import time; ``caplog`` observes the record, ``capsys``
     # does not see that handler's stream.
     with caplog.at_level("WARNING"):
-        resolved = resolve_trust_remote_code("/tmp/phi3", trust_remote_code=True)
+        resolved = resolve_trust_remote_code(str(tmp_path), trust_remote_code=True)
 
     assert resolved is False
     assert "overriding trust_remote_code=True to False" in caplog.text
 
 
-def test_resolve_trust_remote_code_keeps_true_without_native_support(monkeypatch, caplog):
+def test_resolve_trust_remote_code_keeps_true_without_native_support(monkeypatch, caplog, tmp_path):
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "compat_remote_fixture"}))
     hf_utils._TRUST_REMOTE_CODE_OVERRIDE_WARNED.clear()
     monkeypatch.setattr(
         hf_utils,
@@ -927,7 +954,7 @@ def test_resolve_trust_remote_code_keeps_true_without_native_support(monkeypatch
     )
 
     with caplog.at_level("WARNING"):
-        resolved = resolve_trust_remote_code("/tmp/custom", trust_remote_code=True)
+        resolved = resolve_trust_remote_code(str(tmp_path), trust_remote_code=True)
 
     assert resolved is True
     assert caplog.text == ""

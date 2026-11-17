@@ -83,6 +83,9 @@ also selects the definition's local model loader for shell construction.
 The Kimi K3/K3.1 reference loaders require the same security bypass in addition
 to explicit trust. The bypass is checked on each attempt; a previous successful
 remote load is not permission for the next load.
+Direct SGLang and vLLM engine helpers also enforce the bypass before forwarding
+remote trust to an external engine. Their runtime architecture support remains
+the responsibility of those engines.
 
 | Mechanism | Previous behavior (base revision `bb36e7fb2`) | Current behavior |
 | --- | --- | --- |
@@ -93,7 +96,8 @@ remote load is not permission for the next load.
 | Remote pre-load hooks | Could import checkpoint modules on a native load (`gptqmodel/models/loader.py:917-933`) | Declared remote hooks require resolved trust and the bypass |
 
 Tests in `tests/test_local_model_loading.py` exercise public load rejection,
-actual checkpoint config import under explicit bypass, permission revocation,
-native/local precedence, lazy local meta construction and subfolder selection.
+actual checkpoint config and model imports under explicit bypass, permission
+revocation, native/local precedence, all three public dispatchers, lazy local
+meta construction, native multimodal mappings and subfolder selection.
 They establish dispatch and security behavior, not numerical qualification of
 the separate model ports.

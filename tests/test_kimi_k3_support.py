@@ -56,7 +56,7 @@ def test_calibration_reference_requires_trust_remote_code(utils, tmp_path):
 ])
 def test_registry_selects_kimi_backbone(monkeypatch, model_type, definition):
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda *a, **kw: True)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *a, **kw:
+    monkeypatch.setattr(auto, "load_model_config", lambda *a, **kw:
                         SimpleNamespace(model_type=model_type))
     assert auto.check_and_get_model_definition("tiny-kimi", trust_remote_code=True) is definition
 

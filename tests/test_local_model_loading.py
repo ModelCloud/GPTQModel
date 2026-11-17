@@ -12,7 +12,13 @@ from transformers import AutoConfig
 from gptqmodel import GPTQModel
 from gptqmodel.models.auto import MODEL_MAP_CASEFOLD, check_and_get_model_definition
 from gptqmodel.models.local import LocalModelLoader
-from gptqmodel.utils.hf import load_model_config, prepare_remote_model_init_compat, resolve_trust_remote_code
+from gptqmodel.utils.hf import (
+    has_native_transformers_model_support,
+    load_model_config,
+    normalize_hf_config_compat,
+    prepare_remote_model_init_compat,
+    resolve_trust_remote_code,
+)
 from gptqmodel.utils.security import BYPASS_ENV, RemoteCodeSecurityError
 
 
@@ -50,7 +56,10 @@ def test_public_load_requires_security_bypass_before_config_code(tmp_path, entry
     path = tmp_path / "remote"
     marker = checkpoint(path)
     with pytest.raises(RemoteCodeSecurityError, match=BYPASS_ENV):
-        entry(str(path), trust_remote_code=True)
+        if entry.__name__ == "from_pretrained":
+            entry(str(path), quantize_config=None, trust_remote_code=True)
+        else:
+            entry(str(path), trust_remote_code=True)
     assert not marker.exists()
 
 
@@ -98,6 +107,7 @@ def test_local_config_and_loader_win_over_auto_map_even_with_bypass(tmp_path, mo
                                num_local_experts=2, num_experts_per_tok=1, head_dim=8, rotary_dim=8)
     assert type(config).__module__.startswith("gptqmodel.")
     prepare_remote_model_init_compat(path, config, trust_remote_code=True)
+    normalize_hf_config_compat(config)
     with torch.device("meta"):
         model = loader.from_config(config, trust_remote_code=True)
     assert type(model).__module__.startswith("gptqmodel.")
@@ -113,6 +123,66 @@ def test_config_selection_uses_subfolder_for_policy_and_dispatch(tmp_path):
     assert load_model_config(root, subfolder="nested", trust_remote_code=True).model_type == "llama"
     assert check_and_get_model_definition(str(root), trust_remote_code=True, subfolder="nested").__name__ == "LlamaQModel"
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("entry", ["load", "from_pretrained", "from_quantized"])
+@pytest.mark.parametrize("bypass", [False, True])
+def test_public_dispatch_uses_local_definition_and_disables_checkpoint_model_code(tmp_path, monkeypatch, entry, bypass):
+    path = tmp_path / "local"
+    marker = checkpoint(path, "minimax")
+    loader = LocalModelLoader(
+        "gptqmodel.hf_minimax_m2.configuration_minimax_m2.MiniMaxM2Config",
+        "gptqmodel.hf_minimax_m2.modeling_minimax_m2.MiniMaxM2ForCausalLM",
+    )
+    captured = []
+    sentinel = SimpleNamespace(log_kv_cache_estimate=lambda: None)
+
+    def consume(**kwargs):
+        captured.append(kwargs)
+        config = load_model_config(path, trust_remote_code=kwargs["trust_remote_code"])
+        assert type(config).__module__.startswith("gptqmodel.")
+        return sentinel
+
+    monkeypatch.setitem(MODEL_MAP_CASEFOLD, "minimax", SimpleNamespace(
+        loader=loader, from_pretrained=consume, from_quantized=consume,
+    ))
+    if bypass:
+        monkeypatch.setenv(BYPASS_ENV, "1")
+    kwargs = {"quantize_config": None} if entry == "from_pretrained" else {}
+    assert getattr(GPTQModel, entry)(str(path), trust_remote_code=True, **kwargs) is sentinel
+    assert captured and captured[0]["trust_remote_code"] is False
+    assert not marker.exists()
+
+
+def test_native_multimodal_support_uses_definition_auto_class(tmp_path):
+    from transformers import AutoModelForImageTextToText
+
+    path = tmp_path / "vl"
+    marker = checkpoint(path, "qwen2_vl")
+    assert has_native_transformers_model_support(path, AutoModelForImageTextToText, proxies={})
+    assert not marker.exists()
+
+
+def test_remote_model_import_requires_both_permissions(tmp_path, monkeypatch):
+    path = tmp_path / "remote"
+    marker = checkpoint(path)
+    config = SimpleNamespace(model_type="unported_fixture", auto_map={"AutoModelForCausalLM": "remote_model.RemoteModel"})
+    with pytest.raises(RemoteCodeSecurityError):
+        prepare_remote_model_init_compat(path, config, trust_remote_code=True)
+    assert not marker.exists()
+    monkeypatch.setenv(BYPASS_ENV, "1")
+    prepare_remote_model_init_compat(path, config, trust_remote_code=True)
+    assert marker.read_text() == "model"
+
+
+@pytest.mark.parametrize("backend", ["sglang", "vllm"])
+def test_external_engine_helpers_require_security_bypass(monkeypatch, backend):
+    from gptqmodel.utils.sglang import load_model_by_sglang
+    from gptqmodel.utils.vllm import load_model_by_vllm
+
+    load = load_model_by_sglang if backend == "sglang" else load_model_by_vllm
+    with pytest.raises(RemoteCodeSecurityError, match=BYPASS_ENV):
+        load("unported-model", trust_remote_code=True)
 
 
 def test_unported_layout_fails_instead_of_loading_incompatible_native_model(tmp_path):

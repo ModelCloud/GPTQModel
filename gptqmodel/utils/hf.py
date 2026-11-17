@@ -550,6 +550,7 @@ CONFIG_SELECTION_KWARGS = (
     "cache_dir",
     "local_files_only",
     "use_auth_token",
+    "token",
     "force_download",
     "resume_download",
     "proxies",
@@ -903,7 +904,6 @@ def normalize_model_id_or_path_for_hf_gguf(
     return normalized_model_id_or_path
 
 
-@lru_cache(maxsize=None)
 def _detect_native_transformers_causallm_support(model_id_or_path: str, **config_selection_kwargs) -> tuple[bool, Optional[str], Optional[str]]:
     # Qwen-Drive's top-level config is registered by the optional official
     # package, so it must be imported before Transformers first sees config.json.
@@ -1041,7 +1041,14 @@ def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_c
     from ..models.local import local_model_loader
 
     if model_id_or_path:
-        payload, _ = PreTrainedConfig.get_config_dict(model_id_or_path, **config_load_kwargs)
+        try:
+            payload, _ = PreTrainedConfig.get_config_dict(model_id_or_path, **config_load_kwargs)
+        except OSError:
+            # With trust disabled no code can run; leave a missing-path error
+            # to the model loader, which owns local-path diagnostics.
+            if not trust_remote_code:
+                return False
+            raise
         if local_model_loader(payload.get("model_type")) is not None:
             return False
         # A native model_type can still advertise a remote-only layout. Never
@@ -1064,14 +1071,8 @@ def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_c
         from ..models.auto import MODEL_MAP_CASEFOLD
 
         definition = MODEL_MAP_CASEFOLD.get(str(payload.get("model_type", "")).lower())
-        mapping = getattr(getattr(definition, "loader", None), "_model_mapping", None)
-        if mapping is not None:
-            # Unknown remote configs do not belong to a native auto mapping.
-            if str(payload.get("model_type", "")) not in transformers.models.auto.configuration_auto.CONFIG_MAPPING:
-                return require_remote_code_permission(trust_remote_code)
-            config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=False, **config_load_kwargs)
-            if type(config) in mapping:
-                return False
+        if has_native_transformers_model_support(model_id_or_path, getattr(definition, "loader", None), **config_load_kwargs):
+            return False
         return require_remote_code_permission(trust_remote_code)
 
     warning_key = (str(model_id_or_path), model_type or "unknown", model_cls_name or "unknown")
@@ -1085,6 +1086,19 @@ def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_c
         _TRUST_REMOTE_CODE_OVERRIDE_WARNED.add(warning_key)
 
     return False
+
+
+def has_native_transformers_model_support(model_id_or_path, loader, **config_load_kwargs) -> bool:
+    """Probe the definition's declared native auto class, including multimodal models."""
+    from ..models.local import LocalModelLoader
+
+    if isinstance(loader, LocalModelLoader):
+        return True
+    try:
+        config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=False, **config_load_kwargs)
+        return type(config) in loader._model_mapping
+    except (AttributeError, KeyError, TypeError, ValueError, OSError):
+        return False
 
 
 def has_native_transformers_causallm_support(model_id_or_path: Optional[str]) -> bool:
@@ -2497,12 +2511,15 @@ def prepare_remote_model_init_compat(
     config: Any,
     *,
     trust_remote_code: bool = False,
+    **config_selection_kwargs,
 ) -> None:
     # Importing `auto_map` classes is remote-code execution. It is gated by the
     # caller's explicit `trust_remote_code`; `auto_map` alone is checkpoint data
     # and must never enable it. This also covers transformers' cross-repo
     # `repo--module.Class` form, which resolves to another repository's code.
-    if not resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code):
+    if not trust_remote_code:
+        return
+    if not resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code, **config_selection_kwargs):
         return
     if not model_id_or_path:
         return
@@ -2526,7 +2543,7 @@ def prepare_remote_model_init_compat(
     try:
         from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
-        model_cls = get_class_from_dynamic_module(class_ref, str(model_id_or_path))
+        model_cls = get_class_from_dynamic_module(class_ref, str(model_id_or_path), **config_selection_kwargs)
     except Exception as exc:
         log.debug("HF: remote model init compat pre-import failed for `%s`: %s", model_id_or_path, exc)
         return

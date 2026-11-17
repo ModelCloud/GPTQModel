@@ -36,7 +36,7 @@ def load_calibration_reference(snapshot, trust_remote_code: bool = False):
             "Kimi K3 calibration executes code from the checkpoint snapshot; "
             "pass trust_remote_code=True to opt in."
         )
-    from .security import require_remote_code_permission
+    from gptqmodel.utils.security import require_remote_code_permission
 
     require_remote_code_permission(trust_remote_code)
     snapshot = Path(snapshot).resolve()

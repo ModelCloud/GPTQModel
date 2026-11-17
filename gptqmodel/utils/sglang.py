@@ -13,6 +13,7 @@ import torch
 from transformers import AutoConfig
 
 from .generation_result import GenerationResult
+from .security import require_remote_code_permission
 
 
 SGLANG_VERSION: Optional[str] = None
@@ -153,6 +154,7 @@ def load_model_by_sglang(
     config=None,
     **kwargs,
 ):
+    require_remote_code_permission(trust_remote_code)
     _require_sglang()
 
     # from_quantized already loaded the config with its cache/revision and

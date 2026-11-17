@@ -36,7 +36,7 @@ else:
 
 import defuser
 from packaging.version import InvalidVersion, Version
-from transformers import AutoConfig, PretrainedConfig
+from transformers import PretrainedConfig
 from transformers.utils import is_flash_attn_2_available
 
 from ..adapter.adapter import Adapter, normalize_adapter
@@ -72,7 +72,7 @@ from ..utils.hf import (
     get_config_selection_kwargs,
     get_hf_config_dtype,
     get_hf_gguf_load_kwargs,
-    has_native_transformers_causallm_support,
+    has_native_transformers_model_support,
     load_hf_tokenizer,
     load_model_config,
     normalize_hf_config_compat,
@@ -1897,7 +1897,8 @@ def ModelLoader(cls):
 
         normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
         prepare_remote_model_init_compat(
-            model_local_path, config, trust_remote_code=trust_remote_code
+            model_local_path, config, trust_remote_code=trust_remote_code,
+            **get_config_selection_kwargs(model_init_kwargs_without_internal), **hf_gguf_load_kwargs,
         )
 
         from ..utils.mimo import is_mimo_mixed_source
@@ -2082,10 +2083,10 @@ def ModelLoader(cls):
             raise ValueError(f"{cls} only supports desc_act={cls.supports_desc_act}, "
                              f"but quantize_config.desc_act is {quantize_config.desc_act}.")
 
-        native_support = has_native_transformers_causallm_support(model_local_path)
-        from .local import LocalModelLoader
-
-        if cls.require_trust_remote_code and not trust_remote_code and not native_support and not isinstance(cls.loader, LocalModelLoader):
+        native_support = has_native_transformers_model_support(
+            model_local_path, cls.loader, **get_config_selection_kwargs(model_init_kwargs_without_internal), **hf_gguf_load_kwargs
+        )
+        if cls.require_trust_remote_code and not trust_remote_code and not native_support:
             raise ValueError(
                 f"{pretrained_model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
@@ -2376,12 +2377,12 @@ def ModelLoader(cls):
 
         model_local_path = get_model_local_path(model_id_or_path, **kwargs_without_internal)
         trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code, **get_config_selection_kwargs(kwargs_without_internal), **hf_gguf_load_kwargs)
-        native_support = has_native_transformers_causallm_support(model_local_path)
+        native_support = has_native_transformers_model_support(
+            model_local_path, cls.loader, **get_config_selection_kwargs(kwargs_without_internal), **hf_gguf_load_kwargs
+        )
 
         """load quantized model from local disk"""
-        from .local import LocalModelLoader
-
-        if cls.require_trust_remote_code and not trust_remote_code and not native_support and not isinstance(cls.loader, LocalModelLoader):
+        if cls.require_trust_remote_code and not trust_remote_code and not native_support:
             raise ValueError(
                 f"{model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
@@ -2461,7 +2462,8 @@ def ModelLoader(cls):
 
         normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
         prepare_remote_model_init_compat(
-            model_local_path, config, trust_remote_code=trust_remote_code
+            model_local_path, config, trust_remote_code=trust_remote_code,
+            **get_config_selection_kwargs(cached_file_kwargs), **hf_gguf_load_kwargs,
         )
 
         if cls.require_dtype:

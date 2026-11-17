@@ -439,7 +439,12 @@ def test_load_tokenizer_deprecated_shim_forwards_to_tokenicer():
     assert wrapped.model_config is text_config
 
 
-def test_load_hf_tokenizer_delegates_normalization_to_tokenicer(monkeypatch):
+@pytest.mark.parametrize("bypass", [False, True])
+def test_load_hf_tokenizer_delegates_normalization_to_tokenicer(monkeypatch, bypass):
+    if bypass:
+        monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    else:
+        monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
     native_tokenizer = object()
     model_config = object()
     calls = []
@@ -463,7 +468,7 @@ def test_load_hf_tokenizer_delegates_normalization_to_tokenicer(monkeypatch):
             "/tmp/model",
             {
                 "model_config": model_config,
-                "trust_remote_code": True,
+                "trust_remote_code": bypass,
                 "revision": "test-revision",
             },
         )

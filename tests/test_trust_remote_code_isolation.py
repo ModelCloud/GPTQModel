@@ -175,7 +175,12 @@ def test_dequantize_does_not_import_auto_map_config_without_trust(
     assert not marker.exists(), "dequantize imported checkpoint code with trust_remote_code=False"
 
 
-def test_remote_model_init_opt_in_still_imports(tmp_path):
+@pytest.mark.parametrize("bypass", [False, True])
+def test_native_model_init_ignores_remote_opt_in(tmp_path, monkeypatch, bypass):
+    if bypass:
+        monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    else:
+        monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
     checkpoint, marker = _write_checkpoint(tmp_path)
     config = AutoConfig.from_pretrained(str(checkpoint), trust_remote_code=False)
 
@@ -185,10 +190,15 @@ def test_remote_model_init_opt_in_still_imports(tmp_path):
         str(checkpoint), config, trust_remote_code=True
     )
 
-    assert marker.exists(), "trust_remote_code=True must keep importing auto_map classes"
+    assert not marker.exists(), "native model selection must ignore checkpoint Python"
 
 
-def test_dequantize_opt_in_still_imports(tmp_path, monkeypatch):
+@pytest.mark.parametrize("bypass", [False, True])
+def test_native_dequantize_ignores_remote_opt_in(tmp_path, monkeypatch, bypass):
+    if bypass:
+        monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    else:
+        monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
     checkpoint, marker = _write_checkpoint(tmp_path, compressed_tensors=True)
     monkeypatch.setattr(
         model_dequant,
@@ -201,4 +211,29 @@ def test_dequantize_opt_in_still_imports(tmp_path, monkeypatch):
             checkpoint, tmp_path / "out", trust_remote_code=True
         )
 
-    assert marker.exists(), "trust_remote_code=True must keep importing auto_map classes"
+    assert not marker.exists(), "native model selection must ignore checkpoint Python"
+
+
+def test_dequantize_uses_local_model_implementation(tmp_path, monkeypatch):
+    from gptqmodel.models.auto import MODEL_MAP_CASEFOLD
+    from gptqmodel.models.local import LocalModelLoader
+
+    checkpoint, marker = _write_checkpoint(tmp_path, compressed_tensors=True)
+    payload = json.loads((checkpoint / "config.json").read_text())
+    payload.update(model_type="minimax", use_mtp=False, num_mtp_modules=0,
+                   num_local_experts=2, num_experts_per_tok=1, head_dim=8, rotary_dim=8)
+    (checkpoint / "config.json").write_text(json.dumps(payload))
+    loader = LocalModelLoader(
+        "gptqmodel.hf_minimax_m2.configuration_minimax_m2.MiniMaxM2Config",
+        "gptqmodel.hf_minimax_m2.modeling_minimax_m2.MiniMaxM2ForCausalLM",
+    )
+    monkeypatch.setitem(MODEL_MAP_CASEFOLD, "minimax", SimpleNamespace(loader=loader))
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    seen = []
+    deps = _fake_compressed_tensors_deps()
+    deps["map_module_to_scheme"] = lambda model: seen.append(type(model).__module__) or {}
+    monkeypatch.setattr(model_dequant, "_get_compressed_tensors_dependencies", lambda: deps)
+    with pytest.raises(_Stop):
+        model_dequant.dequantize_model(checkpoint, tmp_path / "out", trust_remote_code=True)
+    assert seen and seen[0].startswith("gptqmodel.")
+    assert not marker.exists()

@@ -63,9 +63,9 @@ from ..utils.hf import (
     get_hf_config_dtype,
     load_model_config,
     normalize_hf_config_compat,
+    resolve_trust_remote_code,
     sanitize_generation_config_file,
     sanitize_model_config,
-    resolve_trust_remote_code,
     suspend_hf_weight_init,
 )
 from ..utils.logger import setup_logger

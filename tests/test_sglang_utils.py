@@ -46,6 +46,7 @@ def fake_sglang(monkeypatch):
 
 
 def test_engine_aliases_dtype_device_and_config_reuse(fake_sglang, monkeypatch):
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
     config = object()
     monkeypatch.setattr(
         sglang_utils,

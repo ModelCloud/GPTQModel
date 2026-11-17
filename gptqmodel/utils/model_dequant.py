@@ -340,8 +340,8 @@ def _discover_compressed_tensors_module_schemes(
     init_empty_weights = deps["init_empty_weights"]
     apply_quantization_config = deps["apply_quantization_config"]
     map_module_to_scheme = deps["map_module_to_scheme"]
-    from .hf import load_model_config, normalize_hf_config_compat, resolve_trust_remote_code
     from ..models.local import local_model_loader
+    from .hf import load_model_config, normalize_hf_config_compat, resolve_trust_remote_code
 
     trust_remote_code = resolve_trust_remote_code(model_path, trust_remote_code=trust_remote_code)
     config = load_model_config(
@@ -375,7 +375,7 @@ def _discover_compressed_tensors_module_schemes(
                         dtype=torch.float32,
                     )
             except Exception as exc:  # pragma: no cover - depends on available loaders
-                loader_errors.append((loader.__name__, exc))
+                loader_errors.append((getattr(loader, "__name__", type(loader).__name__), exc))
                 continue
             else:
                 break
