@@ -1,0 +1,23 @@
+{
+  "repository": "nvidia/NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-BF16",
+  "revision": "8fe5546888e9bd03fdbf52d808adebdfca901b52",
+  "base_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-BF16/resolve/8fe5546888e9bd03fdbf52d808adebdfca901b52/",
+  "sha256": {
+    "configuration_nemotron_h.py": "0fc818c10506c91bd02df5a605f49cb0704b5498954f46dbde2d63999ae36c3d",
+    "configuration_nemotron_h_puzzle.py": "c61d2185d7357ad827cb5de8ef91ebdf0e5f18fb9c3d56f6a9e186d72db2ff4b",
+    "modeling_nemotron_h.py": "e1cb5fc02e887983f0a445bf4c1a2604453b2cb2db4624c7004dcf663bbb1b6e",
+    "modeling_nemotron_h_puzzle.py": "e81a7a97ce55896c6af898cf792cfbdff123eb476d11267aefc3f29bc5af3882",
+    "config.json": "a1c8a8548c172f7297876bb15ef2d1da94886f75e7ab9d99f1360d6032525ab5",
+    "model.safetensors.index.json": "ee55269a270b9bb02b7435b5b9ac91554908f7296d4c22d89a29d87e4d369fc0",
+    "LICENSE": "8693c8dea35e24fed3d0b39c1c8f2087d8fc860f351de571c3a9b7fc4996ddca"
+  },
+  "inventory": {
+    "file": "checkpoint_shapes.json.gz",
+    "reader": "read_checkpoint_headers.py",
+    "tensor_count": 42683,
+    "decoder_tensor_count": 41643,
+    "auxiliary_mtp_tensor_count": 1040,
+    "shard_header_count": 32,
+    "note": "Tensor names/shapes and per-header SHA-256 are from actual safetensors range reads; no trained tensor payload was downloaded."
+  }
+}

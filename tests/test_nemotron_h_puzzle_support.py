@@ -4,19 +4,16 @@
 from types import SimpleNamespace
 
 import torch
-from torch import nn
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.nemotron_h_puzzle import NemotronHPuzzleQModel
 
 
-def test_nemotron_h_puzzle_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="nemotron_h_puzzle")
+def test_nemotron_h_puzzle_model_type_selects_definition(tmp_path):
+    from gptqmodel.models.ports.nemotron_h_puzzle import NemotronHPuzzleConfig
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto, "load_model_config", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition("/tmp/nemotron_h_puzzle") is NemotronHPuzzleQModel
+    NemotronHPuzzleConfig().save_pretrained(tmp_path)
+    assert auto.check_and_get_model_definition(str(tmp_path)) is NemotronHPuzzleQModel
 
 
 def test_nemotron_h_puzzle_module_tree_covers_hybrid_mixers_and_moe():
@@ -26,7 +23,7 @@ def test_nemotron_h_puzzle_module_tree_covers_hybrid_mixers_and_moe():
     )
     flat_modules = {name for block in layer_modules for name in block}
 
-    assert NemotronHPuzzleQModel.require_trust_remote_code is True
+    assert NemotronHPuzzleQModel.require_trust_remote_code is False
     assert NemotronHPuzzleQModel.layer_modules_strict is False
     assert NemotronHPuzzleQModel.pre_lm_head_norm_module == "model.norm_f"
     assert NemotronHPuzzleQModel.extract_layers_node() == ["model.layers"]
@@ -119,7 +116,7 @@ def test_nemotron_h_puzzle_replay_builds_attention_causal_mask():
     causal_mask = replay_kwargs["attention_mask"]
     min_dtype = torch.finfo(torch.bfloat16).min
 
-    assert mixer_config._attn_implementation == "eager"
+    assert mixer_config._attn_implementation == "flash_attention_2"
     assert causal_mask.shape == (2, 1, 4, 4)
     assert causal_mask.dtype == torch.bfloat16
     assert torch.all(causal_mask[0, 0, :, 0] == min_dtype)
@@ -140,48 +137,3 @@ def test_nemotron_h_puzzle_replay_keeps_mamba_padding_mask():
     )
 
     assert replay_kwargs["attention_mask"] is padding_mask
-
-
-class _WeightlessLinear(nn.Module):
-    """QuantLinear-shaped test double which intentionally has no dense weight."""
-
-    def forward(self, hidden_states):
-        return hidden_states
-
-
-class _WeightlessExpert(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.up_proj = _WeightlessLinear()
-        self.down_proj = _WeightlessLinear()
-
-    def forward(self, hidden_states):
-        return self.down_proj(self.up_proj(hidden_states))
-
-
-class NemotronHMoE(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.experts = nn.ModuleList([_WeightlessExpert(), _WeightlessExpert()])
-
-
-def test_nemotron_h_puzzle_empty_expert_does_not_require_dense_weight():
-    moe = NemotronHMoE()
-    model_def = SimpleNamespace(
-        model=SimpleNamespace(
-            model=SimpleNamespace(
-                layers=[SimpleNamespace(mixer=moe)],
-            )
-        )
-    )
-    NemotronHPuzzleQModel.monkey_patch(model_def)
-
-    hidden_states = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.bfloat16)
-    # Only expert 0 is routed; expert 1 exercises the empty-expert branch.
-    topk_indices = torch.zeros((2, 1), dtype=torch.long)
-    topk_weights = torch.ones((2, 1), dtype=torch.bfloat16)
-
-    output = moe.moe(hidden_states, topk_indices, topk_weights)
-
-    assert torch.equal(output, hidden_states)
-    assert not hasattr(moe.experts[1].down_proj, "weight")
