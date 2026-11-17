@@ -5708,6 +5708,10 @@
         }
       ]
     },
+    "sensenova_loop": {
+      "definition": "SenseNovaLoopQModel",
+      "reason": "Custom/remote looped implementation: the mHC decoder layer runs the remote forward, so QKV and gate/up fusion needs its own native-forward qualification."
+    },
     "smolvlm": {
       "definition": "SmolVLMQModel",
       "profiles": {

@@ -6,7 +6,7 @@ parents and roles come exclusively from `model.module_plan()`; matching a name,
 shape, or inheritance chain does not grant eligibility.
 
 The checked-in [qualification inventory](../tests/module_tree/fixtures/fusable_models.json)
-accounts for all **206 registered model types**: **102 qualified** and **104 not
+accounts for all **208 registered model types**: **102 qualified** and **106 not
 qualified for the current executor**. Qualified means the real tiny native
 model resolves the declared parents and the planner admits them. It does not
 mean every layer or quantization setting is compatible. In particular, expert
@@ -293,6 +293,7 @@ layout alone does not authorize it.
 | `refinedWeb` | `RwgQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `refinedWebModel` | `RwgQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `ricursive` | `RicursiveQModel` | Remote Ripple forward preprocesses value residuals and chunks MLP calls through helpers; direct-forward executor is not applicable. |
+| `sensenova_loop` | `SenseNovaLoopQModel` | Custom/remote looped implementation: the mHC decoder layer runs the remote forward, so QKV and gate/up fusion needs its own native-forward qualification. |
 | `solar_open2` | `SolarOpen2QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `spark2_5` | `Spark2_5QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `stablelm_epoch` | `LlamaQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
