@@ -218,6 +218,23 @@ def restore_offloaded_modules(
     """
     unresolved: List[str] = []
     for name, module, device in entries:
+        # A base module can be replaced during quantization (the quantizer
+        # swaps the recorded dense module for its packed kernel and writes the
+        # packed bundle into the same offload directory). Restoring the stale
+        # dense module would read the replacement's index and tensors, so skip
+        # it: the live module owns its own bundle and is restored below by
+        # `restore_disk_offloaded_modules` (issue #4758).
+        try:
+            live_module = get_submodule(model, name) if name else model
+        except AttributeError:
+            live_module = None
+        if live_module is not module:
+            log.debug(
+                "Offload: `%s` was replaced during quantization; skipping the "
+                "stale base-module restore.",
+                name,
+            )
+            continue
         try:
             undo_offload_to_disk(module, device=device)
         except Exception as exc:  # pragma: no cover - defensive
@@ -263,6 +280,19 @@ def _owns_offload_hook(module: nn.Module) -> bool:
         elif getattr(hook, "offload", False):
             return True
     return False
+
+
+def has_disk_offloaded_modules(model: nn.Module) -> bool:
+    """Whether any module still reads its weights from a disk-offload bundle.
+
+    Such a module owns an accelerate disk-offload hook and points at a
+    ``module.safetensors`` inside the run's private offload directory. That
+    directory must outlive every module in this state: deleting it leaves the
+    module on meta with a dangling hook, so the next forward raises
+    ``FileNotFoundError`` (issue #4807).
+    """
+
+    return any(_owns_offload_hook(module) for module in model.modules())
 
 
 def restore_disk_offloaded_modules(

@@ -13,6 +13,7 @@ import json
 import math
 import operator
 import os
+import re
 import secrets
 import shutil
 import stat
@@ -2887,6 +2888,86 @@ def validate_checkpoint_qweights(
         )
 
 
+def _matches_ignore_pattern(name: str, pattern) -> bool:
+    try:
+        return re.search(pattern, name) is not None
+    except (TypeError, re.error):
+        return False
+
+
+def _unmaterialized_checkpoint_parameters(
+    model: nn.Module, checkpoint: str | os.PathLike | None,
+) -> List[str]:
+    """Non-quantized parameters that no checkpoint tensor was loaded into.
+
+    A quantized checkpoint only stores the non-quantized tensors as plain
+    dense entries. When a key cannot be mapped back onto the runtime module the
+    parameter keeps the ``torch.empty`` storage allocated while the initializers
+    were suspended: random values, sometimes NaN/inf, with no warning. Compare
+    the checkpoint key set against the live parameters so such a load fails
+    loudly instead of returning a model that runs on garbage.
+    """
+
+    if checkpoint is None:
+        return []
+    checkpoint_keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
+    if checkpoint_keys is None:
+        # Pickle checkpoints cannot be inspected without loading them; leave
+        # that path to Accelerate's own reporting.
+        return []
+
+    loaded_parameter_ids = {
+        id(parameter)
+        for name, parameter in model.named_parameters(remove_duplicate=False)
+        if name in checkpoint_keys
+    }
+
+    quantized_prefixes: List[str] = []
+    for name, module in model.named_modules():
+        if getattr(module, "QUANT_TYPE", None) is not None:
+            quantized_prefixes.append(f"{name}." if name else "")
+
+    ignored_patterns = getattr(model, "_keys_to_ignore_on_load_missing", None) or ()
+
+    missing: List[str] = []
+    for name, parameter in model.named_parameters(remove_duplicate=False):
+        if name in checkpoint_keys:
+            continue
+        if parameter.is_meta:
+            # Meta parameters belong to a lazy shell; its own checks cover them.
+            continue
+        if id(parameter) in loaded_parameter_ids:
+            # Tied to a parameter the checkpoint did populate.
+            continue
+        if any(name.startswith(prefix) for prefix in quantized_prefixes):
+            continue
+        if any(_matches_ignore_pattern(name, pattern) for pattern in ignored_patterns):
+            continue
+        missing.append(name)
+    return missing
+
+
+def _raise_on_unmaterialized_checkpoint_parameters(
+    model: nn.Module, checkpoint: str | os.PathLike | None,
+) -> None:
+    """Raise when a load leaves non-quantized parameters uninitialized."""
+
+    missing = _unmaterialized_checkpoint_parameters(model, checkpoint)
+    if not missing:
+        return
+    preview = ", ".join(missing[:8]) + (", ..." if len(missing) > 8 else "")
+    raise RuntimeError(
+        "Loader: the checkpoint "
+        f"{os.fspath(checkpoint)!r} does not provide tensors for {len(missing)} "
+        f"non-quantized parameter(s): {preview}. They would keep the "
+        "`torch.empty` storage allocated while weight initialization was "
+        "suspended, so inference would run on random (sometimes NaN/inf) "
+        "values. This usually means the checkpoint was written in a module "
+        "layout the loader cannot map back onto the runtime model; save it in "
+        "the source HF layout or load a checkpoint that matches this model."
+    )
+
+
 def _tie_weights_after_checkpoint_load(
     model,
     checkpoint: str | os.PathLike | None,
@@ -3607,6 +3688,9 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
             model,
             kwargs.get("checkpoint", checkpoint),
             extra_keys=fp8_weight_names if converted_checkpoint is not None else None,
+        )
+        _raise_on_unmaterialized_checkpoint_parameters(
+            model, kwargs.get("checkpoint", checkpoint)
         )
     finally:
         _cleanup_remapped_checkpoint(converted_checkpoint)

@@ -6745,9 +6745,87 @@ class BaseQModel(nn.Module):
     def tied_word_embedding(self) -> bool:
         return getattr(self.model.config, "tie_word_embeddings", False)
 
+    # Direct children that carry the token embedding or the language head. The
+    # structural `nn.Module` check is the real guard; these names only break
+    # ties when a decoder parent owns more than one candidate.
+    _INPUT_EMBEDDING_CHILD_NAMES = (
+        "embed_tokens",
+        "wte",
+        "word_embeddings",
+        "tok_embeddings",
+        "embed_in",
+    )
+    _OUTPUT_HEAD_CHILD_NAMES = ("lm_head", "embed_out", "output")
+
+    def _declared_decoder_ancestor_paths(self) -> List[str]:
+        """Paths from each declared decoder up to the wrapper root, nearest first.
+
+        ``extract_layers_node()`` names the declared ``layers`` container, and
+        a decoder keeps its token embedding (and sometimes its language head)
+        as a sibling of that container. Walking the parents covers wrappers
+        that hoist the head above the decoder, such as the Qwen Omni
+        ``thinker``.
+        """
+        paths = self.extract_layers_node()
+        if isinstance(paths, str):
+            paths = [paths]
+        ancestors: List[str] = []
+        for path in paths or []:
+            if not isinstance(path, str) or not path:
+                continue
+            parts = path.split(".")
+            for end in range(len(parts) - 1, -1, -1):
+                candidate = ".".join(parts[:end])
+                if candidate not in ancestors:
+                    ancestors.append(candidate)
+        return ancestors
+
+    def _declared_embedding_endpoint(self, *, output: bool) -> Optional[nn.Module]:
+        """Resolve an embedding endpoint the HF wrapper refuses to expose.
+
+        Composite wrappers can leave ``get_input_embeddings`` /
+        ``get_output_embeddings`` unimplemented while the module tree still
+        declares the decoder that owns them (#4816). Resolution is structural:
+        only an ``nn.Embedding`` (input) or ``nn.Linear`` (output) that is a
+        direct child of a declared decoder ancestor is accepted.
+        """
+        names = self._OUTPUT_HEAD_CHILD_NAMES if output else self._INPUT_EMBEDDING_CHILD_NAMES
+        kind = nn.Linear if output else nn.Embedding
+        modules = []
+        for path in self._declared_decoder_ancestor_paths():
+            module = self.model if not path else get_module_by_name_prefix(self.model, path)[0]
+            if module is not None and not any(module is seen for seen in modules):
+                modules.append(module)
+
+        for module in modules:
+            for name in names:
+                child = getattr(module, name, None)
+                if isinstance(child, kind):
+                    return child
+
+        if output:
+            return None
+        # A decoder whose embedding is spelled differently is still unambiguous
+        # when its parent owns exactly one `nn.Embedding`.
+        for module in modules:
+            candidates = [child for child in module.children() if isinstance(child, nn.Embedding)]
+            if len(candidates) == 1:
+                return candidates[0]
+        return None
+
     def get_input_embeddings(self) -> Optional[nn.Module]:
         getter = getattr(self.model, "get_input_embeddings", None)
-        return getter() if callable(getter) else None
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except NotImplementedError:
+            # Some composite wrappers never implement the getter; resolve the
+            # declared endpoint instead of aborting the quantization run.
+            resolved = self._declared_embedding_endpoint(output=False)
+            if resolved is None:
+                raise
+            return resolved
 
     def get_input_embeddings_name(self) -> Optional[str]:
         module = self.get_input_embeddings()
@@ -6755,7 +6833,15 @@ class BaseQModel(nn.Module):
 
     def get_output_embeddings(self) -> Optional[nn.Module]:
         getter = getattr(self.model, "get_output_embeddings", None)
-        return getter() if callable(getter) else None
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except NotImplementedError:
+            resolved = self._declared_embedding_endpoint(output=True)
+            if resolved is None:
+                raise
+            return resolved
 
     def get_output_embeddings_name(self) -> Optional[str]:
         module = self.get_output_embeddings()

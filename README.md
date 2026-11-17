@@ -275,6 +275,10 @@ in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md
 Re-saving a loaded fused-expert MoE defuses the export shell and fails closed on
 dropped quantization payloads; see
 [`docs/quantized-moe-resave-defuse.md`](docs/quantized-moe-resave-defuse.md).
+`export(..., "hf")` picks its dense decoder from the checkpoint's declared
+`quant_method` and refuses methods that have none (Paro, MACaQ, GGUF, QQQ, NF12,
+VPTQ, EXL3) instead of decoding them with another layout's decoder; see
+[`docs/export-hf-format-detection.md`](docs/export-hf-format-detection.md).
 In-session QQQ kernel rehoming and cache initialization are documented in
 [docs/qqq-kernel-selection.md](docs/qqq-kernel-selection.md).
 QQQ's shared-memory staging of the per-group scales and the reduction-scratch
@@ -344,6 +348,7 @@ and [quantization recipes](https://github.com/ModelCloud/GPTQModel/blob/main/doc
 | Quantize large or MoE models | [Multi-GPU and memory](https://github.com/ModelCloud/GPTQModel/blob/main/docs/multi_gpu_quantization.md) · [MoE and multimodal](https://github.com/ModelCloud/GPTQModel/wiki/Multimodal-and-MoE-Models) |
 | Select and tune execution backends | [Typed backend configuration](https://github.com/ModelCloud/GPTQModel/blob/main/docs/backend-selection.md), [kernel and thread reference](https://github.com/ModelCloud/GPTQModel/blob/main/docs/kernel-config.md) |
 | Resume a job | [Checkpoint and resume](https://github.com/ModelCloud/GPTQModel/blob/main/checkpoint.md) · [Distributed EXL3](https://github.com/ModelCloud/GPTQModel/blob/main/docs/exl3-durable-execution.md) |
+| Export a dense or MLX checkpoint | [Dense dequantization](https://github.com/ModelCloud/GPTQModel/blob/main/docs/checkpoint-interop.md#7-dense-dequantization-with-dequantize_model) · [MLX conversion](https://github.com/ModelCloud/GPTQModel/blob/main/docs/mlx-runtime.md) |
 | Recover accuracy or fine-tune | [EoRA](https://github.com/ModelCloud/GPTQModel/blob/main/docs/eora/README.md) · [PEFT/LoRA](https://github.com/ModelCloud/GPTQModel/blob/main/docs/peft.md) · [GSQ](https://github.com/ModelCloud/GPTQModel/wiki/GSQ) · [RCO](https://github.com/ModelCloud/GPTQModel/wiki/GSQ#non-uniform-bit-allocation-rco) |
 | Evaluate quality and performance | [Evaluation](https://github.com/ModelCloud/GPTQModel/wiki/Evaluation) · [Benchmark methodology](https://github.com/ModelCloud/GPTQModel/blob/main/docs/benchmark-methodology.md) |
 | Serve an OpenAI-compatible API | [Serving guide](https://github.com/ModelCloud/GPTQModel/wiki/Serving) · [Security](https://github.com/ModelCloud/GPTQModel/blob/main/docs/openai-server-exposure.md) |
