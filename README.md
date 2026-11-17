@@ -103,7 +103,9 @@ Quantized kernels keep only packed weights resident; per-call QQQ reduce scratch
   loading support further task adaptation; exported EoRA `rank_pattern` keys follow the [adapter rank-pattern contract](docs/adapter-rank-pattern-matching.md) so PEFT builds the trained rank per module. [Rotation model support](https://github.com/ModelCloud/GPTQModel/blob/main/docs/rotation-model-support.md) lists the exact definitions that opt in. AWQ GSQ uses the
   [packed-code scoring contract](docs/gsq-awq-code-recovery.md) to evaluate exported candidates.
   The fused relaxation kernel keeps the [eager precision contract](docs/gsq-fused-relaxation-precision.md)
-  for BF16 and FP32 logits.
+  for BF16 and FP32 logits, and per-linear refinement searches the exported
+  codes and refits scales under the [scalar refinement
+  contract](docs/gsq-scalar-refinement.md).
 - **Trust the fold.** AWQ divides a scale only into the norm that actually feeds
   a quantized block, including multimodal wrappers and hybrid layer shapes; see
   the [AWQ scaling groups](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-scaling-groups.md) contract. Scale search keeps
