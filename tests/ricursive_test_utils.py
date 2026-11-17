@@ -1,43 +1,21 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Load isolated tiny Ripple models for native and compatibility regression tests."""
+"""Isolate package-owned Ripple classes when a test deliberately patches a class."""
 
 import importlib.util
 import itertools
-import os
 import sys
 import types
 from functools import lru_cache
 from pathlib import Path
 
-import pytest
 import torch
-from huggingface_hub import snapshot_download
-
-
-# Pin to the native source reviewed alongside these tests; no model weights.
-RIPPLE_REVISION = "2f007aabfcedd0f8763d86d08f9aa0afbc344cea"
 
 
 @lru_cache(maxsize=1)
-def reference_dir():
-    configured = os.environ.get("GPTQMODEL_RIPPLE_REF")
-    if configured:
-        root = Path(configured)
-        if not (root / "modeling_ricursive.py").is_file():
-            raise FileNotFoundError(f"Missing Ripple custom code in {root}")
-        return root
-    try:
-        return Path(
-            snapshot_download(
-                "ricursiveAI/Ripple-65B-Preview",
-                revision=RIPPLE_REVISION,
-                allow_patterns=["configuration_ricursive.py", "modeling_ricursive.py"],
-            )
-        )
-    except Exception as exc:
-        pytest.skip(f"Ripple custom code unavailable: {exc}")
+def package_source_dir():
+    return Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/ricursive"
 
 
 COUNTER = itertools.count()
@@ -45,11 +23,7 @@ COUNTER = itertools.count()
 
 @lru_cache(maxsize=1)
 def compatibility_module():
-    """Load the standalone shim without importing unrelated Transformers-5 models.
-
-    This lets the same committed regression tests exercise the shim on 4.57,
-    even though the complete GPT-QModel model registry requires Transformers 5.
-    """
+    """Exercise legacy shim unit contracts separately from public local loading."""
     path = Path(__file__).resolve().parents[1] / "gptqmodel/utils/ricursive_patch.py"
     spec = importlib.util.spec_from_file_location("ricursive_compat_test_module", path)
     module = importlib.util.module_from_spec(spec)
@@ -57,8 +31,10 @@ def compatibility_module():
     return module
 
 
-def make_model(*, source_dir=None, **overrides):
-    root = Path(source_dir) if source_dir is not None else reference_dir()
+def make_model(**overrides):
+    # Only inspect/import installed package files. Unique namespaces prevent a
+    # deliberate legacy-method mutation from leaking into the next test.
+    root = package_source_dir()
     name = f"ripple_audit_{next(COUNTER)}"
     package = types.ModuleType(name)
     package.__path__ = [str(root)]

@@ -4,7 +4,6 @@
 """Independent full-forward oracle and cache/precision boundary coverage."""
 
 import math
-import os
 
 import pytest
 import torch
@@ -149,17 +148,10 @@ def test_chunked_mlp(dtype):
     model = make_model(ffn_clamp_threshold=0.05).to(dtype)
     mlp = model.model.layers[0].mlp
     x = torch.randn(2, 13, 32, dtype=dtype)
-    original = os.environ.get("RIPPLE_MLP_CHUNK")
-    try:
-        os.environ["RIPPLE_MLP_CHUNK"] = "0"
-        expected = mlp(x)
-        os.environ["RIPPLE_MLP_CHUNK"] = "3"
-        actual = mlp(x)
-    finally:
-        if original is None:
-            os.environ.pop("RIPPLE_MLP_CHUNK", None)
-        else:
-            os.environ["RIPPLE_MLP_CHUNK"] = original
+    mlp.chunk_size = 0
+    expected = mlp(x)
+    mlp.chunk_size = 3
+    actual = mlp(x)
     torch.testing.assert_close(actual, expected)
 
 

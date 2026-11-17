@@ -21,6 +21,7 @@ from transformers import DynamicCache, StaticCache
 
 
 def main():
+    torch.set_num_threads(1)
     mode, runtime, dtype_name = sys.argv[1:]
     local_rank = int(os.environ["LOCAL_RANK"])
     device = torch.device(runtime, local_rank) if runtime == "cuda" else torch.device("cpu")
