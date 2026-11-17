@@ -93,6 +93,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | RefinedWeb | `refinedWeb`, `refinedWebModel` |
 | [Ricursive Ripple](https://huggingface.co/ricursiveAI/Ripple-65B-Preview) ([cached generation](ricursive-cached-generation.md)) | `ricursive` |
 | Seed-OSS | `seed_oss` |
+| [SenseNova-Loop 9B](https://github.com/OpenSenseNova/SenseNova-Loop) (`trust_remote_code`) | `sensenova_loop` |
 | SmolLM3 | `smollm3` |
 | SmolVLM | `smolvlm` |
 | Solar Open / Open 2 | `solar_open`, `solar_open2` |
