@@ -773,6 +773,51 @@ _LAYER_TYPE_SLIDING = "sliding_attention"
 _LAYER_TYPE_MASK_UNSUPPORTED = object()
 
 
+def _capture_accepts_position_ids(model: object) -> bool:
+    """Whether ``model.forward`` can take ``position_ids``.
+
+    The derived ids are only passed to a model that declares the parameter (or
+    swallows ``**kwargs``); the keyword would otherwise raise ``TypeError`` at
+    capture time.
+    """
+
+    try:
+        parameters = inspect.signature(model.forward).parameters
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return "position_ids" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+
+
+def _with_capture_position_ids(model: object, example: Dict[str, Any]) -> Dict[str, Any]:
+    """Derive ``position_ids`` from the attention mask for a padded batch.
+
+    A left-padded calibration batch otherwise embeds every real token at
+    ``pad_len + i`` on models with learned absolute position embeddings
+    (GPT-2, GPT-Neo), so every captured statistic comes from hidden states the
+    model never produces at inference. ``generate()`` derives the same ids, and
+    they equal the default ``arange`` for an unpadded row, so this is a no-op
+    there (issue #4861).
+    """
+
+    if "position_ids" in example:
+        return example
+    mask = example.get("attention_mask")
+    if not torch.is_tensor(mask) or mask.ndim != 2 or mask.numel() == 0:
+        return example
+    if not _capture_accepts_position_ids(model):
+        return example
+    # Exactly what `generate()` does: running positions for real tokens, 1 for
+    # pad slots (attention masks those out).
+    position_ids = mask.long().cumsum(-1) - 1
+    position_ids.masked_fill_(mask == 0, 1)
+    derived = dict(example)
+    derived["position_ids"] = position_ids
+    return derived
+
+
 class BaseQModel(nn.Module):
     # Class-method APIs remain available to model definitions.  Calls through
     # an instance are wrapped in ``__getattribute__`` below so they resolve
@@ -3218,7 +3263,7 @@ class BaseQModel(nn.Module):
                 **self.INPUT_EMBEDDING_EXTRA_ARGS,
             )
 
-        return self.model(**example, use_cache=use_cache)
+        return self.model(**_with_capture_position_ids(self.model, example), use_cache=use_cache)
 
     def _sanitize_input_ids_for_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         if input_ids.dtype not in (torch.int32, torch.int64):
