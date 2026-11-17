@@ -13,8 +13,6 @@ host are skipped with the reason their declaration records.
 from __future__ import annotations
 
 import importlib.util
-import os
-import shutil
 import warnings
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -255,9 +253,19 @@ def _unavailable(cls) -> Optional[str]:
 
 
 def _paro_unavailable() -> Optional[str]:
-    if os.environ.get("CUDA_HOME") is None and shutil.which("nvcc") is None:
-        return "ParoLinear needs the AWQ CUDA GEMM JIT extension; no CUDA toolkit on this host"
-    return None
+    # ParoLinear packs through the AWQ CUDA GEMM JIT extension. Gate on the
+    # same runtime check the AWQ kernel uses: it resolves the toolkit through
+    # ``torch.utils.cpp_extension.CUDA_HOME`` (which also finds
+    # ``/usr/local/cuda``), so requiring CUDA_HOME or nvcc on PATH skipped this
+    # test on hosts where the extension builds fine (#4981).
+    from gptqmodel.utils.awq import awq_runtime_available, awq_runtime_error
+
+    if awq_runtime_available():
+        return None
+    return (
+        "ParoLinear needs the AWQ CUDA GEMM JIT extension: "
+        f"{awq_runtime_error() or 'not available on this host'}"
+    )
 
 
 def _fp8_capture_supported() -> bool:
