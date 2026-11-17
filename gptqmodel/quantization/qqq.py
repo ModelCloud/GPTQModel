@@ -776,17 +776,27 @@ class QQQ:
         self._gsq_moments.clear()
         return tuple(result)
 
+    def _reject_unsupported_activation_order(self) -> None:
+        """Fail before Hessian work when the config asks for act ordering.
+
+        QQQ's packed runtime stores contiguous group scales and has no
+        ``g_idx`` buffer, so ``desc_act=True`` cannot be represented in the
+        checkpoint.
+        """
+
+        if self.qcfg.desc_act:
+            raise ValueError(
+                "QQQ quantization does not support `desc_act=True`; "
+                "use `desc_act=False`."
+            )
+
     @torch.inference_mode()
     def _quantize_impl(
             self,
             blocksize=128,
     ):
         start = time.time()
-        if self.qcfg.desc_act:
-            raise ValueError(
-                "QQQ quantization does not support `desc_act=True`; "
-                "use `desc_act=False`."
-            )
+        self._reject_unsupported_activation_order()
 
         from ..utils.fallback import (
             resolve_fallback_strategy,
@@ -925,6 +935,13 @@ class QQQ:
                     cpu_device = torch.device("cpu")
                     Hinv = Hinv.to(device=cpu_device)
                     W = W.to(device=cpu_device)
+                    if actorder:
+                        # ``perm``/``invperm`` were built from the CUDA Hessian.
+                        # The block pass now runs on the host, so the epilogue's
+                        # ``Q[:, invperm]`` must not index a CPU tensor with a
+                        # CUDA index tensor (issue #4538).
+                        perm = perm.to(device=cpu_device)
+                        invperm = invperm.to(device=cpu_device)
                     self.quantizer.find_params(W, weight=True)
                     if static_groups:
                         scale, zero = _move_static_groups(groups, cpu_device)
@@ -1164,6 +1181,12 @@ class QQQ:
             avg_loss = f"{resolved_strategy.value} fallback" if fallback_configured else 999999999
 
         groupsize = groupsize if groupsize != -1 else self.columns
+        if actorder:
+            # A CPU retry can leave the permutation on the Hessian's device
+            # while ``Q`` is on the host; index on ``Q``'s device so the
+            # epilogue is device-agnostic (issue #4538).
+            perm = perm.to(device=Q.device)
+            invperm = invperm.to(device=Q.device)
         if static_groups and actorder:
             g_idx = (perm // groupsize).to(dtype=torch.int32, device=Q.device)
         else:
