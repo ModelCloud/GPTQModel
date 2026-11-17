@@ -249,7 +249,7 @@ def test_quantization_is_reproducible_across_processes(tmp_path, method):
         method = sys.argv[2]
         samples = [
             f"Calibration sample {i}: GPT-QModel quantizes large language models with GPTQ, "
-            "AWQ and ParoQuant while keeping the checkpoint in its packed representation."
+            "AWQ and Paro while keeping the checkpoint in its packed representation."
             for i in range(32)
         ]
         kwargs = dict(bits=4, group_size=128, sym=True, offload_to_disk=False)

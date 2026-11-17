@@ -302,7 +302,7 @@ class ForwardConfig:
     +--------------+----------+------------------------+---------------------------+------------+--------------------+
     | GPTQ          | yes      | yes                    | no                        | yes        | no                 |
     | AWQ           | yes      | yes                    | no                        | yes        | yes                |
-    | ParoQuant     | yes      | yes                    | no                        | yes        | yes                |
+    | Paro     | yes      | yes                    | no                        | yes        | yes                |
     | Native        | yes      | no                     | yes                       | no         | no                 |
     | WeightOnly    | no       | no                     | no/default                | no/default | no                 |
     +--------------+----------+------------------------+---------------------------+------------+--------------------+
@@ -365,7 +365,7 @@ def record_quant_log(model, processors) -> list:
     row for every module (#4367).
 
     Selecting the first owning log rather than a hard-coded processor name keeps
-    every quantizer's rows publishable (FOEM, QQQ, VPTQ, ParoQuant, FP8-GSQ, RTN,
+    every quantizer's rows publishable (FOEM, QQQ, VPTQ, Paro, FP8-GSQ, RTN,
     ...; issue #4321). When no owning processor recorded rows, an existing
     ``model.quant_log`` is preserved: the standalone EoRA-generation loop has no
     primary quantizer, so it cannot replace a restored quantization log with

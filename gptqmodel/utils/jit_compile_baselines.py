@@ -23,7 +23,7 @@ JIT_COMPILE_BASELINE_SECONDS: dict[str, float] = {
     "gptqmodel_marlin_bf16_ops": 120.634,
     "gptqmodel_marlin_fp16_ops": 116.863,
     "gptqmodel_pack_block_cpu": 31.096,
-    "gptqmodel_paroquant_rotation": 78.430,
+    "gptqmodel_paro_rotation": 78.430,
     "gptqmodel_qqq_ops": 82.492,
     "gptqmodel_swordfish_ops": 180.000,
 }

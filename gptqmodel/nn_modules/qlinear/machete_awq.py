@@ -27,6 +27,7 @@ from ...utils.marlin import replace_parameter, replace_tensor, unpack_cols
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.packing_math import scaled_zero_offset
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 
 
 log = setup_logger()
@@ -108,6 +109,11 @@ class AwqMacheteLinear(AWQuantLinear):
     REQUIRES_FORMAT_V2 = False
 
     QUANT_TYPE = "awq_machete"
+
+    # Machete's custom op has no fake/meta kernel, and the runtime is
+    # Hopper-only (SM90) while this GB10 is sm_121; dynamo cannot trace it.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     TYPE_MAP = {
         4: scalar_types.uint4,

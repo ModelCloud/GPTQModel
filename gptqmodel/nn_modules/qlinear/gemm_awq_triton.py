@@ -26,6 +26,7 @@ from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
 from ...utils.kernel import get_kernel_config, resolve_kernel_config
 from ...utils.torch import HAS_XPU
+from ._compile_support import COMPILE_LEVEL
 
 
 def _cuda_graph_capturing(device: torch.device) -> bool:
@@ -202,6 +203,12 @@ class AwqGEMMTritonLinear(AWQuantLinear):
     MODEL_DTYPE_BUFFERS = ()
 
     QUANT_TYPE = "awq_gemm_triton"
+
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: dynamo breaks in
+    # AwqGemmTritonFn.forward on the host-side plan selection / capture query,
+    # but an explicit eager CUDA-graph capture succeeds with matching output.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:

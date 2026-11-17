@@ -283,9 +283,9 @@ class ModelTest(unittest.TestCase):
     BNB_BLOCK_SIZE = None
     BNB_COMPRESS_STATISTICS = None
 
-    PAROQUANT_ROTATION_EPOCHS = None
-    PAROQUANT_FINETUNE_EPOCHS = None
-    PAROQUANT_TRAIN_SAMPLES = None
+    PARO_ROTATION_EPOCHS = None
+    PARO_FINETUNE_EPOCHS = None
+    PARO_TRAIN_SAMPLES = None
 
     SAVE_PATH = None  # default is temp folder
     SPLIT_BY: Optional[str] = None
@@ -1070,7 +1070,7 @@ class ModelTest(unittest.TestCase):
             compare_backends = (torch_backend,)
         elif format_family == FORMAT.EXL3:
             compare_backends = (self.LOAD_BACKEND,)
-        elif format_family in (FORMAT.PAROQUANT, FORMAT.VPTQ, FORMAT.MXFP4_MACAQ):
+        elif format_family in (FORMAT.PARO, FORMAT.VPTQ, FORMAT.MXFP4_MACAQ):
             compare_backends = (self.LOAD_BACKEND,)
         elif format_family == FORMAT.GPTQ:
             if self.LOAD_BACKEND == BACKEND.MARLIN:
@@ -1544,10 +1544,10 @@ class ModelTest(unittest.TestCase):
                 return ParoConfig(
                     bits=self.BITS,
                     method=METHOD.PARO,
-                    format=FORMAT.PAROQUANT,
-                    opt_rotation_epochs=self.PAROQUANT_ROTATION_EPOCHS,
-                    opt_finetune_epochs=self.PAROQUANT_FINETUNE_EPOCHS,
-                    opt_train_samples=self.PAROQUANT_TRAIN_SAMPLES,
+                    format=FORMAT.PARO,
+                    opt_rotation_epochs=self.PARO_ROTATION_EPOCHS,
+                    opt_finetune_epochs=self.PARO_FINETUNE_EPOCHS,
+                    opt_train_samples=self.PARO_TRAIN_SAMPLES,
                     adapter=self.EORA,
                     dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
                     dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,

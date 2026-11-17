@@ -29,6 +29,7 @@ from ...utils.vptq import (
     vptq_packed_words,
 )
 from . import WeightOnlyQuantLinear
+from ._compile_support import COMPILE_LEVEL
 from ._numerics import bias_narrows_losslessly, linear_fp32_reduce, linear_needs_wide_bias
 
 
@@ -43,6 +44,12 @@ def _as_pair(value: Any, name: str) -> List[int]:
 
 class VPTQLinear(WeightOnlyQuantLinear):
     """Weight-only VPTQ linear layer with the portable Torch implementation."""
+
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager, dynamo, aot_eager,
+    # inductor and reduce-overhead pass, and an explicit torch.cuda.graph
+    # capture succeeds with output matching eager.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    SUPPORTS_GRAPH_CAPTURE = True
 
     SUPPORTS_BACKENDS = [BACKEND.VPTQ_TORCH]
     SUPPORTS_METHODS = [METHOD.VPTQ]

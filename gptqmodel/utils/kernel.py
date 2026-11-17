@@ -39,17 +39,17 @@ _BOOL_FIELDS = (
     "swordfish_deterministic",
     "blockfloat_cublas",
     "cpu_bf16x3_matmul",
-    "paroquant_cache_runtime_dtype",
-    "paroquant_auto_cache_bf16_runtime_dtype",
-    "paroquant_cache_rotation_dtype",
-    "paroquant_auto_cache_bf16_rotation_dtype",
-    "paroquant_cpu_avx512",
-    "paroquant_triton_autotune",
-    "paroquant_sym_ste_triton",
-    "paroquant_affine_ste_triton",
-    "paroquant_affine_ste_triton_backward",
-    "paroquant_rotate_autotune",
-    "paroquant_autotune_cache",
+    "paro_cache_runtime_dtype",
+    "paro_auto_cache_bf16_runtime_dtype",
+    "paro_cache_rotation_dtype",
+    "paro_auto_cache_bf16_rotation_dtype",
+    "paro_cpu_avx512",
+    "paro_triton_autotune",
+    "paro_sym_ste_triton",
+    "paro_affine_ste_triton",
+    "paro_affine_ste_triton_backward",
+    "paro_rotate_autotune",
+    "paro_autotune_cache",
     "bitsandbytes_cpu_packed",
     "bitsandbytes_cpu_int8_dense",
     "bitsandbytes_triton",
@@ -78,9 +78,9 @@ _MIN_INT_FIELDS = {
     "gguf_fused_chunk_blocks": 0,
     "gguf_fused_chunk_bytes": 1,
     "gguf_dequant_chunk_bytes": 1,
-    "paroquant_triton_autotune_warmup": 0,
-    "paroquant_triton_autotune_iters": 1,
-    "paroquant_triton_decode_max_rows": 1,
+    "paro_triton_autotune_warmup": 0,
+    "paro_triton_autotune_iters": 1,
+    "paro_triton_decode_max_rows": 1,
     "exl3_tile_batch": 1,
     "exl3_host_rss_limit_bytes": 0,
     "exl3_cuda_allocation_limit_bytes": 0,
@@ -98,12 +98,12 @@ _OPTIONAL_MIN_INT_FIELDS = {
 }
 
 _MIN_FLOAT_FIELDS = {
-    "paroquant_triton_autotune_margin": 0.0,
+    "paro_triton_autotune_margin": 0.0,
 }
 
 _OPTIONAL_CHOICE_FIELDS = {
-    "paroquant_rotate_cta_m": frozenset({4, 8, 16}),
-    "paroquant_rotate_row_pad": frozenset({0, 2}),
+    "paro_rotate_cta_m": frozenset({4, 8, 16}),
+    "paro_rotate_row_pad": frozenset({0, 2}),
 }
 
 _AWQ_SCHEDULE_CHOICES = frozenset({"auto", "legacy"})
@@ -124,7 +124,7 @@ class KernelConfig:
 
     Quantization-time fields (GPTQ block update, NPU Cholesky, GSQ relaxation,
     packer/worker counts, FloatX decode) are read while a run executes.
-    Inference-time fields (Marlin, Torch, GGUF, ParoQuant, bitsandbytes, Triton
+    Inference-time fields (Marlin, Torch, GGUF, Paro, bitsandbytes, Triton
     accumulation, BitBLAS) are read when a quantized module is built or runs.
     """
 
@@ -216,24 +216,24 @@ class KernelConfig:
     gguf_dequant_device: Optional[str] = None
     gguf_dequant_chunk_bytes: int = 256 * 1024 * 1024
 
-    # ParoQuant inference/optimization. Replace ``GPTQMODEL_PAROQUANT_*``.
-    paroquant_cache_runtime_dtype: bool = False
-    paroquant_auto_cache_bf16_runtime_dtype: bool = True
-    paroquant_cache_rotation_dtype: bool = False
-    paroquant_auto_cache_bf16_rotation_dtype: bool = True
-    paroquant_cpu_avx512: bool = True
-    paroquant_triton_autotune: bool = True
-    paroquant_triton_autotune_warmup: int = 2
-    paroquant_triton_autotune_iters: int = 4
-    paroquant_triton_autotune_margin: float = 0.05
-    paroquant_triton_decode_max_rows: int = 8
-    paroquant_sym_ste_triton: bool = True
-    paroquant_affine_ste_triton: bool = True
-    paroquant_affine_ste_triton_backward: bool = False
-    paroquant_rotate_autotune: bool = True
-    paroquant_rotate_cta_m: Optional[int] = None
-    paroquant_rotate_row_pad: Optional[int] = None
-    paroquant_autotune_cache: bool = True
+    # Paro inference/optimization. Replace ``GPTQMODEL_PARO_*``.
+    paro_cache_runtime_dtype: bool = False
+    paro_auto_cache_bf16_runtime_dtype: bool = True
+    paro_cache_rotation_dtype: bool = False
+    paro_auto_cache_bf16_rotation_dtype: bool = True
+    paro_cpu_avx512: bool = True
+    paro_triton_autotune: bool = True
+    paro_triton_autotune_warmup: int = 2
+    paro_triton_autotune_iters: int = 4
+    paro_triton_autotune_margin: float = 0.05
+    paro_triton_decode_max_rows: int = 8
+    paro_sym_ste_triton: bool = True
+    paro_affine_ste_triton: bool = True
+    paro_affine_ste_triton_backward: bool = False
+    paro_rotate_autotune: bool = True
+    paro_rotate_cta_m: Optional[int] = None
+    paro_rotate_row_pad: Optional[int] = None
+    paro_autotune_cache: bool = True
 
     # bitsandbytes / BitBLAS. Replace ``GPTQMODEL_BITSANDBYTES_*``,
     # ``GPTQMODEL_BNB_TRITON`` and ``GPTQMODEL_DISABLE_BITBLAS``.

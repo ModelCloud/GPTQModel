@@ -8,14 +8,14 @@ import torch.nn as nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+from gptqmodel.looper.paro_processor import ParoProcessor
 from gptqmodel.looper.qqq_processor import QQQProcessor
 from gptqmodel.looper.weight_only_processor import WeightOnlyProcessor
 from gptqmodel.models._const import DEVICE, normalize_device
 from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
-from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+from gptqmodel.nn_modules.qlinear.paro import ParoLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear, _right_shift_unpack
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -370,7 +370,7 @@ def test_npu_auto_selects_torch_awq_for_gemm():
     assert qlinear_cls is AwqTorchLinear
 
 
-def test_npu_auto_selects_paroquant_torch_dense_fallback():
+def test_npu_auto_selects_paro_torch_dense_fallback():
     qlinear_cls = select_quant_linear(
         bits=4,
         group_size=128,
@@ -378,7 +378,7 @@ def test_npu_auto_selects_paroquant_torch_dense_fallback():
         sym=True,
         device=DEVICE.NPU,
         backend=BACKEND.AUTO,
-        format=FORMAT.PAROQUANT,
+        format=FORMAT.PARO,
         quant_method=METHOD.PARO,
         pack_dtype=torch.int32,
     )
@@ -446,7 +446,7 @@ def test_npu_awq_processor_selects_torch_runtime_kernel():
     assert _npu_select_quant_linear(qcfg, method=METHOD.AWQ, fmt=FORMAT.GEMM) is AwqTorchLinear
 
 
-def test_npu_paroquant_processor_has_torch_runtime_kernel():
+def test_npu_paro_processor_has_torch_runtime_kernel():
     qcfg = ParoConfig(
         bits=4,
         group_size=128,
@@ -456,16 +456,16 @@ def test_npu_paroquant_processor_has_torch_runtime_kernel():
         offload_to_disk=False,
     )
     model_stub = _NpuProcessorModelStub()
-    processor = ParoQuantProcessor(
+    processor = ParoProcessor(
         **_processor_common_kwargs(qcfg),
         gptq_model=model_stub,
         model=model_stub.model,
     )
 
-    assert processor.name() == "paroquant"
+    assert processor.name() == "paro"
     assert processor.forward.activation_capture is True
     assert processor.qlinear_kernel is ParoLinear
-    assert _npu_select_quant_linear(qcfg, method=METHOD.PARO, fmt=FORMAT.PAROQUANT) is ParoLinear
+    assert _npu_select_quant_linear(qcfg, method=METHOD.PARO, fmt=FORMAT.PARO) is ParoLinear
 
 
 def test_npu_qqq_processor_selects_torch_runtime_kernel():
@@ -502,7 +502,7 @@ def test_npu_supported_quant_methods_have_torch_runnable_kernel():
     cases = [
         (METHOD.GPTQ, FORMAT.GPTQ, 4, 128, TorchLinear),
         (METHOD.AWQ, FORMAT.GEMM, 4, 128, AwqTorchLinear),
-        (METHOD.PARO, FORMAT.PAROQUANT, 4, 128, ParoLinear),
+        (METHOD.PARO, FORMAT.PARO, 4, 128, ParoLinear),
         (METHOD.GGUF, FORMAT.GGUF, "q4_0", -1, GGUFTorchLinear),
         (METHOD.QQQ, FORMAT.QQQ, 4, 128, QQQTorchLinear),
     ]

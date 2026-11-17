@@ -164,7 +164,7 @@ if TYPE_CHECKING:
 # Hessian/Gram from the calibration activations; EXL3 reuses GPTQ's capture.
 # EoRA runs after the primary, so an AWQ + EoRA plan would otherwise keep its
 # adapter Gram on hipBLASLt and produce a different adapter per process (#4614).
-# ParoQuant accumulates no Hessian, but its rotation optimization runs
+# Paro accumulates no Hessian, but its rotation optimization runs
 # fp16/bf16 GEMMs and hipBLASLt selects kernels per process, so two runs with
 # the same seed produced different checkpoints (21.26 vs 21.44 PPL on ROCm).
 # Pinning rocBLAS makes those GEMMs bitwise reproducible at the cost of the
@@ -184,8 +184,8 @@ _DETERMINISTIC_BLAS_PROCESSOR_STEPS = frozenset({
 def _needs_deterministic_hessian(run_plan: QuantizationRunPlan) -> bool:
     """Whether a run's quantization GEMMs must be reproducible on ROCm.
 
-    The name predates ParoQuant: the original set accumulated an input
-    Hessian/Gram. ParoQuant is included because hipBLASLt chooses GEMM kernels
+    The name predates Paro: the original set accumulated an input
+    Hessian/Gram. Paro is included because hipBLASLt chooses GEMM kernels
     per process, which made checkpoints from identical seeded runs differ.
     EoRA is included for its own fp32 input Gram and `eigh`; without it an
     AWQ + EoRA plan produced a different adapter in every process (#4614).
@@ -2314,7 +2314,7 @@ class BaseQModel(nn.Module):
                     else BACKEND.MACAQ_TORCH
                 )
             elif self.quantize_config.method == METHOD.PARO:
-                preferred_backend = BACKEND.PAROQUANT_CUDA
+                preferred_backend = BACKEND.PARO_CUDA
             elif self.quantize_config.method == METHOD.EXL3:
                 preferred_backend = BACKEND.EXL3_EXLLAMA_V3
             elif self.quantize_config.method == METHOD.GGUF:
@@ -2497,11 +2497,11 @@ class BaseQModel(nn.Module):
 
         # On ROCm the deterministic rocBLAS selection is scoped to methods
         # whose quantization GEMMs must be reproducible (GPTQ, QQQ, VPTQ,
-        # MACaQ, EXL3, calibrated FP8 GSQ, and ParoQuant). For the Hessian
+        # MACaQ, EXL3, calibrated FP8 GSQ, and Paro). For the Hessian
         # builders, the calibration forward and replay produce the activations
         # accumulated into the Hessian, so those GEMMs must be reproducible
         # too: pinning only the fp32 X^T X GEMM regressed Qwen2.5-0.5B to
-        # 332/795 differing tensors across processes. ParoQuant accumulates no
+        # 332/795 differing tensors across processes. Paro accumulates no
         # Hessian, but hipBLASLt selects its rotation-optimization GEMM kernels
         # per process, so seeded runs diverged (issue #4460); rocBLAS is the
         # documented speed-for-reproducibility trade-off. AWQ and RTN keep
@@ -6721,7 +6721,7 @@ class BaseQModel(nn.Module):
         }:
             log.warn(
                 f"Module Tree AutoCompat: Failed, quant_method={quant_method}, "
-                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PAROQUANT/VPTQ/MACAQ/NF12"
+                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PARO/VPTQ/MACAQ/NF12"
             )
             return None
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""ParoQuant replay must use the owning module-tree branch's masks (#4226).
+"""Paro replay must use the owning module-tree branch's masks (#4226).
 
 The fixture in ``tests/module_tree/test_parallel_branch_calibration.py``
 already proves that the *kwargs* replayed for each layer come from that layer's
@@ -23,7 +23,7 @@ import torch
 import tests.module_tree.test_parallel_branch_calibration as branch_fixture
 from gptqmodel import CalibrationConfig
 from gptqmodel.looper.input_cache import InputCache
-from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+from gptqmodel.looper.paro_processor import ParoProcessor
 from gptqmodel.quantization.config import ParoConfig
 
 
@@ -132,7 +132,7 @@ def test_processor_records_the_owning_branch_replay_context():
     )
     top_level.branch_first_layer_inputs = {0: text_cache, 2: vision_cache}
 
-    processor = object.__new__(ParoQuantProcessor)
+    processor = object.__new__(ParoProcessor)
     processor.inputs_cache = top_level
     processor._layer_states = {}
     processor._layer_states_lock = threading.Lock()

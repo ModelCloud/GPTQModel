@@ -35,7 +35,7 @@ from gptqmodel.nn_modules.qlinear.bitsandbytes import (
 from gptqmodel.nn_modules.qlinear.fp4 import TorchFP4Linear
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
-from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+from gptqmodel.nn_modules.qlinear.paro import ParoLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
 from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
 from gptqmodel.quantization.awq.utils.packing_utils import (
@@ -47,8 +47,8 @@ from gptqmodel.quantization.config import VPTQConfig
 from gptqmodel.quantization.vptq import VPTQ
 from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 from gptqmodel.utils.logger import render_table
-from gptqmodel.utils.paroquant import (
-    apply_paroquant_rotation_reference,
+from gptqmodel.utils.paro import (
+    apply_paro_rotation_reference,
     build_identity_rotation_buffers,
 )
 
@@ -608,7 +608,7 @@ def main() -> int:
     pack_rows.extend(
         [
             ["QQQ", f"{out_features}x{in_features}", f"{_pack_time(qqq_meta['make']):.3f}"],
-            ["ParoQuant", f"{out_features}x{in_features}", f"{_pack_time(paro_meta['make']):.3f}"],
+            ["Paro", f"{out_features}x{in_features}", f"{_pack_time(paro_meta['make']):.3f}"],
             ["FP8", f"{out_features}x{in_features}", f"{_pack_time(fp8_meta['make']):.3f}"],
             *(
                 [["NVFP4", f"{out_features}x{in_features}", f"{_pack_time(fp4_meta['make']):.3f}"]]
@@ -695,7 +695,7 @@ def main() -> int:
             visible_error=_visible_relative_error(qqq_fallback(x), qqq_oracle),
         )
 
-        rotated = apply_paroquant_rotation_reference(
+        rotated = apply_paro_rotation_reference(
             x,
             paro.pairs,
             paro.theta,
@@ -722,7 +722,7 @@ def main() -> int:
             paro_output = paro(x)
         _add_row(
             rows,
-            method="ParoQuant",
+            method="Paro",
             variant="vectorized rotation + AVX512",
             shape=(out_features, in_features),
             tokens=tokens,
@@ -733,7 +733,7 @@ def main() -> int:
         )
         _add_row(
             rows,
-            method="ParoQuant",
+            method="Paro",
             variant="dense dequant + matmul",
             shape=(out_features, in_features),
             tokens=tokens,

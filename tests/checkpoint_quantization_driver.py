@@ -145,7 +145,7 @@ def main():
         "gguf": BACKEND.GGUF_TORCH,
         "bitsandbytes": BACKEND.BITSANDBYTES,
         "qqq": BACKEND.QQQ,
-        "paro": BACKEND.PAROQUANT_TRITON,
+        "paro": BACKEND.PARO_TRITON,
         "exl3": BACKEND.EXL3_EXLLAMA_V3,
     }.get(args.method, BACKEND.TORCH)
     if args.format in {"gemv", "gemv_fast"}:
