@@ -16,6 +16,7 @@ from gptqmodel.utils.exl3_inline_mixed import (
     InlineMixedTierPlanStore,
     build_layer_tier_plan,
     inline_mixed_policy,
+    projection_score,
 )
 
 
@@ -216,3 +217,42 @@ def test_tier_plan_store_load_authenticates_complete_contract(tmp_path):
             layer_count=1,
             experts_per_layer=16,
         )
+
+
+def _uncalibrated_record(expert: int, projection: str, *, mass: float = 0.0):
+    """A routed projection whose capture was starved (#4995)."""
+
+    record = _record(expert, projection, error=0.0, mass=mass)
+    record["quantizer_metrics"] = {
+        "quantizer_path": "fallback",
+        "hessian_metric_status": "not_applicable_fallback",
+        "hessian_weighted_relative_error": None,
+    }
+    return record
+
+
+def test_starved_projection_scores_zero_and_is_never_upgraded(tmp_path):
+    policy = _policy(tmp_path)
+    records = []
+    for expert in range(16):
+        for projection, multiplier in (("w1", 1.0), ("w3", 2.0), ("w2", 3.0)):
+            if expert == 0:
+                records.append(_uncalibrated_record(expert, projection))
+            else:
+                records.append(
+                    _record(expert, projection, error=(expert + 1) * multiplier)
+                )
+
+    assert projection_score(_uncalibrated_record(0, "w1")) == 0.0
+
+    plan = build_layer_tier_plan(
+        policy=policy,
+        layer_index=0,
+        layer_count=1,
+        candidate_records=records,
+    )
+
+    # The data-free projection has no curvature evidence, so it is never
+    # chosen for the upgraded tier even though it is eligible for the plan.
+    assert plan["selected"]
+    assert all(item["expert"] != 0 for item in plan["selected"])
