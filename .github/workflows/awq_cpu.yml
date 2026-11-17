@@ -61,6 +61,7 @@ jobs:
                 tests/test_rotation_validate_first_4935.py \
                 tests/test_awq_conv1d_gpt2_4887.py \
                 tests/test_calibration_messages_tools_4858.py \
+                tests/test_calibration_tools_formats_4934.py \
                 tests/test_awq_hybrid_moe_root_4903.py \
                 tests/test_awq_deepseek_v4_hash_moe_4880.py \
                 tests/module_tree/test_awq_relationships.py \

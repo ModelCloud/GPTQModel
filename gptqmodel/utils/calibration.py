@@ -376,10 +376,9 @@ def _unwrap_object_array(value: Any) -> Any:
 def _is_single_tool_definition(value: Any) -> bool:
     """Return True for one tool schema rather than a list of them.
 
-    `apply_chat_template(tools=...)` iterates its argument, so a single tool
-    stored as one object (the layout a JSON string round-trip yields for a
-    one-tool dataset) is rejected. The marker keys below are the tool
-    definition's, not a parameters schema's (`{"type": "object", ...}`).
+    The marker keys below belong to a tool definition, not to a parameters
+    schema (`{"type": "object", ...}`), so a parameters object is not mistaken
+    for a tool.
     """
 
     return isinstance(value, Mapping) and (
@@ -387,61 +386,72 @@ def _is_single_tool_definition(value: Any) -> bool:
     )
 
 
-def _normalize_chat_template_payload(value: Any, *, key: str) -> Any:
-    """Return a `tools`/`documents` payload a chat template reads as declared.
+def _normalize_template_input_value(value: Any) -> Any:
+    """Return a ``tools``/``documents`` value a chat template can render.
 
-    HF datasets store these columns in two layouts that `apply_chat_template`
-    does not read the way inference sends them (#4934):
+    Function-calling datasets on the Hub store these columns in two layouts
+    that ``apply_chat_template`` cannot consume verbatim (#4934):
 
-    * a JSON string, because Arrow cannot hold a heterogeneous struct column.
-      The template rejects it outright ("Tools should either be a JSON schema
-      ..."), and the row was then rendered without any tools at all.
-    * a struct column that Arrow unified across rows, so every row's JSON
-      schema gains the other rows' parameter names as `null`. A JSON schema
-      never defines a property as `null`, and the rendered block then differs
-      from what the model sees at inference.
+    * a JSON string, because Arrow cannot hold a different struct schema per
+      row. The template rejects the string with ``ValueError``, and the row is
+      then rendered without the schema -- the #4858 symptom;
+    * a list of dicts read from an Arrow ``Dataset``. Arrow unifies the struct
+      schema across rows, so every row's schema gains the other rows'
+      parameter names with a ``None`` value, e.g.
+      ``"properties": {"city": {...}, "tz": null}``. The rendered tool block
+      then silently differs from what inference sends.
 
-    Decoding a JSON string, dropping `None`-valued mapping entries, and
-    presenting a one-tool `tools` payload as the list the templates iterate
-    restores what the caller declared. Anything else is returned unchanged, and
-    a string that is not a JSON object/array is left alone (a plain `documents`
-    string is not JSON).
+    Decode a JSON string and drop dict entries whose value is ``None``. A real
+    JSON-schema ``null`` is the string ``"null"`` (``{"type": "null"}``), so it
+    survives; a ``None`` element inside a list is a legitimate JSON value and
+    is kept as well. The walk copies every container, so the caller's rows are
+    never mutated.
     """
-
-    normalized = _normalize_chat_template_value(value)
-    if key == "tools" and _is_single_tool_definition(normalized):
-        return [normalized]
-    return normalized
-
-
-def _normalize_chat_template_value(value: Any) -> Any:
-    """Decode a JSON string and drop Arrow's injected `None` entries."""
 
     if isinstance(value, (bytes, bytearray)):
         try:
-            value = value.decode("utf-8")
-        except UnicodeDecodeError:
+            value = bytes(value).decode("utf-8")
+        except UnicodeDecodeError:  # pragma: no cover - non-UTF-8 binary column
             return value
     if isinstance(value, str):
         text = value.strip()
-        if not text or text[0] not in "[{":
+        if not text:
             return value
         try:
-            return _normalize_chat_template_value(json.loads(text))
-        except ValueError:
+            decoded = json.loads(text)
+        except (TypeError, ValueError):
             return value
+        # Only a container is a schema or a document list. A document whose
+        # text happens to read as a JSON scalar stays text.
+        if not isinstance(decoded, (Mapping, list, tuple)):
+            return value
+        return _normalize_template_input_value(decoded)
     # An object-dtype ndarray (`dataset.with_format("numpy")[:]`) holds one
-    # entry per row; unwrap it so the recursion sees python containers.
+    # entry per row; unwrap it so the walk sees python containers.
     value = _unwrap_object_array(value)
     if isinstance(value, Mapping):
         return {
-            name: _normalize_chat_template_value(item)
-            for name, item in value.items()
+            key: _normalize_template_input_value(item)
+            for key, item in value.items()
             if item is not None
         }
     if isinstance(value, (list, tuple)):
-        return [_normalize_chat_template_value(item) for item in value]
+        return [_normalize_template_input_value(item) for item in value]
     return value
+
+
+def _normalize_template_input_payload(value: Any, *, key: str) -> Any:
+    """Normalize a template input and present `tools` as the list templates take.
+
+    `apply_chat_template(tools=...)` iterates its argument, so a one-tool
+    dataset whose column holds a single schema object (the layout a JSON-string
+    round trip yields) is rejected outright. `documents` is passed through.
+    """
+
+    normalized = _normalize_template_input_value(value)
+    if key == "tools" and _is_single_tool_definition(normalized):
+        return [normalized]
+    return normalized
 
 
 def _is_batched_column(value: Any) -> bool:
@@ -948,13 +958,13 @@ def prepare_calibration_dataset(
         # (#4858).
         template_inputs = {}
         if isinstance(row, Mapping):
-            for key in ("tools", "documents"):
+            for key in _TEMPLATE_INPUT_COLUMNS:
                 value = row.get(key)
                 if value is not None:
                     # HF storage layouts (JSON string, Arrow-unified schema with
                     # injected `null` properties) are normalized back to the
                     # payload inference sends (#4934).
-                    template_inputs[key] = _normalize_chat_template_payload(value, key=key)
+                    template_inputs[key] = _normalize_template_input_payload(value, key=key)
         try:
             if template_name == "apply_chat_template":
                 templated = apply_fn(
