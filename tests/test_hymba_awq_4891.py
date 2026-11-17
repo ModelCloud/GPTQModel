@@ -97,12 +97,13 @@ class _HymbaBlock(nn.Module):
 
     def forward(self, hidden_states, past_key_value=None, **kwargs):
         # The real block reads these out of `**kwargs`; a name-based filter that
-        # drops them turns this into a `KeyError`.
+        # drops them turns this into a `KeyError`. Validate the whole required
+        # set explicitly instead of leaving the reads as unused lookups.
+        required = ("attention_mask", "kv_last_layer", "position_ids")
+        missing = [key for key in required if key not in kwargs]
+        if missing:
+            raise KeyError(missing[0])
         attention_mask = kwargs["attention_mask"]
-        # Required by the real block as well; bound explicitly so the presence
-        # check is a real read rather than a no-op expression.
-        _kv_last_layer = kwargs["kv_last_layer"]
-        _position_ids = kwargs["position_ids"]
         residual = hidden_states + self.mamba(self.input_layernorm(hidden_states))
         hidden_states = residual + self.moe(self.pre_moe_layernorm(residual))
         if attention_mask is not None:
