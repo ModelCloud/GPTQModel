@@ -3,10 +3,49 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import copy
+
+from ..local import LocalModelLoader
+from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from . import LlamaQModel
 
 
 class XverseQModel(LlamaQModel):
     fusable = None  # No qualified executor for this definition.
 
-    require_pkgs = ["transformers<=4.38.2", "tokenizers<=0.15.2"]
+    require_trust_remote_code = False
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.xverse.XverseConfig",
+        model_class="gptqmodel.models.ports.xverse.XverseForCausalLM",
+        tokenizer_class="gptqmodel.models.ports.xverse.XverseTokenizer",
+    )
+    dynamic_expert_index = "num_experts"
+    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
+
+    @classmethod
+    def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
+        tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
+        tree = copy.deepcopy(tree)
+        tree[-1]["self_attn"] = {
+            "": tree[-1]["self_attn"],
+            "rotary_emb": ("inv_freq:!",),
+        }
+        if getattr(getattr(model, "config", None), "num_experts", 0):
+            del tree[-1]["mlp"]
+            tree[-1]["mlp:moe"] = {
+                "router": ("router:!",),
+                "experts": {"#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down")},
+                "shared_experts": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+            }
+            if model.config.num_shared_experts is None:
+                del tree[-1]["mlp:moe"]["shared_experts"]
+        return tree
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Dense legacy normalization and routed/shared replay are not fold-qualified.
+        return []
+
+    def pre_quantize(self, module):
+        if self.model.config.pretraining_tp > 1:
+            raise ValueError("XVERSE pretraining_tp > 1 uses dense weight slices; quantization is not qualified")
+        return super().pre_quantize(module)

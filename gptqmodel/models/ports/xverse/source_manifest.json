@@ -1,0 +1,267 @@
+{
+  "XVERSE-13B": {
+    "repo": "xverse/XVERSE-13B",
+    "revision": "11ac840dda17af81046614229fdd0c658afff747",
+    "sha256": {
+      "README.md": "473d204d7c97f205b53a417cb98ac0848ffcfb9781d185b96472eeefcbccd4b1",
+      "config.json": "10eac9a052c7c8329ffefc5dcd361d74a59513b6bd33857476a7ea925257550e",
+      "configuration_xverse.py": "ca3304870409d04ebe919580f251bc943491b0d8156f4b45db1547e1c5ac6525",
+      "generation_config.json": "0e0dfd13dfaa7ecad5ef60a3b999e0e9e5e65dca7f5374ffd3abbb2747c88690",
+      "modeling_xverse.py": "2afff62119ec9d16d13a4250eed15a19f4f073d12f9fa9587ba4c41dae69cc5e",
+      "pytorch_model.bin.index.json": "23e9ccfcd3603665dbc3be6ae384b3e134ad22334620ea5642cce6c0f60f5c74",
+      "special_tokens_map.json": "d3afee922c044b97fe35b26cade93702574354ddabe2c6e0530ebf35a08f17a2",
+      "tokenizer_config.json": "0bd6e22165bbd9bccd0afd612874c01f07a20b1f8a8b9fa157c73e7e127dcac4"
+    }
+  },
+  "XVERSE-13B-256K": {
+    "repo": "xverse/XVERSE-13B-256K",
+    "revision": "a0a34b899fb26cbac14cf518b01846839773e678",
+    "sha256": {
+      "README.md": "e1414dec58c3de641f339b169bcd2a1c5add995745da54959c94a287beeda22a",
+      "config.json": "18ee6dcb20a21865d264ed35b2be18a9010c46c8aa6b555a5b72b133f623bbc0",
+      "configuration_xverse.py": "e2d3e20f72f9c36ba8df2696f25413e9f78b7c2558c1073c7e7bcea07abb6172",
+      "generation_config.json": "0e0dfd13dfaa7ecad5ef60a3b999e0e9e5e65dca7f5374ffd3abbb2747c88690",
+      "modeling_xverse.py": "488257e39373f0f326b02ad9f31d0a66105ba7089252d5fbff7b42d901513112",
+      "pytorch_model.bin.index.json": "2b867d1902413efaf97bb06dfdf51c9d55eec1a493b80c7bacbab1b7ecfce55b",
+      "special_tokens_map.json": "d3afee922c044b97fe35b26cade93702574354ddabe2c6e0530ebf35a08f17a2",
+      "tokenizer_config.json": "0bd6e22165bbd9bccd0afd612874c01f07a20b1f8a8b9fa157c73e7e127dcac4"
+    }
+  },
+  "XVERSE-13B-Chat": {
+    "repo": "xverse/XVERSE-13B-Chat",
+    "revision": "1e4944aaa1d8c8d0cdca28bb8e3a003303d0781b",
+    "sha256": {
+      "README.md": "2df301ef0663f59495f4dcd7c70c28c25f1ded2052f3a8a562e4d33a30fbf528",
+      "config.json": "10eac9a052c7c8329ffefc5dcd361d74a59513b6bd33857476a7ea925257550e",
+      "configuration_xverse.py": "e2d3e20f72f9c36ba8df2696f25413e9f78b7c2558c1073c7e7bcea07abb6172",
+      "generation_config.json": "0e0dfd13dfaa7ecad5ef60a3b999e0e9e5e65dca7f5374ffd3abbb2747c88690",
+      "modeling_xverse.py": "0ed45010bf885972b216cc48e2bf95304f77e3ffa7b690b14b51b42157cecb7e",
+      "pytorch_model.bin.index.json": "23e9ccfcd3603665dbc3be6ae384b3e134ad22334620ea5642cce6c0f60f5c74",
+      "special_tokens_map.json": "d3afee922c044b97fe35b26cade93702574354ddabe2c6e0530ebf35a08f17a2",
+      "tokenizer_config.json": "0bd6e22165bbd9bccd0afd612874c01f07a20b1f8a8b9fa157c73e7e127dcac4"
+    }
+  },
+  "XVERSE-65B": {
+    "repo": "xverse/XVERSE-65B",
+    "revision": "2f5c3c26594741b339d05b5bdf539d3a3583a6ba",
+    "sha256": {
+      "README.md": "367c5818ab339ea7a3b1327e5437a504887839d9e5ae54968652c74ef832582a",
+      "config.json": "3d4f502f6648afc0d8598741d497191f3685c090f0300d9dde85fa55e17ff91d",
+      "configuration_xverse.py": "b4204e7605dc3727e962223a8b1d5697ea04599b88bb41addbbf9558bff9c696",
+      "generation_config.json": "3059746eb92f013c3c9ed4be6f6d6467c6b3e19483380f66013c12ed54a3969b",
+      "modeling_xverse.py": "4ee70f207f7a3b340f4e65e337809f1ca33ddf9eb2cb5bae038779ebb04cbdca",
+      "pytorch_model.bin.index.json": "40444c6ba997ec49bb916b400069920b36363208c61f807299e37e437c915b3b",
+      "special_tokens_map.json": "d3afee922c044b97fe35b26cade93702574354ddabe2c6e0530ebf35a08f17a2",
+      "tokenizer_config.json": "0bd6e22165bbd9bccd0afd612874c01f07a20b1f8a8b9fa157c73e7e127dcac4"
+    }
+  },
+  "XVERSE-65B-2": {
+    "repo": "xverse/XVERSE-65B-2",
+    "revision": "3f1c9ac7904404e18bf3aff5c139e51527074e8a",
+    "sha256": {
+      "README.md": "f1550b46cde8bc991214ad8c092b1433208a70f06390c92b9718e1ca3f64dab6",
+      "config.json": "3d4f502f6648afc0d8598741d497191f3685c090f0300d9dde85fa55e17ff91d",
+      "configuration_xverse.py": "b4204e7605dc3727e962223a8b1d5697ea04599b88bb41addbbf9558bff9c696",
+      "generation_config.json": "3059746eb92f013c3c9ed4be6f6d6467c6b3e19483380f66013c12ed54a3969b",
+      "modeling_xverse.py": "4ee70f207f7a3b340f4e65e337809f1ca33ddf9eb2cb5bae038779ebb04cbdca",
+      "pytorch_model.bin.index.json": "79f3b351cb4a6c22f9ba4cb521c7a748fdce145209021c280fdb67c48e7545dd",
+      "special_tokens_map.json": "d3afee922c044b97fe35b26cade93702574354ddabe2c6e0530ebf35a08f17a2",
+      "tokenizer_config.json": "0bd6e22165bbd9bccd0afd612874c01f07a20b1f8a8b9fa157c73e7e127dcac4"
+    }
+  },
+  "XVERSE-65B-Chat": {
+    "repo": "xverse/XVERSE-65B-Chat",
+    "revision": "bb1ea61dfb5037a9a0d016607bdd3f9ff9ab6666",
+    "sha256": {
+      "README.md": "066af01e8ae4accf80080677b8f90d89e5944e9fc026fd7c23401b4c8fd47e8b",
+      "config.json": "87d5cfb123cffd47816795a37c08b3f683b6430d32124bad09ae6a60fbbfd05a",
+      "configuration_xverse.py": "e2d3e20f72f9c36ba8df2696f25413e9f78b7c2558c1073c7e7bcea07abb6172",
+      "generation_config.json": "0e0dfd13dfaa7ecad5ef60a3b999e0e9e5e65dca7f5374ffd3abbb2747c88690",
+      "modeling_xverse.py": "0ed45010bf885972b216cc48e2bf95304f77e3ffa7b690b14b51b42157cecb7e",
+      "pytorch_model.bin.index.json": "ee6b480d984313da5411e32beb4d3c6a2a236ccc60a735e2c0b88b41ee20576d",
+      "special_tokens_map.json": "d3afee922c044b97fe35b26cade93702574354ddabe2c6e0530ebf35a08f17a2",
+      "tokenizer_config.json": "0bd6e22165bbd9bccd0afd612874c01f07a20b1f8a8b9fa157c73e7e127dcac4"
+    }
+  },
+  "XVERSE-7B": {
+    "repo": "xverse/XVERSE-7B",
+    "revision": "3778b254def675586e9218ccb15b78d6ef66a3a7",
+    "sha256": {
+      "README.md": "98e816c0a57f60f7b34b17461c59b5f84d25595d52ad481a26ce4006085ec3b8",
+      "config.json": "4fc33bdf7fd305e3384746bb867df358a48c5fbd9ff5d56de66ae79bc274c4a6",
+      "configuration_xverse.py": "e2d3e20f72f9c36ba8df2696f25413e9f78b7c2558c1073c7e7bcea07abb6172",
+      "generation_config.json": "0e0dfd13dfaa7ecad5ef60a3b999e0e9e5e65dca7f5374ffd3abbb2747c88690",
+      "modeling_xverse.py": "072471f5dfc9d79d344a622929a90cfa0655593145b4fbb98b32d63ed1473e83",
+      "pytorch_model.bin.index.json": "0946bd80126c2dd3ee2c230a8d01e3bf793ec87d8a5c2258f8bfbdb8a6dc8c48",
+      "special_tokens_map.json": "d3afee922c044b97fe35b26cade93702574354ddabe2c6e0530ebf35a08f17a2",
+      "tokenizer_config.json": "0bd6e22165bbd9bccd0afd612874c01f07a20b1f8a8b9fa157c73e7e127dcac4"
+    }
+  },
+  "XVERSE-7B-Chat": {
+    "repo": "xverse/XVERSE-7B-Chat",
+    "revision": "60acc8c453c067b54df88be98bfdf60585ab5441",
+    "sha256": {
+      "README.md": "49c297fff9bb399c73fa07a5a4c907b9284497c31944f61495fb520852eedc45",
+      "config.json": "4fc33bdf7fd305e3384746bb867df358a48c5fbd9ff5d56de66ae79bc274c4a6",
+      "configuration_xverse.py": "e2d3e20f72f9c36ba8df2696f25413e9f78b7c2558c1073c7e7bcea07abb6172",
+      "generation_config.json": "0e0dfd13dfaa7ecad5ef60a3b999e0e9e5e65dca7f5374ffd3abbb2747c88690",
+      "modeling_xverse.py": "072471f5dfc9d79d344a622929a90cfa0655593145b4fbb98b32d63ed1473e83",
+      "pytorch_model.bin.index.json": "0946bd80126c2dd3ee2c230a8d01e3bf793ec87d8a5c2258f8bfbdb8a6dc8c48",
+      "special_tokens_map.json": "d3afee922c044b97fe35b26cade93702574354ddabe2c6e0530ebf35a08f17a2",
+      "tokenizer.json": "588e468eb27f757265fe6a057ea858fdeb20b86ac4d5f143bae54d68f73849ac",
+      "tokenizer_config.json": "0bd6e22165bbd9bccd0afd612874c01f07a20b1f8a8b9fa157c73e7e127dcac4"
+    }
+  },
+  "XVERSE-Ent-A4.2B": {
+    "header_sha256": {
+      "model-00001-of-00007.safetensors": "74120c3086eac198de06d19c5806ac6a0193d95717b05de22030a54e0f45b4e6",
+      "model-00002-of-00007.safetensors": "45bf4f6dc4d95c09e8178d0081e8cc55066f0d377276880e0059d2ffdd59c1f2",
+      "model-00003-of-00007.safetensors": "6d1e99bf82dd257dc0d186ffc581d4e2ac218fd1ce12c2a5c0247ff19b0d4582",
+      "model-00004-of-00007.safetensors": "5fd4dc1ef7fc3f0b4994be8c26b961183b808d226ad244d116ee82feab914246",
+      "model-00005-of-00007.safetensors": "0cf1abf744c911cdc565a937fdb1faabb3fe89f9c885c11ec1a2f3adb8fa9152",
+      "model-00006-of-00007.safetensors": "c34d6da21006cd7682194816ee8f6d0f9a0a979211964e7be3497aeb3914cdad",
+      "model-00007-of-00007.safetensors": "92574787b1a41ee2842125d5bf953d741154530d38a7aba5cc81bb7f39d97e33"
+    },
+    "repo": "xverse/XVERSE-Ent-A4.2B",
+    "revision": "f37f333bf51498d0c715c8dea9660042712590b0",
+    "sha256": {
+      "README.md": "205151c2e88c037b2ff85d5004e2c5aaa9ea046ee2e9605df609ee6df455f76e",
+      "config.json": "1cefcc583514528e550b577a2f00786fdfb885cf78a7e2c32743913caf1f22b9",
+      "configuration_xverse.py": "649254f2dbc53ab02f07563c109ae7df152a7c105912a8d6fa98b4365b442615",
+      "model.safetensors.index.json": "b72d7f455d2e8a6a5627ca1ca5cb1fa5325c4129cf04b6da1d1318fff2265007",
+      "modeling_xverse.py": "0957cb9aae2f8f65783aa5fc59ffb76d7c85725cdc0bf8956fcf72ea642e0a87",
+      "special_tokens_map.json": "d3afee922c044b97fe35b26cade93702574354ddabe2c6e0530ebf35a08f17a2",
+      "tokenizer_config.json": "ba2cf67c866672d715270f4c9b41fdd14f062a595ce975b5a78ae2bdb400d27f"
+    }
+  },
+  "XVERSE-Ent-A5.7B": {
+    "header_sha256": {
+      "model-00001-of-00015.safetensors": "ba7ce81298c7c83f053a6c642b8f21dfebed4e668d10428ac01224bb5764d847",
+      "model-00002-of-00015.safetensors": "c70a9b3ebccd2c6837c069a81da397431b519461f732df2e28b35282fb841bf4",
+      "model-00003-of-00015.safetensors": "05c434780d150f06656f4334915cda63ec1f0ed4e1e8c7e988e2c46ae7f8e587",
+      "model-00004-of-00015.safetensors": "abbdd3bd22668f9a5acff147572852d1bd5a44b093c253cc12c6d5d31c522536",
+      "model-00005-of-00015.safetensors": "f4496069cda7c281bead49165b7b59865fca531d3915d47fd912da32197063ff",
+      "model-00006-of-00015.safetensors": "b914e0755f2dc8b36ec3f14fda11660b94ea9ab081e20236e3fb3343717cd4c9",
+      "model-00007-of-00015.safetensors": "3d5b50982d070a87ddb70cf2868c137d02535b497b90ec117e79685c57956079",
+      "model-00008-of-00015.safetensors": "6d3f6bdd38ff9ca0f1ae4ed1eae2c47dec0b28d442564bc42052e3e9597c8902",
+      "model-00009-of-00015.safetensors": "32987051be76ca3c7cf832e69ae8541b16ccaca48f30e89c1231dbefdd01e8d1",
+      "model-00010-of-00015.safetensors": "62dda2d07a681f92c46cc622e74616a39ff09f93acc3e03e2903c5cdf58fe651",
+      "model-00011-of-00015.safetensors": "c4d1cca0f9a637bc63fe14f2532b0227ef61ae11e3a7a075fae99189a7aeac56",
+      "model-00012-of-00015.safetensors": "b08a369c19d32004a8c26afd3d06aca479d4ec18d47201454645d6727de9ce26",
+      "model-00013-of-00015.safetensors": "8477323d8e0941386c0b154fef00bc7525d9319301a6c663684a4dd6ef772bb7",
+      "model-00014-of-00015.safetensors": "13618a2b4d8b943b81710410ab726193e50f0283f922b69c5ec5d748aa0173fe",
+      "model-00015-of-00015.safetensors": "91a4c9fcbdb3062b29c82262f61246aaf3477acb6ab4b2a9dd6c26b4f81f6f0f"
+    },
+    "repo": "xverse/XVERSE-Ent-A5.7B",
+    "revision": "bb9f23cc7fe2afdfb721be31875c39d11f8a18ef",
+    "sha256": {
+      "README.md": "4134c0dbc84d95625a5e956432bb6c83c35be2747a625a7cd9c8a29152a81afc",
+      "config.json": "4627b609b72e44b6e07fb1494b240ef8dde8ec704af583d093c1bd67c315fb41",
+      "configuration_xverse.py": "649254f2dbc53ab02f07563c109ae7df152a7c105912a8d6fa98b4365b442615",
+      "generation_config.json": "da81b0dd4001a8e19fb5840d2b524f6957f44ddde6f5c3fe32b1f36cef5205bf",
+      "model.safetensors.index.json": "6d22d5fdf6987217d41b7aae113226d13b36a7212e3c01152d7c7f5859207ab4",
+      "modeling_xverse.py": "0957cb9aae2f8f65783aa5fc59ffb76d7c85725cdc0bf8956fcf72ea642e0a87",
+      "special_tokens_map.json": "cc2e013b7545f183ef03e079a3c91c6f364fa37e4068c512d7dd843e59024535",
+      "tokenizer.json": "79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4",
+      "tokenizer_config.json": "8004530facf809ac432114de2a4dcc65fcb632da5ec16d666091aeb6a2ee444a"
+    }
+  },
+  "XVERSE-MoE-A36B": {
+    "header_sha256": {
+      "model-00001-of-00051.safetensors": "1b36f41d54e6e165ac8612f7cef5be83970da2d66c52e7db44620882c839dc79",
+      "model-00002-of-00051.safetensors": "a150ee5b01bd4974ffed5f24293ee429d07524af951181b055b5b3db0515af72",
+      "model-00003-of-00051.safetensors": "2b934af2b4368da25a8d93615fbceb4879a802884ab0d79dba3b090053c835e6",
+      "model-00004-of-00051.safetensors": "7739f75c55037ac17921234c5818eece761bf401ea170ec698a8e694d753340f",
+      "model-00005-of-00051.safetensors": "c9d30b6adbc5b9ea3de03cacb3515fd87ea3b64e0eba2f94dbd5f4607051908e",
+      "model-00006-of-00051.safetensors": "152b01e93cc7243a98b0919624b7a87e90d3acb0bc9f29b2f98f520043deffc8",
+      "model-00007-of-00051.safetensors": "35140e041b3ec15276e00ada1a04f55bb556707ecdc501c4439a563dcfbfd763",
+      "model-00008-of-00051.safetensors": "444aa5c4ee7ff24b2b152223aa8b2a0f2a75522bede4e5c426209fa918146cc6",
+      "model-00009-of-00051.safetensors": "abb6c85242126e0acb6ffd152901f2b6e9a106ad1339f869f98ce3de4030e2c3",
+      "model-00010-of-00051.safetensors": "0fb8d443ac08de98ffca6cf3a9590adda1343339f3f9316073673a59dc3a4239",
+      "model-00011-of-00051.safetensors": "fb45c5e41d5086d1897befe0171b4060e9ec6d836b178b43c605525081e76a46",
+      "model-00012-of-00051.safetensors": "636490ee6ea6044d73e715950f3d83a9f4f9e3c8569234370dc13f618995dfe2",
+      "model-00013-of-00051.safetensors": "8c53af9a4c87010be6a10b7ee6c02b35c17d1d0669f2dfcce9169a3e70ea75c9",
+      "model-00014-of-00051.safetensors": "978aafc5b2ea33be0b608a0661a3a52e11f34ba11d2577a5dc2b83283559e84f",
+      "model-00015-of-00051.safetensors": "a96c33a3415d0ba40b9aa3c5cea93e3b68ddba21dbd2e6ed36f0d82b072f9222",
+      "model-00016-of-00051.safetensors": "e757300155717aeb51651fc4e06050c341764fba7429074f9a3e819c98e5ff8b",
+      "model-00017-of-00051.safetensors": "643bfd639d00ecf2091e3720b6f0f658dc928954c30cff5083106016fc9bd0ba",
+      "model-00018-of-00051.safetensors": "fce3c1485617abd7838c75f31ec0e7b910cca328ec714e89611d565af6037c6a",
+      "model-00019-of-00051.safetensors": "f69af29608a6beefc2e79d20002d6e6ff79072477d7afa50c1c4c44a2435d7c3",
+      "model-00020-of-00051.safetensors": "cb0a8adf65f83f0ab3bfa9913cf7e9cbae511139574083d040450b118e775d7e",
+      "model-00021-of-00051.safetensors": "6c8b132e6fb4846fb2fde02d93710b31c838ce302b0077898b8ab46dd10a9a0f",
+      "model-00022-of-00051.safetensors": "eebfa02e43e713ea9801992fcef871a31116c42a8a5294c57ad72cf99f2a5fb2",
+      "model-00023-of-00051.safetensors": "68015d407829f7635ea2c784ff97bb8860a6a3a29fd63b3a65077b3d61cb37f2",
+      "model-00024-of-00051.safetensors": "be3d91c6421aa06ed388b7e8204c0035a89df84d8c67d6b2048667561f6f2407",
+      "model-00025-of-00051.safetensors": "393500b182a72f8769e9c169a47592afdc4e9067ff5db6ab75c05866bbdd9474",
+      "model-00026-of-00051.safetensors": "75c4369b44d9409bac36e91ee0bffc152930d17d396e101123031de289893b8a",
+      "model-00027-of-00051.safetensors": "5643313a8e675967a008073a438e9281ebc969027205bad6de007551ddbaab77",
+      "model-00028-of-00051.safetensors": "9fc05c180e38a67e3952695553558cbb7d18dc1300fd016c4483bc1161ed4dd4",
+      "model-00029-of-00051.safetensors": "91c79151cb4a4c798ac7892b43788f375cbb468545b63ba2bcde5d9f522b6844",
+      "model-00030-of-00051.safetensors": "f87d8b6d910862cb5f06439a9004cd5497447bc0fb196d66f2121e7bded0c812",
+      "model-00031-of-00051.safetensors": "43b28347001bf4709dd8fbbbf1196114ef60bca98031fe561f9a63c301aa81ea",
+      "model-00032-of-00051.safetensors": "e9993695329cfa8cc47199fc6a8246eae0265fc073a7f4251aa92563fc8857b4",
+      "model-00033-of-00051.safetensors": "a1aa00b59ac8a0078487b8d8f9aabe180f777dde1a8aa9d1d965cfaa134815d3",
+      "model-00034-of-00051.safetensors": "e928166d8e48d0d0f6e35d2c77fc17166b77c9f0e4ab37d1a8aa129d2ca121e0",
+      "model-00035-of-00051.safetensors": "765a40f2e9875b91593c67b4f1917420c1d3d61c13d29ab1bbf243ea465ad13b",
+      "model-00036-of-00051.safetensors": "c8c251942ca6de905b60542ce4256c1fce60d7c5f280103b708ecc2b90b63ac7",
+      "model-00037-of-00051.safetensors": "a54a36aba6f7dce3ab00b257f981bf5438105baf713e79bae3632e8b0508e97f",
+      "model-00038-of-00051.safetensors": "8c50f047ee622ca0d6c6d20716300f5f89aa5ce9593b427e0067e0b2f75a61db",
+      "model-00039-of-00051.safetensors": "d2fe63ec153cc3fbf7da449ac29caf12f32041c484c5dcd57a47f45b6ea1735f",
+      "model-00040-of-00051.safetensors": "f96160248f59e688e8adb497ad931415d52df739e01206def21626cfa62db0ac",
+      "model-00041-of-00051.safetensors": "aac897842b3a1b1079ea0ff39fba12e86488b8d899be3dbc6d284c03030eb61f",
+      "model-00042-of-00051.safetensors": "e4ae076b49cb4f469fd66108379c51a254e35deab165a239cc6110d8b64ab8a0",
+      "model-00043-of-00051.safetensors": "7da2c1e6b719f45c944746632fe7d50bbfa8711849b75194b3830a1c49f14928",
+      "model-00044-of-00051.safetensors": "d3c0aaf0f2afe8e66a1f7b8aca0b7581f7898f4fec7fd0c2c5a93aec6d107eb9",
+      "model-00045-of-00051.safetensors": "d31227a8816880d933e13292455601890384815ca6d61cacbf11cb11d77962ae",
+      "model-00046-of-00051.safetensors": "c6a7afcf1a9a7faad7a2eecc3d640a6ee84045e6287904e9956b164fa8ab9597",
+      "model-00047-of-00051.safetensors": "9c470a3eb63fd8378b6ec37c20965ae67be6cdd76492addf84b4761755fbee6d",
+      "model-00048-of-00051.safetensors": "cc9a947375c3db19d4734c0caff5d45cae879e29e51c3ae137857e7250615684",
+      "model-00049-of-00051.safetensors": "672f01af3a9df265fec2e203e0ff8cf490ae9be9ca57cb44de0d71a622b1bd04",
+      "model-00050-of-00051.safetensors": "469aec725fbc0c7659d49870a091930eafa041f8029f0cd8cb3974d8d2da9697",
+      "model-00051-of-00051.safetensors": "f9c70197605cc193534e9174a5e2936e5528746d3622090c8d0c33ee3573f3ed"
+    },
+    "repo": "xverse/XVERSE-MoE-A36B",
+    "revision": "2d9a062a243cb2f6a1d30434f3136145c679f76a",
+    "sha256": {
+      "README.md": "e76de29e527f74db69fa82906282c87502b6f0a3bc67674b717505e705171d6a",
+      "config.json": "70cd62efbde41b8a3a465e6d02bdc7e874aaeae93409d372e5fd3490a253b23e",
+      "configuration_xverse.py": "649254f2dbc53ab02f07563c109ae7df152a7c105912a8d6fa98b4365b442615",
+      "model.safetensors.index.json": "6d5403f3507f545ff917530ee2455e810065ae2cff04fb40009efc1922a287d5",
+      "modeling_xverse.py": "0957cb9aae2f8f65783aa5fc59ffb76d7c85725cdc0bf8956fcf72ea642e0a87",
+      "special_tokens_map.json": "d3afee922c044b97fe35b26cade93702574354ddabe2c6e0530ebf35a08f17a2",
+      "tokenizer_config.json": "ba2cf67c866672d715270f4c9b41fdd14f062a595ce975b5a78ae2bdb400d27f"
+    }
+  },
+  "XVERSE-MoE-A4.2B": {
+    "repo": "xverse/XVERSE-MoE-A4.2B",
+    "revision": "3dc97ca598fd5b8325589eee134ff1bb620bddda",
+    "sha256": {
+      "README.md": "29b566566fdb689f8f823c8d729de820c812130410810cb7d4b790df54b8ee85",
+      "config.json": "9439a8ad01c9a45a92ee7737316af18285a52120a8a707f15005d144ed0c0c61",
+      "configuration_xverse.py": "3dcdd5db1f546d8cc6e6731c4c73d5752b4f4c5afa5f1d6282b3940188c6deba",
+      "modeling_xverse.py": "7490b0a1b195e85dd1b24e93248dd24e1967cde00dc3bda72ec3baa13eaf5c03",
+      "pytorch_model.bin.index.json": "367ddee7b7e427d9998b35f192c41e15c34456c8ae040b51b4cdbd98990474a5",
+      "special_tokens_map.json": "d3afee922c044b97fe35b26cade93702574354ddabe2c6e0530ebf35a08f17a2",
+      "tokenizer.json": "588e468eb27f757265fe6a057ea858fdeb20b86ac4d5f143bae54d68f73849ac",
+      "tokenizer_config.json": "0bd6e22165bbd9bccd0afd612874c01f07a20b1f8a8b9fa157c73e7e127dcac4"
+    }
+  },
+  "XVERSE-MoE-A4.2B-Chat": {
+    "repo": "xverse/XVERSE-MoE-A4.2B-Chat",
+    "revision": "283b6278800a87daa6c5349c69d6ae3841cc43d8",
+    "sha256": {
+      "README.md": "50e5a430ae6790601011db7d924039212e8b50be3dbe794dc6df35fb2528add9",
+      "config.json": "0e7a19d732a312a2d4a4e2db7c1f551578c9860027c2f083a98af8e6a56c9469",
+      "configuration_xverse.py": "3dcdd5db1f546d8cc6e6731c4c73d5752b4f4c5afa5f1d6282b3940188c6deba",
+      "generation_config.json": "0e0dfd13dfaa7ecad5ef60a3b999e0e9e5e65dca7f5374ffd3abbb2747c88690",
+      "modeling_xverse.py": "bfb6bf795ba5da2381e5984b834f191027eefa746ed631208495e6b9d99c12a4",
+      "pytorch_model.bin.index.json": "f1b6173c7bc8be738eccc4143aac885bbab2b1e6fb979239565e45328b9f52ec",
+      "special_tokens_map.json": "d3afee922c044b97fe35b26cade93702574354ddabe2c6e0530ebf35a08f17a2",
+      "tokenizer_config.json": "0bd6e22165bbd9bccd0afd612874c01f07a20b1f8a8b9fa157c73e7e127dcac4"
+    }
+  },
+  "code_license": {
+    "sha256": "b288907745e5b717223df2efa6c4e205d76882292bce49b8f8910ee13d4dfaf6",
+    "url": "https://raw.githubusercontent.com/xverse-ai/XVERSE-7B/551dea7e53be070e9f76188e450467200af320f2/LICENSE"
+  }
+}
