@@ -150,6 +150,13 @@ def resolve_blockfloat_dtype(dtype, config=None) -> torch.dtype:
 #: Values per shared exponent.
 BLOCKFLOAT_BLOCK = 16
 
+#: Shared exponents the 8-bit field can store. The field holds ``e + 127`` with
+#: the usual bias, so a candidate beyond either end has no representable
+#: ``2**e``: ``+128`` overflows to infinity and ``-128`` is not a normal scale.
+#: Neither is a grid point, so neither may take part in the per-block search.
+BLOCKFLOAT_EXPONENT_MIN = -127
+BLOCKFLOAT_EXPONENT_MAX = 127
+
 
 #: Buffer names transformers deliberately keeps in float32 inside a bf16 model.
 #: ``from_pretrained`` never casts them -- they are built with an explicit
@@ -221,6 +228,34 @@ def stored_mantissa_bits(total_bits: int) -> int:
     return max(total_bits - 2, 0)
 
 
+def _block_base_exponent(blocks: torch.Tensor) -> torch.Tensor:
+    """Exact binade index of each block maximum, shaped like the block axis.
+
+    ``floor(log2(m))`` is the binade index, but ``torch.log2`` rounds to nearest
+    and is therefore not exact at a power of two: ``log2(float32.max)`` returns
+    ``128.0`` although the value lies in binade 127, and the same one-step-high
+    reading happens just below every ``2**k``. The IEEE-754 exponent field is
+    exact, so decoding it cannot inherit that rounding.
+
+    A zero block keeps the existing convention of being scaled by
+    ``float32.tiny`` (binade -126) so all of its codes stay zero. A non-finite
+    block maximum is rejected: the storage format has no NaN or infinity.
+    """
+
+    magnitude = blocks.abs().amax(dim=-1, keepdim=True)
+    if not bool(torch.isfinite(magnitude).all()):
+        raise ValueError(
+            "block-float storage cannot represent a non-finite value; "
+            "every block maximum must be finite"
+        )
+    # Clamping to ``tiny`` first keeps the historical zero-block convention (all
+    # codes zero) and guarantees a normal value, whose exponent field is exactly
+    # the binade index.
+    safe = magnitude.clamp_min(torch.finfo(torch.float32).tiny).contiguous()
+    fields = (safe.view(torch.int32) >> 23) & 0xFF
+    return (fields - 127).to(torch.float32)
+
+
 def quantize_blockfloat(
     weight: torch.Tensor, total_bits: int, *, block: int = BLOCKFLOAT_BLOCK
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -249,11 +284,9 @@ def quantize_blockfloat(
         x = torch.nn.functional.pad(x, (0, pad))
     blocks = x.reshape(*shape[:-1], x.shape[-1] // block, block)
 
-    magnitude = blocks.abs().amax(dim=-1, keepdim=True)
-    # Shared exponent from the block maximum; floor(log2) keeps the largest
+    # Shared exponent from the block maximum; the binade index keeps the largest
     # value inside the mantissa range rather than scaling it out.
-    safe = magnitude.clamp_min(torch.finfo(torch.float32).tiny)
-    base_exponent = torch.floor(torch.log2(safe))
+    base_exponent = _block_base_exponent(blocks)
 
     mant_bits = stored_mantissa_bits(total_bits)
     # ``mant_bits`` explicit bits plus one implicit leading bit.
@@ -267,21 +300,30 @@ def quantize_blockfloat(
         rounded = torch.round(blocks / scale * levels) / levels
         return rounded.clamp(min=-limit, max=limit) * scale
 
-    # ``floor(log2(block_max))`` is not always the exponent with the lowest
-    # error: the grid only reaches ``limit * 2**exp``, so a block whose maximum
-    # sits in the top quarter of a binade clips by up to ``2 - limit`` of its
-    # largest value. Neighbouring exponents trade that clipping against a
+    # The binade index of the block maximum is not always the exponent with the
+    # lowest error: the grid only reaches ``limit * 2**exp``, so a block whose
+    # maximum sits in the top quarter of a binade clips by up to ``2 - limit``
+    # of its largest value. Neighbouring exponents trade that clipping against a
     # coarser step, and the winner differs per block. Pick it per block by
     # measured squared error; the grid itself is unchanged.
     best = _round_with(base_exponent)
     best_err = (best - blocks).pow(2).sum(dim=-1, keepdim=True)
     best_exp = base_exponent
     for delta in (-1, 1):
-        cand = _round_with(base_exponent + delta)
+        candidate_exp = base_exponent + delta
+        # A neighbour past the stored range has no representable scale: on the
+        # largest binade ``+1`` is ``2**128``, which is inf, and ``0 * inf``
+        # makes the rounded block NaN. Reject the candidate outright -- its
+        # NaN/inf error must never be compared, because it cannot win and a
+        # later candidate would then be compared against the poisoned value.
+        usable = (candidate_exp >= BLOCKFLOAT_EXPONENT_MIN) & (
+            candidate_exp <= BLOCKFLOAT_EXPONENT_MAX
+        )
+        cand = _round_with(candidate_exp)
         err = (cand - blocks).pow(2).sum(dim=-1, keepdim=True)
-        take = err < best_err
+        take = usable & torch.isfinite(err) & (err < best_err)
         best = torch.where(take.expand_as(best), cand, best)
-        best_exp = torch.where(take, base_exponent + delta, best_exp)
+        best_exp = torch.where(take, candidate_exp, best_exp)
         best_err = torch.where(take, err, best_err)
 
     exponent = best_exp
@@ -356,6 +398,8 @@ def _entropy_bits(weight: torch.Tensor, *, group_size: int = 128) -> float:
 __all__ = [
     "BLOCKFLOAT_BITS",
     "BLOCKFLOAT_BLOCK",
+    "BLOCKFLOAT_EXPONENT_MAX",
+    "BLOCKFLOAT_EXPONENT_MIN",
     "TT_BLOCKFLOAT_DTYPES",
     "TT_BLOCKFLOAT_VENDOR_ATTRS",
     "quantize_bfloat2_b",
@@ -386,15 +430,28 @@ def _block_exponents(weight: torch.Tensor, block: int = BLOCKFLOAT_BLOCK) -> tor
     if pad:
         w = torch.nn.functional.pad(w, (0, pad))
     blocks = w.reshape(*w.shape[:-1], -1, block)
-    safe = blocks.abs().amax(dim=-1, keepdim=True).clamp_min(torch.finfo(torch.float32).tiny)
-    return torch.floor(torch.log2(safe)).squeeze(-1)
+    return _block_base_exponent(blocks).squeeze(-1)
 
 
 def _round_with_exponents(
     x: torch.Tensor, exponents: torch.Tensor, bits: int, block: int = BLOCKFLOAT_BLOCK
 ) -> torch.Tensor:
-    """Round ``x`` onto a *fixed* set of block exponents."""
+    """Round ``x`` onto a *fixed* set of block exponents.
 
+    The exponents must be storable ones. An out-of-range value has no
+    representable scale -- ``2**128`` is inf -- so rounding through it would
+    turn the block into NaN instead of failing.
+    """
+
+    exponents = exponents.to(torch.float32)
+    if bool(
+        ((exponents < BLOCKFLOAT_EXPONENT_MIN) | (exponents > BLOCKFLOAT_EXPONENT_MAX)).any()
+    ):
+        raise ValueError(
+            "block-float exponents must lie in "
+            f"[{BLOCKFLOAT_EXPONENT_MIN}, {BLOCKFLOAT_EXPONENT_MAX}], got "
+            f"{sorted(set(int(v) for v in exponents.reshape(-1).tolist()))[:8]}"
+        )
     w = x.to(torch.float32)
     last = w.shape[-1]
     pad = (-last) % block
@@ -1163,6 +1220,12 @@ def decompose_blockfloat(
     base = _block_exponents(w, block)
     for shift in (0, 1, -1, 2):
         candidate = (base + shift).to(torch.float32)
+        if bool(
+            ((candidate < BLOCKFLOAT_EXPONENT_MIN) | (candidate > BLOCKFLOAT_EXPONENT_MAX)).any()
+        ):
+            # No storable scale exists at that shift for every block, so it cannot
+            # describe the whole tensor; skip before any overflowing arithmetic.
+            continue
         scale = torch.pow(2.0, candidate).repeat_interleave(block, dim=1)
         codes = torch.round(w / scale * levels)
         if codes.abs().max() > offset:
