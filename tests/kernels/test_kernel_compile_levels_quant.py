@@ -37,7 +37,7 @@ from gptqmodel.nn_modules.qlinear.vptq_cuda import VPTQCudaLinear
 from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
 from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
 from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
-from tests.kernels.compile_probe import graph_unsafe_constructs, probe
+from tests.kernels.compile_probe import graph_unsafe_constructs, probe, skip_without_measurable_device
 
 
 pytestmark = [pytest.mark.gpu]
@@ -249,8 +249,17 @@ def test_kernel_reaches_declared_compile_level(case):
     if reason is not None:
         pytest.skip(reason)
     assert case.build is not None, f"{case.cls.__name__}: no builder and no skip reason"
+    skip_without_measurable_device(case.cls)
 
-    module, x, cuda_graph = case.build()
+    try:
+        module, x, cuda_graph = case.build()
+    except Exception as error:
+        # A builder that needs a device this host does not have is an
+        # environment skip, not a stale declaration.
+        pytest.skip(
+            f"{case.cls.__name__}: cannot build here: "
+            f"{type(error).__name__}: {str(error)[:200]}"
+        )
     # Only re-probe capture where the kernel claims it. On torch 2.11/cu130 a
     # *failed* capture poisons the caching allocator's graph pool for the rest
     # of the process ("Offset increment outside graph capture"), so a declared

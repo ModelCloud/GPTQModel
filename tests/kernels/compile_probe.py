@@ -239,6 +239,32 @@ def protocol_kernels():
     )
 
 
+def skip_without_measurable_device(kernel_cls) -> None:
+    """Skip when the declared level cannot be measured on this host.
+
+    ``INDUCTOR`` and ``CUDAGRAPH`` are CUDA-device levels: on a CPU-only runner
+    the probe reports them as not reached, which is an environment fact rather
+    than a stale declaration.
+    """
+
+    from gptqmodel.nn_modules.qlinear._compile_support import (
+        COMPILE_LEVEL,
+        compile_level,
+        graph_capture_safe,
+    )
+
+    declared = compile_level(kernel_cls)
+    needs_device = declared >= COMPILE_LEVEL.INDUCTOR or graph_capture_safe(kernel_cls)
+    if needs_device and not torch.cuda.is_available():
+        import pytest
+
+        pytest.skip(
+            f"{getattr(kernel_cls, '__name__', kernel_cls)} declares "
+            f"{declared.name} / capture={graph_capture_safe(kernel_cls)}, "
+            "which needs a CUDA device to measure"
+        )
+
+
 def graph_unsafe_constructs(kernel_cls: type) -> List[str]:
     """Static scan of the kernel's own ``forward`` for capture-unsafe calls."""
 

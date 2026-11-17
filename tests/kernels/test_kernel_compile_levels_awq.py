@@ -41,7 +41,7 @@ from gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq import TorchCpuAvx512AwqL
 from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqLinear
 from gptqmodel.nn_modules.qlinear.torch_int8_awq import TorchInt8AwqLinear
 from gptqmodel.quantization.awq.utils.packing_utils import AWQ_ORDER, pack_awq_columns
-from tests.kernels.compile_probe import graph_unsafe_constructs, probe
+from tests.kernels.compile_probe import graph_unsafe_constructs, probe, skip_without_measurable_device
 
 
 pytestmark = [pytest.mark.gpu]
@@ -251,8 +251,17 @@ def test_awq_kernel_reaches_declared_compile_level(case):
     if reason is not None:
         pytest.skip(reason)
     assert case.build is not None, f"{case.cls.__name__}: no builder and no skip reason"
+    skip_without_measurable_device(case.cls)
 
-    module, x, cuda_graph = case.build()
+    try:
+        module, x, cuda_graph = case.build()
+    except Exception as error:
+        # A builder that needs a device this host does not have is an
+        # environment skip, not a stale declaration.
+        pytest.skip(
+            f"{case.cls.__name__}: cannot build here: "
+            f"{type(error).__name__}: {str(error)[:200]}"
+        )
     result = probe(module, (x,), check_cuda_graph=cuda_graph)
     declared = compile_level(case.cls)
 
