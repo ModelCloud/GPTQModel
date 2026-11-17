@@ -3,7 +3,11 @@
 """ChatGLM checkpoint ownership, independent numerics, cache and real loading."""
 
 import copy
+import hashlib
 import json
+import shutil
+from functools import lru_cache
+from pathlib import Path
 
 import pytest
 import torch
@@ -12,6 +16,233 @@ from torch.nn import functional as F
 from gptqmodel.models.definitions.chatglm import ChatGLMQModel
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.utils.hf import load_model_config
+
+
+TOKENIZER_CONTRACTS = json.loads((Path(__file__).resolve().parents[1] /
+    'gptqmodel/models/ports/chatglm/tokenizer_contracts.json').read_text())
+
+
+@lru_cache(maxsize=3)
+def _released_assets(release):
+    from huggingface_hub import hf_hub_download
+    contract = TOKENIZER_CONTRACTS[release]
+    paths = {}
+    for filename, digest in contract['files'].items():
+        path = Path(hf_hub_download(contract['repo'], filename, revision=contract['revision']))
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+        paths[filename] = path
+    return paths
+
+
+def _write_released_tokenizer(path, release):
+    for filename, source in _released_assets(release).items():
+        shutil.copyfile(source, path / filename)
+
+
+def _assert_tokenizer_contract(tokenizer, release):
+    contract = TOKENIZER_CONTRACTS[release]
+    for sample in contract['texts']:
+        actual = tokenizer(sample['text'], return_tensors='pt')
+        for key, value in sample['input'].items():
+            assert actual[key].tolist() == [value]
+        assert tokenizer.encode(sample['text'], add_special_tokens=False) == sample['plain_ids']
+        assert tokenizer.decode(sample['plain_ids'], skip_special_tokens=True) == sample['decoded']
+    assert tokenizer.get_prefix_tokens() == contract['prefix']
+    for field in ['eos_token', 'eos_token_id', 'pad_token', 'pad_token_id', 'unk_token', 'unk_token_id']:
+        assert getattr(tokenizer, field) == contract['specials'][field]
+    assert dict(tokenizer([contract['texts'][0]['text'], contract['texts'][2]['text']],
+                          padding=True, pad_to_multiple_of=8)) == contract['batch']
+    if 'pair' in contract:
+        assert dict(tokenizer(contract['texts'][0]['text'], text_pair=contract['texts'][1]['text'])) == contract['pair']
+    if release == 'glm2':
+        assert tokenizer.build_prompt('你好！', [('hi', 'hello')]) == contract['prompt']
+        assert tokenizer.encode(contract['prompt']) == contract['prompt_ids']
+    else:
+        assert tokenizer.apply_chat_template(contract['messages'], tokenize=False,
+                                             add_generation_prompt=True) == contract['rendered']
+        chat = tokenizer.apply_chat_template(contract['messages'], tokenize=True,
+                                             add_generation_prompt=True)
+        # TF5 returns BatchEncoding by default; TF4's oracle returned input_ids.
+        assert chat['input_ids'] == contract['chat_ids']
+        assert tokenizer.build_single_message('assistant', 'python', 'print(2 + 3)') == contract['single_message']
+    if release == 'glm3':
+        built = tokenizer.build_chat_input(contract['messages'][-1]['content'], history=contract['history'])
+        assert {key: value.tolist() for key, value in built.items()} == contract['build_chat']
+        # EOS/UNK registration must not overwrite fixed assistant/observation IDs.
+        assert tokenizer.convert_tokens_to_ids('<|assistant|>') == 64796
+        assert tokenizer.convert_tokens_to_ids('<|observation|>') == 64797
+
+
+@pytest.mark.parametrize('release', ['glm2', 'glm3', 'glm4'])
+@pytest.mark.parametrize('trust', [None, False, True])
+@pytest.mark.parametrize('bypass', [False, True])
+def test_chatglm_released_tokenizer_public_load(tmp_path, monkeypatch, release, trust, bypass):
+    from tokenicer import Tokenicer
+
+    from gptqmodel import GPTQModel
+    contract = TOKENIZER_CONTRACTS[release]
+    model = _model(rope_ratio=500 if release == 'glm4' else None,
+                   padded_vocab_size=151552 if release == 'glm4' else 65024,
+                   seq_length=128, pad_token_id=contract['specials']['pad_token_id'],
+                   eos_token_id=contract['specials']['eos_token_id'])
+    model.save_pretrained(tmp_path)
+    _write_released_tokenizer(tmp_path, release)
+    marker = _poison(tmp_path)
+    (tmp_path / 'tokenization_chatglm.py').write_text(
+        (tmp_path / 'checkpoint_code.py').read_text())
+    _bypass(monkeypatch, bypass)
+    loaded = GPTQModel.load(str(tmp_path), trust_remote_code=trust, device='cpu', dtype=torch.float32)
+    assert isinstance(loaded.tokenizer, Tokenicer)
+    assert not isinstance(loaded.tokenizer.tokenizer, Tokenicer)
+    assert type(loaded.tokenizer.tokenizer).__module__.startswith('gptqmodel.models.ports.chatglm.')
+    assert not marker.exists()
+    _assert_tokenizer_contract(loaded.tokenizer, release)
+    tokens = loaded.tokenizer(contract['texts'][0]['text'], return_tensors='pt')
+    with torch.no_grad():
+        torch.testing.assert_close(loaded.model(**tokens).logits, model(**tokens).logits, atol=0, rtol=0)
+        generated = loaded.generate(**tokens, max_new_tokens=2, eos_token_id=None)
+        assert generated.shape[-1] == tokens['input_ids'].shape[-1] + 2
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize('release', ['glm2', 'glm3', 'glm4'])
+def test_chatglm_released_tokenizer_roundtrip_retry(tmp_path, monkeypatch, release):
+    from tokenicer import Tokenicer
+
+    from gptqmodel import GPTQModel
+
+    contract = TOKENIZER_CONTRACTS[release]
+    source = tmp_path / 'source'
+    source.mkdir()
+    model = _model(rope_ratio=500 if release == 'glm4' else None,
+                   padded_vocab_size=151552 if release == 'glm4' else 65024,
+                   seq_length=128, pad_token_id=contract['specials']['pad_token_id'],
+                   eos_token_id=contract['specials']['eos_token_id'])
+    model.save_pretrained(source)
+    _write_released_tokenizer(source, release)
+    marker = _poison(source)
+    _bypass(monkeypatch, True)
+    # A failed load must neither publish a stale tokenizer nor execute Python.
+    asset = source / 'tokenizer.model'
+    asset.write_bytes(b'not a SentencePiece or TikToken model')
+    with pytest.raises((ValueError, RuntimeError, OSError, TypeError)):
+        GPTQModel.load(str(source), trust_remote_code=True, device='cpu', dtype=torch.float32)
+    assert not marker.exists()
+    shutil.copyfile(_released_assets(release)['tokenizer.model'], asset)
+    original_load = Tokenicer.load.__func__
+    calls = []
+
+    def counted_load(cls, tokenizer, **kwargs):
+        calls.append(tokenizer)
+        return original_load(cls, tokenizer, **kwargs)
+
+    monkeypatch.setattr(Tokenicer, 'load', classmethod(counted_load))
+    loaded = GPTQModel.load(str(source), trust_remote_code=True, device='cpu', dtype=torch.float32)
+    assert len(calls) == 1, 'Only the shared adapter may normalize an owned tokenizer'
+    assert calls[0] is loaded.tokenizer.tokenizer
+    tokens = loaded.tokenizer(contract['texts'][1]['text'], return_tensors='pt')
+    with torch.no_grad():
+        expected = loaded.model(**tokens).logits
+    _assert_tokenizer_contract(loaded.tokenizer, release)
+    # Repeat both serialization boundaries; original asset hashes remain exact.
+    for index in range(2):
+        saved = tmp_path / f'saved-{index}'
+        loaded.model.save_pretrained(saved, safe_serialization=True)
+        loaded.tokenizer.save_pretrained(saved)
+        assert hashlib.sha256((saved / 'tokenizer.model').read_bytes()).hexdigest() == contract['files']['tokenizer.model']
+        assert list(saved.glob('*.safetensors'))
+        assert not list(saved.glob('*.bin'))
+        reloaded_marker = _poison(saved)
+        calls.clear()
+        loaded = GPTQModel.load(str(saved), trust_remote_code=True, device='cpu', dtype=torch.float32)
+        assert len(calls) == 1
+        assert calls[0] is loaded.tokenizer.tokenizer
+        _assert_tokenizer_contract(loaded.tokenizer, release)
+        with torch.no_grad():
+            torch.testing.assert_close(loaded.model(**tokens).logits, expected, atol=0, rtol=0)
+        assert not reloaded_marker.exists()
+    assert not marker.exists()
+
+
+def test_chatglm_released_literal_special_tokens(tmp_path):
+    _write_released_tokenizer(tmp_path, 'glm3')
+    tokenizer = ChatGLMQModel.loader.load_tokenizer(tmp_path, encode_special_tokens=True)
+    contract = TOKENIZER_CONTRACTS['glm3']['special_literal']
+    assert tokenizer.encode(contract['text']) == contract['ids']
+    saved = tmp_path / 'saved'
+    tokenizer.save_pretrained(saved)
+    reloaded = ChatGLMQModel.loader.load_tokenizer(saved)
+    assert reloaded.encode(contract['text']) == contract['ids']
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize('release', ['glm2', 'glm3', 'glm4'])
+def test_chatglm_released_tokenizer_plain_awq_roundtrips(tmp_path, monkeypatch, release):
+    from tokenicer import Tokenicer
+
+    from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+    from gptqmodel.quantization.config import AWQConfig
+
+    contract = TOKENIZER_CONTRACTS[release]
+    model = _model(rope_ratio=500 if release == 'glm4' else None,
+                   padded_vocab_size=151552 if release == 'glm4' else 65024,
+                   seq_length=128, pad_token_id=contract['specials']['pad_token_id'],
+                   eos_token_id=contract['specials']['eos_token_id'])
+    model.save_pretrained(tmp_path)
+    _write_released_tokenizer(tmp_path, release)
+    marker = _poison(tmp_path)
+    _bypass(monkeypatch, True)
+    wrapper = GPTQModel.load(str(tmp_path), quantize_config=AWQConfig(device='cpu', group_size=16, fallback=None),
+                            trust_remote_code=True, backend=BACKEND.TORCH, dtype=torch.float16)
+    assert wrapper.awq_get_modules_for_scaling(wrapper.model.transformer.encoder.layers[0], {}, {}) == []
+    # Calibrate actual released token IDs produced by the public tokenizer.
+    calibration = [wrapper.tokenizer(sample['text'], return_tensors='pt') for sample in contract['texts']]
+    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 8
+    state = {key: value.clone() for key, value in wrapper.model.state_dict().items()}
+    dense = model.state_dict()
+    for key, value in state.items():
+        if key.startswith(('transformer.embedding.', 'transformer.output_layer.', 'transformer.rotary_pos_emb.')) or 'layernorm' in key:
+            torch.testing.assert_close(value, dense[key].to(value.dtype), atol=0, rtol=0)
+    with torch.inference_mode():
+        expected = wrapper.model(**calibration[0], use_cache=False).logits
+    original_load = Tokenicer.load.__func__
+    calls = []
+
+    def counted_load(cls, tokenizer, **kwargs):
+        calls.append(tokenizer)
+        return original_load(cls, tokenizer, **kwargs)
+
+    monkeypatch.setattr(Tokenicer, 'load', classmethod(counted_load))
+    for index in range(2):
+        saved = tmp_path / f'awq-{index}'
+        wrapper.save_quantized(str(saved))
+        assert list(saved.glob('*.safetensors')) and not list(saved.glob('*.bin'))
+        assert hashlib.sha256((saved / 'tokenizer.model').read_bytes()).hexdigest() == contract['files']['tokenizer.model']
+        calls.clear()
+        wrapper = GPTQModel.load(str(saved), backend=BACKEND.TORCH, device='cpu', dtype=torch.float16,
+                                trust_remote_code=True)
+        assert len(calls) == 1
+        assert calls[0] is wrapper.tokenizer.tokenizer
+        assert state.keys() == wrapper.model.state_dict().keys()
+        for key, value in wrapper.model.state_dict().items():
+            torch.testing.assert_close(value, state[key], atol=0, rtol=0)
+        _assert_tokenizer_contract(wrapper.tokenizer, release)
+        with torch.inference_mode():
+            torch.testing.assert_close(wrapper.model(**calibration[0], use_cache=False).logits, expected,
+                                       atol=2e-4, rtol=2e-3)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize('name', ['ForeignTokenizer', '../checkpoint_code.ChatGLMTokenizer', None])
+def test_chatglm_tokenizer_unknown_metadata_fails_closed(tmp_path, name):
+    (tmp_path / 'tokenizer_config.json').write_text(json.dumps({
+        'tokenizer_class': name,
+        'auto_map': {'AutoTokenizer': ['checkpoint_code.UntrustedTokenizer', None]},
+    }))
+    with pytest.raises(ValueError, match='Unsupported ChatGLM tokenizer metadata'):
+        ChatGLMQModel.loader.load_tokenizer(tmp_path, trust_remote_code=True, code_revision='malicious')
 
 
 @pytest.fixture(autouse=True)
@@ -431,13 +662,10 @@ def test_chatglm_checkpointed_training_disables_cache_and_backpropagates(rope_ra
 
 
 def _write_tokenizer(path):
-    from tokenizers import Tokenizer
-    from tokenizers.models import WordLevel
-    from transformers import PreTrainedTokenizerFast
-    backend = Tokenizer(WordLevel({"[PAD]": 0, "[UNK]": 1, "[EOS]": 2,
-                                   **{str(i): i for i in range(3, 64)}}, unk_token="[UNK]"))
-    PreTrainedTokenizerFast(tokenizer_object=backend, pad_token="[PAD]", unk_token="[UNK]",
-                           eos_token="[EOS]").save_pretrained(path)
+    # Small-vocabulary resize/dtype fixtures only consume explicit integer IDs.
+    # Use SP's real pad=0 there; the released-asset tests use the full matching
+    # GLM2/3/4 vocabularies and assert text/chat/model-consumer parity separately.
+    _write_released_tokenizer(path, 'glm3')
 
 
 @pytest.mark.parametrize("rope_ratio", [None, 500])

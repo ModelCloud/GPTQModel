@@ -14,6 +14,7 @@ class ChatGLMQModel(BaseQModel):
     loader = LocalModelLoader(
         config_class="gptqmodel.models.ports.chatglm.configuration_chatglm.ChatGLMConfig",
         model_class="gptqmodel.models.ports.chatglm.modeling_chatglm.ChatGLMForConditionalGeneration",
+        tokenizer_class="gptqmodel.models.ports.chatglm.tokenization_chatglm.ChatGLMTokenizer",
     )
 
     pre_lm_head_norm_module = "transformer.encoder.final_layernorm"
