@@ -72,7 +72,7 @@ which end of an over-long row is kept.
 | Every row of the dataset dropped this way | n/a | `prepare_calibration_dataset` returns an empty batch list; the quantizer's existing zero-sample path handles it |
 | Item where only some rows are all padding | n/a | Remaining rows are kept in order; the dropped row never reaches the Hessian |
 | Item already ragged before trimming | Row lists of unequal width would fail the non-batched stack | Only rows that were actually trimmed are re-laid-out; untrimmed items are untouched |
-| `max_positions` unresolved | No trimming at all | Unchanged: no stripping when the model declares no position limit |
+| `max_positions` unresolved | No trimming at all | No budget is applied; pre-padded rows are still stripped (see below) |
 | User row that keeps interior padding | Untouched below the budget | Unchanged below the budget; over-long rows now keep every truthy position, so an interior pad is removed rather than surviving as a hole |
 
 ## `concat_size` reverses the order: pack, then filter
@@ -165,6 +165,53 @@ above the budget is refused and one equal to it is accepted, and the non-concat
 path still trims and filters per row. Five of those cases fail on the
 pre-#4892 code.
 
+## Pre-padded rows below the budget
+
+The trim step above only saw rows that were wider than the position budget.
+A row that was merely *padded* — `tokenizer(texts, padding=True)` or
+`padding="max_length"` — kept its padding, because the strip lived inside the
+over-long branch. Every capture and per-layer replay forward then ran at the
+padded width, and `sort="desc"` (the default) sorted by that padded width, so on
+pre-padded input the sort was a no-op and `batch_size > 1` batches were no longer
+length-grouped. The attention mask kept the pads out of the Hessian, so the
+checkpoint was correct and the cost was pure waste (issue #4889).
+
+Padding is stripped for every row, trimmed or not:
+
+```mermaid
+flowchart TD
+    A["row_ids, row_mask"] --> B{"padded width > max_positions"}
+    B -- "yes" --> C["strip truthy positions, then truncate by truncation_side"]
+    B -- "no" --> D{"row_mask has exactly one<br/>contiguous run of truthy positions"}
+    D -- "no, interior zeros" --> E["keep the row as given"]
+    D -- "yes" --> F["row_ids[first_real : last_real + 1]<br/>row_mask[first_real : last_real + 1]"]
+    C --> G["all-pad / min-length filters"]
+    E --> G
+    F --> G
+    G --> H["sort by real length, then collate_data re-pads per batch"]
+    style E fill:#e6f4ff,stroke:#0958d9
+    style F fill:#e6f4ff,stroke:#0958d9
+```
+
+`first_real` / `last_real` are the first and last truthy mask positions. A row
+whose truthy positions form one contiguous run has its edge pads removed; the
+sort and `collate_data` then see real lengths and re-pad per batch. A row with
+interior mask zeros (a caller-built mask, not tokenizer padding) is left
+untouched, so its mask keeps its original holes.
+
+The strip is unconditional: it runs for a row below the budget whether or not
+`concat_size` is set. With `concat_size` the packer stripped these pads anyway,
+so the packed windows are unchanged; rows simply arrive already stripped.
+
+| Input | Before | After |
+| --- | --- | --- |
+| `tokenizer(texts, padding=True)`, 128 wikitext docs, `max_length=2048` | 59,648 tokens forwarded for 20,882 real tokens (2.86x) | 20,882 forwarded (1.00x) |
+| `sort="desc"` on pre-padded rows | Sorted by padded width, i.e. a no-op | Sorted by real length |
+| `batch_size > 1` collation | Every batch padded to the dataset-wide width | Every batch padded to its own widest row |
+| Row with interior mask zeros | Kept as given | Kept as given |
+| Unpadded row | Unchanged | Unchanged |
+| Pre-padded row with `concat_size` | Packer strips it | Stripped earlier; same windows |
+
 ## Verification
 
 `tests/test_calibration_truncation.py` pins the contract: left and right padding
@@ -173,3 +220,8 @@ all-padding row is dropped whether or not it was over the budget,
 `truncation_side="left"` keeps the real tail, and a ragged item is re-padded only
 on the non-batched path. The issue's reproduction
 now returns `[[11, 12, 13, 14]]` and `[[11, 12]]` instead of a pad-only row.
+
+`tests/test_calibration_strip_padding_4889.py` pins the pre-padded-row contract:
+the same text set tokenized with `padding=True` and with `padding="max_length"`
+produces the same batch widths, sort order, real-token content, sample count and
+mask-filtered Hessian as the unpadded form, while interior mask zeros survive.
