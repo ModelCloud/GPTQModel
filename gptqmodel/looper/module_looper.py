@@ -71,6 +71,7 @@ from ..utils.model import (
 from ..utils.offload import (
     bind_private_offload_root,
     capture_offloaded_base_modules,
+    ensure_version_counters,
     materialize_remaining_meta_modules,
     offload_to_disk,
     release_private_offload_root,
@@ -1992,6 +1993,11 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             self._restore_offloaded_base_modules(strict=True)
             self._restore_disk_offloaded_modules()
             self._materialize_remaining_meta_modules()
+            # Unquantized layers keep the parameters `pre_quantize`
+            # materialized under inference mode, and `post_quantize`'s
+            # `param.data =` move leaves them without a version counter
+            # (issue #4572). Repair every one before the model is returned.
+            ensure_version_counters(self.gptq_model.model)
             return result
 
     def _materialize_deferred_boundary_prefix(self, checkpoint) -> None:

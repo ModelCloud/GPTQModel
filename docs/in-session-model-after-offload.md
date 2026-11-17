@@ -20,11 +20,13 @@ flowchart TD
     Q3 --> W{"WeightOnlyLooper?"}
     W -- yes --> M["_materialize_meta_base_modules(strict=True)<br/>shell_module_materialize + replace_inference_parameters"]
     W -- no --> R
-    M --> R["_materialize_remaining_meta_modules()<br/>shell_direct_meta_materialize for non-quantized modules still on meta (untied lm_head)"]
-    R --> K["BaseQModel.quantize: rehome_quantized_kernel(self)<br/>qweight is on CPU, so AWQ GEMM / QQQ / GGUF Triton switch to a CPU kernel"]
+    M --> R["_materialize_remaining_meta_modules()<br/>shell_direct_meta_materialize for non-quantized modules still on meta"]
+    R --> T["_retie_shared_embeddings: tied lm_head aliases embed_tokens again (#4597)"]
+    T --> V["ensure_version_counters(model)<br/>rebind parameters that lost their counter (#4572)"]
+    V --> K["BaseQModel.quantize: rehome_quantized_kernel(self)<br/>qweight is on CPU, so AWQ GEMM / QQQ / GGUF Triton switch to a CPU kernel"]
     K --> D["in-session model: plain CPU tensors, no hooks"]
     Q1 -. "module keeps meta tensors or its hook" .-> F1["RuntimeError: reload the saved checkpoint"]
-    R -. "module still owns meta tensors" .-> F2["log.error: reload the saved checkpoint<br/>(save() still materializes from the source)"]
+    R -. "module still owns meta tensors" .-> F2["RuntimeError: reload the saved checkpoint"]
     classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
     class F1,F2 failure;
 ```
@@ -75,15 +77,60 @@ unchanged. QQQ in-session numbers equal the `offload_to_disk=False` control
 exactly (3.09397 / 21.1721); its reload differs from both by the same amount
 with or without offload, so that gap is not an offload effect.
 
+## Resume and unquantized layers
+
+Two states used to survive the loop exit and break the in-session model without
+an error. Both are now part of the same contract.
+
+```mermaid
+flowchart TD
+    A["quantize(checkpoint=...) resumes"] --> B["restore_packed_module -> meta packed module"]
+    B --> C["write per-attempt index.json"]
+    C --> D["attach_disk_offload_hook: same hook a fresh offload installs"]
+    D --> E["loop exit: restore_disk_offloaded_modules(strict=True)"]
+    E --> F["packed tensors on CPU"]
+    E -. "index or bundle unreadable" .-> X["RuntimeError: reload the saved checkpoint"]
+
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
+
+A resumed packed module is meta with no hook, so the #4498 restore never saw
+it. `attach_disk_offload_hook` registers it with the existing bundle; because
+the module was already meta when the hook attached, its recorded original
+devices are rewritten to CPU so detaching actually reloads the tensors.
+
+```mermaid
+flowchart TD
+    P["pre_quantize materializes unquantized layers under inference_mode"] --> Q["post_quantize: param.data = cpu_copy"]
+    Q --> R{"is_inference or version counter usable"}
+    R -- "no: plain forward fails" --> S["ensure_version_counters at loop exit"]
+    S --> T["fresh Parameter per aliased old object"]
+    R -- yes --> U["untouched"]
+
+    classDef bad fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d;
+    class S bad;
+```
+
+`param.data = ...` clears the inference flag but not the unusable state, so
+the predicate is "the version counter can be read", not `is_inference()`.
+Aliased parameters keep their aliasing: every owner of one old object is
+rebound to the same replacement.
+
 ## Failure contract
 
 | Situation | Behavior |
 | --- | --- |
 | A hooked module cannot be restored (bundle missing or unreadable) | `RuntimeError` telling the caller to reload the saved checkpoint |
-| A non-quantized module stays on meta after source materialization | Logged as an error; `save()` still writes a correct checkpoint |
+| A non-quantized module stays on meta after source materialization and re-tie | `RuntimeError` telling the caller to reload the saved checkpoint (previously logged only, which led into a partial `.to()` and a CUDA device-side assert) |
+| Tied `lm_head` after base-module materialization | Re-tied to `embed_tokens`; never read from the checkpoint, which does not store it (#4597) |
+| Unquantized parameters without a version counter | Rebound at loop exit; in-session forward and `.to()` work (#4572) |
 | EXL3 reference-offloaded packed modules (`offload_to_safetensors_reference`) | Not hooked, so not restored; they remain an export-only path ([reference offload](safetensors-reference-offload.md)) |
 | `rehome_quantized_kernel` finds no CPU kernel for the format | Unchanged: `RuntimeError` with reload guidance |
 
 [#4368]: https://github.com/ModelCloud/GPTQModel/issues/4368
 [#4380]: https://github.com/ModelCloud/GPTQModel/issues/4380
 [#4450]: https://github.com/ModelCloud/GPTQModel/issues/4450
+[#4572]: https://github.com/ModelCloud/GPTQModel/issues/4572
+[#4562]: https://github.com/ModelCloud/GPTQModel/issues/4562
+[#4597]: https://github.com/ModelCloud/GPTQModel/issues/4597

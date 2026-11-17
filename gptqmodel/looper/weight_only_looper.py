@@ -67,6 +67,7 @@ from ..utils.model import (
 from ..utils.offload import (
     bind_private_offload_root,
     capture_offloaded_base_modules,
+    ensure_version_counters,
     is_meta_module,
     materialize_remaining_meta_modules,
     offload_to_disk,
@@ -978,6 +979,10 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self._restore_disk_offloaded_modules()
         self._materialize_meta_base_modules(strict=True)
         self._materialize_remaining_meta_modules()
+        # Unquantized layers keep the parameters `pre_quantize` materialized
+        # under inference mode, and `post_quantize`'s `param.data =` move
+        # leaves them without a version counter (issue #4572).
+        ensure_version_counters(self.gptq_model.model)
         return result
 
     def _loop_impl(self, **kwargs):
