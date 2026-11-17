@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import contextvars
 import copy
+import difflib
 import inspect
 import json
 import os
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from functools import partial
 from itertools import count
@@ -41,6 +43,7 @@ from ..nn_modules.qlinear.torch import TorchLinear
 from ..quantization.awq.utils.module import get_op_name
 from ..quantization.config import (
     FORMAT,
+    META_FIELD_CALIBRATION_EXCLUDE_ATTENTION_SINKS,
     METHOD,
     QUANTIZE_BLACK_LIST,
     AutoDtypeCast,
@@ -58,6 +61,7 @@ from ..quantization.config import (
     normalize_norm_types,
     resolve_model_rotation,
     resolve_quant_format,
+    validate_rotation_format,
 )
 from ..quantization.dtype import (
     available_float8_dtypes,
@@ -88,7 +92,13 @@ from ..utils.calibration import prepare_calibration_dataset
 from ..utils.checkpoint_paths import resolve_checkpoint_path
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
-from ..utils.hf import autofix_hf_model_config, install_legacy_generation_compat
+from ..utils.hf import (
+    autofix_hf_model_config,
+    get_config_selection_kwargs,
+    install_legacy_generation_compat,
+    load_model_config,
+    resolve_trust_remote_code,
+)
 from ..utils.importer import select_quant_linear
 from ..utils.kv_cache import KVCacheEstimate, estimate_kv_cache
 from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
@@ -134,6 +144,7 @@ from ._const import (
 )
 from .fusable import FusableConfig, require_fusable_config
 from .loader import ModelLoader, _setup_rotation_online_had
+from .local import LocalModelLoader, local_model_loader_for_config
 from .module_plan import ModulePlan
 from .quantization_run_plan import ProcessorStep, QuantizationRunPlan, processor_class
 from .shared_input import SharedInputPlan, build_shared_input_plan
@@ -156,8 +167,10 @@ if TYPE_CHECKING:
 # Processor steps whose quantization GEMMs must run on rocBLAS to be
 # reproducible across processes (issues #4075, #4092, #4123, #4460).
 #
-# GPTQ, QQQ, VPTQ, MACaQ and calibrated FP8 GSQ accumulate an input
+# GPTQ, QQQ, VPTQ, MACaQ, calibrated FP8 GSQ and EoRA accumulate an input
 # Hessian/Gram from the calibration activations; EXL3 reuses GPTQ's capture.
+# EoRA runs after the primary, so an AWQ + EoRA plan would otherwise keep its
+# adapter Gram on hipBLASLt and produce a different adapter per process (#4614).
 # ParoQuant accumulates no Hessian, but its rotation optimization runs
 # fp16/bf16 GEMMs and hipBLASLt selects kernels per process, so two runs with
 # the same seed produced different checkpoints (21.26 vs 21.44 PPL on ROCm).
@@ -171,6 +184,7 @@ _DETERMINISTIC_BLAS_PROCESSOR_STEPS = frozenset({
     ProcessorStep.PARO,
     ProcessorStep.EXL3,
     ProcessorStep.FP8_GSQ,
+    ProcessorStep.EORA,
 })
 
 
@@ -180,6 +194,8 @@ def _needs_deterministic_hessian(run_plan: QuantizationRunPlan) -> bool:
     The name predates ParoQuant: the original set accumulated an input
     Hessian/Gram. ParoQuant is included because hipBLASLt chooses GEMM kernels
     per process, which made checkpoints from identical seeded runs differ.
+    EoRA is included for its own fp32 input Gram and `eigh`; without it an
+    AWQ + EoRA plan produced a different adapter in every process (#4614).
     """
 
     return not _DETERMINISTIC_BLAS_PROCESSOR_STEPS.isdisjoint(run_plan.processors)
@@ -929,6 +945,7 @@ class BaseQModel(nn.Module):
         turtle_model: Optional[LazyTurtle] = None,
         effective_module_tree: Optional[Any] = None,
         fusion_enabled: bool = False,
+        processor_load_kwargs: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
         if type(fusion_enabled) is not bool:
@@ -1040,7 +1057,9 @@ class BaseQModel(nn.Module):
         self.auto_dtype_cast_events: List[Dict[str, Any]] = []
 
         if tokenizer is not None:
-            if isinstance(tokenizer, PreTrainedTokenizerBase):
+            if isinstance(tokenizer, Tokenicer):
+                self.tokenizer = tokenizer
+            elif isinstance(tokenizer, PreTrainedTokenizerBase):
                 self.tokenizer = Tokenicer.load(
                     tokenizer,
                     trust_remote_code=trust_remote_code,
@@ -1067,8 +1086,21 @@ class BaseQModel(nn.Module):
         # stores all per-layer quant stats such as avg loss and processing time
         self.quant_log = []
 
+        self._processor_load_kwargs = get_config_selection_kwargs(processor_load_kwargs or {})
         if self.require_load_processor:
-            self.processor = AutoProcessor.from_pretrained(model_local_path, trust_remote_code=self.trust_remote_code)
+            loader = type(self).loader
+            if isinstance(loader, LocalModelLoader) and loader.processor_class is not None:
+                self.processor = loader.load_processor(
+                    model_local_path,
+                    config=self.model.config,
+                    tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+                    **self._processor_load_kwargs,
+                )
+            else:
+                self.processor = AutoProcessor.from_pretrained(
+                    model_local_path, trust_remote_code=self.trust_remote_code,
+                    **self._processor_load_kwargs,
+                )
 
         # apply patching of broken trust_remote_code models here
         if self.require_monkeypatch:
@@ -2102,8 +2134,21 @@ class BaseQModel(nn.Module):
         embed_quant_mode: Optional[QuantizeEmbed] = None,
         checkpoint: Optional["CheckpointConfig"] = None,
         fuse: Optional[bool] = None,
+        # Drop attention-sink tokens (every attended BOS token) from every
+        # processor's calibration statistics (issue #4393).
+        calibration_exclude_attention_sinks: bool = False,
     ) -> Dict[str, List[Dict[str, str]]]:
         run_started = time.perf_counter()
+        if type(calibration_exclude_attention_sinks) is not bool:
+            raise TypeError("`calibration_exclude_attention_sinks` must be a bool")
+        for pattern, override in (getattr(self.quantize_config, "dynamic", None) or {}).items():
+            if isinstance(override, Mapping) and "exclude_attention_sinks" in override:
+                # The sink rows are a property of the calibration batch, not of
+                # one module, so a per-module rule would silently do nothing.
+                raise ValueError(
+                    f"QuantizeConfig: `dynamic['{pattern}'].exclude_attention_sinks` is not a "
+                    "per-module option; use `quantize(calibration_exclude_attention_sinks=True)`."
+                )
         vram_devices = _quantize_vram_devices(self.quantize_config)
         _reset_peak_vram_stats(vram_devices)
 
@@ -2178,6 +2223,9 @@ class BaseQModel(nn.Module):
                             "adapter_calibration_dataset": adapter_calibration_dataset,
                             "embed_quant_config": embed_quant_config,
                             "checkpoint": checkpoint,
+                            "calibration_exclude_attention_sinks": (
+                                True if calibration_exclude_attention_sinks else None
+                            ),
                         },
                     )
                 self.after_quantize()
@@ -2378,8 +2426,11 @@ class BaseQModel(nn.Module):
                     quant_method=export_quant_method,
                 )
 
-        # rotate model
+        # Validate rotation before any weight is touched. The old order fused
+        # norms and rotated the weights first and only then rejected the
+        # backend, so a refused run left an unusable in-session model (#4666).
         if resolve_model_rotation(self.quantize_config):
+            validate_rotation_format(self.quantize_config, format_code=format_code)
             validate_rotation_model_support(self)
 
             # Validate every width rotation will transform before
@@ -2391,6 +2442,22 @@ class BaseQModel(nn.Module):
                 self.model.config, resolve_model_rotation(self.quantize_config)
             )
 
+            backend = normalize_backend(backend, quant_method=self.quantize_config.method)
+            if backend == BACKEND.AUTO:
+                backend = BACKEND.GPTQ_TORCH
+            if backend not in (
+                BACKEND.GPTQ_TORCH,
+                BACKEND.GPTQ_TRITON,
+                BACKEND.GPTQ_W4AFP8,
+                BACKEND.GPTQ_W4A_NVFP4,
+            ):
+                raise NotImplementedError(
+                    "`rotation` is only supported with `gptq_torch`, `gptq_triton`, "
+                    f"`gptq_w4afp8`, or `gptq_w4a_nvfp4` backend, got `{backend}`."
+                )
+
+        # rotate model
+        if resolve_model_rotation(self.quantize_config):
             if self.model.config.tie_word_embeddings:
                 log.info("Rotation requires word embeddings to be untied. Untying.")
                 self.model.config.tie_word_embeddings = False
@@ -2418,21 +2485,6 @@ class BaseQModel(nn.Module):
                                             device=rotation_device, plan=self.module_plan(),
                                             embedding_name=self.get_input_embeddings_name(),
                                             **module_name_args)
-
-        if resolve_model_rotation(self.quantize_config):
-            backend = normalize_backend(backend, quant_method=self.quantize_config.method)
-            if backend == BACKEND.AUTO:
-                backend = BACKEND.GPTQ_TORCH
-            if backend not in (
-                BACKEND.GPTQ_TORCH,
-                BACKEND.GPTQ_TRITON,
-                BACKEND.GPTQ_W4AFP8,
-                BACKEND.GPTQ_W4A_NVFP4,
-            ):
-                raise NotImplementedError(
-                    "`rotation` is only supported with `gptq_torch`, `gptq_triton`, "
-                    f"`gptq_w4afp8`, or `gptq_w4a_nvfp4` backend, got `{backend}`."
-                )
 
         from ..adapter.adapter import Lora
 
@@ -2473,6 +2525,11 @@ class BaseQModel(nn.Module):
         )
         with blas_context:
             if run_plan.weight_only:
+                if calibration_exclude_attention_sinks:
+                    log.warn(
+                        "Quantize: `calibration_exclude_attention_sinks` has no effect on "
+                        "weight-only quantization, which uses no calibration rows."
+                    )
                 result = self._quantize_weight_only(
                     run_plan=run_plan,
                     checkpoint=checkpoint,
@@ -2489,6 +2546,17 @@ class BaseQModel(nn.Module):
                     raise ValueError(
                         "Calibration dataset is required unless a weight-only quantize config is configured."
                     )
+                # Record the calibration row policy for provenance. The key is
+                # absent for the default policy, so a default run never changes
+                # the serialized config.
+                if calibration_exclude_attention_sinks:
+                    self.quantize_config.meta_set(
+                        key=META_FIELD_CALIBRATION_EXCLUDE_ATTENTION_SINKS, value=True
+                    )
+                elif isinstance(self.quantize_config.meta, dict):
+                    self.quantize_config.meta.pop(
+                        META_FIELD_CALIBRATION_EXCLUDE_ATTENTION_SINKS, None
+                    )
                 result = self._quantize_with_calibration(
                     run_plan=run_plan,
                     calibration=calibration,
@@ -2501,6 +2569,7 @@ class BaseQModel(nn.Module):
                     calibration_concat_separator=calibration_concat_separator,
                     embed_quant_config=embed_quant_config,
                     checkpoint=checkpoint,
+                    calibration_exclude_attention_sinks=calibration_exclude_attention_sinks,
                 )
 
         # Some definitions need the complete layer stack before they can
@@ -2704,11 +2773,15 @@ class BaseQModel(nn.Module):
         owns_teacher = not isinstance(teacher, nn.Module)
         if owns_teacher:
             device = get_device(self.get_input_embeddings())
-            teacher = AutoModelForCausalLM.from_pretrained(
+            teacher_trust = resolve_trust_remote_code(teacher, trust_remote_code=self.trust_remote_code)
+            teacher_config = load_model_config(teacher, trust_remote_code=teacher_trust)
+            teacher_loader = local_model_loader_for_config(teacher_config.to_dict()) or AutoModelForCausalLM
+            teacher = teacher_loader.from_pretrained(
                 teacher,
+                config=teacher_config,
                 dtype=self.model.dtype,
                 device_map={"": device},
-                trust_remote_code=self.trust_remote_code,
+                trust_remote_code=teacher_trust,
             )
         try:
             stats = tune_norm_params(self.model, teacher, batches, names, norm)
@@ -2793,6 +2866,7 @@ class BaseQModel(nn.Module):
         sort: Optional[str],
         concat_separator: Optional[str],
         batch_size: int,
+        exclude_attention_sinks: bool = False,
     ):
         from ..looper.loop_processor import CalibrationConfig
 
@@ -2803,6 +2877,7 @@ class BaseQModel(nn.Module):
             sort=sort,
             concat_separator=concat_separator,
             batch_size=batch_size,
+            exclude_attention_sinks=exclude_attention_sinks,
         )
 
     def _quantize_with_calibration(
@@ -2819,6 +2894,7 @@ class BaseQModel(nn.Module):
         embed_quant_config: Optional[QuantizeEmbedConfig],
         checkpoint: Optional["CheckpointConfig"] = None,
         run_plan: Optional[QuantizationRunPlan] = None,
+        calibration_exclude_attention_sinks: bool = False,
     ):
         from ..looper.loop_processor import CalibrationConfig, _reusable_calibration_dataset
         from ..looper.module_looper import ModuleLooper
@@ -2856,6 +2932,7 @@ class BaseQModel(nn.Module):
             calibration_sort,
             calibration_concat_separator,
             run_plan.batch_size,
+            exclude_attention_sinks=calibration_exclude_attention_sinks,
         )
         args = {
             "tokenizer": self.tokenizer,
@@ -3337,6 +3414,35 @@ class BaseQModel(nn.Module):
 
         try:
             if self.quantized:
+                # The quantized branch has no `save_pretrained` passthrough, so
+                # any extra keyword used to be discarded without a word — a
+                # typo of a real parameter, or an HF option such as
+                # `push_to_hub=True`, reported success and did nothing (#4686).
+                # This is the save-side counterpart of #4052/#4057.
+                if kwargs:
+                    accepted = (
+                        "save_dir",
+                        "safetensors_metadata",
+                        "max_shard_size",
+                        "meta_quantizer",
+                        "eora_path",
+                        "split_by",
+                    )
+                    details = []
+                    for key in sorted(kwargs):
+                        matches = difflib.get_close_matches(key, accepted, n=1)
+                        details.append(
+                            f"`{key}`" + (f" (did you mean `{matches[0]}`?)" if matches else "")
+                        )
+                    raise TypeError(
+                        "GPTQModel.save: unexpected keyword argument(s) for a quantized "
+                        "model: "
+                        + ", ".join(details)
+                        + ". A quantized save accepts "
+                        + ", ".join(f"`{name}`" for name in accepted)
+                        + "."
+                    )
+
                 # Saving an already quantized model (for example one loaded from
                 # an older checkpoint) is the last point where a `dynamic` rule
                 # the fused engines cannot honor can be reported.
@@ -3346,6 +3452,22 @@ class BaseQModel(nn.Module):
                 #untie_weights(self.model)
 
                 if getattr(self, "_model_free_weight_only_replacements_only", False):
+                    # `save_quantized_embeddings` writes a module-replacement
+                    # checkpoint and has no adapter or split support, so it used
+                    # to drop two of `save()`'s own named parameters (#4686).
+                    unsupported = [
+                        name
+                        for name, value in (("eora_path", eora_path), ("split_by", split_by))
+                        if value is not None
+                    ]
+                    if unsupported:
+                        raise ValueError(
+                            "GPTQModel.save: "
+                            + ", ".join(f"`{name}`" for name in unsupported)
+                            + " is not supported when saving a weight-only replacement "
+                            "(module-replacement) checkpoint; only `save_dir`, "
+                            "`safetensors_metadata` and `meta_quantizer` apply."
+                        )
                     self.save_quantized_embeddings(
                         save_dir=save_dir,
                         safetensors_metadata=safetensors_metadata,
@@ -4022,16 +4144,41 @@ class BaseQModel(nn.Module):
     def _resolve_layer_replay_type(layer: nn.Module, layer_types: Sequence[str]) -> Optional[str]:
         """Layer type declared by the decoder layer being replayed."""
 
+        def _declared(value: Any) -> Optional[str]:
+            # Only a value the model actually declared is usable: a stray
+            # `layer_type` attribute outside the declared list cannot be
+            # looked up in `by_type`.
+            return value if isinstance(value, str) and value in layer_types else None
+
         attention = getattr(layer, "self_attn", None)
-        declared = getattr(attention, "layer_type", None)
-        if not isinstance(declared, str):
-            declared = getattr(layer, "layer_type", None)
-        if isinstance(declared, str):
+        declared = _declared(getattr(attention, "layer_type", None))
+        if declared is None:
+            declared = _declared(getattr(layer, "layer_type", None))
+        if declared is None:
+            # Hybrid definitions such as GraniteMoE-Hybrid name the slot
+            # `block_type`; a recurrent mixer is a sibling (`mamba`, `conv`)
+            # rather than `self_attn` and carries its own `layer_type`
+            # (issue #4671).
+            declared = _declared(getattr(layer, "block_type", None))
+        if declared is None:
+            for child in layer.children():
+                declared = _declared(getattr(child, "layer_type", None))
+                if declared is not None:
+                    break
+        if declared is not None:
             return declared
 
         index = getattr(attention, "layer_idx", None)
         if not isinstance(index, int):
             index = getattr(layer, "layer_idx", None)
+        if not isinstance(index, int):
+            # A mixer sibling is also a reliable per-layer index source when
+            # the decoder layer itself does not store one.
+            for child in layer.children():
+                candidate = getattr(child, "layer_idx", None)
+                if isinstance(candidate, int):
+                    index = candidate
+                    break
         if isinstance(index, int) and 0 <= index < len(layer_types):
             return layer_types[index]
         return None
@@ -5348,6 +5495,7 @@ class BaseQModel(nn.Module):
             input_width: int | None,
             allow_block_norm: bool = False,
             shared_source: nn.Module | None = None,
+            refuse_last_module_fallback: bool = False,
         ):
             """Return the normalization that immediately feeds the consumer block.
 
@@ -5369,6 +5517,13 @@ class BaseQModel(nn.Module):
             example Cohere/Cohere2 attention and MLP) read one norm without an
             intervening norm block, so the consumer's input tag is the only
             declaration that both branches share the same source.
+
+            ``refuse_last_module_fallback`` is set when the block immediately
+            before this one declared only modules that this layer does not own
+            (for example the MLA `q_b_proj`/`kv_b_proj` pair on a Ling 2.0
+            layer). `last_module` then still points at the run before that
+            absent block, which is not this block's producer: falling back to it
+            folded `attention.dense` into `input_layernorm` (#4677).
             """
             for candidate_name, candidate_module in reversed(pending_nonquant):
                 if _is_gain_norm(candidate_module, candidate_name, input_width):
@@ -5390,6 +5545,11 @@ class BaseQModel(nn.Module):
                 return last_norm_candidate
             if shared_source is not None and _norm_width(shared_source) == input_width:
                 return shared_source
+            if refuse_last_module_fallback:
+                # Nothing in this run produces the consumer's input and the
+                # preceding declaration resolved to no module on this layer.
+                # Leave the group unscaled instead of folding a stale source.
+                return None
             # A fallback norm whose width differs from the consumer's input
             # cannot absorb this scale: `scale_ln_fcs` would multiply a
             # differently sized weight (or raise). DeepSeek MLA is the concrete
@@ -5520,7 +5680,11 @@ class BaseQModel(nn.Module):
         # the previous branch's output projection.
         shared_input_sources: Dict[str, nn.Module] = {}
         prev_not_quantized = False
+        # True when the previous block declared only modules this layer does not
+        # own (`layer_modules_strict=False` alternative layouts).
+        prev_block_absent = False
         for block in full_layer_modules:
+            block_absent = False
             not_quantized = all(any(flag in name for flag in NON_QUANTIZE_FLAGS) for name in block)
             if not_quantized:
                 # An empty block carries no module to remember; it also must not
@@ -5541,6 +5705,8 @@ class BaseQModel(nn.Module):
                 if not prev_not_quantized:
                     _try_update_last_module(candidate_name)
                 prev_not_quantized = True
+                # A declared norm block is a real producer for the next run.
+                prev_block_absent = False
                 continue
 
             prev_not_quantized = False
@@ -5627,6 +5793,7 @@ class BaseQModel(nn.Module):
                         subset.append(m)
                         subset_names.append(name)
 
+                block_absent = not subset and not skip
                 if skip or not subset:
                     pending_nonquant.clear()
                     skip_block = True
@@ -5672,6 +5839,7 @@ class BaseQModel(nn.Module):
                         input_width,
                         allow_block_norm=allow_block_norm,
                         shared_source=shared_source,
+                        refuse_last_module_fallback=prev_block_absent,
                     )
                     moe_consumers = (
                         _moe_block_consumers(block, input_width, subset)
@@ -5745,6 +5913,7 @@ class BaseQModel(nn.Module):
 
                     nodes.append(n)
 
+            prev_block_absent = block_absent
             # Update tracker to the LAST item of this block
             if is_moe_gate_up_block:
                 # Mixed MoE blocks can legitimately place shared-expert projections
@@ -5895,6 +6064,25 @@ class BaseQModel(nn.Module):
             if spec is not None and AWQ_NO_SCALE_SOURCE_FLAG in spec.flags:
                 log.debug(
                     "awq_get_modules_for_scaling: skipping scaling group with declared non-source prev_op `%s`",
+                    prev_name,
+                )
+                continue
+            # An excluded projection is not a compensated producer: dividing its
+            # output rows changes a module that stays in the source dtype and
+            # nothing multiplies it back, so the group cannot be
+            # output-preserving. Only a gain norm (1-D gain, divided through
+            # `scale_ln_fcs`) or a projection the plan quantizes may absorb a
+            # fold. #4651: Jamba's excluded `mamba.dt_proj` became the source
+            # for `mamba.x_proj` and was rescaled by up to 70%.
+            source_weight = getattr(prev_op, "weight", None)
+            if (
+                spec is not None
+                and not spec.quantize
+                and isinstance(source_weight, torch.Tensor)
+                and source_weight.ndim == 2
+            ):
+                log.debug(
+                    "awq_get_modules_for_scaling: skipping scaling group with non-quantized prev_op `%s`",
                     prev_name,
                 )
                 continue
