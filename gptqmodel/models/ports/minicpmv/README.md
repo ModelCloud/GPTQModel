@@ -184,3 +184,119 @@ source image slicing and native decoder cache semantics are qualified on
 tiny models; real trained checkpoint evaluation remains a separate check.
 The existing `/monster/data/model/MiniCPM-V-4_5` trained test could not be run
 because that checkpoint is absent on this VM.
+
+## Native MiniCPM-V 4.6 AWQ follow-up
+
+This separate definition-owned follow-up repairs the native `minicpmv4_6`
+AWQ input edge. The six legacy layouts above retain their plain policy.
+The native loader, processor, trust policy, module tree and fusion declaration
+are unchanged. No shared AWQ algorithm or absent-block barrier is changed.
+
+### Native source evidence
+
+The inspected Transformers **5.23.0** sources are:
+
+- `transformers/models/minicpmv4_6/modeling_minicpmv4_6.py`,
+  `MiniCPMV4_6Model.__init__`, lines 593–600: its `language_model` is the
+  native `Qwen3_5TextModel` selected from the native text config.
+  SHA256 `fe18aa35920ed4c8e0dcf081e564a95290c2af400092eb6fc211770f119e13d6`.
+- `transformers/models/qwen3_5/modeling_qwen3_5.py`,
+  `Qwen3_5DecoderLayer.forward`, lines 867–907, and
+  `Qwen3_5GatedDeltaNet.forward`, lines 545–654.
+  SHA256 `1a475c45d900e0bfb06b9b245257d7f3234fd247474fcbd3363b03430e504a68`.
+  The decoder applies `input_layernorm` before the mixer; the mixer masks
+  padding before four parallel projections and then applies convolution,
+  recurrent delta mixing and gated per-value-head RMS normalization.
+
+| Source / boundary | Exact consumers | AWQ decision |
+| --- | --- | --- |
+| `input_layernorm`, gain `1 + weight` | `linear_attn.in_proj_qkv`, `in_proj_z`, `in_proj_b`, `in_proj_a` | One fold. Quantize QKV/Z; compensate excluded B/A columns only at final application. Score the complete native DeltaNet. |
+| Internal `linear_attn.norm` | Per-head recurrent output multiplied by SiLU of Z before `out_proj` | No internal fold is admitted, including one value head and accidental head-width/hidden-width collisions. |
+| `post_attention_layernorm`, MLP up/down and full-attention layout | Existing generic groups | Retain the existing generic policy. |
+
+The mask multiplication commutes with the per-channel scale. No fold crosses
+the decoder residual. During candidate replay QKV/Z use `Q(W*s)/s` in the
+original input coordinates; B/A stay unchanged. The final fold divides the
+effective norm gain once and multiplies all four input matrices' columns.
+Dropping B compensation changes tiny full-model logits by max **0.0185142**;
+dropping A changes them by **0.0247176** in the pinned regression fixture.
+
+```mermaid
+flowchart TD
+    A["MiniCPMV4_6QModel.awq_get_modules_for_scaling"] --> B{"Native linear-attention layer?"}
+    B -->|No| C["Existing BaseQModel groups"]
+    B -->|Yes| D["Keep generic MLP groups; remove internal mixer folds"]
+    D --> E["Bind input_layernorm to QKV and Z; record B and A consumers"]
+    E --> F["Replay complete DeltaNet with captured native padding mask"]
+    F --> G{"Valid uncached sequence context?"}
+    G -->|Yes| H["Search QKV/Z; fold norm once and compensate all four consumers"]
+    G -->|No| I["Existing unsupported-replay error or configured plain fallback"]
+    style I fill:#ffd6d6
+```
+
+| Before | After |
+| --- | --- |
+| Missing alternative `self_attn` blocks stop generic source inference; input-norm group disappears. | Definition explicitly binds the inspected native input edge without relaxing the shared barrier. |
+| Internal norm dimensions can collide with hidden width. | Internal mixer candidates are excluded regardless of width/head count. |
+| `run_input_capture` ignores `use_cache=False`; generation injects a mutable cache into repeated AWQ replays. | Capture forwards that argument. Normal calibration is an uncached native prefill. |
+| Flat/stale mixer context or a mutable cache can fail in native code or silently advance state. | Replay rejects those through the existing unsupported-replay contract. |
+
+### Follow-up qualification
+
+`tests/test_minicpmv46_awq_port.py` contains **42** native CPU cases, with
+zero skips. They cover live converted model-plan owners; one/two value heads
+and gated-norm width collisions; every emitted group's neutral full-model
+and cached-continuation outputs; all four source consumers; FP32/FP16/BF16
+padding/causality and partial final microbatches; all twenty identity-quantizer
+candidates; an independently folded four-branch quantized search objective;
+legacy/chunked search parity; reference/quantizer/candidate failure rollback,
+hook cleanup and retry; incomplete branch rejection; stale mask, flat row
+and active-cache rejection; and configured fallback versus `fallback=None`.
+
+Four actual public `GPTQModel.load -> quantize -> pack -> infer -> save ->
+reload -> re-save -> reload` cases cover FP16/BF16 times one/two value heads.
+They use native image/video processor metadata, pretokenized text calibration
+and `fallback=None`; all **13** declared decoder linears pack, the real input
+norm changes, every packed/dense state tensor reloads exactly, and inference
+matches after both safetensors cycles. This is text calibration of the native
+multimodal wrapper; no new image/video numerical claim is made here.
+
+Red evidence: the original
+`tests/module_tree/test_awq_fold_safety_4175.py::test_minicpmv_4_6_linear_attn_tags_preserve_layer_output`
+fails before the fix (**1 failed**, 2.38 s). Four new source/head-layout cases
+also fail specifically because the input-norm group is absent. Four invalid
+context cases fail before adding the replay guard. The original test and all
+owned cases pass after the fix. With the source fix alone, public hybrid AWQ
+still fails because a cache advances from 8 to 16 keys against an 8-token
+mask; forwarding `use_cache=False` repairs the actual pack/reload path.
+
+Final required AWQ baseline plus owned cases and original regression:
+**617 passed, 3 skipped, 5 warnings, 14.78 s** on Python 3.14.6t,
+`PYTHON_GIL=0`, Transformers 5.23.0, Torch 2.15.0+cpu. The three existing
+remote-checkpoint skips are decilm/exaone/nanbeige. This branch predates the
+parent's already-proposed legacy fixture update, so its two legacy Q/K norm
+exclusions were applied to the imported registry inventory **in memory only**.
+Without that adjustment: 614 passed, 3 skipped, one known legacy fixture
+failure before the final two fallback cases were added. No fixture files
+were edited; native 4.6 needs no central fixture change.
+
+Reproduce the native follow-up directly:
+
+```bash
+PYTHON_GIL=0 python -m pytest -q tests/test_minicpmv46_awq_port.py \
+  tests/module_tree/test_awq_fold_safety_4175.py::test_minicpmv_4_6_linear_attn_tags_preserve_layer_output
+```
+
+The full baseline additionally runs `test_awq_scale_search_safety`,
+`test_awq_moe_router_scaling`, `test_awq_empty_groups`,
+`test_awq_position_kwargs`, `test_awq_scale_search_memory`,
+`test_bloom_awq_replay`, and module-tree `test_awq_relationships`,
+`test_bloom_awq_relationships`, `test_registered_module_plans`,
+`test_definition_subset_ordering`. Full pinned `format/check.sh`
+(Ruff 0.14.2), compileall and diff whitespace checks pass.
+
+Scale replay requires uncached, sequence-preserving calibration. Populated
+KV/recurrent cache replay is deliberately rejected rather than mutated;
+ordinary cached model inference after the neutral folds is covered. No trained
+weights/quality, GPU, FlashAttention/FLA kernels, multimodal calibration,
+compile, concurrent model execution, performance or new fusion claim is made.
