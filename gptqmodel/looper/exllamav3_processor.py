@@ -122,6 +122,7 @@ from ..utils.logger import setup_logger
 from ..utils.model import recurse_setattr
 from ..utils.module_locks import parent_module_lock
 from ..utils.offload import offload_to_disk, offload_to_safetensors_reference
+from ..utils.torch import as_torch_device
 
 
 HESSIAN_OWNER_POLICY_META = "ds4rt_hessian_owner_policy"
@@ -130,6 +131,25 @@ HESSIAN_OWNER_WEIGHTED_ROUND_ROBIN = (
 )
 
 log = setup_logger()
+
+
+def routed_expert_owner_devices(qcfg) -> list[torch.device]:
+    """Devices a routed expert's Hessian may be owned by.
+
+    ``DEVICE.ROCM`` has the value ``"rocm"``, which ``torch.device`` rejects, so
+    every configured entry goes through ``as_torch_device`` (#4667). Dense
+    modules never reach this path, which is why EXL3 worked on ROCm for them.
+    """
+
+    devices = [
+        as_torch_device(device)
+        for device in (getattr(qcfg, "moe_vram_strategy_devices", None) or [])
+    ]
+    if devices:
+        return devices
+    configured = getattr(qcfg, "device", None)
+    return [as_torch_device(configured)] if configured is not None else []
+
 
 _EXL3_SIGMA_REG = 0.025
 _DEFERRED_RUNTIME_WEIGHT_STATE = "exl3_deferred_runtime_weight"
@@ -2167,14 +2187,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
         identity = self._routed_expert_identity(module.full_name)
         capture_contract = None
         if identity is not None:
-            configured_devices = list(
-                getattr(self.qcfg, "moe_vram_strategy_devices", None) or []
-            )
-            devices = [torch.device(device) for device in configured_devices]
-            if not devices:
-                configured = getattr(self.qcfg, "device", None)
-                if configured is not None:
-                    devices = [torch.device(configured)]
+            devices = routed_expert_owner_devices(self.qcfg)
             owner_policy = (
                 self.qcfg.meta.get(HESSIAN_OWNER_POLICY_META)
                 if isinstance(self.qcfg.meta, dict)
@@ -2625,7 +2638,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
         if not isinstance(candidate_request_sha256, str):
             raise RuntimeError("EXL3 selected tier lacks its candidate checkpoint")
 
-        target_device = torch.device(
+        target_device = as_torch_device(
             task_entry.get("inline_source_device", self.qcfg.device)
         )
         prepared = model.shell_module_materialize(
@@ -2767,7 +2780,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
         futures = []
         for module_name in sorted(selected):
             module, task_entry = candidate_by_name[module_name]
-            target_device = torch.device(
+            target_device = as_torch_device(
                 task_entry.get("inline_source_device", self.qcfg.device)
             )
             futures.append(
