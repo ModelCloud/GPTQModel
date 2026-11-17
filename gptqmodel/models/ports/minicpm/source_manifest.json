@@ -1,0 +1,321 @@
+{
+  "checkpoints": {
+    "MiniCPM-1B-sft-bf16": {
+      "repository": "openbmb/MiniCPM-1B-sft-bf16",
+      "revision": "85252935bfc9acb3ee93dcea4b793fb87a0b43e8",
+      "source_url": "https://huggingface.co/openbmb/MiniCPM-1B-sft-bf16/tree/85252935bfc9acb3ee93dcea4b793fb87a0b43e8",
+      "files": {
+        "README.md": "07269e346376a663654c63bb01b9ab793224069a2bb309c045ea5e9c3edf5f97",
+        "config.json": "edeafde474d7091260b30c2f6e267be0964525921687427259f1e9d8495e3547",
+        "configuration_minicpm.py": "eca7460ace9a195a69ed9955e065bc3d6a6bf801bb15c1ed0a4c1356ad0fd590",
+        "header.bin": "65b265e1d8b4105b7ba2af60ce62c9a93d8df6021bdf3d594d6a2e75f170100e",
+        "modeling_minicpm.py": "22fb30892396f9ca74c5d924f7b04be56660363402c64dfa72c5eaf93eb14dda"
+      },
+      "config": {
+        "_name_or_path": "openbmb/CPM-2B",
+        "architectures": [
+          "MiniCPMForCausalLM"
+        ],
+        "auto_map": {
+          "AutoConfig": "configuration_minicpm.MiniCPMConfig",
+          "AutoModel": "modeling_minicpm.MiniCPMModel",
+          "AutoModelForCausalLM": "modeling_minicpm.MiniCPMForCausalLM",
+          "AutoModelForSeq2SeqLM": "modeling_minicpm.MiniCPMForCausalLM",
+          "AutoModelForSequenceClassification": "modeling_minicpm.MiniCPMForSequenceClassification"
+        },
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "hidden_act": "silu",
+        "hidden_size": 1536,
+        "initializer_range": 0.1,
+        "intermediate_size": 3840,
+        "max_position_embeddings": 4096,
+        "num_attention_heads": 24,
+        "num_hidden_layers": 52,
+        "num_key_value_heads": 8,
+        "rms_norm_eps": 1e-05,
+        "rope_scaling": null,
+        "torch_dtype": "bfloat16",
+        "transformers_version": "4.36.0",
+        "use_cache": true,
+        "vocab_size": 73440,
+        "scale_emb": 12,
+        "dim_model_base": 256,
+        "scale_depth": 1.4
+      }
+    },
+    "MiniCPM-2B-128k": {
+      "repository": "openbmb/MiniCPM-2B-128k",
+      "revision": "6011acb51acf3e8c0cb10c428d7064dc39431720",
+      "source_url": "https://huggingface.co/openbmb/MiniCPM-2B-128k/tree/6011acb51acf3e8c0cb10c428d7064dc39431720",
+      "files": {
+        "README.md": "9cd55fede506c9be07475cc9bd504eda0dc9d5351fd6f29f2a6d146191626318",
+        "config.json": "c72863af3a680c2866225dc681ffa44dab62ed500985e016ae57c5e64dd81d0e",
+        "configuration_minicpm.py": "c263389935e9296c6cacb8803d9d6dd7974d2808616335818d5b1ae3b0376976",
+        "header.bin": "d417da83c411816121007dec2d5a73bc2e4c68c56017be08ee8ad2e70de24fa4",
+        "modeling_minicpm.py": "e7db9dd8e6b4ae6c2163d6480203df43ba29c7329ab1335535835144e7044f65"
+      },
+      "config": {
+        "_name_or_path": "openbmb/CPM-2B",
+        "architectures": [
+          "MiniCPMForCausalLM"
+        ],
+        "auto_map": {
+          "AutoConfig": "configuration_minicpm.MiniCPMConfig",
+          "AutoModel": "modeling_minicpm.MiniCPMModel",
+          "AutoModelForCausalLM": "modeling_minicpm.MiniCPMForCausalLM",
+          "AutoModelForSeq2SeqLM": "modeling_minicpm.MiniCPMForCausalLM",
+          "AutoModelForSequenceClassification": "modeling_minicpm.MiniCPMForSequenceClassification"
+        },
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "hidden_act": "silu",
+        "hidden_size": 2304,
+        "initializer_range": 0.1,
+        "intermediate_size": 5760,
+        "max_position_embeddings": 65536,
+        "max_length": 131072,
+        "num_attention_heads": 36,
+        "num_hidden_layers": 40,
+        "num_key_value_heads": 36,
+        "rms_norm_eps": 1e-05,
+        "rope_scaling": {
+          "type": "dynamic",
+          "factor": 4.0
+        },
+        "torch_dtype": "bfloat16",
+        "transformers_version": "4.36.0",
+        "use_cache": true,
+        "vocab_size": 122760,
+        "scale_emb": 12,
+        "dim_model_base": 256,
+        "scale_depth": 1.4,
+        "tie_word_embeddings": false,
+        "rope_theta": 1000000.0
+      }
+    },
+    "MiniCPM-2B-dpo-bf16": {
+      "repository": "openbmb/MiniCPM-2B-dpo-bf16",
+      "revision": "9d6de77274c9f364037bf8506b4a831d3520ae79",
+      "source_url": "https://huggingface.co/openbmb/MiniCPM-2B-dpo-bf16/tree/9d6de77274c9f364037bf8506b4a831d3520ae79",
+      "files": {
+        "README.md": "41fc31a43b184e724ac4a3821fa7ecbe6814c119691c3dfa6366795b45e9ce89",
+        "config.json": "41cf26cfdca93f49209a6c0c26c00b281d6408e010ddc8cca9531c825cc17fc4",
+        "configuration_minicpm.py": "eca7460ace9a195a69ed9955e065bc3d6a6bf801bb15c1ed0a4c1356ad0fd590",
+        "header.bin": "c1a45c3d102e2a5733b0e446c690b9dcd3fd4484b6944f0090ffdf359ec2105e",
+        "modeling_minicpm.py": "22fb30892396f9ca74c5d924f7b04be56660363402c64dfa72c5eaf93eb14dda"
+      },
+      "config": {
+        "_name_or_path": "openbmb/CPM-2B",
+        "architectures": [
+          "MiniCPMForCausalLM"
+        ],
+        "auto_map": {
+          "AutoConfig": "configuration_minicpm.MiniCPMConfig",
+          "AutoModel": "modeling_minicpm.MiniCPMModel",
+          "AutoModelForCausalLM": "modeling_minicpm.MiniCPMForCausalLM",
+          "AutoModelForSeq2SeqLM": "modeling_minicpm.MiniCPMForCausalLM",
+          "AutoModelForSequenceClassification": "modeling_minicpm.MiniCPMForSequenceClassification"
+        },
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "hidden_act": "silu",
+        "hidden_size": 2304,
+        "initializer_range": 0.1,
+        "intermediate_size": 5760,
+        "max_position_embeddings": 4096,
+        "num_attention_heads": 36,
+        "num_hidden_layers": 40,
+        "num_key_value_heads": 36,
+        "rms_norm_eps": 1e-05,
+        "rope_scaling": null,
+        "torch_dtype": "bfloat16",
+        "transformers_version": "4.36.0",
+        "use_cache": true,
+        "vocab_size": 122753,
+        "scale_emb": 12,
+        "dim_model_base": 256,
+        "scale_depth": 1.4
+      }
+    },
+    "MiniCPM-2B-dpo-fp32": {
+      "repository": "openbmb/MiniCPM-2B-dpo-fp32",
+      "revision": "22f2b49d6425e1528548fe5c6c2ee379b80ff0ac",
+      "source_url": "https://huggingface.co/openbmb/MiniCPM-2B-dpo-fp32/tree/22f2b49d6425e1528548fe5c6c2ee379b80ff0ac",
+      "files": {
+        "README.md": "51a7511296990212020e5d70579181a374ae3e23960f8a24595f1a3e89277c5b",
+        "config.json": "91d06cde9d85575f32b03e80aeb8e3c1806bfee36b8df5179b5a39adefebface",
+        "configuration_minicpm.py": "eca7460ace9a195a69ed9955e065bc3d6a6bf801bb15c1ed0a4c1356ad0fd590",
+        "modeling_minicpm.py": "22fb30892396f9ca74c5d924f7b04be56660363402c64dfa72c5eaf93eb14dda"
+      },
+      "config": {
+        "_name_or_path": "openbmb/CPM-2B",
+        "architectures": [
+          "MiniCPMForCausalLM"
+        ],
+        "auto_map": {
+          "AutoConfig": "configuration_minicpm.MiniCPMConfig",
+          "AutoModel": "modeling_minicpm.MiniCPMModel",
+          "AutoModelForCausalLM": "modeling_minicpm.MiniCPMForCausalLM",
+          "AutoModelForSeq2SeqLM": "modeling_minicpm.MiniCPMForCausalLM",
+          "AutoModelForSequenceClassification": "modeling_minicpm.MiniCPMForSequenceClassification"
+        },
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "hidden_act": "silu",
+        "hidden_size": 2304,
+        "initializer_range": 0.1,
+        "intermediate_size": 5760,
+        "max_position_embeddings": 4096,
+        "num_attention_heads": 36,
+        "num_hidden_layers": 40,
+        "num_key_value_heads": 36,
+        "rms_norm_eps": 1e-05,
+        "rope_scaling": null,
+        "torch_dtype": "float32",
+        "transformers_version": "4.36.0",
+        "use_cache": true,
+        "vocab_size": 122753,
+        "scale_emb": 12,
+        "dim_model_base": 256,
+        "scale_depth": 1.4
+      }
+    },
+    "MiniCPM-2B-sft-bf16": {
+      "repository": "openbmb/MiniCPM-2B-sft-bf16",
+      "revision": "4ec16344ac13e6ef5010aeecaa533369ac8eb53c",
+      "source_url": "https://huggingface.co/openbmb/MiniCPM-2B-sft-bf16/tree/4ec16344ac13e6ef5010aeecaa533369ac8eb53c",
+      "files": {
+        "README.md": "0c2b81fcbb9e14a1a8800c5ea0b3b6555c654a55d72d7e664cc75fe2d1dae5e8",
+        "config.json": "41cf26cfdca93f49209a6c0c26c00b281d6408e010ddc8cca9531c825cc17fc4",
+        "configuration_minicpm.py": "eca7460ace9a195a69ed9955e065bc3d6a6bf801bb15c1ed0a4c1356ad0fd590",
+        "modeling_minicpm.py": "22fb30892396f9ca74c5d924f7b04be56660363402c64dfa72c5eaf93eb14dda"
+      },
+      "config": {
+        "_name_or_path": "openbmb/CPM-2B",
+        "architectures": [
+          "MiniCPMForCausalLM"
+        ],
+        "auto_map": {
+          "AutoConfig": "configuration_minicpm.MiniCPMConfig",
+          "AutoModel": "modeling_minicpm.MiniCPMModel",
+          "AutoModelForCausalLM": "modeling_minicpm.MiniCPMForCausalLM",
+          "AutoModelForSeq2SeqLM": "modeling_minicpm.MiniCPMForCausalLM",
+          "AutoModelForSequenceClassification": "modeling_minicpm.MiniCPMForSequenceClassification"
+        },
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "hidden_act": "silu",
+        "hidden_size": 2304,
+        "initializer_range": 0.1,
+        "intermediate_size": 5760,
+        "max_position_embeddings": 4096,
+        "num_attention_heads": 36,
+        "num_hidden_layers": 40,
+        "num_key_value_heads": 36,
+        "rms_norm_eps": 1e-05,
+        "rope_scaling": null,
+        "torch_dtype": "bfloat16",
+        "transformers_version": "4.36.0",
+        "use_cache": true,
+        "vocab_size": 122753,
+        "scale_emb": 12,
+        "dim_model_base": 256,
+        "scale_depth": 1.4
+      }
+    },
+    "MiniCPM-2B-sft-fp32": {
+      "repository": "openbmb/MiniCPM-2B-sft-fp32",
+      "revision": "bff9bcef7649d3442482110632b11e36a1fbda4d",
+      "source_url": "https://huggingface.co/openbmb/MiniCPM-2B-sft-fp32/tree/bff9bcef7649d3442482110632b11e36a1fbda4d",
+      "files": {
+        "README.md": "1ed5bfecdd04e950c35bbb79c8de93c2b6f873291174ebfd0fbef07b5c2e2ef0",
+        "config.json": "91d06cde9d85575f32b03e80aeb8e3c1806bfee36b8df5179b5a39adefebface",
+        "configuration_minicpm.py": "eca7460ace9a195a69ed9955e065bc3d6a6bf801bb15c1ed0a4c1356ad0fd590",
+        "modeling_minicpm.py": "22fb30892396f9ca74c5d924f7b04be56660363402c64dfa72c5eaf93eb14dda"
+      },
+      "config": {
+        "_name_or_path": "openbmb/CPM-2B",
+        "architectures": [
+          "MiniCPMForCausalLM"
+        ],
+        "auto_map": {
+          "AutoConfig": "configuration_minicpm.MiniCPMConfig",
+          "AutoModel": "modeling_minicpm.MiniCPMModel",
+          "AutoModelForCausalLM": "modeling_minicpm.MiniCPMForCausalLM",
+          "AutoModelForSeq2SeqLM": "modeling_minicpm.MiniCPMForCausalLM",
+          "AutoModelForSequenceClassification": "modeling_minicpm.MiniCPMForSequenceClassification"
+        },
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "hidden_act": "silu",
+        "hidden_size": 2304,
+        "initializer_range": 0.1,
+        "intermediate_size": 5760,
+        "max_position_embeddings": 4096,
+        "num_attention_heads": 36,
+        "num_hidden_layers": 40,
+        "num_key_value_heads": 36,
+        "rms_norm_eps": 1e-05,
+        "rope_scaling": null,
+        "torch_dtype": "float32",
+        "transformers_version": "4.36.0",
+        "use_cache": true,
+        "vocab_size": 122753,
+        "scale_emb": 12,
+        "dim_model_base": 256,
+        "scale_depth": 1.4
+      }
+    },
+    "MiniCPM-MoE-8x2B": {
+      "repository": "openbmb/MiniCPM-MoE-8x2B",
+      "revision": "7495286593bc56a524a42e26eeaee5e185cb7f9c",
+      "source_url": "https://huggingface.co/openbmb/MiniCPM-MoE-8x2B/tree/7495286593bc56a524a42e26eeaee5e185cb7f9c",
+      "files": {
+        "README.md": "fd4d56ed98bd89210af2afda329547ce14618e0040024041c6a97ca3731f3bba",
+        "config.json": "53b88ed7486134b3281d389bb5169b734861d7569f359327478e32677686acf9",
+        "configuration_minicpm.py": "c263389935e9296c6cacb8803d9d6dd7974d2808616335818d5b1ae3b0376976",
+        "header.bin": "2cff079db2cdb0ca5a8c9f7d882009423f2bc8e35f5f22fc087619be2540f16e",
+        "modeling_minicpm.py": "8eb73cd08d14c9b3887066b5e1a30e7683d8de7e739ea474fb62d468ec4b034f"
+      },
+      "config": {
+        "_name_or_path": "openbmb/CPM-2B",
+        "architectures": [
+          "MiniCPMForCausalLM"
+        ],
+        "auto_map": {
+          "AutoConfig": "configuration_minicpm.MiniCPMConfig",
+          "AutoModel": "modeling_minicpm.MiniCPMModel",
+          "AutoModelForCausalLM": "modeling_minicpm.MiniCPMForCausalLM",
+          "AutoModelForSeq2SeqLM": "modeling_minicpm.MiniCPMForCausalLM",
+          "AutoModelForSequenceClassification": "modeling_minicpm.MiniCPMForSequenceClassification"
+        },
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "hidden_act": "silu",
+        "hidden_size": 2304,
+        "initializer_range": 0.1,
+        "intermediate_size": 5760,
+        "max_position_embeddings": 4096,
+        "num_attention_heads": 36,
+        "num_hidden_layers": 40,
+        "num_key_value_heads": 36,
+        "rms_norm_eps": 1e-05,
+        "rope_scaling": null,
+        "torch_dtype": "bfloat16",
+        "transformers_version": "4.36.0",
+        "use_cache": true,
+        "vocab_size": 122753,
+        "scale_emb": 12,
+        "dim_model_base": 256,
+        "scale_depth": 1.4,
+        "num_experts": 8,
+        "num_experts_per_tok": 2
+      }
+    }
+  },
+  "license": {
+    "url": "https://raw.githubusercontent.com/OpenBMB/MiniCPM/f4293a1a7bde05d1acce99488235792615fc241b/LICENSE",
+    "sha256": "202d02b14796563546e1a1d1e761410fa9e399bf7e1b85d8b43c972658341202"
+  }
+}

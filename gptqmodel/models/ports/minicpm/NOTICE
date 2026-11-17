@@ -1,0 +1,18 @@
+GPT-QModel original MiniCPM port
+
+This product contains code adapted from OpenBMB MiniCPM, under Apache-2.0.
+Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
+OpenBMB adapted the GPT-NeoX/OPT/Meta implementation for MiniCPM; the
+configuration also credits EleutherAI and Hugging Face. Original rotary
+scaling credits kaiokendev (linear), bloc97 and emozilla (dynamic NTK).
+ModelCloud.ai adapted the inspected implementation for Transformers 5 in 2026.
+
+Source repositories, immutable revisions and SHA-256 digests are recorded in
+source_manifest.json. LICENSE preserves OpenBMB's Apache-2.0 license text.
+The model cards separately require the OpenBMB General Model License for
+trained weights. No trained weights or tokenizer assets are redistributed here.
+
+Changes include Transformers 5 model/config/cache/generation integration,
+definition-owned loading, stateless FP32 rotary construction, portable
+eager/SDPA attention and expert dispatch, safetensors lifecycle tests, live
+module ownership and a conservative plain-quantization-only AWQ policy.
