@@ -13,6 +13,7 @@ from ...models._const import DEVICE
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.rocm import IS_ROCM
+from ...utils.vptq_cuda import vptq_cuda_runtime_available, vptq_cuda_runtime_error
 from ._numerics import bias_narrows_losslessly, linear_fp32_reduce, linear_needs_wide_bias
 from .vptq_torch import VPTQLinear
 
@@ -30,7 +31,11 @@ class VPTQCudaLinear(VPTQLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.VPTQ_CUDA]
     SUPPORTS_METHODS = [METHOD.VPTQ]
-    SUPPORTS_FORMATS = {FORMAT.VPTQ: 100}
+    # Rank above the portable Torch kernel (100) so AUTO loads a VPTQ
+    # checkpoint on the fused native kernel instead of the reference
+    # implementation. ``validate_once`` rejects ROCm and a host where the
+    # extension cannot run, so AUTO still falls back to ``VPTQLinear`` there.
+    SUPPORTS_FORMATS = {FORMAT.VPTQ: 110}
     SUPPORTS_BITS = VPTQLinear.SUPPORTS_BITS
     SUPPORTS_SHARDS = VPTQLinear.SUPPORTS_SHARDS
     SUPPORTS_TRAINING = VPTQLinear.SUPPORTS_TRAINING
@@ -53,6 +58,11 @@ class VPTQCudaLinear(VPTQLinear):
         exposes the CUDA device namespace through HIP, which makes
         ``torch.cuda.is_available()`` true there; an explicit architecture check
         is therefore required instead of relying on the torch device type.
+
+        The runtime probe is what keeps AUTO safe now that this kernel outranks
+        the portable one: without it, a host where the JIT build fails (no
+        toolchain, unsupported compute capability) would load the checkpoint and
+        only raise on the first forward instead of selecting ``VPTQLinear``.
         """
         if IS_ROCM:
             return False, NotImplementedError(
@@ -62,6 +72,8 @@ class VPTQCudaLinear(VPTQLinear):
             )
         if not torch.cuda.is_available():
             return False, RuntimeError("VPTQ_CUDA requires an available CUDA device.")
+        if not vptq_cuda_runtime_available():
+            return False, ImportError(vptq_cuda_runtime_error())
         return True, None
 
     def __init__(self, *args, **kwargs):
