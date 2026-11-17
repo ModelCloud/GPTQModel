@@ -462,6 +462,25 @@ the plan from silently losing user intent (issue #4560):
   (`act_order`, `damp_percent`, `symmetric`, `group-size`, `mse`,
   `true_sequential`, ...) raises `ValueError` that names the unsupported keys
   and lists the supported ones. Nothing is silently ignored.
+- Every key above `weight.quantize` is allow-listed too (issue #4939). The
+  accepted sets are `version`/`stages` at the root, `name`/`rules` in a stage,
+  `match`/`aliases`/`actions`/`stop`/`weight`/`input`/`output`/`kv_cache` in a
+  rule, `mode`/`prepare`/`quantize`/`export` in a target, and
+  `format`/`variant`/`impl`/`version`/`options` in `export`. An unknown key
+  raises `ValueError`, names the key, suggests the closest accepted key
+  (`varient` -> `variant`, `stopp` -> `stop`, `prepair` -> `prepare`), and lists
+  the whole accepted set, so a typo cannot silently compile to the default
+  GPTQ v1 config.
+- `sym`, `desc_act`, `act_group_aware`, and `stop` must be real booleans
+  (issue #4939). A quoted YAML/JSON `"false"` (or `0`, `"0"`) raises `TypeError`
+  naming the field instead of being coerced to `True` by `bool(...)`; write the
+  bare `false`.
+- `weight.export.options` and `weight.export.version` raise
+  `NotImplementedError` while no compiler reads them (issue #4939); dropping a
+  requested layout version or exporter knob would change the artifact without
+  saying so. `weight.export.impl` stays accepted: it names the load-time
+  runtime implementation, which is chosen by the backend and is orthogonal to
+  the encoded layout.
 
 ```mermaid
 flowchart TD

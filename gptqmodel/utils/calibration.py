@@ -1025,6 +1025,30 @@ def prepare_calibration_dataset(
                 else:
                     row_ids = row_ids[:max_positions]
                     row_mask = row_mask[:max_positions]
+            else:
+                # Padding is not part of the sample. A row below the position
+                # budget may still be pre-padded by `tokenizer(texts,
+                # padding=True)` / `padding="max_length"`; keeping the pads
+                # makes every capture and per-layer replay forward run at the
+                # padded width and turns the length sort into a no-op (#4889).
+                # Strip the contiguous pad positions at either edge so the sort
+                # and `collate_data` see real lengths and re-pad per batch.
+                # Interior mask zeros describe a caller-built mask rather than
+                # tokenizer padding, so such a row is left untouched.
+                first_real = None
+                last_real = None
+                real_count = 0
+                for pos, keep in enumerate(row_mask):
+                    if keep:
+                        if first_real is None:
+                            first_real = pos
+                        last_real = pos
+                        real_count += 1
+                if first_real is not None and real_count == last_real - first_real + 1:
+                    if first_real != 0 or last_real != row_len - 1:
+                        row_ids = row_ids[first_real : last_real + 1]
+                        row_mask = row_mask[first_real : last_real + 1]
+                        rows_changed = True
 
             # An all-padding row carries no activation statistics: keeping it
             # would only feed the Hessian zeros, so drop it whether or not the
