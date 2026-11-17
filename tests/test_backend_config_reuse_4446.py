@@ -47,7 +47,7 @@ def fake_load(monkeypatch, tmp_path):
             # model; this fake stops before a real model exists.
             return SimpleNamespace(
                 quantize_config=kwargs["quantize_config"],
-                log_kv_cache_estimate=lambda: None,
+                log_budget=lambda: None,
             )
 
     monkeypatch.setattr(auto, "check_and_get_model_definition", lambda *args, **kwargs: _Definition)

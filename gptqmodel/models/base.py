@@ -116,6 +116,7 @@ from ..utils.model import (
 from ..utils.model_dequant import infer_block_shape
 from ..utils.p2p import safe_module_to
 from ..utils.quant_metadata import UnsupportedMetadata, describe_unsupported_metadata, find_unsupported_metadata
+from ..utils.resource_budget import ResourceBudget, device_memory_bytes
 from ..utils.rocm import IS_ROCM, quant_blas_backend
 from ..utils.structure import (
     LazyTurtle,
@@ -393,23 +394,36 @@ def _log_quantize_summary(
 
 
 
-def _free_vram_budget(reserve: float = 0.1) -> Optional[int]:
-    """Bytes the KV cache can use on the current CUDA device, minus a reserve.
+def _model_storage_bytes(inner: object) -> int:
+    """(measured) Storage of the model's parameters and buffers.
 
-    Read at the moment of the call: it is a snapshot of what is free after the
-    weights are resident, not a promise about what a different process will
-    leave behind.
+    Meta tensors are skipped: they carry shapes but no storage, and counting
+    them would inflate the weight budget on a lazy-loaded checkpoint.
     """
 
-    if not torch.cuda.is_available():
-        return None
+    total = 0
     try:
-        free, _total = torch.cuda.mem_get_info()
-    except Exception:  # pragma: no cover - driver edge cases
-        return None
-    if free <= 0:
-        return None
-    return int(free * (1.0 - max(0.0, min(0.9, reserve))))
+        for tensor in list(inner.parameters()) + list(inner.buffers()):
+            if getattr(tensor, "is_meta", False):
+                continue
+            total += tensor.numel() * tensor.element_size()
+    except Exception:  # pragma: no cover - exotic module trees
+        return total
+    return total
+
+
+def _budget_for(inner: object, *, reserve: float = 0.1,
+                dtype: Optional[torch.dtype] = None) -> ResourceBudget:
+    """Resource budget for a decoder module: measured device numbers + estimates."""
+
+    free, total = device_memory_bytes()
+    return ResourceBudget(
+        weights_bytes=_model_storage_bytes(inner),
+        device_free_bytes=free,
+        device_total_bytes=total,
+        kv_cache=_kv_cache_estimate_for(inner, dtype=dtype),
+        reserve_fraction=reserve,
+    )
 
 
 def _kv_cache_estimate_for(inner: object, *, dtype: Optional[torch.dtype] = None) -> Optional[KVCacheEstimate]:
@@ -2285,47 +2299,27 @@ class BaseQModel(nn.Module):
 
         warn_fused_unit_dynamic_conflicts(module_names, self.quantize_config)
 
+    def budget(self, *, reserve: float = 0.1, dtype: Optional[torch.dtype] = None) -> ResourceBudget:
+        """What this model costs on the current device.
+
+        Measured numbers (weight storage, a device-memory snapshot) sit next to
+        the estimated KV-cache footprint, and every accessor on the result says
+        which kind it is. ``reserve`` is the share of free device memory held
+        back from the KV budget.
+        """
+
+        return _budget_for(getattr(self, "model", None), reserve=reserve, dtype=dtype)
+
     def kv_cache_estimate(self, *, dtype: Optional[torch.dtype] = None) -> Optional[KVCacheEstimate]:
-        """Per-token KV-cache cost of this model, or None when the config hides it.
+        """The estimated KV-cache slice of :meth:`budget` (kept as a shortcut)."""
 
-        Weight quantization does not change the cache, so this is the number a
-        user needs after loading to decide how much context fits next to the
-        weights. The dtype defaults to the dtype of the model's own weights: a
-        cache is as large as the activations that fill it, and
-        ``config.torch_dtype`` is usually unset.
-        """
+        return _budget_for(getattr(self, "model", None), dtype=dtype).kv_cache
 
-        return _kv_cache_estimate_for(getattr(self, "model", None), dtype=dtype)
+    def log_budget(self) -> None:
+        """Log the resource budget once, marked measured vs estimated."""
 
-    def kv_cache_plan(self, *, vram_gib: Optional[float] = None, reserve: float = 0.1,
-                      batches: Sequence[int] = (1, 2, 4, 8, 16, 32)):
-        """What contexts fit at each batch size, or None when the config hides it.
-
-        ``vram_gib`` is the budget for the KV cache. Left unset, it is the
-        device's free memory right now minus ``reserve``, which is what is left
-        next to the loaded weights.
-        """
-
-        estimate = _kv_cache_estimate_for(getattr(self, "model", None))
-        if estimate is None:
-            return None
-        budget = int(float(vram_gib) * 1024 ** 3) if vram_gib is not None else _free_vram_budget(reserve)
-        if not budget:
-            return None
-        return budget, estimate.plan(budget, batches), estimate
-
-    def log_kv_cache_estimate(self, *, plan: bool = True) -> None:
-        """Log the KV-cache cost once, when the config supports the estimate."""
-
-        estimate = _kv_cache_estimate_for(getattr(self, "model", None))
-        if estimate is None:
-            return
-        log.info(estimate.format())
-        if not plan:
-            return
-        budget = _free_vram_budget()
-        if budget:
-            log.info(estimate.format_plan(budget))
+        for line in _budget_for(getattr(self, "model", None)).describe():
+            log.info(line)
 
     @with_quantization_device_telemetry
     def quantize(
@@ -2873,7 +2867,7 @@ class BaseQModel(nn.Module):
         # copies are gone once the loop returns, but PyTorch keeps the pinned
         # blocks cached (non-swappable ``RssShmem``) for the process lifetime.
         release_pinned_host_cache()
-        self.log_kv_cache_estimate()
+        self.log_budget()
         return result
 
     @staticmethod

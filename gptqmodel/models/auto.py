@@ -1061,7 +1061,7 @@ class GPTQModel:
 
         # Weight quantization does not change the cache, so state what context
         # costs as soon as a model is loaded for inference.
-        m.log_kv_cache_estimate()
+        m.log_budget()
 
         return m
 

@@ -1,20 +1,21 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # GPU=-1
-"""The estimate has to be reachable from a loaded model, not just from a log line.
+"""A loaded model has to report what it costs, and say which numbers are measured.
 
-Most users load a quantized checkpoint rather than quantize one, and the only
-place the KV-cache cost appeared was the end of a quantization run. These tests
-cover the public method, the dtype it inherits from the weights, and the line
-``load()`` now emits.
+Most users load a quantized checkpoint rather than quantize one. `model.budget()`
+is the single entry point: measured weight storage and device memory sit next to
+the estimated KV-cache footprint, and every accessor names its units so a caller
+does not have to read the implementation to know what a value counts.
 """
 
 import types
 
 import torch
 
+import gptqmodel.models.base as base
 from gptqmodel.models.base import BaseQModel
-from gptqmodel.utils.kv_cache import KVCacheEstimate
+from gptqmodel.utils.resource_budget import ESTIMATED, MEASURED, ResourceBudget
 
 
 def _stub(*, layers=2, heads=4, kv_heads=2, hidden=64, dtype=torch.bfloat16):
@@ -22,132 +23,99 @@ def _stub(*, layers=2, heads=4, kv_heads=2, hidden=64, dtype=torch.bfloat16):
         hidden_size=hidden, num_hidden_layers=layers,
         num_attention_heads=heads, num_key_value_heads=kv_heads,
     )
-    parameters = [torch.zeros(1, dtype=torch.int64), torch.zeros(1, dtype=dtype)]
-    inner = types.SimpleNamespace(config=config, parameters=lambda: iter(parameters))
+    parameters = [torch.zeros(4, dtype=torch.int64), torch.zeros(8, dtype=dtype)]
+    inner = types.SimpleNamespace(config=config, parameters=lambda: iter(parameters),
+                                  buffers=lambda: iter(()))
     return types.SimpleNamespace(model=inner)
 
 
-def test_estimate_inherits_the_weight_dtype():
-    stub = _stub(dtype=torch.bfloat16)
-    estimate = BaseQModel.kv_cache_estimate(stub)
-    assert isinstance(estimate, KVCacheEstimate)
-    assert estimate.dtype == torch.bfloat16
+def test_budget_reports_measured_storage_and_an_estimated_cache():
+    budget = BaseQModel.budget(_stub())
+    assert isinstance(budget, ResourceBudget)
+    # 4 int64 + 8 bf16 bytes, measured from the tensors themselves.
+    assert budget.weights_bytes == 4 * 8 + 8 * 2
+    assert budget.kv_cache is not None
     # 2 layers * 2 (K and V) * 2 kv_heads * 16 head_dim * 2 bytes
-    assert estimate.bytes_per_token == 2 * 2 * 2 * 16 * 2
+    assert budget.kv_cache.kv_bytes_per_token == 2 * 2 * 2 * 16 * 2
 
 
-def test_explicit_dtype_overrides_the_weights():
-    stub = _stub(dtype=torch.bfloat16)
-    estimate = BaseQModel.kv_cache_estimate(stub, dtype=torch.float32)
-    assert estimate.dtype == torch.float32
-    assert estimate.bytes_per_token == 2 * 2 * 2 * 16 * 4
+def test_every_accessor_states_whether_it_is_measured_or_estimated():
+    assert ResourceBudget.ACCURACY["weights_bytes"] == MEASURED
+    assert ResourceBudget.ACCURACY["device_free_bytes"] == MEASURED
+    assert ResourceBudget.ACCURACY["kv_cache"] == ESTIMATED
+    assert ResourceBudget.ACCURACY["max_context_tokens"] == ESTIMATED
 
 
-def test_non_floating_parameters_are_skipped():
-    """Quantized checkpoints hold integer tensors; the cache follows activations."""
+def test_meta_tensors_are_not_counted_as_storage():
+    """A lazily loaded checkpoint carries shapes but no bytes."""
+
+    class _Meta:
+        is_meta = True
+        def numel(self): return 1_000_000
+        def element_size(self): return 4
 
     config = types.SimpleNamespace(hidden_size=64, num_hidden_layers=1,
                                    num_attention_heads=4, num_key_value_heads=2)
-    inner = types.SimpleNamespace(
-        config=config,
-        parameters=lambda: iter([torch.zeros(1, dtype=torch.int64)]),
-    )
-    estimate = BaseQModel.kv_cache_estimate(types.SimpleNamespace(model=inner))
-    # No floating parameter at all: fall back to the config dtype (unset -> fp16).
-    assert estimate.dtype == torch.float16
+    inner = types.SimpleNamespace(config=config, parameters=lambda: iter([_Meta()]),
+                                  buffers=lambda: iter(()))
+    budget = BaseQModel.budget(types.SimpleNamespace(model=inner))
+    assert budget.weights_bytes == 0
 
 
-def test_model_without_a_decoder_config_returns_none():
-    inner = types.SimpleNamespace(config=types.SimpleNamespace(), parameters=lambda: iter([]))
-    assert BaseQModel.kv_cache_estimate(types.SimpleNamespace(model=inner)) is None
+def test_kv_budget_holds_back_the_reserve(monkeypatch):
+    monkeypatch.setattr(base, "device_memory_bytes", lambda: (10 * 1024 ** 3, 24 * 1024 ** 3))
+    budget = BaseQModel.budget(_stub(), reserve=0.1)
+    assert budget.device_free_bytes == 10 * 1024 ** 3
+    assert budget.device_total_bytes == 24 * 1024 ** 3
+    assert budget.kv_budget_bytes == int(9 * 1024 ** 3)
 
 
-def test_logging_is_skipped_when_the_config_cannot_be_resolved(capsys):
-    inner = types.SimpleNamespace(config=types.SimpleNamespace(), parameters=lambda: iter([]))
-    BaseQModel.log_kv_cache_estimate(types.SimpleNamespace(model=inner))
-    assert "KV cache:" not in capsys.readouterr().out
+def test_planning_accessors_name_their_units(monkeypatch):
+    monkeypatch.setattr(base, "device_memory_bytes", lambda: (4 * 1024 ** 3, 24 * 1024 ** 3))
+    budget = BaseQModel.budget(_stub(), reserve=0.0)
+    rows = budget.context_batch_plan()
+    assert rows and all(context > 0 for _batch, context in rows)
+    assert budget.kv_cache_bytes_for(1024) == budget.kv_cache.kv_bytes_for(1024)
+    assert budget.max_sequences(1024) >= 1
+    assert budget.max_context_tokens(batch_size=1) >= 1024
 
 
-def test_load_emits_the_estimate(capsys, tmp_path):
-    """The documented entry point must tell a loader what context costs."""
+def test_planning_returns_none_without_a_device(monkeypatch):
+    monkeypatch.setattr(base, "device_memory_bytes", lambda: (None, None))
+    budget = BaseQModel.budget(_stub())
+    assert budget.kv_budget_bytes is None
+    assert budget.max_context_tokens() is None
+    assert budget.context_batch_plan() == ()
+    # An explicit budget still works without a device.
+    assert budget.max_context_tokens(kv_budget_bytes=1024 ** 2) > 0
 
-    from pathlib import Path
 
-    from tokenizers import Tokenizer
-    from tokenizers.models import WordLevel
-    from tokenizers.pre_tokenizers import Whitespace
-    from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
+def test_describe_marks_measured_and_estimated(monkeypatch):
+    monkeypatch.setattr(base, "device_memory_bytes", lambda: (8 * 1024 ** 3, 24 * 1024 ** 3))
+    lines = BaseQModel.budget(_stub()).describe()
+    text = "\n".join(lines)
+    assert "(measured)" in text
+    assert "(estimated)" in text
+    assert "weights" in text and "KV cache" in text
 
-    from gptqmodel import GPTQModel
 
-    source = Path(tmp_path) / "native"
-    config = LlamaConfig(vocab_size=128, hidden_size=64, intermediate_size=128,
-                         num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
-                         max_position_embeddings=64)
-    torch.manual_seed(0)
-    LlamaForCausalLM(config).save_pretrained(source)
-    tokenizer = Tokenizer(WordLevel(vocab={"<pad>": 0, "<s>": 1, "eos": 2}, unk_token="<pad>"))
-    tokenizer.pre_tokenizer = Whitespace()
-    PreTrainedTokenizerFast(tokenizer_object=tokenizer, pad_token="<pad>",
-                            bos_token="<s>", eos_token="eos").save_pretrained(source)
+def test_without_a_kv_estimate_the_budget_says_so(monkeypatch):
+    monkeypatch.setattr(base, "device_memory_bytes", lambda: (8 * 1024 ** 3, 24 * 1024 ** 3))
+    inner = types.SimpleNamespace(config=types.SimpleNamespace(), parameters=lambda: iter([]),
+                                  buffers=lambda: iter(()))
+    lines = BaseQModel.budget(types.SimpleNamespace(model=inner)).describe()
+    assert any("KV cache unknown" in line for line in lines)
 
-    model = GPTQModel.load(str(source), device="cpu")
-    captured = capsys.readouterr()
-    assert "KV cache:" in captured.out + captured.err
 
-    estimate = model.kv_cache_estimate()
+def test_log_budget_emits_the_described_lines(monkeypatch, capsys):
+    monkeypatch.setattr(base, "device_memory_bytes", lambda: (8 * 1024 ** 3, 24 * 1024 ** 3))
+    BaseQModel.log_budget(_stub())
+    out = capsys.readouterr().out
+    assert "Budget: weights" in out
+    assert "KV cache" in out
+
+
+def test_kv_cache_estimate_is_the_budget_slice():
+    estimate = BaseQModel.kv_cache_estimate(_stub(), dtype=torch.float32)
     assert estimate is not None
-    assert estimate.growing_layers == config.num_hidden_layers
-
-
-def test_kv_cache_plan_takes_an_explicit_budget():
-    stub = _stub()
-    budget, rows, estimate = BaseQModel.kv_cache_plan(stub, vram_gib=1)
-    assert budget == 1024 ** 3
-    assert rows and estimate.context_limit is None
-    assert all(context > 0 for _, context in rows)
-
-
-def test_kv_cache_plan_uses_free_vram_when_no_budget_is_given(monkeypatch):
-    import gptqmodel.models.base as base
-
-    monkeypatch.setattr(base, "_free_vram_budget", lambda reserve=0.1: 2 * 1024 ** 3)
-    budget, rows, _estimate = BaseQModel.kv_cache_plan(_stub())
-    assert budget == 2 * 1024 ** 3
-    assert rows
-
-
-def test_kv_cache_plan_returns_none_without_a_budget(monkeypatch):
-    import gptqmodel.models.base as base
-
-    monkeypatch.setattr(base, "_free_vram_budget", lambda reserve=0.1: None)
-    assert BaseQModel.kv_cache_plan(_stub()) is None
-
-
-def test_free_vram_budget_applies_the_reserve(monkeypatch):
-    import gptqmodel.models.base as base
-
-    monkeypatch.setattr(base.torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(base.torch.cuda, "mem_get_info", lambda: (10 * 1024 ** 3, 24 * 1024 ** 3))
-    assert base._free_vram_budget(0.1) == int(9 * 1024 ** 3)
-    assert base._free_vram_budget(0.0) == 10 * 1024 ** 3
-
-
-def test_logging_adds_the_plan_when_a_budget_is_known(monkeypatch, capsys):
-    import gptqmodel.models.base as base
-
-    monkeypatch.setattr(base, "_free_vram_budget", lambda reserve=0.1: 1024 ** 3)
-    BaseQModel.log_kv_cache_estimate(_stub())
-    out = capsys.readouterr().out
-    assert "KV cache:" in out
-    assert "KV plan:" in out
-
-
-def test_logging_skips_the_plan_when_asked(monkeypatch, capsys):
-    import gptqmodel.models.base as base
-
-    monkeypatch.setattr(base, "_free_vram_budget", lambda reserve=0.1: 1024 ** 3)
-    BaseQModel.log_kv_cache_estimate(_stub(), plan=False)
-    out = capsys.readouterr().out
-    assert "KV cache:" in out
-    assert "KV plan:" not in out
+    assert estimate.dtype == torch.float32
