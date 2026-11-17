@@ -62,7 +62,10 @@ def test_dynamic_exclude_attention_sinks_override_is_applied():
     gptq = GPTQ(layer, qcfg=selected)
     gptq.quantizer.configure(perchannel=True)
     inp = torch.arange(2 * 4 * 4, dtype=torch.float32).reshape(2, 4, 4) / 7.0
-    gptq.add_batch(inp, None)
+    # The processor resolves BOS flags from the calibration ids and passes
+    # them down; a direct add_batch without evidence deliberately keeps every
+    # row (#4526/#4568).
+    gptq.add_batch(inp, None, sink_bos_mask=torch.ones(2, dtype=torch.bool))
     assert gptq.nsamples == 2 * 3  # first token of each sequence dropped
 
 

@@ -18,7 +18,7 @@ import torch.nn as nn
 from models.model_test import ModelTest
 
 from gptqmodel.looper import gptq_processor as gptq_processor_mod
-from gptqmodel.looper.gptq_processor import GPTQProcessor
+from gptqmodel.looper.gptq_processor import GPTQProcessor, clone_gptq_config_for_module
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization import gptq as gptq_mod
 from gptqmodel.quantization.config import (
@@ -414,6 +414,142 @@ def test_gptq_processor_attention_sink_is_inert_when_flag_off():
     ]
     processor.tokenizer = SimpleNamespace(bos_token_id=1)
     assert processor._attention_sink_bos_mask_for_batch(0, 1) is None
+
+
+def _attention_sink_lifecycle_processor(*, qcfg: GPTQConfig, task_qcfg=None):
+    """Processor wired like the looper leaves it just before the layer loop."""
+
+    layer = nn.Linear(4, 3, bias=False, dtype=torch.float32).eval()
+    task = GPTQ(layer, qcfg=task_qcfg or qcfg)
+    task.quantizer.configure(perchannel=True)
+
+    processor = object.__new__(GPTQProcessor)
+    processor.tasks = {"linear": task}
+    processor.qcfg = qcfg
+    processor.lock = threading.Lock()
+    processor._batch_tls = SimpleNamespace(index=0)
+    processor._mask_tls = SimpleNamespace(value=torch.ones((2, 3), dtype=torch.bool))
+    processor.calibration_dataset = [
+        {
+            "input_ids": torch.tensor([[1, 5, 6], [1, 7, 8]]),
+            "attention_mask": torch.ones((2, 3), dtype=torch.long),
+        }
+    ]
+    processor.tokenizer = SimpleNamespace(bos_token_id=1)
+    return processor, task, layer
+
+
+def _run_attention_sink_hook(processor, task, layer):
+    inputs = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4) / 7.0
+    outputs = layer(inputs)
+    processor.pre_process_fwd_hook("linear")(layer, (inputs,), outputs)
+    return inputs, task.finalize_hessian()
+
+
+def test_attention_sink_mask_survives_calibration_dataset_release():
+    # Regression for #4568: ModuleLooper deletes `calibration_dataset` before
+    # the layer loop, so the BOS decision must be captured earlier. This is
+    # the exact lifecycle the unit tests used to skip.
+    sink_on, task_on, layer_on = _attention_sink_lifecycle_processor(
+        qcfg=GPTQConfig(bits=4, group_size=2, exclude_attention_sinks=True)
+    )
+    sink_on.release_calibration_dataset()
+    assert not hasattr(sink_on, "calibration_dataset")
+    inputs, hessian_on = _run_attention_sink_hook(sink_on, task_on, layer_on)
+
+    # The BOS-masked reference keeps every token after position 0.
+    expected_rows = inputs[:, 1:, :].reshape(-1, inputs.shape[-1])
+    assert task_on.nsamples == expected_rows.shape[0]
+    assert task_on.attention_sink_dropped_rows == 2
+    assert task_on.attention_sink_skipped_batches == 0
+    torch.testing.assert_close(
+        hessian_on,
+        _normalized_hessian_oracle(expected_rows),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+    # Flag-off control: the same lifecycle keeps the historical Hessian.
+    sink_off, task_off, layer_off = _attention_sink_lifecycle_processor(
+        qcfg=GPTQConfig(bits=4, group_size=2)
+    )
+    sink_off.release_calibration_dataset()
+    inputs_off, hessian_off = _run_attention_sink_hook(sink_off, task_off, layer_off)
+    assert task_off.nsamples == inputs_off.shape[0] * inputs_off.shape[1]
+    assert task_off.attention_sink_dropped_rows == 0
+    torch.testing.assert_close(
+        hessian_off,
+        _normalized_hessian_oracle(inputs_off),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+    # The option must change the Hessian, not just telemetry.
+    assert not torch.allclose(hessian_on, hessian_off)
+
+
+def test_dynamic_attention_sink_mask_survives_calibration_dataset_release():
+    # A per-module `dynamic` rule enables the mask while the top-level flag is
+    # False; the capture must see it and the hook must honor the module task.
+    qcfg = GPTQConfig(
+        bits=4,
+        group_size=2,
+        dynamic={r"+:.*linear.*": {"exclude_attention_sinks": True}},
+    )
+    task_qcfg = clone_gptq_config_for_module(qcfg, "linear")
+    assert task_qcfg.exclude_attention_sinks is True
+
+    processor, task, layer = _attention_sink_lifecycle_processor(
+        qcfg=qcfg, task_qcfg=task_qcfg
+    )
+    processor.release_calibration_dataset()
+    inputs, hessian = _run_attention_sink_hook(processor, task, layer)
+
+    expected_rows = inputs[:, 1:, :].reshape(-1, inputs.shape[-1])
+    assert task.nsamples == expected_rows.shape[0]
+    assert task.attention_sink_dropped_rows == 2
+    torch.testing.assert_close(
+        hessian,
+        _normalized_hessian_oracle(expected_rows),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_attention_sink_bos_less_tokenizer_survives_calibration_dataset_release(
+    monkeypatch,
+):
+    # #4459 must keep working after the lifetime fix: a tokenizer without BOS
+    # masks nothing, even though the dataset was released.
+    warnings = []
+    monkeypatch.setattr(gptq_processor_mod.log, "warn", warnings.append)
+    processor, task, layer = _attention_sink_lifecycle_processor(
+        qcfg=GPTQConfig(bits=4, group_size=2, exclude_attention_sinks=True)
+    )
+    processor.tokenizer = SimpleNamespace(bos_token_id=None)
+    processor.release_calibration_dataset()
+    inputs, hessian = _run_attention_sink_hook(processor, task, layer)
+
+    assert task.nsamples == inputs.shape[0] * inputs.shape[1]
+    assert task.attention_sink_dropped_rows == 0
+    assert processor.attention_sink_skipped_batches == 1
+    assert len(warnings) == 1
+    assert "no BOS" in warnings[0]
+    torch.testing.assert_close(
+        hessian,
+        _normalized_hessian_oracle(inputs),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_hessian_accumulation_settings_include_attention_sink_flag():
+    layer = nn.Linear(4, 3, bias=False, dtype=torch.float32).eval()
+    sink_on = GPTQ(layer, qcfg=GPTQConfig(bits=4, group_size=2, exclude_attention_sinks=True))
+    sink_off = GPTQ(layer, qcfg=GPTQConfig(bits=4, group_size=2))
+    assert GPTQProcessor._hessian_accumulation_settings(
+        sink_on
+    ) != GPTQProcessor._hessian_accumulation_settings(sink_off)
 
 
 def test_gptq_attention_sink_default_and_flat_inputs_are_unchanged():
