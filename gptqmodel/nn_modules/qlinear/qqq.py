@@ -592,6 +592,20 @@ class QQQLinear(GroupedQuantLinear):
         x = (x / quant_scale).round().clamp(-128, 127).to(torch.int8)
         return x, quant_scale
 
+    def _split_k_locks(self, device) -> torch.Tensor:
+        """A fresh zeroed split-K lock array for one forward call.
+
+        ``qqq_gemm.cu`` spins on and resets these counters, so a single
+        per-module buffer lets two streams serving the same module corrupt each
+        other's counters and deadlock (#4665). EXL3 allocates its locks per
+        call for the same reason; this array is a few hundred int32 slots.
+        """
+        return torch.zeros(
+            _workspace_numel(self.out_features, self.max_par),
+            dtype=torch.int32,
+            device=device,
+        )
+
     def forward(self, A):
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
@@ -619,7 +633,7 @@ class QQQLinear(GroupedQuantLinear):
             s1, # s1
             self.s_channel, # s2
             self.s_group, # s3
-            self.workspace,
+            self._split_k_locks(A.device),
             max_par=self.max_par,
         )
 
