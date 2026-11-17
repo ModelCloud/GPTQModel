@@ -27,7 +27,38 @@ model = GPTQModel.load("org/unquantized-model", quantize_config=qcfg,
 `GPTQModel.from_pretrained`, `GPTQModel.from_quantized`, and `model.quantize`
 also accept typed backend configurations. A quantization-time `backend=`
 overrides the selection retained by the loader. Use `backend=BACKEND.AUTO`
-without a retained typed selection to run the existing automatic chooser.
+without a retained selection to run the existing automatic chooser.
+
+A dense load's explicit selection is retained for a later
+`quantize(backend=AUTO)` whether it was written as a typed configuration or as
+the equivalent enum/string:
+
+| dense load | `quantize(backend=AUTO)` |
+| --- | --- |
+| `backend=AwqTorchConfig()` | `AWQ_TORCH` with that configuration |
+| `backend=BACKEND.AWQ_TORCH` | `AWQ_TORCH` with defaults |
+| `backend=BACKEND.AUTO` | the automatic chooser |
+
+An invalid backend value raises at the load boundary; it is never replaced by
+`AUTO`.
+
+```mermaid
+flowchart TD
+    A["load(backend=X)"] --> B{"BackendConfig instance?"}
+    B -- "yes" --> C["qcfg._backend_config = X"]
+    B -- "no" --> D["normalize_backend(X)<br/>invalid -> ValueError/TypeError"]
+    D --> E{"X == AUTO?"}
+    E -- "no" --> F["qcfg._load_backend = X"]
+    E -- "yes" --> G["no retained selection"]
+    C --> H["quantize(backend=AUTO)"]
+    F --> H
+    G --> H
+    H --> I{"typed or enum retained?"}
+    I -- "yes" --> J["resolve the retained selection"]
+    I -- "no" --> K["BACKEND.AUTO chooser"]
+    classDef failure fill:#ffe0e8,stroke:#b30000,color:#111;
+    class D failure;
+```
 
 ## Types and options
 
