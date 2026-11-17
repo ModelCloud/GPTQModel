@@ -1180,8 +1180,19 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager runs and an explicit
     # torch.cuda.graph capture succeeds, but dynamo breaks on
     # `tensor.is_inference()` in `tensor_cache_key`, so only EAGER is reachable.
+    #
+    # The capture claim covers the formats whose dense dequant runs entirely on
+    # the device (`GRAPH_CAPTURE_QTYPES`: Q4_0/Q8_0 and the K-quants Q4_K/Q5_K/
+    # Q6_K, i.e. the default `q_k_m`). Q2_K/Q3_K and the remaining codebook
+    # formats dequantize through numpy on the host, so they cannot be captured;
+    # `supports_graph_capture()` answers that per instance (#5014).
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
     SUPPORTS_GRAPH_CAPTURE = True
+
+    #: GGUF tensor types whose eager forward is safe under an explicit
+    #: ``torch.cuda.CUDAGraph`` capture. Every other type dequantizes through
+    #: numpy on the host and therefore cannot be captured.
+    GRAPH_CAPTURE_QTYPES = frozenset({"Q4_0", "Q8_0", "Q4_K", "Q5_K", "Q6_K"})
 
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TORCH]
     SUPPORTS_METHODS = [METHOD.GGUF]
@@ -1246,6 +1257,12 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         self.gguf_fused_chunk_bytes = kernel.gguf_fused_chunk_bytes
         self._k_scale_overflow_cache: dict[tuple, bool] = {}
         self._k_scale_overflow_cache_source_key = None
+        # Device-resident `uint8` shift tables for the K-quant dequantizers,
+        # keyed by `(device.type, device.index)` then by the shift tuple.
+        # Rebuilding them per forward is a pageable H2D copy that CUDA graph
+        # capture rejects (#5014); `clear_weight_cache` drops them so a device
+        # move or a reload rebuilds on the new device.
+        self._u8_shift_tables: dict[tuple[str, int | None], dict[tuple[int, ...], torch.Tensor]] = {}
 
         super().__init__(
             bits=int(bits_spec),
@@ -1292,6 +1309,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     def clear_weight_cache(self) -> None:
         self._k_scale_overflow_cache = {}
         self._k_scale_overflow_cache_source_key = None
+        self._u8_shift_tables = {}
 
     def post_init(self):
         self.clear_weight_cache()
@@ -1428,9 +1446,54 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         blocks = qweight.contiguous().view(rows, num_blocks, self.gguf_type_size)
         return blocks, rows, num_blocks
 
-    @staticmethod
-    def _u8_shift(values: tuple[int, ...], device: torch.device) -> torch.Tensor:
-        return torch.tensor(values, dtype=torch.uint8, device=device)
+    def _u8_shift(self, values: tuple[int, ...], device: torch.device) -> torch.Tensor:
+        """Return the immutable ``uint8`` shift table for ``values`` on ``device``.
+
+        The K-quant dequantizers right-shift packed codes by a fixed vector of
+        bit counts. Building that vector with ``torch.tensor(..., device=...)``
+        on every forward issues a pageable host-to-device copy per call: an
+        explicit ``torch.cuda.graph`` capture of a K-quant layer then fails with
+        "Cannot copy between CPU and CUDA tensors during CUDA graph capture
+        unless the CPU tensor is pinned", and outside capture the same code
+        costs one to three small copies per layer per forward (#5014).
+
+        The tables are two to eight bytes and never change, so keep one
+        allocation per device for the module's lifetime. `clear_weight_cache`
+        drops them; it only runs on load/train transitions, never per forward,
+        so a warmed-up module captures with a stable allocation.
+        """
+
+        device = torch.device(device)
+        # Key on the device identity rather than on the created tensor:
+        # `torch.device("cuda")` has no index while the tensor lands on
+        # `cuda:N`, and comparing the two would rebuild the table every call.
+        key = (device.type, device.index)
+        all_tables = getattr(self, "_u8_shift_tables", None)
+        if all_tables is None:
+            # A rehomed module (class swap) may not have run `__init__`.
+            all_tables = {}
+            self._u8_shift_tables = all_tables
+        tables = all_tables.get(key)
+        if tables is None:
+            tables = {}
+            all_tables[key] = tables
+        table = tables.get(values)
+        if table is None:
+            table = torch.tensor(values, dtype=torch.uint8, device=device)
+            tables[values] = table
+        return table
+
+    def supports_graph_capture(self) -> bool:
+        """Whether *this* instance's eager forward is CUDA-graph capturable.
+
+        The class declares ``SUPPORTS_GRAPH_CAPTURE = True`` for the formats
+        whose dequant runs on the device. A checkpoint stored in one of the
+        host-dequantized formats (Q2_K/Q3_K and the remaining codebook types)
+        still cannot be captured, so callers that capture a specific layer ask
+        the instance instead of the class (#5014).
+        """
+
+        return self.gguf_tensor_qtype in self.GRAPH_CAPTURE_QTYPES
 
     def _dequantize_q4_0(
         self,
