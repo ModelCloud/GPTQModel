@@ -3613,6 +3613,37 @@ def _checkpoint_runtime_to_source_keys(
     return mapping
 
 
+def _device_map_target(device_map, name: str) -> Optional[torch.device]:
+    """Resolve the device a ``device_map`` entry assigns to one tensor name.
+
+    Returns ``None`` when the map says nothing about ``name`` or names an
+    offload target (``disk``/``meta``), so the caller keeps the slot's device.
+
+    The result is always a ``torch.device``, never the raw map value: #4915
+    spells ``cuda:0`` as the int ordinal ``0`` for Accelerate, and ``0`` is
+    falsy, so a truthiness test at the call site silently fell back to the
+    CPU slot and left every packed FP8 weight on the host (#4964).
+    """
+
+    if not isinstance(device_map, dict):
+        return None
+    module_name = name
+    while module_name and module_name not in device_map:
+        module_name = ".".join(module_name.split(".")[:-1])
+    if module_name == "" and "" not in device_map:
+        return None
+    target = device_map[module_name]
+    if isinstance(target, str) and target in ("disk", "meta"):
+        return None
+    if isinstance(target, int) and not isinstance(target, bool):
+        # Accelerate accepts a bare ordinal; it always means this accelerator.
+        return torch.device("cuda", target)
+    try:
+        return torch.device(target)
+    except (TypeError, RuntimeError, ValueError):
+        return None
+
+
 def _restore_checkpoint_buffers(
     model, checkpoint, dtypes: dict[str, torch.dtype | None],
     *, exact_source_names: set[str] | frozenset[str] = frozenset(),
@@ -3636,17 +3667,7 @@ def _restore_checkpoint_buffers(
     source_name = (lambda name: name_map.get(name, name)) if name_map else (lambda name: name)
 
     def mapped_device(name: str):
-        if not isinstance(device_map, dict):
-            return None
-        module_name = name
-        while module_name and module_name not in device_map:
-            module_name = ".".join(module_name.split(".")[:-1])
-        if module_name == "" and "" not in device_map:
-            return None
-        target = device_map[module_name]
-        if target in ("disk", "meta"):
-            return None
-        return target
+        return _device_map_target(device_map, name)
 
     checkpoint = os.fspath(checkpoint)
     if os.path.isdir(checkpoint):
@@ -3698,7 +3719,9 @@ def _restore_checkpoint_buffers(
         target_dtype = dtypes[name]
         target_device = slot.device
         if name in exact_source_names:
-            target_device = mapped_device(name) or target_device
+            mapped = mapped_device(name)
+            if mapped is not None:
+                target_device = mapped
         restored_value = value.to(
             device=target_device, dtype=value.dtype if target_dtype is None else target_dtype
         )
