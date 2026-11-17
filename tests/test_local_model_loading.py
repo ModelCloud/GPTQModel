@@ -3,6 +3,7 @@
 """The loading policy applies before config Python, including retries/reloads."""
 
 import json
+import struct
 from types import SimpleNamespace
 
 import pytest
@@ -122,6 +123,57 @@ def test_config_selection_uses_subfolder_for_policy_and_dispatch(tmp_path):
     marker = checkpoint(root / "nested", "llama")
     assert load_model_config(root, subfolder="nested", trust_remote_code=True).model_type == "llama"
     assert check_and_get_model_definition(str(root), trust_remote_code=True, subfolder="nested").__name__ == "LlamaQModel"
+    assert not marker.exists()
+
+
+def _gguf_config(path):
+    """Tiny metadata-only GGUF, parsed by Transformers' actual reader."""
+    def string(value):
+        encoded = value.encode()
+        return struct.pack("<Q", len(encoded)) + encoded
+
+    fields = [("general.architecture", 8, string("llama"))]
+    for key, value in {"context_length": 32, "embedding_length": 16,
+                       "feed_forward_length": 32, "block_count": 1,
+                       "attention.head_count": 2, "attention.head_count_kv": 1}.items():
+        fields.append(("llama." + key, 4, struct.pack("<I", value)))
+    payload = b"GGUF" + struct.pack("<IQQ", 3, 0, len(fields))
+    for key, tag, value in fields:
+        payload += string(key) + struct.pack("<I", tag) + value
+    path.write_bytes(payload + b"\0" * (-len(payload) % 32))
+
+
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("decoy_config", [False, True])
+@pytest.mark.parametrize("subfolder", ["", "nested"])
+def test_gguf_policy_reads_selected_metadata_instead_of_json(tmp_path, monkeypatch, trust, decoy_config, subfolder):
+    from gptqmodel.utils.hf import _patch_transformers_prism_gguf_compat
+
+    # This is the runtime installed by the normal public GGUF path; do not
+    # replace the decoder or stub the metadata returned by Transformers.
+    _patch_transformers_prism_gguf_compat(api_name="test")
+    root = tmp_path / "checkpoint"
+    path = root / subfolder
+    if decoy_config:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        marker = checkpoint(path, "bailing_hybrid")
+        decoy = json.loads((path / "config.json").read_text())
+        decoy["q_lora_rank"] = 8
+        (path / "config.json").write_text(json.dumps(decoy))
+    else:
+        path.mkdir(parents=True)
+        marker = path / "EXECUTED"
+    _gguf_config(path / "tiny.gguf")
+    selected = {"gguf_file": "tiny.gguf", "subfolder": subfolder, "local_files_only": True}
+    assert check_and_get_model_definition(str(root), trust_remote_code=trust, **selected).__name__ == "LlamaQModel"
+    config = load_model_config(root, trust_remote_code=trust, **selected)
+    assert config.model_type == "llama"
+    assert config.hidden_size == 16
+    assert config.num_hidden_layers == 1
+    # Permission changes must not make an unrelated JSON config authoritative.
+    monkeypatch.setenv(BYPASS_ENV, "1")
+    assert load_model_config(root, trust_remote_code=trust, **selected).hidden_size == 16
+    assert check_and_get_model_definition(str(root), trust_remote_code=trust, **selected).__name__ == "LlamaQModel"
     assert not marker.exists()
 
 

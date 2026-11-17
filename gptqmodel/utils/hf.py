@@ -1027,8 +1027,13 @@ def load_model_config(model_id_or_path, *, trust_remote_code: bool = False, **kw
     loader = local_model_loader(payload.get("model_type"))
     if loader is not None:
         return loader.load_config(model_id_or_path, **kwargs)
+    config_selection_kwargs = get_config_selection_kwargs(kwargs)
+    # GGUF metadata is the selected config. The trust preflight must inspect
+    # the same file, including when an unrelated config.json is also present.
+    if kwargs.get("gguf_file") is not None:
+        config_selection_kwargs["gguf_file"] = kwargs["gguf_file"]
     trust_remote_code = resolve_trust_remote_code(
-        model_id_or_path, trust_remote_code=trust_remote_code, **get_config_selection_kwargs(kwargs)
+        model_id_or_path, trust_remote_code=trust_remote_code, **config_selection_kwargs
     )
     return AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code, **kwargs)
 
