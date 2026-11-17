@@ -25,6 +25,7 @@ from typing import Optional  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
+from parameterized import parameterized  # noqa: E402
 
 from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
@@ -89,8 +90,8 @@ class Test(ModelTest):
 # clear && CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 BITS=8 NATIVE_MODEL_ID=/monster/data/model/Llama-3.2-3B-Instruct pytest tests/test_quant_and_eora.py
 
 
-    def test_quant_and_eora(self):
-        bits = int(os.environ["BITS"])
+    @parameterized.expand([(2,), (3,), (4,), (8,)])
+    def test_quant_and_eora(self, bits):
         self.NATIVE_MODEL_ID = os.environ["NATIVE_MODEL_ID"]
 
         print(f"eeeeee gpu: testing {bits}: bits, model: {self.NATIVE_MODEL_ID}")
