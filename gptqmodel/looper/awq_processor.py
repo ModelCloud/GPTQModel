@@ -3135,28 +3135,33 @@ class AWQProcessor(LoopProcessor):
             1, min(n_tokens, budget // max(cand_chunk * row_elems * elem_size, 1))
         )
 
-        # Pre-allocate scratch buffers so the inner loops never allocate large temporaries.
-        scratch_clamp = torch.empty(
-            (cand_chunk, oc_batch_size, 1, n_group, group_w), dtype=w_all.dtype, device=device
-        )
-        scratch_quant = torch.empty_like(scratch_clamp)
-        scratch_out = torch.empty(
-            (cand_chunk, oc_batch_size, n_tokens, n_group),
-            dtype=torch.result_type(input_feat, w_all),
-            device=device,
-        )
-        org_out = torch.empty_like(scratch_out[0])
-        scratch_prod = torch.empty(
-            (cand_chunk, oc_batch_size, token_chunk, n_group, group_w),
-            dtype=scratch_out.dtype,
-            device=device,
-        )
-
         for i_b in range(0, org_w_shape[0], oc_batch_size):
-            # The final tile may be shorter than `oc_batch_size`; every scratch
-            # slice below is cropped to this tile's row count.
+            # The final tile may be shorter than `oc_batch_size`. Size the
+            # scratch to this tile's real row count: cropping a padded buffer to
+            # `co` rows leaves a non-contiguous slice whose `reshape` is a copy,
+            # so `_pseudo_quantize_tensor_into` wrote the quantized candidates
+            # into that copy and the error reduction read stale rows (#4540).
+            # Per-tile allocation keeps every slice below a contiguous view and
+            # never materializes padded rows, so the reduction only sees real
+            # tile rows. Each tile allocates once, outside the inner loops.
             w = w_all[i_b: i_b + oc_batch_size]
             co = w.shape[0]
+
+            scratch_clamp = torch.empty(
+                (cand_chunk, co, 1, n_group, group_w), dtype=w_all.dtype, device=device
+            )
+            scratch_quant = torch.empty_like(scratch_clamp)
+            scratch_out = torch.empty(
+                (cand_chunk, co, n_tokens, n_group),
+                dtype=torch.result_type(input_feat, w_all),
+                device=device,
+            )
+            org_out = torch.empty_like(scratch_out[0])
+            scratch_prod = torch.empty(
+                (cand_chunk, co, token_chunk, n_group, group_w),
+                dtype=scratch_out.dtype,
+                device=device,
+            )
 
             org_max_val = w.abs().amax(dim=-1, keepdim=True)  # [co_batch, 1, n_group, 1]
 
