@@ -67,6 +67,17 @@ def fit_to_grid(height: int, width: int, factor: int = 32, min_pixels: int = 256
     return h, w
 
 
+def _resolve_pixel_size(size, min_pixels=None, max_pixels=None):
+    """Resolve modern size plus legacy per-bound overrides without mutation."""
+    if isinstance(size, dict):
+        size = SizeDict(**size)
+    shortest = min_pixels if min_pixels is not None else size.shortest_edge
+    longest = max_pixels if max_pixels is not None else size.longest_edge
+    if not shortest or not longest:
+        raise ValueError("size must contain 'shortest_edge' and 'longest_edge' keys.")
+    return SizeDict(shortest_edge=shortest, longest_edge=longest)
+
+
 @auto_docstring
 class AgnesImageProcessor(TorchvisionBackend):
     do_resize = True
@@ -107,12 +118,8 @@ class AgnesImageProcessor(TorchvisionBackend):
         max_pixels: int | None = None,
         **kwargs,
     ) -> dict:
-        if min_pixels is not None and max_pixels is not None:
-            size = SizeDict(shortest_edge=min_pixels, longest_edge=max_pixels)
-        kwargs = super()._standardize_kwargs(size=size, **kwargs)
-        size = kwargs.get("size", self.size)
-        if not size.shortest_edge or not size.longest_edge:
-            raise ValueError("size must contain 'shortest_edge' and 'longest_edge' keys.")
+        kwargs = super()._standardize_kwargs(size=self.size if size is None else size, **kwargs)
+        kwargs["size"] = _resolve_pixel_size(kwargs["size"], min_pixels, max_pixels)
         return kwargs
 
     @auto_docstring
@@ -180,11 +187,13 @@ class AgnesImageProcessor(TorchvisionBackend):
         """Number of vision patches an image of this size produces (used by
         serving engines to lay out placeholders without running the processor)."""
         images_kwargs = images_kwargs or {}
-        min_pixels = images_kwargs["min_pixels"] if "min_pixels" in images_kwargs else self.size["shortest_edge"]
-        max_pixels = images_kwargs["max_pixels"] if "max_pixels" in images_kwargs else self.size["longest_edge"]
+        size = self._standardize_kwargs(**images_kwargs)["size"]
         patch_size = images_kwargs.get("patch_size", self.patch_size)
         merge_size = images_kwargs.get("merge_size", self.merge_size)
-        new_h, new_w = fit_to_grid(height, width, patch_size * merge_size, min_pixels=min_pixels, max_pixels=max_pixels)
+        new_h, new_w = height, width
+        if images_kwargs.get("do_resize", self.do_resize):
+            new_h, new_w = fit_to_grid(height, width, patch_size * merge_size,
+                                      min_pixels=size.shortest_edge, max_pixels=size.longest_edge)
         return (new_h // patch_size) * (new_w // patch_size)
 
 

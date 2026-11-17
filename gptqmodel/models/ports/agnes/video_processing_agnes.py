@@ -25,6 +25,8 @@ from transformers.utils import TensorType, is_torchvision_available, logging
 from transformers.video_processing_utils import BaseVideoProcessor
 from transformers.video_utils import VideoMetadata, group_videos_by_shape, reorder_videos
 
+from .image_processing_agnes import _resolve_pixel_size
+
 
 if is_torchvision_available():
     from torchvision.transforms.v2 import functional as tvF
@@ -68,6 +70,8 @@ class AgnesVideoProcessorInitKwargs(VideosKwargs, total=False):
     merge_size: int
     min_frames: int
     max_frames: int
+    min_pixels: int
+    max_pixels: int
 
 
 class AgnesVideoProcessor(BaseVideoProcessor):
@@ -91,13 +95,14 @@ class AgnesVideoProcessor(BaseVideoProcessor):
     model_input_names = ["pixel_values_videos", "video_grid_thw"]
 
     def __init__(self, **kwargs: Unpack[AgnesVideoProcessorInitKwargs]):
-        super().__init__(**kwargs)
+        size = kwargs.pop("size", None)
+        size = _resolve_pixel_size(self.size if size is None else size,
+                                   kwargs.pop("min_pixels", None), kwargs.pop("max_pixels", None))
+        super().__init__(size={"shortest_edge": size.shortest_edge, "longest_edge": size.longest_edge}, **kwargs)
 
-    def _standardize_kwargs(self, **kwargs) -> dict:
-        kwargs = super()._standardize_kwargs(**kwargs)
-        size = kwargs.get("size", self.size)
-        if not size.shortest_edge or not size.longest_edge:
-            raise ValueError("size must contain 'shortest_edge' and 'longest_edge' keys.")
+    def _standardize_kwargs(self, size=None, min_pixels=None, max_pixels=None, **kwargs) -> dict:
+        kwargs = super()._standardize_kwargs(size=self.size if size is None else size, **kwargs)
+        kwargs["size"] = _resolve_pixel_size(kwargs["size"], min_pixels, max_pixels)
         return kwargs
 
     def sample_frames(self, metadata: VideoMetadata, num_frames: int | None = None, fps: int | float | None = None, **kwargs):
@@ -124,14 +129,16 @@ class AgnesVideoProcessor(BaseVideoProcessor):
     def get_number_of_video_patches(self, num_frames, height, width, videos_kwargs=None):
         """Count patches after sampling, for the supplied frame dimensions."""
         options = videos_kwargs or {}
-        size = options.get("size") or self.size
+        size = self._standardize_kwargs(**options)["size"]
         patch = options.get("patch_size", self.patch_size)
         temporal = options.get("temporal_patch_size", self.temporal_patch_size)
         merge = options.get("merge_size", self.merge_size)
-        h, w = fit_video_to_grid(
-            num_frames, height, width, temporal_factor=temporal, factor=patch * merge,
-            min_pixels=size["shortest_edge"], max_pixels=size["longest_edge"],
-        )
+        h, w = height, width
+        if options.get("do_resize", self.do_resize):
+            h, w = fit_video_to_grid(
+                num_frames, height, width, temporal_factor=temporal, factor=patch * merge,
+                min_pixels=size.shortest_edge, max_pixels=size.longest_edge,
+            )
         return math.ceil(num_frames / temporal) * (h // patch) * (w // patch)
 
     def _preprocess(
