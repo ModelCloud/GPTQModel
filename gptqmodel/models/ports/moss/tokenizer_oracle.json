@@ -1,7 +1,7 @@
 {
   "repo": "fnlp/moss-moon-003-sft",
   "revision": "3c06a7a241cef41caa9c339b149e9931d6b3deaa",
-  "note": "Independently computed source regex/byte/ranked-BPE IDs. Original metadata constructor requires upstream Tokenicer preload correction; manual caller AddedToken overrides used for diagnosis until shared fix.",
+  "note": "Independently computed source regex/byte/ranked-BPE IDs. Original five-file metadata qualifies through public GPT-QModel load_hf_tokenizer using upstream Tokenicer 0.0.19 c14e1c8c062c7b7cc9a981054366f98bde015fa1 prepare_load_kwargs before the owned constructor, with no caller AddedToken overrides. All three variants match these IDs and preserve source JSON; base EOS 106028, SFT/plugin EOS 106068.",
   "sha256": {
     "vocab.json": "53a5be5c089e133f66cfa2eb0889d91cfc76ab7ff9a3b0a237e6c550c50e8d40",
     "merges.txt": "b0686029221952e7145d99331c5d89dbf01ece4d86ddce52687a8dab23bcd048",

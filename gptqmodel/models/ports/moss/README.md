@@ -96,7 +96,8 @@ the released policy; the HF optional tying metadata is inactive under it.
 The source tokenizer uses GPT-2 byte BPE, its original regex, special
 whitespace tokens and opt-in BOS/pair and code-completion truncation rules.
 The owned class uses the native TF5 GPT2 tokenizer backend and a source BOS
-template; a saved native post-processor is preserved on reload. No Mistral
+template; a saved native post-processor is preserved on reload. Positional
+truncation arguments and Unicode patterns retain the source `regex` API. No Mistral
 regex substitution is part of this model port.
 
 `tokenizer_oracle.json` pins the five real SFT asset hashes and six independent
@@ -106,10 +107,22 @@ code indentation, emoji and `<eoh>`/`<eom>` chat delimiters. The original
 as dictionaries without `__type`; unprepared TF5.23 native and owned
 constructors reject them. Reusable preload correction belongs upstream in
 Tokenicer, before the definition-owned constructor, not in this port.
+All six cases also match the inspected base and SFT-plugin assets: the three
+variants share vocabulary, merges, and added-token hashes. Base EOS is 106028;
+SFT and SFT-plugin EOS is 106068. Variant metadata hashes are in the oracle
+fixture. Unmodified original metadata now loads through the generic
+`Tokenicer.prepare_load_kwargs(path, **kwargs)` API before the definition-owned
+constructor, then the existing single outer Tokenicer normalization. This uses
+unreleased Tokenicer 0.0.19 source
+[`c14e1c8c062c7b7cc9a981054366f98bde015fa1`](https://github.com/ModelCloud/Tokenicer/commit/c14e1c8c062c7b7cc9a981054366f98bde015fa1)
+from [upstream PR 66](https://github.com/ModelCloud/Tokenicer/pull/66).
+Released 0.0.18 lacks this API. There are no caller `AddedToken` overrides in
+the final public qualification.
 
 ## Qualification and reproduction
 
-Run in an installed GPT-QModel CPU environment with Transformers 5.23.0:
+Run in an installed GPT-QModel CPU environment with Transformers 5.23.0 and
+the Tokenicer candidate above (until its release is available):
 
 ```bash
 PYTHON_GIL=0 python -m pytest -q tests/test_moss_local_port.py tests/module_tree/test_moss_local_port.py
@@ -128,6 +141,12 @@ use, left padding, generation, two dense safetensors cycles, malformed-file
 repair/retry, and public hostile metadata/trust/bypass cases run on CPU.
 Synthetic tokenizer tests independently check ranked BPE, BOS, pairs,
 padding, truncation and modern/legacy reload.
+The twelve original-layout public regressions cross base/SFT EOS with API
+trust false/true and bypass unset/0/1. They check exact IDs, ordinary added
+whitespace surviving special-token removal, immutable original JSON, public
+model/tokenizer selection, native tokenizer save/reload, then corrupt-vocabulary
+failure and restored-file retry. All twelve fail at the native constructor's
+list-of-dictionaries error before shared preload wiring.
 
 Four public AWQ cases cover partial/full-head rotary and offload false/true,
 with `fallback=None`, actual calibration/packing/inference, all eight tiny
@@ -141,14 +160,25 @@ reload losing its template before the owned constructor fix. The numerical
 oracle separately detects source-layout and cache-dtype defects: reversing
 the Q/V/K shard axis fails all 12 numerical cases; narrowing rotated K to
 the compute dtype fails eight FP16/BF16 cases while four FP32 controls pass.
+A source-API probe additionally fails all four BOS/prefix cases when the fourth
+positional decode argument is forwarded to the native backend. The repaired
+owned signature and Unicode patterns pass. The released 64/256 rotary fraction
+is checked at positions 2043–2047 in FP32/FP16/BF16 without allocating 16B weights.
 
 Measured on Python 3.14.6t / GIL disabled, CPU Torch 2.15.0 and Transformers
-5.23.0 with Tokenicer 0.0.14: 60 owned cases passed in 5.66 seconds. The owned
-suite plus shared local-loader/path/processor/config, AWQ relationships,
-registered plans and fusion family passed 827 cases with 475 skips in 21.09
-seconds, using the exact proposed MOSS registry entry in memory only. The
-skips are existing missing native/remote fixtures and NVIDIA-only fusion
-numerics, not executed MOSS qualification. `format/check.sh` passed with
+5.23.0 with Tokenicer 0.0.19 at the pinned source above: 75 owned cases passed
+with no skips in 6.62 seconds. A separate offline check loads all three original
+real tokenizer bundles through public `load_hf_tokenizer`: 18 selections
+(three variants × trust false/true × bypass unset/0/1) each match all six
+independent exact-ID/decode cases and padded batches. Ordinary added whitespace,
+variant EOS, unchanged source JSON, and native save/reload also pass.
+The final owned suite plus shared local-loader/path/processor/config, AWQ
+relationships, registered plans and fusion family passed 842 cases with 475
+skips and 11 warnings in 19.99 seconds on the same Tokenicer candidate, using
+only the proposed MOSS registry entry and fusion reason in memory. Skips are
+468 NVIDIA Marlin hardware cases, four missing remote checkpoint fixtures,
+two non-buildable CausalLM fixture families (OPT350/Muse Glimmer), and one
+missing optional PEFT import. All 75 MOSS cases run. `format/check.sh` passed with
 pinned Ruff 0.14.2; compileall and `git diff --check` were clean.
 
 ## Explicit limits
