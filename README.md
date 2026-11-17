@@ -240,6 +240,9 @@ checkpoint declares a remote-only layout; see
 [`docs/trust-remote-code-isolation.md`](docs/trust-remote-code-isolation.md#native-override-of-explicit-trust).
 Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
+Re-saving a loaded fused-expert MoE defuses the export shell and fails closed on
+dropped quantization payloads; see
+[`docs/quantized-moe-resave-defuse.md`](docs/quantized-moe-resave-defuse.md).
 In-session QQQ kernel rehoming and cache initialization are documented in
 [docs/qqq-kernel-selection.md](docs/qqq-kernel-selection.md).
 Quantized modules load their scales and other quantization buffers at the dtype
