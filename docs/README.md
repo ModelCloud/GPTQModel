@@ -129,6 +129,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [NF12 staged B1 and prefill projections](nf12-staged-b1-projections.md)
 - [NF12 validation backend and performance flow](nf12-validation-backends.md)
 - [QQQ in-memory kernel selection](qqq-kernel-selection.md)
+- [QQQ per-group scale staging](qqq-group-scale-staging.md)
 - [Rotation Hadamard device dispatch](rotation-device-dispatch.md)
 - [Rotation model support and opt-in gate](rotation-model-support.md)
 - [Runtime prompt input normalization](runtime-prompt-input-normalization.md)
