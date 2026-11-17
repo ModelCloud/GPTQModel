@@ -5830,6 +5830,17 @@ class BaseQModel(nn.Module):
                     return stripped
             return strip_non_quantize_flags(names[0]) if names else None
 
+        def _feature_numel(name):
+            """Number of captured activation elements for ``name`` (0 if absent).
+
+            A declared MoE root is seeded as a capture task even on a layer that
+            never runs an expert (ERNIE-4.5-MoE's dense prefix), so the key
+            exists with an empty tensor. Treat "key present" and "captured
+            something" as different questions (#4903).
+            """
+            feature = input_feat.get(name) if name else None
+            return int(feature.numel()) if feature is not None else 0
+
         def _try_update_last_module(candidate_name: str) -> bool:
             nonlocal last_module, last_module_name, last_module_root
 
@@ -6250,9 +6261,15 @@ class BaseQModel(nn.Module):
                     moe_gate_up_root = (
                         _block_moe_root(block) if has_gate_up_roles and is_moe_family else None
                     )
-                    if moe_gate_up_root is not None and moe_gate_up_root in input_feat:
+                    # A seeded-but-uncaptured root is not a usable search input:
+                    # the dense prefix of a hybrid MoE (`mlp:moe` with a dense
+                    # `mlp` block) seeds `mlp` but never runs the root hook, and
+                    # preferring that empty tensor dropped the dense layer's
+                    # norm -> gate/up group (#4903). Fall through to the block's
+                    # own captured feature in that case; a routed-expert block
+                    # keeps the fail-closed path below.
+                    if moe_gate_up_root is not None and _feature_numel(moe_gate_up_root) > 0:
                         feature_name = moe_gate_up_root
-                        inp = input_feat[moe_gate_up_root]
                     # process ['mlp.experts.#.gate_proj', 'mlp.experts.#.gup_proj']
                     elif is_moe_gate_up_block and module2inspect is not None:
                         if last_module_root not in input_feat:
@@ -6262,10 +6279,9 @@ class BaseQModel(nn.Module):
                                 len(block),
                             )
                         feature_name = last_module_root if last_module_root in input_feat else _select_feature_name(block)
-                        inp = input_feat.get(last_module_root, input_feat.get(_select_feature_name(block)))
                     else:
                         feature_name = _select_feature_name(block)
-                        inp = input_feat.get(feature_name)
+                    inp = input_feat.get(feature_name)
 
                     if inp is None:
                         pending_nonquant.clear()
@@ -6276,13 +6292,24 @@ class BaseQModel(nn.Module):
                         # never ran. A zero-width "source" also makes every
                         # consumer look width-foreign below, which used to drop
                         # the routed-expert gate/up group without a trace
-                        # (#4697). Warn before skipping it.
+                        # (#4697). Warn before skipping it, and warn for a
+                        # non-expert gate/up block too: the dense prefix of a
+                        # hybrid MoE used to lose its own group the same silent
+                        # way (#4903).
                         if is_moe_gate_up_block:
                             log.warning(
                                 "awq_get_modules_for_scaling: declared MoE root `%s` captured no "
                                 "activations; skipping the routed-expert gate/up scaling group "
                                 "and leaving those projections on plain quantization",
                                 last_module_root,
+                            )
+                        elif has_gate_up_roles:
+                            log.warning(
+                                "awq_get_modules_for_scaling: feature `%s` captured no activations; "
+                                "skipping the gate/up scaling group for `%s` and leaving those "
+                                "projections on plain quantization",
+                                feature_name,
+                                block[0] if block else "<empty block>",
                             )
                         pending_nonquant.clear()
                         skip_block = True
