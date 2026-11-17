@@ -1,0 +1,22 @@
+Nemotron-H native Transformers 5 binding and qualification
+
+GPT-QModel binding and tests: Copyright 2026 ModelCloud.ai, Apache-2.0.
+No NVIDIA checkpoint Python or model weights are vendored or executed.
+
+The binding directly imports Hugging Face Transformers 5.23.0's exact
+NemotronHConfig and NemotronHForCausalLM implementations, Apache-2.0.
+Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+The inspected original/Nano checkpoint configurations additionally credit:
+Copyright 2024 AI21 Labs Ltd. and the HuggingFace Inc. team. All rights reserved.
+Native/Super configuration: Copyright 2024-2025 NVIDIA Corporation and
+The HuggingFace Inc. team. All rights reserved.
+The inspected original, Nano and Super checkpoint modeling/configuration
+sources carry those Apache-2.0 notices. Their exact revisions and SHA-256
+digests are recorded in PROVENANCE.json. LICENSE contains Apache-2.0.
+
+The shape-only checkpoint fixture contains no tensor payloads. Architecture
+code licensing does not grant a license to model weights: the original 8B
+model card names NVIDIA's Internal Scientific Research and Development Model
+License; Nano and Super model cards name NVIDIA's Nemotron Open Model License.
+Users must independently comply with the applicable checkpoint license.
