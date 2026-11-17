@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import copy
+import difflib
+import inspect
 import json
 import os
 import shutil
@@ -1474,6 +1476,89 @@ def _serialized_model_load(method):
     return wrapper
 
 
+class _TrackedKwargs(dict):
+    """Keyword dict that records every key consumed by ``pop``.
+
+    ``from_quantized`` accepts a long list of keyword options and consumes
+    them with ``pop`` (HF cache selection, placement, GGUF internals, ...).
+    Recording the pops keeps the strict unknown-keyword check derived from the
+    code instead of a hand-maintained allow-list that drifts when an option is
+    added or removed (#4945).
+    """
+
+    __slots__ = ("consumed",)
+
+    # Tracking metadata is not a value: two tracked dicts compare equal only
+    # when both their contents and their consumed keys agree. Comparisons with
+    # a plain dict keep the ordinary dict semantics.
+    __hash__ = None
+
+    def __init__(self, *args, consumed=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.consumed = set(consumed)
+
+    def __eq__(self, other):
+        if isinstance(other, _TrackedKwargs):
+            return dict.__eq__(self, other) and self.consumed == other.consumed
+        if isinstance(other, dict):
+            return dict.__eq__(self, other)
+        return NotImplemented
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def pop(self, key, *default):
+        self.consumed.add(key)
+        return super().pop(key, *default)
+
+
+def _accepted_quantized_load_kwargs(cls, consumed):
+    """Keyword names a quantized load accepts, derived from its own code.
+
+    The explicit parameters are bound by Python. The keyword-only options are
+    exactly the keys ``from_quantized`` pops, plus the Hub snapshot-download
+    options it forwards while resolving a remote checkpoint.
+    """
+
+    try:
+        parameters = inspect.signature(cls.from_quantized).parameters
+    except (TypeError, ValueError):
+        # A callable without an inspectable signature (some C builtins) cannot
+        # contribute parameters; the recorded pops still describe the set.
+        parameters = {}
+    accepted = {
+        name for name in parameters if name not in {"cls", "kwargs", "model_id_or_path"}
+    }
+    accepted.update(consumed)
+    try:
+        accepted.update(inspect.signature(snapshot_download).parameters)
+    except (TypeError, ValueError):
+        # A shim without a Python signature: the Hub options are then simply
+        # not offered as close-match suggestions.
+        pass
+    return accepted
+
+
+def _raise_unexpected_quantized_load_kwargs(cls, leftover, accepted):
+    details = []
+    for key in sorted(leftover):
+        matches = difflib.get_close_matches(key, sorted(accepted), n=1)
+        details.append(
+            f"`{key}`" + (f" (did you mean `{matches[0]}`?)" if matches else "")
+        )
+    raise TypeError(
+        f"{cls.__name__}.from_quantized: unexpected keyword argument(s) for a "
+        "quantized checkpoint: "
+        + ", ".join(details)
+        + ". A quantized load accepts "
+        + ", ".join(f"`{name}`" for name in sorted(accepted))
+        + "."
+    )
+
+
 def _is_meta_shell_build_error(exc: Exception) -> bool:
     # Some trust_remote_code model constructors call int()/item() on tensors
     # during __init__, which breaks when the shell is built on the meta device.
@@ -1694,6 +1779,20 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
         kwargs=kwargs,
         on_removed=_log_removed,
     )
+
+
+def _requires_tokenizer(cls) -> bool:
+    """Whether a definition needs the text path for this load.
+
+    Read defensively: only ``BaseQModel`` and its subclasses inherit the
+    ``require_load_tokenizer`` default that #4894 added, so plain-class test
+    doubles and third-party definitions raised ``AttributeError`` at this call
+    site (#4923, #4941). An absent attribute means "text model", which is the
+    behaviour every definition had before #4894; a definition that really has no
+    tokenizer declares ``require_load_tokenizer = False``.
+    """
+
+    return bool(getattr(cls, "require_load_tokenizer", True))
 
 
 def _get_tokenizer_load_kwargs(model_init_kwargs: Dict) -> Dict:
@@ -2067,7 +2166,7 @@ def ModelLoader(cls):
         # Definitions that declare no tokenizer (Decision Transformer) skip the
         # whole text path: these checkpoints never ship one and calibration
         # samples are named tensors, so the loader must not require it.
-        if cls.require_load_tokenizer:
+        if _requires_tokenizer(cls):
             tokenizer = load_hf_tokenizer(
                 model_local_path,
                 model_config=config,
@@ -2422,6 +2521,7 @@ def ModelLoader(cls):
             runtime: Optional[RuntimeConfig] = None,
             **kwargs,
     ):
+        kwargs = _TrackedKwargs(kwargs)
         backend, kernel = resolve_backend_config(backend, kernel, runtime)
         warn_unsupported_rocm()
 
@@ -2457,7 +2557,8 @@ def ModelLoader(cls):
         )
         requested_dtype = dtype if isinstance(dtype, torch.dtype) else None
         hf_gguf_load_kwargs = get_hf_gguf_load_kwargs(kwargs)
-        kwargs_without_internal = dict(kwargs)
+        kwargs_without_internal = _TrackedKwargs(kwargs)
+        kwargs_without_internal.consumed.update(kwargs.consumed)
         kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
         max_memory = kwargs_without_internal.pop("max_memory", None)
         tokenizer_trust_remote_code = kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
@@ -2507,6 +2608,51 @@ def ModelLoader(cls):
 
         check_versions(cls, cls.require_pkgs)
 
+        # Parameters related to loading from Hugging Face Hub. They are
+        # consumed before the block-float redirect so both routes validate the
+        # caller's keywords the same way.
+        cache_dir = kwargs_without_internal.pop("cache_dir", None)
+        force_download = kwargs_without_internal.pop("force_download", False)
+        resume_download = kwargs_without_internal.pop("resume_download", False)
+        proxies = kwargs_without_internal.pop("proxies", None)
+        local_files_only = kwargs_without_internal.pop("local_files_only", False)
+        use_auth_token = kwargs_without_internal.pop("use_auth_token", None)
+        revision = kwargs_without_internal.pop("revision", None)
+        subfolder = kwargs_without_internal.pop("subfolder", "")
+        # Resolve the requested repo subfolder once. The quantize config, the
+        # checkpoint shards, and a relative adapter manifest must all be read
+        # from the same directory, and that directory must stay inside the
+        # checkpoint the caller named.
+        checkpoint_dir = resolve_checkpoint_subfolder(model_local_path, subfolder)
+        commit_hash = kwargs_without_internal.pop("_commit_hash", None)
+        attn_implementation = kwargs_without_internal.pop("attn_implementation", None)
+        # ``QuantizeConfig.from_pretrained`` consumes ``format`` below. Pop it
+        # here so the strict keyword check sees it as accepted.
+        format_override = kwargs_without_internal.pop("format", None)
+        # Checkpoint-staging options are read later by
+        # ``load_checkpoint_in_model_then_tie_weights``. Pop them here so they
+        # are recorded as accepted while keeping their presence/absence.
+        offload_kwargs = {
+            name: kwargs_without_internal.pop(name)
+            for name in ("offload_folder", "offload_state_dict", "offload_buffers")
+            if name in kwargs_without_internal
+        }
+
+        # A quantized load has no ``from_pretrained`` passthrough, so a
+        # leftover keyword used to reach ``QuantizeConfig.from_pretrained`` and
+        # vanish. A typo of a real option therefore "succeeded" and changed
+        # nothing (#4945), unlike the unquantized path where the HF
+        # constructor raises. VLLM/SGLang are explicit passthrough engines and
+        # consume their own runtime options.
+        if backend not in (BACKEND.VLLM, BACKEND.SGLANG):
+            leftover = set(kwargs_without_internal)
+            if leftover:
+                _raise_unexpected_quantized_load_kwargs(
+                    cls,
+                    leftover,
+                    _accepted_quantized_load_kwargs(cls, kwargs_without_internal.consumed),
+                )
+
         # A native block-float checkpoint carries none of the GPTQ keys this
         # loader binds (qweight/qzeros/scales/g_idx): it stores packed mantissa
         # codes plus one exponent per block of 16 values. Route it before any
@@ -2536,23 +2682,6 @@ def ModelLoader(cls):
                 dtype=dtype,
                 trust_remote_code=trust_remote_code,
             )
-
-        # Parameters related to loading from Hugging Face Hub
-        cache_dir = kwargs_without_internal.pop("cache_dir", None)
-        force_download = kwargs_without_internal.pop("force_download", False)
-        resume_download = kwargs_without_internal.pop("resume_download", False)
-        proxies = kwargs_without_internal.pop("proxies", None)
-        local_files_only = kwargs_without_internal.pop("local_files_only", False)
-        use_auth_token = kwargs_without_internal.pop("use_auth_token", None)
-        revision = kwargs_without_internal.pop("revision", None)
-        subfolder = kwargs_without_internal.pop("subfolder", "")
-        # Resolve the requested repo subfolder once. The quantize config, the
-        # checkpoint shards, and a relative adapter manifest must all be read
-        # from the same directory, and that directory must stay inside the
-        # checkpoint the caller named.
-        checkpoint_dir = resolve_checkpoint_subfolder(model_local_path, subfolder)
-        commit_hash = kwargs_without_internal.pop("_commit_hash", None)
-        attn_implementation = kwargs_without_internal.pop("attn_implementation", None)
 
         cached_file_kwargs = {
             "cache_dir": cache_dir,
@@ -2616,7 +2745,12 @@ def ModelLoader(cls):
                 lm_head=native_gguf_qspec.lm_head_quantized,
             )
         else:
-            qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs_without_internal)
+            qcfg = QuantizeConfig.from_pretrained(
+                model_local_path,
+                format=format_override,
+                **cached_file_kwargs,
+                **kwargs_without_internal,
+            )
 
         # Runtime policy belongs to this checkpoint's modules, not whichever
         # model most recently installed a process policy. It is a resolved
@@ -2707,7 +2841,7 @@ def ModelLoader(cls):
 
         qcfg.calculate_bits_per_weight()
 
-        if cls.require_load_tokenizer:
+        if _requires_tokenizer(cls):
             tokenizer = load_hf_tokenizer(
                 model_local_path,
                 model_config=config,
@@ -3389,8 +3523,8 @@ def ModelLoader(cls):
 
         load_checkpoint_in_model = native_gguf_qspec is None
         load_extra_kwargs = {}
-        if "offload_folder" in kwargs:
-            load_extra_kwargs["offload_folder"] = kwargs["offload_folder"]
+        if "offload_folder" in offload_kwargs:
+            load_extra_kwargs["offload_folder"] = offload_kwargs["offload_folder"]
         elif (
             getattr(qcfg, "offload_to_disk_path", None) is not None
             and isinstance(device_map, dict)
@@ -3398,10 +3532,10 @@ def ModelLoader(cls):
         ):
             load_extra_kwargs["offload_folder"] = qcfg.offload_to_disk_path
 
-        if "offload_state_dict" in kwargs:
-            load_extra_kwargs["offload_state_dict"] = kwargs["offload_state_dict"]
-        if "offload_buffers" in kwargs:
-            load_extra_kwargs["offload_buffers"] = kwargs["offload_buffers"]
+        if "offload_state_dict" in offload_kwargs:
+            load_extra_kwargs["offload_state_dict"] = offload_kwargs["offload_state_dict"]
+        if "offload_buffers" in offload_kwargs:
+            load_extra_kwargs["offload_buffers"] = offload_kwargs["offload_buffers"]
 
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
         if format_code in [FORMAT.GPTQ, FORMAT.GEMM, FORMAT.PARO]:

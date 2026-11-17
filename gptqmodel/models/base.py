@@ -12,6 +12,7 @@ import json
 import os
 import threading
 import time
+import types
 import weakref
 from collections import defaultdict
 from collections.abc import Mapping
@@ -665,6 +666,18 @@ def _switch_quant_linear_class(module: BaseQuantLinear, target_cls) -> None:
     """
 
     module.__class__ = target_cls
+    # An accelerate offload hook captures the previous class's bound ``forward``
+    # in ``_old_forward`` and calls it from its wrapper, so a class swap alone
+    # would keep executing the accelerator-only kernel (#4947). Rebind the
+    # captured forward to the target class.
+    if getattr(module, "_hf_hook", None) is not None and hasattr(module, "_old_forward"):
+        module._old_forward = types.MethodType(target_cls.forward, module)
+    # ``__class__`` assignment never runs the target kernel's ``__init__``, so a
+    # kernel that keeps runtime state on the instance has to install it here
+    # (#4940; this path previously broke on #4451 and #4856).
+    init_runtime_state = getattr(target_cls, "_init_runtime_state", None)
+    if callable(init_runtime_state):
+        init_runtime_state(module)
     backends = getattr(target_cls, "SUPPORTS_BACKENDS", None) or ()
     if backends:
         module.backend = backends[0]
@@ -683,7 +696,7 @@ def _switch_quant_linear_class(module: BaseQuantLinear, target_cls) -> None:
         post_init()
 
 
-def rehome_quantized_kernel(model) -> None:
+def rehome_quantized_kernel(model, device=None) -> None:
     """Make the in-session quantized layers runnable on their final device.
 
     The quantize loop deliberately leaves packed layers on CPU. For AWQ, QQQ
@@ -691,6 +704,11 @@ def rehome_quantized_kernel(model) -> None:
     in-session forward would fail. Switch those modules to the portable Torch
     kernel for the final device, or raise the reload-the-checkpoint guidance
     when no layout-compatible kernel exists.
+
+    ``device`` overrides the probe of the packed modules' runtime device. A
+    cancelled/failed run keeps its finished layers disk-offloaded as meta
+    shells, so the caller passes the device the rest of the model occupies
+    (#4947).
     """
 
     qcfg = getattr(model, "quantize_config", None)
@@ -705,15 +723,16 @@ def rehome_quantized_kernel(model) -> None:
     if not modules:
         return
 
-    device = next(
-        (
-            runtime_device
-            for module in modules
-            if (runtime_device := module.runtime_device()) is not None
-            and runtime_device.type != "meta"
-        ),
-        None,
-    )
+    if device is None:
+        device = next(
+            (
+                runtime_device
+                for module in modules
+                if (runtime_device := module.runtime_device()) is not None
+                and runtime_device.type != "meta"
+            ),
+            None,
+        )
     if device is None:
         return
 
@@ -837,7 +856,35 @@ def _capture_accepts_position_ids(model: object) -> bool:
     )
 
 
-def _with_capture_position_ids(model: object, example: Dict[str, Any]) -> Dict[str, Any]:
+def _model_computes_own_position_ids(model: object) -> bool:
+    """Whether ``model`` builds its own multimodal (mRoPE) position ids.
+
+    Qwen3-VL/Qwen3.5/GLM-4V/Hunyuan-VL-class models call ``get_rope_index`` or
+    ``compute_3d_position_ids`` from ``forward`` only when ``position_ids`` is
+    None. Handing them the mask-derived 2-D text ids replaces the t/h/w grid
+    ids, so image tokens are calibrated at sequential positions (#4933). The
+    capability lives on the inner multimodal model, not the outer conditional
+    generation wrapper, so inspect the module tree.
+    """
+
+    if not isinstance(model, nn.Module):
+        return False
+    for module in model.modules():
+        if callable(getattr(module, "compute_3d_position_ids", None)):
+            return True
+        if callable(getattr(module, "get_rope_index", None)):
+            return True
+        if callable(getattr(module, "compute_mrope_position_ids", None)):
+            return True
+    return False
+
+
+def _with_capture_position_ids(
+    model: object,
+    example: Dict[str, Any],
+    *,
+    derive: Optional[bool] = None,
+) -> Dict[str, Any]:
     """Derive ``position_ids`` from the attention mask for a padded batch.
 
     A left-padded calibration batch otherwise embeds every real token at
@@ -846,6 +893,10 @@ def _with_capture_position_ids(model: object, example: Dict[str, Any]) -> Dict[s
     model never produces at inference. ``generate()`` derives the same ids, and
     they equal the default ``arange`` for an unpadded row, so this is a no-op
     there (issue #4861).
+
+    ``derive=None`` auto-detects the model: an mRoPE vision-language model must
+    keep ``position_ids`` unset so its own ``get_rope_index`` /
+    ``compute_3d_position_ids`` build the image/video grid ids (#4933).
     """
 
     if "position_ids" in example:
@@ -854,6 +905,10 @@ def _with_capture_position_ids(model: object, example: Dict[str, Any]) -> Dict[s
     if not torch.is_tensor(mask) or mask.ndim != 2 or mask.numel() == 0:
         return example
     if not _capture_accepts_position_ids(model):
+        return example
+    if derive is None:
+        derive = not _model_computes_own_position_ids(model)
+    if not derive:
         return example
     # Exactly what `generate()` does: running positions for real tokens, 1 for
     # pad slots (attention masks those out).
@@ -1017,6 +1072,13 @@ class BaseQModel(nn.Module):
     ATTENTION_MASKS_REQUIRED_FOR_INPUT: bool = False
 
     INPUT_EMBEDDING_EXTRA_ARGS = None
+
+    # `run_input_capture` derives 2-D position_ids from the attention mask for
+    # a padded batch (#4861). Leave None to auto-detect: a model that computes
+    # its own multimodal (mRoPE) ids must keep `position_ids` unset (#4933).
+    # Set explicitly only for a model whose capability the auto-detection
+    # cannot see.
+    CAPTURE_DERIVE_POSITION_IDS: Optional[bool] = None
 
     # Some models (e.g. ovis2_6_moe) do not contain MoE layers directly.
     # The actual experts live inside submodules (e.g. Qwen3MoeModel.mlp.experts),
@@ -3309,7 +3371,14 @@ class BaseQModel(nn.Module):
                 **self.INPUT_EMBEDDING_EXTRA_ARGS,
             )
 
-        return self.model(**_with_capture_position_ids(self.model, example), use_cache=use_cache)
+        return self.model(
+            **_with_capture_position_ids(
+                self.model,
+                example,
+                derive=getattr(self, "CAPTURE_DERIVE_POSITION_IDS", None),
+            ),
+            use_cache=use_cache,
+        )
 
     def _sanitize_input_ids_for_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         if input_ids.dtype not in (torch.int32, torch.int64):

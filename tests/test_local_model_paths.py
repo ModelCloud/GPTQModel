@@ -317,9 +317,14 @@ def test_gptqmodel_from_pretrained_allows_supported_floatx_source_with_auto_deco
     assert GPTQModel.from_pretrained("native-floatx-source", quantize_config=target_config) is sentinel
 
 
-def test_gptqmodel_load_routes_quantized_source_with_auto_decoder_to_from_quantized(
+def test_gptqmodel_load_rejects_a_quantize_config_for_a_quantized_source(
     monkeypatch, tmp_path
 ):
+    """A quantized source cannot take a different target config (#4945).
+
+    ``load()`` used to route to ``from_quantized`` and drop the caller's
+    config, so the checkpoint's own settings were used without a word.
+    """
     model_dir = tmp_path / "gptq-source"
     model_dir.mkdir()
     fake_config = SimpleNamespace(quantization_config={"quant_method": "gptq"})
@@ -327,8 +332,6 @@ def test_gptqmodel_load_routes_quantized_source_with_auto_decoder_to_from_quanti
         bits=2.0,
         preprocessors=[AutoModuleDecoderConfig(target_dtype=torch.bfloat16)],
     )
-    sentinel = _loaded_model_stub()
-    captured = {}
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
     monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
@@ -341,20 +344,11 @@ def test_gptqmodel_load_routes_quantized_source_with_auto_decoder_to_from_quanti
     monkeypatch.setattr(
         GPTQModel,
         "from_quantized",
-        classmethod(
-            lambda cls, model_id_or_path, **kwargs: captured.update(
-                path=model_id_or_path,
-                kwargs=kwargs,
-            )
-            or sentinel
-        ),
+        classmethod(lambda cls, *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected inference load"))),
     )
 
-    result = GPTQModel.load(str(model_dir), quantize_config=target_config)
-
-    assert result is sentinel
-    assert captured["path"] == str(model_dir)
-    assert captured["kwargs"]["trust_remote_code"] is False
+    with pytest.raises(ValueError, match="quantize_config.*quantized checkpoint"):
+        GPTQModel.load(str(model_dir), quantize_config=target_config)
 
 
 def test_gptqmodel_from_pretrained_routes_quantized_source_with_auto_decoder_to_from_quantized(

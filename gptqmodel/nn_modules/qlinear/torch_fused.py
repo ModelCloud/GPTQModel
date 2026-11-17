@@ -421,6 +421,12 @@ class TorchFusedLinear(PackableQuantLinear):
             self.linear_mode = None
             self.torch_fused_op = None
             self.scales_and_zeros = None
+        elif not mode and self.linear_mode == LinearMode.TRAIN:
+            # The dense-dequant path holds no derived state, so clearing the
+            # latch lets the next forward choose the fused layout again. A
+            # forward taken in training mode must not pin the module to dense
+            # dequantization after a later `eval()` (#4907).
+            self.linear_mode = None
 
         if self.SUPPORTS_TRAINING_USE_TORCH_KERNEL:
             # training starts

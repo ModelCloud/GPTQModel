@@ -25,7 +25,7 @@ from accelerate.utils import find_tied_parameters
 from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEVICE_THREAD_POOL
-from ..looper.loop_processor import record_quant_log
+from ..looper.loop_processor import record_quant_log, rehome_failed_run_kernels
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.module_preprocessor import ModulePreProcessor
 from ..looper.named_module import NamedModule
@@ -994,6 +994,9 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 # The loop never materialized the layers past the cancel point;
                 # fill them before the next forward (#4860).
                 self._materialize_unreached_meta_modules()
+                # A weight-only kernel can be accelerator-only too (GGUF
+                # Triton); leave the finished layers runnable (#4947).
+                rehome_failed_run_kernels(self.gptq_model)
                 # ``finalize()`` is the only other place the processor closes
                 # its Device-SMI handles, and a failed run never reaches it
                 # (#4813). The release is idempotent and must not mask the run
