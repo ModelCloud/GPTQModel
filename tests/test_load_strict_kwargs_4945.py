@@ -183,3 +183,59 @@ def test_new_load_options_are_accepted_from_the_signature_and_pops():
 
     assert "brand_new_option" in accepted
     assert "newly_popped_option" in accepted
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        {"token": None},
+        {"max_workers": 4},
+        {"etag_timeout": 10},
+        {"repo_type": "model"},
+    ],
+)
+def test_quantized_load_accepts_the_hub_staging_options(checkpoint_without_format, option):
+    """`snapshot_download` options are forwarded, so they must not be rejected.
+
+    #4972 compared the leftover keywords against a set that already listed the
+    Hub options, so `token=`/`max_workers=` were forwarded to
+    `snapshot_download` and then rejected with a self-contradicting message
+    ("unexpected keyword `token` (did you mean `token`?)") (#5007).
+    """
+
+    model = GPTQModel.load(
+        checkpoint_without_format,
+        device="cpu",
+        dtype=torch.float16,
+        backend=BACKEND.TORCH,
+        **option,
+    )
+
+    assert model.quantize_config.bits == 4
+
+
+def test_quantized_load_still_rejects_a_hub_option_typo(checkpoint_without_format):
+    """Accepting the Hub options must not accept a misspelling of one."""
+
+    with pytest.raises(TypeError, match="unexpected keyword argument") as excinfo:
+        GPTQModel.load(checkpoint_without_format, device="cpu", tokn="hf_123")
+
+    message = str(excinfo.value)
+    assert "`tokn`" in message
+    assert "did you mean `token`" in message
+
+
+def test_config_selection_forwards_the_hub_token():
+    """Model-type detection reads the config with the caller's credential.
+
+    `GPTQModel.load` resolves the model type before the loader stages the
+    checkpoint. Without `token` in the selection set, a private or gated
+    repository failed there even though the weights download could use it
+    (#5007).
+    """
+
+    from gptqmodel.utils.hf import get_config_selection_kwargs
+
+    assert get_config_selection_kwargs({"token": "hf_private"}) == {"token": "hf_private"}
+    # An unset option must not be forced into the HF call.
+    assert "token" not in get_config_selection_kwargs({"token": None})

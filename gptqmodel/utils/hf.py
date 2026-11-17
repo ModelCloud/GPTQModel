@@ -545,6 +545,11 @@ CONFIG_SELECTION_KWARGS = (
     "revision",
     "cache_dir",
     "local_files_only",
+    # A private or gated repository needs the same credential for the config
+    # read as the weights download. Leaving `token` out made model-type
+    # detection fail on a repository that `snapshot_download` could open
+    # (#5007).
+    "token",
     "use_auth_token",
     "force_download",
     "resume_download",
