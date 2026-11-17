@@ -1,7 +1,8 @@
-Baichuan local modeling for GPT-QModel
+Baichuan local modeling and tokenizer for GPT-QModel
 
-Derived and adapted from Baichuan Inc.'s configuration_baichuan.py and
-modeling_baichuan.py. The pinned sources and modifications are recorded in
+Derived and adapted from Baichuan Inc.'s configuration_baichuan.py,
+modeling_baichuan.py and Apache-licensed tokenization_baichuan.py.
+The pinned sources and modifications are recorded in
 PROVENANCE.md in this directory.
 
 Copyright 2023 Baichuan Inc. All Rights Reserved.

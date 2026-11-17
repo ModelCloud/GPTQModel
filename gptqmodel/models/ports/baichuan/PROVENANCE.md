@@ -41,6 +41,48 @@ set those fields directly; they do not depend on a checkpoint filename or
 `BaiChuanForCausalLM` spellings are local aliases; the registry has one
 `model_type=baichuan` entry.
 
+### Tokenizer ownership
+
+The same pinned snapshots above supply `tokenization_baichuan.py`. The
+Baichuan2-7B-Chat source retains the Apache license and full upstream copyright
+header and is the basis of the packaged tokenizer. All four inspected source
+classes have identical tokenizer method bodies after removing docstrings and
+formatting; original Baichuan-7B uses the alias `BaiChuanTokenizer`.
+The port changes the Transformers import path, restores the HF4 source's
+native AddedToken objects at its actual vocabulary IDs during initialization
+(HF5's base class first registers their string forms and loses their flags),
+and preserves its own live
+`add_bos_token` / `add_eos_token` values on save, because Transformers 5's
+generic serializer explicitly drops these legacy backend fields.
+
+Tokenizer source SHA256 values in the same snapshot order:
+
+```text
+964e51f8a5b93020d0571f7be22802ebfdeb5ec7e1988527db2af4f1d8b4a21b
+a796151b9ab9d630791620d238be35593a619d7fde8b6a1caaa3f7a4a5c401ae
+324f217fe310f2fd73dd6af10287061e36b5939fe24e90776ce251d7112c9c2b
+db8cc8d06510d096405430b8db835ebedd91753f08cd259e29553bfde73f5bd0
+```
+
+[tokenizer_contracts.json](tokenizer_contracts.json) records exact asset and
+metadata hashes plus fixed IDs, decoded strings, special-token flags and
+pair-mask/BOS/EOS controls captured by executing the inspected source classes
+under isolated Transformers 4.45.2 / SentencePiece 0.2.1. This offline source
+oracle was run after inspection; shipped runtime/tests never execute checkpoint
+Python. Tests download only hash-verified tokenizer/config data and use tiny
+locally initialized safetensors weights with the real vocabulary sizes.
+
+The Chat convention was inspected in pinned `generation_utils.py`:
+Baichuan-13B-Chat SHA256
+`9906bb1524072f22e83f6a91296d725c9733c252781656e9dc2b291075e90c54`
+and Baichuan2-7B-Chat SHA256
+`a4067a97fadd3a4be73c886cb9cd1ab9f3e028d500ff51ae48d2c82e745ea07c`.
+The three Chat generation configs declare user/assistant role IDs 195/196.
+The original tokenizer classes declare no Hugging Face default chat template;
+the port preserves that absence and qualifies source role-ID assembly plus
+an explicit caller-supplied template. See [README.md](README.md) for the flow,
+before/after contract, commands and limits.
+
 ```mermaid
 flowchart TD
     A[load_model_config reads config data] --> B[local_model_loader selects BaiChuanQModel.loader]

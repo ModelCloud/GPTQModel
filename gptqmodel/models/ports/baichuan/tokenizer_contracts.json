@@ -1,0 +1,1192 @@
+{
+  "oracle": "Inspected pinned upstream tokenizer source under Transformers4.45.2 / SentencePiece0.2.1. No weight downloads.",
+  "cases": [
+    {
+      "repo_id": "baichuan-inc/Baichuan-7B",
+      "revision": "5d86e56a58fe4a5b3292cd9bb7468afef6f93eab",
+      "assets": {
+        "tokenizer.model": "4be54af290d93c113bcbf421115ae9eed9d6340408f564898f1e966dc738ef01",
+        "tokenizer_config.json": "e7f263d362cf88171770abfb726120409c049c615f5de154e4eb706e24d2d6c5",
+        "special_tokens_map.json": "ff3b4a612c4e447acb02d40071bddd989fe0da87eb5b7fe0dbadfc4f74de7531",
+        "config.json": "bb7438075814a6e1903e21b0c349a64de96bbddac0a2893319a25c3259d5cc3a",
+        "generation_config.json": "bab95d9bccd3475b5ee697aa5ab5ca87d2f827c1df6bff9b300bcd94ee0a6c0d",
+        "tokenization_baichuan.py": "964e51f8a5b93020d0571f7be22802ebfdeb5ec7e1988527db2af4f1d8b4a21b"
+      },
+      "vocab_size": 64000,
+      "special_tokens": {
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "unk_token_id": 0,
+        "pad_token_id": null,
+        "add_bos_token": false,
+        "add_eos_token": false,
+        "clean_up_tokenization_spaces": false
+      },
+      "samples": [
+        {
+          "text": "你好，世界！ Hello GPT-QModel.",
+          "ids": [
+            9875,
+            31213,
+            72,
+            2781,
+            74,
+            24568,
+            778,
+            14720,
+            31136,
+            31284,
+            11179,
+            79
+          ],
+          "decoded": "你好，世界！ Hello GPT-QModel."
+        },
+        {
+          "text": "  leading  spaces\nsecond\t行🙂",
+          "ids": [
+            31106,
+            31106,
+            3173,
+            31106,
+            7707,
+            5,
+            15219,
+            6,
+            31205,
+            34326
+          ],
+          "decoded": "  leading  spaces\nsecond\t行🙂"
+        },
+        {
+          "text": "<s>hello</s><unk>",
+          "ids": [
+            1,
+            11497,
+            31110,
+            2,
+            0
+          ],
+          "decoded": "<s> hello</s><unk>"
+        },
+        {
+          "text": "A <s> B </s> C",
+          "ids": [
+            703,
+            31106,
+            1,
+            31106,
+            731,
+            31106,
+            2,
+            31106,
+            702
+          ],
+          "decoded": " A <s>  B </s> C"
+        },
+        {
+          "text": "2026-11-17 数学：1+1=2",
+          "ids": [
+            31106,
+            54,
+            52,
+            54,
+            58,
+            31136,
+            53,
+            53,
+            31136,
+            53,
+            59,
+            31106,
+            6619,
+            77,
+            53,
+            31340,
+            53,
+            31191,
+            54
+          ],
+          "decoded": "2026-11-17 数学：1+1=2"
+        },
+        {
+          "text": "",
+          "ids": [],
+          "decoded": ""
+        }
+      ],
+      "pairs": [
+        {
+          "add_bos_token": false,
+          "add_eos_token": false,
+          "encoded": {
+            "input_ids": [
+              9875,
+              31213,
+              24568
+            ],
+            "token_type_ids": [
+              0,
+              0,
+              1
+            ],
+            "special_tokens_mask": [
+              0,
+              0,
+              0
+            ],
+            "attention_mask": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "add_bos_token": true,
+          "add_eos_token": false,
+          "encoded": {
+            "input_ids": [
+              1,
+              9875,
+              31213,
+              1,
+              24568
+            ],
+            "token_type_ids": [
+              0,
+              0,
+              0,
+              1,
+              1
+            ],
+            "special_tokens_mask": [
+              1,
+              0,
+              0,
+              1,
+              0
+            ],
+            "attention_mask": [
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "add_bos_token": false,
+          "add_eos_token": true,
+          "encoded": {
+            "input_ids": [
+              9875,
+              31213,
+              2,
+              24568,
+              2
+            ],
+            "token_type_ids": [
+              0,
+              0,
+              0,
+              1,
+              1
+            ],
+            "special_tokens_mask": [
+              0,
+              0,
+              1,
+              0,
+              1
+            ],
+            "attention_mask": [
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "add_bos_token": true,
+          "add_eos_token": true,
+          "encoded": {
+            "input_ids": [
+              1,
+              9875,
+              31213,
+              2,
+              1,
+              24568,
+              2
+            ],
+            "token_type_ids": [
+              0,
+              0,
+              0,
+              0,
+              1,
+              1,
+              1
+            ],
+            "special_tokens_mask": [
+              1,
+              0,
+              0,
+              1,
+              1,
+              0,
+              1
+            ],
+            "attention_mask": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ],
+      "added_special_flags": {
+        "0": {
+          "content": "<unk>",
+          "single_word": false,
+          "normalized": true,
+          "lstrip": false,
+          "rstrip": false
+        },
+        "1": {
+          "content": "<s>",
+          "single_word": false,
+          "normalized": true,
+          "lstrip": false,
+          "rstrip": false
+        },
+        "2": {
+          "content": "</s>",
+          "single_word": false,
+          "normalized": true,
+          "lstrip": false,
+          "rstrip": false
+        }
+      }
+    },
+    {
+      "repo_id": "baichuan-inc/Baichuan-13B-Chat",
+      "revision": "e3e1498bb6b7fb0bcb5a65679c09b862d7c29301",
+      "assets": {
+        "tokenizer.model": "f7d1ab69d25c74644af5c5e4dcd1cc6e96d33783dbd257b6bdea55b643c72813",
+        "tokenizer_config.json": "227bdcf29c4383f323c9c1ff9ef5005772db9ffbd8f431e5f5f0aa7761378eb6",
+        "special_tokens_map.json": "27f2f6d8de7da5734f3976ccd491b02c3d076a7fe27f9169568b9fc8b74f0488",
+        "config.json": "2fd6c7648c53b3fae089c423e7a13a481013ca637646f0b4b423c31857057c89",
+        "generation_config.json": "eb3bda448fc07ae32ed2cdb072dd9edbb41ebbeb55a796df255cdd4b92a2f927",
+        "tokenization_baichuan.py": "a796151b9ab9d630791620d238be35593a619d7fde8b6a1caaa3f7a4a5c401ae"
+      },
+      "vocab_size": 64000,
+      "special_tokens": {
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "unk_token_id": 0,
+        "pad_token_id": 0,
+        "add_bos_token": false,
+        "add_eos_token": false,
+        "clean_up_tokenization_spaces": false
+      },
+      "samples": [
+        {
+          "text": "你好，世界！ Hello GPT-QModel.",
+          "ids": [
+            9875,
+            31213,
+            72,
+            2781,
+            74,
+            24568,
+            778,
+            14720,
+            31136,
+            31284,
+            11179,
+            79
+          ],
+          "decoded": "你好，世界！ Hello GPT-QModel."
+        },
+        {
+          "text": "  leading  spaces\nsecond\t行🙂",
+          "ids": [
+            98,
+            14863,
+            99,
+            2372,
+            2194,
+            5,
+            15219,
+            6,
+            31205,
+            34326
+          ],
+          "decoded": "  leading  spaces\nsecond\t行🙂"
+        },
+        {
+          "text": "<s>hello</s><unk>",
+          "ids": [
+            1557,
+            31114,
+            31219,
+            16521,
+            31110,
+            2154,
+            31114,
+            31219,
+            0
+          ],
+          "decoded": " <s>hello</s><unk>"
+        },
+        {
+          "text": "A <s> B </s> C",
+          "ids": [
+            703,
+            31106,
+            1,
+            99,
+            31139,
+            31106,
+            2,
+            99,
+            31133
+          ],
+          "decoded": " A <s>  B </s> C"
+        },
+        {
+          "text": "2026-11-17 数学：1+1=2",
+          "ids": [
+            31106,
+            54,
+            52,
+            54,
+            58,
+            31136,
+            53,
+            53,
+            31136,
+            53,
+            59,
+            31106,
+            6619,
+            77,
+            53,
+            31340,
+            53,
+            31191,
+            54
+          ],
+          "decoded": "2026-11-17 数学：1+1=2"
+        },
+        {
+          "text": "",
+          "ids": [],
+          "decoded": ""
+        }
+      ],
+      "pairs": [
+        {
+          "add_bos_token": false,
+          "add_eos_token": false,
+          "encoded": {
+            "input_ids": [
+              9875,
+              31213,
+              24568
+            ],
+            "token_type_ids": [
+              0,
+              0,
+              1
+            ],
+            "special_tokens_mask": [
+              0,
+              0,
+              0
+            ],
+            "attention_mask": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "add_bos_token": true,
+          "add_eos_token": false,
+          "encoded": {
+            "input_ids": [
+              1,
+              9875,
+              31213,
+              1,
+              24568
+            ],
+            "token_type_ids": [
+              0,
+              0,
+              0,
+              1,
+              1
+            ],
+            "special_tokens_mask": [
+              1,
+              0,
+              0,
+              1,
+              0
+            ],
+            "attention_mask": [
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "add_bos_token": false,
+          "add_eos_token": true,
+          "encoded": {
+            "input_ids": [
+              9875,
+              31213,
+              2,
+              24568,
+              2
+            ],
+            "token_type_ids": [
+              0,
+              0,
+              0,
+              1,
+              1
+            ],
+            "special_tokens_mask": [
+              0,
+              0,
+              1,
+              0,
+              1
+            ],
+            "attention_mask": [
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "add_bos_token": true,
+          "add_eos_token": true,
+          "encoded": {
+            "input_ids": [
+              1,
+              9875,
+              31213,
+              2,
+              1,
+              24568,
+              2
+            ],
+            "token_type_ids": [
+              0,
+              0,
+              0,
+              0,
+              1,
+              1,
+              1
+            ],
+            "special_tokens_mask": [
+              1,
+              0,
+              0,
+              1,
+              1,
+              0,
+              1
+            ],
+            "attention_mask": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ],
+      "added_special_flags": {
+        "0": {
+          "content": "<unk>",
+          "single_word": true,
+          "normalized": true,
+          "lstrip": false,
+          "rstrip": false
+        },
+        "1": {
+          "content": "<s>",
+          "single_word": true,
+          "normalized": true,
+          "lstrip": false,
+          "rstrip": false
+        },
+        "2": {
+          "content": "</s>",
+          "single_word": true,
+          "normalized": true,
+          "lstrip": false,
+          "rstrip": false
+        }
+      },
+      "chat": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "你是助手。"
+          },
+          {
+            "role": "user",
+            "content": "你好"
+          },
+          {
+            "role": "assistant",
+            "content": "Hello"
+          },
+          {
+            "role": "user",
+            "content": "1+1=?"
+          }
+        ],
+        "user_token_id": 195,
+        "assistant_token_id": 196,
+        "ids": [
+          9875,
+          31161,
+          29168,
+          73,
+          195,
+          9875,
+          31213,
+          196,
+          24568,
+          195,
+          31106,
+          53,
+          31340,
+          53,
+          31191,
+          81,
+          196
+        ],
+        "user_token": "<reserved_102>",
+        "assistant_token": "<reserved_103>"
+      }
+    },
+    {
+      "repo_id": "baichuan-inc/Baichuan2-7B-Chat",
+      "revision": "ea66ced17780ca3db39bc9f8aa601d8463db3da5",
+      "assets": {
+        "tokenizer.model": "79452955be6b419a65984273a9f08af86042e1c2a75ee3ba989cbf620a133cc2",
+        "tokenizer_config.json": "49bb1dd184695eb2880d4204906a143a6b1e48e684c54603cf8d962bc39ee235",
+        "special_tokens_map.json": "20e75e78a486a1282a8ff92cbfaa7ff23578e058419c516d86867b5f75588b2c",
+        "config.json": "c711afd8cdd1e265d67500d7759d6077cb9f234a876782d3ced52b90b21187a0",
+        "generation_config.json": "459240e548d418a8e15e9f45550877b81fbc6892f6af58129a8dea00f3738fd3",
+        "tokenization_baichuan.py": "324f217fe310f2fd73dd6af10287061e36b5939fe24e90776ce251d7112c9c2b"
+      },
+      "vocab_size": 125696,
+      "special_tokens": {
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "unk_token_id": 0,
+        "pad_token_id": 0,
+        "add_bos_token": false,
+        "add_eos_token": false,
+        "clean_up_tokenization_spaces": false
+      },
+      "samples": [
+        {
+          "text": "你好，世界！ Hello GPT-QModel.",
+          "ids": [
+            16829,
+            65,
+            2089,
+            67,
+            52594,
+            1485,
+            17551,
+            63,
+            92850,
+            12378,
+            72
+          ],
+          "decoded": "你好，世界！ Hello GPT-QModel."
+        },
+        {
+          "text": "  leading  spaces\nsecond\t行🙂",
+          "ids": [
+            1373,
+            22778,
+            92311,
+            11819,
+            5,
+            22943,
+            6,
+            92406,
+            96610
+          ],
+          "decoded": "  leading  spaces\nsecond\t行🙂"
+        },
+        {
+          "text": "<s>hello</s><unk>",
+          "ids": [
+            1,
+            46955,
+            2,
+            0
+          ],
+          "decoded": "<s> hello</s><unk>"
+        },
+        {
+          "text": "A <s> B </s> C",
+          "ids": [
+            92343,
+            92311,
+            1,
+            1432,
+            92311,
+            2,
+            1399
+          ],
+          "decoded": " A <s>  B </s> C"
+        },
+        {
+          "text": "2026-11-17 数学：1+1=2",
+          "ids": [
+            92338,
+            92335,
+            92338,
+            92373,
+            63,
+            92336,
+            92336,
+            63,
+            92336,
+            92383,
+            92311,
+            3939,
+            70,
+            92336,
+            62,
+            92336,
+            64,
+            92338
+          ],
+          "decoded": "2026-11-17 数学：1+1=2"
+        },
+        {
+          "text": "",
+          "ids": [],
+          "decoded": ""
+        }
+      ],
+      "pairs": [
+        {
+          "add_bos_token": false,
+          "add_eos_token": false,
+          "encoded": {
+            "input_ids": [
+              16829,
+              23160
+            ],
+            "token_type_ids": [
+              0,
+              1
+            ],
+            "special_tokens_mask": [
+              0,
+              0
+            ],
+            "attention_mask": [
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "add_bos_token": true,
+          "add_eos_token": false,
+          "encoded": {
+            "input_ids": [
+              1,
+              16829,
+              1,
+              23160
+            ],
+            "token_type_ids": [
+              0,
+              0,
+              1,
+              1
+            ],
+            "special_tokens_mask": [
+              1,
+              0,
+              1,
+              0
+            ],
+            "attention_mask": [
+              1,
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "add_bos_token": false,
+          "add_eos_token": true,
+          "encoded": {
+            "input_ids": [
+              16829,
+              2,
+              23160,
+              2
+            ],
+            "token_type_ids": [
+              0,
+              0,
+              1,
+              1
+            ],
+            "special_tokens_mask": [
+              0,
+              1,
+              0,
+              1
+            ],
+            "attention_mask": [
+              1,
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "add_bos_token": true,
+          "add_eos_token": true,
+          "encoded": {
+            "input_ids": [
+              1,
+              16829,
+              2,
+              1,
+              23160,
+              2
+            ],
+            "token_type_ids": [
+              0,
+              0,
+              0,
+              1,
+              1,
+              1
+            ],
+            "special_tokens_mask": [
+              1,
+              0,
+              1,
+              1,
+              0,
+              1
+            ],
+            "attention_mask": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ],
+      "added_special_flags": {
+        "0": {
+          "content": "<unk>",
+          "single_word": false,
+          "normalized": true,
+          "lstrip": false,
+          "rstrip": false
+        },
+        "1": {
+          "content": "<s>",
+          "single_word": false,
+          "normalized": true,
+          "lstrip": false,
+          "rstrip": false
+        },
+        "2": {
+          "content": "</s>",
+          "single_word": false,
+          "normalized": true,
+          "lstrip": false,
+          "rstrip": false
+        }
+      },
+      "chat": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "你是助手。"
+          },
+          {
+            "role": "user",
+            "content": "你好"
+          },
+          {
+            "role": "assistant",
+            "content": "Hello"
+          },
+          {
+            "role": "user",
+            "content": "1+1=?"
+          }
+        ],
+        "user_token_id": 195,
+        "assistant_token_id": 196,
+        "ids": [
+          8225,
+          18183,
+          66,
+          195,
+          16829,
+          196,
+          23160,
+          195,
+          92336,
+          62,
+          92336,
+          64,
+          74,
+          196
+        ],
+        "user_token": "<reserved_106>",
+        "assistant_token": "<reserved_107>"
+      }
+    },
+    {
+      "repo_id": "baichuan-inc/Baichuan2-13B-Chat",
+      "revision": "c8d877c7ca596d9aeff429d43bff06e288684f45",
+      "assets": {
+        "tokenizer.model": "79452955be6b419a65984273a9f08af86042e1c2a75ee3ba989cbf620a133cc2",
+        "tokenizer_config.json": "227bdcf29c4383f323c9c1ff9ef5005772db9ffbd8f431e5f5f0aa7761378eb6",
+        "special_tokens_map.json": "27f2f6d8de7da5734f3976ccd491b02c3d076a7fe27f9169568b9fc8b74f0488",
+        "config.json": "af0c0f0fd811ecc0365367c25b9227ff16abdc92883e0379a3632a9ea43b6e0e",
+        "generation_config.json": "459240e548d418a8e15e9f45550877b81fbc6892f6af58129a8dea00f3738fd3",
+        "tokenization_baichuan.py": "db8cc8d06510d096405430b8db835ebedd91753f08cd259e29553bfde73f5bd0"
+      },
+      "vocab_size": 125696,
+      "special_tokens": {
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "unk_token_id": 0,
+        "pad_token_id": 0,
+        "add_bos_token": false,
+        "add_eos_token": false,
+        "clean_up_tokenization_spaces": false
+      },
+      "samples": [
+        {
+          "text": "你好，世界！ Hello GPT-QModel.",
+          "ids": [
+            16829,
+            65,
+            2089,
+            67,
+            52594,
+            1485,
+            17551,
+            63,
+            92850,
+            12378,
+            72
+          ],
+          "decoded": "你好，世界！ Hello GPT-QModel."
+        },
+        {
+          "text": "  leading  spaces\nsecond\t行🙂",
+          "ids": [
+            1373,
+            22778,
+            92311,
+            11819,
+            5,
+            22943,
+            6,
+            92406,
+            96610
+          ],
+          "decoded": "  leading  spaces\nsecond\t行🙂"
+        },
+        {
+          "text": "<s>hello</s><unk>",
+          "ids": [
+            92655,
+            92319,
+            92574,
+            46955,
+            2801,
+            92319,
+            92574,
+            0
+          ],
+          "decoded": " <s>hello</s><unk>"
+        },
+        {
+          "text": "A <s> B </s> C",
+          "ids": [
+            92343,
+            92311,
+            1,
+            1432,
+            92311,
+            2,
+            1399
+          ],
+          "decoded": " A <s>  B </s> C"
+        },
+        {
+          "text": "2026-11-17 数学：1+1=2",
+          "ids": [
+            92338,
+            92335,
+            92338,
+            92373,
+            63,
+            92336,
+            92336,
+            63,
+            92336,
+            92383,
+            92311,
+            3939,
+            70,
+            92336,
+            62,
+            92336,
+            64,
+            92338
+          ],
+          "decoded": "2026-11-17 数学：1+1=2"
+        },
+        {
+          "text": "",
+          "ids": [],
+          "decoded": ""
+        }
+      ],
+      "pairs": [
+        {
+          "add_bos_token": false,
+          "add_eos_token": false,
+          "encoded": {
+            "input_ids": [
+              16829,
+              23160
+            ],
+            "token_type_ids": [
+              0,
+              1
+            ],
+            "special_tokens_mask": [
+              0,
+              0
+            ],
+            "attention_mask": [
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "add_bos_token": true,
+          "add_eos_token": false,
+          "encoded": {
+            "input_ids": [
+              1,
+              16829,
+              1,
+              23160
+            ],
+            "token_type_ids": [
+              0,
+              0,
+              1,
+              1
+            ],
+            "special_tokens_mask": [
+              1,
+              0,
+              1,
+              0
+            ],
+            "attention_mask": [
+              1,
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "add_bos_token": false,
+          "add_eos_token": true,
+          "encoded": {
+            "input_ids": [
+              16829,
+              2,
+              23160,
+              2
+            ],
+            "token_type_ids": [
+              0,
+              0,
+              1,
+              1
+            ],
+            "special_tokens_mask": [
+              0,
+              1,
+              0,
+              1
+            ],
+            "attention_mask": [
+              1,
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "add_bos_token": true,
+          "add_eos_token": true,
+          "encoded": {
+            "input_ids": [
+              1,
+              16829,
+              2,
+              1,
+              23160,
+              2
+            ],
+            "token_type_ids": [
+              0,
+              0,
+              0,
+              1,
+              1,
+              1
+            ],
+            "special_tokens_mask": [
+              1,
+              0,
+              1,
+              1,
+              0,
+              1
+            ],
+            "attention_mask": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ],
+      "added_special_flags": {
+        "0": {
+          "content": "<unk>",
+          "single_word": true,
+          "normalized": true,
+          "lstrip": false,
+          "rstrip": false
+        },
+        "1": {
+          "content": "<s>",
+          "single_word": true,
+          "normalized": true,
+          "lstrip": false,
+          "rstrip": false
+        },
+        "2": {
+          "content": "</s>",
+          "single_word": true,
+          "normalized": true,
+          "lstrip": false,
+          "rstrip": false
+        }
+      },
+      "chat": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "你是助手。"
+          },
+          {
+            "role": "user",
+            "content": "你好"
+          },
+          {
+            "role": "assistant",
+            "content": "Hello"
+          },
+          {
+            "role": "user",
+            "content": "1+1=?"
+          }
+        ],
+        "user_token_id": 195,
+        "assistant_token_id": 196,
+        "ids": [
+          8225,
+          18183,
+          66,
+          195,
+          16829,
+          196,
+          23160,
+          195,
+          92336,
+          62,
+          92336,
+          64,
+          74,
+          196
+        ],
+        "user_token": "<reserved_106>",
+        "assistant_token": "<reserved_107>"
+      }
+    }
+  ]
+}
