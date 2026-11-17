@@ -43,9 +43,6 @@ from .generation_utils import DreamGenerationConfig, DreamGenerationMixin
 logger = logging.get_logger(__name__)
 
 
-_CHECKPOINT_FOR_DOC = "Dream-7B"
-_CONFIG_FOR_DOC = "DreamConfig"
-
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Dream
 class DreamRMSNorm(nn.Module):

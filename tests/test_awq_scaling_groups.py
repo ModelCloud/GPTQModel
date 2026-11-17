@@ -222,9 +222,31 @@ def _field_names(config):
 
 def _tiny_config(model_type):
     if model_type == "agnes":
-        from tests.test_agnes_local_port import tiny_config
+        # The CPU decoder invariant must not import the image/video test suite:
+        # that suite requires torchvision, which is optional for text execution.
+        from gptqmodel.models.ports.agnes.configuration_agnes import (
+            AgnesConfig,
+            AgnesTextConfig,
+            AgnesVisionConfig,
+        )
 
-        return tiny_config()
+        return AgnesConfig(
+            text_config=AgnesTextConfig(
+                vocab_size=64, hidden_size=16, num_hidden_layers=2, intermediate_size=32,
+                parallel_ffn_intermediate_size=12, num_attention_heads=2, num_key_value_heads=1,
+                head_dim=8, linear_num_key_heads=1, linear_num_value_heads=2,
+                linear_key_head_dim=4, linear_value_head_dim=4, linear_conv_kernel_dim=3,
+                layer_types=["agnes_delta_attention", "agnes_global_attention"],
+                rope_parameters={"rope_type": "default", "rope_theta": 10000.0,
+                                 "partial_rotary_factor": 1.0, "mrope_section": [2, 1, 1]},
+                pad_token_id=0, eos_token_id=None,
+            ),
+            vision_config=AgnesVisionConfig(
+                depth=1, hidden_size=16, intermediate_size=24, num_heads=2, out_hidden_size=16,
+                patch_size=2, temporal_patch_size=1, spatial_merge_size=2, num_position_embeddings=16,
+            ),
+            image_token_id=60, video_token_id=61, vision_start_token_id=62, vision_end_token_id=63,
+        )
     if model_type in REMOTE_CODE_MODEL_PATHS:
         return _tiny_remote_config(model_type)
     if model_type in COMPOSITE_TEXT_CONFIG_FAMILIES:

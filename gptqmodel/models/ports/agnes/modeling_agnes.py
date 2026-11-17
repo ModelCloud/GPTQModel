@@ -1345,7 +1345,6 @@ class AgnesModel(AgnesPreTrainedModel):
             _, mask = self.get_placeholder_mask(input_ids, inputs_embeds=inputs_embeds, video_features=feats)
             inputs_embeds = inputs_embeds.masked_scatter(mask, feats)
 
-        rope_deltas = getattr(past_key_values, "rope_deltas", None)
         if position_ids is None:
             position_ids, rope_deltas = self.compute_3d_position_ids(
                 input_ids=input_ids, image_grid_thw=image_grid_thw, video_grid_thw=video_grid_thw,
