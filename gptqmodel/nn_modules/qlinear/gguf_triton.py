@@ -1763,39 +1763,76 @@ def _is_current_stream_capturing() -> bool:
         return False
 
 
+_RAW_CURRENT_STREAM = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+
+
+def _current_stream_key(device: torch.device) -> int | None:
+    """Identity of the active CUDA stream, without building a Python wrapper.
+
+    ``torch.cuda.current_stream()`` allocates a ``Stream`` object on every call
+    (~2 us on the hosts we measure), which is a large fraction of a decode-sized
+    launch; the raw handle is the same identity the kernel sees.  Mirrors
+    ``gptqmodel.utils.marlin.marlin_stream_key`` (#4956).
+    """
+
+    try:
+        index = device.index
+        if index is None:
+            index = torch.cuda.current_device()
+        if _RAW_CURRENT_STREAM is not None:
+            return int(_RAW_CURRENT_STREAM(index))
+        return int(torch.cuda.current_stream(index).cuda_stream)
+    except Exception:
+        return None
+
+
+def _retire_triton_cache_ready(cache: dict[str, Any]) -> None:
+    """Drop the build handshake: nothing is left to order."""
+
+    cache.pop("ready_event", None)
+    cache.pop("ready_stream", None)
+
+
 def _wait_for_triton_cache_ready(cache: dict[str, Any], device: torch.device) -> None:
     """Make the caller's stream wait for the cache builder, when they differ."""
 
     event = cache.get("ready_event")
-    try:
-        current = torch.cuda.current_stream(device)
-    except Exception:
+    if event is None:
+        # Retired: the build is complete and the cache is immutable from then
+        # on, so every later forward is a plain kernel launch.  Return before
+        # touching any stream API; this is the steady-state path (#4956).
         return
-    builder = cache.get("ready_stream")
-    same_stream = builder is not None and current == builder
-    if event is not None and not same_stream:
+    if _is_current_stream_capturing():
         # A captured stream may only wait on an event recorded inside the same
         # capture, so an explicit ``torch.cuda.graph`` can never consume this
         # one: the driver fails the capture with
         # ``CUDA_ERROR_STREAM_CAPTURE_ISOLATION`` (#4867). Even ``Event.query()``
         # is rejected while capturing, and ``torch.cuda.graph`` synchronizes the
-        # device before capture starts, so a cache built on another stream is
-        # already complete here: skip both the wait and the retirement.
-        if _is_current_stream_capturing():
-            return
-        if event.query():
-            # The build finished: nothing is left to order, so retire the event
-            # and every later forward -- captured ones included -- is a plain
-            # kernel launch.
-            cache.pop("ready_event", None)
-        else:
-            current.wait_event(event)
-    if not same_stream:
-        # The cached tensors outlive every forward, but the allocator still has to
-        # know this stream reads them.
-        for value in cache.values():
-            if isinstance(value, torch.Tensor):
-                value.record_stream(current)
+        # device before capture starts, so the build is already complete here:
+        # retire instead of waiting or querying.
+        _retire_triton_cache_ready(cache)
+        return
+    if event.query():
+        # The build finished, whichever stream is asking.  Retire the handshake
+        # so this stream - the builder included - pays nothing from now on
+        # (#4956).
+        _retire_triton_cache_ready(cache)
+        return
+    builder = cache.get("ready_stream")
+    if builder is not None and _current_stream_key(device) == builder.cuda_stream:
+        # Same stream: the build is already ordered before this forward, so the
+        # common single-stream path stays free of any bookkeeping.
+        return
+    try:
+        current = torch.cuda.current_stream(device)
+    except Exception:
+        return
+    current.wait_event(event)
+    # The cached tensors outlive every forward, but the allocator still has to
+    # know this stream reads them.
+    for value in cache.values():
+        if isinstance(value, torch.Tensor):
+            value.record_stream(current)
 
 
 # One lock for every module's first-forward re-layout. The permute itself is a
