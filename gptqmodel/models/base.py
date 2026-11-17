@@ -823,6 +823,18 @@ def _module_tree_for_class(cls):
     return active[1] if active is not None and active[0] is cls else cls.module_tree
 
 
+def _module_owns_direct_meta_tensors(module: nn.Module) -> bool:
+    """Whether ``module`` itself (not a child) owns a tensor still on ``meta``."""
+
+    for tensor in list(module.parameters(recurse=False)) + list(module.buffers(recurse=False)):
+        if getattr(tensor, "is_meta", False):
+            return True
+        device = getattr(tensor, "device", None)
+        if device is not None and getattr(device, "type", None) == "meta":
+            return True
+    return False
+
+
 # Replay metadata key: the per-layer-type `attention_mask` / `position_embeddings`
 # captured from the first decoder layer's forward. `capture_first_layer_input_kwargs`
 # stores it in the cached batch kwargs and `prepare_layer_replay_kwargs` consumes it,
@@ -7047,16 +7059,55 @@ class BaseQModel(nn.Module):
         return blocks
 
     @classmethod
+    def _module_tree_prefix_paths(cls) -> List[tuple[str, ...]]:
+        """Return every module-tree prefix path before the layer container."""
+
+        all_prefix_paths: List[tuple[str, ...]] = []
+        for tree in cls._iter_module_tree_variants(_module_tree_for_class(cls)):
+            try:
+                sharp_idx = tree.index("#")
+            except ValueError:
+                raise ValueError("module_tree must contain '#' to separate hierarchy")
+
+            assert sharp_idx > 0, "failed to get_base_modules"
+            for path in cls._expand_module_tree_prefixes(tree):
+                prefix = tuple(path.split("."))
+                if prefix not in all_prefix_paths:
+                    all_prefix_paths.append(prefix)
+        return all_prefix_paths
+
+    @classmethod
     def get_modules_with_direct_meta_tensors(cls, model: nn.Module):
         """
         Return module paths whose direct params/buffers are materialized outside
         normal layer/base-module traversal.
         """
         out = []
+        seen = set()
         module_names = cls.modules_with_direct_meta_tensors or cls.direct_meta_modules or []
         for module_name in module_names:
             module = get_module(model, module_name)
-            if isinstance(module, nn.Module):
+            if isinstance(module, nn.Module) and module_name not in seen:
+                seen.add(module_name)
+                out.append(module_name)
+
+        # A decoder root (or another module-tree prefix node) can own a bare
+        # parameter/buffer that is not a child module, e.g. Hymba's
+        # `model.memory_tokens`. Nothing in the base-module or layer traversal
+        # materializes it, so a lazy shell leaves it on `meta` and the capture
+        # forward fails. Detect those owners generically instead of requiring
+        # every affected definition to declare them (#4888).
+        for parts in cls._module_tree_prefix_paths():
+            for depth in range(1, len(parts) + 1):
+                module_name = ".".join(parts[:depth])
+                if module_name in seen:
+                    continue
+                module = get_module(model, module_name)
+                if not isinstance(module, nn.Module):
+                    continue
+                if not _module_owns_direct_meta_tensors(module):
+                    continue
+                seen.add(module_name)
                 out.append(module_name)
         return out
 
@@ -7069,19 +7120,7 @@ class BaseQModel(nn.Module):
         """
         Return list of base modules directly under the root path but not the layer container.
         """
-        all_prefix_paths = []
-        for tree in cls._iter_module_tree_variants(_module_tree_for_class(cls)):
-            try:
-                sharp_idx = tree.index("#")
-            except ValueError:
-                raise ValueError("module_tree must contain '#' to separate hierarchy")
-
-            assert sharp_idx > 0, "failed to get_base_modules"
-            for path in cls._expand_module_tree_prefixes(tree):
-                prefix = tuple(path.split("."))
-                if prefix not in all_prefix_paths:
-                    all_prefix_paths.append(prefix)
-
+        all_prefix_paths = cls._module_tree_prefix_paths()
         if not all_prefix_paths:
             return []
 
