@@ -89,6 +89,12 @@ def _attach_pending_handshake(module, sleep_cycles: int = 50_000_000):
 class _CountingDict(dict):
     """A cache entry that counts every mutation of its keys."""
 
+    # ``mutations`` is test bookkeeping, not part of the mapping's identity:
+    # keep dict's value-based equality so the extra attribute cannot make two
+    # equal caches compare unequal (or vice versa).
+    __eq__ = dict.__eq__
+    __ne__ = dict.__ne__
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.mutations = 0
