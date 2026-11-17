@@ -133,6 +133,30 @@ def _reshape_reduced(output: torch.Tensor, shape: torch.Size) -> torch.Tensor:
     return output if output.shape == shape else output.reshape(shape)
 
 
+def _reshape_reduced_owned(
+    output: torch.Tensor,
+    x: torch.Tensor,
+    bias: torch.Tensor | None,
+    shape: torch.Size,
+) -> torch.Tensor:
+    """``_reshape_reduced`` for epilogues that can run inside a custom Function.
+
+    A real reshape is still a view, so a batched result returned from
+    ``autograd.Function.forward`` would reject an in-place update by the caller
+    (#4974). Grad mode is disabled inside that forward while the Function's
+    output is tracked, so materialize the view there; eager inference and
+    ordinary training loops keep the allocation-free reshape.
+    """
+
+    if output.shape == shape:
+        return output
+    out = output.reshape(shape)
+    tracked = x.requires_grad or (bias is not None and bias.requires_grad)
+    if tracked and not torch.is_grad_enabled():
+        return out.clone()
+    return out
+
+
 def matmul_fp32_reduce(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
@@ -252,7 +276,11 @@ def linear_wide_bias(
                 output = output.reshape(shape) + bias.float()
             else:
                 output = output + bias.float()
-        return output.to(x.dtype).reshape(shape)
+        # A wide bias can reach this epilogue from inside a custom
+        # ``autograd.Function`` (the Triton decoder and the GGUF fallback both
+        # call ``matmul_fp32_reduce``), where a returned reshape view cannot be
+        # modified in place afterwards (#4974).
+        return _reshape_reduced_owned(output.to(x.dtype), x, bias, shape)
 
     if not autocast_active(x.device.type):
         return reduce()
@@ -356,7 +384,9 @@ def _fused_addmm(
 ) -> torch.Tensor:
     shape = x.shape[:-1] + (weight.shape[0],)
     flat_bias = bias if bias.dim() == 1 else bias.reshape(-1, weight.shape[0])
-    return torch.addmm(flat_bias, x.reshape(-1, x.shape[-1]), weight.t()).reshape(shape)
+    return _reshape_reduced_owned(
+        torch.addmm(flat_bias, x.reshape(-1, x.shape[-1]), weight.t()), x, bias, shape
+    )
 
 
 def linear_fp32_reduce(x, weight, bias=None):

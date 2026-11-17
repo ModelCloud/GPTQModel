@@ -193,11 +193,38 @@ def test_inference_path_does_not_clone(device):
 
 def _adalora_wrapper(module):
     peft = pytest.importorskip("peft", reason="AdaLoRA lives in PEFT")
-    from peft.tuners.adalora.config import AdaLoraConfig
-    from peft.tuners.adalora.gptq import SVDQuantLinear
 
-    config = AdaLoraConfig(r=8, lora_alpha=8, target_modules=["q_proj"], total_step=10)
-    wrapper = SVDQuantLinear(module, "default", config, r=8, lora_alpha=8)
+    # PEFT resolves an installed ``gptqmodel`` distribution on every dispatch
+    # probe (`is_gptqmodel_available`, an ``lru_cache``d function) and raises
+    # ``PackageNotFoundError`` when it is missing, which is the case for a
+    # source checkout. Expose the in-tree version for the construction only.
+    import importlib.metadata as metadata
+
+    original = metadata.version
+    try:
+        metadata.version("gptqmodel")
+    except metadata.PackageNotFoundError:
+        def _version(name):
+            return "7.12.0" if name == "gptqmodel" else original(name)
+
+        metadata.version = _version
+    try:
+        import peft.import_utils
+
+        peft.import_utils.is_gptqmodel_available.cache_clear()
+        from peft.tuners.adalora.config import AdaLoraConfig
+        from peft.tuners.adalora.gptq import SVDQuantLinear
+
+        config = AdaLoraConfig(r=8, lora_alpha=8, target_modules=["q_proj"], total_step=10)
+        wrapper = SVDQuantLinear(module, "default", config, r=8, lora_alpha=8)
+    except (ImportError, AttributeError) as exc:  # pragma: no cover - optional dependency
+        pytest.skip(f"PEFT AdaLoRA GPTQ wrapper unavailable: {exc}")
+    finally:
+        metadata.version = original
+        probe = getattr(getattr(peft, "import_utils", None), "is_gptqmodel_available", None)
+        if probe is not None:
+            probe.cache_clear()
+
     # PEFT keeps the adapter matrices in FP32 and the wrapper casts the input
     # to FP32 before the low-rank product, so align the adapter dtype here.
     for name, param in wrapper.named_parameters():
