@@ -360,7 +360,11 @@ def _accumulate_fp4_planes(Both, GroupScales, GlobalScale, TokenScale, Bias, Acc
                            LAST: tl.constexpr, HAS_BIAS: tl.constexpr, HAS_TOKEN_SCALE: tl.constexpr,
                            BLOCK: tl.constexpr):
     index = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
-    active = index < M * N
+    # M is a runtime i32 and N is a constexpr, so `M * N` is evaluated in
+    # 32 bits and wraps negative once rows * N >= 2^31. Every lane then masks
+    # off and the output is left uninitialized. Widen the row count first.
+    total = M.to(tl.int64) * N
+    active = index < total
     plane_offset = (index // N) * (2 * N) + index % N
     low = tl.load(Both + plane_offset, active, other=0).to(tl.float32)
     high = tl.load(Both + plane_offset + N, active, other=0).to(tl.float32)
