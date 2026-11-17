@@ -5,6 +5,7 @@
 # Credit: int8 kernel sync adapted from Yintong Lu (yintong-lu), vLLM PR #35697.
 
 
+import contextlib
 import threading
 from typing import Optional, Tuple
 
@@ -18,6 +19,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ._numerics import autocast_active
 from ._runtime_cache import tensor_cache_key
 
 
@@ -62,6 +64,21 @@ def _require_native_int8(bits: int) -> None:
 
 def _has_int8_mm_op() -> bool:
     return hasattr(torch.ops.aten, "_weight_int8pack_mm")
+
+
+def _fp32_decode_context(device_type: str):
+    """Keep the FP32 decode and reduction out of an ambient autocast context.
+
+    ``activations @ decoded.t()`` is an autocast-eligible matmul, so an outer
+    ``torch.autocast`` narrows its FP32 operands to the autocast dtype. The
+    result is then rounded before the bias cancels it, and assigning into an
+    FP32 output only widens the already-rounded value. Disabling autocast
+    locally preserves the caller's context on exit and leaves the single
+    output rounding to the activation dtype to ``forward``.
+    """
+    if not autocast_active(device_type):
+        return contextlib.nullcontext()
+    return torch.autocast(device_type=device_type, enabled=False)
 
 
 def _normalize_g_idx(g_idx: torch.Tensor, num_groups: int) -> torch.Tensor:
@@ -284,30 +301,34 @@ class Int8PackedModule(torch.nn.Module):
     ) -> torch.Tensor:
         # The op requires matching activation/scale dtypes and only accepts 2D
         # activations. FP32 preserves tiny group scales and delays output
-        # rounding until after the group reduction and the bias epilogue.
-        activations = self._activations(x)
-        groups = activations.shape[-2]
-        width = activations.shape[-1]
-        flat = activations.reshape(-1, groups, width)
-        output = None
-        if self.int8_group_offset is None:
-            group_scale = self.int8_group_scale.float()
-            for group in range(groups):
-                part = torch.ops.aten._weight_int8pack_mm(
-                    flat[:, group, :], self.int8_weight_gnk[group], group_scale[group]
-                )
-                output = part if output is None else output.add_(part)
-        else:
-            # Asymmetric zero points must be subtracted before the reduction.
-            # Splitting them into a residual reduction plus an offset reduction
-            # lets FP32 rounding survive the cancellation of two large terms.
-            for group in range(groups):
-                part = self._asymmetric_group_output(flat, group)
-                output = part if output is None else output.add_(part)
-        output = output.reshape(activations.shape[:-2] + (self.out_features,))
-        if bias is not None:
-            output = output + bias.float()
-        return output.to(x.dtype)
+        # rounding until after the group reduction and the bias epilogue. An
+        # outer autocast context would narrow the asymmetric group matmul to
+        # the autocast dtype before that rounding, so the FP32 contract is
+        # enforced locally and the caller's context is restored afterwards.
+        with _fp32_decode_context(x.device.type):
+            activations = self._activations(x)
+            groups = activations.shape[-2]
+            width = activations.shape[-1]
+            flat = activations.reshape(-1, groups, width)
+            output = None
+            if self.int8_group_offset is None:
+                group_scale = self.int8_group_scale.float()
+                for group in range(groups):
+                    part = torch.ops.aten._weight_int8pack_mm(
+                        flat[:, group, :], self.int8_weight_gnk[group], group_scale[group]
+                    )
+                    output = part if output is None else output.add_(part)
+            else:
+                # Asymmetric zero points must be subtracted before the reduction.
+                # Splitting them into a residual reduction plus an offset reduction
+                # lets FP32 rounding survive the cancellation of two large terms.
+                for group in range(groups):
+                    part = self._asymmetric_group_output(flat, group)
+                    output = part if output is None else output.add_(part)
+            output = output.reshape(activations.shape[:-2] + (self.out_features,))
+            if bias is not None:
+                output = output + bias.float()
+            return output.to(x.dtype)
 
 
 class TorchInt8Linear(GPTQQuantLinear):
