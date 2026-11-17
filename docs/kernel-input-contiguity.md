@@ -136,16 +136,21 @@ An empty batch used to reach a zero-sized grid or an ambiguous `reshape`.
 flowchart TD
     A["x.numel() == 0"] --> B{"where"}
     B -- native Hadamard --> C["return empty output before the launch"]
+    B -- EXL3 had_r_128/dual --> G["return empty output before the launch"]
+    B -- LinearEXL3.forward --> H["return empty y before torch_mode"]
     B -- Torch butterfly --> D["return empty_like before reshape"]
     B -- apply_online_hadamard --> E["return x unchanged"]
     B -- NF12Linear --> F["empty_linear_output before the rotation"]
     classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
     C -. "before: CUDA error invalid argument" .-> X["crash"]
+    G -. "before: CUDA error invalid argument" .-> X
     D -. "before: RuntimeError ambiguous reshape" .-> X
     class X failure;
 ```
 
-The native early return is in every binding in `gptqmodel_ext/hadamard/hadamard.cpp`;
+The native early return is in every binding in `gptqmodel_ext/hadamard/hadamard.cpp`,
+in EXL3's `had_r_128`/`had_r_128_dual` (`gptqmodel_ext/exllamav3/quant/hadamard.cu`),
+and in `LinearEXL3.forward` (`gptqmodel/exllamav3/modules/quant/exl3.py`);
 the Torch fallback and `apply_online_hadamard` are in
 `gptqmodel/quantization/rotation/hadamard_utils.py`; `NF12Linear._forward_impl`
 checks `input_rows(x) == 0` before rotating.
@@ -183,7 +188,8 @@ flowchart TD
 - A zero-element operand short-circuits before any launch or reshape.
 - A token count is a runtime argument, never a compile-time constant.
 
-The regression coverage lives in `tests/test_hadamard_empty_input.py`,
+The regression coverage lives in `tests/test_hadamard_empty_input.py`
+(including EXL3's `had_r_128` and the `LinearEXL3.forward` short-circuit),
 `tests/kernels/test_kernel_input_contiguity.py`,
 `tests/kernels/test_gguf_triton_multi_gpu.py`,
 `tests/kernels/test_triton_int32_offsets.py`, and
