@@ -26,7 +26,7 @@ def tiny_config(**overrides):
         "n_routed_experts": 4, "num_experts_per_tok": 2, "n_group": 2, "topk_group": 1,
         "moe_intermediate_size": 12, "n_shared_experts": 2, "first_k_dense_replace": 1,
         "max_position_embeddings": 64, "pad_token_id": 0, "bos_token_id": 1, "eos_token_id": 2,
-        "attention_dropout": 0.0,
+        "attention_dropout": 0.0, "experts_implementation": "eager",
     }
     values.update(overrides)
     return DeepseekV2Config(**values)

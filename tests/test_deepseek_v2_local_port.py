@@ -58,6 +58,25 @@ def save_checkpoint(path, hf_model, malicious=False):
         (path / "evil.py").write_text("raise AssertionError('checkpoint Python executed')\n")
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@torch.inference_mode()
+def test_tiny_cpu_experts_after_native_model_construction(dtype):
+    # Native initialization can prime the inherited capability cache before
+    # the local subclass is constructed. This fixture has 12-wide experts,
+    # outside grouped_mm's low-precision 16-byte stride requirement.
+    native = NativeModel(tiny_config()).eval().to(dtype)
+    native.set_experts_implementation("eager")
+    actual = model().to(dtype)
+    actual.load_state_dict(native.state_dict())
+    ids = torch.tensor([[1, 4, 7]])
+    torch.testing.assert_close(
+        actual(ids, use_cache=False).logits,
+        native(ids, use_cache=False).logits,
+        rtol=0, atol=0,
+    )
+    assert actual.config._experts_implementation == "eager"
+
+
 @pytest.mark.parametrize("q_rank", [None, 8], ids=["lite", "full"])
 @pytest.mark.parametrize("method", ["greedy", "group_limited_greedy"])
 @torch.inference_mode()
