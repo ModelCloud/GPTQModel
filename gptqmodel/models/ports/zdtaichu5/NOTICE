@@ -1,0 +1,23 @@
+ZDTaichu-5.0-9B
+Copyright 2026 ZDTaichu-5.0-9B contributors
+
+This distribution contains ZDTaichu-5.0-9B model weights, configuration,
+tokenizer artifacts, and Hugging Face inference code. Third-party licenses
+remain in force; see THIRD_PARTY_LICENSES.md and LICENSES/.
+
+This product includes C-RADIOv4-H components from NVIDIA Corporation.
+
+Licensed by NVIDIA Corporation under the NVIDIA Open Model License
+
+The C-RADIOv4-H upstream model was obtained from nvidia/C-RADIOv4-H at
+Hugging Face revision 0057b339059c0b9e1b4ba996f975410ebbfdfcc8. Original
+copyright and license notices have been retained.
+
+This product includes software derived from OpenGVLab/InternVL. Original
+OpenGVLab copyright notices have been retained. See
+LICENSES/MIT-OpenGVLab.txt.
+
+The Qwen3.5-9B language backbone and upstream artifacts are provided by the
+Qwen team under Apache License 2.0. See LICENSES/Apache-2.0.txt.
+
+No upstream artifact is relicensed by this Notice.
