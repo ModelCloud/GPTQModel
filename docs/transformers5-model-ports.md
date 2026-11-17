@@ -479,6 +479,15 @@ full leaf inventory, registry and required AWQ baseline passed **759 tests with
 fixtures and existing expected failures remain unqualified. No trained weights,
 VL media processing, full Omni wrapper/audio or accelerator behavior is claimed.
 
+The AWQ unit CI then exposed two old synthetic tests that still required LFM3
+fold groups. Those expectations now assert the plain policy; additional real
+Transformers convolution/full/sliding sandwich layers confirm no scale groups.
+`tests/test_awq_scale_folding.py` plus
+`gptqmodel/models/ports/lfm3/tests/test_native_coverage.py` passed **84 tests**
+with no skips in 4.01 seconds. The native suite checks actual quantization,
+packing, dense-owner preservation and failed-capture repair/retry; a no-group
+assertion alone is not counted as packing qualification.
+
 ## InternVL wrapper and K2-Horizon selection
 
 InternVL-chat selects a package-owned vision/wrapper implementation and its
