@@ -11,7 +11,7 @@ from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
 from transformers.cache_utils import DynamicCache, StaticCache
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.auto import check_and_get_model_definition
 from gptqmodel.models.definitions.grinmoe import GrinMoeQModel
 from gptqmodel.models.ports.grinmoe.configuration_grinmoe import GRINMoEConfig
@@ -367,7 +367,10 @@ def test_plain_awq_quantizes_and_packs_every_projection_without_norm_folds(tmp_p
         {"input_ids": torch.tensor([[1, 8, 6, 4, 3, 7, 9, 5]]),
          "attention_mask": torch.ones(1, 8, dtype=torch.long)},
     ]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     expected = {"self_attn." + name + "_proj" for name in ("q", "k", "v", "o")}
     expected |= {f"block_sparse_moe.experts.{i}.{name}" for i in range(3) for name in ("w1", "w2", "w3")}
     layer = wrapper.model.model.layers[0]

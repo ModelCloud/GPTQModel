@@ -11,13 +11,14 @@ from inspect import signature
 from typing import Any, Dict
 
 import torch
-from transformers import AutoModelForCausalLM, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.attn_mask import normalize_seq_mask
 from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
+from ..local import LocalModelLoader
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .qwen3_5_text import Qwen3_5TextQModel
 
@@ -37,13 +38,18 @@ class ZDTaichu5QModel(Qwen3_5TextQModel):
     fusable = None  # No qualified executor for this definition.
 
 
-    loader = AutoModelForCausalLM
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.zdtaichu5.configuration.ZDTaichu5_0_Config",
+        model_class="gptqmodel.models.ports.zdtaichu5.modeling.ZDTaichu5_0_ForConditionalGeneration",
+        processor_class="gptqmodel.models.ports.zdtaichu5.processing.ZDTaichu5_0_Processor",
+        tokenizer_class="gptqmodel.models.ports.zdtaichu5.tokenization.ZDTaichu5Tokenizer",
+    )
 
     lm_head = "language_model.lm_head"
     pre_lm_head_norm_module = "language_model.model.norm"
     rotary_embedding = "language_model.model.rotary_emb"
 
-    require_trust_remote_code = True
+    require_trust_remote_code = False
     require_load_processor = True
     layer_modules_strict = False
     support_batch_quantize = False
@@ -116,11 +122,15 @@ class ZDTaichu5QModel(Qwen3_5TextQModel):
             setattr(parent, name, move_to(getattr(parent, name), device=CPU))
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(
+        return self.loader.load_processor(
             self.model_local_path,
-            trust_remote_code=self.trust_remote_code,
-            use_fast=False,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
         )
+
+    def awq_get_modules_for_scaling(self, *args, **kwargs):
+        """Plain AWQ only; hybrid recurrence and visual folds are unqualified."""
+        return []
 
     def run_input_capture(self, example, use_cache: bool, data_device):
         """Keep the original 2-D padding mask for hybrid-layer replay."""

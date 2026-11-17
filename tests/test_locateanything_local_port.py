@@ -3,10 +3,13 @@
 """Behavioral qualification for the owned LocateAnything port."""
 
 import json
+import sys
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import requests
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -15,7 +18,7 @@ from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
 from transformers.cache_utils import DynamicCache
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.locateanything import LocateAnythingQModel
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.ports.locateanything.configuration_locateanything import LocateAnythingConfig
@@ -288,6 +291,66 @@ def test_processor_patches_video_and_reload(tmp_path):
                                batch["pixel_values"])
 
 
+def test_processor_http_image_failure_closes_response_then_retries(tmp_path, monkeypatch):
+    processor = LocateAnythingProcessor(LocateAnythingImageProcessor(patch_size=2), write_tokenizer(tmp_path))
+    buffer = BytesIO()
+    Image.new("RGB", (4, 4), (23, 74, 131)).save(buffer, format="PNG")
+    calls, responses = [], []
+
+    class Response:
+        content = buffer.getvalue()
+
+        def __init__(self, failed):
+            self.failed, self.closed = failed, False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.closed = True
+
+        def raise_for_status(self):
+            if self.failed:
+                raise requests.HTTPError("image unavailable")
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        response = Response(failed=len(calls) == 1)
+        responses.append(response)
+        return response
+
+    monkeypatch.setattr(requests, "get", get)
+    url = "https://example.com/image.png"
+    messages = [{"role": "user", "content": [{"type": "image", "image": url}]}]
+    with pytest.raises(requests.HTTPError, match="image unavailable"):
+        processor.process_vision_info(messages)
+    assert responses[0].closed
+    images, videos = processor.process_vision_info(messages)
+    assert videos is None
+    assert images[0].getpixel((0, 0)) == (23, 74, 131)
+    assert responses[1].closed
+    assert calls == [(url, {"stream": True, "timeout": (10, 30)})] * 2
+
+
+def test_processor_missing_lmdb_preserves_path_and_can_retry_with_pil(tmp_path, monkeypatch):
+    processor = LocateAnythingProcessor(LocateAnythingImageProcessor(patch_size=2), write_tokenizer(tmp_path))
+
+    def unexpected_open(*args, **kwargs):
+        raise AssertionError("a missing LMDB path was rewritten and opened")
+
+    monkeypatch.setitem(sys.modules, "cv2", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "lmdb", SimpleNamespace(open=unexpected_open))
+    path = "/home/zhidingy/workspace/libs/eagle/Eagle2/missing.lmdb"
+    record = {"lmdb_file": path, "lmdb_key": "image"}
+    messages = [{"role": "user", "content": [{"type": "image", "image": record}]}]
+    with pytest.raises(ValueError, match="LMDB file .* does not exist"):
+        processor.process_vision_info(messages)
+    assert record == {"lmdb_file": path, "lmdb_key": "image"}
+    image = Image.new("RGB", (4, 4), (23, 74, 131))
+    images, _ = processor.process_vision_info([{"role": "user", "content": [{"type": "image", "image": image}]}])
+    assert images[0].getpixel((0, 0)) == (23, 74, 131)
+
+
 def test_localization_sampler_patterns_and_weighted_coordinate_selection():
     model = tiny_model()
     token_ids = model.token_ids
@@ -480,7 +543,10 @@ def test_public_plain_awq_media_replay_pack_infer_and_reload(tmp_path, architect
     calibration = [[{"role": "user", "content": [{"type": "image", "image": image},
                      {"type": "text", "text": "Locate object"}]},
                     {"role": "assistant", "content": "<box>1 2 3 4</box>"}]] * 2
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 14
     for key, value in dense.items():
         torch.testing.assert_close(wrapper.model.state_dict()[key], value, atol=0, rtol=0)

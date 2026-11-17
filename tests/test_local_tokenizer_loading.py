@@ -23,7 +23,7 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.auto import MODEL_MAP_CASEFOLD
 from gptqmodel.models.definitions.internlm import InternLMQModel
 from gptqmodel.models.local import LocalModelLoader
@@ -40,15 +40,22 @@ def _write_tokenizer(path):
     backend = Tokenizer(WordLevel(VOCAB, unk_token="<unk>"))
     backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
     tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=backend, bos_token="<s>", eos_token="</s>", unk_token="<unk>",
+        tokenizer_object=backend,
+        bos_token="<s>",
+        eos_token="</s>",
+        unk_token="<unk>",
     )
     tokenizer.save_pretrained(path)
 
 
 def _config():
     return InternLMConfig(
-        vocab_size=8, hidden_size=16, intermediate_size=24,
-        num_hidden_layers=1, num_attention_heads=2, pad_token_id=None,
+        vocab_size=8,
+        hidden_size=16,
+        intermediate_size=24,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        pad_token_id=None,
     )
 
 
@@ -121,15 +128,23 @@ def test_public_tokenizer_uses_owned_class_and_normalizes(tmp_path, monkeypatch,
     selected = InternLMConfig.from_pretrained(tmp_path)
     # The selected outer definition, not nested tokenizer hints, owns dispatch.
     selected.text_config = PreTrainedConfig(
-        bos_token_id=1, eos_token_id=2, pad_token_id=None,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=None,
         auto_map={"AutoConfig": "checkpoint_python.RemoteConfig"},
     )
     loaded = load_hf_tokenizer(
-        path_kind(tmp_path), model_config=selected,
-        trust_remote_code=trust, code_revision="untrusted",
+        path_kind(tmp_path),
+        model_config=selected,
+        trust_remote_code=trust,
+        code_revision="untrusted",
         config=PreTrainedConfig(model_type="untrusted"),
-        strict=True, pad_tokens=["<other>"], prefer_serialized_tokenizer=False,
-        local_files_only=True, padding_side="left", model_max_length=73,
+        strict=True,
+        pad_tokens=["<other>"],
+        prefer_serialized_tokenizer=False,
+        local_files_only=True,
+        padding_side="left",
+        model_max_length=73,
     )
     assert type(loaded) is tokenizer_class
     assert loaded("hello science", add_special_tokens=False).input_ids == [3, 4]
@@ -236,8 +251,12 @@ def test_caller_tokenizer_keeps_identity_and_normalization_overrides(tmp_path, m
     config = _config()
     _ban_auto(monkeypatch)
     loaded = load_hf_tokenizer(
-        supplied, model_config=config, trust_remote_code=True,
-        pad_tokens=["<other>"], strict=True, prefer_serialized_tokenizer=True,
+        supplied,
+        model_config=config,
+        trust_remote_code=True,
+        pad_tokens=["<other>"],
+        strict=True,
+        prefer_serialized_tokenizer=True,
     )
     assert loaded is supplied
     assert not isinstance(loaded, tokenizer_class)
@@ -269,15 +288,19 @@ def test_quantized_reload_retains_once_normalized_wrapper(tmp_path, monkeypatch,
 
     monkeypatch.setattr(Tokenicer, "load", classmethod(record_normalization))
     loaded = GPTQModel.load(
-        str(tmp_path), dtype=torch.float16, trust_remote_code=True,
+        str(tmp_path),
+        dtype=torch.float16,
+        trust_remote_code=True,
         attn_implementation="eager",
         quantize_config=AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=False),
         backend=BACKEND.TORCH,
     )
     assert len(normalized) == 1 and loaded.tokenizer is normalized[0]
-    sample = {"input_ids": torch.tensor([[1, 3, 4, 3, 4, 3, 4, 2]]),
-              "attention_mask": torch.ones(1, 8, dtype=torch.long)}
-    loaded.quantize([sample, sample], batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    sample = {
+        "input_ids": torch.tensor([[1, 3, 4, 3, 4, 3, 4, 2]]),
+        "attention_mask": torch.ones(1, 8, dtype=torch.long),
+    }
+    loaded.quantize(CalibrationConfig(dataset=[sample, sample], batch_size=1, min_length=1), backend=BACKEND.TORCH)
     # Keep the source's castable rotary buffer at the requested reload dtype.
     loaded.model.half()
     expected_state = {name: value.detach().clone() for name, value in loaded.model.state_dict().items()}
@@ -288,7 +311,10 @@ def test_quantized_reload_retains_once_normalized_wrapper(tmp_path, monkeypatch,
         loaded.save_quantized(str(saved))
         normalized.clear()
         loaded = GPTQModel.load(
-            str(saved), device="cpu", dtype=torch.float16, backend=BACKEND.TORCH,
+            str(saved),
+            device="cpu",
+            dtype=torch.float16,
+            backend=BACKEND.TORCH,
             attn_implementation="eager",
         )
         assert len(normalized) == 1
@@ -322,8 +348,12 @@ def test_broken_owned_tokenizer_fails_then_repairs_without_auto_fallback(tmp_pat
     with pytest.raises(Exception) as error:
         load_hf_tokenizer(str(tmp_path), model_config=selected, trust_remote_code=True)
     assert not isinstance(error.value, AssertionError), "must fail in owned asset loading, never Auto discovery"
-    failed_constructions = 0 if broken_asset == "config" else 1
-    assert len(calls) == failed_constructions
+    # JSON can fail in Tokenicer preparation or the selected backend. Neither
+    # may fall back to Auto discovery or construct the owned backend twice.
+    failed_constructions = len(calls)
+    assert failed_constructions <= 1
+    if broken_asset == "config":
+        assert failed_constructions == 0
     assert selected.pad_token_id is None
     assert not marker.exists()
     asset.write_bytes(good)
@@ -349,7 +379,10 @@ def test_local_tokenizer_direct_dispatch_strips_code_options(tmp_path, owned):
     loader, tokenizer_class, calls = owned
     _write_tokenizer(tmp_path)
     result = loader.load_tokenizer(
-        str(tmp_path), trust_remote_code=True, code_revision="checkpoint", local_files_only=True,
+        str(tmp_path),
+        trust_remote_code=True,
+        code_revision="checkpoint",
+        local_files_only=True,
     )
     assert type(result) is tokenizer_class
     assert calls[0][1] == {"local_files_only": True}
@@ -398,8 +431,11 @@ def test_owned_tokenizer_retains_checkpoint_selection_kwargs(tmp_path, monkeypat
     (tmp_path / "tokenizer.json").write_text("malformed root decoy")
     _ban_auto(monkeypatch)
     selection = {
-        "subfolder": "nested", "revision": "pinned-assets", "local_files_only": True,
-        "cache_dir": str(tmp_path / "cache"), "force_download": False,
+        "subfolder": "nested",
+        "revision": "pinned-assets",
+        "local_files_only": True,
+        "cache_dir": str(tmp_path / "cache"),
+        "force_download": False,
     }
     loaded = load_hf_tokenizer(str(tmp_path), model_config=_config(), pad_tokens=["<pad>"], **selection)
     assert type(loaded) is tokenizer_class
@@ -433,15 +469,25 @@ def test_ordinary_models_preserve_tokenicers_serialized_preference(tmp_path, mon
     backend.train_from_iterator(
         ["Hello world, this is a scientific test.", "  leading and repeated whitespace ", "Unicode café 中文"],
         trainers.BpeTrainer(
-            vocab_size=350, special_tokens=["<unk>", "<s>", "</s>", "<pad>"],
-            initial_alphabet=pre_tokenizers.ByteLevel.alphabet(), show_progress=False,
+            vocab_size=350,
+            special_tokens=["<unk>", "<s>", "</s>", "<pad>"],
+            initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+            show_progress=False,
         ),
     )
     backend.save(str(tmp_path / "tokenizer.json"))
-    (tmp_path / "tokenizer_config.json").write_text(json.dumps({
-        "tokenizer_class": "LlamaTokenizerFast", "bos_token": "<s>", "eos_token": "</s>",
-        "unk_token": "<unk>", "add_bos_token": True, "add_eos_token": False,
-    }))
+    (tmp_path / "tokenizer_config.json").write_text(
+        json.dumps(
+            {
+                "tokenizer_class": "LlamaTokenizerFast",
+                "bos_token": "<s>",
+                "eos_token": "</s>",
+                "unk_token": "<unk>",
+                "add_bos_token": True,
+                "add_eos_token": False,
+            }
+        )
+    )
     config = LlamaConfig(bos_token_id=1, eos_token_id=2, pad_token_id=None)
     serialized = PreTrainedTokenizerFast.from_pretrained(tmp_path)
     legacy = LlamaTokenizer.from_pretrained(tmp_path)

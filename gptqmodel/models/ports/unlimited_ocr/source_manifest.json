@@ -1,0 +1,21 @@
+{
+  "repository": "baidu/Unlimited-OCR",
+  "revision": "8249d20b2822a7d8a4c22c8d8c9069b5ac36bda3",
+  "sha256": {
+    "config.json": "55e6c5179eea054a3fca99e3e41424649d22f574fba4c5f0737ef9c9095526e4",
+    "preprocessor_config.json": "62cef9e2db4ae494ff2ecccaedfeef884d8ba880c25d17f14e81f3d1c3c899cb",
+    "processor_config.json": "2c82d81788aac5146db01d842138e8f5921daa907d2fd61c3c6c757d41dfb1d7",
+    "tokenizer_config.json": "a0cbe8464049da1f891b7a12676de06af4cb54c130995d42f71adc1c30c6e9f3",
+    "special_tokens_map.json": "ab4bd57ce17d62e39e0a39e739de1e407484f090f0b2c7e391312bca7a5b061a",
+    "generation_config.json": "dc97b67afaad12b72320c4230f292be8cb5a73fcb4caa9072074fe5a341fb003",
+    "tokenizer.json": "a02f8fd5228c90256bb4f6554c34a579d48f909e5beb232dc4afad870b55a8b4",
+    "model.safetensors.index.json": "354be1f2dcfb72ebb385e25465522ce5413a77c36f3b35fec088a3162a11af99",
+    "model-00001-of-000001.safetensors.header.json": "734fc1d13a67e9db0da68614c8f8c58d8bdde098404cdda6face2c50129c21a5",
+    "LICENSE": "d985048c6d69429d685fdbe7557340aa0897c0fd8dc038299b148b9c75dc3383",
+    "modeling_unlimitedocr.py": "3894696d68197ad00e89f0963880645dfce49b1933a9f27e78fbc05983547a78",
+    "modeling_deepseekv2.py": "74e36e6bd0ba7bc565ef76464a99baa8e6bccb710ae9c1007b54ac30b855fa4c",
+    "configuration_deepseek_v2.py": "b8470dd616ba8745fce6e27b093aef73a098863cc891b2477dcf9326a36000f7",
+    "deepencoder.py": "0ae2fb6d1e5ae8cf100fc32f854830acd08c821a0a1f23a94a76588c222ddcf2",
+    "conversation.py": "ec7b6ce89bcda643de1f43269ffa66a7b2e65dc3ed30e427958f776546b4ba03"
+  }
+}

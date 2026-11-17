@@ -1,0 +1,25 @@
+TeleChat / TeleChat2 package-owned Transformers 5 adaptation
+
+Based on inspected Tele-AI source releases identified by provenance.json.
+Copyright 2022 HuggingFace Inc. team and BigScience workshop.
+Copyright (c) 2020, 2023 NVIDIA CORPORATION. All rights reserved.
+Copyright (c) 2021 EleutherAI.
+The modeling/configuration sources carry Apache-2.0 notices; see LICENSE.
+The upstream tokenizer is distributed with those Tele-AI releases.
+
+Modified by ModelCloud.ai, 2026: Transformers 5 configuration, generation,
+DynamicCache and SDPA interfaces; device-local rotary tables; complete chunk
+cache append; packaged tokenizer backend and source-specific vocabulary dialects;
+source-byte vocabulary serialization; explicit plain-AWQ policy; safe local loading.
+No checkpoint Python is imported at runtime.
+
+Model artifacts have separate terms. Do not infer an unrestricted model license
+from the source-code headers or model-card Apache metadata. The pinned 35B-32K
+and 115B README files reference the TeleChat community model license and prior
+written authorization for commercial use. The actual community-license PDF
+retrieved from pinned Tele-AI/telechat-7B is retained verbatim as
+TELECHAT_MODEL_LICENSE.pdf; its definition explicitly names TeleChat-7B.
+It is not proof of the precise license version applicable to every later model.
+Users must verify the applicable model/tokenizer artifact terms with Tele-AI.
+Source-byte tokenizer fixtures are included for compatibility testing, not trained
+model weights or a grant of commercial model rights.

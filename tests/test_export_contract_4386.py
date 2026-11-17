@@ -69,9 +69,9 @@ def test_export_mlx_forwards_trust_remote_code(tmp_path, monkeypatch):
 
     monkeypatch.setattr(auto_module, "resolve_trust_remote_code", lambda *args, **kwargs: True)
     monkeypatch.setattr(
-        auto_module.AutoConfig,
-        "from_pretrained",
-        classmethod(lambda cls, *args, **kwargs: SimpleNamespace(quantization_config={"quant_method": "gptq"})),
+        auto_module,
+        "load_model_config",
+        lambda *args, **kwargs: SimpleNamespace(quantization_config={"quant_method": "gptq"}),
     )
 
     def fake_load(model_id_or_path, **kwargs):

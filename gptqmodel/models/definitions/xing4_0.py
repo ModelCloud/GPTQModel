@@ -8,14 +8,23 @@ from typing import List
 import torch
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class Xing4_0QModel(BaseQModel):
     """Quantization layout for XingChen-AGI's Xing4.0 MLA/HC MoE model."""
 
-    # Xing4.0 is distributed with configuration and model code in the model repo.
-    require_trust_remote_code = True
+    require_trust_remote_code = False
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.xing4_0.configuration_xing4_0.Xing4_0Config",
+        model_class="gptqmodel.models.ports.xing4_0.modeling_xing4_0.Xing4_0ForCausalLM",
+        tokenizer_class="gptqmodel.models.ports.xing4_0.tokenization_xing4_0.Xing4_0Tokenizer",
+    )
+
+    def awq_get_modules_for_scaling(self, *args, **kwargs):
+        """Plain AWQ: MLA/HC nonlinear and routed replay is not fold-qualified."""
+        return []
 
     # The first two decoder layers use the dense MLP; later layers use routed
     # experts plus a shared expert.  Keep the tree non-strict for that mix.

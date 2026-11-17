@@ -1,0 +1,19 @@
+Original Qwen package-owned Transformers 5 adaptation
+
+Copyright (c) Alibaba Cloud.
+Adaptation copyright (c) 2026 ModelCloud.ai.
+
+Adapted by inspection from Qwen/Qwen-7B at
+ef3c5c9c57b252f3149c1408daf4d649ec8b6c85 and the public QwenLM/Qwen
+repository at 2df8e8ac450fa185c421a08b0090ef81826caa6e.
+
+Changes include Transformers 5 configuration/model/generation APIs,
+package-local tokenizer ownership, cache-owned NTK metadata and beam operations,
+strict geometry/cache/asset validation, safetensors reload qualification and
+explicit plain AWQ policy. No upstream trained weights are included.
+
+The public source repository's Apache 2.0 code license is retained in
+LICENSE-APACHE. Separate model-release terms are retained in LICENSE (Tongyi
+Qianwen) and LICENSE-1.8B-RESEARCH. The public source license does not override
+those release terms. NOTICE-UPSTREAM retains upstream third-party notices.
+See provenance.json for exact revisions, SHA-256 digests and fixture origins.

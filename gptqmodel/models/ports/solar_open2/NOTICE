@@ -1,0 +1,22 @@
+Solar-Open2 package-owned Transformers 5 port
+
+Derived from Upstage AI's Transformers fork, revision
+ef5c37485091057070b36dd0620798f74988eb01, src/transformers/models/solar_open2/.
+Copyright 2026 Upstage AI and the HuggingFace Inc. team. All rights reserved.
+The upstream configuration/modeling files carry Apache License 2.0 notices;
+their license is preserved in LICENSE and their notices remain in each file.
+
+ModelCloud modifications: package-relative imports, current Transformers cache
+and attention interfaces, ordinary Torch KDA, released per-expert ModuleList
+ownership, cache sequence accounting, validation, strict FP32 router-buffer
+policy, local definition binding and explicit plain-AWQ/fusion policy.
+
+Checkpoint metadata, header-derived shape/dtype inventory, tokenizer evidence
+and chat-template observations refer to upstage/Solar-Open2-250B at revision
+9190fbe63a2ad8e17fc766ccceb36de7c66f004b. Its separate Upstage Solar License is
+preserved in SOLAR_LICENSE. This is not a claim that the model artifacts are
+Apache-only: the Solar license includes derivative-model branding conditions.
+No trained tensor payload or full tokenizer asset is distributed by this port.
+
+source_manifest.json records pinned source, license and asset SHA-256 values;
+header_manifest.json records the 94 independently retrieved safetensors headers.

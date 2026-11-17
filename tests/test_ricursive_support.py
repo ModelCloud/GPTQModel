@@ -1,27 +1,15 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""CPU coverage for the Ricursive Ripple (``ricursive``) quantization path.
-
-``Ripple-65B-Preview`` ships custom code (``RicursiveForCausalLM``), so the
-checkpoint must be loaded with ``trust_remote_code=True``. These tests keep the
-cheap contract checks on CPU: registry wiring, the module tree shape, and -- when
-the reference custom code is importable -- a tiny end-to-end GPTQ
-quantize/save/reload smoke run.
-
-The end-to-end test is skipped when the reference code cannot be fetched. Point
-``GPTQMODEL_RIPPLE_REF`` at a directory holding ``configuration_ricursive.py``
-and ``modeling_ricursive.py`` to run it offline.
-"""
+"""Offline CPU contracts for package-owned Ripple loading and legacy-shim unit tests."""
 
 import json
-import os
-import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+from ricursive_test_utils import make_model
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
@@ -31,8 +19,6 @@ from gptqmodel.models import auto
 from gptqmodel.models.definitions.ricursive import RicursiveQModel
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 
-
-_RIPPLE_REPO = "ricursiveAI/Ripple-65B-Preview"
 
 # Modules the definition must quantize in every decoder layer.
 _QUANTIZED_PER_LAYER = (
@@ -57,21 +43,15 @@ _DENSE_PER_LAYER = (
 )
 
 
-def test_ricursive_registry_selects_definition(monkeypatch):
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto, "patch_remote_code_before_config_load", lambda path: None)
-    monkeypatch.setattr(
-        auto.AutoConfig,
-        "from_pretrained",
-        lambda *args, **kwargs: SimpleNamespace(model_type="ricursive"),
-    )
-
+def test_ricursive_registry_selects_definition(tmp_path):
+    make_model().config.save_pretrained(tmp_path)
     assert auto.MODEL_MAP["ricursive"] is RicursiveQModel
-    assert auto.check_and_get_model_definition("/tmp/ripple", trust_remote_code=True) is RicursiveQModel
+    for trust in (False, True):
+        assert auto.check_and_get_model_definition(tmp_path, trust_remote_code=trust) is RicursiveQModel
 
 
 def test_ricursive_definition_contract():
-    assert RicursiveQModel.require_trust_remote_code is True
+    assert not RicursiveQModel.require_trust_remote_code
     assert RicursiveQModel.pre_lm_head_norm_module == "model.norm"
     assert RicursiveQModel.extract_layers_node() == ["model.layers"]
 
@@ -156,23 +136,19 @@ def test_ricursive_shared_input_plan_excludes_value_residual_projection():
 
 
 def test_plan_matches_real_forward_inputs(tmp_path: Path):
-    """Opt-in check: the declared groups really do share one tensor in a live forward.
+    """Always-run check: the declared groups really do share one tensor in a live forward.
 
     Also proves the `v_proj` exclusion is required rather than merely conservative --
     without it the probe would report `v_proj` as a mismatch.
     """
 
-    ref_dir = _reference_dir()
-    if ref_dir is None:
-        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
 
-    from transformers import AutoModelForCausalLM
 
     from gptqmodel.models.shared_input import probe_shared_inputs
 
     torch.manual_seed(0)
     model_dir = tmp_path / "native"
-    _build_tiny_fixture(ref_dir, model_dir)
+    _build_tiny_fixture(model_dir)
 
     from gptqmodel.models.shared_input import build_shared_input_plan
 
@@ -185,7 +161,7 @@ def test_plan_matches_real_forward_inputs(tmp_path: Path):
     )
     assert template_plan.shared_groups
 
-    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    model = _load_tiny_model(str(model_dir)).eval()
     input_ids = torch.randint(0, 256, (2, 16))
 
     def forward():
@@ -214,29 +190,6 @@ def test_plan_matches_real_forward_inputs(tmp_path: Path):
         assert not plan.shares_input("self_attn.q_proj", "self_attn.o_proj")
 
 
-def _reference_dir() -> Path | None:
-    """Locate the Ripple custom-code directory, or ``None`` when unavailable."""
-
-    env = os.environ.get("GPTQMODEL_RIPPLE_REF")
-    if env:
-        candidate = Path(env)
-        if (candidate / "configuration_ricursive.py").is_file():
-            return candidate
-        return None
-
-    try:
-        from huggingface_hub import snapshot_download
-
-        path = snapshot_download(
-            _RIPPLE_REPO,
-            allow_patterns=["config.json", "*.py", "tokenizer*", "special_tokens_map.json"],
-        )
-    except Exception:
-        return None
-    candidate = Path(path)
-    return candidate if (candidate / "configuration_ricursive.py").is_file() else None
-
-
 def _build_tokenizer(model_dir: Path) -> None:
     vocab = {"<unk>": 0, "<s>": 1, "</s>": 2}
     vocab.update({f"t{i}": i for i in range(3, 256)})
@@ -263,57 +216,31 @@ def _build_tokenizer(model_dir: Path) -> None:
     )
 
 
-def _build_tiny_fixture(ref_dir: Path, model_dir: Path) -> None:
-    from transformers import AutoConfig, AutoModelForCausalLM
-
+def _build_tiny_fixture(model_dir: Path) -> None:
     model_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("configuration_ricursive.py", "modeling_ricursive.py"):
-        shutil.copy(ref_dir / name, model_dir / name)
-
-    # Five layers exercise both the sliding-attention and the full-attention (NoPE) path.
-    (model_dir / "config.json").write_text(
-        json.dumps(
-            {
-                "architectures": ["RicursiveForCausalLM"],
-                "auto_map": {
-                    "AutoConfig": "configuration_ricursive.RicursiveConfig",
-                    "AutoModel": "modeling_ricursive.RicursiveModel",
-                    "AutoModelForCausalLM": "modeling_ricursive.RicursiveForCausalLM",
-                },
-                "model_type": "ricursive",
-                "vocab_size": 256,
-                "hidden_size": 64,
-                "intermediate_size": 96,
-                "num_hidden_layers": 5,
-                "num_attention_heads": 4,
-                "num_key_value_heads": 2,
-                "head_dim": 16,
-                "max_position_embeddings": 128,
-                "sliding_window": 16,
-                "rms_norm_eps": 1e-06,
-                "rope_theta": 10000.0,
-                "use_gated_attention": True,
-                "use_valres": True,
-                "ffn_clamp_threshold": 20.0,
-                "tie_word_embeddings": False,
-            },
-            indent=2,
-        )
+    model = make_model(
+        vocab_size=256, hidden_size=64, intermediate_size=96, num_hidden_layers=5,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=16,
+        max_position_embeddings=128, sliding_window=16, rms_norm_eps=1e-6,
+        rope_theta=10000.0, use_gated_attention=True, use_valres=True,
+        ffn_clamp_threshold=20.0, tie_word_embeddings=False,
+        layer_types=["sliding_attention"] * 4 + ["full_attention"],
     )
+    model.save_pretrained(model_dir)
     _build_tokenizer(model_dir)
 
-    config = AutoConfig.from_pretrained(str(model_dir), trust_remote_code=True)
-    AutoModelForCausalLM.from_config(config, trust_remote_code=True).save_pretrained(str(model_dir))
+
+def _load_tiny_model(model_dir, **kwargs):
+    # The isolated class executes the package files; no checkpoint Python.
+    return type(make_model()).from_pretrained(model_dir, **kwargs)
 
 
 def _apply_compat_patch_for_test(model) -> None:
-    """Exercise the legacy checkpoint path even when the reference is fixed."""
+    """Exercise legacy shim units on an isolated owned-class copy."""
     from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
 
-    # The reference repository is a moving target. Its current custom code
-    # declares native TF5 fixes, so production correctly skips these shims.
-    # Clear only the fixture class's marker to keep the compatibility tests
-    # exercising GPT-QModel's patch on current and older reference snapshots.
+    # The public definition never calls this helper. Isolate the old shim's
+    # class mutations from ordinary packaged model loading and other tests.
     cls = type(model)
     had_marker = "_ricursive_tf5_native_fix" in vars(cls)
     original_marker = vars(cls).get("_ricursive_tf5_native_fix")
@@ -328,24 +255,19 @@ def _apply_compat_patch_for_test(model) -> None:
 
 
 def test_tiny_ricursive_gptq_quantization_smoke(tmp_path: Path):
-    ref_dir = _reference_dir()
-    if ref_dir is None:
-        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
 
     torch.manual_seed(0)
     model_dir = tmp_path / "native"
     quantized_dir = tmp_path / "quantized"
-    _build_tiny_fixture(ref_dir, model_dir)
+    _build_tiny_fixture(model_dir)
 
-    from transformers import AutoModelForCausalLM
 
-    native = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    native = _load_tiny_model(str(model_dir)).eval()
 
     model = GPTQModel.load(
         str(model_dir),
         quantize_config=QuantizeConfig(bits=4, group_size=32, desc_act=False, device="cpu"),
         backend=BACKEND.TORCH,
-        trust_remote_code=True,
     )
     calibration = [{"input_ids": torch.randint(0, 256, (64,))} for _ in range(8)]
     model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
@@ -355,7 +277,6 @@ def test_tiny_ricursive_gptq_quantization_smoke(tmp_path: Path):
         str(quantized_dir),
         backend=BACKEND.TORCH,
         device="cpu",
-        trust_remote_code=True,
     )
     modules = dict(quantized.model.named_modules())
 
@@ -488,19 +409,13 @@ def test_generate_patch_full_prompt_with_capacity_padded_mask(capacity):
 
 
 def test_ricursive_generate_works_and_matches_uncached(tmp_path: Path):
-    ref_dir = _reference_dir()
-    if ref_dir is None:
-        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
-
-    from transformers import AutoModelForCausalLM
-
     from gptqmodel.utils.ricursive_patch import _PATCH_FLAG, apply_ricursive_generate_patch
 
     torch.manual_seed(0)
     model_dir = tmp_path / "native"
-    _build_tiny_fixture(ref_dir, model_dir)
+    _build_tiny_fixture(model_dir)
 
-    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    model = _load_tiny_model(str(model_dir)).eval()
     # The class may already carry the patch if an earlier test loaded through GPTQModel.
     _apply_compat_patch_for_test(model)
     assert getattr(type(model), _PATCH_FLAG, False) is True
@@ -515,7 +430,7 @@ def test_ricursive_generate_works_and_matches_uncached(tmp_path: Path):
     assert torch.equal(cached, uncached)
 
 
-def test_ricursive_definition_installs_generate_patch():
+def test_ricursive_definition_leaves_package_generation_owned():
     from gptqmodel.utils.ricursive_patch import _PATCH_FLAG
 
     class _FakeRemote:
@@ -526,8 +441,8 @@ def test_ricursive_definition_installs_generate_patch():
 
     qmodel = object.__new__(RicursiveQModel)
     model = _FakeRemote()
-    assert qmodel.after_model_load(model) is model
-    assert getattr(type(model), _PATCH_FLAG, False) is True
+    assert qmodel.after_model_load(model, False) is model
+    assert not getattr(type(model), _PATCH_FLAG, False)
 
 
 def test_generate_patch_stands_down_for_native_fix():
@@ -583,19 +498,15 @@ def test_ricursive_generate_with_padding_matches_unpadded(tmp_path: Path):
     batched row collapsed to a constant token.
     """
 
-    ref_dir = _reference_dir()
-    if ref_dir is None:
-        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
 
-    from transformers import AutoModelForCausalLM
 
     from gptqmodel.utils.ricursive_patch import _MASK_PATCH_FLAG, apply_ricursive_generate_patch
 
     torch.manual_seed(0)
     model_dir = tmp_path / "native"
-    _build_tiny_fixture(ref_dir, model_dir)
+    _build_tiny_fixture(model_dir)
 
-    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    model = _load_tiny_model(str(model_dir)).eval()
     _apply_compat_patch_for_test(model)
     assert getattr(type(model.model), _MASK_PATCH_FLAG, False) is True
     assert not apply_ricursive_generate_patch(model)
@@ -627,19 +538,15 @@ def test_sliding_window_mask_fast_path_matches_upstream(tmp_path: Path):
     building that tensor entirely, so the two must agree.
     """
 
-    ref_dir = _reference_dir()
-    if ref_dir is None:
-        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
 
-    from transformers import AutoModelForCausalLM
 
     from gptqmodel.utils.ricursive_patch import _WINDOW_PATCH_FLAG
 
     torch.manual_seed(0)
     model_dir = tmp_path / "native"
-    _build_tiny_fixture(ref_dir, model_dir)
+    _build_tiny_fixture(model_dir)
 
-    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    model = _load_tiny_model(str(model_dir)).eval()
     native_fix = bool(getattr(type(model), "_ricursive_tf5_native_fix", False))
     _apply_compat_patch_for_test(model)
 
@@ -680,17 +587,13 @@ def test_sliding_window_mask_fast_path_matches_upstream(tmp_path: Path):
 def test_sliding_window_fast_path_preserves_generation(tmp_path: Path):
     """Generation must be unchanged with the fast path enabled."""
 
-    ref_dir = _reference_dir()
-    if ref_dir is None:
-        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
 
-    from transformers import AutoModelForCausalLM
 
     torch.manual_seed(0)
     model_dir = tmp_path / "native"
-    _build_tiny_fixture(ref_dir, model_dir)
+    _build_tiny_fixture(model_dir)
 
-    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    model = _load_tiny_model(str(model_dir)).eval()
     _apply_compat_patch_for_test(model)
     model.generation_config.pad_token_id = 0
 
@@ -719,17 +622,13 @@ def test_sliding_window_mask_trims_evicted_keys(tmp_path: Path):
     shape once decoding passes the window.
     """
 
-    ref_dir = _reference_dir()
-    if ref_dir is None:
-        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
 
-    from transformers import AutoModelForCausalLM
 
     torch.manual_seed(0)
     model_dir = tmp_path / "native"
-    _build_tiny_fixture(ref_dir, model_dir)
+    _build_tiny_fixture(model_dir)
 
-    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    model = _load_tiny_model(str(model_dir)).eval()
     _apply_compat_patch_for_test(model)
 
     attn = model.model.layers[0].self_attn
@@ -766,19 +665,15 @@ def test_sliding_window_mask_aligns_to_written_positions(tmp_path: Path):
     layer attends to the wrong positions.
     """
 
-    ref_dir = _reference_dir()
-    if ref_dir is None:
-        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
 
-    from transformers import AutoModelForCausalLM
 
     from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
 
     torch.manual_seed(0)
     model_dir = tmp_path / "native"
-    _build_tiny_fixture(ref_dir, model_dir)
+    _build_tiny_fixture(model_dir)
 
-    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    model = _load_tiny_model(str(model_dir)).eval()
     apply_ricursive_generate_patch(model)
 
     attn = model.model.layers[0].self_attn
@@ -821,20 +716,16 @@ def test_static_cache_decode_matches_full_forward(tmp_path: Path):
     decode step rewrites the prompt slots.
     """
 
-    ref_dir = _reference_dir()
-    if ref_dir is None:
-        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
 
-    from transformers import AutoModelForCausalLM
     from transformers.cache_utils import StaticCache
 
     from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch
 
     torch.manual_seed(0)
     model_dir = tmp_path / "native"
-    _build_tiny_fixture(ref_dir, model_dir)
+    _build_tiny_fixture(model_dir)
 
-    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    model = _load_tiny_model(str(model_dir)).eval()
     apply_ricursive_generate_patch(model)
 
     total = 10
@@ -898,22 +789,15 @@ def test_prepare_inputs_moves_position_ids_to_model_device():
 
 
 def _load_tiny_with_originals(tmp_path: Path):
-    """Load the tiny fixture and return the *reference* forwards.
+    """Return isolated package-owned pre-shim forwards for shim-only A/B tests.
 
-    The custom-code class is shared across a pytest session, so an earlier test may
-    already have installed the decode patches. ``_gptqmodel_original`` keeps the
-    upstream implementation reachable, which is what the A/B assertions need.
+    ``_gptqmodel_original`` retains the packaged forward if a compatibility test
+    has installed a patch. The full port's numerical oracle lives separately.
     """
-    ref_dir = _reference_dir()
-    if ref_dir is None:
-        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
-
-    from transformers import AutoModelForCausalLM
-
     torch.manual_seed(0)
     model_dir = tmp_path / "native"
-    _build_tiny_fixture(ref_dir, model_dir)
-    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    _build_tiny_fixture(model_dir)
+    model = _load_tiny_model(str(model_dir)).eval()
 
     attn = model.model.layers[0].self_attn
     norm = model.model.layers[0].input_layernorm
@@ -948,59 +832,61 @@ def test_decode_patches_install_and_stay_idempotent(tmp_path: Path):
     assert norm_cls.forward is patched_norm
 
 
-def test_chunked_mlp_is_bit_identical_and_idempotent(monkeypatch):
-    """Splitting the MLP over rows must only bound the peak, never change the result.
+def test_config_owned_chunked_mlp_is_bit_identical():
+    mlp = make_model(hidden_size=128, intermediate_size=512,
+                     ffn_clamp_threshold=10.0, mlp_chunk_size=64).model.layers[0].mlp.to(torch.bfloat16)
+    unchunked = make_model(hidden_size=128, intermediate_size=512,
+                           ffn_clamp_threshold=10.0, mlp_chunk_size=0).model.layers[0].mlp.to(torch.bfloat16)
+    unchunked.load_state_dict(mlp.state_dict())
+    x = torch.randn(3, 200, 128, dtype=torch.bfloat16)
+    reference = unchunked(x)
+    rows = []
+    hook = mlp.gate_proj.register_forward_pre_hook(lambda module, args: rows.append(args[0].shape[0]))
+    try:
+        assert torch.equal(mlp(x), reference)
+    finally:
+        hook.remove()
+    assert len(rows) > 1 and sum(rows) == 600 and max(rows) <= 64
+    assert torch.equal(mlp(x.reshape(-1, 128)), reference.reshape(-1, 128))
+    assert torch.equal(mlp(x[:, :10]), reference[:, :10])
 
-    Ripple's MLP expands 5120 -> 40960, so a long-prompt prefill materialises three
-    ``tokens x 40960`` tensors at once. Chunking the row dimension is what keeps a
-    33 GiB 4-bit model inside a 48 GiB card at eval batch sizes, so it has to be
-    exactly equivalent to the unchunked forward.
-    """
-    import types
 
+@pytest.mark.parametrize("chunk_size", [0, 3, 2048])
+def test_legacy_chunk_helper_uses_explicit_config(chunk_size):
     from gptqmodel.utils.ricursive_patch import _MLP_CHUNK_PATCH_FLAG, _patch_chunked_mlp
 
-    class _MLP(torch.nn.Module):
-        def __init__(self, hidden: int = 128, intermediate: int = 512, clamp: float = 10.0):
+    class LegacyMLP(torch.nn.Module):
+        def __init__(self):
             super().__init__()
-            self.clamp_threshold = clamp
-            self.gate_proj = torch.nn.Linear(hidden, intermediate, bias=False)
-            self.up_proj = torch.nn.Linear(hidden, intermediate, bias=False)
-            self.down_proj = torch.nn.Linear(intermediate, hidden, bias=False)
+            self.projection = torch.nn.Linear(8, 8, bias=False)
 
         def forward(self, x):
-            gate = self.gate_proj(x)
-            up = self.up_proj(x)
-            if self.clamp_threshold:
-                gate = gate.clamp(min=None, max=self.clamp_threshold)
-                up = up.clamp(min=-self.clamp_threshold, max=self.clamp_threshold)
-            return self.down_proj(torch.nn.functional.silu(gate) * up)
+            return torch.nn.functional.silu(self.projection(x))
 
-    monkeypatch.setenv("RIPPLE_MLP_CHUNK", "64")
-    torch.manual_seed(0)
-    mlp = _MLP().to(torch.bfloat16)
-    holder = types.SimpleNamespace(
-        model=types.SimpleNamespace(layers=[types.SimpleNamespace(mlp=mlp)])
-    )
+    mlp = LegacyMLP()
+    holder = SimpleNamespace(config=SimpleNamespace(mlp_chunk_size=chunk_size),
+                             model=SimpleNamespace(layers=[SimpleNamespace(mlp=mlp)]))
+    inputs = torch.randn(2, 5, 8)
+    expected = torch.nn.functional.silu(inputs @ mlp.projection.weight.T)
+    assert _patch_chunked_mlp(holder) is (chunk_size > 0)
+    assert bool(getattr(type(mlp), _MLP_CHUNK_PATCH_FLAG, False)) is (chunk_size > 0)
+    assert not _patch_chunked_mlp(holder)
+    rows = []
+    hook = mlp.projection.register_forward_pre_hook(lambda module, args: rows.append(args[0].numel() // 8))
+    try:
+        torch.testing.assert_close(mlp(inputs), expected)
+    finally:
+        hook.remove()
+    assert rows == ([3, 3, 3, 1] if chunk_size == 3 else [10])
 
-    x = torch.randn(3, 200, 128, dtype=torch.bfloat16)
-    reference = mlp(x).clone()
 
-    assert _patch_chunked_mlp(holder) is True
-    assert getattr(type(mlp), _MLP_CHUNK_PATCH_FLAG, False) is True
+@pytest.mark.parametrize("chunk_size", [-1, "3", None])
+def test_legacy_chunk_helper_rejects_invalid_config(chunk_size):
+    from gptqmodel.utils.ricursive_patch import _patch_chunked_mlp
 
-    chunked = mlp(x)
-    assert chunked.dtype == x.dtype
-    assert torch.equal(chunked, reference), "chunked MLP diverged from the row-wise reference"
-
-    # 2-D inputs (already flattened by some callers) take the same path.
-    assert torch.equal(mlp(x.reshape(-1, 128)), reference.reshape(-1, 128))
-    # A prefill shorter than the chunk budget must not be split at all.
-    assert torch.equal(mlp(x[:, :10]), reference[:, :10])
-    # Installing twice must not wrap the wrapper.
-    patched = type(mlp).forward
-    assert _patch_chunked_mlp(holder) is False
-    assert type(mlp).forward is patched
+    holder = SimpleNamespace(config=SimpleNamespace(mlp_chunk_size=chunk_size))
+    with pytest.raises(ValueError, match="mlp_chunk_size"):
+        _patch_chunked_mlp(holder)
 
 
 def test_gqa_attention_is_bit_identical_to_repeat_kv(tmp_path: Path):
@@ -1231,18 +1117,13 @@ def test_patch_classes_are_disjoint_and_documented():
 def cached_generation_model(tmp_path_factory):
     from types import MethodType
 
-    from transformers import AutoModelForCausalLM
-
     from gptqmodel.utils.ricursive_patch import _prepare_inputs_for_generation
 
-    ref_dir = _reference_dir()
-    if ref_dir is None:
-        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
     model_dir = tmp_path_factory.mktemp("ripple_cached_generation")
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(11)
-        _build_tiny_fixture(ref_dir, model_dir)
-        model = AutoModelForCausalLM.from_pretrained(model_dir, trust_remote_code=True).eval()
+        _build_tiny_fixture(model_dir)
+        model = _load_tiny_model(model_dir).eval()
     # Exercise GPT-QModel's compatibility method even when the reference source
     # declares native support and the normal patch installer stands down.
     model.prepare_inputs_for_generation = MethodType(_prepare_inputs_for_generation, model)

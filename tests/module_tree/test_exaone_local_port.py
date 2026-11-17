@@ -11,6 +11,7 @@ import pytest
 import torch
 from torch import nn
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.exaone import ExaOneQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
@@ -108,7 +109,10 @@ def test_plain_awq_quantizes_packs_every_linear_and_round_trips(tmp_path, tied, 
     assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[4, 5, 6, 7, 8, 9, 10, 11]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 14
     for index in range(2):
         decoder = wrapper.model.transformer.h[index]

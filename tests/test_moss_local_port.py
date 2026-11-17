@@ -9,6 +9,7 @@ import pytest
 import torch
 from torch.nn import functional as F
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.moss import MossQModel
 from gptqmodel.models.ports.moss.configuration_moss import MossConfig
 from gptqmodel.models.ports.moss.modeling_moss import MossCache, MossForCausalLM
@@ -343,7 +344,10 @@ def test_moss_public_plain_awq_all_linears_two_roundtrips(tmp_path, rotary, offl
     assert wrapper.awq_get_modules_for_scaling(wrapper.model.transformer.h[0], {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[3, 4, 5, 6, 7, 8, 9, 10]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     linears = {name for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert linears == {f"transformer.h.{i}.{leaf}" for i in range(2)
                        for leaf in ("attn.qkv_proj", "attn.out_proj", "mlp.fc_in", "mlp.fc_out")}

@@ -27,12 +27,93 @@ The earlier batches below used runtime candidate
 | InternVL and InternLM2 model/module plans, shared model/processor/tokenizer/options, registry/AWQ, Baichuan tokenizer and original MiniCPM | 1,143 passed, five fixture skips, 20 warnings; 179.91s |
 | Ovis2.5 model/module plan | 58 passed, no skips, six warnings; 8.80s |
 | Ovis2.6 MoE/Next model/module plans | 110 passed, no skips, nine warnings; 39.46s |
+| Ovis2.6 MoE/Next saved generation policy, caller overrides and expanded owned/module-plan suite | 127 passed, no skips, 21 warnings; 48.30s |
 | Updated Ovis central plans, fusion admission, ordering and generic AWQ policy | 707 passed, 465 skipped, six warnings; 29.83s |
 | AWQ fold-safety and norm guard/teacher lifecycle | 44 passed, no skips, two warnings; 10.70s |
+| Native Qwen3 and released Marin layouts, hostile tokenizer/model maps and public plain-AWQ cycles | 102 passed, no skips, two warnings; 60.33s |
+| Loader/tokenizer/options, Ling/Bailing, config, export/dequant boundary and real nested-config module plans | 590 passed, one optional-PEFT skip, 146 warnings; 10.61s |
+| Native Qwen3 with norm-teacher lifecycle, registry/fusion admission, ordering and AWQ fold safety | 685 passed, 460 NVIDIA-only skips, four warnings; 78.62s |
 
 The five release-run skips are three unavailable Pangu checkpoints and the
 non-buildable `opt350` and `muse_glimmer` CausalLM fixtures.
 The central-plan batch additionally skips 460 NVIDIA-only Marlin cases.
+
+## Optional vision dependencies
+
+Core requirements keep timm and torchvision optional. Install
+`pip install 'gptqmodel[vision]'` for the timm-backed DeepSeek-VL2, LLaVA-Qwen2,
+legacy MiniCPM-V, OpenVLA and ZDTaichu5 components, or InternS1's training-only
+stochastic depth. The extra declares `timm>=1.0.22` and `einops>=0.8.1`;
+select a torchvision build compatible with the installed PyTorch build.
+Native text loading and lazy port imports work without these backends.
+Using a dependent component without its backend raises an `ImportError` with
+the extra installation command, preserving the original exception as its cause.
+
+| Trigger | Previous mechanism | Current mechanism |
+| --- | --- | --- |
+| Core installation | `requirements.txt:16` installed timm, which pulled torchvision into text-only installs | `pyproject.toml` declares a `vision` extra; core requirements omit timm |
+| DeepSeek-VL2 processor import | `processing_deepseek_vl_v2.py:25` imported torchvision immediately | `ImageTransform.__init__` imports it only when needed |
+| Optional vision construction | Missing backend surfaced as an unqualified import failure | Affected constructors/modules raise contextual installation guidance |
+
+```mermaid
+flowchart TD
+    A[Core GPT-QModel installation] --> B[Lazy LocalModelLoader selection]
+    B --> C{Selected component uses optional vision backend?}
+    C -->|No| D[Native or package-owned text execution]
+    C -->|Yes| E{timm or torchvision available?}
+    E -->|Yes| F[Construct the selected vision component]
+    E -->|No| G[ImportError: install gptqmodel vision extra]
+    style G fill:#fee,stroke:#c00
+```
+
+The optional-dependency regression includes a real CPU InternLM forward,
+lazy imports, each guarded vision boundary, and the training/evaluation
+stochastic-depth distinction. A separate clean editable `.[test]` installation
+was qualified with timm, torchvision and einops physically absent, including
+real InternLM plain-AWQ packing and safetensors reload.
+
+Parent qualification at `b7f8cac10` uses published Tokenicer 0.0.19,
+Transformers 5.23.0, Torch 2.15.0 CPU and Python 3.14.6t with `PYTHON_GIL=0`.
+These overlapping runs are not additive:
+
+| Parent validation | Result |
+| --- | --- |
+| Optional dependency boundaries and affected DeepSeek-VL2, OpenVLA, ZDTaichu5, MiniCPM-V, InternS1 and LLaVA-Qwen2 ports | 457 passed, no skips, 96 warnings; 140.73s |
+| Shared model/path/processor/tokenizer/security/config, registered plans, fusion admission and AWQ fold safety | 707 passed, 461 skipped, 17 warnings; 11.13s |
+| DeepSeek-V2 native-first eager-expert fixtures, native Unlimited-OCR, migrated OCR/ZDTaichu support tests and Ricursive | 588 passed, no skips, two warnings; 80.83s |
+| Media failure/retry, DeepSeek-VL2 and Puzzle ownership after maintenance-script relocation | 186 passed, no skips, 72 warnings; 16.15s |
+
+Both built wheel and sdist were checked byte-for-byte against all 883 port
+runtime/provenance/license assets, including 149 compressed JSON fixtures.
+Metadata retains Python `>=3.11`, Transformers `>=5.23.0`, Tokenicer `>=0.0.19`,
+TikToken `>=0.12.0` and SentencePiece `>=0.2.1`; timm and einops are restricted
+to the vision extra. The moved Puzzle network inventory reader is excluded
+from both runtime artifacts. Licensing-held MiniCPM-o and Pangu implementations
+are also excluded.
+
+XVERSE's real legacy Metaspace tokenizer remains incompatible with released
+Tokenicer 0.0.19. Its candidate-only qualification uses unreleased commit
+`63abe8cfba72bb02d62b9df1d069d53d915883c5` in
+[Tokenicer PR #67](https://github.com/ModelCloud/Tokenicer/pull/67).
+This migration is not fully compatible with the latest released dependencies
+until that upstream correction is released and consumed. No downstream
+tokenizer normalization shim is included.
+
+An independent audit of the integrated `0a9a08ea3` port tree plus the optional
+vision patch (`f0245b360`) ran all 145 local-port/module-plan files in 19 bounded
+processes: **7,901 passed, 23 failed, 13 skipped**, with no collection errors or
+incomplete batches. Every failure was an XVERSE legacy Metaspace case on
+published Tokenicer 0.0.19: 12 hostile public loads, two warm-corruption retries,
+two tokenizer reload cases, four public plain-AWQ cases and three source-chat
+cases. The XVERSE-Ent tokenizer cases passed. The parent runs above separately
+verify the subsequent DeepSeek fixture and media-hygiene changes. Neither this
+audit nor the green CI result establishes complete released-Tokenicer support.
+All 13 dedicated-audit skips were uncached Kimi tokenizer assets: six native
+contraction checks, six public native-load checks and one pinned K3 asset check.
+The transferable audit archive contains all 19 exact commands, environment/source
+metadata, failure and skip node IDs, raw logs and JUnit results. Its SHA-256 is
+`b854ba62838c03366ede7377b6a728869cec0cfd1ddf4a985c7aa44db851c37b`;
+all 75 member checksums were independently verified by the parent.
 
 | Integrated batch on the final Tokenicer runtime candidate | Result |
 | --- | --- |
@@ -51,9 +132,20 @@ quality coverage on this checkout.
 
 | Definition / model type | Implementation and provenance | CPU validation | AWQ policy | Limits |
 | --- | --- | --- | --- | --- |
+| `Raon1MiniQModel` / `raon1_mini` | [Owned RDA/MLA, mHC and SiTU-MoE](../gptqmodel/models/ports/raon1_mini/README.md) | 19,434 released key/shape/dtype entries; independent recurrent/MLA equations and all 65,536 E4M3/E8M0 byte pairs; cache, hostile metadata and repeated reloads | Eight public dense-source plain-AWQ cases and two exact reloads; source MXFP8 re-quantization rejects before mutation | Persistent byte weights/scales only; no trained quality, GPU, native MXFP8 GEMM, extended context, fusion or performance qualification |
+| `Spark2_5QModel` / `spark2_5` | [Owned packed-QKV/head-gated hybrid decoder](../gptqmodel/models/ports/spark2_5/README.md) | All 290 released shapes; independent partial-RoPE/FP32-residual equations, three dtypes, cache/generation, real BPE and hostile metadata | Six public plain-AWQ cases, all ten physical decoder linears and two exact reloads | No trained quality, GPU, model disk placement, extended context, fusion or concurrent-execution qualification |
+| `RwgQModel`, `FalconQModel` | [Native Falcon, historical RW config adapter and local ALiBi repair](../gptqmodel/models/ports/rw/README.md) | 680 real 7B/40B keys and 196 header shapes; independent legacy layouts and eager/SDPA ALiBi oracle; real tokenizers, cache, hostile metadata | Twelve public plain-AWQ cases, all eight decoder linears and two exact reloads; dual norms explicit in both registry plans | RW1B source/meta only; 180B config inaccessible. No trained quality, GPU/FlashAttention, extended context or fusion qualification |
+| `TeleChat2QModel` / `telechat` | [Owned TeleChat/TeleChat2 decoder and source tokenizer dialects](../gptqmodel/models/ports/telechat2/README.md) | Four causal release inventories/2,152 keys, 1,606 actual header shapes, independent interleaved-KV/rounded-RoPE equations, source IDs, cache/generation and hostile metadata | Six public plain-AWQ cases, all twelve decoder linears and two exact reloads; headless legacy causal loading rejects | Apache code notices do not grant model-artifact commercial rights; later model cards reference community terms. Original requested 7B endpoint inaccessible; no trained/GPU/fusion qualification |
+| `SolarOpen2QModel` / `solar_open2` | [Owned hybrid GQA/KDA decoder and Upstage provenance](../gptqmodel/models/ports/solar_open2/README.md) | All 47,019 released key/shapes; independent vector-decay/routing/RoPE equations, dtype/cache/generation, hostile metadata and repair/retry | Six public plain-AWQ cases, all 39/40/27 applicable linears, dense recurrent controls, exact FP32 router bias and two reloads; no scale groups | Apache source and separate Upstage Solar artifact license with derivative-model branding conditions. No trained payload, GPU, FLA, fusion, million-token context or concurrent execution qualification |
 | `Ovis2_5QModel` / `ovis2_5` | [Owned Qwen3/SigLIP2 NaViT soft-visual-vocabulary binding and Apache notices](../gptqmodel/models/ports/ovis2_5/README.md) | Both released header inventories, independent vision/merge equations, saved generation policy, hostile metadata, native decoder cache/generation and two safetensors cycles | Six public image-calibrated plain-AWQ cases, all 14 decoder linears and dense vision exclusions; no scale groups | Native Ovis2 remains separate; no trained-payload quality, GPU, fusion, concurrency or foreign-cache qualification |
 | `Ovis2_6_MoeQModel`, `Ovis2_6_NextQModel` | [Owned NaViT/visual-vocabulary wrapper and native Qwen3 MoE/Next decoders](../gptqmodel/models/ports/ovis2_6_moe/README.md) | Independent checkpoint inventories and media equations, hostile metadata, tokenizer/processor, dtype/cache/generation and repeated safetensors reloads | Public image-calibrated plain AWQ, native expert ownership and dense exclusions; linear-attention containers and routers excluded | No trained-payload quality, GPU, optimized FLA, fusion, concurrency or foreign-cache qualification |
 | `OvisQModel` / `ovis` | [Package-owned Ovis 1.0/1.5/1.6 visual vocabulary and pinned Apache notices](../gptqmodel/models/ports/ovis/README.md) | Eight release indexes and four full header inventories, independent vision/media merge equations, native Llama/Qwen2/Gemma2 decoders, released generation policy, hostile metadata, cache and safetensors reload | Eight public image-calibrated plain-AWQ cases, all 14 decoder linears, dense exclusions and two exact reloads; no scale groups | Native Ovis2 is separate; no trained weights, GPU, fusion, concurrent execution, foreign cache or AWQ fold/search qualification |
+| `Qwen3QModel` / `qwen3`, released Marin-32B | [Exact native Qwen3 and pinned Qwen/Marin assets and licenses](../gptqmodel/models/ports/qwen3/README.md) | All 1,018 released key/shapes, exact native tokenizer IDs, hostile model/tokenizer/custom-generation maps, independent Q/K norm/RoPE equations, cache/generation and repeated safetensors cycles | Twelve public plain-AWQ cases, all 14 decoder linears and dense exclusions, offload false/true and two exact reloads; existing Qwen3 fusion contract retained | Raw `marin` fails explicitly; no trained weights, GPU, new fusion, foreign cache, parallel or full-context qualification |
+| `QwenQModel` / original `qwen` | [Owned fused-QKV/TikToken port, pinned sources and separate code/release licenses](../gptqmodel/models/ports/qwen/README.md) | Five full checkpoint header inventories, 1,679 exact key/shapes; independent rotary/attention equations, cache-owned NTK/logn, actual token IDs/ChatML, hostile metadata and repair/retry | Four public plain-AWQ variants, all ten decoder linears and dense exclusions, offload false/true and two exact safetensors cycles | Code Apache; separate Tongyi release and 1.8B research terms retained. No trained weights, GPU, fusion, foreign caches or parallel execution qualification |
+| `Phi4MMGPTQ` / legacy `phi4mm` | [Owned LoRA/vision/audio binding, pinned MIT source and assets](../gptqmodel/models/ports/phi4/README.md) | All 2,047 released key/shapes; independent decoder/vision/Conformer/media equations, real BPE/PIL/audio, grouped beam generation, cache and hostile metadata | Six public image/audio/mixed plain-AWQ cases, all eight decoder base linears, dense LoRAs/media, independent first-layer capture and two exact reloads | Native `phi4_multimodal` remains distinct; no trained weights, GPU, fusion, foreign caches, whole-model offload or parallel execution qualification |
+| `Qwen2VLQModel` / `qwen2_vl`, `qwen2_vl_text` | [Exact native composite/headless selection and Apache provenance](../gptqmodel/models/ports/qwen2_vl/README.md) | All 729 composite and 26 published headless key/shapes; native three-axis rotary, real tokenizer/processor, media/cache/generation and hostile metadata | Six public image-calibrated plain-AWQ cases with two exact packed/dense reloads | Headless feature extraction rejects generation; no trained weights, GPU, new fusion, foreign-cache or fold/search qualification |
+| `Qwen2_5_VLQModel` / `qwen2_5_vl`, `qwen2_5_vl_text` | [Exact native composite/headless selection, Apache source and retained Qwen3B research license](../gptqmodel/models/ports/qwen2_5_vl/README.md) | All 824 composite and 26 independently published headless key/shapes; actual root schema, native hidden states, public hostile metadata and two dense cycles | Six aligned headless public plain-AWQ cases with two exact packed/dense reloads | Headless generation rejected; published width 37 cannot satisfy TorchAWQ packing. No trained weights, GPU or new fusion qualification |
+| `QwenDriveQModel` / `qwen_drive` | [Owned root VLM wrapper over native Qwen3.5, Apache source and pinned assets](../gptqmodel/models/ports/qwen_drive/README.md) | All 723 released key/shapes plus native tied-head alias; hybrid/full attention, media/cache/generation, real BPE and hostile metadata | Four public image-calibrated plain-AWQ cases, hybrid/full × offload, exact first-decoder capture and two packed/dense reloads | VLM only; planner, perception and official scene processor unqualified. No trained weights, GPU, fold/search or fusion qualification; two static protocol diagnostics remain |
 | `KlearQModel` / `klear` | [Package-owned dense/MoE port, pinned Base/Instruct sources and Apache notices](../gptqmodel/models/ports/klear/README.md) | Full 25,059-key meta inventory, independent attention/routing equations, requested-dtype loading, cache/generation, hostile metadata and safetensors reload | Real public plain AWQ dense/MoE/mixed packing and two save/reload cycles; no scale groups | No trained-weight, GPU, FlashAttention, fusion, parallel or compiler qualification |
 | `KimiK3QModel`, `KimiLinearQModel` / AttnRes variants | [Package-owned MLA/KDA, vision and K3 TikToken/XTML; exact native delegation for ordinary KimiLinear](../gptqmodel/models/ports/kimi_k3/README.md) | Independent float64 MLA/KDA and MoE oracles, CPU/meta owners, exact tokenizer IDs, image-conditioned logits, cache/generation, failure/retry and public loads | AttnRes rejects ordinary GPTQ/AWQ before mutation; existing bounded runner retained | No trained-weight, GPU, fused FLA, FlashAttention, MTP, video, parallel or compiler qualification |
 | `DeepSeekV2QModel` / `deepseek_v2` | [Native-derived compatibility and pinned legacy source](../gptqmodel/models/ports/deepseek_v2/README.md) | Lite/full MLA, dense/periodic/shared MoE, top-k normalization, native expert conversion, cache/generation and safetensors round trips, malicious metadata matrix | Actual CPU plain quantization and packing; no scale groups | No GPU/trained-checkpoint quality, FlashAttention, distributed experts or full packed-checkpoint round trip; expert parallelism rejected |
@@ -111,6 +203,56 @@ quality coverage on this checkout.
 
 Only integrated implementations are listed here. This table does not qualify
 other definitions, architectures, kernels, or trained checkpoints by analogy.
+
+### Ripple, Xing4, XVERSE and native OCR selection
+
+These definitions select the actual owned decoder or exact native task before
+checkpoint Python is considered. Their package READMEs retain pinned source,
+license, numerical oracles, negative probes and exact reproduction commands.
+
+| Definition | Selection and evidence | Quantization and compatibility limits |
+| --- | --- | --- |
+| `RicursiveQModel` / `ricursive` | [Owned Ripple PeriNorm/value-residual decoder](../gptqmodel/models/ports/ricursive/README.md); both 1,203-key release schemas, serialized BPE, hybrid caches and explicit `config.mlp_chunk_size` (zero disables) | Six public plain-AWQ cases and two exact reloads; empty scale groups, no runtime chunking environment switch. No trained 65B/NVFP4 payload, full 2M context, GPU, general concurrent execution or fusion qualification |
+| `Xing4_0QModel` / `xing4_0` | [Owned MLA/hyperconnection dense and routed/shared MoE](../gptqmodel/models/ports/xing4_0/README.md); actual SentencePiece dialect and released checkpoint inventory, including auxiliary MTP | Public plain AWQ preserves excluded MTP state; no trained-payload, GPU, full-context or fusion qualification |
+| `XverseQModel` / `xverse` | [Owned dense/256K/routed/shared MoE](../gptqmodel/models/ports/xverse/README.md); thirteen pinned inventories and independent decoder equations | Six public plain-AWQ cases are qualified **only with unreleased Tokenicer candidate** `63abe8cfba72bb02d62b9df1d069d53d915883c5`. Released 0.0.19 cannot parse the legacy Metaspace tokenizer; migration remains incomplete for those assets. No trained-payload, full 256K context, GPU or fusion qualification |
+| `UnlimitedOCRQModel` / `unlimited_ocr`, `unlimited-ocr` | [Exact native UnlimitedOcrForConditionalGeneration](../gptqmodel/models/ports/unlimited_ocr/README.md), native config/processor/BPE; 2,710 source tensors accounted, with the unused source vision patch preserved in exports | Six public image-calibrated plain-AWQ cases and two exact reloads on released Tokenicer 0.0.19. Native eager GQA is explicitly rejected with SDPA retry. No OCR-quality, trained-payload, GPU or fusion qualification |
+| `ZDTaichu5QModel` / `zdtaichu5_0` | [Owned C-RADIO/media wrapper and native Qwen3.5 decoder](../gptqmodel/models/ports/zdtaichu5/README.md); all 820 released key/shapes and source video-before-image order | Six public image-calibrated plain-AWQ cases and two exact reloads on released Tokenicer 0.0.19. NVIDIA Open Model License and notices retained; distinct from LocateAnything's noncommercial license. No trained-payload, GPU, encoded-container decoding or fusion qualification |
+
+| Mechanism | Before | Shipped selection |
+| --- | --- | --- |
+| Ripple and Xing4 modeling | Checkpoint Python and obsolete Transformer APIs | Definition-owned config/model/tokenizer and explicit cache policies |
+| Unlimited-OCR task | Headless `AutoModel` and legacy `model.layers` assumptions | Exact native generative task and `model.language_model.layers` |
+| ZDTaichu5 vision and media | Checkpoint C-RADIO/wrapper code | Owned media/C-RADIO with exact native language decoder |
+| XVERSE legacy tokenizer | Modern Rust parser rejects legacy boolean-only Metaspace | Still blocked with published Tokenicer 0.0.19; generic upstream fix remains a release prerequisite |
+
+```mermaid
+flowchart TD
+    A["load_model_config selects LocalModelLoader"] --> B{"Declared model type?"}
+    B -->|ricursive / xing4_0| C["Owned config, decoder and tokenizer"]
+    B -->|unlimited_ocr / unlimited-ocr| D["UnlimitedOcrConfigLoader + native conditional generation"]
+    B -->|zdtaichu5_0| E["Owned C-RADIO/media + native Qwen3.5"]
+    B -->|xverse| F["Owned XVERSE decoder + selected serialized tokenizer"]
+    F --> G{"Selected JSON readable by released Tokenicer?"}
+    G -->|yes| H["One outer Tokenicer normalization"]
+    G -->|legacy Metaspace| X["Fail closed; upstream release required"]
+    C --> H
+    D --> H
+    E --> H
+    H --> I["Declared ModulePlan and public CalibrationConfig"]
+    I --> J["Plain AWQ; preserve dense exclusions and repeated safetensors saves"]
+    B -->|unknown or invalid geometry| Y["Reject before executing checkpoint Python"]
+    classDef failure fill:#ffcdd2,stroke:#b71c1c
+    class X,Y failure
+```
+
+This flow does not change the dependency to an unpublished candidate. The exact
+candidate is reviewed in [Tokenicer PR #67](https://github.com/ModelCloud/Tokenicer/pull/67).
+The parent independently ran its complete suite: 219 passed, 28 skipped.
+The original three-bundle archive was independently SHA-checked and replayed
+under tokenizers 0.15.2 / Transformers 4.38.2 (30 raw/HF source comparisons)
+and the candidate (45 comparisons with repeated saves); all nine source assets
+remained byte-identical. The parent XVERSE-plus-shared-tokenizer run passed
+180 tests with two warnings on the exact candidate, not released 0.0.19.
 
 ### Recurrent, Nemotron and diffusion implementation selection
 
@@ -1146,3 +1288,438 @@ OMP_NUM_THREADS=1 PYTHON_GIL=0 python -s -m pytest -q \
   tests/module_tree/test_fusable_models.py tests/test_internlm_local_port.py \
   tests/module_tree/test_internlm_local_port.py -x --tb=short --disable-warnings -rs
 ```
+
+## Qwen3 and Marin native selection
+
+`Qwen3Loader.__get__` binds only `Qwen3QModel`; derived Qwen3.5 definitions
+retain their own AutoModel selection. `NativeQwen3Config.from_pretrained`
+reads configuration data and returns exact native `Qwen3Config`, paired with
+native `Qwen3ForCausalLM` and `TokenizersBackend`. Published Marin-32B declares
+`model_type=qwen3`; raw `marin` has no verified checkpoint schema and raises
+before permission handling. The [port reference](../gptqmodel/models/ports/qwen3/README.md)
+preserves both release pins, source hashes, tokenizer fixtures and licenses.
+
+```mermaid
+flowchart TD
+    A["Qwen3QModel.loader: Qwen3Loader.__get__"] --> B["LocalModelLoader: NativeQwen3Config.from_pretrained"]
+    B --> C{"Selected model_type is qwen3?"}
+    C -- yes --> D["Exact native Qwen3Config / Qwen3ForCausalLM / TokenizersBackend"]
+    C -- no --> E["ValueError: raw marin has no verified layout"]
+    D --> F["Public forward, cache, generation and safetensors lifecycle"]
+    D --> G["Explicit plain AWQ; no inferred fold/search safety"]
+    style E fill:#ffcdd2,stroke:#b71c1c
+```
+
+```mermaid
+flowchart LR
+    A["Previous inherited Llama loader"] --> B["Generic AutoModel / tokenizer metadata selection"]
+    C["Current definition-owned Qwen3Loader"] --> D["Exact native classes; checkpoint auto_map ignored"]
+    C --> E["Raw marin: explicit failure"]
+    F["Derived Qwen3.5 definition"] --> G["AutoModel selection retained"]
+    style E fill:#ffcdd2,stroke:#b71c1c
+```
+
+| Mechanism | Before | Current source |
+| --- | --- | --- |
+| Definition binding | Inherited Llama AutoModel selection | `gptqmodel/models/definitions/qwen3.py:20`; `ports/qwen3/__init__.py:13-21` |
+| Marin schema | Registry alias alone did not establish checkpoint layout | `ports/qwen3/native.py:18-26`: exact `qwen3` required; native config returned |
+| AWQ policy | Inherited scaling relationships | `definitions/qwen3.py:22-30`: exact Qwen3 uses plain quantization; derived policies preserved |
+
+Parent qualification on released Tokenicer 0.0.19 passes **102 tests, zero
+skips**, with two warnings in 60.33 seconds. It includes all 1,018 released
+key/shapes, actual pinned token IDs/chat, hostile checkpoint maps, independent
+float64 equations, dtype/cache/generation/failure-retry, twelve public plain-AWQ
+cases and two exact packed/dense reloads. No new fusion qualification is claimed;
+Qwen3's existing fusion contract remains unchanged. GPU, trained weights,
+full-context, parallel execution and foreign caches remain unqualified.
+
+```bash
+OMP_NUM_THREADS=1 PYTHON_GIL=0 python -m pytest -q \
+  tests/test_qwen3_local_port.py tests/module_tree/test_qwen3_local_port.py \
+  --tb=short -ra -o addopts= -o log_cli=false
+```
+
+## Original Qwen and legacy Phi-4 multimodal selection
+
+Original Qwen uses an owned fused-QKV decoder and TikToken vocabulary reader.
+The native Qwen2/Qwen3 implementations do not reproduce its NTK/logn/cache
+contract. Legacy `phi4mm` keeps its exact flat decoder, modality LoRAs and
+image/audio owners while reusing matching native Phi-4 multimodal components.
+It remains distinct from native `phi4_multimodal`.
+
+```mermaid
+flowchart TD
+    A["GPTQModel.load: model_type=qwen"] --> B["QwenQModel.loader: LocalModelLoader"]
+    B --> C["QWenConfig: package-owned geometry"]
+    C --> D{"Supported original-Qwen layout?"}
+    D -->|yes| E["QWenLMHeadModel: fused QKV, RMSNorm, gated MLP"]
+    D -->|no| X["Explicit error; repair config and retry"]
+    B --> F["QWenTokenizer: local TikToken BPE data"]
+    F --> G{"Required vocabulary valid?"}
+    G -->|yes| H["Tokenicer: one normal normalization pass"]
+    G -->|no| Y["Contextual vocabulary error; repair asset and retry"]
+    E --> I["Safetensors state under transformer.h / wte / ln_f / lm_head"]
+    B -.-> J["auto_map, trust_remote_code and code_revision do not select checkpoint code"]
+    classDef failure fill:#fee,stroke:#b22
+    class X,Y failure
+```
+
+```mermaid
+flowchart TD
+    A["Phi4MMProcessor: text / PIL image / waveform"] --> B["Expanded token ids + media tensors + input_mode"]
+    B --> C["Phi4MMGPTQ.prepare_dataset preserves media batches"]
+    C --> D{Batching or concatenation breaks alignment?}
+    D -->|yes| E["ValueError"]
+    D -->|no| F["FeatureEmbedding: image/audio features replace placeholders"]
+    F --> G["DecoderLayer / ModalityLinear"]
+    G --> H{input_mode}
+    H -->|0| I["base_layer only"]
+    H -->|2| J["base_layer + speech LoRA"]
+    H -->|1 or 3| K["base_layer + vision LoRA"]
+    I --> L["Native attention / DynamicCache / generation"]
+    J --> L
+    K --> L
+    C --> M["AWQ policy: zero scaling groups"]
+    M --> N["Plain quantization: four base_layer projections per layer"]
+    N --> O["Pack -> infer -> safetensors -> exact reload"]
+    B --> P["Group media by per-row budgets before beam expansion"]
+    P --> F
+    classDef error fill:#fdd,stroke:#a00
+    class E error
+```
+
+| Mechanism | Before (parent `022031ba2`) | Current source |
+| --- | --- | --- |
+| Original Qwen selection | `definitions/qwen.py:8`: inherited generic loader | `definitions/qwen.py:11-15`: package model/config/tokenizer; checkpoint Python cannot override them |
+| Rotary/cache state | Checkpoint implementation and mutable rotary alpha | `ports/qwen/modeling_qwen.py:22-51,213-305`: `QWenCache.ntk_alpha` stays with its sequence and cache operations |
+| Phi-4 selection and adapters | `definitions/phi4.py:10-14,43-57`: generic loader, obsolete requirements and quantize-only mutable monkeypatch | Owned loader and call-local `ModalityLinear`; defaults work before and after quantization |
+| Phi-4 decoder ownership | `definitions/phi4.py:17-41`: base projections alone | Base projections plus every excluded vision/speech LoRA A/B owner in the 14-block registry plan |
+| Phi-4 media capture | Generic text preparation loses media | `definitions/phi4.py:61-81`: preserve processor batches and reject misaligned rebatching |
+| Phi-4 beam expansion | Individual media repetition mixes ragged rows | `ports/phi4/modeling_phi4.py:443`: group media using per-row placeholder budgets |
+
+The parent combined run passes **1,170 tests, 465 skipped, six warnings in
+106.42 seconds** on Python 3.14.6t, GIL disabled, Transformers 5.23.0, Torch
+2.15.0 CPU and published Tokenicer 0.0.19. It includes all 90 original-Qwen and
+90 Phi-4 owned tests plus actual central registry/fusion/shared-input plans.
+Skips: 460 NVIDIA Marlin hardware checks, three unavailable Pangu fixtures,
+and non-buildable OPT350/Muse CausalLM cases. Skips do not qualify those paths.
+The previously reported generic fixed-expert and nested-config failures are
+repaired and pass in this parent run.
+
+Qwen covers all 1,679 released key/shapes from five full inventories and four
+public plain-AWQ cases. Phi-4 covers all 2,047 released key/shapes and six public
+image/audio/mixed plain-AWQ cases. Both use `fallback=None`, offload false/true,
+quantize every declared decoder linear, preserve all excluded dense tensors,
+and perform two exact packed/dense safetensors cycles. Independent first-layer
+media capture and grouped-beam oracles detect the original Phi-4 failures.
+Neither port claims AWQ fold/search or fusion qualification.
+
+```bash
+OMP_NUM_THREADS=1 PYTHON_GIL=0 python -m pytest -q \
+  tests/test_qwen_local_port.py tests/module_tree/test_qwen_local_port.py \
+  tests/test_phi4_local_port.py tests/module_tree/test_phi4_local_port.py \
+  tests/module_tree/test_registered_module_plans.py \
+  tests/module_tree/test_fusable_models.py \
+  tests/module_tree/test_definition_subset_ordering.py \
+  tests/module_tree/test_explicit_module_plan.py \
+  tests/module_tree/test_shared_input.py tests/test_awq_scaling_groups.py \
+  tests/module_tree/test_awq_fold_safety_4175.py \
+  --tb=short -ra -o addopts= -o log_cli=false
+```
+
+Source pins, byte-preserved license texts, tokenizer/checkpoint inventories,
+strong red/green results and further reproduction commands are in each port's
+README. Original Qwen's separate Tongyi release terms and 1.8B research
+restrictions remain packaged alongside its Apache code attribution; GPT-QModel
+does not relicense those releases. Phi-4 preserves MIT notices. Neither claims
+trained-payload quality, GPU/FlashAttention, multi-GPU, threaded execution,
+compile/training, foreign caches or extended-context qualification. Phi-4 audio
+qualification covers 8/16 kHz; optional resampling at other rates is unverified.
+
+### Qwen VL task and Qwen-Drive wrapper selection
+
+[Qwen2-VL](../gptqmodel/models/ports/qwen2_vl/README.md) and
+[Qwen2.5-VL](../gptqmodel/models/ports/qwen2_5_vl/README.md) select exact native
+Transformers 5 classes for each task. Composite artifacts retain their vision
+model, processor and trained-head schema. Standalone `*_vl_text` artifacts use
+the native headless text model: their keys start at `embed_tokens`, `layers`
+and `norm`. Generation raises `NotImplementedError`; no random head is added.
+The independent published tiny checkpoints establish this schema, not trained
+quality. The Qwen2.5-VL publication's intermediate width 37 remains intact and
+fails the existing TorchAWQ packing constraint; aligned synthetic widths qualify
+the headless quantization lifecycle separately.
+
+```mermaid
+flowchart TD
+    A["load_model_config: LocalModelLoader reads selected config"] --> B{"Exact model_type?"}
+    B -->|qwen2_vl or qwen2_5_vl| C["Qwen2VLModelLoader or Qwen2_5_VLModelLoader: native conditional generation"]
+    B -->|qwen2_vl_text or qwen2_5_vl_text| D["Same selector: native Qwen2VLTextModel or Qwen2_5_VLTextModel"]
+    B -->|Unknown| X["ValueError: no alternative checkpoint Python dispatch"]
+    C --> E["Native processor and decoder; public media generation"]
+    D --> F["Root layers module plan; feature extraction and safetensors reload"]
+    F --> G{"Definition.generate requested?"}
+    G -->|Yes| Y["NotImplementedError: checkpoint has no trained LM head"]
+    G -->|No| H["Native last_hidden_state; plain AWQ for aligned widths"]
+    classDef fail fill:#fee,stroke:#b00
+    class X,Y fail
+```
+
+[Qwen-Drive](../gptqmodel/models/ports/qwen_drive/README.md) owns its released
+root VLM wrapper and fixed nested Qwen3.5 config. `QwenDriveForConditionalGeneration`
+instantiates only native `Qwen3_5ForConditionalGeneration` under `vlm`.
+Definition ownership precedes optional official-package registration. Checkpoint
+`auto_map`, trust flags and the security bypass cannot replace these classes.
+The root's generation policy reaches native delegation. Native tensor media
+calibration keeps image/video data through first-layer capture.
+
+```mermaid
+flowchart TD
+    A["GPTQModel.load: root or selected subfolder"] --> B["load_model_config: LocalModelLoader for qwen_drive"]
+    B --> C{"QwenDriveConfig: exact Qwen3_5Config and nested types?"}
+    C -->|No| X["ValueError; repair metadata and retry"]
+    C -->|Yes| D["QwenDriveForConditionalGeneration: vlm = native Qwen3_5ForConditionalGeneration"]
+    D --> E["VLM-only forward/generate; root generation_config forwarded"]
+    D --> F["QwenDriveQModel.prepare_dataset preserves native media tensors"]
+    F --> G{"batch_size=1 and native tensor rows?"}
+    G -->|No| Y["ValueError before calibration"]
+    G -->|Yes| H["StageInputsCapture: exact image-expanded decoder inputs"]
+    H --> I["Plain AWQ; recurrent controls excluded by linear_attn:!"]
+    I --> J["Pack, inference, safetensors save/load/re-save/reload"]
+    classDef fail fill:#fee,stroke:#b00
+    class X,Y fail
+```
+
+| Mechanism before the port | Shipped selection and consumer |
+| --- | --- |
+| `22bea1201:definitions/qwen2_vl.py:9-12` and `definitions/qwen2_5_vl.py:10-13`: inherited image-text AutoModel selection also served text aliases | Exact native composite/text model selectors; root-only text tree and explicit generation rejection |
+| `22bea1201:definitions/qwen_drive.py:21-30`: optional official-package registration and AutoModel | Definition-owned `QwenDriveConfig` and `QwenDriveForConditionalGeneration`; no official stack import |
+| `22bea1201:definitions/qwen_drive.py:72-85`: construct then delete an unreleased planner and replace the wrapper forward | Construct only the released `vlm.*` schema; forward through the owned wrapper |
+| Generic repeated processor discovery or text-only media preparation | Qwen2-VL reuses its selected normalized processor; Qwen-Drive validates and retains native media batches |
+
+The Qwen-Drive registry explicitly excludes recurrent `A_log` and `dt_bias`
+through `linear_attn:!`, in addition to its norm, convolution and gate exclusions.
+The Qwen VL headless fusion reasons state the unsupported generation contract.
+Composite fusion admission remains its existing independently declared policy.
+No new fusion executor or AWQ folding/search relationship is admitted here.
+
+Public tests cover root and selected-subfolder loading, hostile model/config/
+tokenizer/custom-generation maps, trust false/true and bypass absent/0/1,
+repair/retry, cache and safetensors cycles. Qwen2-VL's parent integration run
+passed 897 tests with 463 hardware/fixture skips in 27.99 seconds; its 92 owned
+cases are included. The corresponding commands, independent source equations,
+token IDs, checkpoint/license hashes and isolated red/green probes are retained
+in each linked port README. All measured execution is CPU on free-threaded
+Python 3.14.6 with GIL disabled, Transformers 5.23.0, Torch 2.15.0 and published
+Tokenicer 0.0.19. This does not qualify trained quality, GPU/FlashAttention,
+multi-GPU, threaded PyTorch, compilation, training, extended context or foreign
+caches. Qwen-Drive planner/perception/actions and its official scene processor
+remain outside the VLM task. Apache source notices and the separate Qwen3B
+research license are retained in package data.
+
+Before main's `CalibrationConfig` API integration, the combined parent run at
+`0a7b644cc` passed **1,082 tests, 463 skips and 17 warnings in 57.75 seconds**.
+This included all three ports, public root/subfolder registration-precedence
+cases and the shared loader/processor/tokenizer/security/AWQ/registry/fusion
+suites. Skips were 460 NVIDIA Marlin cases and three absent DeciLM/EXAONE/
+Nanbeige fixtures. The migrated Qwen-Drive support suite separately passed all
+13 cases in 3.89 seconds; five old assertions had failed because they required
+optional registration, AutoModel and deleting an instantiated planner.
+
+## Solar-Open2 recurrent implementation selection
+
+[Solar-Open2](../gptqmodel/models/ports/solar_open2/README.md) uses the inspected
+Upstage Transformers fork at `ef5c37485091057070b36dd0620798f74988eb01`.
+Transformers 5.23.0 has no exact `solar_open2` mapping. The definition binds
+`SolarOpen2Config` and `SolarOpen2ForCausalLM` directly, retaining released
+per-expert keys, full GQA and vector-decay KDA attention. `SolarOpen2DynamicCache`
+owns convolution/recurrent state and sequence accounting for each generation.
+
+```mermaid
+flowchart TD
+    A["GPTQModel.load: solar_open2 metadata"] --> B["SolarOpen2QModel.loader: LocalModelLoader"]
+    B --> C["SolarOpen2Config and SolarOpen2ForCausalLM"]
+    C --> D{"Configured layer type?"}
+    D -->|full_attention| E["SolarOpen2Attention: native Torch GQA"]
+    D -->|linear_attention| F["SolarOpen2LinearAttention: causal convolution and vector-decay KDA"]
+    E --> G["SolarOpen2DynamicCache: request-owned state"]
+    F --> G
+    G --> H{"Foreign cache or recurrent rollback requested?"}
+    H -->|Yes| X["ValueError or NotImplementedError before unsupported execution"]
+    H -->|No| I["Forward or generation with owned cache"]
+    C --> J["CalibrationConfig to public plain AWQ; scaling groups empty"]
+    J --> K["Pack decoder linears; keep recurrent controls and router bias dense"]
+    K --> L["Safetensors save/load/re-save/reload; FP32 router bias exact"]
+    classDef fail fill:#fee,stroke:#b00
+    class X fail
+```
+
+| Mechanism before the port | Shipped mechanism and evidence |
+| --- | --- |
+| `bf4003d:definitions/solar_open2.py:30-42`: inherited AutoModel loader with no exact installed mapping | `definitions/solar_open2.py:35-42`: explicit package classes, plain AWQ and unqualified fusion |
+| `bf4003d:definitions/solar_open2.py:57-71`: projection/norm plan omitted recurrent controls and correction bias | Complete KDA decay/gate/convolution and `mlp.gate.e_score_correction_bias:!` exclusions in the definition and central registry |
+| No package-owned hybrid cache implementation | `ports/solar_open2/modeling_solar_open2.py:758-859`: per-request cache, independent sequence count, reset and explicit foreign-cache/rollback rejection |
+
+The source-derived gate applies decay independently along each key dimension;
+the port's independent float64 oracle detects scalar substitution. Public AWQ
+tests exercise both calibration offload settings, every packed and dense tensor,
+and nonrepresentable FP32 correction biases through two exact reload cycles.
+The port README records source/header/license hashes, intended mutation failures,
+exact commands and CPU-only qualification. Source code retains Apache notices;
+released artifact metadata retains the separate
+[Upstage Solar License](../gptqmodel/models/ports/solar_open2/SOLAR_LICENSE),
+including the derivative-model naming and attribution conditions. This is not
+trained 250B quality, GPU/FLA, million-token-context or fusion qualification.
+
+## Raon, Spark2.5, RW/Falcon and TeleChat selection
+
+These definitions bind their own loader before checkpoint Python selection.
+Raon, Spark2.5 and TeleChat have no exact installed Transformers 5.23 model
+mapping. RW/Falcon reuses native Falcon projection modules and models, with
+historical config translation and a family-local correction for the measured
+duplicate eager ALiBi bias. Native RoPE and SDPA dispatch retain their existing
+implementations; native FlashAttention is not qualified by CPU checks.
+
+```mermaid
+flowchart TD
+    A["GPTQModel.load: selected checkpoint metadata"] --> B{"Definition-owned loader?"}
+    B -->|Raon1MiniQModel| C["Raon1MiniConfig and Raon1MiniForCausalLM"]
+    B -->|Spark2_5QModel| D["Spark2_5Config and Spark2_5ForCausalLM"]
+    B -->|TeleChat2QModel| E["Telechat2Config and Telechat2ForCausalLM"]
+    B -->|RwgQModel or FalconQModel| F{"RWModelLoader: config.alibi?"}
+    F -->|false| G["Native FalconForCausalLM"]
+    F -->|true| H["RWAlibiForCausalLM: local eager bias repair"]
+    C --> I["Owned or exact native tokenizer through Tokenicer"]
+    D --> I
+    G --> I
+    H --> I
+    B -->|unsupported or ambiguous owned metadata| X["Raise; checkpoint Python cannot replace an owned loader"]
+    E --> J{"Complete causal checkpoint weights?"}
+    J -->|no LM head| X
+    J -->|yes| I
+    I --> K["Public forward and generation"]
+    classDef fail fill:#fee,stroke:#b00
+    class X fail
+```
+
+Raon's source MXFP8 tensors stay in E4M3 byte weights plus U8 E8M0 scales during
+dtype movement and safetensors round trips. Each routed projection expands
+only for its current `F.linear` call. The byte-pair oracle includes signed
+zero, subnormals, both E4M3 FN NaNs and E8M0 exponent 255; weak references and
+in-place weight/scale mutation prove that later forwards rebuild temporary
+values and retain no expanded weight cache.
+
+```mermaid
+flowchart TD
+    A["Raon1MiniQModel.quantize"] --> B{"raon_mxfp8_config set?"}
+    B -->|yes| X["NotImplementedError before quantization mutates state"]
+    B -->|no| C["CalibrationConfig to public dense-source plain AWQ"]
+    C --> D["Packed decoder weights and dense exclusions"]
+    D --> E["Two exact safetensors save/load cycles"]
+    F["Raon1MiniRoutedLinear.forward"] --> G{"E4M3 source weight?"}
+    G -->|yes| H["dequantize_mxfp8: temporary activation-dtype tensor"]
+    G -->|no| I["F.linear with stored dense weight"]
+    H --> J["F.linear consumes expansion"]
+    J --> K["Release temporary; retain only compressed source buffers"]
+    classDef fail fill:#fee,stroke:#b00
+    class X fail
+```
+
+| Before at `bf4003d` | Shipped mechanism and evidence |
+| --- | --- |
+| `gptqmodel/models/definitions/raon1_mini.py:11`: checkpoint trust required | `definitions/raon1_mini.py:12-17`: owned loader; `ports/raon1_mini/modeling_raon1_mini.py:445-473`: compressed projection storage/lifetime; `definitions/raon1_mini.py:73-78`: source MXFP8 quantization rejection |
+| `gptqmodel/models/definitions/spark2_5.py:12-13,43`: trusted checkpoint registration hook | `definitions/spark2_5.py:13-17`: packaged config/model; `ports/spark2_5/modeling_spark.py:261-315`: source FP32 residual and per-layer attention behavior |
+| `gptqmodel/models/definitions/rw.py:9,18-20`: nonexistent `ln_1`/`ln_2` ownership | `definitions/rw.py:9-72`: native-backed loaders and variant-aware norms/parallel tags; `ports/rw/modeling_rw.py:8-25`: eager ALiBi correction while SDPA remains native |
+| `gptqmodel/models/definitions/telechat2.py:15-17`: remote trust and forced FP16 | `definitions/telechat2.py:10-18`: owned model/tokenizer selection; `ports/telechat2/modeling_telechat2.py:32-56,210-238`: source-rounded rotary tables and missing-head rejection |
+
+All four use explicit plain AWQ with empty scaling groups and `fusable=None`.
+Falcon joins the generic plain-family expectation; Raon, Spark and TeleChat
+are qualified by their public port tests. This does not qualify scale search,
+folding, optimized kernels, concurrent PyTorch execution or trained quality.
+The port READMEs retain exact source pins, independent oracles, mutation
+failures, layout boundaries and commands. TeleChat's source code has Apache
+notices, while its 35B/115B cards also reference community-model terms and
+prior commercial authorization. The verbatim
+[retained PDF](../gptqmodel/models/ports/telechat2/TELECHAT_MODEL_LICENSE.pdf)
+explicitly names legacy TeleChat-7B and does not establish the precise license
+version for later artifacts. Both wheel and sdist must preserve that PDF;
+GPT-QModel makes no Apache-only model-artifact rights claim.
+
+## Calibration consumer validation
+
+Port tests use the frozen public `CalibrationConfig` API. The migration wraps
+the original dataset and moves only calibration policy arguments into that
+object; backend, quantizer, assertions and packed/dense round-trip checks remain
+the same. An AST comparison against `7737de616` verified 57 public method calls
+in 52 files, including `requantize()` and the negative-policy consumers. Separate
+`LoopProcessor`/calibration-input tests passed **34 tests, two warnings, 9.18 s**.
+Helper/quantizer methods named `quantize` were not mistaken for model methods.
+
+The initial legacy calls produced the intended removed-keyword `TypeError`
+(three failed, 178 passed in the focused writer/security run); after migration
+that focused run passed 181 tests. The wider run also found two stale
+`SimpleNamespace` registry configs: InternS1 needs `get_text_config()`, and
+InternVL-chat needs `llm_config`. The shared-input test now constructs their
+actual configs. Qwen-Drive's hostile-map test independently hit early random EOS;
+its fixed-length check requests both `min_new_tokens=2` and `max_new_tokens=2`.
+Dedicated generation-policy/EOS tests retain their original behavior checks.
+
+The eleven batches below passed **5,392 tests**. They cover 97 distinct files:
+96 migrated/sibling files plus the shared-input forward suite. Batch 11 includes
+that shared suite after the config repairs. No skipped or deselected cases are
+included in this total. These are CPU checks on Python 3.14.6t with
+`PYTHON_GIL=0`, Transformers 5.23.0, Torch 2.15.0+cpu, published Tokenicer 0.0.19
+and SentencePiece 0.2.1. They do not qualify concurrent PyTorch calls or GPUs.
+
+Run each row separately from the repository root using Bash brace expansion:
+
+```bash
+OMP_NUM_THREADS=1 PYTHON_GIL=0 python -s -m pytest <file arguments below> -q -rs --tb=short
+```
+
+| Batch | File arguments | Passed | Warnings | Seconds |
+| --- | --- | ---: | ---: | ---: |
+| 1 | `tests/module_tree/test_{exaone,interns1}_local_port.py tests/test_baichuan_tokenizer.py tests/{,module_tree/}test_{brumby,chatglm}_local_port.py` | 430 | 2 | 98.02 |
+| 2 | `tests/{,module_tree/}test_{dbrx_converted,decilm,ernie4_5_moe,grinmoe,intern_s2_preview}_local_port.py` | 277 | 146 | 22.14 |
+| 3 | `tests/{,module_tree/}test_{internlm2,internlm,internvl_chat,k2_horizon,kimi_k25}_local_port.py` | 351 | 6 | 237.28 |
+| 4 | `tests/{,module_tree/}test_{klear,lfm3,lfm3_omni,lfm3_vl}_local_port.py tests/test_lazy_native_fp32_materialization.py` | 316 | 9 | 84.17 |
+| 5 | `tests/{,module_tree/}test_{llada2,llama,llava_qwen2,locateanything,mage_vl}_local_port.py` | 837 | 3 | 63.21 |
+| 6 | `tests/{,module_tree/}test_{mimo,mimo_v2,minicpm,minicpmv}_local_port.py tests/test_minicpmv46_awq_port.py` | 577 | 31 | 330.21 |
+| 7 | `tests/{,module_tree/}test_{minimax_m2,mobilellm,moss,nanbeige}_local_port.py tests/test_native_fp32_checkpoint_loading.py` | 752 | 2 | 382.78 |
+| 8 | `tests/{,module_tree/}test_{nemotron_h,nemotron_h_puzzle,nemotron_labs_diffusion,nemotron_omni}_local_port.py tests/test_norm_teacher_loading.py` | 368 | 3 | 130.46 |
+| 9 | `tests/{,module_tree/}test_{openvla,ouro,ovis2_5,ovis2_6_moe,ovis}_local_port.py` | 660 | 37 | 213.97 |
+| 10 | `tests/{,module_tree/}test_{phi4,qwen2_5_vl,qwen2_vl,qwen3,qwen_drive}_local_port.py` | 456 | 3 | 175.70 |
+| 11 | `tests/{,module_tree/}test_qwen_local_port.py tests/test_shared_module_placement.py tests/module_tree/test_shared_input_cpu_forward.py` | 368 | 2 | 37.98 |
+
+The additional central-consumer command passed **835 tests, 465 skipped,
+18 warnings, 44.90 s**:
+
+```bash
+OMP_NUM_THREADS=1 PYTHON_GIL=0 python -s -m pytest \
+  tests/module_tree/test_registered_module_plans.py \
+  tests/module_tree/test_fusable_models.py tests/test_awq_scaling_groups.py \
+  tests/test_awq_scale_folding.py tests/test_awq_empty_groups.py \
+  tests/test_local_model_loading.py tests/test_local_tokenizer_loading.py \
+  tests/test_local_processor_loading.py tests/test_checkpoint_subfolder_resolution.py \
+  -q -rs --tb=short
+```
+
+The skips were 460 NVIDIA-only Marlin cases, three absent Pangu fixture cases
+and the non-buildable `opt350`/`muse_glimmer` CausalLM fixtures. Solar's focused
+parent run passed 108 cases (one trained case deselected); combined Raon/Spark
+passed 266 cases; RW/Falcon plus TeleChat passed 223 cases. Their port READMEs
+retain the source inventories, actual public plain-AWQ cases and negative probes.
+
+Quality gates passed `bash format/check.sh`, explicit Ruff 0.14.2 over
+`gptqmodel docs/eora tests setup.py`, `python -m compileall -q gptqmodel` and
+`git diff --check`. This is not a claim of whole-port Pyright cleanliness.
+Fresh wheel/sdist builds used `uv build --no-build-isolation --wheel --sdist`
+with the qualification interpreter, because its environment has no executable
+`python -m build` frontend. Artifact verification found 727 byte-identical port
+files and 63 valid compressed JSON assets in each, including the TeleChat PDF,
+all required dependency floors, and no tests/scripts, Kimi-K2.5 qualification
+assets, MiniCPM-o or Pangu runtime implementation.
+
+String/path norm teachers resolve their own config and loader. `NormConfig`
+does not expose independent revision/subfolder/cache arguments; pass an already
+constructed dense teacher module when those selections are needed. Student
+selection metadata is deliberately not reused for a different teacher source.

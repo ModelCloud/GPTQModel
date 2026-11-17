@@ -11,7 +11,7 @@ import requests
 
 
 def main():
-    root = Path(__file__).parent
+    root = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/nemotron_h_puzzle"
     manifest = json.loads((root / "source_manifest.json").read_text())
     base = manifest["base_url"]
     response = requests.get(base + "model.safetensors.index.json", timeout=90)

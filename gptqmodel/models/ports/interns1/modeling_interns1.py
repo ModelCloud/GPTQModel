@@ -368,7 +368,13 @@ class InternS1DropPath(nn.Module):
     def forward(self, hidden_states):
         if not self.training or self.probability == 0:
             return hidden_states
-        from timm.layers import drop_path
+        try:
+            from timm.layers import drop_path
+        except ImportError as exc:
+            raise ImportError(
+                "InternS1 vision stochastic depth requires timm; install with `pip install 'gptqmodel[vision]'` "
+                "using a torchvision build compatible with your PyTorch installation."
+            ) from exc
 
         return drop_path(hidden_states, self.probability, self.training)
 

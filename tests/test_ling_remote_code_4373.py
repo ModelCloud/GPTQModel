@@ -28,16 +28,7 @@ def _write_config(directory: Path, payload: dict) -> Path:
 
 
 def _clear_layout_caches() -> None:
-    for name in (
-        "_detect_native_transformers_causallm_support",
-        "_checkpoint_config_payload",
-        "_checkpoint_remote_layout_marker",
-    ):
-        cached = getattr(hf_utils, name, None)
-        if cached is not None and hasattr(cached, "cache_clear"):
-            cached.cache_clear()
     hf_utils._TRUST_REMOTE_CODE_OVERRIDE_WARNED.clear()
-    getattr(hf_utils, "_TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED", set()).clear()
 
 
 def test_native_model_type_without_auto_map_stays_native(tmp_path):

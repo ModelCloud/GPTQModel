@@ -53,6 +53,7 @@ def _capture(layer, forward):
             value = args[0] if args else kwargs.get("hidden_states")
             if isinstance(value, torch.Tensor):
                 features[name] = value.detach().clone()
+
         return hook
 
     try:
@@ -114,8 +115,7 @@ def _assert_neutral(definition, model, layer, forward, tree=None):
                 actual = forward()
             relative = float((actual - reference).norm() / reference.norm())
             assert relative < TOLERANCE, (
-                f"{type(definition).__name__}: {source} -> {targets} changed the layer output "
-                f"by {relative:.3e}"
+                f"{type(definition).__name__}: {source} -> {targets} changed the layer output by {relative:.3e}"
             )
             checked.append((source, targets, consumers))
             layer.load_state_dict(snapshot)
@@ -235,6 +235,7 @@ def test_intern_s2_preview_plain_policy_preserves_layer_state(intern_s2_module):
     definition = MODEL_MAP["intern_s2_preview"]
     wrapper = _wrapper(definition, model, definition.module_tree)
     for layer in layers:
+
         def forward(layer=layer):
             return layer(
                 hidden,
@@ -388,35 +389,26 @@ def test_diffusion_gemma_router_and_value_folds_are_neutral():
         assert "router.proj" not in consumers, source
 
 
-def test_ricursive_value_residual_folds_are_neutral():
-    try:
-        from ricursive_test_utils import make_model
-    except Exception as exc:  # noqa: BLE001 - optional reference custom code
-        pytest.skip(f"Ripple reference code unavailable: {exc}")
+def test_ricursive_plain_policy_preserves_layer_state():
+    from ricursive_test_utils import make_model
 
-    try:
-        model = make_model()
-    except Exception as exc:  # noqa: BLE001 - optional reference custom code
-        pytest.skip(f"Ripple reference code unavailable: {exc}")
-
+    model = make_model()
     definition = MODEL_MAP["ricursive"]
+    wrapper = _wrapper(definition, model, definition.module_tree)
     ids = torch.randint(2, 60, (1, 8))
 
     def forward():
-        return model(input_ids=ids).logits
+        return model(input_ids=ids, use_cache=False).logits
 
-    checked = []
     for layer in model.model.layers:
-        checked.extend(_assert_neutral(definition, model, layer, forward))
-
-    assert checked
-    sources = {source for source, _targets, _consumers in checked}
-    # `v_proj` reads a lerp of the value residual and the norm output, so the
-    # input norm cannot be folded at all with `use_valres`.
-    assert "input_layernorm" not in sources
-    # The gated attention output and the lerped value are not fold sources.
-    assert "self_attn.g_proj" not in sources
-    assert "self_attn.v_proj" not in sources
+        reference, features = _capture(layer, forward)
+        features = _quantized_features(layer, features, definition.module_tree)
+        snapshot = {name: value.clone() for name, value in layer.state_dict().items()}
+        assert wrapper.awq_get_modules_for_scaling(layer, features, {}) == []
+        with torch.inference_mode():
+            torch.testing.assert_close(forward(), reference, rtol=0, atol=0)
+        for name, value in layer.state_dict().items():
+            torch.testing.assert_close(value, snapshot[name], rtol=0, atol=0)
 
 
 def test_qwen4_exp_shared_expert_folds_are_neutral():

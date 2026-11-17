@@ -1,0 +1,52 @@
+{
+  "registered_module_plans": {
+    "cases": {
+      "XverseQModel/gptq": {
+        "layers": [
+          "model.layers"
+        ],
+        "blocks": [
+          [
+            "input_layernorm:!"
+          ],
+          [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          [
+            "self_attn.o_proj"
+          ],
+          [
+            "self_attn.rotary_emb.inv_freq:!"
+          ],
+          [
+            "post_attention_layernorm:!"
+          ],
+          [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          [
+            "mlp.down_proj"
+          ]
+        ]
+      }
+    }
+  },
+  "fusable_models": {
+    "models": {
+      "xverse": {
+        "reason": "Package-owned XVERSE dense/256K and routed/shared MoE decoder; fusion executor has not been qualified."
+      }
+    }
+  },
+  "awq_generic_family_sets": "No change: xverse is not in tests/test_awq_scaling_groups.py FAMILIES. Actual per-layout plain quantization is covered by owned public CPU tests.",
+  "tokenicer20_shared_test_update": {
+    "file": "tests/test_local_tokenizer_loading.py",
+    "test": "test_broken_owned_tokenizer_fails_then_repairs_without_auto_fallback",
+    "old": "failed_constructions = 0 if broken_asset == \"config\" else 1",
+    "new": "failed_constructions = 0 if broken_asset in {\"config\", \"malformed\"} else 1",
+    "reason": "Tokenicer 20 rejects malformed tokenizer JSON during prepare_load_kwargs, before the owned constructor. Keep every fail-closed and repaired-retry assertion; only the expected constructor count changes."
+  }
+}

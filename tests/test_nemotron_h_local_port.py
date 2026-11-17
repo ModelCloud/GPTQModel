@@ -10,6 +10,7 @@ import torch
 from torch.nn import functional as F
 from transformers import AutoModelForCausalLM, NemotronHConfig, NemotronHForCausalLM
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.nemotron_h import NemotronHQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.local import LocalModelLoader
@@ -350,7 +351,10 @@ def test_public_plain_awq_packs_every_decoder_linear_and_reload_is_exact(tmp_pat
 
     loaded.awq_get_modules_for_scaling = inspect
     samples = [torch.arange(start, start + 16) for start in range(0, 64, 16)]
-    loaded.quantize(samples, batch_size=1, backend=BACKEND.AWQ_TORCH, calibration_data_min_length=1)
+    loaded.quantize(
+        CalibrationConfig(dataset=samples, batch_size=1, min_length=1),
+        backend=BACKEND.AWQ_TORCH,
+    )
     assert groups and all(group == [] for group in groups)
     packed = {name for name, module in loaded.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert packed == expected_linears

@@ -227,7 +227,7 @@ layout alone does not authorize it.
 | `ernie4_5_moe_vl` | `Ernie4_5_VLMoeQModel` | Package-owned native ERNIE VL legacy alias; QKV executor admission has not been qualified for this alias. |
 | `exaone` | `ExaOneQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `exaone4_5_text` | `Exaone4QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `falcon` | `RwgQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
+| `falcon` | `FalconQModel` | Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified. |
 | `falcon_mamba` | `FalconMambaQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `gemma3n` | `Gemma3nForConditionalGenerationGPTQ` | Multimodal constructor needs optional timm/torchvision; text-only MLP is qualified separately. |
 | `glm4_moe_lite` | `Glm4MoeLiteQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
@@ -260,7 +260,7 @@ layout alone does not authorize it.
 | `locateanything` | `LocateAnythingQModel` | Package-owned LocateAnything block-diffusion/MoonViT/localization wrapper; fusion executor has not been qualified. |
 | `longllama` | `LlamaQModel` | Package-owned LongLLaMA memory/cache port; fusion executor has not been qualified. |
 | `mage_vl` | `MageVLQModel` | Package-owned Mage-VL custom vision/Qwen3 multimodal binding; fusion executor has not been qualified. |
-| `marin` | `Qwen3QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `marin` | `Qwen3QModel` | Raw marin metadata is unqualified; supported Marin-32B releases serialize native qwen3 and use its existing fusion contract. |
 | `mimo` | `MimoQModel` | Package-owned MiMo-7B Qwen2 extension with full-precision auxiliary MTP; fusion executor has not been qualified. |
 | `mimo_v2` | `MimoV2QModel` | Package-owned MiMo-V2 hybrid attention; fusion executor has not been qualified. |
 | `minicpm` | `MiniCPMGPTQ` | Package-owned original MiniCPM scaled decoder and w1/w3/w2 MoE; fusion executor has not been qualified. |
@@ -284,27 +284,27 @@ layout alone does not authorize it.
 | `ovis2_6_moe` | `Ovis2_6_MoeQModel` | Package-owned Ovis2.6 NaViT/soft-visual-vocabulary wrapper with native Qwen3 MoE; fusion executor has not been qualified. |
 | `ovis2_6_next` | `Ovis2_6_NextQModel` | Package-owned Ovis2.6 NaViT/soft-visual-vocabulary wrapper with native Qwen3 Next linear-attention/MoE; fusion executor has not been qualified. |
 | `phi3` | `Phi3QModel` | No compatible native projection forward: projections already combined, conditional, or preprocessed. |
-| `phi4mm` | `Phi4MMGPTQ` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `qwen` | `QwenQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `qwen2_5_vl_text` | `Qwen2_5_VLQModel` | Installed native layout does not resolve the definition decoder prefix; needs separate layout validation. |
-| `qwen2_vl_text` | `Qwen2VLQModel` | Installed native layout does not resolve the definition decoder prefix; needs separate layout validation. |
-| `qwen_drive` | `QwenDriveQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `raon1_mini` | `Raon1MiniQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `refinedWeb` | `RwgQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `refinedWebModel` | `RwgQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `ricursive` | `RicursiveQModel` | Remote Ripple forward preprocesses value residuals and chunks MLP calls through helpers; direct-forward executor is not applicable. |
-| `solar_open2` | `SolarOpen2QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `spark2_5` | `Spark2_5QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `phi4mm` | `Phi4MMGPTQ` | Package-owned legacy Phi-4 multimodal LoRA/vision/audio binding with packed QKV and gate-up; fusion executor has not been qualified. |
+| `qwen` | `QwenQModel` | Package-owned original Qwen fused-QKV decoder with cache-owned NTK/logn attention; fusion executor has not been qualified. |
+| `qwen2_5_vl_text` | `Qwen2_5_VLQModel` | Native Transformers 5 Qwen2.5-VL headless text backbone; generation is unsupported and fusion executor has not been qualified. |
+| `qwen2_vl_text` | `Qwen2VLQModel` | Native Transformers 5 headless Qwen2VLTextModel feature extraction; generation is unsupported and fusion executor has not been qualified. |
+| `qwen_drive` | `QwenDriveQModel` | Package-owned Qwen-Drive root VLM wrapper with native Qwen3.5 hybrid recurrent/full attention; fusion executor has not been qualified. |
+| `raon1_mini` | `Raon1MiniQModel` | Package-owned Raon RDA/MLA, four-stream mHC and SiTU-MoE with persistent MXFP8 experts; fusion executor has not been qualified. |
+| `refinedWeb` | `RwgQModel` | Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified. |
+| `refinedWebModel` | `RwgQModel` | Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified. |
+| `ricursive` | `RicursiveQModel` | Package-owned Ricursive hybrid sliding/full attention with value residuals, gated attention and PeriNorm; fusion executor has not been qualified. |
+| `solar_open2` | `SolarOpen2QModel` | Package-owned Solar-Open2 hybrid GQA/KDA MoE with vector-decay recurrent state; fusion executor has not been qualified. |
+| `spark2_5` | `Spark2_5QModel` | Package-owned Spark2.5 packed-QKV/head-gated hybrid decoder; fusion executor has not been qualified. |
 | `stablelm_epoch` | `LlamaQModel` | Source-matched native Transformers 5 StableLM Epoch adapter; fusion executor has not been qualified. |
-| `telechat` | `TeleChat2QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `unlimited-ocr` | `UnlimitedOCRQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `telechat` | `TeleChat2QModel` | Package-owned TeleChat/TeleChat2 interleaved-KV dense decoder with source-rounded dynamic NTK RoPE; fusion executor has not been qualified. |
+| `unlimited-ocr` | `UnlimitedOCRQModel` | Native Transformers 5 Unlimited-OCR conditional generation with SAM/vision encoder and dense or routed/shared MoE decoder; fusion executor has not been qualified. |
 | `voxtral` | `VoxtralGPTQ` | Installed native layout does not resolve the definition decoder prefix; needs separate layout validation. |
-| `xing4_0` | `Xing4_0QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `xverse` | `XverseQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `xing4_0` | `Xing4_0QModel` | Package-owned Xing4.0 MLA/hyperconnection dense and routed/shared MoE decoder; fusion executor has not been qualified. |
+| `xverse` | `XverseQModel` | Package-owned XVERSE dense/256K and routed/shared MoE decoder; fusion executor has not been qualified. |
 | `yi` | `LlamaQModel` | Native Transformers 5 Llama-backed Yi legacy alias; fusion executor has not been qualified. |
 | `zamba` | `ZambaQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `zamba2` | `Zamba2QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `zdtaichu5_0` | `ZDTaichu5QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `zdtaichu5_0` | `ZDTaichu5QModel` | Package-owned ZDTaichu5 C-RADIO/native Qwen3.5 hybrid multimodal binding; fusion executor has not been qualified. |
 
 ## Adding or extending a qualification
 

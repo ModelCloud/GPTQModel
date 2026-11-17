@@ -12,6 +12,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import PreTrainedTokenizerFast, Qwen2VLImageProcessor, Qwen3VLVideoProcessor
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.intern_s2_preview import InternS2PreviewQModel
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.ports.intern_s2_preview.configuration_interns2_preview import InternS2PreviewConfig
@@ -325,7 +326,10 @@ def test_public_plain_awq_quantized_safetensors_roundtrip(tmp_path):
                     "attention_mask": torch.ones(1,16,dtype=torch.long)},
                    {"input_ids": torch.arange(16,0,-1).reshape(1,-1),
                     "attention_mask": torch.ones(1,16,dtype=torch.long)}]
-    wrapped.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapped.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     counts = [sum(isinstance(mod, AwqTorchLinear) for mod in layer.modules())
               for layer in wrapped.model.model.language_model.layers]
     assert counts == [15,16]

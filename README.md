@@ -237,6 +237,12 @@ pip install gptqmodel
 # Or: uv pip install gptqmodel
 ```
 
+For ports that use timm or torchvision, install `pip install 'gptqmodel[vision]'`
+with a torchvision build compatible with your PyTorch installation. These
+optional dependencies are loaded when the affected vision component is used;
+core text installations do not install them. See the
+[vision dependency boundary](docs/transformers5-model-ports.md#optional-vision-dependencies).
+
 PyTorch **2.13.x or >= 2.15.0** is required; known-vulnerable versions are
 blocked by the [runtime safety check](https://github.com/ModelCloud/GPTQModel/blob/main/docs/torch-runtime-safety-gate.md).
 Compiled package backends build and cache extensions on first use (JIT),
@@ -333,6 +339,37 @@ decoders and plain AWQ; native Ovis2 keeps its separate definition.
 [Ovis2.5 and Ovis2.6 decoder selection](docs/transformers5-model-ports.md#ovis25-and-ovis26-decoder-selection)
 binds their NaViT visual vocabulary to exact native Qwen3, Qwen3 MoE or Qwen3
 Next text decoders, with explicit ownership and image-calibrated plain AWQ.
+[Qwen3 and Marin selection](docs/transformers5-model-ports.md#qwen3-and-marin-native-selection)
+uses exact native Qwen3 classes and tokenizers for the verified release layouts;
+unqualified raw `marin` metadata fails explicitly.
+[Original Qwen and legacy Phi-4 multimodal selection](docs/transformers5-model-ports.md#original-qwen-and-legacy-phi-4-multimodal-selection)
+preserves source Qwen attention/tokenizer behavior and Phi-4's image/audio LoRAs,
+media calibration and checkpoint owners. Original Qwen release-specific license
+and research restrictions remain separate from the port's Apache code license.
+[Qwen VL task and Qwen-Drive wrapper selection](docs/transformers5-model-ports.md#qwen-vl-task-and-qwen-drive-wrapper-selection)
+binds Qwen2/2.5-VL to exact native composite or headless text models and Qwen-Drive
+to its package-owned root VLM wrapper. Headless text artifacts support feature
+extraction and explicitly reject generation; Qwen-Drive support covers the VLM.
+[Solar-Open2 recurrent implementation selection](docs/transformers5-model-ports.md#solar-open2-recurrent-implementation-selection)
+documents the owned hybrid GQA/KDA decoder, request-owned recurrent cache,
+plain AWQ and exact FP32 routing state through repeated reloads. Released
+artifacts retain the separate Upstage Solar license and derivative-model terms.
+[Raon, Spark2.5, RW/Falcon and TeleChat selection](docs/transformers5-model-ports.md#raon-spark25-rwfalcon-and-telechat-selection)
+documents owned hybrid decoders, persistent MXFP8 storage, exact native Falcon
+reuse and the local eager ALiBi repair. Dense-source plain AWQ is qualified
+separately from source MXFP8 re-quantization, which rejects before mutation.
+TeleChat code notices and community-model artifact terms remain distinct;
+the retained legacy license PDF does not grant later-version commercial rights.
+The [calibration consumer validation](docs/transformers5-model-ports.md#calibration-consumer-validation)
+records current public-API migration coverage and reproducible CPU test batches.
+[Ricursive, Xing4.0, XVERSE, Unlimited-OCR and ZDTaichu5 selection](docs/transformers5-model-ports.md#ripple-xing4-xverse-and-native-ocr-selection)
+documents the owned decoders, exact native OCR task and media bindings. XVERSE's
+legacy Metaspace tokenizer remains blocked on released Tokenicer 0.0.19; its
+upstream correction is qualified separately and does not establish released
+compatibility. ZDTaichu5 retains the NVIDIA Open Model License and notices.
+[Checkpoint config selection](docs/checkpoint-config-selection.md)
+preserves the selected subfolder/revision when rebuilding a quantized save shell,
+including subsequent saves after a public reload.
 [Shared checkpoint ownership](docs/checkpoint-owned-materialization.md)
 explains generated device maps for tied aliases and native FP32 destinations
 during lazy offload, including the exclusions for packed weights.
@@ -471,8 +508,12 @@ Swordfish kernel is [AGPL-3.0-or-later](https://github.com/ModelCloud/GPTQModel/
 Vendored model ports retain their upstream licenses and notices; see the
 [port coverage and licensing table](docs/transformers5-model-ports.md).
 In particular, MobileLLM and LocateAnything carry noncommercial restrictions,
-and OpenVLA's tokenizer assets retain Meta Llama 2 terms. These components are
+OpenVLA's tokenizer assets retain Meta Llama 2 terms, and Solar-Open2 artifacts
+retain Upstage Solar derivative-model naming and attribution terms. These components are
 not relicensed by GPT-QModel's Apache license.
+TeleChat's model cards also reference separate community terms and prior
+commercial authorization; the port preserves the available legacy license
+PDF and explicitly records uncertainty about later-version artifact terms.
 
 ## Attributions and citations 📚
 

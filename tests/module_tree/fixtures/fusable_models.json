@@ -960,7 +960,7 @@
     },
     "falcon": {
       "definition": "FalconQModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified."
     },
     "falcon_h1": {
       "definition": "FalconH1QModel",
@@ -3181,7 +3181,7 @@
     },
     "marin": {
       "definition": "Qwen3QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Raw marin metadata is unqualified; supported Marin-32B releases serialize native qwen3 and use its existing fusion contract."
     },
     "mimo": {
       "definition": "MimoQModel",
@@ -4269,7 +4269,7 @@
     },
     "phi4mm": {
       "definition": "Phi4MMGPTQ",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Package-owned legacy Phi-4 multimodal LoRA/vision/audio binding with packed QKV and gate-up; fusion executor has not been qualified."
     },
     "phimoe": {
       "definition": "PhiMoEGPTQForCausalLM",
@@ -4312,7 +4312,7 @@
     },
     "qwen": {
       "definition": "QwenQModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Package-owned original Qwen fused-QKV decoder with cache-owned NTK/logn attention; fusion executor has not been qualified."
     },
     "qwen2": {
       "definition": "Qwen2QModel",
@@ -4568,7 +4568,7 @@
     },
     "qwen2_5_vl_text": {
       "definition": "Qwen2_5_VLQModel",
-      "reason": "Installed native layout does not resolve the definition decoder prefix; needs separate layout validation."
+      "reason": "Native Transformers 5 Qwen2.5-VL headless text backbone; generation is unsupported and fusion executor has not been qualified."
     },
     "qwen2_audio": {
       "definition": "Qwen2AudioGPTQ",
@@ -4757,7 +4757,7 @@
     },
     "qwen2_vl_text": {
       "definition": "Qwen2VLQModel",
-      "reason": "Installed native layout does not resolve the definition decoder prefix; needs separate layout validation."
+      "reason": "Native Transformers 5 headless Qwen2VLTextModel feature extraction; generation is unsupported and fusion executor has not been qualified."
     },
     "qwen3": {
       "definition": "Qwen3QModel",
@@ -5505,23 +5505,23 @@
     },
     "qwen_drive": {
       "definition": "QwenDriveQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned Qwen-Drive root VLM wrapper with native Qwen3.5 hybrid recurrent/full attention; fusion executor has not been qualified."
     },
     "raon1_mini": {
       "definition": "Raon1MiniQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned Raon RDA/MLA, four-stream mHC and SiTU-MoE with persistent MXFP8 experts; fusion executor has not been qualified."
     },
     "refinedWeb": {
       "definition": "RwgQModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified."
     },
     "refinedWebModel": {
       "definition": "RwgQModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified."
     },
     "ricursive": {
       "definition": "RicursiveQModel",
-      "reason": "Remote Ripple forward preprocesses value residuals and chunks MLP calls through helpers; direct-forward executor is not applicable."
+      "reason": "Package-owned Ricursive hybrid sliding/full attention with value residuals, gated attention and PeriNorm; fusion executor has not been qualified."
     },
     "seed_oss": {
       "definition": "LlamaQModel",
@@ -5740,11 +5740,11 @@
     },
     "solar_open2": {
       "definition": "SolarOpen2QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned Solar-Open2 hybrid GQA/KDA MoE with vector-decay recurrent state; fusion executor has not been qualified."
     },
     "spark2_5": {
       "definition": "Spark2_5QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned Spark2.5 packed-QKV/head-gated hybrid decoder; fusion executor has not been qualified."
     },
     "stablelm": {
       "definition": "LlamaQModel",
@@ -5838,15 +5838,15 @@
     },
     "telechat": {
       "definition": "TeleChat2QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned TeleChat/TeleChat2 interleaved-KV dense decoder with source-rounded dynamic NTK RoPE; fusion executor has not been qualified."
     },
     "unlimited_ocr": {
       "definition": "UnlimitedOCRQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Native Transformers 5 Unlimited-OCR conditional generation with SAM/vision encoder and dense or routed/shared MoE decoder; fusion executor has not been qualified."
     },
     "unlimited-ocr": {
       "definition": "UnlimitedOCRQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Native Transformers 5 Unlimited-OCR conditional generation with SAM/vision encoder and dense or routed/shared MoE decoder; fusion executor has not been qualified."
     },
     "voxtral": {
       "definition": "VoxtralGPTQ",
@@ -5854,11 +5854,11 @@
     },
     "xing4_0": {
       "definition": "Xing4_0QModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Package-owned Xing4.0 MLA/hyperconnection dense and routed/shared MoE decoder; fusion executor has not been qualified."
     },
     "xverse": {
       "definition": "XverseQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned XVERSE dense/256K and routed/shared MoE decoder; fusion executor has not been qualified."
     },
     "yi": {
       "definition": "LlamaQModel",
@@ -5874,7 +5874,7 @@
     },
     "zdtaichu5_0": {
       "definition": "ZDTaichu5QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned ZDTaichu5 C-RADIO/native Qwen3.5 hybrid multimodal binding; fusion executor has not been qualified."
     },
     "dots3_note": {
       "definition": "Dots3NoteQModel",

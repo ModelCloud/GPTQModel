@@ -11,7 +11,7 @@ import pytest
 import torch
 from torch.nn import functional as F
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.lfm3_omni import LFM3OmniQModel
 from gptqmodel.models.ports.lfm3_omni.configuration_lfm3_omni import Lfm3OmniConfig
 from gptqmodel.models.ports.lfm3_omni.feature_extraction_lfm3_omni import Lfm3OmniFeatureExtractor
@@ -455,7 +455,10 @@ def test_public_plain_awq_quantizes_only_text_linears_and_reloads(tmp_path, kv_h
         assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[1, 4, 5, 6, 7, 8, 9, 10]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     packed = {name: module for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert len(packed) == 19
     assert all(name.startswith("model.language_model.layers.") for name in packed)

@@ -12,7 +12,7 @@ import torch
 from huggingface_hub import hf_hub_download
 from transformers import AddedToken, AutoConfig, AutoTokenizer
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.baichuan import BaiChuanQModel
 from gptqmodel.models.ports.baichuan.configuration_baichuan import BaichuanConfig
 from gptqmodel.models.ports.baichuan.modeling_baichuan import BaichuanForCausalLM
@@ -331,8 +331,10 @@ def test_real_tokenizer_public_awq_pack_save_reload(real_assets, tmp_path, monke
              if key.removesuffix('.weight') not in expected}
     assert model.awq_get_modules_for_scaling(model.model.model.layers[0], {}, {}) == []
     # Public string calibration must pass through the real owned tokenizer.
-    model.quantize([sample['text'] for sample in case['samples'][:2]], batch_size=1,
-                   backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(
+        CalibrationConfig(dataset=[sample['text'] for sample in case['samples'][:2]], batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     assert {name for name, module in model.model.named_modules() if isinstance(module, AwqTorchLinear)} == expected
     for key, value in dense.items():
         torch.testing.assert_close(model.model.state_dict()[key], value, rtol=0, atol=0)

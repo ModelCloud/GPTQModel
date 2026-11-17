@@ -13,7 +13,7 @@
   },
   "inventory": {
     "file": "checkpoint_shapes.json.gz",
-    "reader": "read_checkpoint_headers.py",
+    "reader": "scripts/read_nemotron_h_puzzle_checkpoint_headers.py",
     "tensor_count": 42683,
     "decoder_tensor_count": 41643,
     "auxiliary_mtp_tensor_count": 1040,

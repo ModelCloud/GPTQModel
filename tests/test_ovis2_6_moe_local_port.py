@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import json
 from pathlib import Path
 
@@ -10,8 +11,9 @@ import torch
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
-from transformers import PreTrainedTokenizerFast, SiglipImageProcessor
+from transformers import GenerationConfig, LogitsProcessor, PreTrainedTokenizerFast, SiglipImageProcessor
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.ovis2_6_moe import Ovis2_6_MoeQModel, Ovis2_6_NextQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.ports.ovis2_6_moe.configuration_ovis2_6 import Ovis2_6_Moe_Config, Ovis2_6_Next_Config
@@ -77,8 +79,10 @@ def media_inputs():
     }
 
 
-def checkpoint(path, definition, config_class):
+def checkpoint(path, definition, config_class, *, generation_config=None):
     model = build(definition, config_class)
+    if generation_config is not None:
+        model.generation_config = copy.deepcopy(generation_config)
     model.save_pretrained(path, safe_serialization=True)
     backend = Tokenizer(
         WordLevel(
@@ -98,6 +102,159 @@ def checkpoint(path, definition, config_class):
     tokenizer.save_pretrained(path)
     SiglipImageProcessor().save_pretrained(path)
     return model
+
+
+def released_generation_policy():
+    fixture = Path(__file__).parents[1] / "gptqmodel/models/ports/ovis2_6_moe/fixtures/generation_config.json"
+    policy = GenerationConfig.from_dict(json.loads(fixture.read_text()))
+    policy.update(
+        bos_token_id=1,
+        pad_token_id=0,
+        eos_token_id=[2, 63],
+        max_new_tokens=3,
+        return_dict_in_generate=True,
+        output_scores=True,
+    )
+    return policy
+
+
+def test_released_generation_policy_is_pinned_for_both_variants():
+    import hashlib
+
+    port = Path(__file__).parents[1] / "gptqmodel/models/ports/ovis2_6_moe"
+    provenance = json.loads((port / "provenance.json").read_text())
+    payload = (port / "fixtures/generation_config.json").read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    assert digest == provenance["fixture_sha256"]["generation_config.json"]
+    assert all(provenance[size]["files"]["generation_config.json"] == digest for size in ("30B", "80B"))
+    released = json.loads(payload)
+    assert released["eos_token_id"] == [151645, 151643]
+    assert released["do_sample"] is True
+    assert [released[name] for name in ("top_k", "top_p", "temperature", "repetition_penalty")] == [20, .95, .6, 1.05]
+
+
+class ForceToken(LogitsProcessor):
+    def __init__(self, token):
+        self.token = token
+
+    def __call__(self, input_ids, scores):
+        result = torch.full_like(scores, -torch.inf)
+        result[:, self.token] = 0
+        return result
+
+
+@torch.inference_mode()
+def assert_public_generation_policy(loaded, inputs):
+    model = loaded.model
+    policy = released_generation_policy()
+    assert model.generation_config.to_dict() == policy.to_dict()
+    saved_policy = copy.deepcopy(model.generation_config.to_dict())
+    decoder_policy = copy.deepcopy(model.llm.generation_config.to_dict())
+    reference = copy.deepcopy(model.llm).eval()
+    embeddings = model.merge_multimodal(**inputs)
+    mask = torch.ones_like(inputs["input_ids"])
+    forced = [ForceToken(63)]
+    stopped = loaded.generate(**inputs, logits_processor=forced)
+    assert hasattr(stopped, "sequences"), "Saved root generation policy did not reach the native decoder"
+    assert stopped.sequences.tolist() == [[63]], "Saved additional EOS must stop actual generation"
+    assert len(stopped.scores) == 1
+    for explicit_none in (False, True):
+        torch.manual_seed(526)
+        expected = reference.generate(
+            inputs_embeds=embeddings, attention_mask=mask, generation_config=copy.deepcopy(policy)
+        )
+        torch.manual_seed(526)
+        actual = loaded.generate(**inputs, **({"generation_config": None} if explicit_none else {}))
+        assert torch.equal(actual.sequences, expected.sequences)
+        assert torch.isfinite(expected.scores[0]).sum() > 1
+        for got, want in zip(actual.scores, expected.scores, strict=True):
+            torch.testing.assert_close(got, want, atol=0, rtol=0)
+    caller = GenerationConfig(
+        do_sample=False, eos_token_id=63, pad_token_id=0, max_new_tokens=4, return_dict_in_generate=False
+    )
+    caller_policy = copy.deepcopy(caller.to_dict())
+    assert loaded.generate(**inputs, generation_config=caller, logits_processor=forced).tolist() == [[63]]
+    overridden = loaded.generate(
+        **inputs,
+        generation_config=caller,
+        logits_processor=forced,
+        eos_token_id=None,
+        max_new_tokens=2,
+        return_dict_in_generate=True,
+        output_scores=True,
+    )
+    assert overridden.sequences.tolist() == [[63, 63]]
+    assert len(overridden.scores) == 2
+    assert caller.to_dict() == caller_policy
+    assert model.generation_config.to_dict() == saved_policy
+    assert model.llm.generation_config.to_dict() == decoder_policy
+
+
+@pytest.mark.parametrize("definition,config_class", CASES)
+@pytest.mark.parametrize("cycles", [0, 2])
+@pytest.mark.parametrize("media", [False, True])
+def test_public_saved_generation_policy_dense_two_reloads(definition, config_class, cycles, media, tmp_path):
+    from gptqmodel import GPTQModel
+
+    source = tmp_path / "source"
+    checkpoint(source, definition, config_class, generation_config=released_generation_policy())
+    loaded = GPTQModel.load(str(source), device="cpu", dtype=torch.float32, attn_implementation="eager")
+    for cycle in range(cycles):
+        target = tmp_path / f"dense{cycle}"
+        loaded.model.save_pretrained(target, safe_serialization=True)
+        loaded.processor.save_pretrained(target)
+        assert list(target.glob("*.safetensors"))
+        assert not list(target.glob("*.bin"))
+        loaded = GPTQModel.load(str(target), device="cpu", dtype=torch.float32, attn_implementation="eager")
+    inputs = media_inputs() if media else {"input_ids": torch.tensor([[1, 4, 5]])}
+    assert_public_generation_policy(loaded, inputs)
+
+
+@pytest.mark.parametrize("definition,config_class", CASES)
+@pytest.mark.parametrize("policy_options", [
+    {"return_dict_in_generate": True}, {"num_beams": 3}, {"do_sample": True, "num_return_sequences": 2},
+])
+def test_thinking_guard_resolves_root_policy_and_caller_repair(definition, config_class, policy_options, tmp_path):
+    from gptqmodel import GPTQModel
+
+    checkpoint(tmp_path, definition, config_class)
+    loaded = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, attn_implementation="eager")
+    policy = GenerationConfig(max_new_tokens=40, eos_token_id=None, pad_token_id=0, **policy_options)
+    loaded.model.generation_config = copy.deepcopy(policy)
+    options = {"enable_thinking": True, "enable_thinking_budget": True, "thinking_budget": 1}
+    inputs = {"input_ids": torch.tensor([[1, 4, 5]])}
+    with pytest.raises(ValueError, match="one non-beam tensor result"):
+        loaded.generate(**inputs, **options, max_new_tokens=40)
+    actual = loaded.generate(
+        **inputs, **options, logits_processor=[ForceToken(63)], max_new_tokens=40,
+        num_beams=1, num_return_sequences=1, return_dict_in_generate=False,
+    )
+    assert actual.shape == (1, 40)
+    assert loaded.model.generation_config.to_dict() == policy.to_dict()
+
+
+@pytest.mark.parametrize("definition,config_class", CASES)
+def test_thinking_uses_saved_max_new_tokens_for_both_native_stages(definition, config_class, tmp_path):
+    from gptqmodel import GPTQModel
+
+    policy = GenerationConfig(max_new_tokens=40, do_sample=False, eos_token_id=None, pad_token_id=0)
+    checkpoint(tmp_path, definition, config_class, generation_config=policy)
+    loaded = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, attn_implementation="eager")
+    options = {"enable_thinking": True, "enable_thinking_budget": True, "thinking_budget": 1}
+    inputs = {"input_ids": torch.tensor([[1, 4, 5]])}
+    appendent = loaded.tokenizer(
+        "\n\nConsidering the limited time by the user, I have to give the solution based on the thinking directly now.\n</think>\n\n",
+        return_tensors="pt", return_attention_mask=False,
+    ).input_ids
+    for budget in (None, 45):
+        actual = loaded.generate(
+            **inputs, **options, logits_processor=[ForceToken(63)],
+            **({} if budget is None else {"max_new_tokens": budget}),
+        )
+        total = budget or policy.max_new_tokens
+        expected = torch.cat([torch.tensor([[63]]), appendent, torch.full((1, total - 1 - appendent.shape[1]), 63)], dim=1)
+        assert torch.equal(actual, expected)
+        assert loaded.model.generation_config.to_dict() == policy.to_dict()
 
 
 @pytest.mark.parametrize("definition,config_class", CASES)
@@ -173,7 +330,10 @@ def test_public_missing_post_ln_corrupt_payload_repair_retry(definition, config_
     loaded = GPTQModel.load(str(tmp_path), quantize_config=qcfg, **options)
     if offload:
         loaded.pre_quantize_generate_hook_start()
-        loaded.quantize([media_inputs()], backend=BACKEND.TORCH, batch_size=1, calibration_data_min_length=1)
+        loaded.quantize(
+            CalibrationConfig(dataset=[media_inputs()], batch_size=1, min_length=1),
+            backend=BACKEND.TORCH,
+        )
     with torch.inference_mode():
         output = loaded.model(**media_inputs()).logits
         assert output.isfinite().all()
@@ -193,7 +353,7 @@ def test_public_image_calibrated_plain_awq_pack_infer_two_reloads(definition, co
     from gptqmodel.quantization.config import AWQConfig
 
     source = tmp_path / "source"
-    checkpoint(source, definition, config_class)
+    checkpoint(source, definition, config_class, generation_config=released_generation_policy())
     qcfg = AWQConfig(
         device="cpu",
         group_size=16,
@@ -222,7 +382,10 @@ def test_public_image_calibrated_plain_awq_pack_infer_two_reloads(definition, co
             captures.append((args[0] if args else kwargs["hidden_states"]).detach().clone())
 
     handle = loaded.model.llm.model.layers[0].register_forward_pre_hook(capture, with_kwargs=True)
-    loaded.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    loaded.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     handle.remove()
     torch.testing.assert_close(captures[0], expected_capture, atol=0, rtol=0)
     modules = {name: module for name, module in loaded.model.named_modules() if isinstance(module, AwqTorchLinear)}
@@ -266,6 +429,7 @@ def test_public_image_calibrated_plain_awq_pack_infer_two_reloads(definition, co
             )
             assert list(target.glob("*.safetensors"))
             assert not list(target.glob("*.bin"))
+        assert_public_generation_policy(loaded, media_inputs())
 
 
 @pytest.mark.parametrize("definition,config_class", CASES)

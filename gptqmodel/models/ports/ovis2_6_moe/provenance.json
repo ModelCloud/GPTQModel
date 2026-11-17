@@ -3,6 +3,7 @@
     "revision": "44beb8e150b28c7ca537a1673582c64f57d342e3",
     "repository": "AIDC-AI/Ovis2.6-30B-A3B",
     "files": {
+      "generation_config.json": "459bb5572ec8ad5c7dd8bcdfd3205ff1ebeddf9cfdcea707f0e33a8cccadbf0f",
       "preprocessor_config.json": "63ff380d3e424f93e6fbca5cc8e74eeed882e96fd6be2b7728aed308f3ad1513",
       "tokenizer_config.json": "4e51c71d9d962a6816cab5986027a34cca213f3ff2c19bc82186c547e7438220",
       "modeling_ovis2_6.py": "3e2ce754f030a8943a287be05153e83da9cda3e297250cb3441e9a61a09782ee",
@@ -23,6 +24,7 @@
     "revision": "96dd72344e17f098ba7cbe108e6872d12ba7cbfb",
     "repository": "AIDC-AI/Ovis2.6-80B-A3B",
     "files": {
+      "generation_config.json": "459bb5572ec8ad5c7dd8bcdfd3205ff1ebeddf9cfdcea707f0e33a8cccadbf0f",
       "preprocessor_config.json": "63ff380d3e424f93e6fbca5cc8e74eeed882e96fd6be2b7728aed308f3ad1513",
       "tokenizer_config.json": "2993bc5e4de8167fc82c4dcf7856503df1f956837720293870df1784eb4afa24",
       "modeling_ovis2_6.py": "3e2ce754f030a8943a287be05153e83da9cda3e297250cb3441e9a61a09782ee",
@@ -40,6 +42,7 @@
     "source_url": "https://huggingface.co/AIDC-AI/Ovis2.6-80B-A3B/tree/96dd72344e17f098ba7cbe108e6872d12ba7cbfb"
   },
   "fixture_sha256": {
+    "generation_config.json": "459bb5572ec8ad5c7dd8bcdfd3205ff1ebeddf9cfdcea707f0e33a8cccadbf0f",
     "30B_special_tokens_map.json": "76862e765266b85aa9459767e33cbaf13970f327a0e88d1c65846c2ddd3a1ecd",
     "30B_tokenizer_config.json": "4e51c71d9d962a6816cab5986027a34cca213f3ff2c19bc82186c547e7438220",
     "30B_added_tokens.json": "c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680",

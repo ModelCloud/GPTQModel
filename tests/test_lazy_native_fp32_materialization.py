@@ -6,7 +6,7 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.klear import KlearQModel
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.config import AWQConfig
@@ -42,7 +42,10 @@ def test_public_awq_native_fp32_pack_and_two_reloads(tmp_path, dtype, offload):
     model = GPTQModel.load(str(native), quantize_config=config, backend=BACKEND.TORCH,
                           dtype=dtype, attn_implementation="eager", trust_remote_code=False)
     assert (model.turtle_model is not None) is offload
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     packed = {name: module for name, module in model.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert len(packed) == 7 + 4 + 3 * 3 + 3
     actual = model.model.state_dict()[bias_name]

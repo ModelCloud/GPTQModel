@@ -1,0 +1,23 @@
+{
+  "repo_id": "KRAFTON/Raon-1-mini-preview",
+  "revision": "1b4f494d71dff50318288309f64c72aa8c11340e",
+  "sha256": {
+    "model-00007-of-00007.safetensors.header.json": "c6cbd2b75d30a3f647a4400952825cd1e922a1011710048a280904bc1e9f5393",
+    "generation_config.json": "9480ec0f58bcbb8df2050aa8312b3fdd7248792c4b0e861582feeb75fdfe71f5",
+    "model-00003-of-00007.safetensors.header.json": "9bc91a85e1cfbcf8fc6f129d908a839ecef38485f61fe5ab7517cee81bcbbcf9",
+    "model-00004-of-00007.safetensors.header.json": "1fe4a34e0bdd065b8c4d8757ee3910935bc0320190ca9886d52ad9ecc7d2ae96",
+    "modeling_raon1_mini.py": "ca0742570e8c9b730115f2feedbcd9f424dc47d21b132729f27c4d8ac6998fc6",
+    "model-00005-of-00007.safetensors.header.json": "44a48be1f50d31683dea62bd216ef94b0ddfeb06c40da5c8eed129e3c5c32a14",
+    "tokenizer_config.json": "755dbee2faa43f9ad0a8121256d0bee69dff3c847524327693d156067f10e351",
+    "config.json": "ccd1541ed7d4e26dd86e0b9c706f13e5dbdf968c68824c27c2eb53f23d735ee3",
+    "tokenizer.json": "47752d33008f5dd7cc91d875f1b798d1f1ad8f6a0e84aac9e67cbb49f9da16af",
+    "model-00001-of-00007.safetensors.header.json": "846eb63219520f1f103f20d71218e2dc634c758277a7bbcde8472bc09d7d5e71",
+    "model-00002-of-00007.safetensors.header.json": "86aa66adfc55dea1542e8afe13810fa8d0324caeac8e7633916b742d5debf688",
+    "model.safetensors.index.json": "698935d27fd0a7be12be30beb0f93408e378b158cb0913390652c7c6a51713a2",
+    "README.md": "1576da96fea8337c63833f60270f22cef4a9bba618539e2b49774c232c697fb2",
+    "chat_template.jinja": "34a9f0219d315211631885b22d8e4973943c092ef319b57c11853127e392b0ac",
+    "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "configuration_raon1_mini.py": "3656b59a41dec3b228852973f0e2472ed081b14bcd80b36040e0e0afccba42c0",
+    "model-00006-of-00007.safetensors.header.json": "2056ff404c667ef872883fd36823482a4cc0fbd54d9b71a54f0e9fedcdbce136"
+  }
+}

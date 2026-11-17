@@ -13,6 +13,7 @@ import pytest
 import torch
 from torch.nn import functional as F
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.chatglm import ChatGLMQModel
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.utils.hf import load_model_config
@@ -198,7 +199,10 @@ def test_chatglm_released_tokenizer_plain_awq_roundtrips(tmp_path, monkeypatch, 
     assert wrapper.awq_get_modules_for_scaling(wrapper.model.transformer.encoder.layers[0], {}, {}) == []
     # Calibrate actual released token IDs produced by the public tokenizer.
     calibration = [wrapper.tokenizer(sample['text'], return_tensors='pt') for sample in contract['texts']]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 8
     state = {key: value.clone() for key, value in wrapper.model.state_dict().items()}
     dense = model.state_dict()
@@ -739,7 +743,10 @@ def test_chatglm_plain_awq_quantizes_all_linears_and_reloads(tmp_path, rope_rati
     assert wrapper.awq_get_modules_for_scaling(wrapper.model.transformer.encoder.layers[0], {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[4, 5, 6, 7, 8, 9, 10, 11]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 8
     for name, value in wrapper.model.state_dict().items():
         if "layernorm" in name:

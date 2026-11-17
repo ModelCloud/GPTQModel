@@ -104,6 +104,10 @@ def test_dequant_from_config_enters_model_load_lock(monkeypatch):
         "gptqmodel.utils.hf.normalize_hf_config_compat",
         lambda *_args, **_kwargs: None,
     )
+    monkeypatch.setattr(
+        "gptqmodel.utils.hf.load_model_config",
+        lambda *_args, **_kwargs: SimpleNamespace(model_type="lock_fixture"),
+    )
     observed = []
 
     class _Loader:
@@ -113,13 +117,7 @@ def test_dequant_from_config_enters_model_load_lock(monkeypatch):
             observed.append(lock.held())
             return SimpleNamespace()
 
-    class _AutoConfig:
-        @classmethod
-        def from_pretrained(cls, *_args, **_kwargs):
-            return SimpleNamespace()
-
     deps = {
-        "AutoConfig": _AutoConfig,
         "init_empty_weights": lambda **_kwargs: nullcontext(),
         "AutoModelForCausalLM": _Loader(),
         "AutoModelForSeq2SeqLM": None,

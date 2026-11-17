@@ -1,0 +1,122 @@
+{
+  "releases": {
+    "marin": [
+      "marin-community/marin-32b-base",
+      "f19b346615212ff9a6d92c10861a9cdb100cbf97"
+    ],
+    "qwen3": [
+      "Qwen/Qwen3-0.6B",
+      "c1899de289a04d12100db370d81485cdf75e47ca"
+    ]
+  },
+  "assets": {
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/config.json": {
+      "sha256": "25727c410c07e5af0385374080ea91b464e1c34bd8888837b4709ef55aec7f8b",
+      "bytes": 3716
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/tokenizer.json": {
+      "sha256": "6b9e4e7fb171f92fd137b777cc2714bf87d11576700a1dcd7a399e7bbe39537b",
+      "bytes": 17209920
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/tokenizer_config.json": {
+      "sha256": "7c13e62ab7c127945d8b0c26f301f8ea3b9bfdd054b2c431adf577aa827ab4d5",
+      "bytes": 50530
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/README.md": {
+      "sha256": "f2c6479f992b5a9a889a6658341a378932ed027bedc4bc0d6f8c46ac2ff32cb3",
+      "bytes": 11493
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/special_tokens_map.json": {
+      "sha256": "cc2e013b7545f183ef03e079a3c91c6f364fa37e4068c512d7dd843e59024535",
+      "bytes": 301
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/model.safetensors.index.json": {
+      "sha256": "7c006ad13a4993b5b9146d0687983d687b4f791125bd2fb1fc0363ca41ec2c33",
+      "bytes": 55484
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/model-00001-of-00014.safetensors#header": {
+      "sha256": "0aa9d585777c206926f76179a48538c5a92f338ec9bffd76f6863a36f1f3b795",
+      "bytes": 2960
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/model-00002-of-00014.safetensors#header": {
+      "sha256": "7a20ff2e576bed5452e91171a34329d7aa0da8f8a78dc4d688b5652331515026",
+      "bytes": 6344
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/model-00003-of-00014.safetensors#header": {
+      "sha256": "46318adf192b9b3f15624316578c240f523e7c7caa1bbe8eb1c920d49109748c",
+      "bytes": 6344
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/model-00004-of-00014.safetensors#header": {
+      "sha256": "bceb20b4f4765a37350cbf4dcbf541b874e9997a4092461e50a29a1a5d000f06",
+      "bytes": 6336
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/model-00005-of-00014.safetensors#header": {
+      "sha256": "6f71ee3ce67648b19773847395d266f23d4801d15105e7ac1d820e9ac7b1d2c8",
+      "bytes": 6344
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/model-00006-of-00014.safetensors#header": {
+      "sha256": "7a495548d041cf57dd5c1753e5c4790feeedaf4c92aad12490e9864105b82da5",
+      "bytes": 6336
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/model-00007-of-00014.safetensors#header": {
+      "sha256": "f8a6159358851ca646968c449957ecc19dccbc9c4d7ab2d9f3e8f373171118db",
+      "bytes": 6344
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/model-00008-of-00014.safetensors#header": {
+      "sha256": "e4541e2c7481f5684a978f9cf1baaf60e616807a9a876ad27bf82e0d0b86e1fc",
+      "bytes": 6336
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/model-00009-of-00014.safetensors#header": {
+      "sha256": "f451e9a004099fe38540ae2c4f1ca7669f2472bbbd25474faa566c3e36cdcac3",
+      "bytes": 6344
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/model-00010-of-00014.safetensors#header": {
+      "sha256": "991243601bafbd49c0b88b3ce08112c2b9f1923bcdd16f9748ee7028fa13f713",
+      "bytes": 6336
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/model-00011-of-00014.safetensors#header": {
+      "sha256": "8904683423f6169eb2eb9ea1b4e8729ed90d0e6c1c9072c1fe80a226037eec94",
+      "bytes": 6344
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/model-00012-of-00014.safetensors#header": {
+      "sha256": "aa647f688292783cd11dbec592a2189ed0b8a20b18e1850663c89bb6edf79f0e",
+      "bytes": 6336
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/model-00013-of-00014.safetensors#header": {
+      "sha256": "48fdb70891d15806a8ed62caac02c67f48f1d32d7d0531130ac866eedd916c16",
+      "bytes": 6328
+    },
+    "https://huggingface.co/marin-community/marin-32b-base/resolve/f19b346615212ff9a6d92c10861a9cdb100cbf97/model-00014-of-00014.safetensors#header": {
+      "sha256": "9e6e37caafc5fcc9ca4fc0091267bdc8f7388c2faae9f85db63ea39015636587",
+      "bytes": 2400
+    },
+    "https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/config.json": {
+      "sha256": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+      "bytes": 726
+    },
+    "https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/tokenizer.json": {
+      "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+      "bytes": 11422654
+    },
+    "https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/tokenizer_config.json": {
+      "sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101",
+      "bytes": 9732
+    },
+    "https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/README.md": {
+      "sha256": "1ab64a26fcb3b461423b89a433a8c858f1bf8d4086f979cbb3ff878d47cf20e9",
+      "bytes": 13965
+    },
+    "https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/generation_config.json": {
+      "sha256": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2",
+      "bytes": 239
+    },
+    "https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/LICENSE": {
+      "sha256": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
+      "bytes": 11343
+    },
+    "https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/model.safetensors#header": {
+      "sha256": "399d16f500e925c7e923fe05966c6df6862ab64da60916843119e802f1801bca",
+      "bytes": 35552
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "repo_id": "XHToken/Spark-X2.5-4B",
+  "revision": "0bcb35678590218655dff3765b9e61c83b35e9c4",
+  "sha256": {
+    "LICENSE": "525c465ab952779d2d360a9ff36f7f49ae018a23d80302ff839a850a77784c36",
+    "README.md": "275fe9e4f9d3764e39679339ea2795c383e0663d4c06d70c910be81eba260885",
+    "chat_template.jinja": "705345721970da40e6aa56db548a46ecd1d8d94a5418808fa180ac19ee77a9ba",
+    "checkpoint_shapes.json": "7945280d213330aa50dfeb675e1f84b9082b2895deccc78cded0444b0ba86079",
+    "config.json": "767161ece8ed2891e44345afdf98d29c1cacb964116cb6db7d20dc1c757490ad",
+    "configuration_spark.py": "02218597240490f490659b184052db940b08163ff9c3af7b7e59323f6f963722",
+    "generation_config.json": "804a5276a9d237600688267dd2bf6f9d4129ec21faf417f870d5d52b32ad9e6c",
+    "model-00001-of-00005.safetensors.header.json": "fdce5456edfed9efa84a04921176f9387a8a608c27634f9716602b493774f9a3",
+    "model-00002-of-00005.safetensors.header.json": "d7ea113b850d5c1f381748bd9a901be259f38682d5cc25e119d9101b6877c789",
+    "model-00003-of-00005.safetensors.header.json": "fe2ecbd0743847970d109220be02e778985611a0515fea4b23922c77fea94492",
+    "model-00004-of-00005.safetensors.header.json": "7ca9f839bfdab0b61a04e4bf2d357d1dda09070b7554a0498cd5c665c64c18b3",
+    "model-00005-of-00005.safetensors.header.json": "b533df56c31fde13c0a54e2b71438e54a639b8135e1e4bf693a9d75c854ccaa9",
+    "model.safetensors.index.json": "77a11d49b279b5e44fcb1f2453f71a8023237f93992fe5275d842e149d896edd",
+    "modeling_spark.py": "9cf0d1ad2b54b9f7088792779ddd8b5cb4d4fe63bfea054da7f2dd16362bcaf4",
+    "special_tokens_map.json": "48a257e3f5f20a004e7c30482a70ae19ae7d9cf713144f2a1394ba20af8c3cb5",
+    "tokenizer.json": "710cce15cf3565674c499f9413997c6e8101f2bdd96245cff8f0311fb501248c",
+    "tokenizer_config.json": "0729b0aeb1b88e000687b51c72d5aece759233bb4f6fb353eb497676e04d43b0"
+  }
+}

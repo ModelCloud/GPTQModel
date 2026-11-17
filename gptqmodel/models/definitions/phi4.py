@@ -4,14 +4,21 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 
+from collections.abc import Mapping
+
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 class Phi4MMGPTQ(BaseQModel):
-    require_pkgs = [
-        "backoff>=2.2.1",
-        "optimum>=1.24.0",
-    ]
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.phi4.configuration_phi4.Phi4MMConfig",
+        model_class="gptqmodel.models.ports.phi4.modeling_phi4.Phi4MMForCausalLM",
+        processor_class="gptqmodel.models.ports.phi4.processing_phi4.Phi4MMProcessor",
+        tokenizer_class="gptqmodel.models.ports.phi4.tokenization_phi4.Phi4MMTokenizer",
+    )
+    require_pkgs = []
+    require_load_processor = True
     pre_lm_head_norm_module = "model.norm"
 
     module_tree = [
@@ -23,37 +30,52 @@ class Phi4MMGPTQ(BaseQModel):
             "self_attn": {
                 "qkv_proj": {
                     "base_layer": ("base_layer",),
+                    "lora_A": ("vision:!", "speech:!"),
+                    "lora_B": ("vision:!", "speech:!"),
                 },
                 "o_proj": {
                     "base_layer": ("base_layer",),
-                }
+                    "lora_A": ("vision:!", "speech:!"),
+                    "lora_B": ("vision:!", "speech:!"),
+                },
             },
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": {
                 "gate_up_proj": {
                     "base_layer": ("base_layer",),
+                    "lora_A": ("vision:!", "speech:!"),
+                    "lora_B": ("vision:!", "speech:!"),
                 },
                 "down_proj": {
                     "base_layer": ("base_layer",),
-                }
-            }
-        }
+                    "lora_A": ("vision:!", "speech:!"),
+                    "lora_B": ("vision:!", "speech:!"),
+                },
+            },
+        },
     ]
 
-    require_monkeypatch = True
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        return []
 
-    def monkey_patch(self):
-        if not self.quantized:
-            original_forward = self.model.forward
+    def prepare_dataset(self, calibration_dataset, batch_size=1, **kwargs):
+        from ._vlm_calibration import finalize_conversation_batches, pop_conversation_calibration_options
 
-            # patch so input_mode is default to 0 (InputMode.LANGUAGE) if not passed
-            # phi4mm default is None which causes quant error as it expects it to be always passed
-            def patched_forward(self, **kwargs):
-                if "input_mode" not in kwargs:
-                    kwargs["input_mode"] = 0
-                return original_forward(**kwargs)
+        rows = [calibration_dataset] if isinstance(calibration_dataset, Mapping) else list(calibration_dataset)
+        if not any(
+            isinstance(row, Mapping)
+            and any(key in row for key in ("input_image_embeds", "input_audio_embeds", "input_mode"))
+            for row in rows
+        ):
+            return super().prepare_dataset(rows, batch_size=batch_size, **kwargs)
+        if batch_size != 1:
+            raise ValueError("phi4mm prepared media rows are already batches; use batch_size=1")
+        if not all(isinstance(row, Mapping) and "input_ids" in row for row in rows):
+            raise ValueError("phi4mm media calibration requires processor-produced input batches")
+        sort, min_length = pop_conversation_calibration_options(kwargs, label="phi4mm")
+        return finalize_conversation_batches(
+            [dict(row) for row in rows], sort=sort, min_length=min_length, label="phi4mm"
+        )
 
-            # bind forward to instance
-            self.model.forward = patched_forward.__get__(self.model, type(self.model))
 
 __all__ = ["Phi4MMGPTQ"]

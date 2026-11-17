@@ -1,0 +1,16 @@
+{
+  "repository": "hf-tiny-v2/tiny-random-Qwen2_5_VLTextModel",
+  "revision": "3d88ac2485f48cc590e717ba208662768db347e9",
+  "sha256": {
+    "chat_template.jinja": "a0bc6f6fc7a29a80017a433e8f03a1cc1236e838a944a2d034295a60c4f2fddb",
+    "config.json": "4523f083f266a18c29397cbebe331a0e564c7f6947f88e04505a2073a1c78610",
+    "model.safetensors": "374de0fbb2e77646fbeaff32fd35fb95d3510cbffaa57032c70a3f14b47f42b6",
+    "tokenizer.json": "ff8cce547abc110590d19c6b5b6e0c6a7b4c8d1012d78b9c42131bae7f494a02",
+    "tokenizer_config.json": "df594eab0be6bd5da9e2cef6ec1f26c6dc3ce12d0c24bb062c67e358aa49f10c"
+  },
+  "tensor_count": 26,
+  "contract": "Native Qwen2_5_VLTextModel; root embed_tokens/layers/norm; no causal head or generation",
+  "publication_kind": "Independently published tiny-random checkpoint, not trained model quality evidence",
+  "qualified": "Exact public/native dense hidden states and TWO native dense saves with public reload; explicit generation rejection",
+  "awq_limitation": "Published tiny intermediate_size37 cannot pack in Torch AWQ: out_features must be divisible by8. Six independent aligned native fixtures qualify all14 projections separately."
+}

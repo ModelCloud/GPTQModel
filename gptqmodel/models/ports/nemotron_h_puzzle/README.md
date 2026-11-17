@@ -74,7 +74,8 @@ not decoder-owned tensors. MTP execution/speculative decoding is not implemented
 by the inspected source decoder and is not claimed here. Quantized wrapper
 saves preserve this payload instead of silently dropping it.
 
-Run the optional `read_checkpoint_headers.py` to regenerate the inventory from
+Run `python scripts/read_nemotron_h_puzzle_checkpoint_headers.py` from the
+repository root to regenerate the inventory from
 the pinned Hub index and headers; it never fetches trained tensor bodies. Normal
 runtime and offline tests neither import nor run that script.
 

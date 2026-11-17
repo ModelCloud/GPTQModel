@@ -29,8 +29,14 @@ class _ScaleFactor(nn.Module):
 class PrismaticVisionBackbone(nn.Module):
     def __init__(self, config):
         super().__init__()
-        import timm
-        from timm.layers import LayerScale
+        try:
+            import timm
+            from timm.layers import LayerScale
+        except ImportError as exc:
+            raise ImportError(
+                "OpenVLA vision requires timm; install with `pip install 'gptqmodel[vision]'` "
+                "using a torchvision build compatible with your PyTorch installation."
+            ) from exc
 
         self.use_fused_vision_backbone = config.use_fused_vision_backbone
         self.embed_dim = 0

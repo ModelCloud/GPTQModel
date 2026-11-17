@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.ouro import OuroQModel
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.ports.ouro import OuroConfig, OuroForCausalLM, UniversalTransformerCache
@@ -461,7 +461,10 @@ def test_public_plain_awq_all_reused_linears_two_exact_reloads(tmp_path, kv_head
     calibration = [
         {"input_ids": torch.tensor([[4, 5, 6, 7, 6, 5, 4, 7]]), "attention_mask": torch.ones(1, 8, dtype=torch.long)}
     ]
-    loaded.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    loaded.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     expected_names = {
         f"model.layers.{i}.{name}"
         for i in range(2)

@@ -6,7 +6,7 @@ from model_test import ModelTest
 
 class TestSpark2_5(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Spark-X2.5-4B" # XHToken/Spark-X2.5-4B
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 16
     ASSERT_INFERENCE = True
@@ -29,25 +29,20 @@ class TestSpark2_5(ModelTest):
     def test_spark2_5(self):
         self.quantize_and_evaluate()
 
-    def test_spark2_5_native_generate_runs_before_model_load_hook(self):
-        """Issue #4121 item 2: the native branch must call `before_model_load`.
-
-        Spark-X2.5's remote forward passes `input_embeds`/`cache_position` to
-        the transformers mask helper; only `Spark2_5QModel.before_model_load`
-        adapts those names. Without the hook a native load raises
-        `TypeError: create_causal_mask() got an unexpected keyword argument
-        'input_embeds'`.
-        """
+    def test_spark2_5_native_generate_uses_package_owned_model(self):
+        """Current native masks work directly without checkpoint monkeypatching."""
 
         from gptqmodel import GPTQModel
+        from gptqmodel.models.ports.spark2_5.modeling_spark import Spark2_5ForCausalLM
 
         model = GPTQModel.load(
             self.NATIVE_MODEL_ID,
             quantize_config=None,
-            trust_remote_code=True,
+            trust_remote_code=False,
             device="cuda:0",
         )
         try:
+            assert type(model.model) is Spark2_5ForCausalLM
             self.assertInference(model)
         finally:
             del model

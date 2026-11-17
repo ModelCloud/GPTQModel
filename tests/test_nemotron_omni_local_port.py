@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import NemotronHForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.nemotron_omni import NemotronOmniQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.ports.nemotron_omni.configuration import NemotronOmniConfig
@@ -373,7 +373,10 @@ def test_public_plain_awq_image_calibration_all_owners_and_two_reloads(tmp_path,
         {"type": "image", "image": Image.new("RGB", (8, 8), color=(110, 40, 190))},
         {"type": "text", "text": "t3 t4 t5"},
     ]}] for _ in range(2)]
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     packed = {name for name, module in model.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert packed == modules
     assert all(not hasattr(model.model.get_submodule(name), "weight") for name in packed)
