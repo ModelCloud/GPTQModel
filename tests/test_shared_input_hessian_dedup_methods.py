@@ -21,7 +21,7 @@ from torch import nn
 
 from gptqmodel.looper.exllamav3_processor import EXL3Processor
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig, LoopProcessor
+from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.macaq_processor import MacaqProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.native_processor import NATIVE_INPUTS_STATE_KEY
@@ -33,6 +33,7 @@ from gptqmodel.looper.shared_input import (
 from gptqmodel.looper.vptq_processor import VPTQProcessor
 from gptqmodel.models.shared_input import SharedInputPlan, build_shared_input_plan
 from gptqmodel.quantization.config import (
+    CalibrationConfig,
     EXL3Config,
     FOEMConfig,
     GPTAQConfig,

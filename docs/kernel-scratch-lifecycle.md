@@ -88,6 +88,27 @@ fills give bitwise-equal results), that no module-level cache symbol remains,
 that two calls never share storage, and that eight streams retain less than
 2 MiB after their forwards return.
 
+## QQQ split-K lock array
+
+`qqq_gemm` also uses its `workspace` argument as a split-K barrier: each CTA
+increments a per-tile counter and resets it in `barrier_release`.  One array per
+`QQQLinear` therefore let two streams serving the same module increment and
+reset each other's counters and deadlock the device
+([#4665](https://github.com/ModelCloud/GPTQModel/issues/4665)); the per-call
+reduce scratch above did not cover this second writable buffer.
+
+`QQQLinear._split_k_locks(device)` now allocates a zeroed
+`ceil(out_features / 64) * max_par` INT32 array for each forward.  The
+per-module `workspace` buffer is kept only so existing checkpoints keep
+loading; it is no longer passed to the kernel.  EXL3's `exl3_gemm` takes the
+same approach.
+
+| Before | After |
+| --- | --- |
+| One lock array per `QQQLinear` | One zeroed array per call |
+| Two streams on one module corrupt each other's counters (deadlock) | Streams cannot alias |
+| Reused for every stream on every device | Allocated on the call's device |
+
 ## EXL3 kernel scratch
 
 `LinearEXL3.forward` reaches three writable buffers, and all three are consumed

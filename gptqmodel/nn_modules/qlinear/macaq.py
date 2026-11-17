@@ -33,6 +33,7 @@ from ...utils.macaq_triton import (
     triton_mxfp4_available,
 )
 from . import WeightOnlyQuantLinear
+from ._compile_support import COMPILE_LEVEL
 from ._numerics import linear_fp32_reduce
 
 
@@ -61,6 +62,12 @@ class MacaqLinear(WeightOnlyQuantLinear):
     dense rotated-frame weight is reconstructed only for the current forward
     and released immediately.
     """
+
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: every compile level passes,
+    # but explicit capture fails because `dequantize_mxfp4` copies the CPU
+    # `E2M1_MAGNITUDES` table to the device on each call.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MACAQ_TORCH]
     SUPPORTS_METHODS = [METHOD.MACAQ]
@@ -395,6 +402,12 @@ class MacaqLinear(WeightOnlyQuantLinear):
 
 class MacaqTritonLinear(MacaqLinear):
     """NVIDIA CUDA and RDNA4 gfx1201 Triton MXFP4 Linear."""
+
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager runs and an explicit
+    # torch.cuda.graph capture succeeds, but dynamo breaks on
+    # `torch.cuda.device_count()` (non-Tensor return): EAGER only.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
 
     SUPPORTS_BACKENDS = [BACKEND.MACAQ_TRITON]
     SUPPORTS_METHODS = [METHOD.MACAQ]

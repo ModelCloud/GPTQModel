@@ -21,6 +21,7 @@ from ...quantization import FORMAT, METHOD
 from ...quantization.activation_floatx import _nvfp4_mse_quantize_blocks, nvfp4_global_scale
 from ...utils.backend import BACKEND
 from . import PackableQuantLinear
+from ._compile_support import COMPILE_LEVEL
 from .w4a_floatx import W4AFP8Linear
 
 
@@ -85,6 +86,12 @@ def nvfp4_input(x: torch.Tensor, global_scale: torch.Tensor,
 
 
 class W4ANVFP4Linear(W4AFP8Linear):
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager runs and an explicit
+    # torch.cuda.graph capture succeeds, but dynamo fails on `data_ptr()` in
+    # `_require_current_weights` and on `_scaled_mm_v2`: EAGER only.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
+
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_W4A_NVFP4]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 0, FORMAT.GPTQ_V2: 0}
     SUPPORTS_METHODS = [METHOD.GPTQ]

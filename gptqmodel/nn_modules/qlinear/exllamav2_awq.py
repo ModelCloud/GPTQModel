@@ -22,6 +22,7 @@ from ...utils.exllamav2 import (
 )
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 from ._runtime_cache import tensor_cache_key
 
 
@@ -55,6 +56,12 @@ class AwqExllamaV2Linear(AWQuantLinear):
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_exllamav2"
+
+    # Calls the ExLlamaV2 AWQ custom op and builds a host-side q-handle cache
+    # (tensor_cache_key reads data_ptr) from forward, so dynamo breaks and a
+    # CUDA-graph capture cannot cross it; the JIT extension could not build here.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     def __init__(
             self,

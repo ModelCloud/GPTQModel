@@ -26,6 +26,7 @@ from ...utils.exllamav2 import (
 )
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
 from ._runtime_cache import tensor_cache_key
 
@@ -91,6 +92,12 @@ class ExllamaV2Linear(GPTQQuantLinear):
     AUTO_NON_FP16_PRIORITY = 1
 
     REQUIRES_FORMAT_V2 = True
+
+    # Not buildable here: the ExLlamaV2 torch.ops JIT extension fails without
+    # CUDA_HOME/nvcc. Its custom gemm has no fake/meta impl, so dynamo breaks:
+    # conservative EAGER, no capture measured.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     @classmethod
     def auto_select_priority(cls, fmt, dtype=None):

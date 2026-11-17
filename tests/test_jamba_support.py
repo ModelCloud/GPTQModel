@@ -21,7 +21,7 @@ from tokenizers.trainers import WordLevelTrainer
 from transformers import JambaConfig, JambaForCausalLM, PreTrainedTokenizerFast
 from transformers.masking_utils import create_causal_mask
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.jamba import JambaQModel
 from gptqmodel.models.module_plan import ModulePlan
@@ -320,10 +320,12 @@ def test_tiny_jamba_gptq_quantization_smoke(tmp_path: Path, monkeypatch):
         backend=BACKEND.TORCH,
     )
     model.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
     model.save(quantized_dir)
 

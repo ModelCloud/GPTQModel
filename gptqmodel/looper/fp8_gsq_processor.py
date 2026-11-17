@@ -11,11 +11,10 @@ from typing import Optional
 
 import torch
 
-from ..quantization.config import FP8Config, clone_weight_only_config_for_module
+from ..quantization.config import CalibrationConfig, FP8Config, clone_weight_only_config_for_module
 from ..quantization.gsq_fp8_task import FP8GSQTask
 from ..quantization.gsq_scalar import gsq_enabled_for
 from .loop_processor import (
-    CalibrationConfig,
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,

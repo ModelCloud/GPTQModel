@@ -7,7 +7,7 @@ import torch
 
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.paroquant import ParoLinear
+from ..nn_modules.qlinear.paro import ParoLinear
 from ..quantization.config import resolve_quant_format, serialize_quant_bits
 from ..quantization.module_config import ModuleConstructorConfig, module_constructor_config
 from ..utils.importer import get_auto_backend_kernel_mapping

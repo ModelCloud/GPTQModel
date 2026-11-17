@@ -21,6 +21,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
 from . import AWQuantLinear
+from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import (
     bind_runtime_qzeros,
     capture_fused_train_state,
@@ -46,6 +47,12 @@ class TorchFusedAwqLinear(AWQuantLinear):
     """Torch fused AWQ variant based on GPTQ fused kernels via CPU int4 packing."""
 
     QUANT_TYPE = "torch_fused_awq"
+
+    # Measured on CPU, torch 2.11.0+cu130: dynamo cannot enter the
+    # `_cpu_transform_lock` RLock held in forward. CPU/XPU-only, so no CUDA
+    # graph capture applies.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH_FUSED]
     SUPPORTS_METHODS = [METHOD.AWQ]

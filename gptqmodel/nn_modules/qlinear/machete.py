@@ -33,6 +33,7 @@ from ...utils.marlin import replace_parameter
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.packing_math import scaled_zero_offset
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 
 
 log = setup_logger()
@@ -67,6 +68,12 @@ class MacheteLinear(GPTQQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = True
+
+    # Hopper-only (SM90 CUTLASS images); this GB10 is sm_121, so the extension
+    # cannot run here. machete_mm has no fake/meta impl, so dynamo breaks:
+    # conservative EAGER, no capture measured.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     QUANT_TYPE = "machete"
 

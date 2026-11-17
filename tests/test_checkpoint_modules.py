@@ -326,7 +326,7 @@ def test_qqq_torch_checkpoint_restore_runs_with_real_permutations():
 
 
 def test_paro_runtime_options_schema():
-    from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+    from gptqmodel.nn_modules.qlinear.paro import ParoLinear
 
     config = ParoConfig(bits=4, group_size=32, krot=4)
     module = ParoLinear(

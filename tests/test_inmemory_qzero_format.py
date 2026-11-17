@@ -20,7 +20,7 @@ from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.trainers import WordLevelTrainer
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.quantization import FORMAT
 from gptqmodel.quantization.config import RTNConfig
 
@@ -101,10 +101,12 @@ def quantized_model(tmp_path_factory):
     qcfg = RTNConfig(bits=4, group_size=128, offload_to_disk=False, device="cuda:0")
     model = GPTQModel.load(str(model_dir), quantize_config=qcfg, backend=BACKEND.TORCH)
     model.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
     checkpoint = tmp_path_factory.mktemp("inmemory-qzero-checkpoint") / "quantized"
     model.save(str(checkpoint))

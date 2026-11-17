@@ -84,8 +84,8 @@ class _StubLooper:
     def _batch_row_count(self, batch_inputs):
         return int(batch_inputs[0].shape[0]) if batch_inputs else 0
 
-    def _set_processor_mask(self, processor, mask):
-        del processor, mask
+    def _set_processor_mask(self, processor, mask, padding_mask=None):
+        del processor, mask, padding_mask
 
 
 class _Processor:

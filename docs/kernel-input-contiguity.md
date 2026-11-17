@@ -1,7 +1,7 @@
 # Kernel input contiguity and launch contracts
 
 Quantized inference kernels fall into two groups. Native and ctypes kernels
-(BitBLAS, EXL3 `had_r_128`/`hgemm`/`bc`, Machete, the ParoQuant fused rotation)
+(BitBLAS, EXL3 `had_r_128`/`hgemm`/`bc`, Machete, the Paro fused rotation)
 receive a raw `data_ptr()` and walk rows with a fixed `K` stride. Triton kernels
 compute their own dense offsets from the same assumption. Both groups require a
 packed operand, and both must launch in the CUDA context that owns that operand.
@@ -23,7 +23,7 @@ flowchart TD
     C -- BitBLAS --> D["_invoke_bitblas_matmul passes data_ptr() to the prebuilt CUDA library"]
     C -- EXL3 --> E["had_r_128 / hgemm / bc read packed rows"]
     C -- Machete --> F["machete_mm reads packed rows"]
-    C -- ParoQuant --> G["apply_paroquant_rotation launch config"]
+    C -- Paro --> G["apply_paro_rotation launch config"]
     D --> X["silently wrong rows (rel err 1.30)"]
     E --> Y["silently wrong rows (rel err 1.36)"]
     F --> Z["silently wrong rows"]
@@ -39,7 +39,7 @@ flowchart TD
     C -- BitBLAS --> D["_invoke_bitblas_matmul: enter the module device, then data_ptr()"]
     C -- EXL3 --> E["had_r_128 / hgemm / bc + TORCH_CHECK(is_contiguous)"]
     C -- Machete --> F["machete_mm"]
-    C -- ParoQuant --> G["fused rotation"]
+    C -- Paro --> G["fused rotation"]
     D --> H["correct output"]
     E --> H
     F --> H
@@ -51,7 +51,7 @@ flowchart TD
 | BitBLAS fp16 | `bitblas.py:865` reshaped and passed the strided view's `data_ptr()` (`bitblas.py:889-899`). | `bitblas.py:875` packs the operand; the dtype cast above already copies, so this is a no-op for bf16. |
 | EXL3 fp16 | `exl3.py:135` used `x.view(-1, in_features)` and the kernels assumed packed rows. | `exl3.py:139` packs; `hadamard.cu`, `hgemm.cu`, and `libtorch/linear.cpp` now reject a strided operand. |
 | Machete | `machete.py:314` / `machete_awq.py:212` passed the strided view. | `machete.py:317` / `machete_awq.py:215` pack first. |
-| ParoQuant | `paroquant.py:593` fed the strided view to the fused rotation. | `paroquant.py:595` packs first. |
+| Paro | `paro.py:593` fed the strided view to the fused rotation. | `paro.py:595` packs first. |
 
 The native checks are deliberate: a future caller that forgets to pack now
 fails closed instead of returning wrong values.

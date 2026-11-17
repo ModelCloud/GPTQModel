@@ -7,7 +7,7 @@ import pytest
 from safetensors.torch import save_file
 from torch import nn
 
-from gptqmodel import NormConfig, QuantizeConfig, QuantizeEmbed, QuantizeEmbedConfig
+from gptqmodel import CalibrationConfig, NormConfig, QuantizeConfig, QuantizeEmbed, QuantizeEmbedConfig
 from gptqmodel.models.base import BaseQModel, _QuantizedCheckpointSource
 from gptqmodel.quantization import FORMAT
 from gptqmodel.quantization import QuantizeEmbedConfig as QuantizationEmbedConfig
@@ -56,7 +56,7 @@ def test_requantize_forwards_canonical_embedding_config():
 
     model.quantize = quantize
     config = QuantizeEmbedConfig(embed_quant_mode=QuantizeEmbed.BOTH, embed_only=False)
-    assert model.requantize(calibration=["sample"], embed_quant_config=config) == {
+    assert model.requantize(CalibrationConfig(dataset=["sample"]), embed_quant_config=config) == {
         "ok": []
     }
     assert captured["embed_quant_config"] is config
@@ -69,7 +69,7 @@ def test_requantize_keeps_embedding_mode_compatibility():
     captured = {}
     model.quantize = lambda **kwargs: captured.update(kwargs)
 
-    model.requantize(calibration=["sample"], embed_quant_mode=QuantizeEmbed.INPUT)
+    model.requantize(CalibrationConfig(dataset=["sample"]), embed_quant_mode=QuantizeEmbed.INPUT)
 
     assert captured["embed_quant_config"] == QuantizeEmbedConfig(
         embed_quant_mode=QuantizeEmbed.INPUT
@@ -79,7 +79,7 @@ def test_requantize_keeps_embedding_mode_compatibility():
 def test_requantize_requires_an_embedding_target():
     model = _bare_model(quantized=True)
     with pytest.raises(ValueError, match="requires"):
-        model.requantize(calibration=["sample"])
+        model.requantize(CalibrationConfig(dataset=["sample"]))
 
 
 def test_quantized_checkpoint_source_reads_single_safetensors_weight_map(tmp_path):
@@ -112,7 +112,9 @@ def test_requantize_loaded_checkpoint_configures_embedding_only_save_source(tmp_
     model.quantize = lambda **_kwargs: {"ok": []}
 
     result = model.requantize(
-        calibration=["sample"],
+        CalibrationConfig(
+            dataset=["sample"],
+        ),
         embed_quant_mode=QuantizeEmbed.OUTPUT,
     )
 
@@ -167,5 +169,5 @@ def test_requantize_checks_persistence_before_dispatch(tmp_path, operation, brok
     if operation != "norm":
         kwargs["embed_quant_mode"] = QuantizeEmbed.OUTPUT
     with pytest.raises(ValueError if broken == "invalid-index" else FileNotFoundError):
-        model.requantize(calibration=["unused"], **kwargs)
+        model.requantize(CalibrationConfig(dataset=["unused"]), **kwargs)
     assert not getattr(model, "_module_replacement_prefixes", set())

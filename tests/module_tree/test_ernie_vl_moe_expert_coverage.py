@@ -28,6 +28,7 @@ import torch
 import transformers
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.models._const import EXPERT_INDEX_PLACEHOLDER
 from gptqmodel.models.auto import MODEL_MAP
@@ -419,10 +420,12 @@ def test_quantized_model_covers_both_expert_families(tmp_path):
         backend=BACKEND.TORCH,
     )
     module.quantize(
-        [[{"role": "user", "content": "tiny expert coverage calibration sample"}]] * 4,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=[[{"role": "user", "content": "tiny expert coverage calibration sample"}]] * 4,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
 
     modules = dict(module.model.named_modules())

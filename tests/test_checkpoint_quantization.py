@@ -25,7 +25,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
     Qwen3MoeForCausalLM,
 )
 
-from gptqmodel import BACKEND, CheckpointConfig, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, CalibrationConfig, CheckpointConfig, GPTQModel, QuantizeConfig
 from gptqmodel.looper.checkpoint import CheckpointExtension, CheckpointStopped
 from gptqmodel.looper.gptq_checkpoint import (
     GPTQCheckpointAdapter,
@@ -384,10 +384,12 @@ def test_quantized_tensors_equal_after_resume(tmp_path, monkeypatch, family):
             str(native), quantize_config=config, backend=BACKEND.TORCH
         )
         model.quantize(
-            calibration,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.TORCH,
-            calibration_data_min_length=1,
             checkpoint=checkpoint,
         )
         model.save(tmp_path / output)
@@ -465,10 +467,12 @@ def test_dynamic_quantized_tensors_equal_after_resume(tmp_path, monkeypatch):
             str(native), quantize_config=config, backend=BACKEND.TORCH
         )
         model.quantize(
-            calibration,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.TORCH,
-            calibration_data_min_length=1,
             checkpoint=checkpoint,
         )
         model.save(tmp_path / output)
@@ -536,8 +540,10 @@ def test_dynamic_weight_only_quantized_tensors_equal_after_resume(
             str(native), quantize_config=config, backend=BACKEND.FP8_TORCH
         )
         model.quantize(
-            calibration,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+            ),
             backend=BACKEND.FP8_TORCH,
             checkpoint=checkpoint,
         )
@@ -612,10 +618,12 @@ def test_runtime_calibration_exclusions_survive_resume(tmp_path, monkeypatch):
             str(native), quantize_config=config, backend=BACKEND.TORCH
         )
         model.quantize(
-            calibration,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.TORCH,
-            calibration_data_min_length=1,
             checkpoint=checkpoint,
         )
         model.save(tmp_path / output)
@@ -841,10 +849,12 @@ def test_resumed_quantize_leaves_a_usable_in_session_model(tmp_path, monkeypatch
         )
         model = GPTQModel.load(str(native), quantize_config=config, backend=BACKEND.TORCH)
         model.quantize(
-            calibration,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.TORCH,
-            calibration_data_min_length=1,
             checkpoint=checkpoint,
         )
         return model

@@ -308,7 +308,7 @@ covered experts keep their scales.
 
 Measured on Qwen3-30B-A3B truncated to one decoder layer, AWQ 4-bit `g128`,
 `fallback=None`, 4 C4 rows × 8 tokens, `batch_size=4`,
-`calibration_data_min_length=1`, RTX 5090: 41 of 128 experts received no
+`CalibrationConfig(min_length=1)`, RTX 5090: 41 of 128 experts received no
 tokens. Before: `RuntimeError: AWQProcessor: module model.layers.0.self_attn.q_proj
 reached packing without quantized zero points`. After: 265 quantized modules,
 123 dense expert projections, all 123 bit-identical to the source and exactly

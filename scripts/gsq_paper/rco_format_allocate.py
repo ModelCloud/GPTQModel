@@ -342,7 +342,7 @@ def allocate(args):
 
 
 def quantize(args):
-    from gptqmodel import GPTQModel
+    from gptqmodel import CalibrationConfig, GPTQModel
     from gptqmodel.quantization.rco_formats import RCOPlan, discover_projections
 
     plan = RCOPlan.from_dict(json.loads(Path(args.plan).read_text()))
@@ -367,7 +367,7 @@ def quantize(args):
         raise ValueError("RCO plan must cover the complete model definition; remeasure without --limit")
     if any(tuple(wrapper.model.get_submodule(name).weight.shape) != plan.shapes[name] for name in names):
         raise ValueError("RCO plan matrix shapes differ from the loaded model")
-    wrapper.quantize(calibration=load_calibration(args.calibration), backend=backend)
+    wrapper.quantize(CalibrationConfig(dataset=load_calibration(args.calibration)), backend=backend)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     wrapper.save_quantized(str(out))

@@ -6,7 +6,7 @@
 Both the transformers refusal and the save-time compatibility warning used to
 say "load them with ``GPTQModel.load`` or vLLM". The vLLM bridge accepts only
 ``FORMAT.GPTQ``/``FORMAT.GEMM``, and ``docs/support-matrix.md`` marks vLLM x for
-EXL3, MACaQ, ParoQuant, QQQ, NF12 and GGUF, so following that advice hit a second
+EXL3, MACaQ, Paro, QQQ, NF12 and GGUF, so following that advice hit a second
 failure. The remedy is now per-method and checked against that matrix.
 """
 

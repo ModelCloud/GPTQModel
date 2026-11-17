@@ -22,7 +22,7 @@ from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.trainers import WordLevelTrainer
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.quantization import AutoDtypeCast
 from gptqmodel.quantization.config import EXL3Config
 from gptqmodel.utils import auto_dtype_cast
@@ -110,10 +110,12 @@ def _quantize(native, output, cast: str | None):
         backend=BACKEND.AUTO,
     )
     model.quantize(
-        _calibration(native),
-        batch_size=1,
+        CalibrationConfig(
+            dataset=_calibration(native),
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.AUTO,
-        calibration_data_min_length=1,
     )
     model.save(str(output))
     return output

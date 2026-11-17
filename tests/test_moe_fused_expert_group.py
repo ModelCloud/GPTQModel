@@ -29,7 +29,7 @@ import torch  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from safetensors import safe_open  # noqa: E402
 
-from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel import CalibrationConfig, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.quantization.config import RTNConfig  # noqa: E402
 from gptqmodel.utils import model as model_utils  # noqa: E402
 from gptqmodel.utils.model import (  # noqa: E402
@@ -394,7 +394,7 @@ class TestFusedExpertGroupMoEQuantization(ModelTest):
 
     def quantize(self, quantize_config):
         model = GPTQModel.load(self.NATIVE_MODEL_ID, quantize_config=quantize_config)
-        model.quantize(self.calibration_dataset, batch_size=1)
+        model.quantize(CalibrationConfig(dataset=self.calibration_dataset, batch_size=1))
         return model
 
     def assert_no_fused_engine_warning(self, warn):

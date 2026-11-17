@@ -14,12 +14,12 @@ from gptqmodel.adapter.adapter import Lora
 from gptqmodel.looper.eora_processor import EoraProcessor
 from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.loop_processor import (
-    CalibrationConfig,
     LoopProcessor,
     _ThreadSafeDict,
     _ThreadSafeInputCache,
 )
 from gptqmodel.looper.stage_subset import _collect_worker_results
+from gptqmodel.quantization.config import CalibrationConfig
 
 
 class _RecordingFuture:
@@ -78,7 +78,7 @@ def test_loop_processor_rejects_empty_calibration_before_prepare(monkeypatch, tm
         LoopProcessor(
             tokenizer=None,
             qcfg=MagicMock(),
-            calibration=CalibrationConfig(dataset=[], prepare_dataset=prepare_dataset_func),
+            calibration=CalibrationConfig(dataset=[]).bind(prepare_dataset_func),
         )
     prepare_dataset_func.assert_not_called()
 
@@ -103,10 +103,7 @@ def test_loop_processor_raises_when_prepare_empties_calibration(monkeypatch, tmp
         LoopProcessor(
             tokenizer=None,
             qcfg=MagicMock(),
-            calibration=CalibrationConfig(
-                dataset=[{"text": "hi"}],
-                prepare_dataset=lambda **kwargs: [],
-            ),
+            calibration=CalibrationConfig(dataset=[{"text": "hi"}]).bind(lambda **kwargs: []),
         )
 
 
@@ -122,10 +119,7 @@ def test_loop_processor_accepts_nonempty_prepared_calibration(monkeypatch, tmp_p
     processor = LoopProcessor(
         tokenizer=None,
         qcfg=MagicMock(),
-        calibration=CalibrationConfig(
-            dataset=[{"text": "a"}, {"text": "b"}],
-            prepare_dataset=lambda **kwargs: rows,
-        ),
+        calibration=CalibrationConfig(dataset=[{"text": "a"}, {"text": "b"}]).bind(lambda **kwargs: rows),
     )
 
     assert processor.num_batches == 2
@@ -160,7 +154,7 @@ def test_loop_processor_accepts_unsized_calibration_dataset(monkeypatch, tmp_pat
     processor = LoopProcessor(
         tokenizer=None,
         qcfg=MagicMock(),
-        calibration=CalibrationConfig(dataset=stream, prepare_dataset=prepare_dataset_func),
+        calibration=CalibrationConfig(dataset=stream).bind(prepare_dataset_func),
     )
 
     # The raw stream must reach prepare_dataset untouched instead of being
@@ -189,10 +183,7 @@ def test_loop_processor_accepts_hf_iterable_dataset(monkeypatch, tmp_path):
     processor = LoopProcessor(
         tokenizer=None,
         qcfg=MagicMock(),
-        calibration=CalibrationConfig(
-            dataset=stream,
-            prepare_dataset=MagicMock(return_value=rows),
-        ),
+        calibration=CalibrationConfig(dataset=stream).bind(MagicMock(return_value=rows)),
     )
 
     assert processor.num_batches == 2
@@ -214,10 +205,7 @@ def test_loop_processor_materializes_unsized_prepared_calibration(monkeypatch, t
     processor = LoopProcessor(
         tokenizer=None,
         qcfg=MagicMock(),
-        calibration=CalibrationConfig(
-            dataset=_UnsizedCalibrationStream([{"text": "a"}, {"text": "b"}]),
-            prepare_dataset=lambda **kwargs: (row for row in rows),
-        ),
+        calibration=CalibrationConfig(dataset=_UnsizedCalibrationStream([{"text": "a"}, {"text": "b"}])).bind(lambda **kwargs: (row for row in rows)),
     )
 
     assert processor.calibration_dataset == rows
@@ -234,10 +222,7 @@ def test_loop_processor_rejects_empty_unsized_calibration(monkeypatch, tmp_path)
         LoopProcessor(
             tokenizer=None,
             qcfg=MagicMock(),
-            calibration=CalibrationConfig(
-                dataset=_UnsizedCalibrationStream([]),
-                prepare_dataset=lambda **kwargs: [],
-            ),
+            calibration=CalibrationConfig(dataset=_UnsizedCalibrationStream([])).bind(lambda **kwargs: []),
         )
 
 

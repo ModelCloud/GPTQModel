@@ -18,6 +18,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.qqq import qqq_gemm, qqq_runtime_available, qqq_runtime_error
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 from ._runtime_cache import tensor_cache_key
 
 
@@ -163,6 +164,12 @@ def mul(
 
 
 class QQQLinear(GroupedQuantLinear):
+    # The native Marlin W4A8 `qqq_gemm` custom op has no fake impl and the
+    # per-call reduce scratch/locks allocation is host-side; the JIT extension
+    # is also unbuildable here (no CUDA toolkit). Static: EAGER.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
+
     SUPPORTS_BACKENDS = [BACKEND.QQQ]
     SUPPORTS_METHODS = [METHOD.QQQ]
     SUPPORTS_FORMATS = {FORMAT.QQQ: 100}
@@ -592,6 +599,20 @@ class QQQLinear(GroupedQuantLinear):
         x = (x / quant_scale).round().clamp(-128, 127).to(torch.int8)
         return x, quant_scale
 
+    def _split_k_locks(self, device) -> torch.Tensor:
+        """A fresh zeroed split-K lock array for one forward call.
+
+        ``qqq_gemm.cu`` spins on and resets these counters, so a single
+        per-module buffer lets two streams serving the same module corrupt each
+        other's counters and deadlock (#4665). EXL3 allocates its locks per
+        call for the same reason; this array is a few hundred int32 slots.
+        """
+        return torch.zeros(
+            _workspace_numel(self.out_features, self.max_par),
+            dtype=torch.int32,
+            device=device,
+        )
+
     def forward(self, A):
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
@@ -619,7 +640,7 @@ class QQQLinear(GroupedQuantLinear):
             s1, # s1
             self.s_channel, # s2
             self.s_group, # s3
-            self.workspace,
+            self._split_k_locks(A.device),
             max_par=self.max_par,
         )
 
@@ -638,6 +659,12 @@ class QQQLinear(GroupedQuantLinear):
 
 
 class QQQTorchLinear(QQQLinear):
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager, dynamo, aot_eager,
+    # inductor and reduce-overhead all pass. Explicit torch.cuda.graph capture
+    # fails: forward copies the CPU `_scale_perm_single_i` table to the device.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    SUPPORTS_GRAPH_CAPTURE = False
+
     SUPPORTS_BACKENDS = [BACKEND.QQQ_TORCH]
     SUPPORTS_METHODS = [METHOD.QQQ]
     SUPPORTS_FORMATS = {FORMAT.QQQ: 90}

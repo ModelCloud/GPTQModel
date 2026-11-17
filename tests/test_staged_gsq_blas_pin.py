@@ -14,6 +14,7 @@ from contextlib import contextmanager
 
 import gptqmodel.looper.gsq_training_model as gsq_model
 import gptqmodel.models.base as base_mod
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization import GPTQConfig
 from gptqmodel.utils.backend import BACKEND
@@ -72,13 +73,15 @@ def test_staged_gsq_gptq_runs_inside_deterministic_blas_pin(monkeypatch):
     calibration = [{"input_ids": [1, 2, 3]}]
 
     result = model.quantize(
-        calibration,
+        CalibrationConfig(
+            dataset=calibration,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
 
     assert result == {}
-    assert seen["calibration"] is calibration
+    assert seen["calibration"].dataset is calibration
     # The staged run must start inside the pin, not before or after it.
     assert seen["depth_at_call"] == 1
     assert [call["deterministic"] for call in entered] == [True]
@@ -103,7 +106,7 @@ def test_staged_gsq_pin_wraps_only_the_staged_run(monkeypatch):
     monkeypatch.setattr(base_mod, "_log_quantize_summary", lambda *args, **kwargs: None)
 
     model = _bare_model(_staged_gsq_config())
-    model.quantize([{"input_ids": [1, 2, 3]}], backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=[{"input_ids": [1, 2, 3]}], min_length=1), backend=BACKEND.TORCH)
 
     assert order == ["enter", "quantize", "exit"]
 

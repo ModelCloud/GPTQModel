@@ -356,6 +356,47 @@ the emitted block list (the compiler drops non-`!`/`?` flags from block names).
 | `gemma4_text` | `v_proj` | MHA configs pass v through a scale-free `v_norm` |
 | `minimax` (original) | both block norms | the normalized value is the residual |
 
+## MoE-root capture
+
+The routed-expert gate/up group reads the shared pre-router input of the
+declared `:moe` root, not the per-expert routed rows. `BaseQModel.awq_input_feature_aggregation`
+returns `capture_root` for every `ModulePlan.moe_roots()` template, and
+`AWQProcessor.preprocess` seeds an empty task for that root. The activation is
+recorded by a forward-pre-hook registered in `run_subset_stage`.
+
+The hook is resolved from the module plan, not from the optional
+`moe_lifecycle_hooks` object: the root input is a plain pointwise capture and
+does not need routing control. Before this, a definition without lifecycle
+hooks (Granite-MoE, gpt-oss, ERNIE-4.5-MoE, Gemma-4, DBRX-converted,
+Diffusion-Gemma, Kimi, Nemotron-H puzzle) left the root feature as `(0,)`.
+`awq_get_modules_for_scaling` then read `input_width = 0`, treated every expert
+as width-foreign, and dropped the whole gate/up group without a warning
+(#4697).
+
+```mermaid
+flowchart TD
+    A["awq_input_feature_aggregation<br/>plan.moe_roots()"] --> B["capture_root policy<br/>for the root template"]
+    B --> C["AWQProcessor.preprocess<br/>seed tasks root"]
+    D["run_subset_stage<br/>_model_module_plan(looper.gptq_model)"] --> E{"AWQ and layer has<br/>plan.is_expert?"}
+    E -- "yes" --> F["resolve layer-level root<br/>module.get_submodule(template)"]
+    F --> G["register_moe_root_capture_hook<br/>forward_pre_hook on root"]
+    E -- "no" --> H["no root hook"]
+    G --> I["record_moe_root_input_feature<br/>bounded token rows"]
+    I --> J["_layer_input_features<br/>aggregate root feature"]
+    J --> K{"awq_get_modules_for_scaling<br/>MoE gate/up block"}
+    K -- "root feature non-empty" --> L["group: norm -> experts gate/up<br/>plus declared consumers"]
+    K -- "root feature empty" --> M["warn and skip group<br/>experts stay on plain quantization"]
+    L --> N["AWQProcessor._quantize_layer<br/>apply_scale"]
+    style M fill:#fff3cd,stroke:#997404,stroke-width:2px
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Root hook source | `moe_lifecycle_hooks.get_moe_block_for_subset` only (`gptqmodel/looper/stage_subset.py`) | module-plan `moe_roots()` for AWQ, deduplicated against the lifecycle block |
+| Definitions without lifecycle hooks | root feature `(0,)`, gate/up group dropped silently | root feature captured, group emitted |
+| Empty root feature | width `0` treated every consumer as foreign; only `log.debug` | explicit `log.warning` names the root and the skipped group |
+| Nested roots (`mixer.experts`) | group builder reads a layer-level root feature | unchanged: the existing shared-expert feature fallback supplies the input |
+
 ## Before and after
 
 | Mechanism | Before | After |
@@ -622,6 +663,7 @@ Issue #4093 item coverage:
 | `tests/test_pangu_alpha_replay.py` | last layer replays `ln_f` + `custom_query`; GPTQ beats RTN on the top-query `q_proj` |
 | `tests/test_looped_decoder_capture.py` | Ouro captures 4 invocations, Nanbeige 2, per-loop cosine < 0.99 |
 | `tests/test_layer_module_coverage.py` | undeclared quantizable leaves are recorded and warned about |
+| `tests/test_awq_moe_root_capture_4697.py` | a real tiny Granite-MoE/gpt-oss quantize applies the routed-expert gate/up group from the declared root feature; an empty root warns instead of silently dropping the group |
 
 Issue #4121 item coverage:
 

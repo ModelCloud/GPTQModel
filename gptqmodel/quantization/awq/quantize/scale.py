@@ -315,6 +315,12 @@ def apply_scale(module, scales_list, input_feat_dict=None, consumer_map=None):
                 # Skip the modules that are not quantized
                 if layer_name in input_feat_dict:
                     inp = input_feat_dict[layer_name]
+                    if inp is None or inp.numel() == 0:
+                        # A starved member captured no rows: there is nothing to
+                        # divide. Its weights were still multiplied by the
+                        # folded scale, which is what keeps the layer equivalent
+                        # to the unscaled one (#4675).
+                        continue
                     previous_group = divided.get(id(inp))
                     if previous_group == group_index:
                         # A sibling in this group already applied the same scale.

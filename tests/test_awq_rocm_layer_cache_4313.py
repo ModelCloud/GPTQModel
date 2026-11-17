@@ -21,9 +21,8 @@ from torch import nn
 from gptqmodel import _alloc_conf
 from gptqmodel.looper import awq_processor as awq_processor_module
 from gptqmodel.looper.awq_processor import AWQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.quantization.awq.quantize import scale
-from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
+from gptqmodel.quantization.config import FORMAT, METHOD, CalibrationConfig, QuantizeConfig
 
 
 pytestmark = [pytest.mark.cpu]

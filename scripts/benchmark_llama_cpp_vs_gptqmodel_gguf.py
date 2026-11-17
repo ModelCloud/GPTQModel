@@ -19,6 +19,7 @@ from transformers import AutoTokenizer
 
 from gptqmodel import BACKEND, GGUFConfig, GPTQModel
 
+
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True,max_split_size_mb:256")
 
@@ -152,7 +153,6 @@ def _prepare_gptqmodel_quantized(source_model: Path, output_dir: Path, offload_d
         trust_remote_code=False,
     )
     model.quantize(
-        calibration=None,
         tokenizer=tokenizer,
         backend=BACKEND.GGUF_TORCH,
     )

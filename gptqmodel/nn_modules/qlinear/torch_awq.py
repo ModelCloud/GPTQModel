@@ -13,6 +13,7 @@ from ...quantization.awq.utils.packing_utils import dequantize_gemm, pack_awq
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
+from ._compile_support import COMPILE_LEVEL
 from ._numerics import linear_wide_bias, matmul_fp32_reduce
 from ._runtime_cache import tensor_cache_key
 
@@ -30,6 +31,17 @@ class AwqTorchLinear(AWQuantLinear):
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
+    # Measured, not assumed: the reporter of #4669 saw a static-cache
+    # `generate()` improve from 1.36 s to 0.76 s on Llama-3.2-1B (4090), and
+    # this host's tiny Llama fixture measured parity (0.167 s dynamic vs
+    # 0.155 s static steady state). The eager dequantize path is slow enough
+    # that compiling it is not a pessimization, unlike the custom-op kernels.
+    SUPPORTS_COMPILE = True
+    # Measured on NVIDIA GB10 (sm_121), torch 2.11.0+cu130: dynamo, aot_eager,
+    # inductor and reduce-overhead all pass. Eager CUDA-graph capture fails:
+    # dequantize_gemm builds its shift table with `torch.tensor([...], cuda)`.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    SUPPORTS_GRAPH_CAPTURE = False
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [8]
@@ -199,19 +211,23 @@ class AwqTorchLinear(AWQuantLinear):
         scales = self.scales
         if scales is None or scales.numel() == 0 or scales.device.type == "meta":
             return True
-        key = (tensor_cache_key(scales), dtype, self.bits)
-        if key == self._decode_range_key:
-            return self._decode_range_fits
 
         # A host-side value would become a data-dependent branch in a compiled
         # graph and cannot be read during CUDA graph capture. Keep the
         # conservative wide decode in both cases without caching the choice:
         # the graph re-reads the live scale tensor on every replay, and an
         # eager call after capture must still be allowed the narrow decode.
+        # The check must precede the cache key: `tensor_cache_key` reads
+        # `.is_inference()`/`data_ptr()` on the host, which dynamo rejects and
+        # a CUDA-graph capture cannot cross.
         if torch.compiler.is_compiling() or (
             scales.device.type == "cuda" and torch.cuda.is_current_stream_capturing()
         ):
             return False
+
+        key = (tensor_cache_key(scales), dtype, self.bits)
+        if key == self._decode_range_key:
+            return self._decode_range_fits
 
         # Check the actual cast the decoder will perform, in the decoder's
         # dtype: a scale that overflows, or a nonzero scale that rounds to
@@ -264,7 +280,7 @@ class AwqTorchLinear(AWQuantLinear):
     ) -> torch.Tensor:
         # `dequantize_gemm` multiplies the integer codes by the scales, so the
         # weight follows the temporary scale dtype. The Torch AWQ forward uses
-        # a half compute dtype, while ParoQuant's dense fallback can use FP32.
+        # a half compute dtype, while Paro's dense fallback can use FP32.
         # Keep FP32 scales in FP32 there: a half intermediate could underflow
         # or overflow before the finished weight is widened again.
         weight = dequantize_gemm(
@@ -392,7 +408,7 @@ class AwqTorchLinear(AWQuantLinear):
         # This is the portable/reference AWQ implementation.  Its arithmetic
         # must remain the dense dequantize + matmul oracle; the BF16-only
         # AVX512 path is selected explicitly through TorchCpuAvx512AwqLinear.
-        # Subclasses such as ParoQuant use the shared dequantize helper.
+        # Subclasses such as Paro use the shared dequantize helper.
         # The decode dtype follows the stored checkpoint range, not only the
         # activation dtype: narrowing an overflowing or underflowing weight
         # first produces `inf`/`0`, which no later FP32 reduction recovers.

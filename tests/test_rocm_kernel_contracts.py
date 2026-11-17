@@ -29,7 +29,7 @@ ROCM_KERNELS = set("""
     AllSparkLinear AllSparkAwqLinear AwqGEMMTritonLinear AwqGEMVTritonLinear
     GGUFTritonKernel TorchFP8Linear BitsAndBytesLinear
     TorchLinear TorchQuantEmbeddings AwqTorchLinear QQQTorchLinear
-    GGUFTorchLinear ParoLinear ParoQuantTritonLinear VPTQLinear NF12Linear
+    GGUFTorchLinear ParoLinear ParoTritonLinear VPTQLinear NF12Linear
     MacaqLinear MacaqTritonLinear
     TTBlockfloatLinear
 """.split())

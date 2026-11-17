@@ -19,7 +19,7 @@ Inside `quantize_deepseek.py`, configure the pool using the logical CUDA
 indices visible to that process (`cuda:0` and `cuda:1` in this example):
 
 ```python
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.quantization.config import VramStrategy
 
 model_id = "MODEL_REPO_OR_LOCAL_PATH"
@@ -32,11 +32,11 @@ quant_config = QuantizeConfig(
 )
 
 model = GPTQModel.load(model_id, quant_config, dtype="bfloat16")
-model.quantize(calibration_dataset)
+model.quantize(CalibrationConfig(dataset=calibration_dataset))
 model.save("DeepSeek-GPTQ-4bit")
 ```
 
-Provide `calibration_dataset` using the normal `model.quantize()` input format.
+Provide `calibration_dataset` in any format `CalibrationConfig.dataset` accepts.
 The dense model modules remain on the default exclusive strategy; balanced
 MoE placement distributes expert work across the selected devices. The Python
 runtime must be a free-threaded build and the GIL must actually be disabled;

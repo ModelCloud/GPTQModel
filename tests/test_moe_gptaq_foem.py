@@ -23,6 +23,7 @@ import pytest
 import torch
 from torch import nn
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.native_processor import NATIVE_INPUTS_STATE_KEY
 from gptqmodel.quantization.config import FOEMConfig, GPTAQConfig, QuantizeConfig
@@ -186,10 +187,12 @@ def _quantize_and_load(model_dir: Path, output_dir: Path, calibration, qcfg, dev
         dtype=dtype,
     )
     model.quantize(
-        calibration,
-        batch_size=batch_size,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=batch_size,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
     model.save(output_dir)
     return GPTQModel.load(str(output_dir), backend=BACKEND.TORCH, device=device)

@@ -3276,7 +3276,7 @@ class DeepSeekV4MTPQuantizationModel(DeepSeekV4QModel):
             raise ValueError("MTP replay batches do not accept a concat separator")
         if calibration_dataset_sort not in (None, "none"):
             raise ValueError(
-                "MTP replay order is immutable; calibration_sort must be None"
+                "MTP replay order is immutable; CalibrationConfig.sort must be None"
             )
         if batch_size != 1:
             raise ValueError(

@@ -120,7 +120,7 @@ except Exception:  # pragma: no cover - availability check
     def is_flash_attn_2_available():  # type: ignore
         return False
 
-from gptqmodel import BACKEND, DEBUG_ON, GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, DEBUG_ON, CalibrationConfig, GPTQModel  # noqa: E402
 from gptqmodel.looper.module_looper import StopMainLoop  # noqa: E402
 from gptqmodel.models.base import BaseQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
@@ -283,9 +283,9 @@ class ModelTest(unittest.TestCase):
     BNB_BLOCK_SIZE = None
     BNB_COMPRESS_STATISTICS = None
 
-    PAROQUANT_ROTATION_EPOCHS = None
-    PAROQUANT_FINETUNE_EPOCHS = None
-    PAROQUANT_TRAIN_SAMPLES = None
+    PARO_ROTATION_EPOCHS = None
+    PARO_FINETUNE_EPOCHS = None
+    PARO_TRAIN_SAMPLES = None
 
     SAVE_PATH = None  # default is temp folder
     SPLIT_BY: Optional[str] = None
@@ -1070,7 +1070,7 @@ class ModelTest(unittest.TestCase):
             compare_backends = (torch_backend,)
         elif format_family == FORMAT.EXL3:
             compare_backends = (self.LOAD_BACKEND,)
-        elif format_family in (FORMAT.PAROQUANT, FORMAT.VPTQ, FORMAT.MXFP4_MACAQ):
+        elif format_family in (FORMAT.PARO, FORMAT.VPTQ, FORMAT.MXFP4_MACAQ):
             compare_backends = (self.LOAD_BACKEND,)
         elif format_family == FORMAT.GPTQ:
             if self.LOAD_BACKEND == BACKEND.MARLIN:
@@ -1544,10 +1544,10 @@ class ModelTest(unittest.TestCase):
                 return ParoConfig(
                     bits=self.BITS,
                     method=METHOD.PARO,
-                    format=FORMAT.PAROQUANT,
-                    opt_rotation_epochs=self.PAROQUANT_ROTATION_EPOCHS,
-                    opt_finetune_epochs=self.PAROQUANT_FINETUNE_EPOCHS,
-                    opt_train_samples=self.PAROQUANT_TRAIN_SAMPLES,
+                    format=FORMAT.PARO,
+                    opt_rotation_epochs=self.PARO_ROTATION_EPOCHS,
+                    opt_finetune_epochs=self.PARO_FINETUNE_EPOCHS,
+                    opt_train_samples=self.PARO_TRAIN_SAMPLES,
                     adapter=self.EORA,
                     dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
                     dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,
@@ -1723,13 +1723,15 @@ class ModelTest(unittest.TestCase):
             temp_dir_context = None
             try:
                 model.quantize(
-                    calibration_dataset,
-                    calibration_concat_size=dataset_concat_size,
-                    calibration_concat_separator=self.DATASET_CONCAT_SEPARATOR,
-                    calibration_sort=self.DATASET_SORT,
+                    CalibrationConfig(
+                        dataset=calibration_dataset,
+                        concat_size=dataset_concat_size,
+                        concat_separator=self.DATASET_CONCAT_SEPARATOR,
+                        sort=self.DATASET_SORT,
+                        batch_size=batch_size,
+                        exclude_attention_sinks=self.EXCLUDE_ATTENTION_SINKS,
+                    ),
                     backend=self.QUANT_BACKEND,
-                    batch_size=batch_size,
-                    calibration_exclude_attention_sinks=self.EXCLUDE_ATTENTION_SINKS,
                 )
 
                 self.check_kernel(model, self.KERNEL_QUANT)

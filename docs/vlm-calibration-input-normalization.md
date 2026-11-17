@@ -18,14 +18,14 @@ batch finalization.
 
 ```mermaid
 flowchart TD
-    A["BaseQModel.quantize<br/>calibration options"] --> B["definition.prepare_dataset"]
+    A["BaseQModel.quantize<br/>CalibrationConfig"] --> B["definition.prepare_dataset"]
     B --> C["prepare_vlm_calibration_dataset"]
     C --> D["split_calibration_dataset"]
     D -->|"pre-tokenized rows / columnar mapping"| E["prepare_calibration_dataset<br/>base text path"]
     D -->|"mixed token ids + conversations"| F["ValueError:<br/>mixes pre-tokenized rows"]
     D -->|"multimodal columns in an input_ids row"| G["ValueError:<br/>non-text columns"]
     D -->|"chat conversations"| H["pop_conversation_calibration_options"]
-    H -->|"calibration_concat_size set"| I["ValueError:<br/>concat not supported"]
+    H -->|"CalibrationConfig.concat_size set"| I["ValueError:<br/>concat not supported"]
     H --> J["batched_conversations<br/>preprocess_func"]
     J --> K["prepare_inputs_for_conversations<br/>or prepare_conversations callback"]
     K --> L["finalize_conversation_batches<br/>sort / min_length / shuffle"]
@@ -96,7 +96,7 @@ load a multimodal processor at all.
 Before #4633, definitions added after #4228/#4308 copied the conversation loop
 and dropped the split. A `[{"input_ids": ...}]` dataset was rendered as an empty
 chat prompt or calibrated on the literal text `"input_ids"`, and
-`calibration_concat_size`/`sort`/`min_length` were silently discarded with
+`CalibrationConfig.concat_size`/`sort`/`min_length` were silently discarded with
 `del kwargs`.
 
 | Pre-fix location | Bypass | Now |
@@ -150,8 +150,8 @@ input and is out of scope.
 | columnar mapping (`tokenizer(texts)`) | calibrated on key names | unpacked into rows |
 | mixed token ids and conversations | silent corruption or late crash | `ValueError` naming the mix |
 | `input_ids` row plus `pixel_values` | tensors silently dropped | `ValueError` naming the columns |
-| `calibration_concat_size` with conversations | silently ignored | `ValueError` |
-| `calibration_dataset_sort` / `calibration_data_min_length` | silently ignored | applied |
+| `CalibrationConfig.concat_size` with conversations | silently ignored | `ValueError` |
+| `CalibrationConfig.sort` / `CalibrationConfig.min_length` | silently ignored | applied |
 | `Dataset.with_format("numpy")[:]` (object columns) | crash in tensor conversion | unpacked into rows |
 | `Dataset.with_format("pandas")[:]` / `DataFrame` | calibrated on the column labels | unpacked into rows, or rejected by definitions that cannot unpack |
 | unequal conversations at `batch_size > 1` | `ValueError` from `apply_chat_template` | `padding=True` on `support_batch_quantize=True` models |
@@ -164,7 +164,7 @@ and pins the contract with a stub tokenizer and a fail-closed processor loader:
 
 - pre-tokenized mapping rows keep their exact ids and masks;
 - a columnar mapping is unpacked instead of rendered as `"input_ids"`;
-- conversations reject `calibration_concat_size`;
+- conversations reject `CalibrationConfig.concat_size`;
 - `batch_size=2` pads unequal conversations for Cohere Compass and Inkling.
 
 A new VLM definition cannot skip the contract: adding an override puts it in the

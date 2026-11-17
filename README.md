@@ -69,7 +69,7 @@ compatible deployment engine.
 | **[GPTQ](https://github.com/ModelCloud/GPTQModel/wiki/GPTQ)** | Calibration-driven, low-bit weight quantization with mixed precision and broad checkpoint/runtime support. |
 | **[AWQ](https://github.com/ModelCloud/GPTQModel/wiki/AWQ)** | Activation-aware weight quantization, including dense and MoE workflows. |
 | **[RTN](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md#rtn-w4a16-without-calibration)** | Round-to-nearest weight quantization when a calibration-free baseline is useful. |
-| **[ParoQuant](https://github.com/ModelCloud/GPTQModel/wiki/ParoQuant)** | Low-bit weight quantization with learned rotations for accuracy recovery. [Affine fitting and optimization controls](docs/paroquant-optimization.md). [Fused rotation backward](docs/paroquant.md#fused-rotation-backward). |
+| **[Paro](https://github.com/ModelCloud/GPTQModel/wiki/ParoQuant)** | Low-bit weight quantization with learned rotations for accuracy recovery. [Affine fitting and optimization controls](docs/paro-optimization.md). [Fused rotation backward](docs/paro.md#fused-rotation-backward). |
 | **[MACaQ](https://github.com/ModelCloud/GPTQModel/blob/main/docs/macaq.md)** | Calibrated MXFP4 weights and activations, with native W4A4 inference and a W4A16 option. |
 | **[QQQ](https://github.com/ModelCloud/GPTQModel/wiki/QQQ)** | INT4 weights with dynamic INT8 activation quantization for W4A8 inference. |
 | **[GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF)** | Block-quantized checkpoints for GGUF-oriented workflows and native inference. [Torch fused dispatch](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-torch-fused-dispatch.md). [CPU zero-copy packed weights](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-kernel-selection.md#cpu-zero-copy-packed-weight). [mmap pages after the aligned copy](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-kernel-selection.md#mmap-pages-after-the-aligned-copy). [Checkpoint load policy](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-load-policy.md). |
@@ -143,13 +143,17 @@ Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kerne
   a block-diagonal per-document mask and keeps each row's original position;
   additive masks treat `0` as attended. See
   [AWQ calibration aggregation](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-calibration-aggregation.md).
+- **Resolve the rotary label from the attention.** AWQ scale search rebuilds
+  `position_embeddings` with the attention's own rope label and keeps a
+  per-rope-type mapping intact; see
+  [AWQ rotary replay selection](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-rotary-replay.md).
 - **Trim padding before the position budget.** Over-long calibration rows are
   measured on their real tokens, not their padded width, so a left-padded row
   cannot lose real tokens to its own padding. See
   [calibration row trimming](https://github.com/ModelCloud/GPTQModel/blob/main/docs/calibration-row-trimming.md).
 - **Keep VLM calibration rows intact.** Pre-tokenized rows (`input_ids`) take the
   base text path instead of a chat template, columnar mappings are unpacked, and
-  conversations reject `calibration_concat_size`. See
+  conversations reject `CalibrationConfig.concat_size`. See
   [VLM calibration input normalization](https://github.com/ModelCloud/GPTQModel/blob/main/docs/vlm-calibration-input-normalization.md).
 
 ### Inference and deployment 🚢
@@ -355,6 +359,9 @@ dropped quantization payloads; see
 [`docs/quantized-moe-resave-defuse.md`](docs/quantized-moe-resave-defuse.md).
 In-session QQQ kernel rehoming and cache initialization are documented in
 [docs/qqq-kernel-selection.md](docs/qqq-kernel-selection.md).
+QQQ's shared-memory staging of the per-group scales and the reduction-scratch
+ordering are documented in
+[docs/qqq-group-scale-staging.md](docs/qqq-group-scale-staging.md).
 Quantized modules load their scales and other quantization buffers at the dtype
 the checkpoint stores, whatever model dtype you request; see
 [checkpoint buffer dtype](docs/checkpoint-and-runtime-contracts.md#4-checkpoint-buffer-dtype).
@@ -367,7 +374,7 @@ settings affect the quality of the resulting model.
 
 ```python
 from datasets import load_dataset
-from gptqmodel import GPTQConfig, GPTQModel
+from gptqmodel import CalibrationConfig, GPTQConfig, GPTQModel
 
 dataset = load_dataset(
     "allenai/c4",
@@ -380,9 +387,15 @@ calibration = [row["text"] for row in dataset.take(256)]
 model = GPTQModel.load(
     "Qwen/Qwen3-0.6B", GPTQConfig(bits=4, group_size=128),
 )
-model.quantize(calibration, batch_size=1)
+model.quantize(CalibrationConfig(dataset=calibration, batch_size=1))
 model.save("Qwen3-0.6B-GPTQ-4bit")
 ```
+
+`quantize()` takes every calibration choice in one `CalibrationConfig`: `dataset`,
+`concat_size`, `sort` (`"desc"`), `batch_size` (`1`), `min_length` (`10`),
+`concat_separator`, `exclude_attention_sinks` (`False`) and the EoRA
+`adapter_dataset`. See
+[the calibration API](https://github.com/ModelCloud/GPTQModel/blob/main/docs/calibration-config.md).
 
 The [end-to-end guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md) covers other methods,
 calibration, saving, reloading, and validation.
@@ -497,7 +510,7 @@ details are available in the [citation reference](https://github.com/ModelCloud/
 | GPT-QModel | ModelCloud.ai and contributors | [Project](https://github.com/ModelCloud/GPTQModel) |
 | [GPTQ](https://github.com/ModelCloud/GPTQModel/wiki/GPTQ) | Elias Frantar et al., IST-DASLab | [Paper](https://arxiv.org/abs/2210.17323) |
 | [AWQ](https://github.com/ModelCloud/GPTQModel/wiki/AWQ) | Ji Lin et al. | [Paper](https://arxiv.org/abs/2306.00978) |
-| [ParoQuant](https://github.com/ModelCloud/GPTQModel/wiki/ParoQuant) | Yesheng Liang et al., Z-Lab | [Paper](https://openreview.net/forum?id=1USeVjsKau) · [Code](https://github.com/z-lab/paroquant) |
+| [Paro](https://github.com/ModelCloud/GPTQModel/wiki/ParoQuant) | Yesheng Liang et al., Z-Lab | [Paper](https://openreview.net/forum?id=1USeVjsKau) · [Code](https://github.com/z-lab/paroquant) |
 | [MACaQ](https://github.com/ModelCloud/GPTQModel/blob/main/docs/macaq.md) | Lorenz K. Muller et al., Huawei CSL | [Paper](https://arxiv.org/abs/2611.10649) · [Code](https://github.com/huawei-csl/MACaQ) |
 | [QQQ](https://github.com/ModelCloud/GPTQModel/wiki/QQQ) | Ying Zhang et al., Meituan | [Paper](https://arxiv.org/abs/2406.09904) |
 | [VPTQ](https://github.com/ModelCloud/GPTQModel/wiki/VPTQ) | Yifei Liu et al., Microsoft | [Paper](https://arxiv.org/abs/2409.17066) · [Code](https://github.com/microsoft/VPTQ) |

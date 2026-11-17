@@ -25,6 +25,7 @@ from ...utils.backend import BACKEND
 from ...utils.kernel import resolve_kernel_config
 from ...utils.packing_math import scale_to_storage_dtype
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 
 
 def _awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum: bool = None, kernel=None):
@@ -210,6 +211,12 @@ class AwqGEMMLinear(AWQuantLinear):
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemm"
+
+    # Calls the native AWQ GEMM custom op (no fake/meta kernel), so dynamo
+    # breaks. The JIT extension could not build on this host (no
+    # CUDA_HOME/nvcc); EAGER is the conservative static answer.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
