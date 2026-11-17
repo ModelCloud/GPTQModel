@@ -256,7 +256,8 @@ print(model.tokenizer.decode(tokens))
 
 [Loading and inference](https://github.com/ModelCloud/GPTQModel/wiki/Loading-and-Inference)
 covers backend selection, generation, and adapters. GPT-QModel targets
-Transformers 5. Model definitions use native Transformers implementations or
+Transformers 5.23.0 or newer and requires Python 3.11 or newer. Model definitions
+use native Transformers implementations or
 local modeling code shipped with GPT-QModel; local ports always ignore
 checkpoint `auto_map`. Executing unsupported checkpoint Python requires both
 `trust_remote_code=True` and the existing `GPTQ_BYPASS_SAFETY_CHECKS=1` security
@@ -268,6 +269,9 @@ cover the package-owned GQA/MLA/recurrent variants and their qualification limit
 documents partition selection, cache ownership and plain AWQ qualification.
 [DeepSeek V2/V3/V4/VL2, Kimi-K2, Deci/Nemotron-NAS, DBRX, Dream, native ERNIE MoE and EXAONE 4/4.5](docs/transformers5-model-ports.md#native-bridges-sparse-decoders-and-diffusion)
 have model-specific compatibility boundaries, source references and CPU validation.
+[GRIN-MoE, Instella, EXAONE 3 and both ERNIE VL aliases](docs/transformers5-model-ports.md#grin-moe-instella-exaone-3-and-ernie-vl-selection)
+use package-selected implementations with explicit plain AWQ policies; the
+reference records processor selection, cache failure behavior and provenance.
 Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
 Re-saving a loaded fused-expert MoE defuses the export shell and fails closed on

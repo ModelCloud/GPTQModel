@@ -751,7 +751,7 @@
     },
     "ernie4_5_moe_vl": {
       "definition": "Ernie4_5_VLMoeQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned native ERNIE VL legacy alias; QKV executor admission has not been qualified for this alias."
     },
     "ernie4_5_vl_moe": {
       "definition": "Ernie4_5_VLMoeQModel",
@@ -2119,7 +2119,7 @@
     },
     "grinmoe": {
       "definition": "GrinMoeQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned GRIN-MoE implementation; attention and SparseMixer expert fusion have not been qualified."
     },
     "helium": {
       "definition": "LlamaQModel",
@@ -2500,7 +2500,7 @@
     },
     "instella": {
       "definition": "InstellaQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned Instella implementation; full-width Q/K normalization and projection fusion have not been qualified."
     },
     "intern_s2_preview": {
       "definition": "InternS2PreviewQModel",

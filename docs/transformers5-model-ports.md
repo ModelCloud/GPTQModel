@@ -1,5 +1,10 @@
 # GPT-QModel Transformers 5 model ports
 
+GPT-QModel requires `transformers>=5.23.0`, the latest stable release when this
+migration was qualified. Transformers 5.23.0 requires Python 3.11 or newer;
+the project's Python requirement follows that floor. Transformers 4.x and
+older Transformers 5 releases are outside this dependency contract.
+
 Definitions select package-owned implementations through `LocalModelLoader`.
 Checkpoint `auto_map`, API trust, and the safety bypass cannot replace these
 config/model classes. See [implementation selection](trust-remote-code-isolation.md)
@@ -21,6 +26,10 @@ definition ownership corrections alongside the package-owned ports.
 | `CodeGenQModel` / `codegen` | [CodeGen/CodeGen2 partition and checkpoint provenance](../gptqmodel/models/ports/codegen/PROVENANCE.md); native four partitions, package-owned eight partitions | Independent per-head equations, exact native four-partition parity, legacy metadata/mask validation, cache/generation, FP32/FP16/BF16 safetensors reload, public hostile metadata matrix and full-size meta ownership | Actual plain quantization of all four decoder linears; no scale groups | No trained multi-GB/GPU accuracy, packed quantized reload or multi-GPU concurrency qualification; ambiguous legacy metadata requires explicit `qkv_layout` |
 | `DbrxConvertedQModel` / `dbrx_converted` | [Converted DBRX sources, Databricks license and cache/mask lifecycle](../gptqmodel/models/ports/dbrx_converted/PROVENANCE.md) | Both pinned 2203-key indexes match full meta state; independent FP32/FP16/BF16 equations, failed decoder/head/loss cache invalidation and reset/retry, physical-position static padding masks, beam generation, hostile metadata isolation and safetensors reload | Public CPU plain-AWQ quantize/pack/save/reload of all 26 tiny linears; routers and norms stay dense | Cache failure requires reset and full-prefix refill; arbitrary 4D masks unsupported for router loss; eager only, no GPU, trained 132B quality, compilation, SDPA/FlashAttention or fusion qualification |
 | `Ernie4_5_MoeQModel` / `ernie4_5_moe` | [Native Transformers 5.23 selection and checkpoint ownership](../gptqmodel/models/ports/ernie4_5_moe/README.md) | Pinned 5504-key checkpoint index, numbered/native expert conversion, dense router-statistics ownership, cache/generation, hostile metadata isolation, and FP16/BF16 exact-FP32 router reload | Actual CPU plain-AWQ quantize/pack/reload of 23 projections; no scale groups | Native MTP remains excluded; no GPU, trained 21B, non-dynamic cache or fusion qualification |
+| `Ernie4_5_VLMoeQModel` / `ernie4_5_moe_vl`, `ernie4_5_vl_moe` | [Native ERNIE VL, legacy metadata, processor and font provenance](../gptqmodel/models/ports/ernie4_5_vl_moe/README.md) | Dense/sparse/mixed layouts, native expert conversion, actual image/video preprocessing and forwards, processor reuse, generation, safetensors reload and hostile metadata isolation | Actual CPU plain AWQ packs 7 dense or 19 sparse linears; no scale groups | Requires Tokenicer 0.0.17 changes; no trained 28B, GPU, long-context or legacy-alias fusion qualification |
+| `ExaOneQModel` / `exaone` | [EXAONE 3.0/3.5 source and rollback flow](../gptqmodel/models/ports/exaone/PROVENANCE.md), [validation](../gptqmodel/models/ports/exaone/VALIDATION.md) | Published 3.0/3.5 meta/index layouts, independent six-mode RoPE oracle, MHA/GQA/MQA, static/dynamic cache rollback through LM output, greedy/beam generation and safetensors reload | Public CPU plain-AWQ calibration/packing/save/reload of 14 tiny linears; no scale groups | No trained-checkpoint quality, GPU, FlashAttention or fusion qualification; unsupported cache layers/offloading rejected |
+| `GrinMoeQModel` / `grinmoe` | [Pinned Microsoft GRIN-MoE source and SparseMixer flow](../gptqmodel/models/ports/grinmoe/PROVENANCE.md), [validation](../gptqmodel/models/ports/grinmoe/VALIDATION.md) | Exact 1957-key published meta schema, independent routing/attention equations, inspected source parity, cache/generation, dense/packed safetensors reload and public hostile metadata matrix | Actual CPU plain AWQ packs every supported projection; norms/router unchanged; no scale groups | Native dynamic cache only; eager and SDPA retain distinct source window semantics; no GPU, trained-checkpoint quality or fusion qualification |
+| `InstellaQModel` / `instella` | [Pinned AMD Instella source](../gptqmodel/models/ports/instella/PROVENANCE.md), [selection and qualification](../gptqmodel/models/ports/instella/COVERAGE.md) | Exact 399-key published meta schema, full-width Q/K norms, MHA/GQA/MQA, eager/SDPA low-precision forwards, static/dynamic cache, generation, scaled-RoPE reload and hostile metadata isolation | Actual CPU plain AWQ packs seven decoder linears; Q/K norms stay dense; no scale groups | Research-only RAIL-MS source terms retained; failed cache needs reset; no trained 3B, GPU, FlashAttention or fusion qualification |
 | `Exaone4QModel`, `Exaone4_5QModel` / `exaone4`, `exaone4_5_text`, `exaone4_5` | [Native text/vision alias, checkpoint schemas and flow](../gptqmodel/models/ports/exaone4/README.md) | Published 707/1064-key reduced index contracts, MHA/GQA, cache/generation, image/video processor input, hostile metadata isolation and safetensors reload | Actual CPU plain-AWQ quantization of decoder linears; no scale groups | Native MTP omitted; no trained-checkpoint quality, GPU packed kernels or fusion qualification |
 | `BailingMoeQModel` / `bailing_moe`, `bailing_hybrid` | [Ling dense/MLA/hybrid/MTP provenance](../gptqmodel/models/ports/bailing_moe/README.md) | Three full meta indexes; dense GQA, normalized heads, low-rank/dense-query MLA, recurrence, MTP replay, generation, safetensors reload and head/loss failure-reset coverage | Actual CPU plain quantization/packing/inference; no scale groups | No GPU, trained evaluation, fused FLA or full public quantize/save/load qualification |
 | `ApertusQModel`, `Apertus1p5TextQModel`, `Apertus1p5QModel` / `apertus`, `apertus1p5_text`, `apertus1p5` | [Native Apertus and package-owned 1.5 text/multimodal qualification](../gptqmodel/models/ports/apertus/README.md); pinned Apache-2.0 Swiss AI fork | Native text oracle; full/pruned output vocabularies, bias/activation variants, live CPU/meta ownership, eager/decoder-SDPA cache/generation and safetensors reload, actual image/audio processor and embedding splice, public hostile metadata matrix | Actual CPU plain quantization of every decoder projection across layouts, including failure/retry; no scale folding/search | Official gated checkpoint returned HTTP 401: no trained weights, official tokenizer/chat template or checkpoint key audit; no GPU/FlashAttention/CUDA xIELU, packed GPTQ/AWQ roundtrip or fusion qualification; vision attention remains the source's fixed implementation |
@@ -177,8 +186,103 @@ flowchart TD
 The exact model plans and license/weight-provenance boundaries are recorded in
 the linked per-model references above. CPU/meta qualification and plain-AWQ
 policy vary by family; these checks do not establish GPU or trained-checkpoint
-accuracy. DeepSeek V2 router/cache/dtype follow-up is in progress and must
-pass its failure/retry regressions before those paths can be called qualified.
+accuracy. DeepSeek V2's normalized router now computes FP32 selected
+probabilities without the redundant scaling that overflowed at extreme finite
+factors. Derived rotary frequencies are regenerated in FP32 from native config
+after casts and reloads. Its continuation and failure contract is shown below.
+
+```mermaid
+flowchart TD
+    A["DeepseekV2Model.forward: past_key_values"] --> B{"_fork_cache: supported native cache?"}
+    B -->|unsupported type or offloading| X[TypeError before decoder]
+    B -->|incomplete or nonuniform prefix| Y[ValueError before decoder]
+    B -->|supported| C[Copy cache and layer metadata; retain prefix tensors]
+    B -->|None| D["Native forward: optional new DynamicCache"]
+    C --> D
+    D --> E["Native DynamicLayer.update: new concatenated tensors"]
+    E --> F[Decoder output; native CausalLM head and loss]
+    E -->|decoder fails| G[Propagate error; caller prefix unchanged]
+    F -->|head or loss fails| G
+    F -->|success| H[Public output carries continuation cache]
+    H --> I["Caller continues with outputs.past_key_values"]
+    G --> J[Retry suffix with original caller prefix]
+    classDef failure fill:#fee,stroke:#b00
+    class X,Y,G failure
+```
+
+Only ordinary non-offloaded native `DynamicCache`/`DynamicLayer` prefixes are
+supported here. This differs from EXAONE 3, which supports native dynamic and
+static layers and restores the caller cache on a failed write, and Instella,
+which requires resetting a cache after decoder failure. See the respective
+port references for exact cache contracts and before/after source lines.
+
+## GRIN-MoE, Instella, EXAONE 3 and ERNIE VL selection
+
+GRIN-MoE, Instella and EXAONE 3 have no exact native Transformers 5.23 mapping.
+Their definitions select the package-owned config and model. Both ERNIE VL
+aliases select package adapters for configuration and processing around the
+exact native model; the adapters translate legacy JSON and never import its
+checkpoint decoder hook. All four families explicitly use plain AWQ.
+
+```mermaid
+flowchart TD
+    A["load_model_config / local_model_loader"] --> B{MODEL_MAP definition}
+    B -->|grinmoe| G["GRINMoEConfig / GRINMoEForCausalLM"]
+    G --> G1{DynamicCache and complete mask lengths?}
+    G1 -->|valid| G2[GQA, RoPE, LayerNorm and SparseMixer]
+    G1 -->|invalid| X[Error before KV update]
+    B -->|instella| I["InstellaConfig / InstellaForCausalLM"]
+    I --> I1["Full-width Q/K normalization before head reshape"]
+    I1 --> I2[Original, linear or dynamic NTK RoPE]
+    B -->|exaone| E["ExaoneConfig / ExaoneForCausalLM"]
+    E --> E1{Supported native cache and mask?}
+    E1 -->|invalid| Y[Error before cache mutation]
+    E1 -->|valid| E2[Snapshot cache metadata and static write window]
+    E2 --> E3[Decoder, LM head, loss and output encoding]
+    E3 -->|failure| Z[Restore caller cache and re-raise]
+    E3 -->|success| E4[Return continuation]
+    B -->|both ERNIE VL aliases| V["ErnieVLConfig.from_dict"]
+    V --> V1{Legacy flat or native nested JSON?}
+    V1 -->|flat| V2[_legacy_text_config]
+    V1 -->|nested| V3[Native Ernie4_5_VLMoeConfig]
+    V2 --> V3
+    V -->|incompatible expert counts or modality schedule| C["ValueError: correct metadata and retry"]
+    V3 --> V4[Native Ernie4_5_VLMoeForConditionalGeneration]
+    V4 --> V5["ErnieVLProcessor: native media components and packaged font"]
+    V5 --> V6["load_hf_tokenizer: Tokenicer ERNIE normalization"]
+    V6 --> V7["Calibration reuses self.processor"]
+    V5 -->|invalid media or tokenizer assets| C
+    B --> Q[awq_get_modules_for_scaling returns no groups]
+    Q --> P[AWQProcessor plain quantization and packing]
+    T[Checkpoint auto_map and trust toggles] -. cannot replace package selection .-> B
+    classDef failure fill:#fee,stroke:#b00
+    class X,Y,Z,C failure
+```
+
+| Mechanism | Before | Shipped behavior |
+| --- | --- | --- |
+| GRIN-MoE selection | Base `22bea1201`, `definitions/grinmoe.py:11-12`: remote trust and inherited auto loader | `GrinMoeQModel.loader` selects package config/model; explicit empty AWQ groups preserve plain quantization |
+| Instella selection and norms | Base `22bea1201`, `definitions/instella.py:12,25`: remote loader and omitted Q/K norms | `InstellaQModel.loader` owns selection; `module_tree` includes non-quantized full-width Q/K norms before projections |
+| EXAONE 3 selection | Base `22bea1201`, `definitions/exaone.py:10-11`: checkpoint Python required | `ExaOneQModel.loader` selects package config/model; `_rollback_cache_on_error` protects decoder/head/loss/output failures |
+| ERNIE VL model and processor | Base `22bea1201`, `definitions/ernie4_5_vl_moe.py:28,397-398,419-427`: auto model/processor and dynamic decoder import | Package config/model/processor selection, native model re-export, no decoder hook, selected processor reused for calibration |
+| DeepSeek V2 continuation | Base `da3ecd85c`, `ports/deepseek_v2/modeling_deepseek_v2.py:102-132`: inherited forward mutated caller prefix | `_fork_cache` isolates metadata and native concatenation replaces tensors; only returned `past_key_values` carries the continuation |
+
+ERNIE VL uses a packaged Roboto font for native video timestamps. Its bytes
+match pinned upstream SHA-256
+`56a45233d29f11b4dfb86d248e921939d115778f87325e7ae8cc108383d6664d`;
+the source distribution includes `*.ttf`, licenses and notices. Native ERNIE
+tokenizer normalization requires the changes in
+[Tokenicer PR 64](https://github.com/ModelCloud/Tokenicer/pull/64), version
+0.0.17. This prerequisite is not a claim that the dependency has been released.
+
+The combined CPU port, module-plan, AWQ, loader, processor and security batch
+passed **1173 tests with 14 skips** in 60.14 seconds on Transformers 5.23.0,
+Torch 2.15.0+cpu and Python 3.14.6t (`PYTHON_GIL=0`). This batch covers the
+four families above and the DeepSeek V2 follow-up; it does not establish
+accelerator kernels, trained-weight quality or all-registry leaf coverage.
+The related fusion inventory, registry and AWQ-family batch passed 674 tests
+with 477 skips; unavailable NVIDIA kernels and unrelated optional fixtures
+remain unqualified.
 
 Run the InternLM checks from the repository root:
 

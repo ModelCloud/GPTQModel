@@ -226,7 +226,7 @@ layout alone does not authorize it.
 | `deepseek_v4` | `DeepSeekV4QModel` | Native sliding/compressed attention and hash/routed experts have no independently qualified fused executor. |
 | `deepseek_vl_v2` | `DeepSeekVLV2QModel` | Dense/MLA attention and routed/shared-expert native fusion are not independently qualified; fusion remains disabled. |
 | `dream` | `DreamQModel` | Bidirectional diffusion attention and gated MLP have no qualified fused executor. |
-| `ernie4_5_moe_vl` | `Ernie4_5_VLMoeQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `ernie4_5_moe_vl` | `Ernie4_5_VLMoeQModel` | Package-owned native ERNIE VL legacy alias; QKV executor admission has not been qualified for this alias. |
 | `exaone` | `ExaOneQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `exaone4_5_text` | `Exaone4QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `falcon` | `RwgQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
@@ -242,9 +242,9 @@ layout alone does not authorize it.
 | `gpt_bigcode` | `GptBigCodeQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `gpt_neox` | `GPTNeoXQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `gpt_pangu` | `PanguAlphaQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `grinmoe` | `GrinMoeQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `grinmoe` | `GrinMoeQModel` | Package-owned GRIN-MoE implementation; attention and SparseMixer expert fusion have not been qualified. |
 | `hymba` | `HymbaQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `instella` | `InstellaQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `instella` | `InstellaQModel` | Package-owned Instella implementation; full-width Q/K normalization and projection fusion have not been qualified. |
 | `intern_s2_preview` | `InternS2PreviewQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `internlm` | `InternLMQModel` | Package-owned InternLM 1 port; fusion executor has not been qualified. |
 | `internlm2` | `InternLM2QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
