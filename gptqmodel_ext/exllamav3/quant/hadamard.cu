@@ -112,6 +112,26 @@ void had_r_128
     int rows = input.size(0);
     int cols = input.size(1);
 
+    if (rows == 0)
+    {
+        // A zero-row batch would launch a zero-sized grid, which the CUDA/HIP
+        // runtime rejects. Keep dtype validation identical for empty operands
+        // and return the caller's empty output before the launch.
+        if (input.dtype() == at::kHalf)
+        {
+            TORCH_CHECK_DTYPE(output, kHalf);
+        }
+        else if (input.dtype() == at::kFloat)
+        {
+            TORCH_CHECK_DTYPE(output, kFloat);
+        }
+        else
+        {
+            TORCH_CHECK(false, "unsupported datatype");
+        }
+        return;
+    }
+
     int blocks = cols / 128;
     float r_scale = scale * 0.088388347648f; // scale / sqrt(128)
 
@@ -176,6 +196,28 @@ void had_r_128_dual
     TORCH_CHECK(output2.is_contiguous(), "had_r_128_dual requires a contiguous output2");
     int rows = input1.size(0);
     int cols = input1.size(1);
+
+    if (rows == 0)
+    {
+        // A zero-row batch would launch a zero-sized grid, which the CUDA/HIP
+        // runtime rejects. Keep dtype validation identical for empty operands
+        // and return the caller's empty outputs before the launch.
+        if (input1.dtype() == at::kHalf)
+        {
+            TORCH_CHECK_DTYPE(output1, kHalf);
+            TORCH_CHECK_DTYPE(output2, kHalf);
+        }
+        else if (input1.dtype() == at::kFloat)
+        {
+            TORCH_CHECK_DTYPE(output1, kFloat);
+            TORCH_CHECK_DTYPE(output2, kFloat);
+        }
+        else
+        {
+            TORCH_CHECK(false, "unsupported datatype");
+        }
+        return;
+    }
 
     int blocks = cols / 128;
     float r_scale = scale * 0.088388347648f; // scale / sqrt(128)
