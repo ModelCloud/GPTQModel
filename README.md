@@ -151,6 +151,11 @@ Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kerne
   measured on their real tokens, not their padded width, so a left-padded row
   cannot lose real tokens to its own padding. See
   [calibration row trimming](https://github.com/ModelCloud/GPTQModel/blob/main/docs/calibration-row-trimming.md).
+- **Pack before filtering when concatenating.** With `concat_size` set, the
+  per-row minimum-length filter and position trim run on the packed windows
+  instead, so short documents are combined rather than discarded and a long
+  document is not cut before it is windowed. See
+  [calibration row trimming](https://github.com/ModelCloud/GPTQModel/blob/main/docs/calibration-row-trimming.md#concat_size-reverses-the-order-pack-then-filter).
 - **Keep VLM calibration rows intact.** Pre-tokenized rows (`input_ids`) take the
   base text path instead of a chat template, columnar mappings are unpacked, and
   conversations reject `CalibrationConfig.concat_size`. See
