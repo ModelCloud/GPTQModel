@@ -261,15 +261,8 @@ def test_invalid_inputs_fail_then_same_model_retries_with_cache():
 
 
 def write_tokenizer(path):
-    from tokenizers import Tokenizer
-    from tokenizers.models import WordLevel
-    from transformers import PreTrainedTokenizerFast
-
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=Tokenizer(WordLevel({"[PAD]": 0, "[BOS]": 1, "[EOS]": 2, "hello": 3, "[UNK]": 4}, unk_token="[UNK]")),
-        pad_token="[PAD]", bos_token="[BOS]", eos_token="[EOS]", unk_token="[UNK]",
-    )
-    tokenizer.save_pretrained(path)
+    from tests.test_internlm_tokenizers_local_port import copy_release_assets
+    copy_release_assets(path)
 
 
 @pytest.mark.parametrize("trust", [False, True])
