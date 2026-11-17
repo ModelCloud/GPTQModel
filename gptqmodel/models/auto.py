@@ -11,6 +11,7 @@ from contextlib import contextmanager
 
 from .._alloc_conf import apply_default_alloc_conf
 from ..utils.logger import setup_logger
+from ..utils.quant_metadata import describe_unsupported_metadata, find_unsupported_metadata
 
 log = setup_logger()
 
@@ -485,33 +486,10 @@ MODEL_MAP_CASEFOLD = {
 }
 
 
-def _activation_quantization_mode(quantization_config: dict) -> Optional[str]:
-    """Return the first activation-quantization field that makes this config unsupported.
+def _unsupported_quantization_metadata(quantization_config: dict):
+    """Return the first unsupported quantization feature in this payload."""
 
-    GPT-QModel can load weight-only quantized checkpoints through the Transformers
-    surface, but it does not currently implement activation-quantized runtime
-    semantics. This helper keeps the rejection logic in one place for both
-    ModelOpt-style grouped configs and flatter HF quantization payloads.
-    """
-
-    config_groups = quantization_config.get("config_groups")
-    if isinstance(config_groups, dict):
-        for group_cfg in config_groups.values():
-            if not isinstance(group_cfg, dict):
-                continue
-            input_activations = group_cfg.get("input_activations")
-            if isinstance(input_activations, dict) and input_activations:
-                return "input_activations"
-
-    kv_cache_scheme = quantization_config.get("kv_cache_scheme")
-    if isinstance(kv_cache_scheme, dict) and kv_cache_scheme:
-        return "kv_cache_scheme"
-
-    for key in ("input_activations", "activation_quantization", "activations"):
-        value = quantization_config.get(key)
-        if isinstance(value, dict) and value:
-            return key
-    return None
+    return find_unsupported_metadata(quantization_config)
 
 
 def _is_supported_quantization_config(config: AutoConfig) -> bool:
@@ -519,15 +497,13 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
     if not isinstance(quantization_config, dict):
         return False
 
-    # Fail fast before model selection so activation-quantized checkpoints do
-    # not accidentally proceed down a weight-only loader path.
-    unsupported_mode = _activation_quantization_mode(quantization_config)
-    if unsupported_mode is not None:
-        log.error("GPT-QModel currently does not support loading of activation quantized models")
-        raise ValueError(
-            "GPT-QModel currently does not support loading of activation quantized models. "
-            f"Detected unsupported metadata: {unsupported_mode}."
-        )
+    # Fail fast before model selection so checkpoints that expect activation or
+    # KV-cache quantization do not proceed down a weight-only loader path.
+    unsupported = _unsupported_quantization_metadata(quantization_config)
+    if unsupported is not None:
+        message = describe_unsupported_metadata(unsupported)
+        log.error(message)
+        raise ValueError(message)
 
     quant_format = quantization_config.get("quant_format")
     if isinstance(quant_format, str) and quant_format.lower() in (
