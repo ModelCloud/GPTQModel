@@ -156,8 +156,10 @@ if TYPE_CHECKING:
 # Processor steps whose quantization GEMMs must run on rocBLAS to be
 # reproducible across processes (issues #4075, #4092, #4123, #4460).
 #
-# GPTQ, QQQ, VPTQ, MACaQ and calibrated FP8 GSQ accumulate an input
+# GPTQ, QQQ, VPTQ, MACaQ, calibrated FP8 GSQ and EoRA accumulate an input
 # Hessian/Gram from the calibration activations; EXL3 reuses GPTQ's capture.
+# EoRA runs after the primary, so an AWQ + EoRA plan would otherwise keep its
+# adapter Gram on hipBLASLt and produce a different adapter per process (#4614).
 # ParoQuant accumulates no Hessian, but its rotation optimization runs
 # fp16/bf16 GEMMs and hipBLASLt selects kernels per process, so two runs with
 # the same seed produced different checkpoints (21.26 vs 21.44 PPL on ROCm).
@@ -171,6 +173,7 @@ _DETERMINISTIC_BLAS_PROCESSOR_STEPS = frozenset({
     ProcessorStep.PARO,
     ProcessorStep.EXL3,
     ProcessorStep.FP8_GSQ,
+    ProcessorStep.EORA,
 })
 
 
@@ -180,6 +183,8 @@ def _needs_deterministic_hessian(run_plan: QuantizationRunPlan) -> bool:
     The name predates ParoQuant: the original set accumulated an input
     Hessian/Gram. ParoQuant is included because hipBLASLt chooses GEMM kernels
     per process, which made checkpoints from identical seeded runs differ.
+    EoRA is included for its own fp32 input Gram and `eigh`; without it an
+    AWQ + EoRA plan produced a different adapter in every process (#4614).
     """
 
     return not _DETERMINISTIC_BLAS_PROCESSOR_STEPS.isdisjoint(run_plan.processors)
