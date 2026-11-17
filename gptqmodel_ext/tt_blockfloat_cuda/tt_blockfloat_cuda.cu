@@ -50,6 +50,11 @@ __device__ __forceinline__ int floor_log2_exact(float x) {
   return e < -126 ? -126 : e;
 }
 
+// Shared exponents the int8 field can store.  One step beyond either end is an
+// infinity (``2**128``) or a non-normal scale, not a grid point.
+constexpr int kExponentMin = -127;
+constexpr int kExponentMax = 127;
+
 // ---------------------------------------------------------------------------
 // Element type helpers
 // ---------------------------------------------------------------------------
@@ -225,14 +230,22 @@ __global__ void quantize_kernel(const float* __restrict__ x, int64_t rows, int64
 #pragma unroll
   for (int i = 0; i < BLOCK; ++i) unit[i] = block[i] / base_scale;
 
+  // Candidate 0 is taken unconditionally: near FLT_MAX every candidate's
+  // squared error overflows to inf, so a strict comparison against the initial
+  // inf would leave ``best_code`` uninitialised.  A neighbour outside the
+  // storable exponent range has no representable scale (``2**128`` is inf, and
+  // ``0 * inf`` is NaN), so it is rejected before its error is compared -- a
+  // NaN error must never decide the winner.
   int best_exp = base;
-  float best_err = CUDART_INF_F;
+  float best_err = 0.0f;
   int best_code[BLOCK];
+#pragma unroll
+  for (int i = 0; i < BLOCK; ++i) best_code[i] = 0;
   const int deltas[3] = {0, -1, 1};
 #pragma unroll
   for (int t = 0; t < 3; ++t) {
     const int ex = base + deltas[t];
-    if (ex > 127) continue;
+    const bool usable = ex >= kExponentMin && ex <= kExponentMax;
     const float step = (t == 0) ? 1.0f : (t == 1 ? 0.5f : 2.0f);
     float err = 0.0f;
     int cand[BLOCK];
@@ -247,11 +260,7 @@ __global__ void quantize_kernel(const float* __restrict__ x, int64_t rows, int64
       const float d = u - unit[i];
       err += d * d;
     }
-    // Candidate 0 is taken unconditionally, matching the reference's
-    // ``best = _round_with(base_exponent)``.  A strict comparison against
-    // INFINITY would leave ``best_code`` uninitialised when every candidate
-    // overflows, which used to happen for inputs near FLT_MAX.
-    if (t == 0 || err < best_err) {
+    if (usable && (t == 0 || (isfinite(err) && err < best_err))) {
       best_err = err;
       best_exp = ex;
 #pragma unroll
@@ -302,10 +311,12 @@ __global__ void decompose_kernel(const float* __restrict__ x, int64_t rows, int6
   for (int i = 0; i < BLOCK; ++i) mag = fmaxf(mag, fabsf(p[i]));
   const int base = min(floor_log2_exact(fmaxf(mag, FLT_MIN)), 127);
 
-  // Same candidate order as decompose_blockfloat.
+  // Same candidate order as decompose_blockfloat.  A shift past the representable
+  // exponent range has no storable scale, so skip it rather than search it.
   const int shifts[4] = {0, 1, -1, 2};
   for (int s = 0; s < 4; ++s) {
     const int ex = base + shifts[s];
+    if (ex < kExponentMin || ex > kExponentMax) continue;
     const float scale = exp2f((float)ex);
     bool ok = true;
     int cand[BLOCK];

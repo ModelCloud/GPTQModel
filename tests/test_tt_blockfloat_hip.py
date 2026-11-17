@@ -98,6 +98,96 @@ def test_quantize_matches_torch_oracle(bits):
     assert torch.equal(exponents, expected_exponents.to(torch.int8))
 
 
+def _scalar_block_oracle(values, bits):
+    """Independent double-precision expectation for one 16-value block.
+
+    ``math.frexp`` gives the exact binade index, ``round`` performs the
+    round-to-nearest grid snap and the squared error accumulates in Python
+    floats.  Every fp32 input and every power-of-two scale is exact in double,
+    so this is a bit-level expectation, not a re-run of the kernel.
+    """
+
+    import math
+
+    levels = 1 << max(bits - 2, 0)
+    limit = 2.0 - 1.0 / levels
+    offset = 2 * levels - 1
+    smallest = 1.17549435e-38
+    magnitude = max(abs(float(v)) for v in values)
+    base = math.frexp(max(magnitude, smallest))[1] - 1
+
+    def round_with(exp):
+        scale = 2.0 ** exp
+        out = []
+        for value in values:
+            unit = round(float(value) / scale * levels) / levels
+            out.append(min(max(unit, -limit), limit) * scale)
+        return out
+
+    def error(grid):
+        return sum((v - float(x)) ** 2 for v, x in zip(grid, values))
+
+    best = round_with(base)
+    best_error = error(best)
+    best_exp = base
+    for delta in (-1, 1):
+        candidate_exp = base + delta
+        if not -127 <= candidate_exp <= 127:
+            continue
+        candidate = round_with(candidate_exp)
+        candidate_error = error(candidate)
+        if math.isfinite(candidate_error) and candidate_error < best_error:
+            best, best_error, best_exp = candidate, candidate_error, candidate_exp
+    scale = 2.0 ** best_exp
+    codes = [int(round(v / scale * levels)) + offset for v in best]
+    return codes, best_exp
+
+
+def _extreme_blocks():
+    """Blocks whose exponent derivation is the operation under test."""
+
+    fmax = torch.finfo(torch.float32).max
+    blocks = [[fmax] * 16, [-fmax] * 16, [3e38] * 16]
+    # Binades where ``log2``/``log2f`` rounds up while the squared error is still
+    # representable in float32. Above ~2**64 every candidate's error saturates to
+    # inf for float32 inputs, which would hide the exponent defect.
+    for k in (20, 24, 40, 50, 60):
+        boundary = torch.tensor(2.0**k, dtype=torch.float32)
+        below = float(torch.nextafter(boundary, torch.zeros((), dtype=torch.float32)))
+        blocks.append([below] * 16)
+    return blocks
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+def test_quantize_extreme_finite_blocks_follow_the_exact_binade(bits):
+    """Extreme finite blocks must use the exact binade, never an illegal one.
+
+    ``log2``/``log2f`` round to nearest, so a value just below ``2**k`` -- and
+    ``float32.max``, one ulp below ``2**128`` -- was read as binade ``k``.  The
+    ``+1`` candidate then used ``2**128 = inf``, ``0 * inf`` made the block NaN,
+    and that NaN error also blocked the ``-1`` candidate.
+
+    Expected values come from ``_scalar_block_oracle``, which performs its own
+    arithmetic; the device result is asserted on its own before any comparison
+    with a reference path.
+    """
+
+    blocks = _extreme_blocks()
+    weight = torch.tensor(blocks, dtype=torch.float32, device="cuda")
+    codes, exponents = quantize(weight, bits)
+    unpacked = _unpack_codes(codes, bits, tuple(weight.shape)).cpu()
+    exponents = exponents.reshape(weight.shape[0], -1)
+    for row, block in enumerate(blocks):
+        expected_codes, expected_exp = _scalar_block_oracle(block, bits)
+
+        assert int(exponents[row, 0]) == expected_exp, (
+            f"row {row}: kernel exponent {int(exponents[row, 0])} != {expected_exp}"
+        )
+        assert unpacked[row].tolist() == expected_codes, row
+    assert int(exponents.max()) <= 127
+    grid = recompose_blockfloat(unpacked, exponents.cpu(), bits=bits)
+    assert torch.isfinite(grid).all(), "an illegal candidate leaked a NaN"
+
 @pytest.mark.parametrize("bits", [4, 8])
 @pytest.mark.parametrize("exponent", [-80, -40, 0, 40, 80])
 def test_quantize_exponent_matches_the_float64_oracle_across_scales(bits, exponent):

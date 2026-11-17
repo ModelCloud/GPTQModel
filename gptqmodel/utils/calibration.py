@@ -631,11 +631,16 @@ def prepare_calibration_dataset(
                     )
                 processed_examples.append(_tokenize_messages_value(example["messages"], idx))
                 continue
+            # Explicit token ids win over `text`. A row carrying both is the
+            # normal output of `Dataset.map(tokenizer, truncation=True, ...)`
+            # and of `dataset[:]`, so re-tokenizing from `text` silently
+            # discarded the caller's truncation, special-token, and chat
+            # choices and fed documents far past the requested length (#4635).
+            if "input_ids" in example and example["input_ids"] is not None:
+                processed_examples.append(_pack_ids(example["input_ids"], example.get("attention_mask"), idx))
+                continue
             if "text" in example:
                 processed_examples.append(_tokenize_text_value(example["text"], idx))
-                continue
-            if "input_ids" in example:
-                processed_examples.append(_pack_ids(example["input_ids"], example.get("attention_mask"), idx))
                 continue
             raise ValueError(
                 f"Quantize: unsupported calibration example structure at index {idx}: keys={list(example.keys())}"

@@ -208,6 +208,12 @@ Consequences that shape kernels:
 - The grid is a *superset* of what a 4-level binade suggests: 15 codes for
   `bf4_b`, spanning `±1.75 · 2^e`. A quantizer that assumes 4 codes total will
   disagree with the hardware.
+- The shared exponent is the **exact binade index** of the block maximum and is
+  storable only in `[-127, 127]`: the field holds `e + 127`, so `+128` is the
+  all-ones pattern. Derive it from the IEEE-754 exponent field, not from `log2`
+  -- `log2f(FLT_MAX)` rounds to `128`, `2**128` is infinity, and a `+1`
+  candidate would round to `NaN`. Reject out-of-range candidates before their
+  error is compared; a non-finite block has no representation at all.
 
 ### 8.5 Naming, and why the `_b` stays
 
