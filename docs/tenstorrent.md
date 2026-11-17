@@ -115,6 +115,12 @@ modeling file subclasses the checkpoint's own causal-LM class; a fixed Llama
 base class only works for Llama. The class comes from the live model, with the
 declared `model_type` as the fallback for wrappers and subclasses.
 
+The quantization config records the shipped modeling file. The HF
+refusing-quantizer guard, which stops silent random-init loads of packed
+formats that transformers cannot read, therefore lets this documented
+`auto_map` path through. A `tt-blockfloat` config with no shipped loader still
+fails closed.
+
 ```mermaid
 flowchart TD
     A["save_blockfloat_model(model)"] --> B{"type(model).__module__<br/>starts with transformers.?"}
@@ -160,6 +166,85 @@ flowchart LR
 
 A checkpoint whose architecture cannot be resolved fails at save time instead
 of writing an entry point that only loads Llama.
+
+## Native block-float checkpoint payload (`save_blockfloat_checkpoint`)
+
+`save_blockfloat_checkpoint()` writes the decoder blocks of a model into a
+single payload (`blockfloat.safetensors`) plus a sidecar manifest
+(`blockfloat.json`). It is the checkpoint format read by
+`read_blockfloat_checkpoint()`, `expand_native_layer()`,
+`load_native_checkpoint_into_dense_model()` and `load_blockfloat_into_model()`.
+It is not the HF-style directory written by `save_blockfloat_model()`, which
+publishes every tensor as sharded safetensors and has no sidecar manifest.
+
+A decoder tensor is only storable as codes when it is exactly on the block-float
+grid; `decompose_blockfloat()` raises `ValueError` otherwise. The writer catches
+that error and stores `<layer>.weight` (and its bias) as dense floats at the
+module's own dtype, so an off-grid layer is preserved rather than narrowed.
+
+The manifest used to list only the encoded layers. A dense fallback therefore
+had no entry: `read_blockfloat_checkpoint()` never returned it and
+`load_native_checkpoint_into_dense_model()` treated the missing entry as "no
+work to do". The load succeeded and left exactly those fallback layers at their
+initial values -- the weights the save path had just written.
+
+The manifest now lists both kinds of decoder layer, and the reader dispatches on
+the recorded `kind`:
+
+```mermaid
+flowchart TD
+    A["save_blockfloat_checkpoint: block.named_modules()"] --> B{"module.weight is 2D?"}
+    B -- no --> Z["skipped: not a decoder linear"]
+    B -- yes --> C{"decompose_blockfloat succeeds?"}
+    C -- yes --> D["codes + exponents + code_shape"]
+    D --> E["manifest entry kind=blockfloat<br/>bits, shape, numel, has_bias"]
+    C -- no --> F["dense src-dtype weight<br/>kind=dense, source dtype"]
+    F --> G["manifest entry kind=dense<br/>shape, dtype, has_bias"]
+    E --> H{"module.bias is a tensor?"}
+    G --> I{"module.bias is a tensor?"}
+    H -- yes --> J["payload .bias at source dtype<br/>manifest bias_dtype"]
+    I -- yes --> J
+    H -- no --> K["no .bias tensor"]
+    I -- no --> K
+    J --> L["blockfloat.safetensors<br/>format/version/bits/block"]
+    K --> L
+    L --> M["blockfloat.json<br/>layers: kind per layer"]
+    M --> N["read_blockfloat_checkpoint<br/>dispatch on kind"]
+    N --> O{"kind"}
+    O -- blockfloat --> P["entry codes/exponents/bits"]
+    O -- dense --> Q["entry weight/dtype"]
+    P --> R["expand_native_layer: recompose"]
+    Q --> S["expand_native_layer: return weight"]
+    R --> T["load_native_checkpoint_into_dense_model:<br/>copy weight + bias"]
+    S --> T
+    T --> U{"every manifest layer matched?"}
+    U -- no --> V["ValueError: no target module"]:::fail
+    U -- yes --> W["restored map"]
+
+    classDef fail fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d;
+```
+
+| Old mechanism | New mechanism | Evidence (before) |
+| --- | --- | --- |
+| dense fallback wrote `<layer>.weight` and `continue`d without a manifest entry | manifest entry `kind="dense"` with source dtype, shape and bias record | `gptqmodel/utils/tt_blockfloat_quant.py:1304-1307` (pre-change) |
+| `read_blockfloat_checkpoint` iterated only manifest layers and skipped missing codes | reader returns dense entries too; a declared layer with missing tensors raises | `gptqmodel/utils/tt_blockfloat_quant.py:1427-1434` (pre-change) |
+| loader `continue`d on any layer with no entry | loader expands either kind and raises when a manifest layer has no target module | `gptqmodel/utils/tt_blockfloat_quant.py:1473-1475` (pre-change) |
+
+A `dense` entry stores the tensor at the dtype the module had, and records that
+dtype in the manifest. A `blockfloat` entry keeps its packed codes and stores
+its bias unmodified, because a bias is dense state rather than part of the grid.
+Every manifest entry also records `has_bias` and, when present, `bias_dtype`, so
+a reader knows which tensors the payload must contain.
+
+Existing version-1 checkpoints keep loading: a manifest entry without a `kind`
+is treated as `blockfloat`, and an absent `bits` falls back to the global width.
+The dense tensors a version-1 writer emitted were never attributed to a layer,
+so they cannot be recovered from the file; re-saving such a checkpoint from a
+model that still holds them writes a version-2 manifest that lists them.
+`BLOCKFLOAT_SAVE_FORMAT_VERSION` is `2`.
+
+The native checkpoint still covers decoder blocks only. Embeddings, norms and
+the lm-head are `save_blockfloat_model()`'s job, not this writer's.
 
 ## Block-float kernel dispatch
 

@@ -79,12 +79,10 @@ inline bool use_prefill(int64_t m, torch::headeronly::ScalarType a_st, bool w8,
 // K-heavy shapes pay proportionally more dequant per flop, so they cross
 // later still.
 inline int dense_tier_min_m(int sms, bool w8, int64_t size_k, int64_t size_n,
-                            bool has_perm) {
-  static const int v = [] {
-    const char* e = std::getenv("APHRODITE_SWORDFISH_DENSE_M");
-    return e != nullptr && e[0] != '\0' ? std::atoi(e) : 0;
-  }();
-  if (v != 0) return v;
+                            bool has_perm, int64_t dense_m_override) {
+  // ``dense_m_override`` is an explicit kernel option, not an environment
+  // variable, so the same shape always takes the same dispatch on a host.
+  if (dense_m_override > 0) return static_cast<int>(dense_m_override);
   if (sms < 100) {
     if (!w8) return INT_MAX;
     return size_k >= 2 * size_n ? 8192 : 2048;
@@ -97,17 +95,6 @@ inline int dense_tier_min_m(int sms, bool w8, int64_t size_k, int64_t size_n,
   return w8 ? 1024 : 4096;
 }
 
-// APHRODITE_SWORDFISH_DETERMINISTIC forces the run-stable decode paths:
-// the smem-reduction epilogue replaces every atomic-window kernel, at the
-// decode window's cost. The tcgen05 prefill is deterministic either way.
-// The fused-MoE kernels keep their atomic merge regardless.
-inline bool force_deterministic() {
-  static const bool v = [] {
-    const char* e = std::getenv("APHRODITE_SWORDFISH_DETERMINISTIC");
-    return e != nullptr && e[0] != '\0' && std::strcmp(e, "0") != 0;
-  }();
-  return v;
-}
 
 
 template <aphrodite::ScalarTypeId type_id, int T, bool HAS_ZP, bool W8 = false,
@@ -216,9 +203,10 @@ void launch_decode_atomic(int T, const void* a, const int32_t* b, const void* s,
 template <aphrodite::ScalarTypeId type_id, bool HAS_ZP, bool W8 = false>
 void launch_decode(const void* a, const int32_t* b, const void* s,
                    const void* z, void* c, int m, int k, int n, int group_size,
-                   cudaStream_t stream, int sms, bool c_zeroed = false) {
+                   cudaStream_t stream, int sms, bool c_zeroed = false,
+                   bool deterministic = false) {
   using scalar_t = typename marlin::MarlinScalarType<type_id>::scalar_t;
-  if (force_deterministic()) {
+  if (deterministic) {
     dim3 grid((m + 15) / 16, n / kBlockN);
     swordfish_decode_kernel<type_id, false, 1, HAS_ZP, W8>
         <<<grid, kDecodeThreads, 0, stream>>>(
@@ -291,7 +279,8 @@ torch::stable::Tensor swordfish_mm(
     torch::stable::Tensor& a, torch::stable::Tensor& b_packed,
     torch::stable::Tensor& group_scales,
     std::optional<torch::stable::Tensor> const& group_zps, int64_t num_bits,
-    int64_t group_size, int64_t size_k, int64_t size_n) {
+    int64_t group_size, int64_t size_k, int64_t size_n,
+    int64_t dense_m_override, bool deterministic) {
   STD_TORCH_CHECK(num_bits == 4 || num_bits == 8,
                   "swordfish supports 4-bit and 8-bit weights");
   const bool w8 = num_bits == 8;
@@ -368,8 +357,8 @@ torch::stable::Tensor swordfish_mm(
   const bool has_perm = false;
 
   if (size_m >=
-          dense_tier_min_m(sms, w8, size_k, size_n, has_perm) &&
-      !force_deterministic()) {
+          dense_tier_min_m(sms, w8, size_k, size_n, has_perm, dense_m_override) &&
+      !deterministic) {
     torch::stable::Tensor c =
         torch::stable::empty({size_m, size_n}, a_st, std::nullopt, a.device());
     torch::stable::Tensor w_dense =
@@ -414,29 +403,29 @@ torch::stable::Tensor swordfish_mm(
     if (has_zp) {
       launch_decode<aphrodite::kFloat16.id(), true>(
           a_ptr, b_ptr, s_ptr, z_ptr, c_ptr, size_m, size_k, size_n, group_size,
-          stream, sms, prep_perm);
+          stream, sms, prep_perm, deterministic);
     } else if (w8) {
       launch_decode<aphrodite::kFloat16.id(), false, true>(
           a_ptr, b_ptr, s_ptr, z_ptr, c_ptr, size_m, size_k, size_n, group_size,
-          stream, sms, prep_perm);
+          stream, sms, prep_perm, deterministic);
     } else {
       launch_decode<aphrodite::kFloat16.id(), false>(
           a_ptr, b_ptr, s_ptr, z_ptr, c_ptr, size_m, size_k, size_n, group_size,
-          stream, sms, prep_perm);
+          stream, sms, prep_perm, deterministic);
     }
   } else {
     if (has_zp) {
       launch_decode<aphrodite::kBFloat16.id(), true>(
           a_ptr, b_ptr, s_ptr, z_ptr, c_ptr, size_m, size_k, size_n, group_size,
-          stream, sms, prep_perm);
+          stream, sms, prep_perm, deterministic);
     } else if (w8) {
       launch_decode<aphrodite::kBFloat16.id(), false, true>(
           a_ptr, b_ptr, s_ptr, z_ptr, c_ptr, size_m, size_k, size_n, group_size,
-          stream, sms, prep_perm);
+          stream, sms, prep_perm, deterministic);
     } else {
       launch_decode<aphrodite::kBFloat16.id(), false>(
           a_ptr, b_ptr, s_ptr, z_ptr, c_ptr, size_m, size_k, size_n, group_size,
-          stream, sms, prep_perm);
+          stream, sms, prep_perm, deterministic);
     }
   }
 

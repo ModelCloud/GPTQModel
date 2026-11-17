@@ -11,6 +11,7 @@ from contextlib import contextmanager
 
 from .._alloc_conf import apply_default_alloc_conf
 from ..utils.logger import setup_logger
+from ..utils.quant_metadata import describe_unsupported_metadata, find_unsupported_metadata
 
 log = setup_logger()
 
@@ -71,11 +72,13 @@ from ..utils.linalg_warmup import (  # noqa: E402
     kick_torch_quantize_prewarm,
 )
 from ..utils.model import auto_dtype, find_modules  # noqa: E402
+from ..utils.kernel import KernelConfig, configure_kernel  # noqa: E402
+from ..utils.backend_config import Backend, RuntimeConfig, resolve_backend_config, resolve_quantize_backend  # noqa: E402
 from ..utils.p2p import P2PConfig  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
 from ._const import normalize_device  # noqa: E402
 from .base import BaseQModel  # noqa: E402
-from .loader import native_floatx_source_format  # noqa: E402
+from .loader import _explicit_requested_devices, native_floatx_source_format  # noqa: E402
 from .definitions.afmoe import AfMoeQModel  # noqa: E402
 from .definitions.agnes import AgnesQModel  # noqa: E402
 from .definitions.apertus import Apertus1p5QModel, Apertus1p5TextQModel, ApertusQModel  # noqa: E402
@@ -483,33 +486,10 @@ MODEL_MAP_CASEFOLD = {
 }
 
 
-def _activation_quantization_mode(quantization_config: dict) -> Optional[str]:
-    """Return the first activation-quantization field that makes this config unsupported.
+def _unsupported_quantization_metadata(quantization_config: dict):
+    """Return the first unsupported quantization feature in this payload."""
 
-    GPT-QModel can load weight-only quantized checkpoints through the Transformers
-    surface, but it does not currently implement activation-quantized runtime
-    semantics. This helper keeps the rejection logic in one place for both
-    ModelOpt-style grouped configs and flatter HF quantization payloads.
-    """
-
-    config_groups = quantization_config.get("config_groups")
-    if isinstance(config_groups, dict):
-        for group_cfg in config_groups.values():
-            if not isinstance(group_cfg, dict):
-                continue
-            input_activations = group_cfg.get("input_activations")
-            if isinstance(input_activations, dict) and input_activations:
-                return "input_activations"
-
-    kv_cache_scheme = quantization_config.get("kv_cache_scheme")
-    if isinstance(kv_cache_scheme, dict) and kv_cache_scheme:
-        return "kv_cache_scheme"
-
-    for key in ("input_activations", "activation_quantization", "activations"):
-        value = quantization_config.get(key)
-        if isinstance(value, dict) and value:
-            return key
-    return None
+    return find_unsupported_metadata(quantization_config)
 
 
 def _is_supported_quantization_config(config: AutoConfig) -> bool:
@@ -517,15 +497,13 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
     if not isinstance(quantization_config, dict):
         return False
 
-    # Fail fast before model selection so activation-quantized checkpoints do
-    # not accidentally proceed down a weight-only loader path.
-    unsupported_mode = _activation_quantization_mode(quantization_config)
-    if unsupported_mode is not None:
-        log.error("GPT-QModel currently does not support loading of activation quantized models")
-        raise ValueError(
-            "GPT-QModel currently does not support loading of activation quantized models. "
-            f"Detected unsupported metadata: {unsupported_mode}."
-        )
+    # Fail fast before model selection so checkpoints that expect activation or
+    # KV-cache quantization do not proceed down a weight-only loader path.
+    unsupported = _unsupported_quantization_metadata(quantization_config)
+    if unsupported is not None:
+        message = describe_unsupported_metadata(unsupported)
+        log.error(message)
+        raise ValueError(message)
 
     quant_format = quantization_config.get("quant_format")
     if isinstance(quant_format, str) and quant_format.lower() in (
@@ -766,7 +744,7 @@ def _kick_quantize_prewarms(device, device_map, kwargs, model_cfg=None) -> None:
     kick_torch_quantize_prewarm(target, dtype)
 
 
-def _prebuild_device_thread_pool() -> None:
+def _prebuild_device_thread_pool(device=None) -> None:
     """
     Build the device thread pool before the quantization loop starts.
 
@@ -774,13 +752,32 @@ def _prebuild_device_thread_pool() -> None:
     `DeviceThreadPool._kick_worker_warmups`). Building the pool at load time lets
     those warmups overlap with the (CPU-bound) model load instead of serializing
     in front of the first quantization task.
+
+    When the caller named concrete accelerators (`device=("cuda:1",)`), only
+    those devices may be warmed. The pool still knows about every visible
+    device, but the excluded ones keep no CUDA context and no linalg warmup
+    allocations until work is actually submitted to them.
     """
+    from .. import resize_device_thread_pool
+
+    explicit_devices = _explicit_requested_devices(device)
     if not env_flag("GPTQMODEL_POOL_PREWARM", default=True):
+        # Do not build eagerly, but still retune a pool an earlier load created.
+        resize_device_thread_pool(warmup_devices=explicit_devices, create=False)
         return
 
-    from .. import get_device_thread_pool
+    # Resize the singleton to the policy installed for *this* run. A later load
+    # that asks for a different ``cpu_workers`` must not inherit the first
+    # load's worker count (issue #4396).
+    resize_device_thread_pool(warmup_devices=explicit_devices)
 
-    get_device_thread_pool()
+
+def _install_kernel_policy(kernel) -> None:
+    """Install a load's process policy and report retired env vars set since import."""
+    from .. import warn_retired_kernel_env_vars
+
+    configure_kernel(kernel)
+    warn_retired_kernel_env_vars()
 
 
 class GPTQModel:
@@ -809,7 +806,7 @@ class GPTQModel:
             quantize_config: Optional[QuantizeConfig | Dict] = None,
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, torch.device]] = None,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             allow_remote_adapter: bool = False,
@@ -817,15 +814,25 @@ class GPTQModel:
             adapter_sha256: Optional[str] = None,
             fuse: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **kwargs,
     ):
         if type(fuse) is not bool:
             raise TypeError("Fusion enabled must be bool")
         kwargs["fuse"] = fuse
+        if isinstance(quantize_config, Dict):
+            quantize_config = QuantizeConfig(**quantize_config)
+        # from_pretrained resolves the caller's own arguments against the same
+        # config again; only the already-quantized redirect forwards the
+        # resolved enum/policy pair, because it does not receive the config.
+        requested_backend, requested_kernel = backend, kernel
+        backend, kernel = resolve_quantize_backend(backend, quantize_config, kernel, runtime)
+        _install_kernel_policy(kernel)
         if quantize_config is not None:
             _kick_quantize_prewarms(device, device_map, kwargs)
-            _prebuild_device_thread_pool()
+            _prebuild_device_thread_pool(device)
 
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
@@ -908,6 +915,7 @@ class GPTQModel:
                 device_map=device_map,
                 device=device,
                 p2p=p2p,
+                kernel=kernel,
                 backend=backend,
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=requested_trust_remote_code,
@@ -925,10 +933,13 @@ class GPTQModel:
                 quantize_config=quantize_config,
                 device_map=device_map,
                 device=device,
-                backend=backend,
+                backend=requested_backend,
                 profile=profile,
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=requested_trust_remote_code,
+                kernel=requested_kernel,
+                runtime=runtime,
+                p2p=p2p,
                 module_tree=module_tree,
                 **kwargs,
             )
@@ -936,6 +947,10 @@ class GPTQModel:
         # debug model structure
         # if debug:
         #     print_module_tree(m.model)
+
+        # Weight quantization does not change the cache, so state what context
+        # costs as soon as a model is loaded for inference.
+        m.log_kv_cache_estimate()
 
         return m
 
@@ -945,16 +960,35 @@ class GPTQModel:
             cls,
             model_id_or_path: str,
             quantize_config: QuantizeConfig,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **model_init_kwargs,
     ) -> BaseQModel:
+        if isinstance(quantize_config, dict):
+            quantize_config = QuantizeConfig(**quantize_config)
+        # The model definition re-resolves the caller's arguments against the
+        # same config; the already-quantized redirect gets the resolved pair.
+        requested_backend, requested_kernel = backend, kernel
+        backend, kernel = resolve_quantize_backend(backend, quantize_config, kernel, runtime)
         if p2p is not None and quantize_config is not None:
             # The looper installs this policy before it enables peer access.
             quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
+
+        # Install the policy before the thread-pool prebuild reads it. The pool
+        # is a per-process singleton, so a policy installed after the prebuild
+        # would only affect the next process (issue #4396).
+        _install_kernel_policy(kernel)
+        if quantize_config is None:
+            # Dense inference loads do not prebuild the pool, but an earlier
+            # load may have left one at a different worker count.
+            from .. import resize_device_thread_pool
+
+            resize_device_thread_pool(create=False)
 
         if quantize_config is not None:
             _kick_quantize_prewarms(
@@ -962,7 +996,7 @@ class GPTQModel:
                 model_init_kwargs.get("device_map"),
                 model_init_kwargs,
             )
-            _prebuild_device_thread_pool()
+            _prebuild_device_thread_pool(model_init_kwargs.get("device"))
 
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
@@ -1024,6 +1058,7 @@ class GPTQModel:
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=tokenizer_trust_remote_code,
                 p2p=p2p,
+                kernel=kernel,
                 module_tree=module_tree,
                 **model_init_kwargs,
             )
@@ -1049,11 +1084,14 @@ class GPTQModel:
         return model_definition.from_pretrained(
             pretrained_model_id_or_path=model_id_or_path,
             quantize_config=quantize_config,
-            backend=backend,
+            backend=requested_backend,
             profile=profile,
             trust_remote_code=trust_remote_code,
             tokenizer_trust_remote_code=tokenizer_trust_remote_code,
             module_tree=module_tree,
+            p2p=p2p,
+            kernel=requested_kernel,
+            runtime=runtime,
             **model_init_kwargs,
         )
 
@@ -1063,16 +1101,26 @@ class GPTQModel:
             model_id_or_path: Optional[str],
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, int]] = None,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             adapter: Optional[Adapter | Dict] = None,
             trust_remote_code: bool = False,
             allow_remote_adapter: bool = False,
             adapter_revision: Optional[str] = None,
             adapter_sha256: Optional[str] = None,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **kwargs,
     ) -> BaseQModel:
+        backend, kernel = resolve_backend_config(backend, kernel, runtime)
+        _install_kernel_policy(kernel)
+        # Retune an existing singleton pool before any module is built. A
+        # post-quantized load may be the second load in the process and must
+        # honour its own ``cpu_workers`` (issue #4396).
+        from .. import resize_device_thread_pool
+
+        resize_device_thread_pool(create=False)
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
             kwargs,
@@ -1102,6 +1150,7 @@ class GPTQModel:
             device_map=device_map,
             device=device,
             p2p=p2p,
+            kernel=kernel,
             backend=backend,
             trust_remote_code=trust_remote_code,
             tokenizer_trust_remote_code=tokenizer_trust_remote_code,
@@ -1115,9 +1164,15 @@ class GPTQModel:
 
     @staticmethod
     def export(model_id_or_path: str, target_path: str, format: str, trust_remote_code: bool = False):
+        normalized_format = str(format).strip().lower()
+        if normalized_format not in ("hf", "mlx"):
+            raise ValueError(
+                f"Unsupported export format: {format!r}. Expected 'hf' or 'mlx'."
+            )
+
         trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
 
-        if format == "hf":
+        if normalized_format == "hf":
             # Export through the checkpoint-level dequantizer: it understands
             # every stored layout (AWQ, GPTQ, quantized embeddings, legacy
             # quantize_config.json) instead of assuming a TorchLinear runtime.
@@ -1169,9 +1224,13 @@ class GPTQModel:
             backend = BACKEND.GPTQ_TORCH
 
         # load gptq model
-        gptq_model = GPTQModel.load(model_id_or_path, backend=backend)
+        gptq_model = GPTQModel.load(
+            model_id_or_path,
+            backend=backend,
+            trust_remote_code=trust_remote_code,
+        )
 
-        if format == "mlx":
+        if normalized_format == "mlx":
             try:
                 from mlx_lm.utils import save_config, save_model
 

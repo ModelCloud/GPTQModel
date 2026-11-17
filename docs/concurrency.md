@@ -132,6 +132,45 @@ which launch through the same `JITFunction.run` path.
 | JIT compile | unsynchronized, one compile per missing thread | `_single_flight_triton_compile` under `_TRITON_COMPILE_LOCK` |
 | Cold-start cost | concurrent compiles race | cold compiles run one at a time; the first caller pays the compile, the rest wait and reuse it |
 
+### Autotuner single-flight futures resolve on every owner exit
+
+`_get_config_for_key` publishes one `CacheFuture` per tuning key and collapses
+concurrent misses for that key onto it. The owner used to call
+`prune_configs()` *before* entering the `try/finally` that sets
+`future.event` and removes the future from `_cache_futures`. A pruning
+exception therefore escaped with the future still pending: every waiter parked
+on `future.event.wait()` with no timeout, and every same-key retry reused the
+unresolved future. The exception was catchable; the hang was not.
+
+Pruning now runs inside the owner-finalization scope, so every exit path
+resolves the future and removes the key.
+
+```mermaid
+flowchart TD
+    A["_get_config_for_key"] --> B{"_cache has key"}
+    B -- yes --> C["return cached config"]
+    B -- no --> D{"_cache_futures has key"}
+    D -- yes --> E["waiter: future.event.wait"]
+    E --> F{"future.error set"}
+    F -- yes --> G["raise future.error"]
+    F -- no --> H["return future.config"]
+    D -- no --> I["owner: publish CacheFuture"]
+    I --> J["try: prune_configs"]
+    J -- "raises" --> K["except BaseException: future.error = exc"]
+    J -- ok --> L["benchmark, disk cache, store best config"]
+    L --> M["return best config"]
+    K --> N["finally: future.event.set"]
+    M --> N
+    N --> O["finally: _cache_futures.pop key"]
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Owner scope | `prune_configs` outside the `try` (`utils/nogil_patcher.py:355` at `461b42023`) | `prune_configs` inside the owner `try` |
+| Pruning exception | future retained, Event unset, `error` unset | `future.error` set, Event set, key popped |
+| Same-key retry | reuses the pending future and blocks forever | becomes a new owner and completes |
+| Waiter | `future.event.wait()` with no timeout | wakes on success or re-raises the owner error |
+
 ## 3. Dynamo guard failures fall back to eager
 
 `_is_compiler_failure` (`gptqmodel/utils/torch.py`) classifies an exception by
@@ -279,6 +318,7 @@ and defaults to 1.
 | Caller already selected BF16x3, or oneDNN refuses the switch | `cpu_bf16x3_scope` yields without counting; nothing to restore |
 | Restore raises | swallowed; the quantization result is already computed |
 | Triton compile raises | lock is released; the next miss retries the compile |
+| Triton autotuner pruning raises | future error is set, waiters re-raise it, the key is removed, and the next call retries |
 | Triton cache already populated | no lock, no compile |
 | Dynamo guard fails on a user frame | exception propagates; no double execution |
 | `fullgraph=True` capture failure | exception propagates; no silent fallback |

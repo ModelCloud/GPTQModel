@@ -44,6 +44,9 @@ log = setup_logger()
 class EoraProcessor(LoopProcessor):
     """Builds LoRA-style error adapters from dequantization residuals and activations."""
 
+    # EoRA rows describe adapter fitting time, not quantization loss/samples/damp.
+    owns_quant_log = False
+
     lifecycle = ProcessorLifecycleConfig(
         checkpointing=CheckpointSupport.SECONDARY,
     )

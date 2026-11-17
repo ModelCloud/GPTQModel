@@ -94,7 +94,7 @@ def test_qqq_packs_uncorrected_weight_after_eora():
     model = torch.nn.Module()
     model.proj = torch.nn.Linear(4, 4, bias=False)
 
-    def stop_before_packing():
+    def stop_before_packing(*_args, **_kwargs):
         raise RuntimeError("packing boundary")
 
     processor._quant_linear_kernel = stop_before_packing

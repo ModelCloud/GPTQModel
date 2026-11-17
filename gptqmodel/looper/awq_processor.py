@@ -19,6 +19,7 @@ import torch
 from torch import nn
 from torch.nn import Module
 
+from .._alloc_conf import clamp_budget_below_allocator_split
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
@@ -296,6 +297,24 @@ def _is_rotary_embedding_module(module: nn.Module, leaf_name: str) -> bool:
         in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
     ]
     return len(positional) >= 2
+
+
+def _resolve_module_sym(qcfg, module_name: Optional[str], resolved_cfg=None) -> bool:
+    """Resolve one module's symmetry mode from its dynamic rule.
+
+    A real ``sym=False`` override is a legitimate value, so the resolution
+    cannot go through ``dynamic_get`` (which also returns ``False`` for an
+    excluded module). The rule snapshot distinguishes the two cases.
+    """
+
+    if not module_name:
+        return bool(qcfg.sym)
+    if resolved_cfg is None:
+        resolved_cfg = qcfg.resolve_module_config(module_name)
+    if resolved_cfg.excluded:
+        return bool(qcfg.sym)
+    override = resolved_cfg.get("sym", qcfg.sym)
+    return bool(qcfg.sym if override is None else override)
 
 
 class AWQProcessor(LoopProcessor):
@@ -612,6 +631,16 @@ class AWQProcessor(LoopProcessor):
             override = self.qcfg.format
         return resolve_quant_format(override, self.qcfg.method)
 
+    def _module_sym(self, module_name: Optional[str], *, resolved_cfg=None) -> bool:
+        """Resolve the symmetric/affine mode this module is staged and packed with.
+
+        The packing layer already receives the per-module ``sym`` from
+        ``create_quant_module``; staging and the clip search must use the same
+        mode or an affine module is packed with symmetric zeros (and the other
+        way around).
+        """
+        return _resolve_module_sym(self.qcfg, module_name, resolved_cfg)
+
     def _full_module_name(self, layer_module: Optional[nn.Module], module: nn.Module) -> Optional[str]:
         """Build a model-level module name from a layer and one of its children."""
         try:
@@ -676,7 +705,7 @@ class AWQProcessor(LoopProcessor):
                 bits=self._module_bits(module_name, resolved_cfg=resolved_cfg),
                 group_size=group_size,
                 desc_act=self.qcfg.desc_act,
-                sym=self.qcfg.sym,
+                sym=_resolve_module_sym(self.qcfg, module_name, resolved_cfg),
                 in_features=in_features,
                 out_features=out_features,
                 pack_dtype=self.qcfg.pack_dtype,
@@ -832,6 +861,14 @@ class AWQProcessor(LoopProcessor):
     ) -> FORMAT:
         """Resolve the resolved packing format of one layer child."""
         return self._module_format(
+            self._full_module_name(layer_module, module)
+        )
+
+    def _sym_for(
+        self, layer_module: Optional[nn.Module], module: nn.Module
+    ) -> bool:
+        """Resolve the resolved symmetry mode of one layer child."""
+        return self._module_sym(
             self._full_module_name(layer_module, module)
         )
 
@@ -2937,6 +2974,7 @@ class AWQProcessor(LoopProcessor):
                 "prepared_forward": prepared_forward,
                 "bits": [self._bits_for(module, layer) for layer in layers] if bits is None else bits,
                 "group_sizes": group_sizes,
+                "syms": [self._sym_for(module, layer) for layer in layers],
             }
             if any(module_format != default_format for module_format in formats):
                 best_scale_kwargs["formats"] = formats
@@ -2988,6 +3026,7 @@ class AWQProcessor(LoopProcessor):
                 bits=self._bits_for(layer, linear),
                 group_size=self._group_size_for(layer, linear),
                 format=self._format_for(layer, linear),
+                sym=self._sym_for(layer, linear),
             )
             clip_list.append((name, max_val))
             move_to(linear, device=original_device)
@@ -3005,6 +3044,7 @@ class AWQProcessor(LoopProcessor):
             bits: Optional[int] = None,
             group_size: Optional[int] = None,
             format: Optional[FORMAT] = None,
+            sym: Optional[bool] = None,
     ):
         """Finds the clipping bound that minimizes reconstruction error for a weight tensor.
 
@@ -3012,10 +3052,15 @@ class AWQProcessor(LoopProcessor):
         minimise the error of *that* quantizer, not of the global default.
         """
 
-        assert w.dim() == 2
+        if w.dim() != 2:
+            raise ValueError(
+                "AWQ clipping expects a 2-D weight tensor, "
+                f"got shape {tuple(w.shape)}"
+            )
         org_w_shape = w.shape
         # w           [co, ci]      -> [co, 1, n_group, group size]
         # input_feat  [n_token, ci] -> [1, n_token, n_group, group size]
+        sym = self.qcfg.sym if sym is None else bool(sym)
         configured_group_size = (
             self.qcfg.group_size if group_size is None else group_size
         )
@@ -3033,8 +3078,11 @@ class AWQProcessor(LoopProcessor):
 
         w = w.reshape(org_w_shape[0], 1, -1, group_size)
 
+        # Clip search owns a tile size, not a second module-shape predicate. The
+        # packer admits any width divisible by its own packing factor, so a
+        # partial final tile must be searched instead of rejected (#4474).
         oc_batch_size = 256 if org_w_shape[0] % 256 == 0 else 64  # prevent OOM
-        assert org_w_shape[0] % oc_batch_size == 0
+        oc_batch_size = min(oc_batch_size, org_w_shape[0])
         w_all = w
         best_max_val_all = []
         device = w_all.device
@@ -3064,6 +3112,15 @@ class AWQProcessor(LoopProcessor):
             mse_cfg.clip_grid_budget if isinstance(mse_cfg, MSEConfig) else None,
             device,
         )
+        # The caching allocator refuses to serve a sub-cap request from a free
+        # block at or above `max_split_size`, so a workspace sized just under
+        # the cap (the 256 MiB GPU default) maps one new segment per module:
+        # MoE layers grew reserved VRAM by ~256 MiB per expert projection while
+        # allocated memory stayed flat. Staying below the cap keeps every
+        # segment splittable, so the next module reuses it. This only changes
+        # chunk sizes; each candidate is still reduced over the same axes, so
+        # the clip search results are bitwise unchanged.
+        budget = clamp_budget_below_allocator_split(budget)
         row_elems = oc_batch_size * n_group * group_w
         out_elems = oc_batch_size * n_tokens * n_group
         cand_chunk = max(
@@ -3078,25 +3135,33 @@ class AWQProcessor(LoopProcessor):
             1, min(n_tokens, budget // max(cand_chunk * row_elems * elem_size, 1))
         )
 
-        # Pre-allocate scratch buffers so the inner loops never allocate large temporaries.
-        scratch_clamp = torch.empty(
-            (cand_chunk, oc_batch_size, 1, n_group, group_w), dtype=w_all.dtype, device=device
-        )
-        scratch_quant = torch.empty_like(scratch_clamp)
-        scratch_out = torch.empty(
-            (cand_chunk, oc_batch_size, n_tokens, n_group),
-            dtype=torch.result_type(input_feat, w_all),
-            device=device,
-        )
-        org_out = torch.empty_like(scratch_out[0])
-        scratch_prod = torch.empty(
-            (cand_chunk, oc_batch_size, token_chunk, n_group, group_w),
-            dtype=scratch_out.dtype,
-            device=device,
-        )
+        for i_b in range(0, org_w_shape[0], oc_batch_size):
+            # The final tile may be shorter than `oc_batch_size`. Size the
+            # scratch to this tile's real row count: cropping a padded buffer to
+            # `co` rows leaves a non-contiguous slice whose `reshape` is a copy,
+            # so `_pseudo_quantize_tensor_into` wrote the quantized candidates
+            # into that copy and the error reduction read stale rows (#4540).
+            # Per-tile allocation keeps every slice below a contiguous view and
+            # never materializes padded rows, so the reduction only sees real
+            # tile rows. Each tile allocates once, outside the inner loops.
+            w = w_all[i_b: i_b + oc_batch_size]
+            co = w.shape[0]
 
-        for i_b in range(org_w_shape[0] // oc_batch_size):
-            w = w_all[i_b * oc_batch_size: (i_b + 1) * oc_batch_size]
+            scratch_clamp = torch.empty(
+                (cand_chunk, co, 1, n_group, group_w), dtype=w_all.dtype, device=device
+            )
+            scratch_quant = torch.empty_like(scratch_clamp)
+            scratch_out = torch.empty(
+                (cand_chunk, co, n_tokens, n_group),
+                dtype=torch.result_type(input_feat, w_all),
+                device=device,
+            )
+            org_out = torch.empty_like(scratch_out[0])
+            scratch_prod = torch.empty(
+                (cand_chunk, co, token_chunk, n_group, group_w),
+                dtype=scratch_out.dtype,
+                device=device,
+            )
 
             org_max_val = w.abs().amax(dim=-1, keepdim=True)  # [co_batch, 1, n_group, 1]
 
@@ -3116,15 +3181,15 @@ class AWQProcessor(LoopProcessor):
 
             for t0 in range(0, n_tokens, token_chunk):
                 t1 = min(t0 + token_chunk, n_tokens)
-                prod = scratch_prod[0, :, : t1 - t0]
+                prod = scratch_prod[0, :co, : t1 - t0]
                 torch.mul(input_feat[:, t0:t1], w, out=prod)
-                torch.sum(prod, dim=-1, out=org_out[:, t0:t1])
+                torch.sum(prod, dim=-1, out=org_out[:co, t0:t1])
 
             for s0 in range(0, steps, cand_chunk):
                 tc = min(cand_chunk, steps - s0)
                 max_val = cand_max_val[s0:s0 + tc]  # [tc, co_batch, 1, n_group, 1]
-                clamp_slice = scratch_clamp[:tc]
-                quant_slice = scratch_quant[:tc]
+                clamp_slice = scratch_clamp[:tc, :co]
+                quant_slice = scratch_quant[:tc, :co]
                 torch.clamp(w.unsqueeze(0), -max_val, max_val, out=clamp_slice)
                 # `clamp(w, -max_val, max_val)` bounds every group by `max_val`, so the
                 # symmetric magnitude the quantizer needs is `min(|w|.amax(), max_val)`.
@@ -3140,6 +3205,7 @@ class AWQProcessor(LoopProcessor):
                     "abs_max": max_val,
                     "bits": bits,
                     "group_size": configured_group_size,
+                    "sym": sym,
                 }
                 if format is not None and format != self._module_format(None):
                     quantize_kwargs["format"] = format
@@ -3153,22 +3219,22 @@ class AWQProcessor(LoopProcessor):
                 # so the product stays under the workspace cap. Slicing the
                 # token axis does not change any element's sum over `group_w`,
                 # and the mean below still reduces the same full token axis.
-                cur_out = scratch_out[:tc]
+                cur_out = scratch_out[:tc, :co]
                 for t0 in range(0, n_tokens, token_chunk):
                     t1 = min(t0 + token_chunk, n_tokens)
                     torch.mul(
                         input_feat[:, t0:t1],
                         quant_slice,
-                        out=scratch_prod[:tc, :, : t1 - t0],
+                        out=scratch_prod[:tc, :co, : t1 - t0],
                     )
                     torch.sum(
-                        scratch_prod[:tc, :, : t1 - t0],
+                        scratch_prod[:tc, :co, : t1 - t0],
                         dim=-1,
                         out=cur_out[:, :, t0:t1],
                     )
 
                 # `cur_out` is scratch, so the difference and square happen in place.
-                cur_out.sub_(org_out.unsqueeze(0)).pow_(2)
+                cur_out.sub_(org_out[:co].unsqueeze(0)).pow_(2)
                 err_chunks.append(cur_out.mean(dim=2).view(tc, *org_max_val.shape))
                 max_val_chunks.append(max_val)
 
@@ -3188,6 +3254,12 @@ class AWQProcessor(LoopProcessor):
             best_max_val_all.append(best_max_val)
 
         best_max_val = torch.cat(best_max_val_all, dim=0)
+        # Every output row must get a bound before the caller mutates the weight.
+        if best_max_val.shape[0] != org_w_shape[0]:
+            raise RuntimeError(
+                "AWQ clip search covered "
+                f"{best_max_val.shape[0]} of {org_w_shape[0]} output rows."
+            )
         del input_feat
         del org_out
 
@@ -3199,16 +3271,19 @@ class AWQProcessor(LoopProcessor):
         bits: Optional[int] = None,
         group_size: Optional[int] = None,
         format: Optional[FORMAT] = None,
+        sym: Optional[bool] = None,
     ):
         """Simulates AWQ quantization and returns dequantized weights plus scales/zeros.
 
         ``bits`` defaults to the global width. Pass the per-module width when the
         config carries a ``dynamic`` override, so the staged codes match the
-        container they are packed into.
+        container they are packed into. ``sym`` follows the same rule: the
+        per-module mode must be the one the packed layer is labelled with.
         """
 
         org_w_shape = w.shape
         input_dtype = w.dtype
+        sym = self.qcfg.sym if sym is None else bool(sym)
         bits = int(self.qcfg.runtime_bits if bits is None else bits)
         configured_group_size = (
             self.qcfg.group_size if group_size is None else group_size
@@ -3219,9 +3294,13 @@ class AWQProcessor(LoopProcessor):
                 f"group_size ({configured_group_size})!"
             )
             w = w.reshape(-1, configured_group_size)
-        assert w.dim() == 2
+        if w.dim() != 2:
+            raise ValueError(
+                "AWQ clipping expects a 2-D weight tensor, "
+                f"got shape {tuple(w.shape)}"
+            )
 
-        if not self.qcfg.sym:
+        if not sym:
             max_int = 2**bits - 1
             effective_format = self.qcfg.format if format is None else format
             scales, zeros, repair = _awq_affine_qparams(
@@ -3257,7 +3336,7 @@ class AWQProcessor(LoopProcessor):
         # representation to unsigned by adding 2^(bits-1), i.e. q_u = q_s + 2^(bits-1).
         # This is equivalent to using an affine form with zero_point = 2^(bits-1),
         # without changing the numerical behavior of symmetric quantization.
-        if self.qcfg.sym:
+        if sym:
             zeros = torch.full_like(scales, 0 + 2 ** (bits - 1))
 
         w = w.reshape(org_w_shape).to(dtype=input_dtype)
@@ -3273,16 +3352,19 @@ class AWQProcessor(LoopProcessor):
         bits: Optional[int] = None,
         group_size: Optional[int] = None,
         format: Optional[FORMAT] = None,
+        sym: Optional[bool] = None,
     ) -> None:
         """Writes pseudo-quantized values into a destination tensor without reallocating.
 
         ``bits`` follows :meth:`pseudo_quantize_tensor`: the clip search must use
         the same width the module will be packed at, otherwise a 3-bit module is
-        clipped against a 4-bit reconstruction error.
+        clipped against a 4-bit reconstruction error. ``sym`` follows the same
+        rule for the module's symmetry mode.
         """
 
         # Quantize `src` into `dst` without allocating a new tensor (mirrors pseudo_quantize_tensor)
         org_shape = src.shape
+        sym = self.qcfg.sym if sym is None else bool(sym)
         bits = int(self.qcfg.runtime_bits if bits is None else bits)
         configured_group_size = (
             self.qcfg.group_size if group_size is None else group_size
@@ -3294,7 +3376,7 @@ class AWQProcessor(LoopProcessor):
             src_view = src.reshape(org_shape[0], -1)
             dst_view = dst.reshape_as(src_view)
 
-        if not self.qcfg.sym:
+        if not sym:
             max_int = 2 ** bits - 1
             effective_format = self.qcfg.format if format is None else format
             scales, zeros, repair = _awq_affine_qparams(
@@ -3377,6 +3459,7 @@ class AWQProcessor(LoopProcessor):
         bits: Optional[int | List[int]] = None,
         group_sizes: Optional[int | List[int]] = None,
         formats: Optional[FORMAT | List[FORMAT]] = None,
+        syms: Optional[bool | List[bool]] = None,
         scale_consumers: Optional[List[nn.Module]] = None,
     ):
         """
@@ -3424,6 +3507,14 @@ class AWQProcessor(LoopProcessor):
             ]
         if len(layer_formats) != len(linears2scale):
             raise ValueError("AWQ scale search requires one format per linear")
+        if syms is None:
+            layer_syms = [bool(self.qcfg.sym)] * len(linears2scale)
+        elif isinstance(syms, bool):
+            layer_syms = [syms] * len(linears2scale)
+        else:
+            layer_syms = [bool(sym) for sym in syms]
+        if len(layer_syms) != len(linears2scale):
+            raise ValueError("AWQ scale search requires one symmetry mode per linear")
 
         # Stash a pristine master copy of every scaled linear once so the per-ratio
         # quantize/restore cycle never reaches back to host memory. The master stays on
@@ -3521,12 +3612,13 @@ class AWQProcessor(LoopProcessor):
                 # `apply_scaled_weights` rebuilds the product from that master, so the
                 # restore the previous iteration needed is folded into this step.
                 apply_scaled_weights(scales_view)
-                for fc, module_bits, module_group_size, module_format in zip(
-                    linears2scale, layer_bits, layer_group_sizes, layer_formats
+                for fc, module_bits, module_group_size, module_format, module_sym in zip(
+                    linears2scale, layer_bits, layer_group_sizes, layer_formats, layer_syms
                 ):
                     quantize_kwargs = {
                         "bits": module_bits,
                         "group_size": module_group_size,
+                        "sym": module_sym,
                     }
                     if module_format != default_format:
                         quantize_kwargs["format"] = module_format
@@ -4092,11 +4184,13 @@ class AWQProcessor(LoopProcessor):
                 pad = weight_for_quant.new_zeros(weight_for_quant.shape[0], pad_cols)
                 weight_for_quant = torch.cat((weight_for_quant, pad), dim=1)
 
+            module_sym = self._module_sym(named_module.full_name, resolved_cfg=resolved_cfg)
             wq, scales, zeros = self.pseudo_quantize_tensor(
                 weight_for_quant,
                 bits=module_bits,
                 group_size=module_group_size,
                 format=module_format,
+                sym=module_sym,
             )
 
             from ..quantization.gsq_scalar import gsq_enabled_for, refine_affine_scalar
@@ -4282,6 +4376,29 @@ class AWQProcessor(LoopProcessor):
                 self.tasks[module.name] = {"inputs": []}
             else:
                 entry.setdefault("inputs", [])
+
+    def prune_uncovered_module(self, module: NamedModule) -> None:
+        """Remove a coverage-pruned module from its AWQ layer state.
+
+        ``preprocess`` registered the module in ``_AWQLayerState.modules`` and
+        ``pending_modules``. Left there, it kept ``pending_in_scope`` non-empty,
+        so ``_quantize_layer`` never ran and every module of the layer reached
+        ``pack_module`` without zero points (#4456). Dropping it from the layer
+        state also keeps it out of ``_layer_input_features``: a scaling group
+        that contains it loses its missing member and is skipped like any other
+        group with missing features, so the dense module is never folded or
+        quantized while the rest of the layer is.
+        """
+
+        with self.lock:
+            super().prune_uncovered_module(module)
+        layer_index = getattr(module, "layer_index", None)
+        if layer_index is None:
+            return
+        state = self._get_layer_state(layer_index)
+        with state.lock:
+            state.modules.pop(module.name, None)
+            state.pending_modules.discard(module.name)
 
     def is_skipped(self, module: NamedModule) -> bool:
         """Reports whether preprocessing excluded this module from AWQ work."""

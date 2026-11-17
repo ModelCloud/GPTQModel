@@ -29,7 +29,7 @@ from ..utils.checkpoint_paths import (
     resolve_checkpoint_path,
 )
 from ..utils.device_telemetry import emit_device_telemetry
-from ..utils.offload import set_submodule
+from ..utils.offload import attach_disk_offload_hook, set_submodule
 from ..utils.tensor import tensor_bytes
 from .checkpoint_devices import checkpoint_device_topology
 from .checkpoint_modules import (
@@ -611,6 +611,11 @@ class QuantizationCheckpointAdapter:
                 }
             (directory / "index.json").write_text(json.dumps(index))
             set_submodule(self.model.model, name, module)
+            # The #4498 contract materializes disk-offloaded modules at loop
+            # exit. A resumed module is meta with no hook, so register it with
+            # the same hook the loop installs; otherwise it stays meta and the
+            # in-session forward fails silently (issue #4562).
+            attach_disk_offload_hook(module, str(directory))
         for module, key, value, parameter, requires_grad in dense_targets:
             setattr(
                 module,

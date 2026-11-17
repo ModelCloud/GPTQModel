@@ -8,6 +8,7 @@ import torch
 from test_torch_weight_storage import state_tensors
 
 from gptqmodel.quantization import FORMAT
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 DEVICES = ['cpu'] + (['cuda'] if torch.cuda.is_available() else [])
@@ -361,11 +362,12 @@ def test_native_qqq_small_activation_scale():
 @pytest.mark.parametrize('simd', ['default', 'avx2', 'scalar'])
 def test_floatx_cpu_scale_range(monkeypatch, dtype, fmt, layout, simd):
     from gptqmodel.quantization.dtype import dequantize_fp8
-    monkeypatch.setenv('GPTQMODEL_FLOATX_CPU_FORCE_NATIVE_FP8', '1')
-    if simd in ('avx2', 'scalar'):
-        monkeypatch.setenv('GPTQMODEL_FLOATX_CPU_DISABLE_AVX512', '1')
-    if simd == 'scalar':
-        monkeypatch.setenv('GPTQMODEL_FLOATX_CPU_DISABLE_AVX2', '1')
+    configure_kernel(
+        KernelConfig(
+            floatx_cpu_native_fp8=True,
+            floatx_cpu_simd_level={'default': 2, 'avx2': 1, 'scalar': 0}[simd],
+        )
+    )
     # All byte codes plus tails; mask NaN/Inf codes, which have no finite oracle.
     codes = torch.arange(256, dtype=torch.uint8).repeat(3)[:2 * 257].reshape(2, 257)
     source = codes.view(getattr(torch, fmt))
@@ -384,10 +386,11 @@ def test_floatx_cpu_scale_range(monkeypatch, dtype, fmt, layout, simd):
 @pytest.mark.parametrize('simd', ['default', 'avx2', 'scalar'])
 def test_fp4_cpu_tiny_scale(monkeypatch, dtype, simd):
     from gptqmodel.quantization.dtype import dequantize_f4_e2m1
-    if simd in ('avx2', 'scalar'):
-        monkeypatch.setenv('GPTQMODEL_FLOATX_CPU_DISABLE_AVX512', '1')
-    if simd == 'scalar':
-        monkeypatch.setenv('GPTQMODEL_FLOATX_CPU_DISABLE_AVX2', '1')
+    configure_kernel(
+        KernelConfig(
+            floatx_cpu_simd_level={'default': 2, 'avx2': 1, 'scalar': 0}[simd],
+        )
+    )
     packed = torch.arange(256, dtype=torch.uint8).reshape(2, 128)
     lut = torch.tensor([0., .5, 1., 1.5, 2., 3., 4., 6., -0., -.5, -1., -1.5, -2., -3., -4., -6.], dtype=torch.float64)
     expected = torch.stack((lut[(packed & 15).long()], lut[(packed >> 4).long()]), -1).reshape(2, 256)

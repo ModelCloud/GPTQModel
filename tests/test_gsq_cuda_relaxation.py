@@ -21,6 +21,7 @@ from gptqmodel.quantization.gsq_training import (
     sampling_schedule,
     train_stage_update,
 )
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 def _cuda_relaxation_available():
@@ -59,6 +60,10 @@ def test_cuda_gsq_relaxation_matches_eager_forward_and_gradients(
 
     quant.zero_grad(set_to_none=True)
     eager = quant(uniform=uniform, temperature=temperature, multiplier=multiplier)
+    # Capture before backward frees the graph: the eager path saves an FP32
+    # probability for every logits dtype, so the fused path must match it. A
+    # BF16 fused probability is what drifted by 5.9e-4 (issue #4357).
+    assert eager.grad_fn.saved_tensors[0].dtype == torch.float32
     (eager*upstream).sum().backward()
     eager_logits = quant.logits.grad.detach().clone()
     eager_scales = quant.scales.grad.detach().clone()
@@ -68,16 +73,77 @@ def test_cuda_gsq_relaxation_matches_eager_forward_and_gradients(
                                         quant.valid, uniform, group_size, temperature, multiplier)
     if fused is None:
         pytest.skip("CUDA NVRTC relaxation unavailable")
-    if logits_dtype == torch.float32:
-        assert fused.grad_fn.saved_tensors[0].dtype == torch.float32
+    assert fused.grad_fn.saved_tensors[0].dtype == torch.float32
     (fused*upstream).sum().backward()
     torch.testing.assert_close(fused, eager, rtol=0, atol=1e-4)
     torch.testing.assert_close(quant.logits.grad, eager_logits, rtol=.02, atol=.02)
     torch.testing.assert_close(quant.scales.grad, eager_scales, rtol=.02, atol=.05)
 
 
+def test_cuda_bf16_relaxation_matches_eager_probability_and_exponent():
+    """The BF16 fused path must not round its exponent or probability.
+
+    Issue #4357: keeping the Gumbel noise chain in BF16 is required (eager
+    derives its noise from the BF16 `uniform`), but the exponent and the softmax
+    probability stay FP32 in eager. Rounding either one moved the relaxation
+    output by up to 5.9e-4 on this geometry.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA device required")
+    if not _cuda_relaxation_available():
+        pytest.skip("CUDA NVRTC relaxation unavailable")
+    torch.manual_seed(102)
+    rows, columns, group_size = 8, 256, 32
+    weight = (torch.randn(rows, columns, device="cuda", dtype=torch.bfloat16)*.02).clamp(-.04, .04)
+    scales = torch.full((rows, columns//group_size), .02, device="cuda", dtype=torch.float32)
+    noise = torch.randn(5, rows, columns, device="cuda", dtype=torch.bfloat16)
+    quant = GSQScalarTrainingModule(weight, scales, group_size, bits=3, noise=noise,
+                                    logits_dtype=torch.bfloat16)
+    uniform = torch.rand_like(quant.logits)
+
+    eager = quant(uniform=uniform, temperature=.7, multiplier=125.)
+    eager_probability = eager.grad_fn.saved_tensors[0].detach().clone()
+    eager_expected = eager.grad_fn.saved_tensors[4].detach().clone()
+    fused = cuda_relaxed_scalar_weights(quant.logits, quant.scales, quant.initial, quant.valid,
+                                        uniform, group_size, .7, 125.)
+    if fused is None:
+        pytest.skip("CUDA NVRTC relaxation unavailable")
+    fused_probability = fused.grad_fn.saved_tensors[0].detach().clone()
+    fused_expected = fused.grad_fn.saved_tensors[1].detach().clone()
+
+    assert eager_probability.dtype == torch.float32
+    assert fused_probability.dtype == torch.float32
+    # Both paths share the BF16 noise chain and FP32 exponent, so the
+    # probability may only differ by the device libm/softmax rounding.
+    torch.testing.assert_close(fused_probability, eager_probability, rtol=1e-6, atol=1e-7)
+
+    # An independent FP32 Torch oracle for the same draws. It derives the BF16
+    # noise chain from `uniform` itself and never consumes a kernel output.
+    u = uniform
+    inner = -torch.log(u + 1e-8) + 1e-8
+    assert inner.dtype == torch.bfloat16
+    noise = -torch.log(inner)
+    assert noise.dtype == torch.bfloat16
+    masked_logits = quant.logits.masked_fill(~quant.valid, -torch.inf)
+    score = (masked_logits.to(torch.float32)*125. + noise.to(torch.float32))/.7
+    oracle_probability = score.softmax(0)
+    levels = torch.arange(-2, 3, device="cuda", dtype=torch.float32)[:, None, None]
+    oracle_expected = quant.initial + (oracle_probability*levels).sum(0)
+    torch.testing.assert_close(fused_probability, oracle_probability, rtol=1e-6, atol=1e-7)
+    torch.testing.assert_close(fused_expected, oracle_expected, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(eager_expected, oracle_expected, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(fused, eager, rtol=0, atol=1e-6)
+
+    # The pre-fix kernel rounded the exponent and probability to BF16. Show that
+    # rounding here is what the 1e-4 contract rejects, so the test cannot pass
+    # while the rounding returns.
+    rounded_probability = oracle_probability.bfloat16().float()
+    rounded_expected = quant.initial + (rounded_probability*levels).sum(0)
+    assert (rounded_expected - oracle_expected).abs().max() > 1e-4
+
+
 def test_cuda_gsq_relaxation_keeps_eager_fallback(monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION", "1")
+    configure_kernel(KernelConfig(gsq_disable_cuda_relaxation=True))
     initial = torch.zeros(2, 32)
     logits = torch.zeros(5, 2, 32)
     scales = torch.ones(2, 1)
@@ -159,10 +225,7 @@ def test_cuda_gsq_30_update_trajectory_matches_eager(bits, logits_dtype, monkeyp
         for module, optimizer, generator, disabled in zip(
             (eager, fused), optimizers, generators, (True, False)
         ):
-            if disabled:
-                monkeypatch.setenv("GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION", "1")
-            else:
-                monkeypatch.delenv("GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION", raising=False)
+            configure_kernel(KernelConfig(gsq_disable_cuda_relaxation=disabled))
             loss = train_stage_update(
                 {"weight": module}, optimizer, [(None, 1)], objective,
                 generator=generator, temperature=temperature, multiplier=multiplier,
@@ -292,10 +355,7 @@ def test_cuda_and_eager_staged_llama_agree_after_packed_training(tmp_path, monke
     validation = [{"input_ids": list(range(49, 65))}]
     results = []
     for disabled, label in ((True, "eager"), (False, "cuda")):
-        if disabled:
-            monkeypatch.setenv("GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION", "1")
-        else:
-            monkeypatch.delenv("GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION", raising=False)
+        configure_kernel(KernelConfig(gsq_disable_cuda_relaxation=disabled))
         model = copy.deepcopy(original)
         run = quantize_llama_gsq_model(
             model, train, initialization_documents=initialization,
@@ -347,8 +407,12 @@ def test_hip_escape_hatch_forces_eager_path(monkeypatch):
 
     device = torch.cuda.current_device()
     fast_module._FAILED.discard(device)
-    monkeypatch.setenv("GPTQMODEL_GSQ_DISABLE_HIP_RELAXATION", "1")
-    monkeypatch.delenv("GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION", raising=False)
+    configure_kernel(
+        KernelConfig(
+            gsq_disable_hip_relaxation=True,
+            gsq_disable_cuda_relaxation=False,
+        )
+    )
     logits = torch.zeros((5, 2, 32), device="cuda", dtype=torch.bfloat16)
     scales = torch.ones((2, 1), device="cuda", dtype=torch.float32)
     initial = torch.zeros((2, 32), device="cuda", dtype=torch.float32)

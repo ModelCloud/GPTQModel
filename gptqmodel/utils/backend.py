@@ -39,7 +39,7 @@ class BACKEND(str, Enum):
     # Marlin kernels
     # A single backend covers both Marlin sub-kernels. The quantization method
     # and checkpoint format select the concrete GPTQ or AWQ implementation.
-    MARLIN = "marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
+    MARLIN = "marlin"  # marlin reduce ops, fp32 by default; controlled by KernelConfig.marlin_fp32
 
     # Machete kernels
     # A single backend covers both Machete sub-kernels. The quantization method
@@ -222,6 +222,11 @@ def normalize_backend(
     *,
     quant_method: Optional[Union[str, Any]] = None,
 ) -> Optional[BACKEND]:
+    # Imported lazily: configs depend on the enum and normalization rules.
+    from .backend_config import BackendConfig
+
+    if isinstance(backend, BackendConfig):
+        backend = backend.backend
     if backend is None:
         return None
 
@@ -276,19 +281,26 @@ def awq_gemm_pack_backend(
     return BACKEND.AWQ_GEMM
 
 
-def awq_gemv_pack_backend(*, is_rocm: bool) -> BACKEND:
-    """Return the AWQ GEMV backend used to pack quantized weights.
+def awq_gemv_pack_backend(*, device_type: str = "cuda", is_rocm: bool) -> BACKEND:
+    """Return the AWQ GEMV backend used to pack and run quantized weights.
 
     The native AWQ GEMV extension (``gemv_forward``/``gemmv2_forward``) is
     CUDA-only: its sources include ``cuda_fp16.h`` and CUDA-only inline asm, and
     its hipified warp-sync reduction rejects wave32.  ``AWQ_GEMV_TRITON`` reads
     the identical packed GEMV layout with a portable Triton kernel, so ROCm
-    packs with that kernel instead of selecting a CUDA-only class.
+    packs with that kernel instead of selecting a CUDA-only class.  A CPU-only
+    host has neither accelerator kernel; it packs and runs with the portable
+    Torch GEMV reader (``AwqGEMVTorchLinear``) so ``quantize()`` -> ``save()``
+    still produces the requested GEMV checkpoint (issue #4554).
 
     Args:
+        device_type: Runtime type of the quantization device (``"cuda"``,
+            ``"rocm"``, ``"cpu"``, ...).
         is_rocm: Whether the CUDA namespace is backed by the HIP runtime.
     """
 
+    if device_type == "cpu":
+        return BACKEND.AWQ_TORCH
     return BACKEND.AWQ_GEMV_TRITON if is_rocm else BACKEND.AWQ_GEMV
 
 

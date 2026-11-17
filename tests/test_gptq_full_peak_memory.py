@@ -6,6 +6,7 @@ import torch
 from gptqmodel.quantization import gptq as gptq_mod
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 @pytest.mark.parametrize("device_type", ["cpu", "cuda"])
@@ -14,7 +15,7 @@ def test_nan_retry_uses_original_hessian_diagonal(device_type, ordering, monkeyp
     if device_type == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
 
-    monkeypatch.setenv("GPTQMODEL_DISABLE_GPTQ_CUDA", "1")
+    configure_kernel(KernelConfig(gptq_fused_block_update=False))
     device = torch.device(device_type)
     torch.manual_seed(821)
     weight = torch.randn(4, 16, device=device)
@@ -79,7 +80,7 @@ def test_hessian_is_released_before_block_updates(device_type, monkeypatch):
     if device_type == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
 
-    monkeypatch.setenv("GPTQMODEL_DISABLE_GPTQ_CUDA", "1")
+    configure_kernel(KernelConfig(gptq_fused_block_update=False))
     device = torch.device(device_type)
     task = GPTQ(
         torch.nn.Linear(16, 4, bias=False, device=device),

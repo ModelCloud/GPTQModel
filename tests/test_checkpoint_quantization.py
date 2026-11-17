@@ -801,3 +801,78 @@ def test_checkpoint_roundtrip_restores_runtime_dynamic_exclusions(tmp_path):
     assert resumed_config.dynamic == config.dynamic
     assert resumed_config._runtime_dynamic_exclusions == {runtime_rule}
     assert resumed.processors[0].loaded == {"cursor": 1}
+
+
+def test_resumed_quantize_leaves_a_usable_in_session_model(tmp_path, monkeypatch):
+    """#4572 + #4562: a resumed run must honour the #4498 in-session contract.
+
+    The checkpoint-restored packed layers were meta with no offload hook, so the
+    loop-exit restore skipped them, and the excluded dense layer kept the
+    `param.data =` parameters that cannot take part in a forward.
+    """
+
+    torch.manual_seed(1234)
+    native = tmp_path / "native"
+    config_args = {
+        "num_hidden_layers": 2,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "vocab_size": 128,
+        "pad_token_id": 0,
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+    }
+    build_native_model("llama", config_args, moe_intermediate_size=32).save_pretrained(native)
+    tokenizer = _build_local_tokenizer(native)
+    calibration = _build_calibration_dataset(tokenizer)
+
+    def run(output, checkpoint):
+        torch.manual_seed(6789)
+        config = QuantizeConfig(
+            bits=4,
+            group_size=32,
+            desc_act=False,
+            device="cpu",
+            offload_to_disk=True,
+            offload_to_disk_path=str(tmp_path / f"offload-{output}"),
+            dynamic={r"-:^model\.layers\.1\.": {}},
+        )
+        model = GPTQModel.load(str(native), quantize_config=config, backend=BACKEND.TORCH)
+        model.quantize(
+            calibration,
+            batch_size=1,
+            backend=BACKEND.TORCH,
+            calibration_data_min_length=1,
+            checkpoint=checkpoint,
+        )
+        return model
+
+    original = CheckpointExtension.on_boundary
+
+    def stop(extension, boundary):
+        if boundary.step.index == 0:
+            signal.raise_signal(signal.SIGTERM)
+        original(extension, boundary)
+
+    checkpoint = CheckpointConfig(tmp_path / "checkpoints")
+    with monkeypatch.context() as patch:
+        patch.setattr(CheckpointExtension, "on_boundary", stop)
+        with pytest.raises(CheckpointStopped):
+            run("interrupted", checkpoint)
+
+    resumed = run("resumed", checkpoint)
+
+    meta = [
+        name
+        for name, tensor in list(resumed.model.named_parameters())
+        + list(resumed.model.named_buffers())
+        if tensor.is_meta
+    ]
+    assert meta == []
+    for name, parameter in resumed.model.named_parameters():
+        parameter._version  # raises for the #4572 leftovers
+    ids = tokenizer("the quick brown fox", return_tensors="pt")["input_ids"]
+    with torch.inference_mode():
+        assert resumed.model(input_ids=ids).logits.shape[:2] == (1, ids.shape[1])

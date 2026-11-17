@@ -42,12 +42,21 @@ class TTNNUnavailable(RuntimeError):
 
 @dataclass(frozen=True)
 class TTNNMesh:
-    """An open ``ttnn.MeshDevice`` plus the fabric mode it was opened with."""
+    """An open ``ttnn.MeshDevice`` plus the request it was opened for.
+
+    ``device_id`` and ``trace_region_size`` are recorded next to the fabric mode
+    because they are part of the placement the caller asked for: a later
+    ``open_mesh`` may only reuse this handle when every one of them matches.
+    ``mesh_shape == ()`` means a single chip, so it cannot carry the ordinal;
+    ``device_id`` is where that chip identity lives.
+    """
 
     device: Any
     mesh_shape: tuple[int, ...]
     fabric: str
     owner: str
+    device_id: int = 0
+    trace_region_size: int = 0
 
     @property
     def num_devices(self) -> int:
@@ -173,6 +182,12 @@ def open_mesh(
     ``trace_region_size`` reserves device memory for captured traces (a traced
     decode step needs one).  ``device_id`` picks the chip for a single-device
     open, which is how one process per card is run.
+
+    A live handle is reused only when it was opened for the same owner, chip
+    count, chip ordinal, fabric mode and trace reservation.  Anything else
+    raises :class:`TTNNUnavailable` instead of returning a device with different
+    placement than the caller asked for; changing placement requires an
+    explicit :func:`close_mesh` first.
     """
 
     global _MESH
@@ -180,6 +195,19 @@ def open_mesh(
     ttnn = import_ttnn()
     if device_count < 1:
         raise ValueError(f"device_count must be >= 1, got {device_count}")
+    device_count = int(device_count)
+    device_id = int(device_id)
+    trace_region_size = int(trace_region_size)
+    # Normalise and validate the request before touching process state, so an
+    # unknown fabric or a mesh offset fails even when a handle already exists.
+    fabric = (fabric or "DISABLED").upper()
+    configured_fabric = None
+    if fabric != "DISABLED":
+        configured_fabric = getattr(ttnn.FabricConfig, fabric, None)
+        if configured_fabric is None:
+            raise ValueError(f"unknown TTNN fabric config {fabric!r}")
+    if device_count > 1 and device_id:
+        raise ValueError("device_id selects a single chip; it cannot offset a mesh")
 
     with _LOCK:
         if _MESH is not None:
@@ -188,10 +216,23 @@ def open_mesh(
                     f"the Tenstorrent chips are already owned by {_MESH.owner!r}; "
                     f"{owner!r} cannot open a second runtime in this process"
                 )
-            if _MESH.mesh_shape and _prod(_MESH.mesh_shape) != device_count:
+            mismatched = []
+            if _MESH.num_devices != device_count:
+                mismatched.append(f"device_count={device_count} (open: {_MESH.num_devices})")
+            if _MESH.device_id != device_id:
+                mismatched.append(f"device_id={device_id} (open: {_MESH.device_id})")
+            if _MESH.fabric != fabric:
+                mismatched.append(f"fabric={fabric} (open: {_MESH.fabric})")
+            if _MESH.trace_region_size != trace_region_size:
+                mismatched.append(
+                    f"trace_region_size={trace_region_size} "
+                    f"(open: {_MESH.trace_region_size})"
+                )
+            if mismatched:
                 raise TTNNUnavailable(
-                    f"an existing {_MESH.mesh_shape} TTNN mesh cannot serve "
-                    f"device_count={device_count}"
+                    "the open TTNN device cannot serve this request: "
+                    + ", ".join(mismatched)
+                    + "; close it and reopen explicitly to change placement"
                 )
             return _MESH
 
@@ -202,24 +243,18 @@ def open_mesh(
         # left the GDDR hot, and give the parts a fixed idle window otherwise.
         before_device_open(owner=owner)
 
-        fabric = (fabric or "DISABLED").upper()
         applied_fabric = "DISABLED"
-        if fabric != "DISABLED":
-            configured = getattr(ttnn.FabricConfig, fabric, None)
-            if configured is None:
-                raise ValueError(f"unknown TTNN fabric config {fabric!r}")
-            ttnn.set_fabric_config(configured)
+        if configured_fabric is not None:
+            ttnn.set_fabric_config(configured_fabric)
             applied_fabric = fabric
 
         mesh_shape: tuple[int, ...] = ()
         device = None
         try:
-            extra = {"trace_region_size": int(trace_region_size)} if trace_region_size else {}
+            extra = {"trace_region_size": trace_region_size} if trace_region_size else {}
             if device_count == 1:
-                device = ttnn.open_device(device_id=int(device_id), **extra)
+                device = ttnn.open_device(device_id=device_id, **extra)
             else:
-                if device_id:
-                    raise ValueError("device_id selects a single chip; it cannot offset a mesh")
                 mesh_shape = (1, device_count)
                 device = ttnn.open_mesh_device(ttnn.MeshShape(*mesh_shape), **extra)
         except Exception as exc:
@@ -238,9 +273,12 @@ def open_mesh(
             mesh_shape=mesh_shape,
             fabric=applied_fabric,
             owner=owner,
+            device_id=device_id,
+            trace_region_size=trace_region_size,
         )
         log.info(
-            f"TTNN: opened {'mesh ' + str(mesh_shape) if mesh_shape else 'device 0'} "
+            f"TTNN: opened "
+            f"{'mesh ' + str(mesh_shape) if mesh_shape else f'device {device_id}'} "
             f"for {owner!r} (fabric={applied_fabric})."
         )
         return _MESH
@@ -261,6 +299,15 @@ def close_mesh(*, owner: Optional[str] = None) -> None:
             )
         mesh, _MESH = _MESH, None
         mesh.close()
+        # Every cached grid operand is device-resident, so it died with this
+        # device. Dropping the entries here also keeps a recycled object id from
+        # ever matching a buffer that belonged to the closed device.
+        try:
+            from .tt_int4_kernel import clear_grid_weight_cache
+
+            clear_grid_weight_cache()
+        except Exception as exc:  # pragma: no cover - teardown must not mask errors
+            log.debug(f"TTNN: could not clear the grid weight cache on close: {exc}")
         # Closing the device does not stop the card generating heat: measured on
         # a p300c, AICLK stayed at 1350 MHz and ~50 W per board for over 50 s
         # after ``close_device``, with GDDR still climbing. The firmware drops

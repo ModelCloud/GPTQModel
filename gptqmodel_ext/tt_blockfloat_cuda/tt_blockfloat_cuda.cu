@@ -717,13 +717,6 @@ struct CublasApi {
 inline const CublasApi& cublas_api() {
   static const CublasApi api = [] {
     CublasApi a;
-    // Escape hatch that forces the fused fallback.  It is the only way to
-    // exercise that path on a machine which does have cuBLAS, and it lets a
-    // build with no cuBLAS at all run the same tests.
-    if (const char* off = std::getenv("GPTQMODEL_BLOCKFLOAT_NO_CUBLAS");
-        off != nullptr && off[0] != '\0' && off[0] != '0') {
-      return a;
-    }
     static const char* kSonames[] = {"libcublas.so.13", "libcublas.so.12",
                                      "libcublas.so.11", "libcublas.so"};
     void* lib = nullptr;
@@ -946,6 +939,7 @@ cudaError_t launch_linear_cublas(const void* x, const uint8_t* codes,
                                  const int8_t* exponents, int64_t m, int64_t n, int64_t k,
                                  const void* bias, void* out, cudaStream_t stream) {
   cublasHandle_t handle = nullptr;
+
   cudaError_t e = cublas_handle_for_stream(stream, &handle);
   if (e != cudaSuccess) return e;
   const CublasApi& api = cublas_api();
@@ -1028,10 +1022,12 @@ cudaError_t launch_linear_fused(const void* x, const uint8_t* codes,
 template <int BITS, typename T>
 cudaError_t launch_linear_mma(const void* x, const uint8_t* codes,
                               const int8_t* exponents, int64_t m, int64_t n, int64_t k,
-                              const void* bias, void* out, cudaStream_t stream) {
+                              const void* bias, void* out, cudaStream_t stream,
+                              bool allow_cublas) {
   if (m <= 0 || n <= 0 || k <= 0) return cudaErrorInvalidValue;
   constexpr int64_t kIntMax = std::numeric_limits<int>::max();
-  if (cublas_api().ready && m <= kIntMax && n <= kIntMax && k <= kIntMax) {
+  if (allow_cublas && cublas_api().ready && m <= kIntMax && n <= kIntMax &&
+      k <= kIntMax) {
     cudaError_t e =
         launch_linear_cublas<BITS, T>(x, codes, exponents, m, n, k, bias, out, stream);
     if (e != cudaErrorNotSupported) return e;
@@ -1114,17 +1110,19 @@ cudaError_t blockfloat_decompose(const float* x, int bits, int64_t rows, int64_t
 
 cudaError_t blockfloat_linear(const void* x, int dtype, const uint8_t* codes,
                         const int8_t* exponents, int bits, int64_t m, int64_t n,
-                        int64_t k, const void* bias, void* out, cudaStream_t stream) {
+                        int64_t k, const void* bias, void* out, cudaStream_t stream,
+                        int32_t allow_cublas) {
   if (k % BLOCK) return cudaErrorInvalidValue;
   if (m <= 0 || n <= 0 || k <= 0) return cudaErrorInvalidValue;
+  const bool cublas = allow_cublas != 0;
   if (bits == 4) {
     if (dtype == BLOCKFLOAT_DTYPE_F32) return launch_linear_f32<4>(x, codes, exponents, m, n, k, bias, out, stream);
-    if (dtype == BLOCKFLOAT_DTYPE_F16) return launch_linear_mma<4, __half>(x, codes, exponents, m, n, k, bias, out, stream);
-    if (dtype == BLOCKFLOAT_DTYPE_BF16) return launch_linear_mma<4, __nv_bfloat16>(x, codes, exponents, m, n, k, bias, out, stream);
+    if (dtype == BLOCKFLOAT_DTYPE_F16) return launch_linear_mma<4, __half>(x, codes, exponents, m, n, k, bias, out, stream, cublas);
+    if (dtype == BLOCKFLOAT_DTYPE_BF16) return launch_linear_mma<4, __nv_bfloat16>(x, codes, exponents, m, n, k, bias, out, stream, cublas);
   } else if (bits == 8) {
     if (dtype == BLOCKFLOAT_DTYPE_F32) return launch_linear_f32<8>(x, codes, exponents, m, n, k, bias, out, stream);
-    if (dtype == BLOCKFLOAT_DTYPE_F16) return launch_linear_mma<8, __half>(x, codes, exponents, m, n, k, bias, out, stream);
-    if (dtype == BLOCKFLOAT_DTYPE_BF16) return launch_linear_mma<8, __nv_bfloat16>(x, codes, exponents, m, n, k, bias, out, stream);
+    if (dtype == BLOCKFLOAT_DTYPE_F16) return launch_linear_mma<8, __half>(x, codes, exponents, m, n, k, bias, out, stream, cublas);
+    if (dtype == BLOCKFLOAT_DTYPE_BF16) return launch_linear_mma<8, __nv_bfloat16>(x, codes, exponents, m, n, k, bias, out, stream, cublas);
   }
   return cudaErrorInvalidValue;
 }

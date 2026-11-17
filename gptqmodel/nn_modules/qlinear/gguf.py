@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import math
-import os
 import platform
 import sys
 import time
@@ -32,6 +31,7 @@ from ...quantization.config import (
 from ...quantization.fallback_smooth import smooth_block
 from ...utils.backend import BACKEND
 from ...utils.cpu_features import cpu_bf16x3_matmul
+from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
 from ._numerics import matmul_fp32_reduce
@@ -1194,25 +1194,18 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     AUTOTUNE = True
 
     QUANT_TYPE = "gguf"
-    GGUF_FUSED_CUDA_MAX_ROWS = max(0, int(os.environ.get("GPTQMODEL_GGUF_FUSED_CUDA_MAX_ROWS", "32")))
-    GGUF_FUSED_CUDA_MIN_MATRIX_ELEMENTS = max(
-        0,
-        int(os.environ.get("GPTQMODEL_GGUF_FUSED_CUDA_MIN_MATRIX_ELEMENTS", "8388608")),
-    )
-    GGUF_FUSED_CPU_MAX_ROWS = max(0, int(os.environ.get("GPTQMODEL_GGUF_FUSED_CPU_MAX_ROWS", "64")))
-    GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS = max(
-        0,
-        int(os.environ.get("GPTQMODEL_GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS", "0")),
-    )
-    # A positive block count is an explicit override. Zero selects the
-    # byte-budgeted default, which uses one GEMM for ordinary layers and
-    # narrows the K chunk only when the expanded chunk would exceed the
-    # transient-memory budget.
-    GGUF_FUSED_CHUNK_BLOCKS = max(0, int(os.environ.get("GPTQMODEL_GGUF_FUSED_CHUNK_BLOCKS", "0")))
-    GGUF_FUSED_CHUNK_BYTES = max(1, int(os.environ.get("GPTQMODEL_GGUF_FUSED_CHUNK_BYTES", str(32 * 1024 * 1024))))
-    GGUF_FUSED_AUTOTUNE_WARMUP = max(0, int(os.environ.get("GPTQMODEL_GGUF_FUSED_AUTOTUNE_WARMUP", "1")))
-    GGUF_FUSED_AUTOTUNE_ITERS = max(1, int(os.environ.get("GPTQMODEL_GGUF_FUSED_AUTOTUNE_ITERS", "2")))
-    GGUF_FUSED_AUTOTUNE_MARGIN = max(0.0, float(os.environ.get("GPTQMODEL_GGUF_FUSED_AUTOTUNE_MARGIN", "0.05")))
+    # Defaults for the fused forward. Per-instance overrides come from
+    # ``KernelConfig``; a positive chunk block count is an explicit override and
+    # zero selects the byte-budgeted default.
+    GGUF_FUSED_CUDA_MAX_ROWS = 32
+    GGUF_FUSED_CUDA_MIN_MATRIX_ELEMENTS = 8_388_608
+    GGUF_FUSED_CPU_MAX_ROWS = 64
+    GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS = 0
+    GGUF_FUSED_CHUNK_BLOCKS = 0
+    GGUF_FUSED_CHUNK_BYTES = 32 * 1024 * 1024
+    GGUF_FUSED_AUTOTUNE_WARMUP = 1
+    GGUF_FUSED_AUTOTUNE_ITERS = 2
+    GGUF_FUSED_AUTOTUNE_MARGIN = 0.05
 
     def __init__(
         self,
@@ -1233,17 +1226,18 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         self.gguf_block_size = qtype_info["block_size"]
         self.gguf_type_size = qtype_info["type_size"]
         self.padded_in_features = math.ceil(in_features / self.gguf_block_size) * self.gguf_block_size
-        self.gguf_fused_cuda_max_rows = self.GGUF_FUSED_CUDA_MAX_ROWS
-        self.gguf_fused_cuda_min_matrix_elements = self.GGUF_FUSED_CUDA_MIN_MATRIX_ELEMENTS
-        self.gguf_fused_cpu_max_rows = self.GGUF_FUSED_CPU_MAX_ROWS
-        self.gguf_fused_cpu_min_matrix_elements = self.GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS
-        self.gguf_fused_chunk_blocks = self.GGUF_FUSED_CHUNK_BLOCKS
-        self.gguf_fused_chunk_bytes = self.GGUF_FUSED_CHUNK_BYTES
+        kernel = resolve_kernel_config(kwargs.get("kernel") or kwargs.get("backend"))
+        self.gguf_fused_cuda_max_rows = kernel.gguf_fused_cuda_max_rows
+        self.gguf_fused_cuda_min_matrix_elements = kernel.gguf_fused_cuda_min_matrix_elements
+        self.gguf_fused_cpu_max_rows = kernel.gguf_fused_cpu_max_rows
+        self.gguf_fused_cpu_min_matrix_elements = kernel.gguf_fused_cpu_min_matrix_elements
+        self.gguf_fused_chunk_blocks = kernel.gguf_fused_chunk_blocks
+        self.gguf_fused_chunk_bytes = kernel.gguf_fused_chunk_bytes
         self._k_scale_overflow_cache: dict[tuple, bool] = {}
         self._k_scale_overflow_cache_source_key = None
-        self.gguf_fused_autotune_warmup = self.GGUF_FUSED_AUTOTUNE_WARMUP
-        self.gguf_fused_autotune_iters = self.GGUF_FUSED_AUTOTUNE_ITERS
-        self.gguf_fused_autotune_margin = self.GGUF_FUSED_AUTOTUNE_MARGIN
+        self.gguf_fused_autotune_warmup = kernel.gguf_fused_autotune_warmup
+        self.gguf_fused_autotune_iters = kernel.gguf_fused_autotune_iters
+        self.gguf_fused_autotune_margin = kernel.gguf_fused_autotune_margin
 
         super().__init__(
             bits=int(bits_spec),

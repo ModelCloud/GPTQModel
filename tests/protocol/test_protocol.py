@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
+
 from gptqmodel.quantization import FORMAT, METHOD, AWQConfig, GGUFConfig, GPTQConfig
 from gptqmodel.quantization.protocol import (
     MatchSpec,
@@ -317,3 +319,110 @@ def test_negative_match_awq_protocol_compiles_to_dynamic_skip_config():
     assert yaml_cfg.sym is True
     assert python_cfg.dynamic == {r"-:.*(?:.*layers\.2.*)": {}}
     assert yaml_cfg.dynamic == {r"-:.*(?:.*layers\.2.*)": {}}
+
+
+def _gptq_yaml_with_weight_quantize(extra: str = "") -> str:
+    return (
+        "version: 2\n"
+        "stages:\n"
+        "  - name: ptq\n"
+        "    rules:\n"
+        "      - match: \"*\"\n"
+        "        weight:\n"
+        "          quantize:\n"
+        "            method: gptq\n"
+        "            bits: 4\n"
+        f"{extra}"
+        "          export:\n"
+        "            format: gptq\n"
+    )
+
+
+@pytest.mark.parametrize("target", ["input", "output", "kv_cache"])
+def test_weight_rule_rejects_dropped_non_weight_targets(target):
+    protocol = _gptq_yaml_with_weight_quantize(
+        f"        {target}:\n"
+        "          quantize: {method: fp8}\n"
+    )
+
+    with pytest.raises(NotImplementedError, match="only supports weight-target compilation") as excinfo:
+        compile_protocol_yaml_to_quantize_config(protocol)
+
+    assert f"`{target}`" in str(excinfo.value)
+
+
+def test_weight_rule_rejects_input_and_kv_cache_together():
+    protocol = _gptq_yaml_with_weight_quantize(
+        "        input:\n"
+        "          quantize: {method: mxfp4, mode: dynamic}\n"
+        "        kv_cache:\n"
+        "          quantize: {method: fp8}\n"
+    )
+
+    with pytest.raises(NotImplementedError, match="only supports weight-target compilation") as excinfo:
+        compile_protocol_yaml_to_quantize_config(protocol)
+
+    message = str(excinfo.value)
+    assert "`input`" in message and "`kv_cache`" in message
+
+
+@pytest.mark.parametrize(
+    ("extra", "unknown"),
+    [
+        ("            act_order: true\n", "act_order"),
+        ("            damp_percent: 0.1\n", "damp_percent"),
+        ("            symmetric: false\n", "symmetric"),
+        ("            group-size: 32\n", "group-size"),
+        ("            mse: true\n", "mse"),
+        ("            true_sequential: false\n", "true_sequential"),
+    ],
+)
+def test_gptq_weight_quantize_rejects_unknown_arguments(extra, unknown):
+    with pytest.raises(ValueError, match="unsupported `weight.quantize` argument") as excinfo:
+        compile_protocol_yaml_to_quantize_config(_gptq_yaml_with_weight_quantize(extra))
+
+    message = str(excinfo.value)
+    assert f"`{unknown}`" in message
+    assert "Supported keys:" in message
+    for key in ("bits", "group_size", "sym", "desc_act", "act_group_aware"):
+        assert f"`{key}`" in message
+
+
+def test_gptq_weight_quantize_accepts_every_supported_argument():
+    protocol = _gptq_yaml_with_weight_quantize(
+        "            group_size: 32\n"
+        "            sym: false\n"
+        "            desc_act: false\n"
+        "            act_group_aware: true\n"
+    )
+
+    cfg = compile_protocol_yaml_to_quantize_config(protocol)
+
+    assert isinstance(cfg, GPTQConfig)
+    assert cfg.bits == 4
+    assert cfg.group_size == 32
+    assert cfg.sym is False
+    assert cfg.desc_act is False
+    assert cfg.act_group_aware is True
+
+
+def test_gguf_weight_quantize_rejects_unknown_arguments():
+    protocol = """
+version: 2
+stages:
+  - name: weight_only
+    rules:
+      - match: "*"
+        weight:
+          quantize:
+            method: gguf
+            bits: q4_k_m
+            group_size: 32
+"""
+
+    with pytest.raises(ValueError, match="unsupported `weight.quantize` argument") as excinfo:
+        compile_protocol_yaml_to_quantize_config(protocol)
+
+    message = str(excinfo.value)
+    assert "`group_size`" in message
+    assert "Supported keys: `bits`" in message

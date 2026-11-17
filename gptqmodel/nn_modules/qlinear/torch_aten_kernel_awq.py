@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 import torch
 
 from ...adapter.adapter import Adapter
+from ...models._const import DEVICE
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import (
     dequantize_gemm,
@@ -19,7 +20,9 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
 from ._fused_train_state import (
+    bind_runtime_qzeros,
     capture_fused_train_state,
+    finalize_fused_train_state,
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
@@ -30,7 +33,12 @@ from .torch_aten_kernel import (
     _cpu_int4pack_zero_offsets,
     _has_local_int4pack_cpu_ops,
 )
-from .torch_fused import _cpu_int4pack_mm, pack_scales_and_zeros
+from .torch_fused import (
+    _cpu_int4pack_mm,
+    _validate_cpu_int4pack_group_size,
+    _validate_cpu_int4pack_out_features,
+    pack_scales_and_zeros,
+)
 
 
 log = setup_logger()
@@ -63,6 +71,13 @@ class TorchAtenAwqLinear(AWQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     gemm_int4_forward_kernel = None
+
+    # ``transform_cpu`` keeps ``scales`` in the checkpoint dtype and layout, so
+    # only the rewritten qweight/qzeros need a checkpoint snapshot.
+    _FUSED_TRAIN_STATE_NAMES = ("qweight", "qzeros")
+    # The ATen CPU int4pack permutation has a verified inverse, so the
+    # checkpoint qweight is rebuilt on save instead of kept resident.
+    _FUSED_TRAIN_STATE_REBUILD = "awq"
 
     def __init__(
         self,
@@ -124,6 +139,52 @@ class TorchAtenAwqLinear(AWQuantLinear):
                 self.bias = None
 
     @classmethod
+    def _validate(
+        cls,
+        bits: int = 4,
+        group_size: int = 128,
+        desc_act: bool = False,
+        sym: bool = False,
+        pack_dtype: torch.dtype = None,
+        dtype: Optional[torch.dtype] = None,
+        dynamic: Optional[dict] = None,
+        in_features: int = None,
+        out_features: int = None,
+        device: Optional[DEVICE | torch.device] = None,
+        trainable: Optional[bool] = None,
+        adapter: Optional[Adapter] = None,
+    ):
+        ok, err = super()._validate(
+            bits=bits,
+            group_size=group_size,
+            desc_act=desc_act,
+            sym=sym,
+            pack_dtype=pack_dtype,
+            dtype=dtype,
+            dynamic=dynamic,
+            in_features=in_features,
+            out_features=out_features,
+            device=device,
+            trainable=trainable,
+            adapter=adapter,
+        )
+        if not ok:
+            return ok, err
+        ok, err = _validate_cpu_int4pack_group_size(
+            cls,
+            group_size=group_size,
+            in_features=in_features,
+            device=device if device is not None else DEVICE.CPU,
+        )
+        if not ok:
+            return ok, err
+        return _validate_cpu_int4pack_out_features(
+            cls,
+            out_features=out_features,
+            device=device if device is not None else DEVICE.CPU,
+        )
+
+    @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         ok, err = TorchAtenLinear.validate_once()
         if ok:
@@ -173,8 +234,12 @@ class TorchAtenAwqLinear(AWQuantLinear):
         self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(iweight.t().int(), 1).contiguous()
         self.qzeros = _cpu_int4pack_zero_offsets(izeros, compute_scales, self.bits).to(compute_dtype).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(compute_scales, self.qzeros)
+        bind_runtime_qzeros(self)
         self._cpu_transform_dtype = target_dtype
         self._cpu_transformed = True
+        # ``qweight`` now holds int4pack words: drop the checkpoint clone if
+        # the inverse reproduces exactly the bytes captured before the pack.
+        finalize_fused_train_state(self)
 
     def transform(self, device, dtype: torch.dtype | None = None):
         if device == "cpu":
@@ -194,7 +259,7 @@ class TorchAtenAwqLinear(AWQuantLinear):
         ).to(device=device, dtype=dtype)
 
     @torch.no_grad()
-    def _fused_op_forward(self, x):
+    def _fused_op_forward(self, x, out_dtype=None):
         self._refresh_fused_state()
         if x.device.type != "cpu":
             raise NotImplementedError
@@ -204,16 +269,21 @@ class TorchAtenAwqLinear(AWQuantLinear):
                 f"{self.__class__.__name__} fused ATen int4pack requires activation dtype "
                 f"{self.scales_and_zeros.dtype}, got {x.dtype}."
             )
+        if (
+            out_dtype is None
+            and self.bias is not None
+            and x.dtype in (torch.float16, torch.bfloat16)
+        ):
+            # A caller that adds its own bias after this call needs the wide
+            # product across the boundary; narrowing here overflows before the
+            # outer epilogue can cancel it.
+            out_dtype = torch.float32
         return _cpu_int4pack_mm(
             x,
             self.qweight,
             self.group_size,
             self.scales_and_zeros,
-            out_dtype=(
-                torch.float32
-                if self.bias is not None and x.dtype in (torch.float16, torch.bfloat16)
-                else None
-            ),
+            out_dtype=out_dtype,
         )
 
     # The native affine operand is derived metadata, shared with GPTQ's ATen
@@ -272,26 +342,28 @@ class TorchAtenAwqLinear(AWQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        if (
-            not self.training
-            and not x.requires_grad
-            and self.linear_mode is None
-            and _has_local_int4pack_cpu_ops()
-            and x.device.type == "cpu"
-            and self._fused_input_dtype(x)
-            # FP16 can overflow before a cancelling bias. BF16 has FP32's
-            # range, so it can use the fused kernel and add the bias once. The
-            # CPU fused op returns an FP32 product for a biased FP16 layer.
-            and (
-                self.bias is None
-                or x.dtype in (torch.bfloat16, torch.float16)
-            )
-        ):
-            capture_fused_train_state(self)
-            self.transform(x.device.type, dtype=x.dtype)
-            self.linear_mode = "inference"
-        elif self.linear_mode is None:
-            self.linear_mode = "train"
+        with self._cpu_transform_lock:
+            if (
+                not self.training
+                and not x.requires_grad
+                and self.linear_mode is None
+                and _has_local_int4pack_cpu_ops()
+                and x.device.type == "cpu"
+                and self._fused_input_dtype(x)
+                # FP16 can overflow before a cancelling bias. BF16 has FP32's
+                # range, so it can use the fused kernel and add the bias once.
+                # The CPU fused op returns an FP32 product for a biased FP16
+                # layer.
+                and (
+                    self.bias is None
+                    or x.dtype in (torch.bfloat16, torch.float16)
+                )
+            ):
+                capture_fused_train_state(self)
+                self.transform(x.device.type, dtype=x.dtype)
+                self.linear_mode = "inference"
+            elif self.linear_mode is None:
+                self.linear_mode = "train"
 
         if self.linear_mode == "inference":
             if not self._fused_input_dtype(x):

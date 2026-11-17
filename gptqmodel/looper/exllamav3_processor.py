@@ -24,6 +24,7 @@ from torch.nn.modules.conv import _ConvNd
 from ..exllamav3.modules.quant.exl3_lib.quantize import (
     EXL3_HESSIAN_NUMERICAL_CONTRACT,
     EXL3_HESSIAN_SYMMETRY_CONTRACT,
+    clear_tile_workspace,
     quantize_exl3,
     reconstruct_exl3_tensors,
     validate_exl3_quantization_geometry,
@@ -34,10 +35,10 @@ from ..looper.loop_processor import (
     CalibrationConfig,
     CheckpointSupport,
     ForwardConfig,
-    LoopProcessor,
     ProcessorLifecycleConfig,
 )
 from ..looper.named_module import NamedModule
+from ..looper.shared_input import SharedInputCaptureProcessor
 from ..models import BaseQModel
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
@@ -57,12 +58,9 @@ from ..quantization.config import FORMAT, METHOD, EXL3Config, GPTQConfig
 from ..quantization.gptq import GPTQ
 from ..utils.device import get_device
 from ..utils.exl3_capture_batch_spool import (
-    CAPTURE_BATCH_CHECKPOINT_INTERVAL_ENV,
-    CAPTURE_BATCH_SPOOL_ENV,
     EXL3CaptureBatchSpool,
 )
 from ..utils.exl3_capture_frontier import (
-    CAPTURE_FRONTIER_ENV,
     EXL3CaptureDescriptor,
     EXL3CaptureFrontierStore,
     EXL3CaptureRecord,
@@ -118,17 +116,13 @@ from ..utils.exl3_router_candidates import (
     learned_router_ranked_choices,
 )
 from ..utils.exllamav3 import _resolve_linear_shape, create_exllamav3_module
+from ..utils.kernel import get_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.model import recurse_setattr
 from ..utils.module_locks import parent_module_lock
 from ..utils.offload import offload_to_disk, offload_to_safetensors_reference
 
 
-HOST_RSS_LIMIT_ENV = "GPTQMODEL_EXL3_HOST_RSS_LIMIT_BYTES"
-CUDA_ALLOCATION_LIMIT_ENV = "GPTQMODEL_EXL3_CUDA_ALLOCATION_LIMIT_BYTES"
-MEMORY_TELEMETRY_INTERVAL_ENV = (
-    "GPTQMODEL_EXL3_MEMORY_TELEMETRY_INTERVAL_BATCHES"
-)
 HESSIAN_OWNER_POLICY_META = "ds4rt_hessian_owner_policy"
 HESSIAN_OWNER_WEIGHTED_ROUND_ROBIN = (
     "ds4rt.exl3-hessian-owner-weighted-round-robin-v1"
@@ -700,7 +694,7 @@ def clone_exllamav3_config_for_module(
     return qcfg_clone
 
 
-class EXL3Processor(LoopProcessor):
+class EXL3Processor(SharedInputCaptureProcessor):
     """Captures activations and repacks modules into ExLlamaV3 format."""
 
     lifecycle = ProcessorLifecycleConfig(
@@ -728,6 +722,7 @@ class EXL3Processor(LoopProcessor):
             calibration=calibration,
             forward=forward,
         )
+        self._init_shared_input_capture()
 
         self.avg_losses = []
         self.lm_head_name = lm_head_name
@@ -836,7 +831,7 @@ class EXL3Processor(LoopProcessor):
     ) -> EXL3CaptureFrontierStore | None:
         """Construct the opt-in durable Hessian store at most once per run."""
 
-        configured_root = os.getenv(CAPTURE_FRONTIER_ENV)
+        configured_root = get_kernel_config().exl3_capture_frontier
         root = Path(configured_root).expanduser().resolve() if configured_root else None
         family_join = (
             provenance.get("family_join")
@@ -936,20 +931,13 @@ class EXL3Processor(LoopProcessor):
     ) -> frozenset[int]:
         """Rebuild live Hessians from durable batches before missing forwards."""
 
-        configured_root = os.getenv(CAPTURE_BATCH_SPOOL_ENV)
+        configured_root = get_kernel_config().exl3_capture_batch_spool
         if not configured_root:
             self._active_capture_batch_spool = None
             self._active_capture_batch_layer = None
             return frozenset()
         phase, identities = self._subset_capture_phase(subset)
-        try:
-            checkpoint_interval = int(
-                os.getenv(CAPTURE_BATCH_CHECKPOINT_INTERVAL_ENV, "1")
-            )
-        except ValueError as error:
-            raise RuntimeError(
-                "EXL3 capture checkpoint interval is invalid"
-            ) from error
+        checkpoint_interval = get_kernel_config().exl3_capture_batch_checkpoint_interval
         if checkpoint_interval <= 0:
             raise RuntimeError("EXL3 capture checkpoint interval must be positive")
         family_ids = {
@@ -1070,7 +1058,7 @@ class EXL3Processor(LoopProcessor):
             self, "_active_capture_batch_layer", None
         ) == layer_index:
             capture.commit_batch(batch_index)
-            interval = int(os.getenv(MEMORY_TELEMETRY_INTERVAL_ENV, "0"))
+            interval = get_kernel_config().exl3_memory_telemetry_interval_batches
             spool = getattr(self, "_active_capture_batch_spool", None)
             complete = (
                 spool is not None
@@ -1085,11 +1073,9 @@ class EXL3Processor(LoopProcessor):
     def _enforce_capture_memory_limits(self, *, context: str) -> dict[str, Any]:
         """Stop after a durable batch if host or device capture memory is unsafe."""
 
-        try:
-            host_limit = int(os.getenv(HOST_RSS_LIMIT_ENV, "0"))
-            cuda_limit = int(os.getenv(CUDA_ALLOCATION_LIMIT_ENV, "0"))
-        except ValueError as error:
-            raise RuntimeError("EXL3 memory-safety environment is invalid") from error
+        kernel = get_kernel_config()
+        host_limit = kernel.exl3_host_rss_limit_bytes
+        cuda_limit = kernel.exl3_cuda_allocation_limit_bytes
         summary = self.log_capture_memory_summary(context)
         rss = int(summary.get("process_rss_bytes", 0))
         if host_limit > 0 and rss > host_limit:
@@ -2273,6 +2259,18 @@ class EXL3Processor(LoopProcessor):
     ) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that feeds captured batches into the EXL3 task."""
 
+        if self.shared_input_leader(name) is not None:
+            def skip(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
+                """Follower of a shared-input group: the leader collects this Hessian."""
+
+                active_batch_capture = getattr(
+                    self, "_active_natural_route_capture", None
+                )
+                if active_batch_capture is not None:
+                    active_batch_capture.capture_expert_input(name, inp[0].data)
+                del module, inp, out
+            return skip
+
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             """Records one activation batch for the EXL3 capture task."""
 
@@ -2287,6 +2285,35 @@ class EXL3Processor(LoopProcessor):
             del inp, out
 
         return tmp
+
+    # -- shared-input Hessian dedup ----------------------------------------
+
+    def _shared_input_task(self, name: str):
+        entry = self.tasks.get(name)
+        if not isinstance(entry, dict):
+            return None
+        return entry.get("capture")
+
+    def _shared_input_task_enabled(self, capture: GPTQ) -> bool:
+        # `w3` aliases an already-shared `w1` accumulator and captures nothing;
+        # a shared state is already deduplicated by `share_hessian_state_from`.
+        if capture is None:
+            return False
+        if not getattr(capture, "_hessian_capture_enabled", True):
+            return False
+        return not capture.hessian_is_shared
+
+    def _shared_input_task_signature(self, capture: GPTQ):
+        if type(capture) is not GPTQ:
+            return None
+        hessian = capture.qcfg.hessian
+        return (
+            "gptq",
+            int(capture.columns),
+            str(hessian.staging_dtype),
+            hessian.chunk_size,
+            hessian.chunk_bytes,
+        )
 
     def _is_lm_head(self, module: NamedModule) -> bool:
         """Returns whether the named module corresponds to the model lm_head."""
@@ -4070,6 +4097,11 @@ class EXL3Processor(LoopProcessor):
         model.quantize_config.format = FORMAT.EXL3
         model.qlinear_kernel = ExllamaV3Linear
         super().finalize(model=model, **kwargs)
+
+    def release_run_workspace(self) -> None:
+        """Drop the per-stream EXL3 tile scratch cached for this run."""
+
+        clear_tile_workspace()
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         """Ensures EXL3 received calibration data before the quantization loop starts."""

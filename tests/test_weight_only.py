@@ -321,7 +321,8 @@ def test_baseqmodel_quantize_uses_weight_only_rtn_pipeline():
         original_weight = original_state[f"{name}.weight"].to(dtype=torch.float16)
         expected_qweight, expected_g_idx = _reference_rtn_quantized_weight(original_weight, device=device, smooth=smooth)
 
-        assert qmodule.qzero_format() == 1
+        # ``pack()`` writes logical (v2) zero points and records that layout.
+        assert qmodule.qzero_format() == 2
         assert qmodule.qweight.device.type == "cpu"
         assert qmodule.qzeros.device.type == "cpu"
         assert qmodule.scales.device.type == "cpu"
@@ -463,13 +464,11 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
     assert model.quantize_config.bits == bit_width
     assert model.quantize_config.quant_method == METHOD.GGUF
     assert model.quantize_config.export_quant_method() == METHOD.GGUF
-    # The fused Triton kernel only implements a subset of the ggml layouts;
-    # Q4_0/Q5_0 must fall back to the portable Torch kernel even on CUDA.
-    fused_qtype = tensor_qtype in GGUFTritonKernel.SUPPORTS_GGUF_QTYPES
-    expected_kernel = (
-        GGUFTritonKernel if device_type == "cuda" and fused_qtype else GGUFTorchLinear
-    )
-    assert model.qlinear_kernel is expected_kernel
+    # ``quantize()`` re-homes the in-session model onto a kernel that supports
+    # the device the packed layers actually live on. ``post_quantize`` leaves
+    # them on CPU, so even a CUDA host ends on the portable Torch kernel
+    # (issue #4381).
+    assert model.qlinear_kernel is GGUFTorchLinear
 
     qmodules = find_modules(model.model, [model.qlinear_kernel])
     assert len(qmodules) == 4
@@ -540,13 +539,16 @@ def test_baseqmodel_quantize_gguf_dynamic_qtype_falls_back_to_torch():
     result = model.quantize(calibration=None, backend=BACKEND.AUTO)
 
     assert "weight_only_gguf" in result
-    assert model.qlinear_kernel is GGUFTritonKernel
+    # The dynamic Q4_0 module must fall back to the portable kernel while
+    # packing; the post-quantize re-home then moves every layer onto that
+    # kernel because the finished model lives on CPU (issue #4381).
+    assert model.qlinear_kernel is GGUFTorchLinear
     up_proj = model.model.model.layers[0].mlp.up_proj
     down_proj = model.model.model.layers[0].mlp.down_proj
     assert up_proj.gguf_tensor_qtype == "Q4_0"
     assert isinstance(up_proj, GGUFTorchLinear)
     assert down_proj.gguf_tensor_qtype == "Q4_K"
-    assert isinstance(down_proj, GGUFTritonKernel)
+    assert isinstance(down_proj, GGUFTorchLinear)
 
 
 def test_baseqmodel_quantize_gguf_weight_only_skips_rtn(monkeypatch):

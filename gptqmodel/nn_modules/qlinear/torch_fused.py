@@ -13,13 +13,19 @@ from transformers import PreTrainedModel
 from ...adapter.adapter import Adapter, Lora
 from ...looper.linear_mode import LinearMode
 from ...models._const import DEVICE, PLATFORM, normalize_device
-from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ...nn_modules.qlinear import (
+    BaseQuantLinear,
+    PackableQuantLinear,
+    resolve_dequantize_dtype,
+)
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
 from ._fused_train_state import (
+    bind_runtime_qzeros,
     capture_fused_train_state,
+    finalize_fused_train_state,
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
@@ -35,6 +41,30 @@ log = setup_logger()
 # supported without this check let AUTO select this kernel on CPU for a
 # checkpoint whose first forward then raised inside the aten op.
 CPU_INT4PACK_GROUP_SIZES = (32, 64, 128, 256)
+# ``aten::_convert_weight_to_int4pack_for_cpu`` requires the packed row width
+# to be a multiple of 16.  The XPU path packs the same logical layout with a
+# nibble pack factor of 8, so it keeps the smaller declaration and the CPU
+# contract is checked separately.
+CPU_INT4PACK_OUT_FEATURES_DIVISIBLE_BY = 16
+
+
+def _validate_cpu_int4pack_out_features(
+    cls,
+    *,
+    out_features: Optional[int],
+    device: Optional[DEVICE | torch.device],
+):
+    """Reject a CPU output width the packed int4 kernel cannot consume."""
+    if device is None or normalize_device(device) != DEVICE.CPU:
+        return True, None
+    if out_features is None or out_features % CPU_INT4PACK_OUT_FEATURES_DIVISIBLE_BY == 0:
+        return True, None
+    return False, NotImplementedError(
+        f"{cls}: CPU int4pack requires out_features to be divisible by "
+        f"{CPU_INT4PACK_OUT_FEATURES_DIVISIBLE_BY}: actual out_features = "
+        f"`{out_features}`. Select `backend=\"gptq_torch\"` for this "
+        "checkpoint on CPU."
+    )
 
 
 def _validate_cpu_int4pack_group_size(
@@ -61,6 +91,17 @@ def _validate_cpu_int4pack_group_size(
         resolved = in_features
     else:
         resolved = group_size
+    if (
+        getattr(cls, "CPU_INT4PACK_REQUIRES_DIVISIBLE_IN_FEATURES", True)
+        and in_features is not None
+        and in_features % resolved
+    ):
+        return False, NotImplementedError(
+            f"{cls}: CPU int4pack requires in_features to be divisible by the "
+            f"resolved group_size: actual in_features = `{in_features}`, "
+            f"resolved group_size = `{resolved}`. Select "
+            "`backend=\"gptq_torch\"` for this checkpoint on CPU."
+        )
     if resolved in CPU_INT4PACK_GROUP_SIZES:
         return True, None
     return False, NotImplementedError(
@@ -144,7 +185,7 @@ class TorchFusedLinear(PackableQuantLinear):
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = True
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [8]
     SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
@@ -221,13 +262,35 @@ class TorchFusedLinear(PackableQuantLinear):
         )
         if not ok:
             return ok, err
-        return _validate_cpu_int4pack_group_size(
+        ok, err = _validate_cpu_int4pack_group_size(
             cls, group_size=group_size, in_features=in_features, device=device
+        )
+        if not ok:
+            return ok, err
+        return _validate_cpu_int4pack_out_features(
+            cls, out_features=out_features, device=device
         )
 
     def post_init(self):
         super().post_init()
         self.optimize()
+
+    # The CPU ATen int4pack permutation has a verified inverse, so the
+    # checkpoint qweight is rebuilt on save instead of kept resident.
+    _FUSED_TRAIN_STATE_REBUILD = "gptq"
+
+    def _fused_train_state_names(self):
+        """Checkpoint operands the current fused transform rewrites.
+
+        ``transform_cpu`` keeps ``scales`` in the checkpoint dtype and layout,
+        so the live buffer is the checkpoint tensor and a snapshot clone would
+        only be a byte-identical second copy. The XPU transform narrows
+        ``scales`` in place, so it still needs the snapshot.
+        """
+
+        if getattr(self, "qweight", None) is not None and self.qweight.device.type == "cpu":
+            return ("qweight", "qzeros")
+        return ("qweight", "qzeros", "scales")
 
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         if self.optimized:
@@ -285,6 +348,11 @@ class TorchFusedLinear(PackableQuantLinear):
         dtype = current.dtype if isinstance(current, torch.Tensor) else scales.dtype
         dtype = torch.promote_types(dtype, torch.promote_types(scales.dtype, qzeros.dtype))
         self.scales_and_zeros = pack_scales_and_zeros(scales.to(dtype), qzeros.to(dtype))
+        # ``qzeros`` is byte-identical to the packed metadata's zero column.
+        # Keep it as a view instead of a second allocation, then key the cache
+        # on the view that is actually installed.
+        if bind_runtime_qzeros(self):
+            key = tuple(tensor_cache_key(tensor) for tensor in (qweight, scales, self.qzeros))
         self.torch_fused_op = Int4PackedOp(
             self.qweight, self.scales_and_zeros, self.group_size
         ).eval()
@@ -429,7 +497,11 @@ class TorchFusedLinear(PackableQuantLinear):
         if do_scales_and_zeros:
             self.qzeros = _cpu_int4pack_zero_offsets(zero_codes, compute_scales, self.bits).to(compute_dtype).contiguous()
             self.scales_and_zeros = pack_scales_and_zeros(compute_scales, self.qzeros)
+            bind_runtime_qzeros(self)
         self._cpu_transform_dtype = dtype
+        # ``qweight`` now holds int4pack words: drop the checkpoint clone if
+        # the inverse reproduces exactly the bytes captured before the pack.
+        finalize_fused_train_state(self)
 
     def transform(self, dtype, device):
         if device == "xpu":
@@ -448,24 +520,25 @@ class TorchFusedLinear(PackableQuantLinear):
         # The CPU fused op now returns FP32 when a bias is present, so both
         # FP16 and BF16 can add the bias before the single output cast.
         fused_bias_safe = self.bias is None or x.dtype in (torch.bfloat16, torch.float16)
-        if (
-            not self.training
-            and not x.requires_grad
-            and self.linear_mode is None
-            and TORCH_HAS_FUSED_OPS
-            and fused_bias_safe
-        ):
-            # one-time transform per module for xpu aten fused ops
-            capture_fused_train_state(self)
-            self.transform(x.dtype, x.device.type)
-            self.linear_mode = LinearMode.INFERENCE
-            if x.device.type == "cpu":
-                self._refresh_fused_op()
-                # self.torch_fused_op.forward = torch.compile(
-                #     self.torch_fused_op.forward, options={"max_autotune": True}
-                # )
-        elif self.linear_mode is None:
-            self.linear_mode = LinearMode.TRAIN
+        with self._cpu_transform_lock:
+            if (
+                not self.training
+                and not x.requires_grad
+                and self.linear_mode is None
+                and TORCH_HAS_FUSED_OPS
+                and fused_bias_safe
+            ):
+                # one-time transform per module for xpu aten fused ops
+                capture_fused_train_state(self)
+                self.transform(x.dtype, x.device.type)
+                self.linear_mode = LinearMode.INFERENCE
+                if x.device.type == "cpu":
+                    self._refresh_fused_op()
+                    # self.torch_fused_op.forward = torch.compile(
+                    #     self.torch_fused_op.forward, options={"max_autotune": True}
+                    # )
+            elif self.linear_mode is None:
+                self.linear_mode = LinearMode.TRAIN
 
         if self.linear_mode == LinearMode.INFERENCE:
             out = self._fused_op_forward(x)
@@ -536,7 +609,11 @@ class TorchFusedLinear(PackableQuantLinear):
         self.g_idx = None
         self.scales = None
 
-def dequantize_model(model: PreTrainedModel):
+def dequantize_model(model: PreTrainedModel, dtype: Optional[torch.dtype] = None):
+    # Use the model's compute dtype, not the checkpoint storage dtype: GPTQ
+    # restores fp16 scales even for a bf16 model, so ``scales.dtype`` would
+    # turn a bf16 model into fp16 dense layers that fail in forward.
+    target_dtype = None
     for name, module in model.named_modules():
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchFusedLinear):
             raise ValueError(
@@ -545,10 +622,28 @@ def dequantize_model(model: PreTrainedModel):
             )
 
         if isinstance(module, TorchFusedLinear):
+            if target_dtype is None:
+                target_dtype = resolve_dequantize_dtype(model, module, dtype)
             # Create a new Linear layer with dequantized weights
-            new_module = nn.Linear(module.in_features, module.out_features)
-            new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
-            new_module.bias = torch.nn.Parameter(module.bias)
+            # Keep the quantized module's device; the shell is built on meta
+            # because both parameters are replaced below.
+            device = module.qweight.device
+            new_module = nn.Linear(
+                module.in_features,
+                module.out_features,
+                bias=module.bias is not None,
+                device="meta",
+            )
+            new_module.weight = nn.Parameter(
+                module.dequantize_weight().T.detach().to(device, target_dtype)
+            )
+            # ``nn.Parameter(None)`` is a shape-[0] tensor, not an absent
+            # bias. Every bias-less layer then failed in forward.
+            new_module.bias = (
+                nn.Parameter(module.bias.detach().to(device, target_dtype))
+                if module.bias is not None
+                else None
+            )
 
             # Replace the module in the model
             parent = model

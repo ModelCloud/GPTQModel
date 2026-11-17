@@ -72,16 +72,20 @@ def selective_state_update(
     dA = torch.exp(rearrange(dt, "b h d -> b h d 1") * A)
     B = repeat(B, "b g n -> b (g h) n", h=nheads // ngroups)
     C = repeat(C, "b g n -> b (g h) n", h=nheads // ngroups)
-    dB = rearrange(dt, "b h d -> b h d 1") * rearrange(B, "b h n -> b h 1 n")
-    updated_state = selected_state * dA + dB * rearrange(x, "b h d -> b h d 1")
+    # The recurrent state is FP32; keep the input/B products and the state
+    # readout in FP32 too. Half products here overflow before they are added
+    # to the wide state (issue #4471), and narrowing the updated state before
+    # the C readout can overflow a finite result.
+    dB = rearrange(dt.float(), "b h d -> b h d 1") * rearrange(B.float(), "b h n -> b h 1 n")
+    updated_state = selected_state * dA + dB * rearrange(x.float(), "b h d -> b h d 1")
 
     if state_index is None:
         state.copy_(updated_state)
     else:
         state.index_copy_(0, state_index, updated_state)
 
-    out = torch.einsum("bhdn,bhn->bhd", updated_state.to(C.dtype), C)
+    out = torch.einsum("bhdn,bhn->bhd", updated_state, C.float())
     if D is not None:
-        out += (x * D).to(out.dtype)
+        out += x.float() * D.float()
     out = (out if z is None else out * F.silu(z)).to(x.dtype)
     return out if has_heads else out.squeeze(1)

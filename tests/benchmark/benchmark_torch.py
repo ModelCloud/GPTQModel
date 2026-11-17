@@ -187,6 +187,14 @@ def _worker(case: dict[str, Any]) -> dict[str, Any]:
     }
 
     try:
+        from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+
+        triton_choice = {
+            "off": False,
+            "on": True,
+        }.get(case.get("triton", "default"))
+        configure_kernel(KernelConfig(torch_triton_dequant=triton_choice))
+
         if case["pin"] == "CPU":
             device = "cpu"
             torch_dev = "CPU"
@@ -281,21 +289,18 @@ def _worker(case: dict[str, Any]) -> dict[str, Any]:
 def _run_case_subprocess(case: BenchCase) -> dict[str, Any]:
     env = os.environ.copy()
 
+    # ``case.triton`` travels in the worker payload; the worker installs it
+    # through ``KernelConfig.torch_triton_dequant``. Kernel selection is never
+    # transported through the environment.
     if case.pin == "CPU":
         env["CUDA_VISIBLE_DEVICES"] = ""
         env.pop("CUDA_DEVICE_ORDER", None)
-        env.pop("GPTQ_TORCH_TRITON_DEQUANT", None)
     else:
         env["CUDA_VISIBLE_DEVICES"] = case.cuda_visible or ""
         if case.cuda_order == "default":
             env.pop("CUDA_DEVICE_ORDER", None)
         else:
             env["CUDA_DEVICE_ORDER"] = case.cuda_order
-
-        if case.triton == "off":
-            env["GPTQ_TORCH_TRITON_DEQUANT"] = "0"
-        elif case.triton == "on":
-            env.pop("GPTQ_TORCH_TRITON_DEQUANT", None)
 
     cmd = [sys.executable, str(Path(__file__).resolve()), "--worker", json.dumps(asdict(case))]
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env)

@@ -36,7 +36,7 @@ rules, and records the Optimum inclusion list for the loader:
 flowchart TD
     A["config.json quantization_config"] --> B["from_quant_config"]
     B --> C{"modules_to_not_convert or ignore"}
-    C -- yes --> D["suffix regex rule<br/>-:.*(?:^|\.)down_proj$"]
+    C -- yes --> D["module-boundary regex rule<br/>-:(?:^|.*\\.)down_proj(?:\\..*)?$"]
     C -- no --> E["keep declared dynamic"]
     D --> F["config.dynamic"]
     E --> F
@@ -54,8 +54,12 @@ flowchart TD
 ```
 
 `-:` rules are first-match and therefore inserted before any positive rule.
-Plain names become a dot-boundary suffix regex because `dynamic` matching is
-start-anchored while the producer keys are substring/suffix matches.
+Plain names become a module-boundary regex that also covers children because
+`dynamic` matching is start-anchored while the producer keys name modules
+(substrings / prefixes). llm-compressor's `re:` prefix is stripped and the
+regex kept verbatim. On export, `-:` exclusions are written to
+`modules_to_not_convert` as plain module names (not `pcre.escape`d regexes) so
+substring-matching consumers such as vLLM can skip them.
 
 `validate_checkpoint_qweights` now covers the AWQ formats (and shared
 Marlin/BitBLAS formats) as well as GPTQ. A module the loader decided to quantize
@@ -331,6 +335,13 @@ The old path loaded the model with a runtime backend and called
 `TorchLinear` (so AWQ failed), turned quantized embeddings into `nn.Linear`
 (shape error on forward), and hard-coded fp16. The new path never selects a
 runtime kernel for `hf`.
+
+The dense dtype is the checkpoint's own: with no explicit `target_dtype`,
+`dequantize_model()` calls `resolve_dense_target_dtype(config)`, which reads
+`dtype`, legacy `torch_dtype`, or `text_config` and accepts float16, bfloat16
+and float32. Only a checkpoint that declares none of them falls back to
+bfloat16. An fp16 GPTQ checkpoint therefore exports `dtype=float16` with F16
+tensors instead of being rewritten as bf16 (#4455).
 
 ## 8. `dequantize_model` resolves per-module bits
 

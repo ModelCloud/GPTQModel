@@ -10,6 +10,8 @@ file under the writable build cache, for every extension rather than the five
 that opted in for #4072.
 """
 
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -260,3 +262,121 @@ def test_staged_include_root_refreshes_when_a_header_changes(monkeypatch, tmp_pa
 
     assert staged_header.read_text(encoding="utf-8") == "// header v2\n"
     assert second_fingerprint != first_fingerprint, "a header edit must change the cache key"
+
+
+def _optional_header_extension(monkeypatch, tmp_path):
+    """Build an extension whose source optionally includes a deletable header."""
+
+    checkout = tmp_path / "checkout"
+    source = checkout / "source" / "kernel.cpp"
+    source.parent.mkdir(parents=True)
+    include = checkout / "include"
+    include.mkdir(parents=True)
+    source.write_text(
+        '#if __has_include("deleted.h")\n'
+        '#include "deleted.h"\n'
+        "#else\n"
+        "#define VERSION 3\n"
+        "#endif\n"
+        "int kernel_version = VERSION;\n",
+        encoding="utf-8",
+    )
+    header = include / "deleted.h"
+    header.write_text("#define VERSION 1\n", encoding="utf-8")
+
+    monkeypatch.setattr(cpp, "IS_ROCM", True)
+    monkeypatch.setattr(cpp, "_source_checkout_root", lambda: checkout)
+    extension = TorchOpsJitExtension(
+        name="native_header_fixture",
+        namespace="native_header_fixture",
+        required_ops=("fixture",),
+        sources=[str(source)],
+        build_root_env=None,
+        default_build_root=tmp_path / "cache",
+        display_name="fixture",
+        extra_include_paths=[str(include)],
+    )
+    return extension, source, include, header
+
+
+def test_deleted_include_header_changes_the_cache_fingerprint(monkeypatch, tmp_path):
+    """A deletion must invalidate the key; hashing the staged union hid it (#4487)."""
+
+    extension, _, _, header = _optional_header_extension(monkeypatch, tmp_path)
+
+    first = extension._cache_fingerprint()
+    header.write_text("#define VERSION 2\n", encoding="utf-8")
+    edited = extension._cache_fingerprint()
+    header.unlink()
+    deleted = extension._cache_fingerprint()
+
+    assert first != edited
+    assert deleted != edited, "deleting an included header must change the cache key"
+
+
+def test_deleted_include_header_is_absent_from_the_staged_generation(monkeypatch, tmp_path):
+    """The staged snapshot must not retain a header removed from the authoritative tree."""
+
+    extension, source, _, header = _optional_header_extension(monkeypatch, tmp_path)
+    extension._resolved_sources_and_include_paths()
+    staged_root = extension._staging_root()
+    assert (staged_root / "_checkout" / "include" / "deleted.h").is_file()
+
+    header.unlink()
+    extension._resolved_sources_and_include_paths()
+
+    staged_source = staged_root / "kernel.cpp"
+    staged_include = staged_root / "_checkout" / "include"
+    assert not (staged_include / "deleted.h").exists()
+    assert staged_source.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+
+    compiler = shutil.which("c++")
+    if compiler is not None:
+        output = subprocess.check_output(
+            [compiler, "-E", "-P", "-I", str(staged_include), str(staged_source)],
+            text=True,
+        ).strip()
+        assert output == "int kernel_version = 3;"
+
+
+def test_fingerprint_and_lock_wait_never_stage_sources(monkeypatch, tmp_path):
+    """A waiter that times out must not overwrite the lock holder's staged sources (#4487)."""
+
+    if cpp.fcntl is None:
+        pytest.skip("requires fcntl-based cross-process locking")
+
+    monkeypatch.setattr(cpp, "IS_ROCM", True)
+    base = tmp_path / "fixture"
+    for version, value in (("v1", 1), ("v2", 2)):
+        (base / version).mkdir(parents=True)
+        (base / version / "kernel.cpp").write_text(f"int kernel_version = {value};\n", encoding="utf-8")
+
+    def loader(version):
+        return TorchOpsJitExtension(
+            name="native_stage_fixture",
+            namespace="native_stage_fixture",
+            required_ops=("fixture",),
+            sources=[str(base / version / "kernel.cpp")],
+            build_root_env=None,
+            default_build_root=base / "cache",
+            display_name="fixture",
+        )
+
+    holder = loader("v1")
+    with cpp._cross_process_build_lock(holder._cross_process_lock_path(), timeout_seconds=1) as acquired:
+        assert acquired
+        holder._resolved_sources_and_include_paths()
+        staged = holder._staging_root() / "kernel.cpp"
+        assert staged.read_text(encoding="utf-8") == "int kernel_version = 1;\n"
+
+    waiter = loader("v2")
+    # A fingerprint is a read: it must not stage v2 over the shared tree.
+    waiter._cache_fingerprint()
+    assert staged.read_text(encoding="utf-8") == "int kernel_version = 1;\n"
+
+    waiter._build_lock_timeout_seconds = lambda: 0.01
+    with cpp._cross_process_build_lock(waiter._cross_process_lock_path(), timeout_seconds=1) as held:
+        assert held
+        assert waiter.load() is False
+        assert "timed out" in waiter.last_error_message()
+        assert staged.read_text(encoding="utf-8") == "int kernel_version = 1;\n"

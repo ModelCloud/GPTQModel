@@ -334,6 +334,12 @@ def _fused_module(cls, checkpoint):
     )
     for name, value in checkpoint.items():
         setattr(module, name, value.clone())
+    # Raw buffer writes bypass the load hook, so declare the layout of the
+    # words just written, as every product writer does (the v1->v2 loader
+    # conversion, packing, the offload restore). These checkpoints store the
+    # logical zero codes the fused kernels decode, i.e. the v2 layout.
+    # Unresolved words are raw v1 checkpoint words to the load hook (#4377).
+    module.qzero_format(format=2)
     module.eval()
     module._init_wf_unsqueeze_buffers()
     return module
@@ -537,7 +543,13 @@ def test_fused_refresh_preserves_wider_source_metadata(cls, dtype, operation):
     with torch.no_grad():
         module(activation)
         if operation == "load_assign":
-            state = {name: value.clone() for name, value in module.state_dict().items()}
+            # ``state_dict()`` emits the checkpoint snapshot layout (#4091), so
+            # a wider-dtype load of *runtime* metadata must be driven from the
+            # live packed buffers, not from ``state_dict()``.
+            state = {
+                name: getattr(module, name).detach().clone()
+                for name in ("qweight", "qzeros", "scales", "g_idx")
+            }
             state["scales"] = state["scales"].float().fill_(2049)
             state["qzeros"] = state["qzeros"].float().fill_(-2048)
             module.load_state_dict(state, assign=True)

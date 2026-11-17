@@ -1,8 +1,14 @@
-"""Opt-in Llama 3.2 1B quality check for the native CUDA GPTQ block update."""
+"""Opt-in Llama 3.2 1B quality check for the native CUDA GPTQ block update.
+
+The full quantize-and-evaluate check is selected with ``-m gptq_cuda_e2e``.
+The saved-checkpoint-only check is selected with ``-m gptq_cuda_eval_only``;
+it reads the checkpoint written by the first run (``SAVE_PATH``).
+"""
 
 import os
 from unittest.mock import patch
 
+import pytest
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
@@ -35,14 +41,8 @@ class TestLlama3_2GPTQCUDA(ModelTest):
         },
     }
 
+    @pytest.mark.gptq_cuda_e2e
     def test_gsm8k_platinum_cuda(self):
-        if os.environ.get("GPTQMODEL_RUN_LLAMA3_2_GPTQ_CUDA_E2E") != "1":
-            self.skipTest("Set GPTQMODEL_RUN_LLAMA3_2_GPTQ_CUDA_E2E=1 to run the model quality check")
-        if os.environ.get("GPTQMODEL_LLAMA3_2_CUDA_EVAL_ONLY") == "1":
-            self.get_eval_tasks()
-            results = self.evaluate_model(model=self.SAVE_PATH, delete_quantized_model=False)
-            self.check_results(results)
-            return
         if not gptq_cuda.block_update_available():
             self.skipTest(gptq_cuda._EXTENSION.last_error_message())
 
@@ -57,3 +57,9 @@ class TestLlama3_2GPTQCUDA(ModelTest):
         with patch.object(gptq_cuda, "gptq_block_update", counted):
             self.quantize_and_evaluate()
         self.assertGreater(block_calls, 0, "The native CUDA GPTQ block update was not used")
+
+    @pytest.mark.gptq_cuda_eval_only
+    def test_gsm8k_platinum_cuda_eval_only(self):
+        self.get_eval_tasks()
+        results = self.evaluate_model(model=self.SAVE_PATH, delete_quantized_model=False)
+        self.check_results(results)

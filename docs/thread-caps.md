@@ -13,6 +13,14 @@ single `pytest` process reported `torch.get_num_threads() == 205` and held
 Adding cores does not help: the pools grow to fill whatever the process is
 allowed to see.
 
+## The device pool
+
+The cap above bounds one process. `DeviceThreadPool` multiplies it by its worker
+count, because libgomp gives every pthread its own team: 12 CPU workers on a
+320-CPU host held 2538 OS threads (#4356). The pool therefore splits the
+process intra-op budget across its workers before each worker's first parallel
+region. See [Device thread pool intra-op budget](device-thread-pool-intraop-budget.md).
+
 ## What the repository does
 
 The pytest harness caps the pools in `tests/conftest.py`. The environment

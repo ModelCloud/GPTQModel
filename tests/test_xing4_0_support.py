@@ -86,7 +86,9 @@ def test_xing4_0_lm_head_hook_reduces_hyperconnection_streams():
     qmodel = object.__new__(Xing4_0QModel)
     nn.Module.__init__(qmodel)
     qmodel.model = _Root()
-    qmodel.quantize_config = SimpleNamespace(device=torch.device("cpu"))
+    qmodel.quantize_config = SimpleNamespace(
+        device=torch.device("cpu"), activation_mode=None
+    )
     stream_4d = torch.arange(24, dtype=torch.float32).square().reshape(1, 2, 3, 4)
     stream_3d = torch.arange(8, dtype=torch.float32).reshape(1, 2, 4)
     inputs = [[stream_4d.clone(), stream_3d.clone()]]

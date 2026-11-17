@@ -22,20 +22,36 @@ from ...utils.awq import (
     awq_runtime_error,
 )
 from ...utils.backend import BACKEND
-from ...utils.env import env_flag
+from ...utils.kernel import resolve_kernel_config
 from ...utils.packing_math import scale_to_storage_dtype
 from ...utils.rocm import IS_ROCM
 
 
-# Shared runtime default: prefer accuracy first unless the user explicitly opts out.
-FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
+def _awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum: bool = None, kernel=None):
+    kernel = resolve_kernel_config(kernel)
+    if fp32_accum is None:
+        fp32_accum = kernel.fp32_accum
+    return awq_gemm_forward(
+        input,
+        qweight,
+        scales,
+        qzeros,
+        split_k_iters,
+        fp32_accum,
+        kernel.awq_fused_splitk_reduce,
+    )
 
-def _awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum: bool = FP32_ACCUM):
-    return awq_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum)
 
-
-def _awq_cuda_gemm_forward_fp32_reduce(input, qweight, scales, qzeros, split_k_iters):
-    return awq_gemm_forward_fp32_reduce(input, qweight, scales, qzeros, split_k_iters, True)
+def _awq_cuda_gemm_forward_fp32_reduce(input, qweight, scales, qzeros, split_k_iters, kernel=None):
+    return awq_gemm_forward_fp32_reduce(
+        input,
+        qweight,
+        scales,
+        qzeros,
+        split_k_iters,
+        True,
+        resolve_kernel_config(kernel).awq_fused_splitk_reduce,
+    )
 
 
 def _awq_fp32_output_mm(x_2d: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -75,8 +91,11 @@ class AwqGemmFn(torch.autograd.Function):
         bias=None,
         out_features=0,
         prefer_backend=None,
-        fp32_accum=FP32_ACCUM,
+        fp32_accum=None,
+        kernel=None,
     ):
+        if fp32_accum is None:
+            fp32_accum = resolve_kernel_config(kernel).fp32_accum
         # Input and bias values are not needed for the input-gradient backward;
         # retain only input metadata and the quantized weight tensors.
         qweight, qzeros, scales = qweight.contiguous(), qzeros.contiguous(), scales.contiguous()
@@ -120,6 +139,7 @@ class AwqGemmFn(torch.autograd.Function):
                 scales,
                 qzeros,
                 8,
+                **({"kernel": kernel} if kernel is not None else {}),
             )
             out = (out + bias.float()).to(dtype=x.dtype)
         else:
@@ -130,6 +150,7 @@ class AwqGemmFn(torch.autograd.Function):
                 qzeros,
                 8,
                 fp32_accum=fp32_accum,
+                **({"kernel": kernel} if kernel is not None else {}),
             )
 
         out = out.reshape(out_shape)
@@ -146,7 +167,7 @@ class AwqGemmFn(torch.autograd.Function):
         if ctx.needs_input_grad[0]:
             if ctx.input_rows == 0:
                 grad_input = grad_output.new_empty(ctx.input_shape)
-                gradients = (grad_input, None, None, None, None, None, grad_bias, None, None, None)
+                gradients = (grad_input, None, None, None, None, None, grad_bias, None, None, None, None)
                 return gradients[:len(ctx.needs_input_grad)]
             weights = awq_dequantize_weights(
                 qweight, scales, qzeros, 1, 0, 0, False
@@ -156,7 +177,7 @@ class AwqGemmFn(torch.autograd.Function):
             grad_input = torch.matmul(grad_output_2d, weights.transpose(-1, -2))
             grad_input = grad_input.reshape(ctx.input_shape)
 
-        gradients = (grad_input, None, None, None, None, None, grad_bias, None, None, None)
+        gradients = (grad_input, None, None, None, None, None, grad_bias, None, None, None, None)
         return gradients[:len(ctx.needs_input_grad)]
 
 
@@ -241,7 +262,7 @@ class AwqGEMMLinear(AWQuantLinear):
         pack_dtype: torch.dtype = torch.int32,
         adapter: Adapter = None,
         register_buffers: bool = False,
-        fp32_accum: bool = FP32_ACCUM,
+        fp32_accum: bool = None,
         **kwargs,
     ):
 
@@ -258,7 +279,8 @@ class AwqGEMMLinear(AWQuantLinear):
             adapter=adapter,
             register_buffers=register_buffers,
             **kwargs)
-        self.fp32_accum = bool(fp32_accum)
+        kernel = resolve_kernel_config(self)
+        self.fp32_accum = bool(kernel.fp32_accum if fp32_accum is None else fp32_accum)
 
     def _scales_for_compute(self, dtype: torch.dtype) -> torch.Tensor:
         """Return the stored scales converted for this computation only.
@@ -335,6 +357,7 @@ class AwqGEMMLinear(AWQuantLinear):
                 self.out_features,
                 "cuda",
                 self.fp32_accum,
+                self.kernel,
             )
 
         if out.dtype != input_dtype:

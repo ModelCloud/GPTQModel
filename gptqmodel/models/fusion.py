@@ -454,6 +454,10 @@ class _FusionGroup:
             if suppress_restore:
                 for module in self.modules:
                     module._suspend_fused_train_restore = True
+                    # The source operands are now views of the fused
+                    # allocation. Its cache rebuild must not re-point
+                    # ``qzeros`` at a private ``scales_and_zeros`` copy.
+                    module._fused_operands_shared = True
             if self.kernel.layout != "exllamav2":
                 for clear in self.original_clears:
                     if clear is not None:
@@ -464,6 +468,7 @@ class _FusionGroup:
             if suppress_restore:
                 for module in self.modules:
                     module.__dict__.pop("_suspend_fused_train_restore", None)
+                    module.__dict__.pop("_fused_operands_shared", None)
         # Sources and the executor now consume the fused views. A native
         # descriptor's per-call operand snapshot would still own the replaced
         # standalone allocations; keep the descriptors, release the snapshots.

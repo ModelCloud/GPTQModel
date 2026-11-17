@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdlib>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -63,38 +62,41 @@ __global__ void rotate_kernel(const scalar_t *__restrict__ x, scalar_t *__restri
 }
 
 template <int CTA_M, int GROUP_SIZE, int KROT, bool USE_SCALE, int ROW_PAD>
-__global__ void rotate_kernel_bf16_half_workspace(const __nv_bfloat16 *__restrict__ x,
-                                                  __nv_bfloat16 *__restrict__ out,
-                                                  const int16_t *__restrict__ idx_ij,
-                                                  const __nv_bfloat16 *__restrict__ theta,
-                                                  const __nv_bfloat16 *__restrict__ scales, int s,
-                                                  int h, int reverse) {
+__global__ void rotate_kernel_bf16_float_workspace(const __nv_bfloat16 *__restrict__ x,
+                                                   __nv_bfloat16 *__restrict__ out,
+                                                   const int16_t *__restrict__ idx_ij,
+                                                   const __nv_bfloat16 *__restrict__ theta,
+                                                   const __nv_bfloat16 *__restrict__ scales, int s,
+                                                   int h, int reverse) {
   constexpr int ROW_STRIDE = CTA_M + ROW_PAD;
-  __shared__ __half x_grp[ROW_STRIDE * GROUP_SIZE];
+  // FP32 workspace: the whole Givens sweep accumulates in FP32 and store_group
+  // performs the single BF16 rounding (#4317).  Explicit 16-byte alignment
+  // keeps the float2 row-pair view in apply_one aligned.
+  __shared__ __align__(16) float x_grp[ROW_STRIDE * GROUP_SIZE];
 
   int j = blockIdx.x;
   int g = blockIdx.y;
   int t = threadIdx.x;
 
-  RotateAccessBFloat16HalfWorkspace::template load_group<CTA_M, ROW_STRIDE, GROUP_SIZE, USE_SCALE>(
+  RotateAccessBFloat16FloatWorkspace::template load_group<CTA_M, ROW_STRIDE, GROUP_SIZE, USE_SCALE>(
       x_grp, x, scales, s, h, j, g, t);
 
   float reg_theta[KROT];
   int reg_idx[KROT];
-  RotateAccessBFloat16HalfWorkspace::template load_coeffs<KROT, GROUP_SIZE>(reg_theta, reg_idx,
-                                                                            idx_ij, theta, h, g,
-                                                                            t);
+  RotateAccessBFloat16FloatWorkspace::template load_coeffs<KROT, GROUP_SIZE>(reg_theta, reg_idx,
+                                                                             idx_ij, theta, h, g,
+                                                                             t);
   __syncthreads();
 
 #pragma unroll
   for (int r = 0; r < KROT; r++) {
     const int rr = reverse ? (KROT - 1 - r) : r;
-    RotateAccess<__half>::template apply_one<CTA_M, ROW_STRIDE, GROUP_SIZE>(
+    RotateAccessBFloat16FloatWorkspace::template apply_one<CTA_M, ROW_STRIDE, GROUP_SIZE>(
         x_grp, reg_idx[rr], reverse ? -reg_theta[rr] : reg_theta[rr]);
     __syncthreads();
   }
 
-  RotateAccessBFloat16HalfWorkspace::template store_group<CTA_M, ROW_STRIDE, GROUP_SIZE>(
+  RotateAccessBFloat16FloatWorkspace::template store_group<CTA_M, ROW_STRIDE, GROUP_SIZE>(
       out, x_grp, s, h, j, g, t);
 }
 
@@ -116,7 +118,7 @@ __global__ void rotate_kernel_bf16_half_workspace(const __nv_bfloat16 *__restric
   }
 
 template <int KROT, int CTA_M, int GROUP_SIZE, int ROW_PAD>
-torch::Tensor rotate_launcher_bf16_half_workspace(at::Tensor x, at::Tensor idx_ij,
+torch::Tensor rotate_launcher_bf16_float_workspace(at::Tensor x, at::Tensor idx_ij,
                                                   at::Tensor theta, at::Tensor scales,
                                                   int reverse) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
@@ -142,10 +144,10 @@ torch::Tensor rotate_launcher_bf16_half_workspace(at::Tensor x, at::Tensor idx_i
   auto *t_p = reinterpret_cast<__nv_bfloat16 *>(theta_cast.data_ptr<c10::BFloat16>());
   if (has_scale) {
     auto *s_p = reinterpret_cast<__nv_bfloat16 *>(scales_cast.data_ptr<c10::BFloat16>());
-    rotate_kernel_bf16_half_workspace<CTA_M, GROUP_SIZE, KROT, true, ROW_PAD><<<grid, block, 0, stream>>>(
+    rotate_kernel_bf16_float_workspace<CTA_M, GROUP_SIZE, KROT, true, ROW_PAD><<<grid, block, 0, stream>>>(
         x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, s_p, seq_len, h, reverse);
   } else {
-    rotate_kernel_bf16_half_workspace<CTA_M, GROUP_SIZE, KROT, false, ROW_PAD><<<grid, block, 0, stream>>>(
+    rotate_kernel_bf16_float_workspace<CTA_M, GROUP_SIZE, KROT, false, ROW_PAD><<<grid, block, 0, stream>>>(
         x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, nullptr, seq_len, h, reverse);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -181,8 +183,8 @@ torch::Tensor rotate_launcher(at::Tensor x, at::Tensor idx_ij, at::Tensor theta,
   case at::kHalf:
     LAUNCH_ROTATE(__half, c10::Half)
   case at::kBFloat16:
-    return rotate_launcher_bf16_half_workspace<KROT, CTA_M, GROUP_SIZE, ROW_PAD>(x, idx_ij, theta,
-                                                                                 scales, reverse);
+    return rotate_launcher_bf16_float_workspace<KROT, CTA_M, GROUP_SIZE, ROW_PAD>(x, idx_ij, theta,
+                                                                                  scales, reverse);
   default:
     TORCH_CHECK(false, "rotate supports Float, Half, and BFloat16, got ", x.scalar_type());
   }
@@ -365,16 +367,39 @@ std::tuple<at::Tensor, at::Tensor> dispatch_rotate_pair_variant(at::Tensor x, at
 // The ParoQuant autograd backward sweeps the rotations in reverse: at every
 // step it rotates the saved activation and the incoming gradient by the negated
 // theta and then measures the rotation gradient from the freshly rotated pair.
+//
+// After that step x is the rotation's input and g = R^T g_out is the gradient
+// with respect to that input. With R = [[c, s], [-s, c]] on (x_i, x_j),
+// dR/dtheta = R J for J = [[0, 1], [-1, 0]], so
+//   dL/dtheta = g_out^T (R J) x = (R^T g_out)^T J x = sum_rows g_i x_j - g_j x_i.
+// No sin/cos factor remains: those would be needed only with the output-side
+// gradient g_out, which the sweep no longer holds.
 // That is one `rotate_pair` plus one `grad_theta` launch per rotation, plus the
 // host-side staging of the sin/cos tables and the gathered index pairs.
 //
 // This kernel folds the whole sweep into a single launch. The running rotated
 // state is kept in shared memory, every rotation's gradient contribution is
-// accumulated in registers, and only the cross-tile reduction is left over.
+// accumulated in registers, and only the cross-granule reduction is left over.
 //
-// Each thread owns exactly one (i, j) column pair per rotation, so the readback
-// after `apply_one` only touches columns the calling thread just wrote; a single
-// barrier per rotation covers the shared-memory staging.
+// Launch-plan invariance. CTA_M (and ROW_PAD) come from a timing-based
+// autotune, so two runs can pick different tiles for the same shape. The
+// gradient must not depend on that choice (#4460): each CTA therefore sums its
+// rows in fixed kRotatePairGradRowGranule-row granules and writes one partial
+// per granule, and the reduce folds the granules in ascending order. The
+// rounding sequence is the same for every CTA_M, so the gradient is
+// bit-identical across launch plans, not only across repeated launches.
+//
+// Shared-memory ordering. Each thread owns exactly one (i, j) column pair per
+// rotation, so the readback after `apply_one` only touches columns the calling
+// thread just wrote and needs no barrier of its own (same-thread program order).
+// The hazards are across rotations: rotation r-1 pairs columns differently, so
+// its `apply_one` reads columns other threads wrote for rotation r (read after
+// write) and overwrites columns other threads may still be reading back for
+// rotation r (write after read). The single barrier therefore sits after the
+// readback, which orders both: every write and every read of rotation r
+// completes before any thread starts rotation r-1 (#4461).
+constexpr int kRotatePairGradRowGranule = 4;
+
 template <typename scalar_t, int CTA_M, int GROUP_SIZE, int KROT, int ROW_PAD>
 __global__ void rotate_pair_grad_kernel(const scalar_t *__restrict__ x,
                                         const scalar_t *__restrict__ g,
@@ -383,9 +408,11 @@ __global__ void rotate_pair_grad_kernel(const scalar_t *__restrict__ x,
                                         const int16_t *__restrict__ idx_ij,
                                         const scalar_t *__restrict__ theta,
                                         float *__restrict__ partials, int s, int h,
-                                        int row_tiles) {
+                                        int granules) {
   constexpr int ROW_STRIDE = CTA_M + ROW_PAD;
   constexpr int HALF_GROUP = GROUP_SIZE / 2;
+  constexpr int GRANULE = kRotatePairGradRowGranule;
+  static_assert(CTA_M % GRANULE == 0, "CTA_M must be a multiple of the gradient row granule");
   __shared__ scalar_t x_grp[ROW_STRIDE * GROUP_SIZE];
   __shared__ scalar_t g_grp[ROW_STRIDE * GROUP_SIZE];
 
@@ -411,26 +438,36 @@ __global__ void rotate_pair_grad_kernel(const scalar_t *__restrict__ x,
     const float tr = reg_theta[r];
     RotateAccess<scalar_t>::template apply_one<CTA_M, ROW_STRIDE, GROUP_SIZE>(x_grp, reg_idx[r], -tr);
     RotateAccess<scalar_t>::template apply_one<CTA_M, ROW_STRIDE, GROUP_SIZE>(g_grp, reg_idx[r], -tr);
-    __syncthreads();
 
-    const int i = reg_idx[r] & 0xFFFF;
-    const int j = reg_idx[r] >> 16;
-    float sum_a = 0.0f;
-    float sum_b = 0.0f;
+    // Same masking as apply_one, so the readback addresses exactly the columns
+    // this thread just rotated.
+    const int i = static_cast<uint16_t>(reg_idx[r] & 0xFFFF) % GROUP_SIZE;
+    const int j = static_cast<uint16_t>((reg_idx[r] >> 16) & 0xFFFF) % GROUP_SIZE;
 #pragma unroll
-    for (int m = 0; m < CTA_M; m++) {
-      if (base_row + m < s) {
-        const float xi = RotateAccess<scalar_t>::to_float(x_grp[i * ROW_STRIDE + m]);
-        const float xj = RotateAccess<scalar_t>::to_float(x_grp[j * ROW_STRIDE + m]);
-        const float gi = RotateAccess<scalar_t>::to_float(g_grp[i * ROW_STRIDE + m]);
-        const float gj = RotateAccess<scalar_t>::to_float(g_grp[j * ROW_STRIDE + m]);
-        sum_a += gi * xj - gj * xi;
-        sum_b += gi * xi + gj * xj;
+    for (int q = 0; q < CTA_M / GRANULE; q++) {
+      // Uniform across the block: the tail CTA may own granules past the end.
+      const int granule = tile * (CTA_M / GRANULE) + q;
+      if (granule < granules) {
+        float sum = 0.0f;
+#pragma unroll
+        for (int mm = 0; mm < GRANULE; mm++) {
+          const int m = q * GRANULE + mm;
+          if (base_row + m < s) {
+            const float xi = RotateAccess<scalar_t>::to_float(x_grp[i * ROW_STRIDE + m]);
+            const float xj = RotateAccess<scalar_t>::to_float(x_grp[j * ROW_STRIDE + m]);
+            const float gi = RotateAccess<scalar_t>::to_float(g_grp[i * ROW_STRIDE + m]);
+            const float gj = RotateAccess<scalar_t>::to_float(g_grp[j * ROW_STRIDE + m]);
+            sum += gi * xj - gj * xi;
+          }
+        }
+        partials[static_cast<int64_t>(r) * granules * hh + static_cast<int64_t>(granule) * hh +
+                 grp * HALF_GROUP + t] = sum;
       }
     }
-    float sn, cs;
-    __sincosf(tr, &sn, &cs);
-    partials[r * row_tiles * hh + tile * hh + grp * HALF_GROUP + t] = sum_a * cs - sum_b * sn;
+    // Orders this rotation's readback before the next rotation's apply_one
+    // writes, and this rotation's writes before the next rotation's reads
+    // (and before store_group after the last rotation).
+    __syncthreads();
   }
 
   RotateAccess<scalar_t>::template store_group<CTA_M, ROW_STRIDE, GROUP_SIZE>(out_x, x_grp, s, h,
@@ -439,9 +476,11 @@ __global__ void rotate_pair_grad_kernel(const scalar_t *__restrict__ x,
                                                                               tile, grp, t);
 }
 
-// Collapse the per-row-tile partials into one rotation-gradient tensor. The
-// reduction stays deterministic: a fixed tile order per output element, with no
-// atomics, so repeated runs produce identical results.
+// Collapse the per-granule partials into one rotation-gradient tensor. The
+// reduction stays deterministic: a fixed granule order per output element, with
+// no atomics, so repeated runs produce identical results. The "tile" axis below
+// is the fixed-size granule axis written by rotate_pair_grad_kernel, which does
+// not depend on the launch plan.
 //
 // Each output element walks the tile axis with a stride of `hh` floats, so the
 // loop trip count is a runtime value and the compiler cannot unroll it. That
@@ -511,10 +550,12 @@ rotate_pair_grad_launcher(at::Tensor x, at::Tensor g, at::Tensor idx_ij, at::Ten
   constexpr int pn = GROUP_SIZE / 2;
   const int seq_len = static_cast<int>(x.numel() / x.size(-1));
   const int row_tiles = std::max(1, (seq_len + CTA_M - 1) / CTA_M);
+  constexpr int GRANULE = kRotatePairGradRowGranule;
+  const int granules = std::max(1, (seq_len + GRANULE - 1) / GRANULE);
   auto options = torch::TensorOptions().dtype(x.dtype()).device(x.device());
   at::Tensor out_x = torch::empty(x.sizes(), options);
   at::Tensor out_g = torch::empty(x.sizes(), options);
-  at::Tensor partials = at::empty({KROT, row_tiles, h / 2}, x.options().dtype(at::kFloat));
+  at::Tensor partials = at::empty({KROT, granules, h / 2}, x.options().dtype(at::kFloat));
   at::Tensor grad = at::empty({KROT, h / 2}, x.options().dtype(at::kFloat));
 
   const at::ScalarType dtype = x.scalar_type();
@@ -529,7 +570,7 @@ rotate_pair_grad_launcher(at::Tensor x, at::Tensor g, at::Tensor idx_ij, at::Ten
     rotate_pair_grad_kernel<float, CTA_M, GROUP_SIZE, KROT, ROW_PAD><<<grid, block, 0, stream>>>(
         x.data_ptr<float>(), g.data_ptr<float>(), out_x.data_ptr<float>(), out_g.data_ptr<float>(),
         idx_ij.data_ptr<int16_t>(), theta_cast.data_ptr<float>(), partials.data_ptr<float>(),
-        seq_len, h, row_tiles);
+        seq_len, h, granules);
     break;
   case at::kHalf:
     rotate_pair_grad_kernel<__half, CTA_M, GROUP_SIZE, KROT, ROW_PAD><<<grid, block, 0, stream>>>(
@@ -538,7 +579,7 @@ rotate_pair_grad_launcher(at::Tensor x, at::Tensor g, at::Tensor idx_ij, at::Ten
         reinterpret_cast<__half *>(out_x.data_ptr<c10::Half>()),
         reinterpret_cast<__half *>(out_g.data_ptr<c10::Half>()), idx_ij.data_ptr<int16_t>(),
         reinterpret_cast<const __half *>(theta_cast.data_ptr<c10::Half>()),
-        partials.data_ptr<float>(), seq_len, h, row_tiles);
+        partials.data_ptr<float>(), seq_len, h, granules);
     break;
   default:
     TORCH_CHECK(false, "rotate_pair_grad supports Float and Half, got ", dtype);
@@ -549,7 +590,7 @@ rotate_pair_grad_launcher(at::Tensor x, at::Tensor g, at::Tensor idx_ij, at::Ten
   const int reduce_block = 256;
   const int reduce_grid = static_cast<int>((total + reduce_block - 1) / reduce_block);
   rotate_grad_reduce_kernel<<<reduce_grid, reduce_block, 0, stream>>>(
-      partials.data_ptr<float>(), grad.data_ptr<float>(), row_tiles, h / 2, total);
+      partials.data_ptr<float>(), grad.data_ptr<float>(), granules, h / 2, total);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   return {out_x, out_g, grad};
@@ -611,6 +652,15 @@ constexpr float kAutotuneMinRelativeSpeedup = 0.15f;
 // Tiny decode kernels can show large relative swings from timer noise. Require
 // a minimum absolute win before overriding the architecture baseline.
 constexpr float kAutotuneMinAbsoluteSpeedupMs = 0.01f;
+// Autotune measurement knobs. These are internal constants, not environment
+// variables: runtime behaviour is selected through ``KernelConfig`` only
+// (AGENTS.md). ``paroquant_rotate_autotune`` enables or disables the search,
+// and ``paroquant_rotate_cta_m``/``paroquant_rotate_row_pad`` pin a launch
+// shape. The values below keep the historical defaults.
+constexpr int kAutotuneWarmup = 3;
+constexpr int kAutotuneBaseIters = 25;
+constexpr int kAutotuneRepeats = 5;
+constexpr float kAutotuneTargetMs = 5.0f;
 constexpr std::array<LaunchConfig, 6> kAutotuneCandidates = {{
     {4, 0},
     {4, 2},
@@ -666,46 +716,6 @@ std::mutex &autotune_measurement_mutex() {
   // the same or competing launch plans concurrently on cache misses.
   static std::mutex mutex;
   return mutex;
-}
-
-int resolve_autotune_count(const char *name, int default_value) {
-  if (const char *raw = std::getenv(name)) {
-    int parsed = std::atoi(raw);
-    if (parsed > 0) {
-      return parsed;
-    }
-  }
-  return default_value;
-}
-
-float resolve_autotune_target_ms() {
-  if (const char *raw = std::getenv("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_TARGET_MS")) {
-    const float parsed = std::atof(raw);
-    if (parsed > 0.0f) {
-      return parsed;
-    }
-  }
-  return 5.0f;
-}
-
-float resolve_autotune_min_relative_speedup() {
-  if (const char *raw = std::getenv("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_MIN_SPEEDUP_PCT")) {
-    const float parsed = std::atof(raw);
-    if (parsed > 0.0f) {
-      return parsed / 100.0f;
-    }
-  }
-  return kAutotuneMinRelativeSpeedup;
-}
-
-float resolve_autotune_min_absolute_speedup_seconds() {
-  if (const char *raw = std::getenv("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_MIN_SPEEDUP_US")) {
-    const float parsed = std::atof(raw);
-    if (parsed > 0.0f) {
-      return parsed / 1e6f;
-    }
-  }
-  return kAutotuneMinAbsoluteSpeedupMs / 1e3f;
 }
 
 bool requests_autotune(int requested_cta_m, int requested_row_pad) {
@@ -805,10 +815,10 @@ LaunchConfig resolve_legacy_launch_config(at::ScalarType dtype, int explicit_cta
 float benchmark_launch_config(const at::Tensor &x, const at::Tensor &idx, const at::Tensor &theta,
                               const at::Tensor &scales, int64_t group_size, int64_t krot,
                               LaunchConfig config) {
-  const int warmup = resolve_autotune_count("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_WARMUP", 3);
-  const int base_iters = resolve_autotune_count("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_ITERS", 25);
-  const int repeats = resolve_autotune_count("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_REPEATS", 5);
-  const float target_ms = resolve_autotune_target_ms();
+  constexpr int warmup = kAutotuneWarmup;
+  constexpr int base_iters = kAutotuneBaseIters;
+  constexpr int repeats = kAutotuneRepeats;
+  constexpr float target_ms = kAutotuneTargetMs;
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   auto synchronize_stream = [stream]() {
     const cudaError_t status = cudaStreamSynchronize(stream);
@@ -898,8 +908,8 @@ LaunchConfig autotune_launch_config(const at::Tensor &x, const at::Tensor &idx, 
       resolve_legacy_launch_config(x.scalar_type(), kLegacyLaunchSentinel, kLegacyLaunchSentinel);
   const float fallback_seconds =
       benchmark_launch_config(x, idx, theta, scales, group_size, krot, fallback);
-  const float min_relative_speedup = resolve_autotune_min_relative_speedup();
-  const float min_absolute_speedup_seconds = resolve_autotune_min_absolute_speedup_seconds();
+  constexpr float min_relative_speedup = kAutotuneMinRelativeSpeedup;
+  constexpr float min_absolute_speedup_seconds = kAutotuneMinAbsoluteSpeedupMs / 1e3f;
   auto beats_fallback = [&](float candidate_seconds, float baseline_seconds) {
     const float absolute_improvement = baseline_seconds - candidate_seconds;
     return absolute_improvement >= min_absolute_speedup_seconds &&
@@ -1136,20 +1146,18 @@ rotate_pair_grad(at::Tensor x, at::Tensor g, at::Tensor idx, at::Tensor theta,
 //
 // This op collapses one rotation's whole contribution into a single launch:
 //
-//   out[e] = ( sum_b grad[b, i] * rot[b, j] - grad[b, j] * rot[b, i] ) * cos[e]
-//          - ( sum_b grad[b, i] * rot[b, i] + grad[b, j] * rot[b, j] ) * sin[e]
+//   out[e] = sum_b grad[b, i] * rot[b, j] - grad[b, j] * rot[b, i]
 //
-// with i = idx_i[e], j = idx_j[e]. The two partial sums are accumulated
-// separately in fp32 and combined after the batch loop, which matches the
-// `(A).sum(0) * cos - (B).sum(0) * sin` form of the torch path.
+// with i = idx_i[e], j = idx_j[e], where `rot` is the rotation's input and
+// `grad` the gradient with respect to that input (see rotate_pair_grad_kernel
+// for the derivation). The sum accumulates in fp32, matching the
+// `(grad_i * xj - grad_j * xi).sum(0)` form of the torch path.
 constexpr int GRAD_THETA_E_TILE = 128;
 constexpr int GRAD_THETA_B_CHUNK = 32;
 
 __global__ void grad_theta_kernel(const float *__restrict__ rot, const float *__restrict__ grad,
                                   const int64_t *__restrict__ idx_i,
-                                  const int64_t *__restrict__ idx_j,
-                                  const float *__restrict__ sin_t,
-                                  const float *__restrict__ cos_t, float *__restrict__ out,
+                                  const int64_t *__restrict__ idx_j, float *__restrict__ out,
                                   int batch, int hidden, int h) {
   const int e = blockIdx.x * GRAD_THETA_E_TILE + threadIdx.x;
   if (e >= h) {
@@ -1162,44 +1170,37 @@ __global__ void grad_theta_kernel(const float *__restrict__ rot, const float *__
   const int b_begin = blockIdx.y * GRAD_THETA_B_CHUNK;
   const int b_end = min(batch, b_begin + GRAD_THETA_B_CHUNK);
 
-  float sum_a = 0.0f;
-  float sum_b = 0.0f;
+  float sum = 0.0f;
   for (int b = b_begin; b < b_end; ++b) {
     const int64_t base = static_cast<int64_t>(b) * hidden;
     const float gi = grad[base + i];
     const float gj = grad[base + j];
     const float xi = rot[base + i];
     const float xj = rot[base + j];
-    sum_a += gi * xj - gj * xi;
-    sum_b += gi * xi + gj * xj;
+    sum += gi * xj - gj * xi;
   }
 
-  atomicAdd(out + e, sum_a * cos_t[e] - sum_b * sin_t[e]);
+  atomicAdd(out + e, sum);
 }
 
-at::Tensor grad_theta(at::Tensor rot, at::Tensor grad, at::Tensor idx_i, at::Tensor idx_j,
-                      at::Tensor sin_t, at::Tensor cos_t) {
+at::Tensor grad_theta(at::Tensor rot, at::Tensor grad, at::Tensor idx_i, at::Tensor idx_j) {
   TORCH_CHECK(rot.is_cuda() && grad.is_cuda(), "ParoQuant grad_theta expects CUDA tensors.");
   const at::cuda::OptionalCUDAGuard device_guard(device_of(rot));
   TORCH_CHECK(rot.dim() == 2 && grad.dim() == 2 && grad.size(0) == rot.size(0) &&
                   grad.size(1) == rot.size(1),
               "ParoQuant grad_theta expects rot and grad to share a (batch, hidden) shape.");
   TORCH_CHECK(rot.is_contiguous() && grad.is_contiguous() && idx_i.is_contiguous() &&
-                  idx_j.is_contiguous() && sin_t.is_contiguous() && cos_t.is_contiguous(),
+                  idx_j.is_contiguous(),
               "ParoQuant grad_theta expects contiguous tensors.");
   TORCH_CHECK(rot.scalar_type() == at::kFloat && grad.scalar_type() == at::kFloat,
               "ParoQuant grad_theta supports float32 activations.");
   TORCH_CHECK(idx_i.scalar_type() == at::kLong && idx_j.scalar_type() == at::kLong &&
                   idx_i.dim() == 1 && idx_j.dim() == 1 && idx_i.size(0) == idx_j.size(0),
               "ParoQuant grad_theta expects matching 1D int64 index tensors.");
-  TORCH_CHECK(sin_t.scalar_type() == at::kFloat && cos_t.scalar_type() == at::kFloat,
-              "ParoQuant grad_theta expects float32 sin/cos tables.");
 
   const int64_t h = idx_i.size(0);
   const int64_t batch = rot.size(0);
   const int64_t hidden = rot.size(1);
-  TORCH_CHECK(sin_t.numel() == h && cos_t.numel() == h,
-              "ParoQuant grad_theta sin/cos tables must match the index length.");
 
   at::Tensor out = at::zeros({h}, rot.options());
   if (h == 0 || batch == 0) {
@@ -1212,7 +1213,6 @@ at::Tensor grad_theta(at::Tensor rot, at::Tensor grad, at::Tensor idx_i, at::Ten
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   grad_theta_kernel<<<grid, block, 0, stream>>>(rot.data_ptr<float>(), grad.data_ptr<float>(),
                                                 idx_i.data_ptr<int64_t>(), idx_j.data_ptr<int64_t>(),
-                                                sin_t.data_ptr<float>(), cos_t.data_ptr<float>(),
                                                 out.data_ptr<float>(),
                                                 static_cast<int>(batch), static_cast<int>(hidden),
                                                 static_cast<int>(h));
@@ -1227,7 +1227,7 @@ TORCH_LIBRARY(gptqmodel_paroquant, m) {
   m.def("launch_config(Tensor x, int krot=8, bool has_scale=True, int group_size=128, int cta_m=-1, int row_pad=-1) -> int[]");
   m.def("clear_autotune_cache() -> ()");
   m.def("autotune_cache_size() -> int");
-  m.def("grad_theta(Tensor rot, Tensor grad, Tensor idx_i, Tensor idx_j, Tensor sin_t, Tensor cos_t) -> Tensor");
+  m.def("grad_theta(Tensor rot, Tensor grad, Tensor idx_i, Tensor idx_j) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_paroquant, CUDA, m) {

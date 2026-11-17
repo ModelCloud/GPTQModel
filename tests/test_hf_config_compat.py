@@ -900,7 +900,7 @@ def test_prepare_remote_model_init_compat_skips_input_mode_patch_without_forward
     assert not hasattr(Phi4MMForCausalLM, "_gptqmodel_input_mode_patch")
 
 
-def test_resolve_trust_remote_code_overrides_when_native_support_exists(monkeypatch, capsys):
+def test_resolve_trust_remote_code_overrides_when_native_support_exists(monkeypatch, caplog):
     hf_utils._TRUST_REMOTE_CODE_OVERRIDE_WARNED.clear()
     monkeypatch.setattr(
         hf_utils,
@@ -908,11 +908,14 @@ def test_resolve_trust_remote_code_overrides_when_native_support_exists(monkeypa
         lambda model_id_or_path: (True, "phi3", "Phi3ForCausalLM"),
     )
 
-    resolved = resolve_trust_remote_code("/tmp/phi3", trust_remote_code=True)
-    captured = capsys.readouterr()
+    # The warning is emitted through the library logger, whose sink is a logbar
+    # handler bound at import time; ``caplog`` observes the record, ``capsys``
+    # does not see that handler's stream.
+    with caplog.at_level("WARNING"):
+        resolved = resolve_trust_remote_code("/tmp/phi3", trust_remote_code=True)
 
     assert resolved is False
-    assert "overriding trust_remote_code=True to False" in captured.out + captured.err
+    assert "overriding trust_remote_code=True to False" in caplog.text
 
 
 def test_resolve_trust_remote_code_keeps_true_without_native_support(monkeypatch, caplog):

@@ -26,7 +26,7 @@ from .cpp import (
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
 )
-from .env import env_flag
+from .kernel import get_kernel_config
 
 
 _SUPPORTED_ROTATION_KERNEL_DTYPES = {
@@ -61,7 +61,6 @@ _ROTATION_EXTENSION_READY = False
 # persisted per device/torch/HIP fingerprint. Bump the format whenever the
 # native candidate set or its scoring changes so stale picks are discarded.
 _ROTATION_AUTOTUNE_CACHE_FORMAT = 1
-_ROTATION_AUTOTUNE_CACHE_ENV = "GPTQMODEL_PAROQUANT_AUTOTUNE_CACHE"
 _ROTATION_AUTOTUNE_DISK_LOCK = threading.Lock()
 # device index -> loaded flag, so the on-disk cache is read at most once.
 _ROTATION_AUTOTUNE_DISK_LOADED: set[int] = set()
@@ -444,29 +443,9 @@ def _load_rotation_extension() -> bool:
     return loaded
 
 
-def _rotation_env_int(name: str, allowed: set[int]) -> Optional[int]:
-    """Parse a bounded integer environment override."""
-    raw = os.getenv(name)
-    if raw is None:
-        return None
-    try:
-        value = int(raw)
-    except ValueError:
-        return None
-    return value if value in allowed else None
-
-
-def _rotation_env_flag(name: str, default: bool) -> bool:
-    """Parse a boolean environment flag used by rotation autotune."""
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
-
-
 def _rotation_autotune_enabled() -> bool:
     """Report whether fused rotation launch autotune is enabled for this process."""
-    return _rotation_env_flag("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE", True)
+    return get_kernel_config().paroquant_rotate_autotune
 
 
 def _rotation_native_op_if_loaded(op_name: str):
@@ -483,15 +462,21 @@ def _rotation_native_op_if_loaded(op_name: str):
 
 
 def _rotation_requested_launch() -> tuple[int, int]:
-    """Resolve the requested fused launch policy from env overrides or autotune."""
+    """Resolve the requested fused launch policy from config overrides or autotune."""
     global _ROTATION_LAUNCH_POLICY_CACHE
 
+    kernel = get_kernel_config()
+    config_key = (
+        kernel.paroquant_rotate_autotune,
+        kernel.paroquant_rotate_cta_m,
+        kernel.paroquant_rotate_row_pad,
+    )
     cached = _ROTATION_LAUNCH_POLICY_CACHE
-    if cached is not None:
-        return cached
+    if cached is not None and cached[0] == config_key:
+        return cached[1]
 
-    cta_m_override = _rotation_env_int("GPTQMODEL_PAROQUANT_ROTATE_CTA_M", {4, 8, 16})
-    row_pad_override = _rotation_env_int("GPTQMODEL_PAROQUANT_ROTATE_ROW_PAD", {0, 2})
+    cta_m_override = kernel.paroquant_rotate_cta_m
+    row_pad_override = kernel.paroquant_rotate_row_pad
     if cta_m_override is not None or row_pad_override is not None:
         resolved = (
             -1 if cta_m_override is None else int(cta_m_override),
@@ -501,7 +486,7 @@ def _rotation_requested_launch() -> tuple[int, int]:
         resolved = (-2, -2)
     else:
         resolved = (-1, -1)
-    _ROTATION_LAUNCH_POLICY_CACHE = resolved
+    _ROTATION_LAUNCH_POLICY_CACHE = (config_key, resolved)
     return resolved
 
 
@@ -696,7 +681,7 @@ def _apply_fused_rotation_pair_grad(
 
 
 def _rotation_autotune_cache_enabled() -> bool:
-    return env_flag(_ROTATION_AUTOTUNE_CACHE_ENV, default=True)
+    return get_kernel_config().paroquant_autotune_cache
 
 
 def _rotation_autotune_cache_dir() -> Path:
@@ -1091,12 +1076,10 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
 
                 # The rotation set is fixed for the whole backward pass, so derive every
                 # per-rotation constant once instead of rebuilding it inside the loop:
-                # the negated thetas, their sin/cos, and the gather index pairs. This
-                # removes krot sin/cos/neg launches and krot strided-slice+add passes.
+                # the negated thetas and the gather index pairs. This removes krot neg
+                # launches and krot strided-slice+add passes.
                 krot = pairs.shape[0]
                 neg_theta_all = theta.neg()
-                sin_all = theta.reshape(krot, num_groups, half_group).sin()
-                cos_all = theta.reshape(krot, num_groups, half_group).cos()
                 pair_view_all = pairs.reshape(krot, num_groups, group_size)
                 idx_i_all = (pair_view_all[:, :, 0::2] + offsets).reshape(krot, -1)
                 idx_j_all = (pair_view_all[:, :, 1::2] + offsets).reshape(krot, -1)
@@ -1136,14 +1119,7 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
                     idx_j = idx_j_all[rot_idx]
 
                     if fused_grad_theta is not None:
-                        fused_parts[rot_idx] = fused_grad_theta(
-                            rotated,
-                            grad,
-                            idx_i,
-                            idx_j,
-                            sin_all[rot_idx].reshape(-1),
-                            cos_all[rot_idx].reshape(-1),
-                        )
+                        fused_parts[rot_idx] = fused_grad_theta(rotated, grad, idx_i, idx_j)
                         continue
 
                     xi = rotated[:, idx_i].reshape(batch_rows, num_groups, half_group)
@@ -1151,15 +1127,12 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
                     grad_i = grad[:, idx_i].reshape(batch_rows, num_groups, half_group)
                     grad_j = grad[:, idx_j].reshape(batch_rows, num_groups, half_group)
 
-                    sin_t = sin_all[rot_idx]
-                    cos_t = cos_all[rot_idx]
+                    # ``rotated`` is this rotation's input and ``grad`` the gradient
+                    # with respect to that input (both already swept back), so
+                    # dL/dtheta = sum(grad_i * x_j - grad_j * x_i): dR/dtheta = R J
+                    # and R^T g_out is exactly ``grad``. No sin/cos factor remains.
                     grad_theta[rot_idx] = (
-                        (
-                            (grad_i * xj - grad_j * xi).sum(0) * cos_t
-                            - (grad_i * xi + grad_j * xj).sum(0) * sin_t
-                        )
-                        .reshape(-1)
-                        .to(theta.dtype)
+                        (grad_i * xj - grad_j * xi).sum(0).reshape(-1).to(theta.dtype)
                     )
 
                 if fused_parts is not None:

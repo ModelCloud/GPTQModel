@@ -39,6 +39,34 @@ def test_fp8_packing_preserves_fp32_bias_range():
     assert torch.equal(output, torch.full((2, 1), 70000.0))
 
 
+def test_fp8_bias_free_fallback_keeps_decoded_weight_range():
+    """A finite cancellation must not NaN because the decoded weight narrowed."""
+    linear = torch.nn.Linear(2, 1, bias=False, dtype=torch.float32)
+    with torch.no_grad():
+        linear.weight.fill_(65536.0)
+    module = TorchFP8Linear(
+        bits=8,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=2,
+        out_features=1,
+        bias=False,
+        register_buffers=False,
+        format="float8_e4m3fn",
+    )
+    module.pack_original(linear, None, None)
+
+    x = torch.tensor([[1.0, -1.0]], dtype=torch.float16)
+    decoded = module.weight.float() / module.weight_scale_inv.float().view(-1, 1)
+    expected = (x.double() @ decoded.double().T).half()
+
+    actual = module(x)
+
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("dtype,input_value", [
     (torch.float16, 70.0),
     (torch.bfloat16, 68.5),
@@ -168,3 +196,86 @@ def test_fp8_gpu_scaled_mm_adds_fp32_bias_before_rounding(dtype, input_value):
     assert not module._scaled_mm_hard_disabled
     assert actual.dtype == dtype
     torch.testing.assert_close(actual, oracle, rtol=2e-3, atol=2e-3)
+
+
+def _bias_free_fp8_module(weight: torch.Tensor) -> TorchFP8Linear:
+    linear = torch.nn.Linear(weight.shape[1], weight.shape[0], bias=False, dtype=torch.float32)
+    with torch.no_grad():
+        linear.weight.copy_(weight)
+    module = TorchFP8Linear(
+        bits=8,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=weight.shape[1],
+        out_features=weight.shape[0],
+        bias=False,
+        register_buffers=False,
+        format="float8_e4m3fn",
+    )
+    module.pack_original(linear, None, None)
+    return module
+
+
+def test_fp8_decoded_weight_bound_tracks_reload():
+    """The range decision must be recomputed after the payload changes."""
+    module = _bias_free_fp8_module(torch.ones(1, 2))
+    assert module._weights_fit_activation_dtype(torch.float16)
+
+    big = torch.nn.Linear(2, 1, bias=False, dtype=torch.float32)
+    with torch.no_grad():
+        big.weight.fill_(65536.0)
+    module.pack_original(big, None, None)
+    assert not module._weights_fit_activation_dtype(torch.float16)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or ROCm runtime required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fp8_bias_free_cuda_in_range_weights_keep_native_path(monkeypatch, dtype):
+    """In-range decoded weights must not force an FP32 dense GEMM on CUDA."""
+    if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        pytest.skip("BF16 arithmetic unavailable on this device")
+    generator = torch.Generator().manual_seed(0)
+    module = _bias_free_fp8_module(torch.randn(32, 64, generator=generator) * 0.02)
+    module = module.to("cuda")
+    x = torch.randn(8, 64, device="cuda", dtype=dtype)
+
+    seen = []
+    dequantize = module.dequantize_weight
+
+    def tracked(*args, **kwargs):
+        seen.append(kwargs.get("dtype"))
+        return dequantize(*args, **kwargs)
+
+    monkeypatch.setattr(module, "dequantize_weight", tracked)
+    with torch.inference_mode():
+        output = module(x)
+
+    assert seen == [dtype]
+    assert output.dtype == dtype
+    assert torch.isfinite(output).all()
+    decoded = module.weight.float() / module.weight_scale_inv.float().view(-1, 1)
+    oracle = (x.float() @ decoded.T).to(dtype)
+    torch.testing.assert_close(output, oracle, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or ROCm runtime required")
+def test_fp8_bias_free_cuda_out_of_range_weights_stay_wide(monkeypatch):
+    """A decoded weight above the FP16 finite range must keep the wide path."""
+    module = _bias_free_fp8_module(torch.full((1, 2), 65536.0)).to("cuda")
+    x = torch.tensor([[1.0, -1.0]], device="cuda", dtype=torch.float16)
+
+    seen = []
+    dequantize = module.dequantize_weight
+
+    def tracked(*args, **kwargs):
+        seen.append(kwargs.get("dtype"))
+        return dequantize(*args, **kwargs)
+
+    monkeypatch.setattr(module, "dequantize_weight", tracked)
+    with torch.inference_mode():
+        output = module(x)
+
+    assert seen == [torch.float32]
+    assert output.dtype == torch.float16
+    assert torch.isfinite(output).all()

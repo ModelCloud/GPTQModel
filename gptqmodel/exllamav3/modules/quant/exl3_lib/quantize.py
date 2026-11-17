@@ -133,17 +133,14 @@ def _tile_batch_size() -> int:
     The scratch buffer below is ``batch x 256 x (65536 >> K)`` int16, i.e. 2 GiB
     at the default batch of 256. That is allocated once per CUDA stream, and the
     quantization pool runs one stream per worker thread, so a wide run can hold
-    several GiB of pure scratch per device. ``GPTQMODEL_EXL3_TILE_BATCH`` lowers
+    several GiB of pure scratch per device. ``KernelConfig.exl3_tile_batch`` lowers
     the slot count for memory-constrained hosts; tiles are quantized
     independently, so a smaller batch only means more launches.
     """
 
-    import os
+    from .....utils.kernel import get_kernel_config
 
-    try:
-        batch = int(os.environ.get("GPTQMODEL_EXL3_TILE_BATCH", _DEFAULT_TILE_BATCH))
-    except ValueError:
-        batch = _DEFAULT_TILE_BATCH
+    batch = get_kernel_config().exl3_tile_batch
     return max(1, min(_DEFAULT_TILE_BATCH, batch))
 
 
@@ -165,6 +162,20 @@ def _allocate_temp_buffers(device, K: int, batch: int):
 
 _workspace_registry_lock = threading.Lock()
 _workspace_buffers = {}
+
+
+def clear_tile_workspace() -> None:
+    """Drop the process-wide per-stream tile scratch.
+
+    ``_workspace_buffers`` keeps one scratch pair per device/K/stream so tile
+    launches on the same stream can reuse it. Nothing else owns those tensors,
+    so without this call a completed run leaves them allocated for the life of
+    the process (512 MiB per stream at K=4, 2 GiB at K=2). Call it once the
+    run's worker streams have drained.
+    """
+
+    with _workspace_registry_lock:
+        _workspace_buffers.clear()
 
 
 def _stream_temp_buffers(device, K: int, stream):
@@ -445,7 +456,13 @@ def block_ldl(H: torch.Tensor, b: int, verbose: bool):
 
     # Fall back on CPU factorization
     except Exception as e:
-        if e.__class__.__name__ == "OutOfMemoryError" or "CUDA out of memory" in str(e) or "HIP out of memory" in str(e):
+        # Reuse GPTQ's allocation classifier so cuSOLVER/hipSOLVER
+        # ``*SOLVER_STATUS_ALLOC_FAILED`` errors (a failed workspace/handle
+        # allocation, not an "out of memory" phrase) also retry on CPU instead
+        # of aborting the run (issue #4400).
+        from .....quantization.gptq import _is_memory_allocation_failure
+
+        if _is_memory_allocation_failure(e):
             retry_cpu = True
         else:
             raise e
@@ -467,7 +484,16 @@ def block_ldl(H: torch.Tensor, b: int, verbose: bool):
     # D = DL @ DL.transpose(1, 2)
 
     # Invert each diagonal block
-    DL = torch.linalg.inv(DL)
+    try:
+        DL = torch.linalg.inv(DL)
+    except Exception as e:
+        from .....quantization.gptq import _is_memory_allocation_failure
+
+        if not _is_memory_allocation_failure(e):
+            raise
+        # The diagonal blocks are tiny; a solver handle allocation failure
+        # here should not abort the run either.
+        DL = torch.linalg.inv(DL.cpu()).to(device=DL.device)
 
     # Multiply each block's column with its inverse
     L = L.view(n, m, b)

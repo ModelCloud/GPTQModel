@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -29,7 +29,7 @@ from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.input_cache import InputCache
-from ..looper.loop_processor import LoopProcessor
+from ..looper.loop_processor import LoopProcessor, record_quant_log
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -47,6 +47,7 @@ from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.disk import estimate_disk_io_speed
+from ..utils.kernel import configure_kernel, resolve_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
     clone_module_for_devices,
@@ -67,7 +68,16 @@ from ..utils.model import (
     set_moe_topk,
     untie_word_embeddings,
 )
-from ..utils.offload import offload_to_disk
+from ..utils.offload import (
+    bind_private_offload_root,
+    capture_offloaded_base_modules,
+    ensure_version_counters,
+    materialize_remaining_meta_modules,
+    offload_to_disk,
+    release_private_offload_root,
+    restore_disk_offloaded_modules,
+    restore_offloaded_modules,
+)
 from ..utils.p2p import (
     configure_p2p,
     enable_for_devices,
@@ -201,6 +211,10 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self.processors = processors
         self.extensions = LoopExtensions(extensions)
         self.gptq_model = model
+        # Base modules offloaded at the start of the run are restored when the
+        # loop exits so the model stays usable in-session.
+        self._offloaded_base_modules: List[Tuple[str, nn.Module, torch.device]] = []
+        self._bind_private_offload_namespace()
         # Concurrent module-tree branches can declare different quantizable
         # leaves.  Cache each branch's leaf blocks so a layer is never asked to
         # resolve a sibling branch's modules.
@@ -360,6 +374,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # mode, so a failed probe never blocks quantization.
         cross_device_pool = self._cross_device_pool()
         configure_p2p(getattr(self.gptq_model.quantize_config, "p2p", None))
+        configure_kernel(resolve_kernel_config(self.gptq_model.quantize_config, use_process_default=False))
         if len(cross_device_pool) > 1:
             enable_for_devices(cross_device_pool)
 
@@ -368,6 +383,14 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
         # Track current subset for MoE lifecycle hooks
         self._current_subset: Optional[Dict[str, Any]] = None
+
+        # The decoder layer (or embedding/lm_head endpoint) currently in the
+        # quantization stage, paired with the device it lived on before the
+        # stage moved it. A cancelled or failed run must return it there;
+        # otherwise the in-flight layer stays on the accelerator while the rest
+        # of the model is on CPU and the next forward raises a device mismatch
+        # (issue #4546).
+        self._inflight_layer: Optional[Tuple[torch.nn.Module, torch.device]] = None
 
         # moe_routing_override is only required for MoE models (i.e., models with dynamic_expert_index).
         # `get_num_experts()` returns None when the config does not expose a
@@ -1257,7 +1280,10 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             except Exception:
                 pass
 
-        tensor_attrs = ("H", "module_copy")
+        # GPTAQ/FOEM keep an auxiliary Hessian companion (`dXXT`) beside
+        # `H`. Rehome every per-module tensor the task owns so quantization
+        # cannot mix devices (issue #4312).
+        tensor_attrs = ("H", "module_copy", "dXXT")
         for attr_name in tensor_attrs:
             tensor_value = getattr(task, attr_name, None)
             if isinstance(tensor_value, torch.Tensor):
@@ -1321,24 +1347,62 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     def _lm_head_is_tied(self) -> bool:
         """Return whether `lm_head` shares its source weight with another module.
 
+        Real storage identity is authoritative. Composite/VLM configs commonly
+        leave a nested ``text_config.tie_word_embeddings=True`` while the loaded
+        model keeps independent input and output embeddings (for example
+        Qwen3-VL), so nested config flags must not be treated as proof of tying
+        (issue #4369).
+
         `find_tied_parameters` only compares materialized parameters. A lazily
         loaded shell keeps both sides as independent META parameters until the
         loader ties them, so identity never matches and quantization continues
         until the source reload fails with a misleading "missing checkpoint
         tensors" error. Detect that shape from the checkpoint instead: a tied
         HF checkpoint omits `lm_head.weight`, so the head has no independent
-        source tensor to quantize.
+        source tensor to quantize. The declared tied key at the root config is
+        the final fallback for checkpoints that do store `lm_head.weight`
+        (Qwen3) while the loader still ties it.
         """
 
         model = self.gptq_model.model
         lm_head_name = self.gptq_model.lm_head
+
+        # 1. Actual storage identity: the input embedding and output head are
+        #    the same parameter (or share materialized storage).
+        try:
+            input_embeddings = model.get_input_embeddings()
+            output_embeddings = model.get_output_embeddings()
+        except (AttributeError, TypeError):
+            input_embeddings = output_embeddings = None
+        input_weight = getattr(input_embeddings, "weight", None)
+        output_weight = getattr(output_embeddings, "weight", None)
+        if torch.is_tensor(input_weight) and torch.is_tensor(output_weight):
+            if output_weight is input_weight:
+                return True
+            # Meta tensors all report data_ptr() == 0, so only compare storage
+            # for materialized parameters.
+            if not (
+                getattr(input_weight, "is_meta", False)
+                or getattr(output_weight, "is_meta", False)
+            ):
+                try:
+                    same_storage = (
+                        input_weight.untyped_storage().data_ptr()
+                        == output_weight.untyped_storage().data_ptr()
+                        and input_weight.data_ptr() == output_weight.data_ptr()
+                    )
+                except Exception:  # pragma: no cover - backend without untyped_storage
+                    same_storage = False
+                if same_storage:
+                    return True
+
+        # 2. Accelerate's tied-parameter report (materialized parameters only).
         if any(
             f"{lm_head_name}.weight" in names
             for names in find_tied_parameters(model)
         ):
             return True
-        if not bool(getattr(getattr(model, "config", None), "tie_word_embeddings", False)):
-            return False
+
         lm_head_module = get_module(model, key=lm_head_name)
         if lm_head_module is None:
             return False
@@ -1350,7 +1414,23 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         checker = getattr(getattr(self.gptq_model, "turtle_model", None), "has_checkpoint_tensor", None)
         if not callable(checker):
             return False
-        return not checker(target_model=model, target_submodule=lm_head_module)
+        if not checker(target_model=model, target_submodule=lm_head_module):
+            return True
+
+        # A tied checkpoint may still contain `lm_head.weight` (Qwen3 stores it
+        # even though the head is tied). Only the *root* config flag is trusted
+        # here; a nested text_config flag does not describe the loaded model's
+        # actual storage (issue #4369).
+        config = getattr(model, "config", None)
+        if not bool(getattr(config, "tie_word_embeddings", False)):
+            return False
+        tied_keys = getattr(model, "_tied_weights_keys", None)
+        tied_head = f"{lm_head_name}.weight"
+        if isinstance(tied_keys, dict):
+            return tied_head in tied_keys
+        if tied_keys:
+            return tied_head in set(tied_keys)
+        return False
 
     def _prepare_layer_direct_state_for_forward(
         self,
@@ -1783,11 +1863,142 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             layer_names=layer_names,
         )
 
+    def _bind_private_offload_namespace(self) -> None:
+        """Give this run a private offload root under the configured path."""
+
+        config = getattr(self.gptq_model, "quantize_config", None)
+        if config is None:
+            return
+        run_root = bind_private_offload_root(self.gptq_model)
+        if run_root is None:
+            return
+        private_config = self.gptq_model.quantize_config
+        # Processors are built before the looper and may hold the shared config
+        # object; point them at the private copy so every offload write during
+        # this run lands in the same namespace the model saves from.
+        for processor in self.processors:
+            if getattr(processor, "qcfg", None) is config:
+                processor.qcfg = private_config
+
+    def _restore_offloaded_base_modules(self, *, strict: bool) -> None:
+        entries = getattr(self, "_offloaded_base_modules", None)
+        if not entries:
+            return
+        self._offloaded_base_modules = []
+        restore_offloaded_modules(self.gptq_model.model, entries, strict=strict)
+
+    def _restore_disk_offloaded_modules(self) -> None:
+        """Bring the disk-offloaded quantized modules back into memory.
+
+        Offload bounds host memory while the loop runs. Once it returns, the
+        in-session model must not depend on the run's bundles (issue #4450).
+        """
+
+        restore_disk_offloaded_modules(self.gptq_model.model, device=CPU, strict=True)
+
+    def _materialize_remaining_meta_modules(self) -> None:
+        """Load modules the lazy shell left on meta (e.g. an untied lm_head)."""
+
+        materialize_remaining_meta_modules(self.gptq_model, device=CPU)
+
+    def _release_run_workspace(self) -> None:
+        """Release processor-owned scratch shared across the whole run."""
+
+        for processor in getattr(self, "processors", ()) or ():
+            processor.release_run_workspace()
+
+    def _track_inflight_layer(
+        self,
+        module: torch.nn.Module,
+        home_device: Optional[torch.device] = None,
+    ) -> None:
+        """Remember the layer being staged and its pre-run home device."""
+
+        if not isinstance(module, torch.nn.Module):
+            return
+        if home_device is None:
+            try:
+                home_device = get_device(module)
+            except Exception:
+                home_device = CPU
+        # A lazy shell has no usable runtime placement to return to, so the
+        # model's ordinary CPU home is the only safe destination.
+        if getattr(home_device, "type", None) == "meta":
+            home_device = CPU
+        self._inflight_layer = (module, home_device)
+
+    def _clear_inflight_layer(self) -> None:
+        """Mark the current layer as complete so failure cleanup ignores it."""
+
+        self._inflight_layer = None
+
+    def _restore_inflight_layer(self) -> None:
+        """Return a cancelled/failed in-flight layer to its pre-run device.
+
+        The stage moves the whole layer to the compute device before a subset
+        forward. The success path relies on ``post_quantize`` to move it back,
+        but a ``StopMainLoop``/exception unwinds before that step, leaving every
+        parameter and buffer of the layer on the accelerator (issue #4546).
+        """
+
+        inflight = self._inflight_layer
+        self._inflight_layer = None
+        if inflight is None:
+            return
+        module, home_device = inflight
+        try:
+            rehome_module_to_device(
+                module,
+                home_device,
+                move_parameters=True,
+                move_buffers=True,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
+        except Exception:
+            # Cleanup must never mask the cancellation/failure that got us
+            # here; ``rehome_module_to_device`` already reports per-tensor
+            # failures, so this only guards unexpected structural errors.
+            log.warning(
+                "failed to restore in-flight quantization layer to %s",
+                home_device,
+                exc_info=True,
+            )
+
     def loop(self, fallback=None, **kwargs):
         """Run the quantization loop under the TF32 guard."""
 
         with tf32_high_precision_guard():
-            return self._loop_impl(fallback=fallback, **kwargs)
+            try:
+                result = self._loop_impl(fallback=fallback, **kwargs)
+            except BaseException:
+                # A cancelled or failed run must also release the layer that
+                # was mid-stage: the success path moves it back only after
+                # post_quantize, which the exception skipped (#4546).
+                try:
+                    self._restore_inflight_layer()
+                finally:
+                    # A failed run must not leave the base modules stranded on meta.
+                    try:
+                        self._restore_offloaded_base_modules(strict=False)
+                    finally:
+                        # A failed run cannot be saved, so its per-run offload
+                        # bundles are no longer reachable (issue #4368).
+                        release_private_offload_root(self.gptq_model)
+                raise
+            finally:
+                # Process-wide scratch (e.g. EXL3's per-stream tile buffers)
+                # outlives the model unless the run releases it, and a failed
+                # run must release it too.
+                self._release_run_workspace()
+            self._restore_offloaded_base_modules(strict=True)
+            self._restore_disk_offloaded_modules()
+            self._materialize_remaining_meta_modules()
+            # Unquantized layers keep the parameters `pre_quantize`
+            # materialized under inference mode, and `post_quantize`'s
+            # `param.data =` move leaves them without a version counter
+            # (issue #4572). Repair every one before the model is returned.
+            ensure_version_counters(self.gptq_model.model)
+            return result
 
     def _materialize_deferred_boundary_prefix(self, checkpoint) -> None:
         """Install a recovered packed prefix only when publication needs it."""
@@ -1911,10 +2122,15 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     if name
                 }
                 base_modules = [name for name in base_modules if name not in endpoint_names]
+            self._offloaded_base_modules = capture_offloaded_base_modules(
+                self.gptq_model.model, base_modules
+            )
             offload_to_disk(
                 model=self.gptq_model.model,
                 module=base_modules,
-                disk_path=self.gptq_model.quantize_config.offload_to_disk_path
+                disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
+                source_root=getattr(self.gptq_model, "model_local_path", None),
+                source_checkpoint=getattr(self.gptq_model, "checkpoint_file_name", None),
             )
 
         for processor in self.processors:
@@ -2098,8 +2314,6 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     len(reverse_p.log),
                 )
                 total_log[processor_name] = reverse_p.log
-                if processor_name in ["gptq", "gptaq", "awq", "exl3", "macaq"]:
-                    self.gptq_model.quant_log = reverse_p.log
 
                 if emit_finalize_records:
                     for module_log in reverse_p.log:
@@ -2127,6 +2341,13 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             region_timer.flush()
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
+
+        # Publish one row per module from the primary quantizer. Auxiliary
+        # processors (EoRA) opt out via ``owns_quant_log``, so an adapter pass
+        # cannot duplicate rows or replace the primary log (#4367). Reading the
+        # processor objects directly also covers a processor whose dynamic name
+        # changed mid-run.
+        record_quant_log(self.gptq_model, self.processors)
 
         return total_log
 

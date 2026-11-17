@@ -22,7 +22,7 @@ from ...quantization.config import (
 )
 from ...utils.backend import BACKEND
 from ...utils.cpu_features import cpu_bf16x3_matmul, has_avx512_bf16
-from ...utils.env import env_flag
+from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
 from .gguf import _apply_optional_smoother
@@ -46,7 +46,6 @@ _BITSANDBYTES_4BIT_STATE_BUFFER_NAMES = (
 _BITSANDBYTES_8BIT_STATE_BUFFER_NAMES = ("weight_scb",)
 _MLX_4BIT_MIN_ELEMENTS = 4 * 1024 * 1024
 _MLX_INT8_MIN_ELEMENTS = 8 * 1024 * 1024
-_CPU_PACKED_ENV = "GPTQMODEL_BITSANDBYTES_CPU_PACKED"
 _CPU_PACKED_SMALL_WEIGHT_ELEMENTS = 512 * 512
 _CPU_PACKED_SMALL_WEIGHT_MAX_M = 512
 _CPU_PACKED_SMALL_WEIGHT_MULTITHREAD_MAX_M = 64
@@ -54,7 +53,6 @@ _CPU_PACKED_WIDE_WEIGHT_MAX_M = 48
 _CPU_PACKED_SINGLE_THREAD_MAX_M = 32
 _CPU_PACKED_SMALL_WEIGHT_MIN_THREADS = 4
 _CPU_PACKED_REL_TOL = 2e-3
-_CPU_INT8_DENSE_ENV = "GPTQMODEL_BITSANDBYTES_CPU_INT8_DENSE"
 _CPU_INT8_DENSE_MIN_ROWS = 64
 _CPU_INT8_DENSE_MAX_ROWS = 256
 _CPU_INT8_DENSE_SQUARE = 512
@@ -318,7 +316,7 @@ def _int8_vectorwise_quant_fp32(
     scale), so the shared dequant epilogue stays valid.
     """
 
-    x_fp32 = x.to(torch.float32)
+    x_fp32 = x.to(torch.float32).reshape(-1, x.shape[-1])
     row_absmax = x_fp32.abs().amax(dim=1)
     scale = row_absmax / 127.0
     scale = torch.where(scale == 0, torch.ones_like(scale), scale)
@@ -357,6 +355,7 @@ def _cpu_int8_dense_should_use(
     in_features: int,
     out_features: int,
     compute_dtype: torch.dtype,
+    kernel=None,
 ) -> bool:
     """Return whether a tiled FP32 recompute is accurate and faster than native INT8.
 
@@ -369,7 +368,7 @@ def _cpu_int8_dense_should_use(
     retains a dense weight.
     """
 
-    if not env_flag(_CPU_INT8_DENSE_ENV, default=True):
+    if not resolve_kernel_config(kernel).bitsandbytes_cpu_int8_dense:
         return False
     if not has_avx512_bf16():
         return False
@@ -634,7 +633,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
         return self.quant_state
 
     def _cpu_packing_supported(self, x: torch.Tensor, compute_dtype: torch.dtype) -> bool:
-        if self._cpu_packing_disabled or not env_flag(_CPU_PACKED_ENV, default=False):
+        if self._cpu_packing_disabled or not self.kernel.bitsandbytes_cpu_packed:
             return False
         if not self.is_4bit or self.training or self.weight.device.type != "cpu":
             return False
@@ -903,6 +902,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                     self.weight.device,
                     compute_dtype,
                     x.numel() // self.in_features,
+                    kernel=self.kernel,
                 )
             ):
                 quant_state = self._refresh_quant_state()
@@ -993,41 +993,52 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                 in_features=self.in_features,
                 out_features=self.out_features,
                 compute_dtype=compute_dtype,
+                kernel=self.kernel,
             )
         ):
             return self._cpu_int8_tiled_forward(x, bias)
 
+        # ``int8_vectorwise_quant`` and ``int8_linear_matmul`` are rank-2
+        # kernels. Flatten arbitrary leading activation dimensions and restore
+        # them afterwards. Without the flatten, a [batch, seq, K] activation
+        # reduces the wrong axis in the row quantizer and the rank-2 row scale
+        # no longer matches the rank-3 product in the epilogue. The copy is
+        # required: ``reshape`` can return a row-strided view (for example
+        # ``hidden[:, -1:, :]``), and the native quantizer reads ``data_ptr()``
+        # as packed [M, K] rows instead of honoring the tensor strides.
+        x_flat = x.reshape(-1, self.in_features).contiguous()
+
         if x.dtype == torch.float16:
             x_int8, x_stats, outlier_cols = bnb.functional.int8_vectorwise_quant(
-                x,
+                x_flat,
                 threshold=0.0,
             )
         else:
-            x_int8, x_stats, outlier_cols = _int8_vectorwise_quant_fp32(x)
+            x_int8, x_stats, outlier_cols = _int8_vectorwise_quant_fp32(x_flat)
         if outlier_cols is not None and outlier_cols.numel() > 0:
             raise NotImplementedError(
                 "BitsAndBytesLinear only supports the direct int8 vectorwise path without outlier routing."
             )
 
+        x_int8 = x_int8.contiguous()
         mm_out = bnb.functional.int8_linear_matmul(x_int8, self.weight)
         if x.dtype == torch.float16 and bias is None:
             # The native fused epilogue is safe without a bias: there is no
             # later cancellation that could be destroyed by its FP16 rounding.
-            return bnb.functional.int8_mm_dequant(
-                mm_out, x_stats, self.weight_scb
-            ).to(input_dtype)
-        # ``int8_mm_dequant`` runs its epilogue in FP16, which rounds (or
-        # overflows) the partial sum before a cancelling bias is added. Keep
-        # the row/column scales and the bias in FP32 and round once.
-        out = (
-            mm_out.to(torch.float32)
-            * x_stats.to(torch.float32).reshape(-1, 1)
-            * self.weight_scb.to(torch.float32).reshape(1, -1)
-            / (127.0 * 127.0)
-        )
-        if bias is not None:
-            out = out + bias.to(torch.float32)
-        return out.to(input_dtype)
+            out = bnb.functional.int8_mm_dequant(mm_out, x_stats, self.weight_scb)
+        else:
+            # ``int8_mm_dequant`` runs its epilogue in FP16, which rounds (or
+            # overflows) the partial sum before a cancelling bias is added. Keep
+            # the row/column scales and the bias in FP32 and round once.
+            out = (
+                mm_out.to(torch.float32)
+                * x_stats.to(torch.float32).reshape(-1, 1)
+                * self.weight_scb.to(torch.float32).reshape(1, -1)
+                / (127.0 * 127.0)
+            )
+            if bias is not None:
+                out = out + bias.to(torch.float32)
+        return out.reshape(x.shape[:-1] + (self.out_features,)).to(input_dtype)
 
 
 BitsAndBytes4bitLinear = BitsAndBytesLinear

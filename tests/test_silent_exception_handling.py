@@ -444,8 +444,8 @@ def test_generation_config_is_loaded_not_silently_skipped(tmp_path):
 
     assert cfg is not None, "generation config silently failed to load"
     assert cfg.max_new_tokens == 7
-    # _sanitize_generation_config forces sampling on.
-    assert cfg.do_sample is True
+    # The checkpoint declared greedy decoding; normalization must preserve it.
+    assert cfg.do_sample is False
 
 
 def test_generation_config_enables_sampling_before_validation(tmp_path):

@@ -10,16 +10,13 @@ expectation.  Quantise and decompose are required to be *bit* identical; the
 GEMM is allowed float32 accumulation error.
 """
 
-import os
-import subprocess
-import sys
-import textwrap
-from pathlib import Path
+import contextlib
 
 import pytest
 import torch
 
 from gptqmodel.utils import tt_blockfloat_cuda as bf_cuda
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 from gptqmodel.utils.tt_blockfloat_quant import (
     _unpack_codes,
     decompose_blockfloat,
@@ -27,6 +24,17 @@ from gptqmodel.utils.tt_blockfloat_quant import (
     recompose_blockfloat,
 )
 from tests.accelerator_gates import cuda_only_skip_reason
+
+
+@contextlib.contextmanager
+def _kernel_config(*, bf_cuda: bool):
+    """Install a kernel policy for one assertion and restore the defaults."""
+
+    configure_kernel(KernelConfig(blockfloat_cublas=bf_cuda))
+    try:
+        yield
+    finally:
+        configure_kernel(KernelConfig())
 
 
 def _skip_reason() -> str | None:
@@ -276,6 +284,45 @@ def test_embedding_module_routes_through_the_kernel():
     assert torch.count_nonzero(out_of_range) == 0
 
 
+@pytest.mark.parametrize(
+    "dtype", [torch.float16, torch.bfloat16, torch.float32], ids=["fp16", "bf16", "fp32"]
+)
+def test_tied_head_routes_through_the_kernel(dtype):
+    """The tied head's CUDA branch must own a policy and reach the native matmul.
+
+    Regression for #4482: the head delegates to the embedding's
+    ``_kernel_linear``, which read ``self.kernel.blockfloat_cublas`` off a
+    storage owner that never defined one.  Compare against an independent
+    float64 GEMM over the exact grid, never against the path under test.
+    """
+
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import (
+        TTBlockfloatEmbedding,
+        TTBlockfloatTiedHead,
+    )
+
+    torch.manual_seed(22)
+    module = TTBlockfloatEmbedding(48, 64, bits=8).cuda()
+    module.codes.copy_(
+        torch.randint(0, 256, module.codes.shape, device="cuda", dtype=torch.uint8)
+    )
+    module.exponents.copy_(
+        torch.randint(-8, 4, module.exponents.shape, device="cuda", dtype=torch.int8)
+    )
+    head = TTBlockfloatTiedHead(module)
+
+    hidden = torch.randn(2, 3, 64, device="cuda", dtype=dtype)
+    assert module._kernel_linear(hidden) is not None
+    got = head(hidden)
+
+    grid = module.dequantize(dtype=torch.float32).to(torch.float64)
+    expected = (hidden.to(torch.float64) @ grid.T).to(dtype)
+    assert got.dtype is dtype
+    torch.testing.assert_close(
+        got.to(torch.float64), expected.to(torch.float64), rtol=2e-3, atol=2e-3
+    )
+
+
 def _constant_bf8(value: float) -> int:
     """The ``bf8_b`` code for a constant at exponent 0 (levels 64, offset 127)."""
 
@@ -441,50 +488,49 @@ def test_fused_fallback_masks_an_odd_output_width():
 
     Regression for the review finding: the MMA epilogue owns a *pair* of
     adjacent columns, so an odd ``n`` used to store into ``out[m * n]`` and read
-    ``bias[n]``.  The fallback is only selected when cuBLAS is unavailable, so
-    this runs in a subprocess with the escape hatch set and checks a canary
-    immediately after the last valid element.
+    ``bias[n]``.  The fused fallback is selected explicitly with
+    ``allow_cublas=False`` (a ``KernelConfig`` choice, not an environment
+    variable), and a canary immediately after the last valid element catches an
+    overrun.
     """
 
-    bf_cuda.prewarm()  # build once here so the child only has to load it
+    bf_cuda.prewarm()
 
-    script = textwrap.dedent(
-        """
-        import torch
+    m, k = 1, 16
+    # bf4_b: levels 4, offset 7, so code 8 is (8 - 7) / 4 = 0.25.
+    for n in (1, 3, 5):
+        codes = torch.full((n * k // 2,), 0x88, dtype=torch.uint8, device="cuda")
+        exponents = torch.zeros((n * (k // 16),), dtype=torch.int8, device="cuda")
+        x = torch.ones((m, k), dtype=torch.bfloat16, device="cuda")
+        buffer = torch.full((m * n + 1,), 123.0, dtype=torch.bfloat16, device="cuda")
+        out = buffer[: m * n].view(m, n)
+        torch.ops.gptqmodel_blockfloat_cuda.blockfloat_linear(
+            x, codes, exponents, 4, None, out, False
+        )
+        torch.cuda.synchronize()
+        expected = torch.full((m, n), 4.0, dtype=torch.bfloat16, device="cuda")
+        assert torch.equal(out, expected), f"n={n}: wrong result"
+        assert buffer[-1].item() == 123.0, f"n={n}: wrote past the last column"
 
-        from gptqmodel.utils import tt_blockfloat_cuda as bf_cuda
 
-        assert bf_cuda.prewarm(), "extension did not load"
+def test_kernel_config_selects_the_cublas_prefill():
+    """``KernelConfig.blockfloat_cublas`` reaches the op as an argument."""
 
-        m, k = 1, 16
-        # bf4_b: levels 4, offset 7, so code 8 is (8 - 7) / 4 = 0.25.
-        for n in (1, 3, 5):
-            codes = torch.full((n * k // 2,), 0x88, dtype=torch.uint8, device="cuda")
-            exponents = torch.zeros((n * (k // 16),), dtype=torch.int8, device="cuda")
-            x = torch.ones((m, k), dtype=torch.bfloat16, device="cuda")
-            buffer = torch.full((m * n + 1,), 123.0, dtype=torch.bfloat16, device="cuda")
-            out = buffer[: m * n].view(m, n)
-            torch.ops.gptqmodel_blockfloat_cuda.blockfloat_linear(
-                x, codes, exponents, 4, None, out
-            )
-            torch.cuda.synchronize()
-            expected = torch.full((m, n), 4.0, dtype=torch.bfloat16, device="cuda")
-            assert torch.equal(out, expected), f"n={n}: wrong result"
-            assert buffer[-1].item() == 123.0, f"n={n}: wrote past the last column"
-        print("ok")
-        """
-    )
-    env = dict(os.environ, GPTQMODEL_BLOCKFLOAT_NO_CUBLAS="1")
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=str(Path(__file__).resolve().parents[1]),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
-    assert result.returncode == 0, result.stderr
-    assert "ok" in result.stdout
+    bf_cuda.prewarm()
+
+    n, k = 1, 16
+    codes = torch.full((n * k // 2,), 0x88, dtype=torch.uint8, device="cuda")
+    exponents = torch.zeros((n * (k // 16),), dtype=torch.int8, device="cuda")
+    x = torch.ones((1, k), dtype=torch.bfloat16, device="cuda")
+
+    with _kernel_config(bf_cuda=True):
+        cublas = bf_cuda.linear(x, codes, exponents, 4)
+    with _kernel_config(bf_cuda=False):
+        fused = bf_cuda.linear(x, codes, exponents, 4)
+
+    expected = torch.full((1, n), 4.0, dtype=torch.bfloat16, device="cuda")
+    assert torch.equal(cublas, expected)
+    assert torch.equal(fused, expected)
 
 
 def test_empty_inputs_keep_their_shapes():

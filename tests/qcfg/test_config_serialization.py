@@ -131,6 +131,19 @@ def test_static_groups_written_to_meta_reloads():
     assert GPTQConfig.from_quant_config(GPTQConfig(bits=4).to_dict()).static_groups is False
 
 
+@pytest.mark.parametrize("config_cls", CONFIG_CLASSES, ids=lambda cls: cls.__name__)
+def test_true_sequential_round_trips_for_every_concrete_config(config_cls):
+    """#4382: the shared serializer must not drop `true_sequential`."""
+
+    config = config_cls(true_sequential=False)
+
+    payload = config.to_dict()
+
+    assert payload["meta"]["true_sequential"] is False
+    assert QuantizeConfig(**payload).true_sequential is False
+    assert QuantizeConfig.from_quant_config(payload).true_sequential is False
+
+
 @pytest.mark.parametrize(
     ("field_name", "value"),
     (

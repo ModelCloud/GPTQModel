@@ -18,6 +18,7 @@ from gptqmodel.nn_modules.qlinear import (
     gemm_awq,
     machete,
 )
+from gptqmodel.nn_modules.qlinear._fused_train_state import _materialize_snapshot_entry
 from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, pack_intweight
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCudaKernel, _GGMLBridge
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
@@ -537,7 +538,7 @@ def test_exllamav2_handle_tracks_replaced_packed_tensors(monkeypatch):
 def test_exllamav2_gptq_forward_compacts_noncontiguous_activations(monkeypatch):
     seen = {}
 
-    def fake_gemm(x, _handle, output, _force_cuda):
+    def fake_gemm(x, _handle, output, _force_cuda, **_kwargs):
         seen["contiguous"] = x.is_contiguous()
         seen["shape"] = tuple(x.shape)
         output.fill_(1)
@@ -552,9 +553,10 @@ def test_exllamav2_gptq_forward_compacts_noncontiguous_activations(monkeypatch):
     )
     layer._ensure_q_handle = lambda: 11
     layer.input_rows = lambda value: value.shape[0]
-    layer.ext_gemm_half_q_half = lambda *args: exllamav2.ExllamaV2Linear.ext_gemm_half_q_half(
+    layer.ext_gemm_half_q_half = lambda *args, **kwargs: exllamav2.ExllamaV2Linear.ext_gemm_half_q_half(
         layer,
         *args,
+        **kwargs,
     )
     base = torch.arange(16, dtype=torch.float16).reshape(4, 4)
     x = base[:, ::2]
@@ -764,18 +766,12 @@ def _transformed_layer(cls, *, seed=17):
 )
 @pytest.mark.parametrize("assign", (False, True))
 def test_transformed_cpu_layer_round_trips_its_own_state_dict(class_name, module_path, assign):
-    """A transformed layer must accept its own runtime ``state_dict()`` back.
+    """A transformed layer must accept its own ``state_dict()`` back.
 
-    After a CPU inference forward the live operands are in the int4pack layout.
-    Taking ``state_dict()`` in that state and loading it back is a self
-    round-trip: the incoming ``qweight``/``qzeros`` describe the *runtime*
-    layout, not the checkpoint held in ``_fused_train_state``.
-
-    ``scales`` keeps its checkpoint shape in both layouts, so a gate that
-    accepted any single matching operand mistook this dict for a checkpoint,
-    restored the snapshot, and then failed strict loading with a size mismatch
-    (``qweight`` 64x64 into 16x64). The load must instead keep the live layout
-    and remain numerically lossless.
+    ``state_dict()`` emits the checkpoint-layout snapshot, not the int4pack
+    runtime operands, so a self round-trip is a checkpoint load. The load
+    restores the snapshot and replaces the live runtime layout, and the
+    resulting forward must remain numerically lossless.
     """
 
     from tests.test_torch_weight_storage import state_tensors
@@ -792,17 +788,29 @@ def test_transformed_cpu_layer_round_trips_its_own_state_dict(class_name, module
     # ``scales`` is shape-identical across both layouts; it must never be the
     # operand that decides the load.
     live_qweight = tuple(layer.qweight.shape)
-    snapshot_qweight = tuple(layer._buffers[layer._fused_train_state["qweight"]].shape)
-    assert live_qweight != snapshot_qweight
-    assert tuple(layer.scales.shape) == tuple(
-        layer._buffers[layer._fused_train_state["scales"]].shape
+    snapshot_qweight = tuple(
+        _materialize_snapshot_entry(layer, layer._fused_train_state["qweight"]).shape
     )
+    assert live_qweight != snapshot_qweight
+    if class_name.startswith("TorchCpuAvx512"):
+        # The AVX512 transform widens ``scales`` in place, so it remains a
+        # rewritten checkpoint operand and needs a snapshot.
+        assert tuple(layer.scales.shape) == tuple(
+            layer._buffers[layer._fused_train_state["scales"]].shape
+        )
+    else:
+        # The int4pack transform leaves ``scales`` in the checkpoint layout, so
+        # the live tensor *is* the checkpoint tensor; a second copy would be a
+        # byte-identical duplicate.
+        assert "scales" not in layer._fused_train_state
 
     state = {name: value.clone() for name, value in layer.state_dict().items()}
     layer.load_state_dict(state, assign=assign)
 
-    # The load kept the live layout instead of restoring the checkpoint shapes.
-    assert tuple(layer.qweight.shape) == live_qweight
+    # The state dict described the checkpoint, so the load restored that
+    # layout instead of keeping the kernel-private runtime shapes.
+    assert tuple(layer.qweight.shape) == snapshot_qweight
+    assert layer._fused_train_state is None
 
     with torch.inference_mode():
         restored = holder(x).clone()
@@ -817,20 +825,23 @@ def test_transformed_cpu_layer_round_trips_its_own_state_dict(class_name, module
     assert exported["proj.qweight"].shape == snapshot_qweight
 
 
-def test_changed_runtime_state_cannot_silently_export_stale_checkpoint():
+def test_edited_checkpoint_scales_export_instead_of_stale_snapshot():
     from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
     from gptqmodel.utils.model import get_state_dict_for_save
 
     holder, _x, _baseline = _transformed_layer(TorchAtenLinear)
     state = {name: value.clone() for name, value in holder.proj.state_dict().items()}
     checkpoint = dict(state)
-    for name, buffer_name in holder.proj._fused_train_state.items():
-        checkpoint[name] = holder.proj._buffers[buffer_name].clone()
+    for name, entry in holder.proj._fused_train_state.items():
+        checkpoint[name] = _materialize_snapshot_entry(holder.proj, entry).clone()
     state["scales"].mul_(2)
     holder.proj.load_state_dict(state, assign=True)
 
-    with pytest.raises(RuntimeError, match="modified CPU int4pack runtime state"):
-        get_state_dict_for_save(holder)
+    # ``state_dict()`` is a checkpoint, so an edited checkpoint load updates
+    # the exportable snapshot rather than being rejected as runtime garbage.
+    exported = get_state_dict_for_save(holder)
+    torch.testing.assert_close(exported["proj.scales"].source, state["scales"])
+    assert exported["proj.qweight"].shape == checkpoint["qweight"].shape
 
     holder.proj.load_state_dict(checkpoint)
     assert get_state_dict_for_save(holder)["proj.qweight"].shape == checkpoint["qweight"].shape
@@ -882,12 +893,14 @@ def test_checkpoint_layout_gate_uses_discriminating_operands(class_name, module_
     holder, _x, _baseline = _transformed_layer(cls)
     layer = holder.proj
     runtime = {name: value.clone() for name, value in layer.state_dict().items()}
+    for name in layer._fused_train_state:
+        runtime[name] = getattr(layer, name).clone()
     assert state_dict_matches_runtime_layout(layer, runtime)
     assert not state_dict_matches_checkpoint_layout(layer, runtime)
 
     checkpoint = {
-        name: layer._buffers[buffer_name].clone()
-        for name, buffer_name in layer._fused_train_state.items()
+        name: _materialize_snapshot_entry(layer, entry).clone()
+        for name, entry in layer._fused_train_state.items()
     }
     assert state_dict_matches_checkpoint_layout(layer, checkpoint)
     assert not state_dict_matches_runtime_layout(layer, checkpoint)
@@ -913,7 +926,7 @@ def test_transformed_cpu_layer_accepts_partial_checkpoint_state(class_name, modu
         pytest.skip(f"{class_name} does not support bfloat16")
     holder, x, baseline = _transformed_layer(cls)
     layer = holder.proj
-    saved = layer._buffers[layer._fused_train_state["qweight"]].clone()
+    saved = _materialize_snapshot_entry(layer, layer._fused_train_state["qweight"]).clone()
     missing = holder.load_state_dict({"proj.qweight": saved}, strict=False, assign=assign)
     assert "proj.qzeros" in missing.missing_keys
     assert torch.equal(layer.qweight, saved)
@@ -971,7 +984,9 @@ def test_transformed_cpu_layer_rejects_mixed_layout_without_mutation():
     holder, _x, _baseline = _transformed_layer(TorchAtenLinear)
     layer = holder.proj
     runtime_qweight = layer.qweight.clone()
-    checkpoint_qweight = layer._buffers[layer._fused_train_state["qweight"]].clone()
+    checkpoint_qweight = _materialize_snapshot_entry(
+        layer, layer._fused_train_state["qweight"]
+    ).clone()
     with pytest.raises(RuntimeError, match="mixed or invalid CPU int4pack"):
         layer.load_state_dict({"qweight": checkpoint_qweight, "qzeros": layer.qzeros.clone()}, strict=False)
     assert torch.equal(layer.qweight, runtime_qweight)

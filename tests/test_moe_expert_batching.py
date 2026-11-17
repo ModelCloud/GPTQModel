@@ -56,7 +56,6 @@ class TestMoEExpertBatching(unittest.TestCase):
                                                           required=True,
                                                           replay_after_process=True,
                                                       )
-        self.processor.restore_subset_capture_frontier.return_value = False
         self.processor.plan_subset_zero_route_recovery.return_value = ()
         # Mock processor tasks
         self.processor.tasks = {}
@@ -110,7 +109,7 @@ class TestMoEExpertBatching(unittest.TestCase):
 
         self._run_subset_stage(self.subset)
 
-        self.assertEqual(self.looper._run_forward_batches.call_count, 2)
+        self.assertEqual(self.looper._run_forward_batches.call_count, 1)
 
     def test_batch_size_zero_is_rejected_not_treated_as_disabled(self):
         """batch_size=0 used to read as "batching disabled"; it is invalid now.
@@ -151,13 +150,12 @@ class TestMoEExpertBatching(unittest.TestCase):
 
         self._run_subset_stage(subset)
 
-        # 20 total modules (10 experts × 2 modules) with batch_size 2 modules = 10 batches
-        # Each chunk runs two forwards since #3600: the capture pass and the
-        # causal replay (execution_config.fwd_replay_after_process is set in
-        # setUp). torch_empty_cache is still called 3 times per chunk - once
-        # after the forward, once after the quant pass, once between chunks -
-        # because the replay pass does not flush.
-        self.assertEqual(self.looper._run_forward_batches.call_count, 20)
+        # 20 total modules (10 experts × 2 modules) with batch_size 2 modules = 10 batches.
+        # The causal replay is deferred to the layer stage, so each chunk runs
+        # one capture forward. torch_empty_cache is still called 3 times per
+        # chunk - once after the forward, once after the quant pass, once
+        # between chunks.
+        self.assertEqual(self.looper._run_forward_batches.call_count, 10)
         self.assertEqual(mock_empty_cache.call_count, 30)
 
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
@@ -183,7 +181,7 @@ class TestMoEExpertBatching(unittest.TestCase):
 
         # 7 experts (modules) with batch_size 3 = 3 batches (3 + 3 + 1)
         # Two forwards per chunk (capture + replay since #3600), 3 flushes per chunk.
-        self.assertEqual(self.looper._run_forward_batches.call_count, 6)
+        self.assertEqual(self.looper._run_forward_batches.call_count, 3)
         self.assertEqual(mock_empty_cache.call_count, 9)
 
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
@@ -207,8 +205,8 @@ class TestMoEExpertBatching(unittest.TestCase):
 
         self._run_subset_stage(subset)
 
-        # One chunk, so capture plus replay: two forwards.
-        self.assertEqual(self.looper._run_forward_batches.call_count, 2)
+        # One chunk; the causal replay is deferred to the layer stage.
+        self.assertEqual(self.looper._run_forward_batches.call_count, 1)
 
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
     def test_batching_one_expert_per_batch(self, mock_empty_cache):
@@ -231,9 +229,9 @@ class TestMoEExpertBatching(unittest.TestCase):
 
         self._run_subset_stage(subset)
 
-        # 4 experts with batch_size 1 = 4 batches
-        # Two forwards per chunk (capture + replay since #3600), 3 flushes per chunk.
-        self.assertEqual(self.looper._run_forward_batches.call_count, 8)
+        # 4 experts with batch_size 1 = 4 batches. The causal replay is
+        # deferred to the layer stage, so one forward and 3 flushes per chunk.
+        self.assertEqual(self.looper._run_forward_batches.call_count, 4)
         self.assertEqual(mock_empty_cache.call_count, 12)
 
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
@@ -246,8 +244,8 @@ class TestMoEExpertBatching(unittest.TestCase):
 
         self._run_subset_stage(self.subset)
 
-        # One chunk, so capture plus replay: two forwards.
-        self.assertEqual(self.looper._run_forward_batches.call_count, 2)
+        # One chunk; the causal replay is deferred to the layer stage.
+        self.assertEqual(self.looper._run_forward_batches.call_count, 1)
 
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
     def test_no_batching_when_moe_is_none(self, mock_empty_cache):
@@ -256,7 +254,7 @@ class TestMoEExpertBatching(unittest.TestCase):
 
         self._run_subset_stage(self.subset)
 
-        self.assertEqual(self.looper._run_forward_batches.call_count, 2)
+        self.assertEqual(self.looper._run_forward_batches.call_count, 1)
 
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
     def test_batching_with_non_expert_modules(self, mock_empty_cache):
@@ -285,7 +283,7 @@ class TestMoEExpertBatching(unittest.TestCase):
 
         # 6 total modules (4 expert + 2 non-expert) with batch_size 2 modules = 3 chunks,
         # each running capture plus replay: six forwards.
-        self.assertEqual(self.looper._run_forward_batches.call_count, 6)
+        self.assertEqual(self.looper._run_forward_batches.call_count, 3)
 
 if __name__ == '__main__':
     unittest.main()

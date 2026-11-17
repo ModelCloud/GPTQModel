@@ -368,6 +368,88 @@ class FOEM(GPTQ):
         self._foem_device_dxxT.clear()
         self._foem_device_counts.clear()
 
+    def _align_foem_hessian_device(self) -> None:
+        """Keep FOEM's ``dXXT`` companion on the same device as ``H``.
+
+        ``_finalize_foem_hessian`` returns early when every batch came from
+        one device. A caller that rehomed only ``H`` (issue #4312) then leaves
+        ``dXXT`` behind, and ``_neutralize_dead_columns`` mixes devices.
+        """
+
+        if self.H is None or self.dXXT is None:
+            return
+        if self.dXXT.device != self.H.device:
+            self.dXXT = safe_move_to(self.dXXT, self.H.device, dtype=torch.float32)
+
+    def adopt_hessian_from(self, leader: "FOEM") -> None:
+        """Copy a sibling leader's ``H`` and ``dXXT`` instead of recomputing both.
+
+        ``FOEM.add_batch`` depends only on the module input and the paired
+        native input; both are bitwise identical for the members of one
+        explicit ``:in=<tag>`` group (``NativeProcessor`` shares the sibling
+        native entry storage).  The per-device partials are reduced on the
+        leader first, so the follower holds exactly one private ``H`` and one
+        private ``dXXT`` — the same two matrices it would have accumulated.
+        """
+
+        if leader is self:
+            return
+        if type(leader) is not type(self):
+            raise TypeError(
+                f"FOEM: cannot share Hessian with `{type(leader).__name__}` task `{leader.name}`."
+            )
+        if leader.columns != self.columns:
+            raise ValueError(
+                f"FOEM: cannot share Hessian from `{leader.name}` ({leader.columns} columns) "
+                f"with `{self.name}` ({self.columns} columns)."
+            )
+        if leader.gptaq != self.gptaq:
+            raise ValueError(
+                f"FOEM: cannot share Hessian from `{leader.name}` (native delta="
+                f"{leader.gptaq}) with `{self.name}` (native delta={self.gptaq})."
+            )
+
+        leader._finalize_foem_hessian()
+        with leader.lock:
+            hessian = leader.H
+            dxxT = leader.dXXT
+            nsamples = leader.nsamples
+            fwd_counter = leader.fwd_counter
+            if hessian is None:
+                target_device = torch.device(getattr(self, "dev", "cpu"))
+                hessian_copy = torch.zeros(
+                    (self.columns, self.columns),
+                    dtype=torch.float32,
+                    device=target_device,
+                )
+                dxxT_copy = None
+            else:
+                target_device = hessian.device
+                hessian_copy = safe_move_to(
+                    hessian.detach(), target_device, dtype=torch.float32, copy=True
+                )
+                dxxT_copy = (
+                    None
+                    if dxxT is None
+                    else safe_move_to(
+                        dxxT.detach(), target_device, dtype=torch.float32, copy=True
+                    )
+                )
+
+        with self.lock:
+            self.H = hessian_copy
+            self.dXXT = dxxT_copy
+            self.nsamples = nsamples
+            self.fwd_counter = fwd_counter
+            self._foem_device_hessian.clear()
+            self._foem_device_dxxT.clear()
+            self._foem_device_counts.clear()
+            self._foem_active_device = None
+            self._foem_active_count = 0
+            # The follower no longer replays batches, so its native inputs are
+            # dead references to the shared sibling storage.
+            self.native_inps = []
+
     @torch.inference_mode()
     def quantize(
             self,
@@ -398,12 +480,16 @@ class FOEM(GPTQ):
         # when a RuntimeError is raised inside the damp-recovery loop and the graph
         # is re-entered.
 
+        # Mirror GPTQ: the Hessian's device is the canonical quantization
+        # device. Move a pre-cloned weight and the auxiliary `dXXT` there so
+        # `_neutralize_dead_columns` never mixes devices (issue #4312).
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
             W = self.clone_module(device=self.H.device)
         else:
-            W = self.module_copy
+            W = safe_move_to(self.module_copy, self.H.device)
             self.module_copy = None
+        self._align_foem_hessian_device()
 
         self.quantizer.find_params(W, weight=True)
 

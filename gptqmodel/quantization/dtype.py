@@ -15,6 +15,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
+from ..utils.kernel import get_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.torch import HAS_NPU
 
@@ -163,12 +164,9 @@ def is_fp4_packed_dtype(dtype: torch.dtype) -> bool:
 
 
 def _cpu_floatx_threads(numel: Optional[int] = None, *, enable_large_threads: bool = False) -> int:
-    raw = os.environ.get("GPTQMODEL_FLOATX_CPU_THREADS", "").strip()
     default_value = 32 if enable_large_threads and numel is not None and numel >= 64 * 1024 * 1024 else 8
-    try:
-        value = int(raw) if raw else default_value
-    except ValueError:
-        value = default_value
+    configured = get_kernel_config().floatx_cpu_threads
+    value = configured if configured is not None else default_value
     return max(1, min(value, 32, os.cpu_count() or 1))
 
 
@@ -211,7 +209,7 @@ def _prefer_reference_fp8_cpu(
         return False
     if target_dtype not in _TARGET_DTYPE_CODES:
         return False
-    if os.environ.get("GPTQMODEL_FLOATX_CPU_FORCE_NATIVE_FP8", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if get_kernel_config().floatx_cpu_native_fp8:
         return False
 
     standard_fp8_dtypes = tuple(
@@ -796,6 +794,7 @@ def dequantize_f8_e4m3(
                     _TARGET_DTYPE_CODES[target_dtype],
                     int(format_code),
                     _cpu_floatx_threads(tensor.numel(), enable_large_threads=enable_large_threads),
+                    get_kernel_config().floatx_cpu_simd_level,
                 )
 
     return _dequantize_f8_reference(
@@ -866,6 +865,7 @@ def dequantize_f4_e2m1(
                 axis is None,
                 _TARGET_DTYPE_CODES[target_dtype],
                 _cpu_floatx_threads(source.numel() * 2),
+                get_kernel_config().floatx_cpu_simd_level,
             )
 
     return _dequantize_f4_reference(

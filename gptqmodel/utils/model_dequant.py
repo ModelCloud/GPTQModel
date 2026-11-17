@@ -43,6 +43,12 @@ from ..utils.planar_packing import (
 
 LOG = logging.getLogger(__name__)
 
+# Quantization-only metadata must not survive into a dense export: leaving it
+# behind makes loaders route the dense checkpoint back through from_quantized.
+_DENSE_OUTPUT_EXCLUDED_FILES = frozenset(
+    {"quantize_config.json", "quant_config.json", "quant_log.csv"}
+)
+
 # Reuse the shared dtype registries so checkpoint detection stays aligned with
 # the CPU dequant kernels and config normalization paths.
 _FLOAT8_DTYPES = available_float8_dtypes()
@@ -1956,11 +1962,40 @@ def copy_aux_files(
             shutil.copy2(item, target)
 
 
+_DENSE_TARGET_DTYPES = {
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "float32": torch.float32,
+}
+
+
+def resolve_dense_target_dtype(config: dict) -> torch.dtype:
+    """Return the dense dtype a dequantized checkpoint keeps by default.
+
+    The source checkpoint's own floating dtype (``dtype``, legacy
+    ``torch_dtype``, or the nested ``text_config`` of a multimodal config) is
+    the dtype its non-quantized tensors and quantization scales were produced
+    for, so a dense export keeps it. Checkpoints that declare no float16,
+    bfloat16 or float32 dtype fall back to bfloat16.
+    """
+
+    for source in (config, config.get("text_config")):
+        if not isinstance(source, dict):
+            continue
+        for key in ("dtype", "torch_dtype"):
+            value = source.get(key)
+            if isinstance(value, str):
+                dtype = _DENSE_TARGET_DTYPES.get(value.strip().removeprefix("torch."))
+                if dtype is not None:
+                    return dtype
+    return torch.bfloat16
+
+
 def dequantize_model(
     model_path: Path | str,
     output_path: Path | str,
     *,
-    target_dtype: torch.dtype = torch.bfloat16,
+    target_dtype: Optional[torch.dtype] = None,
     device: Optional[str] = None,
     resume: bool = False,
     trust_remote_code: bool = False,
@@ -1985,6 +2020,8 @@ def dequantize_model(
             quant_cfg = {**legacy_quant_cfg, **quant_cfg}
         config["quantization_config"] = quant_cfg
     fmt = detect_format(model_path, config)
+    if target_dtype is None:
+        target_dtype = resolve_dense_target_dtype(config)
 
     files, index = list_safetensor_files(model_path)
     if not files:
@@ -2166,5 +2203,9 @@ def dequantize_model(
     new_config["dtype"] = str(target_dtype).split(".")[-1]
     write_json(output_path / "config.json", new_config)
 
-    skip_files = set(files) | {"config.json", "model.safetensors.index.json"}
+    skip_files = (
+        set(files)
+        | {"config.json", "model.safetensors.index.json"}
+        | _DENSE_OUTPUT_EXCLUDED_FILES
+    )
     copy_aux_files(model_path, output_path, skip_files, dirs_exist_ok=resume)

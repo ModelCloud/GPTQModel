@@ -5,6 +5,7 @@
 # Credit: int8 kernel sync adapted from Yintong Lu (yintong-lu), vLLM PR #35697.
 
 
+import contextlib
 import threading
 from typing import Optional, Tuple
 
@@ -18,6 +19,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ._numerics import autocast_active
 from ._runtime_cache import tensor_cache_key
 
 
@@ -33,6 +35,24 @@ _INT8_REBUILD_LOCK = threading.Lock()
 # transient scratch: it is released before the next tile or group is processed.
 _INT8_ASYMMETRIC_DECODE_TILE = 256
 
+# `aten::_weight_int8pack_mm` reduces the contraction axis in 8-wide chunks and
+# is only defined for `K % 8 == 0`: with a narrower or misaligned width it reads
+# past the end of every weight row and silently returns wrong values (measured on
+# torch 2.11: K=8/16/24/32 correct, K=4/12/15/17/33 wrong). Group codes are zero
+# padded up to this alignment; the matching activation columns are already zero,
+# so the extra products contribute exactly nothing.
+_INT8_KERNEL_CONTRACTION_ALIGN = 8
+
+
+def _align_int8_group_width(width: int) -> int:
+    """Return the kernel-valid contraction width that holds ``width`` channels."""
+
+    width = int(width)
+    if width <= 0:
+        raise ValueError(f"INT8 group width must be positive, got {width}")
+    remainder = width % _INT8_KERNEL_CONTRACTION_ALIGN
+    return width if remainder == 0 else width + _INT8_KERNEL_CONTRACTION_ALIGN - remainder
+
 
 def _require_native_int8(bits: int) -> None:
     if bits != 8:
@@ -44,6 +64,21 @@ def _require_native_int8(bits: int) -> None:
 
 def _has_int8_mm_op() -> bool:
     return hasattr(torch.ops.aten, "_weight_int8pack_mm")
+
+
+def _fp32_decode_context(device_type: str):
+    """Keep the FP32 decode and reduction out of an ambient autocast context.
+
+    ``activations @ decoded.t()`` is an autocast-eligible matmul, so an outer
+    ``torch.autocast`` narrows its FP32 operands to the autocast dtype. The
+    result is then rounded before the bias cancels it, and assigning into an
+    FP32 output only widens the already-rounded value. Disabling autocast
+    locally preserves the caller's context on exit and leaves the single
+    output rounding to the activation dtype to ``forward``.
+    """
+    if not autocast_active(device_type):
+        return contextlib.nullcontext()
+    return torch.autocast(device_type=device_type, enabled=False)
 
 
 def _normalize_g_idx(g_idx: torch.Tensor, num_groups: int) -> torch.Tensor:
@@ -188,6 +223,13 @@ class Int8PackedModule(torch.nn.Module):
         group_lengths: Optional[tuple[int, ...]] = None,
     ):
         super().__init__()
+        # The contraction axis must be kernel-aligned. Production tensors are
+        # already padded by `transform_cpu`; a directly constructed module pads
+        # its own copy so it cannot silently miscompute.
+        self.source_group_width = int(int8_weight_gnk.shape[-1])
+        aligned_width = _align_int8_group_width(self.source_group_width)
+        if aligned_width != self.source_group_width:
+            int8_weight_gnk = F.pad(int8_weight_gnk, (0, aligned_width - self.source_group_width))
         self.register_buffer(INT8_WEIGHT_BUFFER_NAME, int8_weight_gnk, persistent=False)
         self.register_buffer(INT8_GROUP_SCALE_BUFFER_NAME, group_scale, persistent=False)
         self.register_buffer(INT8_GROUP_OFFSET_BUFFER_NAME, group_offset, persistent=False)
@@ -211,7 +253,9 @@ class Int8PackedModule(torch.nn.Module):
         """
         width = self.group_width
         num_groups = int(self.int8_weight_gnk.shape[0])
-        lengths = self.group_lengths or (width,) * num_groups
+        # The default group length is the *unpadded* width; `group_width` is the
+        # kernel-aligned contraction width that may be larger.
+        lengths = self.group_lengths or (self.source_group_width,) * num_groups
         ordered = x if self.int8_input_perm is None else x.index_select(-1, self.int8_input_perm)
         ordered = ordered.float()
         if all(length == width for length in lengths):
@@ -257,30 +301,34 @@ class Int8PackedModule(torch.nn.Module):
     ) -> torch.Tensor:
         # The op requires matching activation/scale dtypes and only accepts 2D
         # activations. FP32 preserves tiny group scales and delays output
-        # rounding until after the group reduction and the bias epilogue.
-        activations = self._activations(x)
-        groups = activations.shape[-2]
-        width = activations.shape[-1]
-        flat = activations.reshape(-1, groups, width)
-        output = None
-        if self.int8_group_offset is None:
-            group_scale = self.int8_group_scale.float()
-            for group in range(groups):
-                part = torch.ops.aten._weight_int8pack_mm(
-                    flat[:, group, :], self.int8_weight_gnk[group], group_scale[group]
-                )
-                output = part if output is None else output.add_(part)
-        else:
-            # Asymmetric zero points must be subtracted before the reduction.
-            # Splitting them into a residual reduction plus an offset reduction
-            # lets FP32 rounding survive the cancellation of two large terms.
-            for group in range(groups):
-                part = self._asymmetric_group_output(flat, group)
-                output = part if output is None else output.add_(part)
-        output = output.reshape(activations.shape[:-2] + (self.out_features,))
-        if bias is not None:
-            output = output + bias.float()
-        return output.to(x.dtype)
+        # rounding until after the group reduction and the bias epilogue. An
+        # outer autocast context would narrow the asymmetric group matmul to
+        # the autocast dtype before that rounding, so the FP32 contract is
+        # enforced locally and the caller's context is restored afterwards.
+        with _fp32_decode_context(x.device.type):
+            activations = self._activations(x)
+            groups = activations.shape[-2]
+            width = activations.shape[-1]
+            flat = activations.reshape(-1, groups, width)
+            output = None
+            if self.int8_group_offset is None:
+                group_scale = self.int8_group_scale.float()
+                for group in range(groups):
+                    part = torch.ops.aten._weight_int8pack_mm(
+                        flat[:, group, :], self.int8_weight_gnk[group], group_scale[group]
+                    )
+                    output = part if output is None else output.add_(part)
+            else:
+                # Asymmetric zero points must be subtracted before the reduction.
+                # Splitting them into a residual reduction plus an offset reduction
+                # lets FP32 rounding survive the cancellation of two large terms.
+                for group in range(groups):
+                    part = self._asymmetric_group_output(flat, group)
+                    output = part if output is None else output.add_(part)
+            output = output.reshape(activations.shape[:-2] + (self.out_features,))
+            if bias is not None:
+                output = output + bias.float()
+            return output.to(x.dtype)
 
 
 class TorchInt8Linear(GPTQQuantLinear):
@@ -464,6 +512,17 @@ class TorchInt8Linear(GPTQQuantLinear):
         )
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
 
+        # The packed layout pads the input-channel axis up to the pack factor
+        # (K=17 stores 20 rows). Only the real channels are logical, matching
+        # the crop `transform_cpu` applies when it builds the runtime view, so a
+        # cold source decode must crop before indexing the per-channel groups.
+        if weight.shape[0] < self.in_features:
+            raise RuntimeError(
+                "TorchInt8Linear GPTQ buffers decode fewer channels than "
+                f"in_features: got {weight.shape[0]} rows for in_features={self.in_features}."
+            )
+        weight = weight[: self.in_features]
+
         groups = _normalize_g_idx(self.g_idx, int(self.scales.shape[0]))
         return self.scales[groups] * (weight - zeros[groups])
 
@@ -531,19 +590,21 @@ class TorchInt8Linear(GPTQQuantLinear):
         # invertible for dequantization and export.
         input_perm = torch.argsort(groups, stable=True)
         ordered_codes = codes.index_select(0, input_perm)
-        group_width = max(group_lengths)
-        if all(length == group_width for length in group_lengths):
+        # Pad the widest group up to the INT8 kernel's contraction alignment so
+        # the runtime module never has to copy the codes again.
+        kernel_width = _align_int8_group_width(max(group_lengths))
+        if all(length == kernel_width for length in group_lengths):
             # [K, N] -> [G, W, N] -> [G, N, W]
-            grouped_codes = ordered_codes.reshape(num_groups, group_width, self.out_features).permute(0, 2, 1)
+            grouped_codes = ordered_codes.reshape(num_groups, kernel_width, self.out_features).permute(0, 2, 1)
         else:
             pieces = []
             start = 0
             for length in group_lengths:
                 piece = ordered_codes[start:start + length]
                 start += length
-                if length != group_width:
+                if length != kernel_width:
                     piece = torch.cat(
-                        (piece, piece.new_zeros(group_width - length, self.out_features)), dim=0
+                        (piece, piece.new_zeros(kernel_width - length, self.out_features)), dim=0
                     )
                 pieces.append(piece)
             grouped_codes = torch.stack(pieces, dim=0).permute(0, 2, 1)

@@ -100,8 +100,6 @@ def save_quantized_awq_artifact(
     with open(Path(artifact_root) / QUANT_CONFIG_FILENAME, "r", encoding="utf-8") as config_file:
         file_dict = json.loads(config_file.read())
         assert model.quantize_config.to_dict() == file_dict
-        # Exclude `offload_to_disk_path`, which is a random value.
-        file_dict["meta"].pop("offload_to_disk_path")
         logging.info("Saved config file: %s", file_dict)
 
     del model
@@ -127,7 +125,6 @@ def assert_awq_linear_backend(model, backend: BACKEND) -> None:
 
 def assert_loaded_quantize_config_matches(model, expected_config: dict) -> None:
     actual_quantize_config = model.quantize_config.to_dict()
-    actual_quantize_config["meta"].pop("offload_to_disk_path")
     assert actual_quantize_config == expected_config
 
 

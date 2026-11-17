@@ -8,7 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from test_awq_scaling_groups import _foldable_groups, _tiny_config
+from test_awq_scaling_groups import (
+    MAMBA_SSM_KERNEL_FAMILIES,
+    _foldable_groups,
+    _mamba_ssm_cpu_unavailable_reason,
+    _tiny_config,
+)
 from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 from transformers.models.cohere_compass.configuration_cohere_compass import CohereCompassTextConfig
@@ -151,6 +156,12 @@ def test_parallel_projections_are_not_declared_as_sequential(family, expected):
 
 
 def test_every_inferred_fold_preserves_full_text_outputs(case):
+    if case.family in MAMBA_SSM_KERNEL_FAMILIES:
+        # The invariant runs a real CPU forward; `mamba_ssm` would route it to
+        # CUDA-only kernels and fail on the device, not on the fold math.
+        reason = _mamba_ssm_cpu_unavailable_reason()
+        if reason is not None:
+            pytest.skip(reason)
     ids = torch.randint(2, case.config.vocab_size, (1, 8))
     checked = 0
     for layer in case.layers:

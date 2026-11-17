@@ -56,6 +56,39 @@ Introduced in [PR #3744](https://github.com/ModelCloud/GPTQModel/pull/3744).
 
 Current internal benchmarks have only shown a clear resource-usage benefit for `layer` scope. `module` and `compute_block` support the toggle, but they are not enabled by default because we have not yet measured a consistent memory win there.
 
+## ROCm quantization determinism
+
+ParoQuant derives per-module seeds from `opt_seed`, so a fixed seed is expected
+to produce the same checkpoint. CUDA runs are bitwise-identical after
+[PR #4499](https://github.com/ModelCloud/GPTQModel/pull/4499) made the fused
+rotation gradient independent of the launch plan.
+
+ROCm needed a separate fix. ParoQuant accumulates no Hessian, so it used to
+keep hipBLASLt, which selects GEMM kernels per process. Two Qwen2.5-0.5B runs
+with the same seed and calibration produced PPL `21.26` and `21.44`. The
+quantization run plan now treats `ProcessorStep.PARO` like the Hessian builders
+in `_needs_deterministic_hessian` (`gptqmodel/models/base.py`), so
+`quant_blas_backend(deterministic=True)` pins rocBLAS for the whole run. Two
+runs with rocBLAS pinned produced bitwise-identical checkpoints (issue #4460).
+
+The trade-off is accepted: rocBLAS is deterministic but its fp16/bf16 GEMMs are
+slower than hipBLASLt (8-14x on gfx1201 for the shapes in
+[ROCm default environment](rocm-default-environment.md)). Deterministic
+checkpoints are the product contract, so ParoQuant pays that cost. The
+documented reproducibility opt-out remains
+`KernelConfig(rocm_quant_blas="hipblaslt")`.
+
+The fused-rotation autotune timing knobs are internal C++ constants now; they
+are no longer read from `GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_*` environment
+variables. `KernelConfig.paroquant_rotate_autotune`,
+`KernelConfig.paroquant_rotate_cta_m` and `KernelConfig.paroquant_rotate_row_pad`
+are the only controls.
+
+| Test | Invariant |
+| --- | --- |
+| `test_paroquant_selects_the_deterministic_pin_on_mocked_rocm` | A `ProcessorStep.PARO` run plan selects the rocBLAS pin on a mocked ROCm platform |
+| `test_paroquant_has_no_environment_variable_reads` | The ParoQuant extension sources contain no `GPTQMODEL_PAROQUANT_*` environment reads |
+
 ## Triton bias epilogue
 
 ParoQuant Triton decode and prefill kernels accumulate quantized products in
@@ -66,7 +99,7 @@ intermediate exceeds the FP16 range. The dense plan uses
 rotated input or trainable bias uses the dense plan so autograd can return
 its gradient. An unbiased fused call
 keeps its existing accumulation setting, while a biased call uses FP32
-accumulation even when `GPTQMODEL_FP32_ACCUM=0`. On NVIDIA CUDA, the dense plan
+accumulation even when `KernelConfig(fp32_accum=False)`. On NVIDIA CUDA, the dense plan
 keeps the stored bias precision until the FP32 epilogue instead of casting it
 to the activation dtype first.
 
@@ -268,3 +301,52 @@ The alias was removed. `transformers` now fails cleanly with
 `Unknown quantization type, got paroquant`, which names the actual problem
 instead of a FORMAT/METHOD mismatch, and `GPTQModel.load` continues to load
 ParoQuant checkpoints with `ParoLinear`.
+
+## Fused rotation backward
+
+When the rotation angles train, `_ParoQuantRotateTensorFunc.backward` runs
+`rotate_pair_grad` (`gptqmodel_ext/paroquant/rotation.cu`). The op sweeps the
+rotations in reverse. It rotates the saved output and the incoming gradient
+back by `-theta[r]` in shared memory, and records each rotation's angle
+gradient from the swept pair. A second launch, `rotate_grad_reduce_kernel`,
+folds the per-row partials.
+
+```mermaid
+flowchart TD
+    A["load x_grp = y, g_grp = g_out (CTA_M rows, one group)"] --> B["__syncthreads()"]
+    B --> C["r = KROT-1 .. 0"]
+    C --> D["apply_one(x_grp, -theta[r]); apply_one(g_grp, -theta[r])<br/>thread owns pair (i, j) of rotation r"]
+    D --> E["read back own columns i, j for each 4-row granule<br/>partial = sum g_i x_j - g_j x_i"]
+    E --> F["__syncthreads() after the readback"]
+    F --> C
+    F --> G["store x_grp, g_grp"]
+    G --> H["rotate_grad_reduce_kernel: fold granules in ascending order"]
+    D -. "rotation r-1 rewrites columns another thread still reads" .-> X["write-after-read race (#4461), closed by the barrier at F"]
+    classDef blocked fill:#fce8e6,stroke:#a33,color:#111
+    class X blocked
+```
+
+After the swept step, `x` is the rotation's input and `g = R^T g_out` is the
+gradient with respect to that input. For `R = [[c, s], [-s, c]]`,
+`dR/dtheta = R J` with `J = [[0, 1], [-1, 0]]`. The angle gradient is
+therefore `g_out^T R J x = g^T J x = sum(g_i x_j - g_j x_i)`, with no
+sin/cos factor.
+
+| Contract | Before | Now |
+| --- | --- | --- |
+| Shared-memory ordering | One barrier between `apply_one` and the readback (`rotation.cu:417` at 4bc0413). Nothing ordered the readback of rotation `r` before the `apply_one` writes of rotation `r-1`, so the gradient was sporadically wrong (up to 4.2 on ROCm and 1.7 on CUDA at 2048 features). | The barrier comes after the readback (`rotation.cu:471`). It orders both the write-after-read and the read-after-write between rotations. A thread reads back only columns it wrote itself, so the readback needs no barrier of its own. |
+| Launch-plan invariance | One partial per `CTA_M`-row tile (`rotation.cu:436`, `:516`). The autotune picks `CTA_M` by timing, so two cold runs could sum in different orders. Llama-3.2-1B picked 8 vs 16 for its 2048x2048 weight shape, and the checkpoints diverged from layer 0. | One partial per fixed 4-row granule (`kRotatePairGradRowGranule`), folded in ascending order. The result is bit-identical for every `cta_m`/`row_pad`. `cta_m=4` results did not change. |
+| Angle gradient | `A cos(theta) - B sin(theta)` on the input-side gradient (`rotation.cu:436`, `paroquant.py:1143`). This is exact only at `theta == 0`: the error against fp64 autograd was 0.7 / 7.1 / 18.5 for \|theta\| up to 0.05 / 0.25 / 1.0. | `A = sum(g_i x_j - g_j x_i)` in `rotate_pair_grad`, `grad_theta` and the torch fallback. These now match fp64 autograd and the unfused optimizer path. |
+
+The `grad_theta` op is reached only when `rotate_pair_grad` is unavailable.
+It still folds its batch chunks with `atomicAdd`, so it is not bitwise
+reproducible when the batch has more than 32 rows.
+
+### Validation
+
+| Test | Invariant |
+| --- | --- |
+| `test_paroquant_pair_grad_sweep_is_race_free` | 20 launches at 2048 features are bit-identical for every `cta_m`/`row_pad`, and the gradient matches fp64 autograd |
+| `test_paroquant_pair_grad_is_launch_plan_invariant` | x, gradient and angle gradient are bit-identical across all 6 launch plans (1, 1000 and 1001 rows) |
+| `test_paroquant_fused_rotation_theta_grad_matches_autograd` | `rotate_pair_grad`, `grad_theta` and the torch fallback, with and without channel scales, match fp64 autograd for \|theta\| up to 0.8 |
+| `test_paroquant_pair_grad_reduce_folds_tiles_in_ascending_order` | The granule fold equals adding the per-4-row results one at a time |

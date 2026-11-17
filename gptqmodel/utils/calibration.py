@@ -140,17 +140,22 @@ _CALIBRATION_COLUMNS = ("input_ids", "attention_mask", "text", "messages")
 def _is_batched_column(value: Any) -> bool:
     """Return True when ``value`` holds one entry per calibration row."""
 
+    if isinstance(value, (str, bytes, bytearray)):
+        return False
     ndim = getattr(value, "ndim", None)
     if ndim is not None:
         return ndim >= 2
-    if isinstance(value, (list, tuple)):
-        if not value:
+    if isinstance(value, Sequence):
+        if len(value) == 0:
             return False
         first = value[0]
         first_ndim = getattr(first, "ndim", None)
         if first_ndim is not None:
             return first_ndim >= 1
-        return isinstance(first, (list, tuple))
+        # A nested sequence is a column of rows; a sequence of scalars is one
+        # token row. This also covers ``datasets.arrow_dataset.Column``, which
+        # is a ``Sequence`` but exposes neither ``ndim`` nor a ``list`` type.
+        return isinstance(first, Sequence) and not isinstance(first, (str, bytes, bytearray))
     return False
 
 
@@ -174,6 +179,95 @@ def _is_columnar_mapping(mapping: Mapping) -> bool:
             return False
         return len(value) > 0 and isinstance(value[0], (list, tuple))
     return False
+
+
+def calibration_input_row_count(dataset: Any) -> Optional[int]:
+    """Return the number of calibration rows, or ``None`` when unknown.
+
+    A columnar mapping stores one entry per *column*, so ``len(mapping)`` is the
+    number of columns (2 for ``input_ids``/``attention_mask``), not the number
+    of calibration rows. Report the primary column's length instead so callers
+    such as the size warning count rows.
+    """
+
+    if isinstance(dataset, Mapping):
+        if _is_columnar_mapping(dataset):
+            for name in _CALIBRATION_COLUMNS:
+                if name in dataset and dataset[name] is not None:
+                    try:
+                        return len(dataset[name])
+                    except TypeError:
+                        return None
+            return None
+        if any(name in dataset for name in _CALIBRATION_COLUMNS):
+            # A mapping that is not columnar describes one calibration row.
+            return 1
+    try:
+        return len(dataset)
+    except TypeError:
+        return None
+
+
+def attention_sink_bos_flags(
+    input_ids: Any,
+    attention_mask: Any = None,
+    bos_token_id: Optional[int] = None,
+) -> Optional[torch.Tensor]:
+    """Per-sample flags: the first non-padding token of the sample is BOS.
+
+    ``exclude_attention_sinks`` may only drop a token that is really an
+    attention sink. Qwen2.5/Qwen3 tokenizers add no BOS, so the historical
+    unconditional ``keep[:, 0] = False`` removed the first *text* token of
+    every row and could make GPTQ worse than RTN (issue #4459). This helper
+    turns the calibration ``input_ids`` into one flag per sample, which lets
+    the Hessian skip exactly the rows whose first retained token is the
+    tokenizer's BOS id.
+
+    Padding is resolved from ``attention_mask`` (left padding included): the
+    flag describes the first position that survives the mask, which is also
+    the first row GPTQ sees after the batch keep-mask is applied.
+
+    Returns ``None`` when the decision cannot be made from the supplied
+    metadata (no ids, no BOS id, unusable shape). Callers must then skip
+    position-0 masking instead of guessing. A tensor of all ``False`` is a
+    positive decision that nothing in this batch is a BOS sink.
+    """
+
+    if input_ids is None or bos_token_id is None:
+        return None
+
+    try:
+        ids = torch.as_tensor(input_ids)
+    except (TypeError, ValueError, RuntimeError):
+        return None
+    if ids.dim() == 1:
+        ids = ids.unsqueeze(0)
+    if ids.dim() != 2 or ids.shape[0] == 0:
+        return None
+    if ids.dtype == torch.bool or ids.is_floating_point() or ids.is_complex():
+        return None
+    ids = ids.to(dtype=torch.long)
+
+    if attention_mask is None:
+        keep = torch.ones_like(ids, dtype=torch.bool)
+    else:
+        try:
+            keep = torch.as_tensor(attention_mask)
+        except (TypeError, ValueError, RuntimeError):
+            return None
+        if keep.dim() == 1:
+            keep = keep.unsqueeze(0)
+        if keep.dim() != 2:
+            return None
+        if keep.shape != ids.shape:
+            return None
+        keep = keep.to(dtype=torch.bool)
+
+    has_token = keep.any(dim=1)
+    # ``argmax`` on an all-False row yields 0, which ``has_token`` masks out.
+    first_position = keep.to(dtype=torch.int8).argmax(dim=1)
+    first_ids = ids.gather(1, first_position.unsqueeze(1)).squeeze(1)
+    return has_token & (first_ids == int(bos_token_id))
 
 
 def _is_dataset_split_mapping(mapping: Mapping) -> bool:
@@ -361,6 +455,13 @@ def prepare_calibration_dataset(
         except Exception as exc:  # pragma: no cover - defensive
             raise ValueError(f"Quantize: failed to convert `{name}` to tensor for calibration item {idx}.") from exc
 
+        # `torch.as_tensor([])` / `torch.as_tensor([[]])` infers float32 from the
+        # empty Python container. That is an absent value, not a float token id,
+        # so normalize empty containers to long before the integer check instead
+        # of reporting a misleading dtype error.
+        if tensor.numel() == 0 and not torch.is_tensor(value):
+            tensor = tensor.to(dtype=torch.long)
+
         if tensor.dtype == torch.bool or tensor.is_floating_point() or tensor.is_complex():
             raise ValueError(
                 f"Quantize: `{name}` for calibration item {idx} must contain integers, got dtype {tensor.dtype}."
@@ -392,6 +493,20 @@ def prepare_calibration_dataset(
         if mask_tensor.ndim == 1:
             mask_tensor = mask_tensor.unsqueeze(0)
 
+        # An additive/extended mask encodes "attend" as 0 (or a positive bias)
+        # and "masked" as a negative bias. When such a mask is all zeros there
+        # is no padding at all, but ``normalize_seq_mask`` reads 0 as "drop" for
+        # a 0/1 mask and would erase every token. Resolve it here first so only
+        # genuinely masked positions are dropped. A 2-D integer 0/1 mask keeps
+        # the usual meaning: an all-zero row is all padding.
+        if (
+            mask_tensor.dtype != torch.bool
+            and mask_tensor.numel() > 0
+            and torch.count_nonzero(mask_tensor).item() == 0
+            and (mask_tensor.is_floating_point() or mask_tensor.ndim >= 3)
+        ):
+            mask_tensor = torch.ones_like(mask_tensor)
+
         try:
             keep_mask = normalize_seq_mask(mask_tensor, seq_len=ids_tensor.shape[-1])
         except ValueError as exc:
@@ -413,10 +528,14 @@ def prepare_calibration_dataset(
     def _pack_ids(ids_value: Any, mask_value: Any, idx: int) -> Dict[str, torch.Tensor]:
         ids_tensor = _to_2d_long_tensor(ids_value, "input_ids", idx)
 
-        if ids_tensor.shape[0] == 0 or ids_tensor.shape[1] == 0:
+        # A zero-ROW item (`torch.empty(0, N)`) carries no sample at all and is a
+        # structural error. A zero-COLUMN row (`(1, 0)`, e.g. tokenizing `""`
+        # with a tokenizer that adds no BOS) is merely too short: it is dropped
+        # by the minimum-length filter below, exactly as before #4194.
+        if ids_tensor.shape[0] == 0:
             raise ValueError(
                 f"Quantize: calibration item {idx} has empty `input_ids` with shape "
-                f"{tuple(ids_tensor.shape)}; every item needs at least one token."
+                f"{tuple(ids_tensor.shape)}; every item needs at least one row of tokens."
             )
 
         if mask_value is None:
@@ -629,10 +748,13 @@ def prepare_calibration_dataset(
 
         for row_index, (row_ids, row_mask) in enumerate(zip(input_ids, attention_mask)):
             if len(row_ids) == 0:
-                raise ValueError(
-                    f"Quantize: calibration item {example_index} row {row_index} is empty; "
-                    "every row needs at least one token."
-                )
+                # An empty token row is a too-short sample, not a malformed one:
+                # tokenizers without a BOS encode `""` as `(1, 0)`. Drop it
+                # through the minimum-length filter below so one blank line in
+                # the calibration data cannot abort the whole run.
+                too_short_row_count += 1
+                rows_changed = True
+                continue
             if len(row_ids) != len(row_mask):
                 raise ValueError(
                     f"Quantize: calibration item {example_index} row {row_index} has "
@@ -715,7 +837,8 @@ def prepare_calibration_dataset(
 
     if too_short_calibration_data_count > 0:
         log.warn(
-            f"Quantize: {too_short_calibration_data_count} input_ids with length <= {calibration_data_min_length} were removed. "
+            f"Quantize: {too_short_calibration_data_count} calibration items were removed because every row was "
+            f"empty, all-padding, or <= {calibration_data_min_length} non-padding tokens. "
             f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length."
         )
 
@@ -792,6 +915,14 @@ def prepare_calibration_dataset(
             current_length = 0
 
         for row_ids, row_mask in _iter_calibration_rows(new_calibration_dataset):
+            # Strip pad positions before packing. Rows that needed trimming were
+            # already stripped above, but a padded row below the position budget
+            # (e.g. from `tokenizer(texts, padding=True)`) still carries pad ids
+            # that must never enter a concatenated window.
+            if not all(row_mask):
+                row_ids = [token for token, keep in zip(row_ids, row_mask) if keep]
+                row_mask = [keep for keep in row_mask if keep]
+
             position = 0
             row_length = len(row_ids)
 
@@ -827,7 +958,15 @@ def prepare_calibration_dataset(
         if input_ids_buff:
             padding_length = calibration_dataset_concat_size - len(input_ids_buff)
             if padding_length > 0:
-                pad_id = getattr(tokenizer, "pad_token_id", 0)
+                pad_id = getattr(tokenizer, "pad_token_id", None)
+                if pad_id is None:
+                    # A tokenizer without a pad token still needs a value for
+                    # the final window's tail. EOS is the conventional safe
+                    # fallback, then 0; the zero mask keeps these slots out of
+                    # the Hessian.
+                    pad_id = getattr(tokenizer, "eos_token_id", None)
+                if pad_id is None:
+                    pad_id = 0
                 if padding_side == "left":
                     input_ids_buff = ([pad_id] * padding_length) + input_ids_buff
                     attention_mask_buff = ([0] * padding_length) + attention_mask_buff

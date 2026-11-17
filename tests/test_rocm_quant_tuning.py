@@ -8,6 +8,7 @@ import torch
 
 from gptqmodel.quantization import gsq_cuda_relaxation
 from gptqmodel.utils import linalg_warmup, rocm
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 @pytest.mark.parametrize(
@@ -25,7 +26,7 @@ from gptqmodel.utils import linalg_warmup, rocm
 )
 def test_quantize_tuning_on_rocm_hosts(monkeypatch, arch, blas_backend, prewarm_ops):
     monkeypatch.setattr(rocm, "IS_ROCM", True)
-    monkeypatch.delenv(rocm.QUANT_BLAS_BACKEND_ENV, raising=False)
+    configure_kernel(KernelConfig())
 
     tuning = rocm.quantize_tuning(arch)
 
@@ -36,7 +37,7 @@ def test_quantize_tuning_on_rocm_hosts(monkeypatch, arch, blas_backend, prewarm_
 @pytest.mark.parametrize("value", ["hipblaslt", "cublaslt", "HIPBLASLT"])
 def test_quantize_tuning_keeps_the_hipblaslt_opt_in(monkeypatch, value):
     monkeypatch.setattr(rocm, "IS_ROCM", True)
-    monkeypatch.setenv(rocm.QUANT_BLAS_BACKEND_ENV, value)
+    configure_kernel(KernelConfig(rocm_quant_blas=value))
 
     assert rocm.quantize_tuning("gfx1201")["blas_backend"] == value.strip().lower()
 
@@ -45,7 +46,7 @@ def test_quantize_tuning_preserves_disabled_backend_tokens(monkeypatch, value):
     """Opt-outs must stay no-ops, not silently resolve to rocBLAS."""
 
     monkeypatch.setattr(rocm, "IS_ROCM", True)
-    monkeypatch.setenv(rocm.QUANT_BLAS_BACKEND_ENV, value)
+    configure_kernel(KernelConfig(rocm_quant_blas=value))
 
     tuning = rocm.quantize_tuning("gfx1201")
 
@@ -53,12 +54,20 @@ def test_quantize_tuning_preserves_disabled_backend_tokens(monkeypatch, value):
     assert tuning["blas_backend"] in rocm.QUANT_BLAS_BACKEND_DISABLED
 
 
-@pytest.mark.parametrize("value", ["bogus", "ROCBLASX"])
-def test_quantize_tuning_falls_back_to_rocblas_for_unknown_values(monkeypatch, value):
-    monkeypatch.setattr(rocm, "IS_ROCM", True)
-    monkeypatch.setenv(rocm.QUANT_BLAS_BACKEND_ENV, value)
+@pytest.mark.parametrize("value", ["bogus", "ROCBLASX", "hipblas_lt"])
+def test_unknown_blas_spellings_are_rejected_instead_of_pinning_rocblas(value):
+    """#4448: a typo must not silently select the rocBLAS pin."""
 
-    assert rocm.quantize_tuning("gfx1201")["blas_backend"] == "rocblas"
+    with pytest.raises(ValueError, match="rocm_quant_blas"):
+        KernelConfig(rocm_quant_blas=value)
+
+
+def test_kernel_config_blas_choices_match_the_rocm_resolver():
+    from gptqmodel.utils import kernel
+
+    assert kernel._ROCM_QUANT_BLAS_CHOICES == (
+        rocm.QUANT_BLAS_BACKEND_DISABLED | rocm._QUANT_BLAS_BACKEND_CHOICES
+    )
 
 
 @pytest.mark.parametrize("value", ["", "0", "off", "default"])
@@ -83,7 +92,7 @@ def test_disabled_tokens_do_not_switch_the_blas_backend(monkeypatch, value):
         return preferred
 
     monkeypatch.setattr(rocm, "IS_ROCM", True)
-    monkeypatch.setenv(rocm.QUANT_BLAS_BACKEND_ENV, value)
+    configure_kernel(KernelConfig(rocm_quant_blas=value))
     monkeypatch.setattr(rocm, "_preferred_blas_library_getter", getter)
 
     with rocm.quant_blas_backend("gfx1201"):
@@ -94,7 +103,7 @@ def test_disabled_tokens_do_not_switch_the_blas_backend(monkeypatch, value):
 
 def test_quantize_tuning_on_non_rocm_hosts(monkeypatch):
     monkeypatch.setattr(rocm, "IS_ROCM", False)
-    monkeypatch.setenv(rocm.QUANT_BLAS_BACKEND_ENV, "hipblaslt")
+    configure_kernel(KernelConfig(rocm_quant_blas="hipblaslt"))
 
     assert rocm.quantize_tuning("gfx1201") == {
         "blas_backend": "default",
@@ -191,7 +200,7 @@ def _capture_warnings(monkeypatch):
 def test_hipblaslt_opt_in_warns_once_about_reproducibility(monkeypatch):
     warnings = _capture_warnings(monkeypatch)
     monkeypatch.setattr(rocm, "IS_ROCM", True)
-    monkeypatch.setenv(rocm.QUANT_BLAS_BACKEND_ENV, "hipblaslt")
+    configure_kernel(KernelConfig(rocm_quant_blas="hipblaslt"))
     monkeypatch.delenv("ROCBLAS_USE_HIPBLASLT", raising=False)
 
     rocm.quantize_tuning("gfx1201")
@@ -204,7 +213,7 @@ def test_hipblaslt_opt_in_warns_once_about_reproducibility(monkeypatch):
 def test_rocblas_forwarding_switch_warns_about_reproducibility(monkeypatch):
     warnings = _capture_warnings(monkeypatch)
     monkeypatch.setattr(rocm, "IS_ROCM", True)
-    monkeypatch.delenv(rocm.QUANT_BLAS_BACKEND_ENV, raising=False)
+    configure_kernel(KernelConfig())
     monkeypatch.setenv("ROCBLAS_USE_HIPBLASLT", "1")
 
     rocm.quantize_tuning("gfx1201")
@@ -215,7 +224,7 @@ def test_rocblas_forwarding_switch_warns_about_reproducibility(monkeypatch):
 def test_default_rocblas_path_does_not_warn(monkeypatch):
     warnings = _capture_warnings(monkeypatch)
     monkeypatch.setattr(rocm, "IS_ROCM", True)
-    monkeypatch.delenv(rocm.QUANT_BLAS_BACKEND_ENV, raising=False)
+    configure_kernel(KernelConfig())
     monkeypatch.setenv("ROCBLAS_USE_HIPBLASLT", "0")
 
     rocm.quantize_tuning("gfx1201")
@@ -229,7 +238,7 @@ def test_opt_out_spellings_warn_about_reproducibility(monkeypatch, value):
 
     warnings = _capture_warnings(monkeypatch)
     monkeypatch.setattr(rocm, "IS_ROCM", True)
-    monkeypatch.setenv(rocm.QUANT_BLAS_BACKEND_ENV, value)
+    configure_kernel(KernelConfig(rocm_quant_blas=value))
     monkeypatch.setenv("ROCBLAS_USE_HIPBLASLT", "0")
 
     tuning = rocm.quantize_tuning("gfx1201")
@@ -237,13 +246,3 @@ def test_opt_out_spellings_warn_about_reproducibility(monkeypatch, value):
     assert tuning["blas_backend"] == value
     assert len(warnings) == 1
     assert "will not pin rocBLAS" in warnings[0][0]
-
-
-def test_unknown_spelling_still_falls_back_to_rocblas_without_warning(monkeypatch):
-    warnings = _capture_warnings(monkeypatch)
-    monkeypatch.setattr(rocm, "IS_ROCM", True)
-    monkeypatch.setenv(rocm.QUANT_BLAS_BACKEND_ENV, "bogus")
-    monkeypatch.setenv("ROCBLAS_USE_HIPBLASLT", "0")
-
-    assert rocm.quantize_tuning("gfx1201")["blas_backend"] == "rocblas"
-    assert warnings == []

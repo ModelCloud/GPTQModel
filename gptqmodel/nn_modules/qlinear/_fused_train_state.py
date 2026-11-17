@@ -5,12 +5,90 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 
 
 _STATE_NAMES = ("qweight", "qzeros", "scales")
 _STATE_BUFFER_PREFIX = "_fused_train_state_"
+
+
+@dataclass(frozen=True)
+class RebuiltCheckpointTensor:
+    """Checkpoint operand that is rebuilt from the live runtime layout.
+
+    ``qweight`` is not stored twice. The CPU int4pack permutation is a pure
+    nibble permutation whose inverse :func:`finalize_fused_train_state` verified
+    against this module's own checkpoint bytes, so the checkpoint words are
+    reconstructed on ``state_dict()``/save and when training restores the
+    module. Only the checkpoint shape and dtype stay resident.
+    """
+
+    shape: tuple[int, ...]
+    dtype: torch.dtype
+
+
+@dataclass(frozen=True)
+class RebuildCandidate:
+    """Checkpoint clone kept only until the transform proves its inverse.
+
+    ``capture_fused_train_state`` still clones ``qweight`` for a module whose
+    class declares an invertible int4pack layout. The transform then calls
+    :func:`finalize_fused_train_state`, which rebuilds the checkpoint words from
+    the packed tensor and compares them with this clone. A match replaces the
+    clone with :class:`RebuiltCheckpointTensor`; any mismatch keeps the clone,
+    so an unverified inverse can never reach a saved checkpoint.
+    """
+
+    buffer_name: str
+    shape: tuple[int, ...]
+    dtype: torch.dtype
+
+
+#: Entries that describe the checkpoint layout instead of naming a buffer.
+_DESCRIBED_ENTRIES = (RebuiltCheckpointTensor, RebuildCandidate)
+
+
+def _entry_shape(entry):
+    """Checkpoint shape an entry describes, or ``None`` for a buffer name."""
+
+    if isinstance(entry, _DESCRIBED_ENTRIES):
+        return entry.shape
+    return None
+
+
+def _entry_buffer_name(entry):
+    """Resident snapshot buffer backing an entry, or ``None`` if it has none."""
+
+    if isinstance(entry, RebuildCandidate):
+        return entry.buffer_name
+    if isinstance(entry, str):
+        return entry
+    return None
+
+
+def _materialize_snapshot_entry(module: nn.Module, entry):
+    """Return the checkpoint tensor described by a snapshot entry."""
+
+    if isinstance(entry, RebuiltCheckpointTensor):
+        tensor = module._rebuild_checkpoint_qweight()
+        if not isinstance(tensor, torch.Tensor):
+            raise RuntimeError(
+                f"{module.__class__.__name__} could not rebuild its checkpoint qweight"
+            )
+        if tuple(tensor.shape) != entry.shape or tensor.dtype != entry.dtype:
+            raise RuntimeError(
+                f"{module.__class__.__name__} rebuilt qweight with shape/dtype "
+                f"{tuple(tensor.shape)}/{tensor.dtype}, expected "
+                f"{entry.shape}/{entry.dtype}"
+            )
+        return tensor
+    buffer_name = _entry_buffer_name(entry)
+    if buffer_name is None:
+        return None
+    return module._buffers.get(buffer_name)
 
 #: Persistent buffer that records the qzero word layout a state dict carries.
 #:
@@ -29,26 +107,121 @@ def capture_fused_train_state(module: nn.Module, *, names=None) -> None:
     captured from inside an inference forward, but the snapshot is later
     restored as the checkpoint tensor: ``load_state_dict`` copies into it in
     place outside ``inference_mode``, which Torch rejects for inference tensors.
+
+    A kernel whose CPU transform leaves an operand byte-identical to the live
+    tensor does not need a second copy of it. Such a kernel declares its
+    snapshot names through ``_fused_train_state_names`` (or
+    ``_FUSED_TRAIN_STATE_NAMES``), and the untouched operand is emitted
+    directly from the live buffer by ``state_dict()``.
+
+    ``qweight`` is cloned only as a :class:`RebuildCandidate` when the module
+    declares an invertible int4pack layout. The clone is dropped by
+    :func:`finalize_fused_train_state` once the transform proves that the
+    checkpoint words can be rebuilt from the packed tensor, which removes the
+    largest resident duplicate while leaving the emitted checkpoint
+    byte-identical.
     """
 
     if getattr(module, "_fused_train_state", None) is not None:
         return
     if names is None:
-        names = getattr(module, "_FUSED_TRAIN_STATE_NAMES", _STATE_NAMES)
+        resolver = getattr(module, "_fused_train_state_names", None)
+        if callable(resolver):
+            names = resolver()
+        else:
+            names = getattr(module, "_FUSED_TRAIN_STATE_NAMES", _STATE_NAMES)
+    rebuild_qweight = getattr(module, "_can_rebuild_checkpoint_qweight", None)
     snapshot = {}
     with torch.inference_mode(False):
         for name in names:
             tensor = getattr(module, name, None)
-            if isinstance(tensor, torch.Tensor):
-                buffer_name = f"{_STATE_BUFFER_PREFIX}{name}"
-                module.register_buffer(
-                    buffer_name,
-                    tensor.detach().clone(),
-                    persistent=False,
+            if not isinstance(tensor, torch.Tensor):
+                continue
+            buffer_name = f"{_STATE_BUFFER_PREFIX}{name}"
+            module.register_buffer(
+                buffer_name,
+                tensor.detach().clone(),
+                persistent=False,
+            )
+            if (
+                name == "qweight"
+                and callable(rebuild_qweight)
+                and rebuild_qweight()
+            ):
+                snapshot[name] = RebuildCandidate(
+                    buffer_name, tuple(tensor.shape), tensor.dtype
                 )
+            else:
                 snapshot[name] = buffer_name
         module._fused_train_state = snapshot
         module._fused_train_state_exportable = True
+
+
+def finalize_fused_train_state(module: nn.Module) -> bool:
+    """Drop the ``qweight`` clone after proving its inverse on this module.
+
+    Called at the end of a CPU int4pack transform, once the live ``qweight``
+    holds the packed words. The checkpoint words are rebuilt from that tensor
+    and compared bitwise with the clone captured before the transform. Only an
+    exact match removes the clone and keeps a :class:`RebuiltCheckpointTensor`
+    descriptor; a layout this build cannot invert (a different PyTorch packing,
+    a fused operand order, an unsupported dtype) keeps the resident clone, so
+    the exported checkpoint stays byte-identical either way.
+
+    Returns whether any clone was dropped.
+    """
+
+    snapshot = getattr(module, "_fused_train_state", None)
+    if not snapshot:
+        return False
+    rebuild = getattr(module, "_rebuild_checkpoint_qweight", None)
+    if not callable(rebuild):
+        return False
+    dropped = False
+    for name, entry in tuple(snapshot.items()):
+        if not isinstance(entry, RebuildCandidate):
+            continue
+        expected = module._buffers.get(entry.buffer_name)
+        if not isinstance(expected, torch.Tensor):
+            continue
+        descriptor = RebuiltCheckpointTensor(entry.shape, entry.dtype)
+        try:
+            rebuilt = _materialize_snapshot_entry(module, descriptor)
+        except Exception:
+            # Fail closed: an unverified inverse keeps the resident clone.
+            continue
+        if rebuilt is None or not torch.equal(rebuilt, expected):
+            continue
+        module._buffers.pop(entry.buffer_name, None)
+        snapshot[name] = descriptor
+        dropped = True
+    return dropped
+
+
+def bind_runtime_qzeros(module: nn.Module) -> bool:
+    """Point ``qzeros`` at the zero column of the packed affine metadata.
+
+    The CPU int4pack transform stores ``scales_and_zeros`` as
+    ``[out_features, groups, 2]`` with the zero offsets in the second column and
+    then keeps a standalone ``qzeros`` tensor holding the same offsets. Reusing
+    that column removes the duplicate storage without changing any value: the
+    affine metadata already owns those bytes. Returns whether ``qzeros`` is now
+    a view of ``scales_and_zeros``.
+
+    A fused source owns no storage of its own: ``_share_operands`` rebinds its
+    operands to views of the fused allocation, so re-pointing ``qzeros`` at a
+    private ``scales_and_zeros`` would break that alias and reintroduce a copy.
+    """
+
+    if getattr(module, "_fused_operands_shared", False):
+        return False
+    packed = getattr(module, "scales_and_zeros", None)
+    if not isinstance(packed, torch.Tensor):
+        return False
+    if packed.dim() != 3 or tuple(packed.shape[-1:]) != (2,):
+        return False
+    module.qzeros = packed[..., 1]
+    return True
 
 
 def _replace_tensor(module: nn.Module, name: str, tensor: torch.Tensor) -> None:
@@ -82,8 +255,17 @@ def restore_fused_train_state(module: nn.Module) -> bool:
             "Cannot restore or save a modified CPU int4pack runtime state as a checkpoint. "
             "Load checkpoint-layout weights to restore the checkpoint format."
         )
-    for name, buffer_name in snapshot.items():
-        tensor = module._buffers.pop(buffer_name, None)
+    # Rebuild every derived operand before replacing anything: a rebuild reads
+    # the live runtime tensor it is derived from.
+    rebuilt = {}
+    for name, entry in snapshot.items():
+        if isinstance(entry, RebuiltCheckpointTensor):
+            rebuilt[name] = _materialize_snapshot_entry(module, entry)
+    for name, entry in snapshot.items():
+        if isinstance(entry, RebuiltCheckpointTensor):
+            _replace_tensor(module, name, rebuilt[name])
+            continue
+        tensor = module._buffers.pop(_entry_buffer_name(entry), None)
         if tensor is not None:
             _replace_tensor(module, name, tensor)
     discard_fused_train_state(module)
@@ -143,11 +325,36 @@ def refinalize_fused_state_after_apply(
     return restore_fused_train_state(module)
 
 
+def checkpoint_layout_tensor(module: nn.Module, name: str):
+    """Return the checkpoint tensor a CPU transform replaced with a runtime one.
+
+    Returns ``None`` when no transform replaced ``name``. A transformed module
+    whose runtime operands were modified has no guaranteed inverse, so callers
+    that serialize or repack must fail closed instead of copying the runtime
+    ABI. The snapshot is the canonical checkpoint payload; using it here keeps
+    a repack independent of whether a forward already ran.
+    """
+
+    snapshot = getattr(module, "_fused_train_state", None)
+    if not snapshot or name not in snapshot:
+        return None
+    if not getattr(module, "_fused_train_state_exportable", True):
+        raise RuntimeError(
+            f"{type(module).__name__} holds a modified CPU int4pack runtime state "
+            "that cannot be converted back to the checkpoint layout. Load "
+            "checkpoint-layout weights before saving or repacking."
+        )
+    tensor = _materialize_snapshot_entry(module, snapshot[name])
+    return tensor if isinstance(tensor, torch.Tensor) else None
+
+
 def discard_fused_train_state(module: nn.Module) -> None:
     snapshot = getattr(module, "_fused_train_state", None)
     if snapshot:
-        for buffer_name in snapshot.values():
-            module._buffers.pop(buffer_name, None)
+        for entry in snapshot.values():
+            buffer_name = _entry_buffer_name(entry)
+            if buffer_name is not None:
+                module._buffers.pop(buffer_name, None)
     module._fused_train_state = None
     module.__dict__.pop("_fused_train_state_exportable", None)
 
@@ -178,12 +385,12 @@ def materialize_fused_runtime_state(module: nn.Module, state_dict, prefix: str =
     checkpoint operands, including ``g_idx``, can be inference tensors.
     ``load_state_dict(assign=False)`` copies into them outside
     inference mode, which Torch rejects. Cloning them into normal tensors keeps
-    the runtime layout while allowing that copy; ``assign=True`` does not need
-    it because the load replaces the tensors outright.
+    the current layout while allowing that copy; ``assign=True`` does not need
+    it because the load replaces the tensors outright. ``g_idx`` is shared by
+    the checkpoint and runtime layouts and is never part of the snapshot, so
+    this applies to checkpoint loads as well.
     """
 
-    if not getattr(module, "_fused_train_state", None):
-        return False
     materialized = False
     with torch.inference_mode(False):
         for name in (*module._parameters, *module._buffers):
@@ -206,13 +413,18 @@ def _discriminating_operands(module: nn.Module):
     """
 
     snapshot = getattr(module, "_fused_train_state", None) or {}
-    for name, buffer_name in snapshot.items():
-        expected = module._buffers.get(buffer_name)
+    for name, entry in snapshot.items():
+        expected_shape = _entry_shape(entry)
+        if expected_shape is None:
+            expected = module._buffers.get(_entry_buffer_name(entry))
+            if not isinstance(expected, torch.Tensor):
+                continue
+            expected_shape = tuple(expected.shape)
         live = getattr(module, name, None)
-        if not isinstance(expected, torch.Tensor) or not isinstance(live, torch.Tensor):
+        if not isinstance(live, torch.Tensor):
             continue
-        if tuple(expected.shape) != tuple(live.shape):
-            yield name, buffer_name
+        if expected_shape != tuple(live.shape):
+            yield name, expected_shape
 
 
 def classify_fused_state_layout(module: nn.Module, state_dict, prefix: str = "") -> str:
@@ -226,16 +438,15 @@ def classify_fused_state_layout(module: nn.Module, state_dict, prefix: str = "")
     """
 
     layout = None
-    for name, buffer_name in _discriminating_operands(module):
+    for name, expected_shape in _discriminating_operands(module):
         key = f"{prefix}{name}"
         if key not in state_dict:
             continue
         incoming = state_dict[key]
-        expected = module._buffers[buffer_name]
         live = getattr(module, name)
         if not isinstance(incoming, torch.Tensor):
             return "invalid"
-        if tuple(incoming.shape) == tuple(expected.shape):
+        if tuple(incoming.shape) == expected_shape:
             candidate = "checkpoint"
         elif tuple(incoming.shape) == tuple(live.shape):
             candidate = "runtime"
@@ -271,7 +482,13 @@ def state_dict_matches_runtime_layout(module: nn.Module, state_dict, prefix: str
 
 __all__ = [
     "QZEROS_FORMAT_BUFFER",
+    "RebuildCandidate",
+    "RebuiltCheckpointTensor",
+    "bind_runtime_qzeros",
+    "_materialize_snapshot_entry",
     "capture_fused_train_state",
+    "checkpoint_layout_tensor",
+    "finalize_fused_train_state",
     "classify_fused_state_layout",
     "discard_fused_train_state",
     "materialize_fused_runtime_state",

@@ -18,9 +18,10 @@ def _processor_for_uniformity():
     return processor
 
 
-class _FakeModule:
+class _FakeModule(torch.nn.Module):
     def __init__(self, device):
-        self.weight = type("_Weight", (), {"data": torch.empty(0, device=device)})()
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.empty(0, device=device))
 
 
 def test_eora_covariance_weights_every_batch_uniformly():

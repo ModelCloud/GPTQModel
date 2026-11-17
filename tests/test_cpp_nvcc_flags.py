@@ -47,7 +47,9 @@ def test_is_nvcc_compatible_rejects_older_nvcc(monkeypatch):
 
 def test_is_nvcc_compatible_rejects_missing_nvcc(monkeypatch):
     _reset_nvcc_caches()
-    monkeypatch.setattr(cpp_utils.shutil, "which", lambda _cmd: None)
+    # The probe also falls back to CUDA_HOME and /usr/local/cuda, so stub the
+    # resolved path rather than only ``shutil.which``.
+    monkeypatch.setattr(cpp_utils, "_nvcc_path", lambda: None)
 
     assert cpp_utils.is_nvcc_compatible() is False
     assert cpp_utils._NVCC_VERSION_CACHE == (0, 0)

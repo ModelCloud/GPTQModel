@@ -250,7 +250,6 @@ def test_real_qwen25_awq_gemv_greedy_decode_stays_finite(tmp_path):
         group_size=GROUP_SIZE,
         quant_method=METHOD.AWQ,
         format=FORMAT.GEMV,
-        dtype=torch.float16,
     )
     model = GPTQModel.load(
         str(QWEN25_DENSE_PATH),

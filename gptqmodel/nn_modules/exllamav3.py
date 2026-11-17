@@ -34,6 +34,9 @@ def _torch_dtype(value: Any) -> torch.dtype:
 
 class ExllamaV3Linear(nn.Module):
     QUANT_TYPE = "exl3"
+    # Every floating EXL3 buffer (the fp16 `suh`/`svh` sign vectors and the
+    # bias) loads at its checkpoint dtype; the Hadamard kernels require fp16.
+    MODEL_DTYPE_BUFFERS = ()
     SUPPORTS_SHARDS = True
     SUPPORTS_DEVICES = [DEVICE.CUDA]
 

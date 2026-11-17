@@ -83,12 +83,14 @@ from ..utils.backend import (
     backend_for_activation,
     normalize_backend,
 )
+from ..utils.backend_config import Backend, resolve_quantize_backend
 from ..utils.calibration import prepare_calibration_dataset
 from ..utils.checkpoint_paths import resolve_checkpoint_path
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
 from ..utils.hf import autofix_hf_model_config, install_legacy_generation_compat
 from ..utils.importer import select_quant_linear
+from ..utils.kv_cache import KVCacheEstimate, estimate_kv_cache
 from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
 from ..utils.looper_helpers import normalize_device_like, select_forward_devices
 from ..utils.model import (
@@ -105,6 +107,7 @@ from ..utils.model import (
 )
 from ..utils.model_dequant import infer_block_shape
 from ..utils.p2p import safe_module_to
+from ..utils.quant_metadata import UnsupportedMetadata, describe_unsupported_metadata, find_unsupported_metadata
 from ..utils.rocm import IS_ROCM, quant_blas_backend
 from ..utils.structure import (
     LazyTurtle,
@@ -114,7 +117,13 @@ from ..utils.structure import (
     alias_from_turtle_for_submodule,
     restore_init_owned_rotary_buffers,
 )
-from ..utils.torch import TORCH_HAS_COMPILE, as_torch_device, torch_compile, torch_empty_cache
+from ..utils.torch import (
+    TORCH_HAS_COMPILE,
+    as_torch_device,
+    release_pinned_host_cache,
+    torch_compile,
+    torch_empty_cache,
+)
 from ._const import (
     CPU,
     DEFAULT_MAX_SHARD_SIZE,
@@ -144,29 +153,36 @@ if TYPE_CHECKING:
     from ..looper.named_module import NamedModule
 
 
-# Processor steps that accumulate an input Hessian/Gram from calibration
-# activations and then invert or consume it. Their fp32 GEMMs must run on
-# rocBLAS to be reproducible across processes (issues #4075, #4092, #4123).
-_HESSIAN_PROCESSOR_STEPS = frozenset({
+# Processor steps whose quantization GEMMs must run on rocBLAS to be
+# reproducible across processes (issues #4075, #4092, #4123, #4460).
+#
+# GPTQ, QQQ, VPTQ, MACaQ and calibrated FP8 GSQ accumulate an input
+# Hessian/Gram from the calibration activations; EXL3 reuses GPTQ's capture.
+# ParoQuant accumulates no Hessian, but its rotation optimization runs
+# fp16/bf16 GEMMs and hipBLASLt selects kernels per process, so two runs with
+# the same seed produced different checkpoints (21.26 vs 21.44 PPL on ROCm).
+# Pinning rocBLAS makes those GEMMs bitwise reproducible at the cost of the
+# faster hipBLASLt kernels. AWQ and weight-only (RTN) keep hipBLASLt.
+_DETERMINISTIC_BLAS_PROCESSOR_STEPS = frozenset({
     ProcessorStep.GPTQ,
     ProcessorStep.QQQ,
     ProcessorStep.VPTQ,
     ProcessorStep.MACAQ,
+    ProcessorStep.PARO,
     ProcessorStep.EXL3,
     ProcessorStep.FP8_GSQ,
 })
 
 
 def _needs_deterministic_hessian(run_plan: QuantizationRunPlan) -> bool:
-    """Whether a run accumulates a Hessian whose GEMMs must be reproducible.
+    """Whether a run's quantization GEMMs must be reproducible on ROCm.
 
-    GPTQ, QQQ, VPTQ, MACaQ and calibrated FP8 GSQ accumulate an input
-    Hessian/Gram from the calibration activations; EXL3 reuses GPTQ's capture.
-    AWQ, ParoQuant and weight-only (RTN) do not, so they keep hipBLASLt for the
-    fp16/bf16 GEMMs that are 8-14x faster there on gfx1201.
+    The name predates ParoQuant: the original set accumulated an input
+    Hessian/Gram. ParoQuant is included because hipBLASLt chooses GEMM kernels
+    per process, which made checkpoints from identical seeded runs differ.
     """
 
-    return not _HESSIAN_PROCESSOR_STEPS.isdisjoint(run_plan.processors)
+    return not _DETERMINISTIC_BLAS_PROCESSOR_STEPS.isdisjoint(run_plan.processors)
 
 
 # Model types whose definition class declares `supports_rotation`. This is the
@@ -361,6 +377,29 @@ def _log_quantize_summary(
     )
 
 
+
+
+def _kv_cache_estimate_for(inner: object, *, dtype: Optional[torch.dtype] = None) -> Optional[KVCacheEstimate]:
+    """KV-cache estimate for a decoder module, dtype taken from its weights."""
+
+    return estimate_kv_cache(
+        getattr(inner, "config", None),
+        dtype=dtype or _module_weight_dtype(inner),
+    )
+
+
+def _module_weight_dtype(module: object) -> Optional[torch.dtype]:
+    """dtype of the first floating parameter of a module, or None."""
+
+    try:
+        for parameter in module.parameters():
+            if parameter.is_floating_point():
+                return parameter.dtype
+    except Exception:  # pragma: no cover - exotic module trees
+        return None
+    return None
+
+
 class _QuantizedCheckpointSource:
     """Expose an on-disk quantized checkpoint through the shard-map interface.
 
@@ -516,6 +555,145 @@ NON_QUANTIZE_FLAGS = (NOT_QUANTIZE_FLAG, CAPTURE_ONLY_FLAG)
 modeling_utils.check_support_param_buffer_assignment = check_support_param_buffer_assignment
 
 log = setup_logger()
+
+
+# Methods whose packing kernel may be accelerator-only. The quantize loop packs
+# every layer and ``post_quantize`` leaves it on CPU, so an in-session forward
+# must use a kernel that supports the model's final device (issue #4381).
+_IN_SESSION_KERNEL_METHODS = frozenset({METHOD.AWQ, METHOD.QQQ, METHOD.GGUF})
+
+
+def _kernel_supports_device(kernel, device) -> bool:
+    """Whether a quant-linear class declares support for ``device``."""
+
+    supported = getattr(kernel, "SUPPORTS_DEVICES", None)
+    if not supported:
+        return True
+    family = normalize_device(device)
+    return DEVICE.ALL in supported or family in supported
+
+
+def select_in_session_quant_linear(qcfg, device):
+    """Select a quant-linear kernel that can execute on the final device.
+
+    ``quantize()`` selects its packing kernel from ``quantize_config.device``,
+    which may be an accelerator while the finished layers live on CPU. Resolve
+    the same method/format for the device the model actually occupies instead
+    of reusing the calibration-time choice.
+    """
+
+    method = qcfg.export_quant_method()
+    return select_quant_linear(
+        bits=qcfg.runtime_bits,
+        dynamic=qcfg.dynamic,
+        group_size=qcfg.group_size,
+        desc_act=qcfg.desc_act,
+        sym=qcfg.sym,
+        backend=BACKEND.AUTO,
+        format=resolve_quant_format(qcfg.format, method),
+        quant_method=method,
+        device=normalize_device(device),
+        pack=True,
+        pack_dtype=qcfg.pack_dtype,
+    )
+
+
+def _switch_quant_linear_class(module: BaseQuantLinear, target_cls) -> None:
+    """Reinterpret one packed module with another layout-compatible kernel.
+
+    The portable Torch kernels read the same packed buffers as their
+    accelerator-only counterparts (AWQ GEMM, QQQ, GGUF). Swapping the class
+    keeps the packed state and hooks intact while changing only the compute
+    path, which is exactly the kernel switch the in-session model needs.
+    """
+
+    module.__class__ = target_cls
+    backends = getattr(target_cls, "SUPPORTS_BACKENDS", None) or ()
+    if backends:
+        module.backend = backends[0]
+    if not hasattr(module, "compute_dtype"):
+        scales = getattr(module, "scales", None)
+        module.compute_dtype = (
+            scales.dtype
+            if isinstance(scales, torch.Tensor) and scales.dtype in (torch.float16, torch.bfloat16)
+            else torch.float16
+        )
+    clear = getattr(module, "clear_weight_cache", None)
+    if callable(clear):
+        clear()
+    post_init = getattr(module, "post_init", None)
+    if callable(post_init):
+        post_init()
+
+
+def rehome_quantized_kernel(model) -> None:
+    """Make the in-session quantized layers runnable on their final device.
+
+    The quantize loop deliberately leaves packed layers on CPU. For AWQ, QQQ
+    and GGUF the calibration-time kernel can be CUDA-only, so the first
+    in-session forward would fail. Switch those modules to the portable Torch
+    kernel for the final device, or raise the reload-the-checkpoint guidance
+    when no layout-compatible kernel exists.
+    """
+
+    qcfg = getattr(model, "quantize_config", None)
+    if qcfg is None or qcfg.export_quant_method() not in _IN_SESSION_KERNEL_METHODS:
+        return
+
+    modules = [
+        module
+        for module in model.model.modules()
+        if isinstance(module, BaseQuantLinear)
+    ]
+    if not modules:
+        return
+
+    device = next(
+        (
+            runtime_device
+            for module in modules
+            if (runtime_device := module.runtime_device()) is not None
+            and runtime_device.type != "meta"
+        ),
+        None,
+    )
+    if device is None:
+        return
+
+    current = getattr(model, "qlinear_kernel", None)
+    unsupported = [module for module in modules if not _kernel_supports_device(type(module), device)]
+    if not unsupported:
+        if current is not None and not _kernel_supports_device(current, device):
+            model.qlinear_kernel = select_in_session_quant_linear(qcfg, device)
+        return
+
+    selection_error = None
+    try:
+        target = select_in_session_quant_linear(qcfg, device)
+    except Exception as exc:  # pragma: no cover - defensive
+        target = None
+        selection_error = exc
+
+    if target is not None:
+        for module in unsupported:
+            # Only reinterpret kernels this run actually produced. A dynamic
+            # per-module format may have selected a different class; leaving it
+            # untouched lets the final check raise the actionable error below.
+            if current is not None and not isinstance(module, current):
+                continue
+            _switch_quant_linear_class(module, target)
+
+    remaining = [module for module in modules if not _kernel_supports_device(type(module), device)]
+    if remaining:
+        kernels = ", ".join(sorted({type(module).__name__ for module in remaining}))
+        raise RuntimeError(
+            "Quantize: quantized layers use kernels that cannot run on the final "
+            f"device `{device}` ({kernels}). The in-session model cannot run "
+            "inference; save the quantized model and reload the saved checkpoint "
+            "on this device (or use the portable Torch backend) before using it."
+        ) from selection_error
+
+    model.qlinear_kernel = target
 
 
 # Class methods are intentionally kept as the public model-definition API.  At
@@ -1885,6 +2063,25 @@ class BaseQModel(nn.Module):
 
         warn_fused_unit_dynamic_conflicts(module_names, self.quantize_config)
 
+    def kv_cache_estimate(self, *, dtype: Optional[torch.dtype] = None) -> Optional[KVCacheEstimate]:
+        """Per-token KV-cache cost of this model, or None when the config hides it.
+
+        Weight quantization does not change the cache, so this is the number a
+        user needs after loading to decide how much context fits next to the
+        weights. The dtype defaults to the dtype of the model's own weights: a
+        cache is as large as the activations that fill it, and
+        ``config.torch_dtype`` is usually unset.
+        """
+
+        return _kv_cache_estimate_for(getattr(self, "model", None), dtype=dtype)
+
+    def log_kv_cache_estimate(self) -> None:
+        """Log the KV-cache cost once, when the config supports the estimate."""
+
+        estimate = _kv_cache_estimate_for(getattr(self, "model", None))
+        if estimate is not None:
+            log.info(estimate.format())
+
     @with_quantization_device_telemetry
     def quantize(
         self,
@@ -1894,7 +2091,7 @@ class BaseQModel(nn.Module):
         calibration_sort: Optional[str] = "desc",  # valid values are asc, desc, shuffle
         batch_size: int = 1,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
-        backend: Optional[BACKEND] = BACKEND.AUTO,
+        backend: Optional[Backend] = BACKEND.AUTO,
         # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
         adapter: Adapter = None,
         adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
@@ -1927,12 +2124,18 @@ class BaseQModel(nn.Module):
         if self.quantize_config is None or not isinstance(self.quantize_config, BaseQuantizeConfig):
             raise AttributeError("`quantize_config` must be not None")
 
+        # A typed choice on the dense-model load survives into quantize(),
+        # while an explicit quantize backend may replace that choice.
+        backend, _ = resolve_quantize_backend(backend, self.quantize_config, inherit=True)
+
         dynamic_cache_stats_before = (
             dynamic_override_cache_stats(self.quantize_config.dynamic) if self.quantize_config.dynamic else None
         )
 
         if os.environ.get("GPTQMODEL_RESUME") == "1":
-            raise ValueError("GPTQMODEL_RESUME is retired; use checkpoint=CheckpointConfig(path=...) in a new directory")
+            raise ValueError(
+                "GPTQMODEL_RESUME is retired; use checkpoint=CheckpointConfig(path=...) in a new directory"
+            )
         if checkpoint is not None:
             from ..looper.checkpoint_store import CheckpointConfig
             from ..looper.gptq_checkpoint import validate_checkpoint_support
@@ -2048,8 +2251,12 @@ class BaseQModel(nn.Module):
                 elif format_code == FORMAT.GEMV:
                     # The native GEMV extension is CUDA-only. ROCm packs the
                     # identical GEMV layout with the portable Triton kernel
-                    # instead of selecting a class its runtime cannot build.
-                    preferred_backend = awq_gemv_pack_backend(is_rocm=IS_ROCM)
+                    # instead of selecting a class its runtime cannot build; a
+                    # CPU-only host has neither accelerator kernel and packs
+                    # with the portable Torch GEMV reader (issue #4554).
+                    preferred_backend = awq_gemv_pack_backend(
+                        device_type=quant_device_type, is_rocm=IS_ROCM
+                    )
                 elif format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
                     preferred_backend = BACKEND.AWQ_GEMV_FAST
                 else:
@@ -2247,16 +2454,20 @@ class BaseQModel(nn.Module):
         # load there (issue #1455).
         self._warn_fused_unit_dynamic_overrides()
 
-        # On ROCm the deterministic rocBLAS selection is scoped to methods that
-        # accumulate a Hessian (GPTQ, QQQ, VPTQ, MACaQ, EXL3, calibrated FP8
-        # GSQ). Their calibration forward and replay produce the activations
+        # On ROCm the deterministic rocBLAS selection is scoped to methods
+        # whose quantization GEMMs must be reproducible (GPTQ, QQQ, VPTQ,
+        # MACaQ, EXL3, calibrated FP8 GSQ, and ParoQuant). For the Hessian
+        # builders, the calibration forward and replay produce the activations
         # accumulated into the Hessian, so those GEMMs must be reproducible
         # too: pinning only the fp32 X^T X GEMM regressed Qwen2.5-0.5B to
-        # 332/795 differing tensors across processes. Methods without a Hessian
-        # (AWQ, ParoQuant, RTN) keep hipBLASLt, which is 8-14x faster for their
-        # fp16/bf16 GEMMs on gfx1201. Every run pins its backend for the whole
-        # run; a concurrent run that needs the other one waits rather than
-        # flipping it mid-run (issue #4123).
+        # 332/795 differing tensors across processes. ParoQuant accumulates no
+        # Hessian, but hipBLASLt selects its rotation-optimization GEMM kernels
+        # per process, so seeded runs diverged (issue #4460); rocBLAS is the
+        # documented speed-for-reproducibility trade-off. AWQ and RTN keep
+        # hipBLASLt, which is 8-14x faster for their fp16/bf16 GEMMs on
+        # gfx1201. Every run pins its backend for the whole run; a concurrent
+        # run that needs the other one waits rather than flipping it mid-run
+        # (issue #4123).
         blas_context = quant_blas_backend(
             deterministic=_needs_deterministic_hessian(run_plan)
         )
@@ -2295,6 +2506,12 @@ class BaseQModel(nn.Module):
         # Some definitions need the complete layer stack before they can
         # restore cross-branch aliases (for example DiffusionGemma's decoder).
         self.after_quantize()
+
+        # The loop leaves packed layers on CPU, so an accelerator-only packing
+        # kernel (AWQ GEMM, QQQ, GGUF Triton) would fail the first in-session
+        # forward. Match the runtime kernel to the device the model now lives
+        # on, or raise the reload-the-checkpoint guidance (issue #4381).
+        rehome_quantized_kernel(self)
 
         if self.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
             from ..nn_modules.qlinear.w4a_floatx import W4AFP8Linear
@@ -2336,6 +2553,11 @@ class BaseQModel(nn.Module):
             run_started=run_started,
             vram_devices=vram_devices,
         )
+        # Quantization offloads every layer through pinned host staging. Those
+        # copies are gone once the loop returns, but PyTorch keeps the pinned
+        # blocks cached (non-swappable ``RssShmem``) for the process lifetime.
+        release_pinned_host_cache()
+        self.log_kv_cache_estimate()
         return result
 
     @staticmethod
@@ -2598,8 +2820,14 @@ class BaseQModel(nn.Module):
         checkpoint: Optional["CheckpointConfig"] = None,
         run_plan: Optional[QuantizationRunPlan] = None,
     ):
-        from ..looper.loop_processor import CalibrationConfig
+        from ..looper.loop_processor import CalibrationConfig, _reusable_calibration_dataset
         from ..looper.module_looper import ModuleLooper
+
+        # The native and EoRA steps each prepare their calibration input, so a
+        # one-shot iterator must be materialised once here or the second
+        # processor sees an exhausted dataset (issue #4307).
+        calibration = _reusable_calibration_dataset(calibration)
+        adapter_calibration_dataset = _reusable_calibration_dataset(adapter_calibration_dataset)
 
         if run_plan is None:
             from ..adapter.adapter import Lora
@@ -2891,7 +3119,9 @@ class BaseQModel(nn.Module):
             self.model = self.model.to(device)
             return self
         else:
-            raise f"{self.model.__class__.__name__} does not support the to() method"
+            raise NotImplementedError(
+                f"{self.model.__class__.__name__} does not support the to() method"
+            )
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
@@ -3142,6 +3372,10 @@ class BaseQModel(nn.Module):
             else:
                 self.save_pretrained(save_dir=save_dir, **kwargs)
         finally:
+            # The per-run offload bundles are *not* released here: the quantized
+            # modules stay on meta with an accelerate hook that reads them, so an
+            # in-session forward after `save()` still needs them. Teardown, a
+            # failed run, or rebinding releases the directory (#4368).
             if timer is not None and start_time is not None:
                 try:
                     target = os.path.abspath(save_dir)
@@ -4438,36 +4672,26 @@ class BaseQModel(nn.Module):
 
         return self._decoder_quant_method_name() == "modelopt"
 
-    def _modelopt_activation_quantization_mode(self) -> Optional[str]:
-        """Describe unsupported ModelOpt activation quantization metadata when present."""
+    def _modelopt_unsupported_metadata(self) -> Optional[UnsupportedMetadata]:
+        """Describe unsupported quantization metadata in a ModelOpt checkpoint.
+
+        The config payload is classified by the shared helper so a KV-cache
+        scheme is reported as a KV-cache scheme, not as activation
+        quantization. Checkpoints that pre-quantize activations also ship the
+        corresponding scales, which the weight map exposes as side tensors.
+        """
 
         quant_config = getattr(getattr(self.model, "config", None), "quantization_config", None)
-        if not isinstance(quant_config, dict):
-            return None
-
-        config_groups = quant_config.get("config_groups")
-        if isinstance(config_groups, dict):
-            for group_cfg in config_groups.values():
-                if not isinstance(group_cfg, dict):
-                    continue
-                input_activations = group_cfg.get("input_activations")
-                if isinstance(input_activations, dict):
-                    num_bits = input_activations.get("num_bits")
-                    if isinstance(num_bits, (int, float)) and int(num_bits) < 16:
-                        return "input_activations"
-
-        kv_cache_scheme = quant_config.get("kv_cache_scheme")
-        if isinstance(kv_cache_scheme, dict):
-            num_bits = kv_cache_scheme.get("num_bits")
-            if isinstance(num_bits, (int, float)) and int(num_bits) < 16:
-                return "kv_cache_scheme"
+        found = find_unsupported_metadata(quant_config)
+        if found is not None:
+            return found
 
         if isinstance(self.turtle_model, LazyTurtle):
             keys = self.turtle_model._weight_map.keys()
         else:
             keys = self.model.state_dict().keys()
         if any(str(name).endswith((".input_scale", ".k_scale", ".v_scale")) for name in keys):
-            return "checkpoint_scales"
+            return UnsupportedMetadata(field="checkpoint_scales", kind="checkpoint_scales")
         return None
 
     def _configure_modelopt_runtime(self) -> None:
@@ -4484,15 +4708,11 @@ class BaseQModel(nn.Module):
         if self._active_auto_module_decoder_config() is not None:
             return
 
-        unsupported_mode = self._modelopt_activation_quantization_mode()
-        if unsupported_mode is not None:
-            log.error("GPT-QModel currently does not support loading of activation quantized models")
-            raise ValueError(
-                "GPT-QModel currently does not support loading of activation quantized models. "
-                "GPTQModel does not support loading ModelOpt checkpoints with activation quantization. "
-                "Only dense-activation weight-only variants such as W8A16/FP8 and W4A16/FP4 are supported. "
-                f"Detected unsupported metadata: {unsupported_mode}."
-            )
+        unsupported = self._modelopt_unsupported_metadata()
+        if unsupported is not None:
+            message = describe_unsupported_metadata(unsupported)
+            log.error(message)
+            raise ValueError(message)
 
     def _decoder_scale_tensor(
         self,
@@ -6238,7 +6458,13 @@ class BaseQModel(nn.Module):
         except Exception as exc:  # torch Modules raise AttributeError here
             model = self.__dict__.get("model")
             if model is None:
-                model = self._modules.get("model") if hasattr(self, "_modules") else None
+                # ``self._modules`` must be read from ``__dict__``: during
+                # ``__init__`` (and for instances built with ``object.__new__``
+                # in tests) it does not exist yet, and ``hasattr(self,
+                # "_modules")`` re-enters this hook forever instead of
+                # returning False.
+                modules = self.__dict__.get("_modules")
+                model = modules.get("model") if modules is not None else None
             if model is not None and item != "model":
                 return getattr(model, item)
             raise exc

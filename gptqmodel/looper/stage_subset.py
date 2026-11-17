@@ -1107,6 +1107,25 @@ def _run_single_subset_pass(
                 len(subset),
             )
 
+    def _release_capture_hooks() -> None:
+        """Detach this subset's hooks and clear its inline hook state.
+
+        Safe to call twice: a removed ``RemovableHandle`` is inert and the
+        inline attributes are already ``None``/``False``. Every exit path uses
+        it, including a cancellation or a forward failure, so the model never
+        keeps a capture closure that retains the processor state or raises
+        ``StopForward`` on the next ordinary forward (#4470).
+        """
+
+        for hook in handle:
+            hook.remove()
+        handle.clear()
+        if execute_forward:
+            for name in subset_names:
+                if hasattr(subset[name], "forward_hook"):
+                    subset[name].forward_hook = None
+                    subset[name].forward_hook_last = False
+
     capture_layer_forward_context = (
         execute_forward and forward.capture_layer_context
     )
@@ -1123,14 +1142,21 @@ def _run_single_subset_pass(
     forward_source = f"{layer_descriptor}:subset{subset_index + 1}/{subset_total}"
     if execute_forward:
         if subset_event_cb:
-            subset_event_cb(
-                stage="forward_start",
-                layer_idx=layer_index,
-                subset_index=subset_index,
-                subset_total=subset_total,
-                module_names=subset_names,
-                processor=getattr(processor, "name", type(processor).__name__),
-            )
+            try:
+                subset_event_cb(
+                    stage="forward_start",
+                    layer_idx=layer_index,
+                    subset_index=subset_index,
+                    subset_total=subset_total,
+                    module_names=subset_names,
+                    processor=getattr(processor, "name", type(processor).__name__),
+                )
+            except BaseException:
+                # The hooks are already installed, and this callback is how a
+                # caller cancels the run (StopMainLoop). Release them before the
+                # stop unwinds past the success-path cleanup (#4470).
+                _release_capture_hooks()
+                raise
 
         fwd_start = time.perf_counter()
         reuse_kv = bool(getattr(module, "reuse_kv", False))
@@ -1151,11 +1177,17 @@ def _run_single_subset_pass(
     previous_forward_devices: Dict[str, torch.device] = {}
     preserve_devices = plan.preserve_module_devices
     if execute_forward and forward_device_map:
-        previous_forward_devices = looper._apply_forward_device_overrides(
-            subset,
-            forward_device_map,
-            fallback_modules=full,
-        )
+        try:
+            previous_forward_devices = looper._apply_forward_device_overrides(
+                subset,
+                forward_device_map,
+                fallback_modules=full,
+            )
+        except BaseException:
+            # Device placement runs after the hooks are installed and before the
+            # guarded forward, so release them here as well (#4470).
+            _release_capture_hooks()
+            raise
 
     forward_outputs = None
     if execute_forward:
@@ -1164,12 +1196,14 @@ def _run_single_subset_pass(
             "subset_forward_capture_context",
             None,
         )
-        capture_context = (
-            capture_context_factory(layer_module=module, subset=subset)
-            if callable(capture_context_factory)
-            else nullcontext()
-        )
         try:
+            # Build the capture context inside the guarded region so a failing
+            # factory cannot strand the installed hooks (#4470).
+            capture_context = (
+                capture_context_factory(layer_module=module, subset=subset)
+                if callable(capture_context_factory)
+                else nullcontext()
+            )
             # MoE lifecycle hooks need to know which subset is currently active.
             # Replay-only passes can disable that when they only need outputs.
             if disable_moe_hooks:
@@ -1234,6 +1268,12 @@ def _run_single_subset_pass(
                     force_serial=plan.subset_forward_serial,
                     preserve_module_devices=preserve_devices,
                 )
+        except BaseException:
+            # A cancellation (StopMainLoop/StopForward) or a forward failure
+            # unwinds before the success-path cleanup below, so release the
+            # capture hooks here as well (#4470).
+            _release_capture_hooks()
+            raise
         finally:
             if forward_device_map and plan.restore_forward_device_overrides:
                 looper._restore_forward_device_overrides(
@@ -1381,18 +1421,10 @@ def _run_single_subset_pass(
             source=forward_source,
         )
 
-    for h in handle:
-        # Detach temporary hooks to avoid leaking state into future passes.
-        h.remove()
+    # Detach temporary hooks to avoid leaking state into future passes.
+    _release_capture_hooks()
 
     if execute_forward:
-        for name in subset_names:
-            # Reset inline hook attributes on NamedModule wrappers so future passes
-            # do not reuse state from this subset run.
-            if hasattr(subset[name], "forward_hook"):
-                subset[name].forward_hook = None
-                subset[name].forward_hook_last = False
-
         # Followers adopt the leader's finalized Hessian before coverage checks and
         # before any worker may quantize (and mutate/free) the leader's copy.
         dedup_telemetry = processor.end_shared_input_capture(subset_names)
@@ -1445,9 +1477,29 @@ def _run_single_subset_pass(
         if calibration_coverage_policy.prune_uncovered_modules:
             for name in moe_skip_modules:
                 skipped_module = subset.pop(name)
-                task_map = getattr(processor, "tasks", None)
-                if task_map is not None:
-                    task_map.pop(name, None)
+                # The processor owns every per-module record created in
+                # `preprocess` (GPTQ tasks, AWQ layer state); a record left
+                # behind keeps waiting for a module that will never be processed.
+                processor.prune_uncovered_module(skipped_module)
+
+                # AUTO_NF12 stores the calibration source in `nf12_*` buffers
+                # and only the quant-source step restores the dense module.
+                # A pruned module never reaches that step below, so restore it
+                # here; otherwise the packed source survives into `save()` and
+                # the writer's NF12 ownership check aborts the export. Modules
+                # without a deferred source are already dense and stay as-is.
+                if (
+                    skipped_module.state.get("auto_dtype_cast_source_spec") is not None
+                    or isinstance(
+                        skipped_module.state.get("quant_source_module"), torch.nn.Module
+                    )
+                ):
+                    looper._prepare_named_module_for_quantization(
+                        processor=processor,
+                        named_module=skipped_module,
+                        fallback_device=cur_layer_device,
+                    )
+                    skipped_module.state.pop("auto_dtype_cast_was_applied", False)
 
                 # No calibration data was routed to these MoE expert modules.
                 # We skip quantization them and record them in `qcfg.dynamic` as dynamically excluded modules.

@@ -74,7 +74,9 @@ def test_packed_gptq_cpu_bias_cancels_before_output_rounding(
     assert all(ref() is None for ref in temporary_refs)
     for name, before in packed_before.items():
         torch.testing.assert_close(getattr(module, name), before, rtol=0, atol=0)
-    assert set(module.state_dict()) == {"qweight", "qzeros", "scales", "g_idx", "bias"}
+    assert set(module.state_dict()) == {
+        "qweight", "qzeros", "scales", "g_idx", "bias", "qzeros_format",
+    }
 
 
 def test_packed_gptq_cpu_fused_bias_keeps_input_gradient(monkeypatch):

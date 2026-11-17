@@ -110,7 +110,7 @@ results below for that build.
 | `torch.cuda.is_initialized` | SAFE (concurrent) | startup checks | Avoid calling before you want CUDA initialized. |
 | `torch.cuda.is_current_stream_capturing` | SAFE (concurrent) | graph guards | Thread-local. |
 | `torch.cuda.get_arch_list` | SAFE (concurrent) | diagnostics | Pure metadata query. |
-| `Tensor.record_stream` | UNVERIFIED under GIL=0 | Torch streaming dequant `gptqmodel/nn_modules/qlinear/torch.py:706`; P2P raw copy `gptqmodel/utils/p2p.py:1841-1842`; activation staging `gptqmodel/utils/cuda_activation_buffer.py:119`; host streaming `gptqmodel/utils/stream.py:277`; marlin scratch `gptqmodel/utils/marlin_scratch.py:317`, `:443`, `:458`; GPTQ workspace `gptqmodel/quantization/gptq.py:274`, `:280` | Not probed on a free-threaded build, and the ledger has no evidence it is safe when two threads record the same tensor. It only extends allocator lifetime; it is not an ordering primitive. The Torch streaming path is opt-in (`GPTQ_TORCH_STREAMING`, `qlinear/torch.py:245`) and caches one dequant stream per device in a plain dict with an unlocked check-then-set (`qlinear/torch.py:856-862`), so concurrent first use of one module can race the cache (last stream wins). Use per-thread streams and do not share one tensor across concurrent streaming forwards. |
+| `Tensor.record_stream` | UNVERIFIED under GIL=0 | Torch streaming dequant `gptqmodel/nn_modules/qlinear/torch.py:706`; P2P raw copy `gptqmodel/utils/p2p.py:1841-1842`; activation staging `gptqmodel/utils/cuda_activation_buffer.py:119`; host streaming `gptqmodel/utils/stream.py:277`; marlin scratch `gptqmodel/utils/marlin_scratch.py:317`, `:443`, `:458`; GPTQ workspace `gptqmodel/quantization/gptq.py:274`, `:280` | Not probed on a free-threaded build, and the ledger has no evidence it is safe when two threads record the same tensor. It only extends allocator lifetime; it is not an ordering primitive. The Torch streaming path is opt-in (`KernelConfig.torch_streaming`, read at `qlinear/torch.py:245`) and caches one dequant stream per device in a plain dict with an unlocked check-then-set (`qlinear/torch.py:856-862`), so concurrent first use of one module can race the cache (last stream wins). Use per-thread streams and do not share one tensor across concurrent streaming forwards. |
 | `Stream.wait_stream` | UNVERIFIED under GIL=0 | Torch streaming dequant `gptqmodel/nn_modules/qlinear/torch.py:704`, `:728`; host streaming `gptqmodel/utils/stream.py:268`; activation staging `gptqmodel/utils/cuda_activation_buffer.py:113`; ParoQuant stage capture `gptqmodel/quantization/paroquant/optimization.py:1942`, `:1957`; EXL3 quantize `gptqmodel/exllamav3/modules/quant/exl3_lib/quantize.py:521`, `:606`, `:643`, `:707`, `:1012`, `:1056`, `:1389`, `:1403` | Not probed on a free-threaded build. It inserts an event dependency between two streams and changes stream ordering, not tensor data; the risk is sharing one stream object across threads. `gptqmodel/utils/stream.py` caches its copy stream under `_STREAM_CACHE_LOCK` (`stream.py:74`, `:103-114`), while the TorchLinear dequant-stream cache (`qlinear/torch.py:856-862`) is unlocked. Use one stream per worker. |
 | `torch.cuda.CUDAGraph` + `torch.cuda.graph` | SAFE (single-thread only); UNVERIFIED under GIL=0 | ParoQuant stage optimizer: `gptqmodel/quantization/paroquant/optimization.py:1960-1962` (`_run_stage_gptqmodel_cudagraph`) | Graph capture is process-global. Capture is reached only on a CUDA tensor stage with `fused_rotation` set, `inputs_train.shape[0] >= batch_size`, and `stage_cudagraph` not False (`optimization.py:1877-1889`); ROCm is excluded (`optimization.py:1881`). The looper disables it for the default `opt_scope="module"` (`gptqmodel/looper/paroquant_processor.py:673-683`, `gptqmodel/quantization/config.py:5764`), but `opt_scope` of `compute_block`/`layer` and the public `optimize_paroquant_linear(..., stage_cudagraph=None)` default (`optimization.py:1877-1878`) reach the capture. Capture on the thread that owns the model and replay from that thread's stream; do not capture or replay concurrently. The probe is single-shot (`scripts/gil0_api_probe.py:45`, `:123-124`) and was not run in this change. |
 
@@ -158,6 +158,7 @@ results below for that build.
 | `torch.eye` | SAFE (concurrent) | tests | - |
 | `torch.tensor` | SAFE (concurrent) | constants | Copies host data; prefer `as_tensor` when the input is already a tensor. |
 | `torch.as_tensor` | SAFE (concurrent) | constants | No copy when dtype/device already match. |
+| `torch.as_tensor` over a `__cuda_array_interface__` exporter | SAFE (concurrent), NVIDIA CUDA | `_GGMLSharedWeight.as_tensor`: `GGUFCudaKernel.qweight` as a zero-copy view of the ggml weight buffer (#4387) | `scripts/gil0_api_probe.py --only 'torch.as_tensor (__cuda_array_interface__ view)'` passed three separate processes on 2026-11-17, each 8 threads × 4 iterations, with Python 3.14.10 GIL disabled, PyTorch 2.16.0.dev20261102+cu130 and one RTX 4090. The probe checks that the view aliases the exporter's pointer, is not an inference tensor under `inference_mode(False)`, and reads the same bytes. The view keeps the exporter alive. In GPT-QModel the call also runs under `_GGMLBridge.cuda_backend_lock`. |
 | `torch.from_numpy` | SAFE (concurrent) | host-side data | CPU only; shares memory with the array. Do not resize the source. |
 | `torch.zeros_like` | SAFE (concurrent) | accumulators | - |
 | `torch.ones_like` | SAFE (concurrent) | masks | - |
@@ -198,6 +199,7 @@ results below for that build.
 | `torch.Generator(device="cuda")` | SAFE (concurrent), per-thread | deterministic sampling | One generator per worker. Never share a generator across threads. |
 | `Tensor.to` (cuda:0 -> cuda:1) | SAFE (concurrent) (needs 2 GPUs) | fallback for every P2P fast path | Goes through the PyTorch copy machinery. Correct, but per-tensor and slower than `peer_copy_batch`; use it only as the fallback. |
 | `Tensor.copy_` (non_blocking, cross-device) | SAFE (concurrent) (needs 2 GPUs) | P2P verify, Hessian adopt | Must synchronize the destination stream before reading the result. |
+| `torch.set_num_threads` / `torch.get_num_threads` (per worker) | SAFE (serialized), process-global value scoped per task | `DeviceThreadPool` task scope (`gptqmodel/utils/threadx.py`, `_scoped_intraop_threads`), reached through `split_intraop_threads` | `torch.set_num_threads` updates libtorch's process-global `num_threads` as well as the calling thread's intra-op setting. A thread created later reads that global when its pool initializes, so leaving a worker budget installed capped every later caller thread (issue #4601: 205 -> 20 threads, ~2x slower CPU GEMMs). The pool now sets the budget under `_INTRAOP_SCOPE_LOCK` only for the duration of a warmup/task and restores the previous value in `finally`, including on exception; the last active scope restores the value captured before the first pool task. Each worker still bounds its own OpenMP team (issue #4356: 2622 -> 308 OS threads in the isolated 12-worker repro). The earlier probe only checked the caller's existing thread and therefore missed the global leak; `tests/test_thread_caps.py` now checks a fresh caller thread after successful and raising tasks. |
 | `torch.inference_mode` | SAFE (concurrent), thread-local | inference paths | Thread-local grad mode; no shared state. |
 | `torch.no_grad` | SAFE (concurrent), thread-local | calibration | Same as above. |
 | `torch.is_autocast_enabled("cpu")` + `torch.autocast("cpu", enabled=False)` | SAFE (concurrent CPU) | GGUF Torch CPU FP32 reduction | On Python 3.14.10t / Torch 2.16.0.dev20261102+cu130 with `PYTHON_GIL=0`, the probe ran 8 threads x 4 iterations in three subprocesses. The active flag remained thread-local; the nested disabled context returned the exact FP32 dot `100000`, while surrounding BF16 dots stayed `99840`. |
@@ -465,6 +467,27 @@ rejects a mixed-dtype, meta or stuck-default-dtype result. Do not call
 
 Regression: `tests/test_concurrent_load.py` (two threads, six rounds, both GIL
 modes) and `tests/test_load_state_assertions.py`.
+
+### 12. ggml-cuda entry is serialized process-wide (#4378)
+
+`_GGMLBridge.cuda_backend_lock` handed out one `RLock` per CUDA device, and
+`GGUFCudaKernel.forward` held it across the ggml-cuda graph compute. ggml-cuda
+keeps cuBLAS handles and memory pools in process-global state, so forwards on
+cuda:0 and cuda:1 could be inside it together. On 2x RTX 4090 at `def6e61`
+with `PYTHON_GIL=0`, 4 threads x 200 forwards aborted 5 of 20 runs with
+`CUDA error: an internal operation failed ... cublasGemmEx` on device 1.
+Monkeypatching the lock to a single process-wide `RLock` gave 0 of 20 aborts.
+
+`cuda_backend_lock` now returns one re-entrant process-wide lock; the
+per-device backend-handle map (`_cuda_backends`) is unchanged. Single-thread
+latency is unchanged (~57 µs/call) because a forward already took one lock.
+
+Regression: `tests/test_gguf_cuda_process_lock_4378.py` drives the real lock
+through a mocked bridge, since CPU CI has no ggml CUDA extension. It asserts
+that cuda:0 and cuda:1 share one lock object and that concurrent forwards and
+lock entries on two devices never overlap inside the backend critical section.
+All three tests fail on the pre-fix code (`max_active == 2`) and pass after the
+fix.
 
 ## Adding a probe
 

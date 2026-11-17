@@ -90,6 +90,7 @@ FAMILY_MODEL_TYPES = [
     "minimax",
     "minimax_m2",
     "deepseek_v2",
+    "lfm2_moe",
     "qwen2_moe",
     "qwen3_moe",
     "mixtral",
@@ -146,6 +147,72 @@ REMOTE_CODE_MODEL_OVERRIDES = {
 COMPOSITE_TEXT_CONFIG_FAMILIES = {"gemma4", "gemma4_unified"}
 
 
+def _kernel_fallback_implementation(func):
+    """Return the implementation a hub-kernel fallback wrapper resolved.
+
+    ``use_kernel_func_from_hub_with_fallback`` closes over the resolved
+    ``implementation`` cell, so the decorated module attribute always reports
+    ``transformers`` as its own module. The closure is the only place that says
+    whether the eager Torch reference or an external fused package is in use.
+    """
+
+    cells = dict(zip(getattr(func.__code__, "co_freevars", ()), func.__closure__ or ()))
+    implementation = cells.get("implementation")
+    if implementation is None:
+        return None
+    try:
+        return implementation.cell_contents
+    except ValueError:
+        return None
+
+
+# Modules whose Mamba-2 forward kernels ``transformers`` resolves through the
+# hub-kernel fallback decorator, paired with the attribute holding the wrapper.
+MAMBA_SSM_KERNEL_BINDINGS = (
+    ("transformers.models.mamba.modeling_mamba", ("mamba_selective_scan", "mamba_inner_fn")),
+    ("transformers.models.falcon_h1.modeling_falcon_h1", ("mamba2_chunk_scan", "mamba2_split_conv1d_scan_combined")),
+    ("transformers.models.nemotron_h.modeling_nemotron_h", ("mamba2_chunk_scan", "mamba2_split_conv1d_scan_combined")),
+)
+
+
+def _mamba_ssm_cpu_unavailable_reason():
+    """Report whether ``mamba_ssm`` would displace the eager Torch Mamba-2 path.
+
+    ``transformers`` resolves the Mamba-2 kernels through
+    ``use_kernel_func_from_hub_with_fallback``, which prefers an installed
+    ``mamba_ssm`` over its own eager reference. Those implementations are
+    CUDA-only: they raise ``Expected u.is_cuda()`` or hand a CPU pointer to
+    Triton. A host that merely happens to have the package installed therefore
+    cannot run this CPU-only fold invariant for the hybrid SSM families.
+
+    The check reads the resolved implementation out of each decorator closure
+    rather than testing whether the distribution imports, so a host without
+    ``mamba_ssm`` still runs the invariant against the Torch fallback.
+    """
+
+    displaced = []
+    for module_path, names in MAMBA_SSM_KERNEL_BINDINGS:
+        try:
+            module = importlib.import_module(module_path)
+        except Exception:
+            continue
+        for name in names:
+            wrapper = getattr(module, name, None)
+            if wrapper is None or not hasattr(wrapper, "__closure__"):
+                continue
+            implementation = _kernel_fallback_implementation(wrapper)
+            resolved = getattr(implementation, "__module__", "") or ""
+            if not resolved.startswith("mamba_ssm"):
+                continue
+            displaced.append(f"{module_path.rsplit('.', 1)[-1]}.{name}")
+    if not displaced:
+        return None
+    return (
+        "mamba_ssm displaced the eager Torch Mamba-2 path with CUDA-only kernels "
+        f"({', '.join(sorted(displaced))}); this CPU fold invariant needs the Torch fallback"
+    )
+
+
 def _field_names(config):
     if dataclasses.is_dataclass(config):
         return {field.name for field in dataclasses.fields(config)}
@@ -164,6 +231,11 @@ def _tiny_config(model_type):
         # These families keep the first two decoder layers dense, so a third
         # layer is required to exercise the routed + shared expert group.
         kwargs["num_hidden_layers"] = 3
+    if model_type == "lfm2_moe" and "layer_types" in fields:
+        # LFM2-MoE has no default `layer_types`; without one the decoder layer
+        # indexes `None`. Exercise the short-convolution and attention mixers.
+        kwargs["layer_types"] = ["conv", "full_attention"]
+        kwargs["num_dense_layers"] = 1
     for key in ("head_dim", "rotary_dim"):
         if key in fields:
             kwargs[key] = 8
@@ -408,6 +480,11 @@ def _worst_relative_change(hf_model, ids, layer, groups):
 # Families whose decoder layer has no foldable AWQ group and is quantized plainly.
 PLAIN_QUANTIZATION_FAMILIES = {"codegen", "gpt2", "minimax"}
 
+# Hybrid SSM families whose decoder forward resolves Mamba-2 scan kernels through
+# `transformers`' hub-kernel fallback. When that decorator selects CUDA-only
+# `mamba_ssm` code the CPU-only fold invariant cannot execute at all.
+MAMBA_SSM_KERNEL_FAMILIES = {"falcon_h1", "falcon_mamba", "nemotron_h"}
+
 # Issue #4039 families that can be instantiated as a tiny ``AutoModelForCausalLM``.
 # ``exaone4_5`` and ``muse_glimmer`` are vision-language wrappers with no
 # ``AutoModelForCausalLM`` entry point; their flags are pinned statically by
@@ -470,6 +547,12 @@ def test_parallel_norm_group_cannot_score_only_attention(family):
 
 @pytest.mark.parametrize("family", sorted(FAMILIES))
 def test_scaling_groups_preserve_decoder_layer_output(family):
+    if family in MAMBA_SSM_KERNEL_FAMILIES:
+        # The invariant runs a real CPU forward; `mamba_ssm` would route it to
+        # CUDA-only kernels and fail on the device, not on the fold math.
+        reason = _mamba_ssm_cpu_unavailable_reason()
+        if reason is not None:
+            pytest.skip(reason)
     hf_model, qmodel, layers, tree = _tiny_model(family)
     plan = ModulePlan.from_tree(tree)
     ids = torch.randint(0, _vocab_size(hf_model.config), (1, 8))
@@ -548,10 +631,12 @@ def test_routed_and_shared_experts_share_one_group(family):
         # nonlinearity. `olmo_hybrid` is absent on purpose: its
         # `post_attention_layernorm` is a valid source on linear-attention
         # layers, so only the per-layer fold invariant can pin it.
+        # Issue #4355: the routed and shared expert MLPs are the same `relu2`
+        # network as `mixer.up_proj`, so neither may be a fold source.
         ("gemma4", ["self_attn.v_proj", "post_feedforward_layernorm", "post_per_layer_input_norm"]),
         ("gemma4_unified", ["self_attn.v_proj", "post_feedforward_layernorm"]),
         ("gpt_pangu", ["mlp.c_fc"]),
-        ("nemotron_h", ["mixer.up_proj"]),
+        ("nemotron_h", ["mixer.up_proj", "mixer.shared_experts.up_proj", "mixer.experts.0.up_proj"]),
         ("falcon", ["mlp.dense_h_to_4h"]),
         ("falcon_h1", ["mamba.in_proj"]),
     ],

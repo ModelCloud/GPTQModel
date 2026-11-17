@@ -12,6 +12,7 @@ from contextlib import contextmanager
 import torch
 
 from .arch import arch_class
+from .kernel import get_kernel_config
 from .logger import setup_logger
 
 
@@ -117,7 +118,6 @@ def warn_unsupported_rocm(logger=None) -> bool:
 # touches four combinations, so most of a cold GPTQ/QQQ/ParoQuant quantize is
 # library loading rather than math. rocBLAS covers the same work with roughly
 # 0.15 s of loading and the same steady-state throughput.
-QUANT_BLAS_BACKEND_ENV = "GPTQMODEL_ROCM_QUANT_BLAS"
 QUANT_BLAS_BACKEND_DEFAULT = "rocblas"
 QUANT_BLAS_BACKEND_DISABLED = frozenset({"", "0", "off", "default", "hipblaslt", "cublaslt"})
 _QUANT_BLAS_BACKEND_CHOICES = frozenset({"rocblas", "hipblaslt", "cublaslt"})
@@ -143,9 +143,17 @@ _RDNA4_PREWARM_GROUPS = ("elementwise", "fp32", "reduce", "gather", "dtype", "bi
 
 
 def _requested_quant_blas_backend() -> str:
-    """Return the nominal ``GPTQMODEL_ROCM_QUANT_BLAS`` value, lower-cased."""
+    """Return the configured quantization BLAS backend, lower-cased.
 
-    return os.getenv(QUANT_BLAS_BACKEND_ENV, QUANT_BLAS_BACKEND_DEFAULT).strip().lower()
+    ``None`` keeps the reproducible ``rocblas`` default. The empty string is a
+    documented opt-out spelling, so it must be preserved instead of being
+    coalesced into the default.
+    """
+
+    configured = get_kernel_config().rocm_quant_blas
+    if configured is None:
+        return QUANT_BLAS_BACKEND_DEFAULT
+    return configured.strip().lower()
 
 
 def _warn_if_blas_is_not_reproducible(blas_backend: str) -> None:
@@ -172,12 +180,11 @@ def _warn_if_blas_is_not_reproducible(blas_backend: str) -> None:
         return
     _REPRODUCIBILITY_WARNED = True
     log.warning(
-        "ROCm quantization will not pin rocBLAS (%s), so hipBLASLt may choose a "
+        "ROCm quantization will not pin rocBLAS (rocm_quant_blas=%s), so hipBLASLt may choose a "
         "different GEMM kernel in another process for the same shape and identical "
         "runs can save different checkpoints. The reproducible default is "
-        "`%s=rocblas` with `%s` unset; see docs/rocm-default-environment.md.",
-        f"{QUANT_BLAS_BACKEND_ENV}={blas_backend}, {_HIPBLASLT_ENV}={forwarded or 'unset'}",
-        QUANT_BLAS_BACKEND_ENV,
+        "`rocm_quant_blas=rocblas` with `%s` unset; see docs/rocm-default-environment.md.",
+        f"{blas_backend}, {_HIPBLASLT_ENV}={forwarded or 'unset'}",
         _HIPBLASLT_ENV,
     )
 
@@ -202,7 +209,7 @@ def quantize_tuning(device=None) -> dict:
         for RDNA4 yet, and the per-(dtype, layout) cold load measured on gfx950
         is the dominant cost of a quantization pass.  rocBLAS is therefore the
         default for both ``cdna4`` and ``rdna4``; setting
-        ``GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt`` keeps torch's hipBLASLt default
+        ``rocm_quant_blas="hipblaslt"`` keeps torch's hipBLASLt default
         as an opt-in experiment. That opt-in is faster for the forward/replay
         path but not reproducible across processes, so it logs a warning once.
 
@@ -226,16 +233,10 @@ def quantize_tuning(device=None) -> dict:
 def _rocm_quantize_tuning(device=None) -> dict:
     """ROCm quantize tuning without re-checking ``IS_ROCM`` (callers assert it)."""
 
-    requested = _requested_quant_blas_backend()
-    # Disabled tokens (``""``/``0``/``off``/``default``) must survive resolution so
-    # ``quant_blas_backend`` can treat them as "keep torch's backend". Only an
-    # unrecognised *name* falls back to the rocBLAS default.
-    if requested in QUANT_BLAS_BACKEND_DISABLED:
-        blas_backend = requested
-    elif requested in _QUANT_BLAS_BACKEND_CHOICES:
-        blas_backend = requested
-    else:
-        blas_backend = QUANT_BLAS_BACKEND_DEFAULT
+    # Disabled tokens (``""``/``0``/``off``/``default``) survive resolution so
+    # ``quant_blas_backend`` can treat them as "keep torch's backend".
+    # ``KernelConfig`` rejects every other unknown spelling at construction.
+    blas_backend = _requested_quant_blas_backend()
     cls = arch_class(device)
     prewarm_ops = _RDNA4_PREWARM_GROUPS if cls == "rdna4" else None
     return {"blas_backend": blas_backend, "amp": False, "prewarm_ops": prewarm_ops}
@@ -320,7 +321,7 @@ def quant_blas_backend(device=None, *, deterministic: bool | None = None):
     The pin is skipped on non-ROCm hosts, when the platform lacks
     ``torch.backends.cuda.preferred_blas_library``, when the caller already
     selected a backend the guard must not override, and when
-    ``GPTQMODEL_ROCM_QUANT_BLAS`` is one of ``QUANT_BLAS_BACKEND_DISABLED``
+    ``KernelConfig.rocm_quant_blas`` is one of ``QUANT_BLAS_BACKEND_DISABLED``
     (the documented reproducibility opt-out).
 
     ``torch.backends.cuda.preferred_blas_library`` is process-global, so the

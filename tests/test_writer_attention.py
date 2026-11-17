@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from transformers import GenerationConfig
 
 from gptqmodel.models.writer import (
     PROCESS_LOG_LAYER,
@@ -76,6 +77,9 @@ class _DummyQuantizeConfig:
     def extract_adapter_rank_patterns(self):  # pragma: no cover - not exercised here
         return {}
 
+    def has_dynamic_exclusions(self):
+        return False
+
 
 class _DummyConfig:
     def __init__(self):
@@ -98,6 +102,9 @@ class _DummyModel:
         self.config = _DummyConfig()
         self.generation_config = _DummyGenerationConfig()
         self._tracker = tracker
+
+    def named_modules(self):
+        return iter(())
 
     def save_pretrained(self, *_args, **_kwargs):
         self._tracker["config_snapshot"] = dict(self.config.__dict__)
@@ -132,7 +139,7 @@ def test_save_quantized_strips_attention_before_serialization(tmp_path, monkeypa
 
     monkeypatch.setattr("gptqmodel.models.writer.get_model_files_size", lambda _: 1)
 
-    def stop_after_checks(model, _save_dir, _source_model_dir):
+    def stop_after_checks(model, _save_dir, _source_model_dir, **_kwargs):
         tracker["config_snapshot"] = dict(model.config.__dict__)
         tracker["generation_snapshot"] = dict(model.generation_config.__dict__)
         raise RuntimeError("stop after checks")
@@ -155,6 +162,46 @@ def test_save_quantized_strips_attention_before_serialization(tmp_path, monkeypa
 
     assert writer.model.config.attn_implementation == "flash_attention_2"
     assert writer.model.config._attn_implementation == "flash_attention_2"
+
+
+def test_save_quantized_uses_live_generation_config_for_shell(tmp_path, monkeypatch):
+    tracker = {}
+    writer = _build_dummy_model_writer()
+    writer.load_quantized_model = True
+    writer.model = _DummyModel(tracker)
+    live_generation_config = GenerationConfig(
+        do_sample=True,
+        temperature=0.6,
+        top_p=0.9,
+        repetition_penalty=1.1,
+        eos_token_id=[151645, 151643],
+    )
+    writer.model.generation_config = live_generation_config
+    shell = _DummyModel(tracker)
+    shell.generation_config = GenerationConfig()
+    writer.get_model_with_quantize = lambda **_kwargs: shell
+
+    monkeypatch.setattr("gptqmodel.models.writer.get_model_files_size", lambda _: 1)
+
+    def stop_after_checks(model, _save_dir, _source_model_dir, **_kwargs):
+        tracker["generation_snapshot"] = dict(model.generation_config.__dict__)
+        raise RuntimeError("stop after checks")
+
+    monkeypatch.setattr(
+        "gptqmodel.models.writer._save_model_configs_without_weights",
+        stop_after_checks,
+    )
+
+    with pytest.raises(RuntimeError, match="stop after checks"):
+        writer.save_quantized(save_dir=str(tmp_path))
+
+    saved = tracker["generation_snapshot"]
+    assert saved["do_sample"] is True
+    assert saved["temperature"] == 0.6
+    assert saved["top_p"] == 0.9
+    assert saved["repetition_penalty"] == 1.1
+    assert saved["eos_token_id"] == [151645, 151643]
+    assert writer.model.generation_config is live_generation_config
 
 
 def test_save_quantized_persists_exl3_ledger_and_unambiguous_csv(tmp_path, monkeypatch):
@@ -195,7 +242,7 @@ def test_save_quantized_persists_exl3_ledger_and_unambiguous_csv(tmp_path, monke
     ]
     monkeypatch.setattr("gptqmodel.models.writer.get_model_files_size", lambda _: 1)
 
-    def stop_after_checks(model, _save_dir, _source_model_dir):
+    def stop_after_checks(model, _save_dir, _source_model_dir, **_kwargs):
         tracker["config_snapshot"] = dict(model.config.__dict__)
         tracker["generation_snapshot"] = dict(model.generation_config.__dict__)
         raise RuntimeError("stop after checks")

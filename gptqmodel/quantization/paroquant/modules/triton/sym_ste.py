@@ -48,7 +48,7 @@ from typing import Optional
 
 import torch
 
-from gptqmodel.utils.env import env_flag
+from gptqmodel.utils.kernel import get_kernel_config
 
 
 try:  # pragma: no cover - exercised implicitly by the availability probe
@@ -66,10 +66,6 @@ except Exception:  # pragma: no cover - Triton is an optional accelerator
 
 
 _SYM_STE_BLOCK = 1024
-
-# Kill switch for hosts where the Triton kernels cannot be exercised safely.
-_SYM_STE_TRITON_ENABLED = env_flag("GPTQMODEL_PAROQUANT_SYM_STE_TRITON", default=True)
-
 
 if _SYM_STE_TRITON_AVAILABLE:
 
@@ -212,7 +208,7 @@ if _SYM_STE_TRITON_AVAILABLE:
 
 def sym_quant_dequant_ste_available() -> bool:
     """Report whether the fused Triton symmetric STE kernels can run on this host."""
-    return _SYM_STE_TRITON_AVAILABLE and _SYM_STE_TRITON_ENABLED
+    return _SYM_STE_TRITON_AVAILABLE and get_kernel_config().paroquant_sym_ste_triton
 
 
 def sym_quant_dequant_ste_forward(

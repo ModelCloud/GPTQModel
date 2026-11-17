@@ -32,6 +32,7 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..quantization.config import QuantizeConfig
+from ..utils.calibration import calibration_input_row_count
 from ..utils.colors import ANSIColor, color_text
 from ..utils.logger import setup_logger
 from ..utils.random_str import get_random_string
@@ -60,18 +61,20 @@ def remove_processor_log(log_path: Optional[str], *, keep: bool = True) -> bool:
 
 
 def _calibration_dataset_length(dataset) -> Optional[int]:
-    """Return ``len(dataset)`` when the calibration input exposes a size.
+    """Return the calibration row count when the input exposes a size.
 
     ``datasets.IterableDataset`` and plain generators are valid calibration
     inputs (``prepare_calibration_dataset`` materialises them), but they do not
     implement ``__len__``. Callers must treat ``None`` as "unknown" instead of
     forcing a length the input cannot provide.
+
+    A columnar mapping (``{"input_ids": [...], "attention_mask": [...]}``) has
+    one entry per column, so ``len(mapping)`` is the column count, not the row
+    count. ``calibration_input_row_count`` resolves that case to the primary
+    column's length.
     """
 
-    try:
-        return len(dataset)
-    except TypeError:
-        return None
+    return calibration_input_row_count(dataset)
 
 
 def _sized_calibration_dataset(dataset):
@@ -83,6 +86,29 @@ def _sized_calibration_dataset(dataset):
     """
 
     if _calibration_dataset_length(dataset) is None:
+        return list(dataset)
+    return dataset
+
+
+def _reusable_calibration_dataset(dataset):
+    """Return a calibration input that more than one processor can prepare.
+
+    ``quantize()`` builds separate calibration configs for the native and EoRA
+    steps, and every ``LoopProcessor`` prepares its dataset again. A plain
+    iterator (for example a generator expression) is exhausted by the first
+    preparation, so the second processor would receive an empty dataset and
+    fail with "calibration dataset is empty". Materialise such an input once,
+    before it is shared. Sized containers are returned unchanged, and
+    ``datasets.IterableDataset`` stays lazy because it yields a fresh iterator.
+    """
+
+    if dataset is None:
+        return None
+    try:
+        iterator = iter(dataset)
+    except TypeError:
+        return dataset
+    if iterator is dataset:
         return list(dataset)
     return dataset
 
@@ -339,6 +365,37 @@ def checkpoint_chain_supported(roles) -> bool:
     }
 
 
+def record_quant_log(model, processors) -> list:
+    """Publish one row per module from the run's primary quantization processor.
+
+    ``processors`` is the loop's processor chain in run-plan order. The earliest
+    processor that recorded per-module rows and owns the quantization log
+    supplies ``model.quant_log``. Auxiliary processors such as EoRA set
+    ``owns_quant_log = False`` because their rows carry adapter timing, not
+    quantization loss/samples/damp; concatenating them produced a second, blank
+    row for every module (#4367).
+
+    Selecting the first owning log rather than a hard-coded processor name keeps
+    every quantizer's rows publishable (FOEM, QQQ, VPTQ, ParoQuant, FP8-GSQ, RTN,
+    ...; issue #4321). When no owning processor recorded rows, an existing
+    ``model.quant_log`` is preserved: the standalone EoRA-generation loop has no
+    primary quantizer, so it cannot replace a restored quantization log with
+    adapter rows.
+    """
+
+    for processor in processors:
+        if not getattr(processor, "owns_quant_log", True):
+            continue
+        entries = getattr(processor, "log", None)
+        if entries:
+            model.quant_log = list(entries)
+            return model.quant_log
+
+    if getattr(model, "quant_log", None) is None:
+        model.quant_log = []
+    return model.quant_log
+
+
 @dataclass
 class ProcessorLifecycleConfig:
     """Mutable processor configuration consumed by the looper and checkpoint adapter."""
@@ -378,6 +435,11 @@ def get_resolved_module_config(module):
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
     """Base lifecycle coordinator shared by all quantization processors."""
+
+    # Auxiliary processors (EoRA) record their own per-module timing rows but do
+    # not own the quantization log. ``record_quant_log`` skips them so they
+    # neither duplicate nor replace the primary quantizer's rows.
+    owns_quant_log: bool = True
 
     @property
     def forward(self) -> ForwardConfig:
@@ -1264,6 +1326,22 @@ class LoopProcessor:
         del moe_block, moe_block_name, handles
         return False
 
+    def prune_uncovered_module(self, module: NamedModule) -> None:
+        """Forget a module the calibration-coverage policy removed from quantization.
+
+        ``fallback=None`` prunes modules that never received calibration input
+        (typically MoE experts no token was routed to). The subset executor
+        removes the module from the subset, restores its dense source and
+        records the dynamic exclusion; the processor must drop every per-module
+        record it created in ``preprocess`` so the module is never quantized,
+        never gates layer completion and never reaches ``submodule_finalize``.
+        Processors that track more than ``tasks`` extend this.
+        """
+
+        tasks = getattr(self, "tasks", None)
+        if tasks is not None:
+            tasks.pop(module.name, None)
+
     # do work and return processor.self state which will updated/merged
     def process(
             self,
@@ -1338,6 +1416,16 @@ class LoopProcessor:
 
         pass
         #self.offload_to_disk(module=module)
+
+    def release_run_workspace(self) -> None:
+        """Release process-wide scratch that outlives individual modules.
+
+        The looper calls this from its end-of-run cleanup on both success and
+        failure, after every worker stream has drained. Processors that cache
+        shared scratch tensors override it.
+        """
+
+        pass
 
     # last step, after all loop processor is called
     # finalize is called in reverse after all next sequential processes are called

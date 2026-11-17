@@ -22,11 +22,16 @@ from ..quantization.config import FallbackStrategy, MSEConfig, SmoothMSE
 from ..quantization.quantizer import HF_OPTIMUM, _mse_shrink_grid, _neutralize_dead_columns
 from ..utils import setup_logger
 from ..utils.device import get_device
-from ..utils.env import env_flag
+from ..utils.kernel import resolve_kernel_config
 from ..utils.p2p import safe_move_to
 from .conv_padding import conv_padding_pairs, pad_mode
 from .fallback_smooth import affine_range_with_zero, mse_optimal_quant, smooth_block, symmetric_range
-from .gptq import _uniform_column_group, get_number_of_rows_and_cols
+from .gptq import (
+    _is_memory_allocation_failure,
+    _move_static_groups,
+    _uniform_column_group,
+    get_number_of_rows_and_cols,
+)
 from .npu_linalg import npu_inverse_cholesky_factor
 
 
@@ -588,7 +593,9 @@ class QQQ:
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
         elif isinstance(self.layer, nn.Conv2d):
-            (left, right), (top, bottom) = conv_padding_pairs(self.layer)
+            # `conv_padding_pairs` reports pairs in the module's spatial order
+            # (height, width); `F.pad` wants the last dimension first.
+            (top, bottom), (left, right) = conv_padding_pairs(self.layer)
             inp = F.pad(
                 inp,
                 (left, right, top, bottom),
@@ -698,6 +705,45 @@ class QQQ:
         self._device_sample_counts.clear()
         return self.H
 
+    def adopt_hessian_from(self, leader: "QQQ") -> None:
+        """Replace this task's Hessian with a private copy of ``leader``'s.
+
+        Both modules must consume the identical input tensor (see ``:in=<tag>``
+        in ``module_tree``).  ``quantize`` mutates ``H`` in place, so the copy
+        must be independent.  The leader's per-device partials are already
+        folded into ``H`` by :meth:`materialize_hessian`, which keeps the peak
+        at the same two matrices the independent path holds (leader ``H`` plus
+        the follower's copy).
+        """
+
+        if leader is self:
+            return
+        if leader.columns != self.columns:
+            raise ValueError(
+                f"QQQ: cannot share Hessian from `{leader.name}` ({leader.columns} columns) "
+                f"with `{self.name}` ({self.columns} columns)."
+            )
+
+        source = leader.materialize_hessian(self.dev)
+        with leader.lock:
+            nsamples = leader.nsamples
+            fwd_counter = leader.fwd_counter
+            materialized_samples = leader._materialized_samples
+            copy = safe_move_to(
+                source.detach(),
+                self.dev,
+                dtype=torch.float32,
+                copy=True,
+            )
+
+        with self.lock:
+            self.H = copy
+            self.nsamples = nsamples
+            self.fwd_counter = fwd_counter
+            self._materialized_samples = materialized_samples
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+
     @torch.inference_mode()
     def quantize(self, blocksize=128):
         if not self._gsq_enabled:
@@ -730,17 +776,27 @@ class QQQ:
         self._gsq_moments.clear()
         return tuple(result)
 
+    def _reject_unsupported_activation_order(self) -> None:
+        """Fail before Hessian work when the config asks for act ordering.
+
+        QQQ's packed runtime stores contiguous group scales and has no
+        ``g_idx`` buffer, so ``desc_act=True`` cannot be represented in the
+        checkpoint.
+        """
+
+        if self.qcfg.desc_act:
+            raise ValueError(
+                "QQQ quantization does not support `desc_act=True`; "
+                "use `desc_act=False`."
+            )
+
     @torch.inference_mode()
     def _quantize_impl(
             self,
             blocksize=128,
     ):
         start = time.time()
-        if self.qcfg.desc_act:
-            raise ValueError(
-                "QQQ quantization does not support `desc_act=True`; "
-                "use `desc_act=False`."
-            )
+        self._reject_unsupported_activation_order()
 
         from ..utils.fallback import (
             resolve_fallback_strategy,
@@ -755,6 +811,56 @@ class QQQ:
         # cached branch returns a device-corrected value without moving the
         # cache, so the return value is the one to quantize with.
         self.H = self.materialize_hessian(self.layer.weight.device)
+
+        # No calibration rows reached this module (for example an unrouted
+        # expert). A zero Hessian makes every column look calibration-dead, so
+        # ``_neutralize_dead_columns`` would zero the whole weight and return an
+        # all-zero module. Absence of evidence is not evidence that every column
+        # is dead: use the data-independent RTN grid instead, matching GPTQ's
+        # zero-sample guard.
+        if self.nsamples == 0:
+            resolved_strategy = FallbackStrategy.RTN
+            log.warn(
+                "Quantization: Module `%s` -> no calibration samples reached this module; "
+                "forcing `%s` fallback quantization instead of quantizing a zero Hessian.",
+                self.name,
+                resolved_strategy.value,
+            )
+            self.H = None
+            self._materialized_samples = 0
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+            return self._fallback_quantize(resolved_strategy)
+
+        # A module that received some calibration rows but fewer than the
+        # configured ``Fallback.threshold`` has a near rank-deficient Hessian
+        # (a rarely routed MoE expert is the typical case). GPTQ applies the
+        # documented low-sample policy before it uses the Hessian; QQQ used to
+        # consult the threshold only after a failed inverse, so these modules
+        # silently ran the full error-propagation loop. Apply the same check
+        # here, before the block pass, so the configured fallback is honoured
+        # for every module the policy selects.
+        if should_use_fallback(self.fallback, float(self.nsamples), self.expected_nsamples):
+            threshold_raw, is_percent = resolve_threshold(self.fallback, self.expected_nsamples)
+            threshold_text = str(getattr(self.fallback, "threshold", None))
+            extra = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
+            log.warn(
+                "Quantization: Module `%s` -> Using `%s` fallback quantization "
+                "(observed %s samples, threshold=%s%s, max_total=%s).",
+                self.name,
+                resolved_strategy.value,
+                self.nsamples,
+                threshold_text,
+                extra,
+                self.expected_nsamples,
+            )
+            # The fallback is data-independent: release the Hessian instead of
+            # carrying a near-singular matrix into the block loop.
+            self.H = None
+            self._materialized_samples = 0
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+            return self._fallback_quantize(resolved_strategy)
 
         percdamp = self.qcfg.damp_percent
         groupsize = self.qcfg.group_size
@@ -815,15 +921,64 @@ class QQQ:
         threshold_raw, is_percent = resolve_threshold(self.fallback, self.expected_nsamples)
         fallback_configured = threshold_raw is not None
 
+        # Inverse-Cholesky factor of the damped Hessian, one step at a time.
+        # Each step rebinds ``Hinv`` so its input is released as soon as the
+        # output exists: holding the input Hessian through the sequence (or
+        # the block pass) costs another ``columns**2 * 4`` bytes of VRAM
+        # (issue #4463). A CUDA allocation failure moves the current step's
+        # input to the host and finishes the remaining steps there, so the
+        # CPU retry never needs the original Hessian.
+        if H.device.type == "npu":
+            npu_block_size = resolve_kernel_config(self.qcfg).npu_cholesky_block_size
+            inverse_steps = (
+                lambda hessian: npu_inverse_cholesky_factor(hessian, block_size=npu_block_size),
+            )
+        else:
+            inverse_steps = (
+                torch.linalg.cholesky,
+                torch.cholesky_inverse,
+                lambda factor: torch.linalg.cholesky(factor, upper=True),
+            )
+
+        Hinv = H
+        del H
         try:
-            if H.device.type == "npu":
-                H = npu_inverse_cholesky_factor(H)
-            else:
-                H = torch.linalg.cholesky(H)
-                H = torch.cholesky_inverse(H)
-                H = torch.linalg.cholesky(H, upper=True)
-            Hinv = H
+            for inverse_step in inverse_steps:
+                try:
+                    Hinv = inverse_step(Hinv)
+                except Exception as exc:
+                    # Reuse GPTQ's allocation classifier and CPU retry: cuSOLVER /
+                    # hipSOLVER report a failed workspace allocation as
+                    # ``*SOLVER_STATUS_ALLOC_FAILED``, which the old bare ``raise``
+                    # turned into an aborted run. A non-positive-definite
+                    # factorization is still a numerical failure and keeps the
+                    # sample-count fallback below (issue #4400).
+                    if Hinv.device.type != "cuda" or not _is_memory_allocation_failure(exc):
+                        raise
+                    log.warn(
+                        "Quantization: Module `%s` -> CUDA OOM during Hessian inverse on %s; "
+                        "falling back to CPU. Due to this fallback, the calculation may take "
+                        "much longer than normal.",
+                        self.name,
+                        Hinv.device,
+                    )
+                    cpu_device = torch.device("cpu")
+                    Hinv = Hinv.to(device=cpu_device)
+                    W = W.to(device=cpu_device)
+                    if actorder:
+                        # ``perm``/``invperm`` were built from the CUDA Hessian.
+                        # The block pass now runs on the host, so the epilogue's
+                        # ``Q[:, invperm]`` must not index a CPU tensor with a
+                        # CUDA index tensor (issue #4538).
+                        perm = perm.to(device=cpu_device)
+                        invperm = invperm.to(device=cpu_device)
+                    self.quantizer.find_params(W, weight=True)
+                    if static_groups:
+                        scale, zero = _move_static_groups(groups, cpu_device)
+                    Hinv = inverse_step(Hinv)
         except Exception:
+            # The failed step may have left a partial factor bound to ``Hinv``.
+            Hinv = None
             fallback_requested = should_use_fallback(
                 self.fallback,
                 float(self.nsamples),
@@ -840,9 +995,11 @@ class QQQ:
                     extra,
                     self.expected_nsamples,
                 )
-                if resolved_strategy != FallbackStrategy.RTN:
-                    return self._fallback_quantize(resolved_strategy)
-                Hinv = None
+                # The selected fallback is data-independent: it must never
+                # continue into the block loop with ``Hinv=None``. RTN used to
+                # fall through here and fail with
+                # ``TypeError: 'NoneType' object is not subscriptable``.
+                return self._fallback_quantize(resolved_strategy)
             else:
                 raise
 
@@ -882,7 +1039,7 @@ class QQQ:
                 and groupsize != -1
                 and type(self.quantizer) is Quantizer
                 and not self.qcfg.mock_quantization
-                and not env_flag("GPTQMODEL_DISABLE_GPTQ_CUDA")
+                and resolve_kernel_config(self.qcfg).gptq_fused_block_update
             ):
                 from .gptq_cuda import block_update_available, gptq_block_update
 
@@ -1054,6 +1211,12 @@ class QQQ:
             avg_loss = f"{resolved_strategy.value} fallback" if fallback_configured else 999999999
 
         groupsize = groupsize if groupsize != -1 else self.columns
+        if actorder:
+            # A CPU retry can leave the permutation on the Hessian's device
+            # while ``Q`` is on the host; index on ``Q``'s device so the
+            # epilogue is device-agnostic (issue #4538).
+            perm = perm.to(device=Q.device)
+            invperm = invperm.to(device=Q.device)
         if static_groups and actorder:
             g_idx = (perm // groupsize).to(dtype=torch.int32, device=Q.device)
         else:
