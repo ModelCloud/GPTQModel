@@ -92,6 +92,33 @@ def test_native_model_ignores_checkpoint_model_code(tmp_path, monkeypatch, bypas
     assert not marker.exists()
 
 
+def test_public_load_preserves_native_max_seq_len(tmp_path):
+    from transformers import MptConfig, MptForCausalLM
+
+    from gptqmodel.quantization import QuantizeConfig
+    from tests.test_internlm_local_port import _write_tokenizer
+
+    torch.manual_seed(31)
+    config = MptConfig(
+        vocab_size=32, d_model=16, n_heads=2, n_layers=1, max_seq_len=8192,
+        expansion_ratio=2,
+    )
+    model = MptForCausalLM(config).eval()
+    model.save_pretrained(tmp_path)
+    _write_tokenizer(tmp_path)
+    assert "max_position_embeddings" not in config.to_dict()
+    assert config.to_dict()["max_seq_len"] == 8192
+
+    loaded = GPTQModel.load(
+        str(tmp_path), device="cpu", dtype=torch.float32,
+        quantize_config=QuantizeConfig(bits=4, group_size=16, offload_to_disk=False),
+    )
+    assert loaded.model.seqlen == 8192
+    ids = torch.tensor([[1, 7, 9]])
+    with torch.inference_mode():
+        torch.testing.assert_close(loaded.model(ids).logits, model(ids).logits)
+
+
 def test_local_config_and_loader_win_over_auto_map_even_with_bypass(tmp_path, monkeypatch):
     path = tmp_path / "local"
     marker = checkpoint(path, "minimax")

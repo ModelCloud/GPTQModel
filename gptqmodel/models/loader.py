@@ -1441,7 +1441,7 @@ def _load_tt_blockfloat_model(model_cls, *, model_local_path, dtype, trust_remot
     model_config = model.config.to_dict()
     seq_len = find_config_seq_len(
         model_config,
-        ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"],
+        ["max_position_embeddings", "max_seq_len", "seq_length", "n_positions", "multimodal_max_length"],
     )
     model.seqlen = seq_len if seq_len is not None else 4096
 
@@ -2234,7 +2234,7 @@ def ModelLoader(cls):
         )
 
         model_config = model.config.to_dict()
-        seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
+        seq_len_keys = ["max_position_embeddings", "max_seq_len", "seq_length", "n_positions", "multimodal_max_length"]
         config_seq_len = find_config_seq_len(model_config, seq_len_keys)
         if config_seq_len is not None:
             model.seqlen = config_seq_len
@@ -3430,7 +3430,7 @@ def ModelLoader(cls):
 
         # == step4: set seqlen == #
         model_config = model.config.to_dict()
-        seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
+        seq_len_keys = ["max_position_embeddings", "max_seq_len", "seq_length", "n_positions", "multimodal_max_length"]
         config_seq_len = find_config_seq_len(model_config, seq_len_keys)
         if config_seq_len is not None:
             model.seqlen = config_seq_len
