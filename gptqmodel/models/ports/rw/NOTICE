@@ -1,0 +1,21 @@
+RW/Falcon native-backed legacy aliases for GPT-QModel
+Copyright 2026 ModelCloud.ai
+
+The historical RW/Falcon architecture and checkpoint metadata were published
+by the Technology Innovation Institute (TII). Those modeling sources credit
+BigScience's BLOOM implementation as their starting point. The authoritative
+Apache-2.0 release/relicensing revisions, inspected source and asset SHA-256
+digests are recorded in source_sha256.json and README.md. No historical
+checkpoint Python implementation or trained weights are redistributed here.
+
+The runtime imports Transformers' Apache-2.0 Falcon implementation, whose
+copyright notice credits the Falcon authors and HuggingFace Inc. team (2023).
+LICENSE preserves the Apache-2.0 license shipped with Transformers 5.23.0.
+ModelCloud adds config translation, definition ownership, a narrow eager
+ALiBi bias correction, and regression/qualification tests. Native parameter
+names, projections, decoder computation, caching and generation are reused.
+
+Historical TII Falcon LLM royalty-license text must not be substituted for
+the later Apache-2.0 release identified in the source manifest. The three
+pinned README revisions explicitly state Apache-2.0 and remove that earlier
+license. No assertion is made about uninspected Falcon releases or weights.
