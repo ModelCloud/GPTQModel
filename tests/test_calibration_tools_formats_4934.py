@@ -73,11 +73,14 @@ def _qwen2_5_tokenizer():
             "Qwen/Qwen2.5-0.5B-Instruct", local_files_only=True
         )
     except Exception as exc:
-        pytest.skip(
+        # Raise the skip exception explicitly: a bare ``pytest.skip(...)`` call
+        # leaves the ``except`` path as an implicit fall-through return, which
+        # mixes explicit and implicit returns in one function.
+        raise pytest.skip.Exception(
             "Qwen2.5-0.5B-Instruct tokenizer is not cached locally; "
             f"`AutoTokenizer.from_pretrained(..., local_files_only=True)` raised "
             f"{type(exc).__name__}: {exc}"
-        )
+        ) from exc
 
 
 def _hf_dataset():
