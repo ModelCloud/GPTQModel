@@ -59,7 +59,29 @@ flowchart TD
     style I fill:#ffcdd2,stroke:#b71c1c
 ```
 
-Processor loads use the resolved model trust. Definition pre-load hooks that
+Definitions can also declare `LocalModelLoader.processor_class`. For models
+requiring a processor, `BaseQModel.__init__` selects that packaged class
+directly and passes the already-selected model config and the underlying
+Tokenicer-normalized tokenizer. Checkpoint processor `auto_map`, API trust and
+the bypass cannot replace it. Class paths are validated by the same
+`gptqmodel.` package restriction. The packaged processor must construct its
+packaged image/video components directly rather than rediscovering checkpoint
+classes through an auto loader.
+
+```mermaid
+flowchart TD
+    A["BaseQModel.__init__"] --> B{"require_load_processor?"}
+    B -- no --> C["No processor load"]
+    B -- yes --> D{"LocalModelLoader declares processor_class?"}
+    D -- yes --> E["LocalModelLoader.load_processor: selected config and tokenizer"]
+    E --> F["Direct package processor; strip checkpoint code options"]
+    D -- no --> G["AutoProcessor.from_pretrained: resolved model trust"]
+    G --> H["Native processor or explicitly permitted checkpoint code"]
+    G --> I["Unsupported processor: load error"]
+    style I fill:#ffcdd2,stroke:#b71c1c
+```
+
+Other processor loads use the resolved model trust. Definition pre-load hooks that
 import checkpoint modules declare `before_model_load_requires_remote_code` and
 run only when remote trust has been resolved and the bypass is enabled.
 
@@ -76,6 +98,8 @@ from ..local import LocalModelLoader
 loader = LocalModelLoader(
     config_class="gptqmodel.models.model_name.configuration_model_name.ModelConfig",
     model_class="gptqmodel.models.model_name.modeling_model_name.ModelForCausalLM",
+    # Optional for definitions with require_load_processor=True.
+    processor_class="gptqmodel.models.model_name.processing_model_name.ModelProcessor",
 )
 ```
 
@@ -114,6 +138,7 @@ the responsibility of those engines.
 | Re-save | Loaded config directly through AutoConfig (`gptqmodel/models/writer.py:2587`) | Uses the same local/native/security policy |
 | Remote pre-load hooks | Could import checkpoint modules on a native load (`gptqmodel/models/loader.py:917-933`) | Declared remote hooks require resolved trust and the bypass |
 | Tokenizer config discovery | AutoTokenizer could reload checkpoint `AutoConfig` despite a policy-selected local config | `load_hf_tokenizer` supplies the selected config through the existing Tokenicer API |
+| Processor selection | Always entered `AutoProcessor.from_pretrained` (`464cfb05f:gptqmodel/models/base.py:1071`) | Optional definition-owned processor class receives selected config/tokenizer directly |
 
 Tests in `tests/test_local_model_loading.py` exercise public load rejection,
 actual checkpoint config and model imports under explicit bypass, permission
