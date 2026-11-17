@@ -87,8 +87,8 @@ class Apertus1p5TextConfig(PreTrainedConfig):
         Number of LM-head rows kept after pruning the multimodal token rows from the output projection; the
         retained output ids are `0..output_vocab_size - 1`. `None` means the head is unpruned (`vocab_size`
         rows). Input embeddings always use `vocab_size`, while returned logits use the LM-head width,
-        with or without `labels`. Released checkpoints
-        use `tie_word_embeddings=False` to keep the pruned head separate from the input embeddings.
+        with or without `labels`. Pruned heads require `tie_word_embeddings=False` in both the text
+        and multimodal configurations; full-width heads can be tied to the input embeddings.
 
     Example:
 
@@ -167,10 +167,21 @@ class Apertus1p5TextConfig(PreTrainedConfig):
         super().__post_init__(**kwargs)
 
     def validate_output_vocab_size(self):
+        self._validate_output_vocab_size()
+
+    def _validate_output_vocab_size(self, *, tie_word_embeddings: bool = False):
         if self.output_vocab_size is not None and not 1 <= self.output_vocab_size <= self.vocab_size:
             raise ValueError(
                 f"`output_vocab_size` ({self.output_vocab_size}) must be in `[1, vocab_size]` "
                 f"(vocab_size is {self.vocab_size})."
+            )
+        if self.output_vocab_size not in (None, self.vocab_size) and (
+            self.tie_word_embeddings or tie_word_embeddings
+        ):
+            raise ValueError(
+                "`tie_word_embeddings=True` is incompatible with a pruned `output_vocab_size` "
+                f"({self.output_vocab_size} < vocab_size={self.vocab_size}). Use a full-width LM head or set "
+                "`tie_word_embeddings=False` on both the text and multimodal configurations."
             )
 
 
@@ -184,6 +195,7 @@ class Apertus1p5Config(PreTrainedConfig):
         `text_config.output_vocab_size` physical rows when set, otherwise it uses the full
         `text_config.vocab_size`. Returned logits always use the LM-head width, with or without `labels`;
         input-only ids beyond the physical LM head have no output scores and cannot be generated.
+        Pruned heads reject `tie_word_embeddings=True` on either this wrapper or the nested text config.
     vision_config (`Union[dict, Apertus1p5VisionTokenizerConfig]`, *optional*):
         Configuration of the bundled EMU3.5-derived vision tokenizer.
     audio_config (`Union[dict, WavTokenizerEncoderConfig]`, *optional*):
@@ -228,7 +240,7 @@ class Apertus1p5Config(PreTrainedConfig):
 
     def validate_architecture(self):
         super().validate_architecture()
-        self.text_config.validate_output_vocab_size()
+        self.text_config._validate_output_vocab_size(tie_word_embeddings=self.tie_word_embeddings)
         if self.image_token_offset + self.vision_config.codebook_size != self.audio_token_offset:
             raise ValueError(
                 "The visual token range must end where the audio token range begins: expected "

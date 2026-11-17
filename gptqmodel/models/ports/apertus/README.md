@@ -82,6 +82,66 @@ cannot replace a package-owned implementation. Missing optional image/audio
 dependencies raise their normal dependency error only when that component is
 imported, not when the model definition is imported.
 
+## LM-head tying admission
+
+A pruned head has fewer physical rows than the input embedding table. Direct
+parameter tying would replace that head with the full table without updating
+its declared width, yielding too many logits and an invalid loss reshape. Prefix
+tying is not implemented: pruned heads explicitly require both applicable tying
+flags to be false. This guard is an intentional correction to the pinned source.
+
+| Head width | Text tying | Multimodal outer/nested tying | Admission |
+|---|---|---|---|
+| Full (`None` or `vocab_size`) | Either | Any combination | Supported |
+| Pruned (`output_vocab_size < vocab_size`) | False | Both false | Supported, separate parameters |
+| Pruned | True | Either true | Rejected before model allocation/initialization |
+
+For a full-width multimodal model, the **outer** `tie_word_embeddings` flag
+controls the outer LM head. A nested-only true flag does not tie that head;
+the flags are preserved rather than silently synchronized. Explicit full-width
+`output_vocab_size == vocab_size` canonicalizes to `None` during config creation.
+
+Both the strict configuration path and model constructors check this invariant.
+Constructor checks also cover mutable configurations whose tying flag or output
+width changes after successful validation. Rejection does not alter the caller's
+config; fixing its flags allows an ordinary retry.
+
+```mermaid
+flowchart TD
+    A["Configuration creation or supplied mutable config"] --> B{"Text or multimodal"}
+    B -->|text| T["Apertus1p5TextConfig.validate_output_vocab_size"]
+    B -->|multimodal| M["Apertus1p5Config.validate_architecture"]
+    T --> C["Apertus1p5TextConfig._validate_output_vocab_size"]
+    M --> C
+    C --> D{"Pruned head and any applicable tying flag"}
+    D -->|yes| E["Failure: ValueError, wrapped by strict config parsing"]
+    D -->|no| F["Construct decoder and LM head"]
+    F --> G["post_init: full-width tying or separate pruned parameters"]
+    style E fill:#fdd,stroke:#c00
+```
+
+| Mechanism | Before at `fee1477f5` | After |
+|---|---|---|
+| Text config | `configuration_apertus1p5.py:169-174`: range validation only | `configuration_apertus1p5.py:169-185`: range and tying admission |
+| Multimodal config | `configuration_apertus1p5.py:229-231`: outer tying ignored | `configuration_apertus1p5.py:241-243`: validate with outer plus nested tying |
+| Mutable config consumption | `modeling_apertus1p5.py:723-732,1027-1036`: model construction and post_init without revalidation | `modeling_apertus1p5.py:723-726,1028-1031`: validate before creating decoder/head |
+
+Regression command:
+
+```bash
+python -s -m pytest -q tests/test_apertus_local_port.py \
+  -k 'tied_pruned_head or supported_head_tying' --tb=short
+```
+
+Before the guard, 16 cases failed because invalid configs/constructors/public
+loads did not reject; 14 valid controls passed. With the guard, all 30 pass.
+The controls cover both architectures, full-width `None`/explicit sizes,
+untied pruned heads, every outer/inner flag combination, exact parameter aliases
+and widths, independent cross-entropy/finite loss, and two safetensors save/reload
+cycles with no missing/unexpected/mismatched keys and bitwise-identical tensors,
+logits and loss. Negative cases also exercise mutation in both directions and
+public invalid-checkpoint rejection followed by repair/retry at the same path.
+
 ## AWQ policy
 
 **Plain quantization only**, for native Apertus and both 1.5 aliases, including
