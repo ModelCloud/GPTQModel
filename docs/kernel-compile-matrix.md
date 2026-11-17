@@ -106,7 +106,7 @@ python -m tests.kernels.gen_compile_matrix
 | `TorchAtenLinear` | `torch_aten_kernel` | `EAGER` | no | no |
 | `TorchCpuAvx512AwqLinear` | `torch_cpu_avx512_awq` | `EAGER` | no | no |
 | `TorchCpuAvx512Linear` | `torch_cpu_avx512` | `EAGER` | no | no |
-| `TorchFP8Linear` | `fp8` | `CUDAGRAPH` | yes | no |
+| `TorchFP8Linear` | `fp8` | `CUDAGRAPH` | yes | yes |
 | `TorchFusedAwqLinear` | `torch_fused_awq` | `EAGER` | no | no |
 | `TorchFusedLinear` | `torch_fused` | `EAGER` | no | no |
 | `TorchInt8AwqLinear` | `torch_int8_awq` | `EAGER` | no | no |
