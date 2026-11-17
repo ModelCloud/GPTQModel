@@ -333,6 +333,7 @@ class TTLlama:
         decode_k_chunk: Optional[int] = None,
         grids: Optional[dict] = None,
         check_drift: bool = True,
+        max_traces: int = 2,
     ):
         ttnn = import_ttnn()
         self.ttnn = ttnn
@@ -381,7 +382,9 @@ class TTLlama:
         self.cos_table = self._put(self.cos.reshape(1, 1, *self.cos.shape), ttnn.bfloat16, layout=rm)
         self.sin_table = self._put(self.sin.reshape(1, 1, *self.sin.shape), ttnn.bfloat16, layout=rm)
         self.page_table = ttnn.from_torch(self.pool.table, dtype=ttnn.int32, device=device)
-        self._trace = None
+        self.max_traces = max(1, int(max_traces))
+        self._traces = {}
+        self.active = DECODE_BATCH
 
     # -- upload -----------------------------------------------------------
 
@@ -699,44 +702,106 @@ class TTLlama:
         return [ttnn.to_device(t, self.device) for t in host] if on_device else host
 
     def capture(self, tokens, positions, active: int = DECODE_BATCH):
-        """Capture :meth:`decode_step` as a trace (needs a trace region on the device)."""
+        """Capture :meth:`decode_step` as a trace for one ``active`` width.
+
+        Traces are kept per width: batched decode shrinks ``active`` as requests
+        finish, and re-capturing on every change would pay the compile cost
+        (measured at seconds) each time. Capturing the same width twice only
+        refreshes its inputs.
+        """
 
         ttnn = self.ttnn
-        self.release()
+        cached = self._traces.get(active)
+        if cached is not None:
+            self._copy_inputs(tokens, positions, cached[1])
+            self.active = active
+            return cached[2]
+
         device_inputs = self.decode_inputs(tokens, positions, on_device=True)
         ttnn.deallocate(self.decode_step(*device_inputs, active=active))  # compile outside the trace
         device_inputs = self.decode_inputs(tokens, positions, on_device=True)
         trace = ttnn.begin_trace_capture(self.device, cq_id=0)
         out = self.decode_step(*device_inputs, active=active)
         ttnn.end_trace_capture(self.device, trace, cq_id=0)
-        self._trace = (trace, device_inputs, out)
+        while len(self._traces) >= self.max_traces:
+            # Every trace pins its own region on the device, so keep the newest
+            # widths only: a batch drains through a few buckets at most.
+            evicted, (old_trace, _old_inputs, _old_out) = next(iter(self._traces.items()))
+            ttnn.release_trace(self.device, old_trace)
+            self._traces.pop(evicted)
+        self._traces[active] = (trace, device_inputs, out)
         self.active = active
-
-    def replay(self, tokens=None, positions=None, *, blocking: bool = False):
-        """Load new inputs into the captured tensors (optional) and replay the step."""
-
-        ttnn = self.ttnn
-        if self._trace is None:
-            raise RuntimeError("capture() a trace before replay()")
-        trace, device_inputs, out = self._trace
-        if tokens is not None:
-            for host, device in zip(self.decode_inputs(tokens, positions), device_inputs):
-                ttnn.copy_host_to_device_tensor(host, device)
-        ttnn.execute_trace(self.device, trace, cq_id=0, blocking=blocking)
         return out
 
-    def read_ids(self, ids) -> torch.Tensor:
-        return self.ttnn.to_torch(ids).reshape(-1)[: self.users].to(torch.int64)
+    def _copy_inputs(self, tokens, positions, device_inputs) -> None:
+        """Load this step's inputs into a captured trace's device tensors."""
+
+        for host, device in zip(self.decode_inputs(tokens, positions), device_inputs):
+            self.ttnn.copy_host_to_device_tensor(host, device)
+
+    def replay(self, tokens=None, positions=None, *, active: Optional[int] = None,
+               blocking: bool = False):
+        """Replay the trace for ``active`` (defaults to the last captured width)."""
+
+        if active is None:
+            active = self.active
+        if active not in self._traces:
+            if tokens is None or positions is None:
+                raise RuntimeError(f"no trace captured for active={active}")
+            self.capture(tokens, positions, active)
+        trace, device_inputs, out = self._traces[active]
+        if tokens is not None:
+            self._copy_inputs(tokens, positions, device_inputs)
+        self.ttnn.execute_trace(self.device, trace, cq_id=0, blocking=blocking)
+        return out
 
     def release(self):
-        if self._trace is not None:
-            self.ttnn.release_trace(self.device, self._trace[0])
-            self._trace = None
+        for trace, _inputs, _out in self._traces.values():
+            self.ttnn.release_trace(self.device, trace)
+        self._traces = {}
+        self.active = DECODE_BATCH
 
     # -- generation -------------------------------------------------------------
 
-    def generate(self, prompts, max_new_tokens: int, *, eos_token_ids=(), use_trace: bool = True):
-        """Greedy-generate for up to 32 prompts: chunked prefill, then batched decode."""
+    @staticmethod
+    def _active_bucket(count: int) -> int:
+        """Smallest decode width that covers ``count`` live slots."""
+
+        for bucket in (1, 2, 4, 8, 16, 32):
+            if bucket >= count:
+                return bucket
+        return DECODE_BATCH
+
+    def _compact_slots(self, order: Sequence[int], current: Sequence[int]) -> None:
+        """Move the live slots to the front of the page table.
+
+        ``current`` is the user occupying each row *before* the move, so the
+        source row of a user is its position in ``current`` - not the user id,
+        which stops matching the row after the first compaction. The KV blocks
+        stay where they are; only the page-table rows move, which is what makes
+        shrinking ``active`` cheap. Rows past the live slots are zeroed so idle
+        slots keep writing to the scratch block.
+        """
+
+        table = self.pool.table
+        position = {user: slot for slot, user in enumerate(current)}
+        sources = torch.as_tensor([position[user] for user in order], dtype=torch.long)
+        rows = table.index_select(0, sources).clone()
+        table.zero_()
+        table[: len(order)] = rows
+        self._sync_page_table()
+
+    def generate(self, prompts, max_new_tokens: int, *, eos_token_ids=(), use_trace: bool = True,
+                 shrink_active: bool = True):
+        """Greedy-generate for up to 32 prompts: chunked prefill, then batched decode.
+
+        Flash-decode splits the cores between the query rows it is given, so the
+        width of a decode step is what a step costs: at 16k context the same
+        layer takes 3.4 ms with 32 rows and 0.13 ms with one. ``shrink_active``
+        keeps the width at the smallest bucket covering the requests that are
+        still generating, moving finished ones out of the leading rows, so a
+        batch that drains to one sequence stops paying for 32.
+        """
 
         if not prompts or len(prompts) > self.users:
             raise ValueError(f"need 1..{self.users} prompts, got {len(prompts)}")
@@ -747,35 +812,60 @@ class TTLlama:
         positions = [0] * self.users
         for user, prompt in enumerate(prompts):
             if len(prompt) + max_new_tokens > self.max_context:
-                raise ValueError(f"prompt {user}: {len(prompt)} + {max_new_tokens} exceeds {self.max_context}")
+                raise ValueError(f"prompt {user}: {len(prompt)} + {max_new_tokens} exceeds the max context")
             first = int(self.prefill(user, prompt).argmax())
             generated[user].append(first)
             done[user] = first in eos or max_new_tokens <= 1
             self.pool.reserve(user, len(prompt) + max_new_tokens)
             tokens[user], positions[user] = first, len(prompt)
         self._sync_page_table()
-        active = next(b for b in (1, 2, 4, 8, 16, 32) if b >= len(prompts))
+
+        order = [user for user in range(len(prompts)) if not done[user]]
+        if shrink_active:
+            # Finished-on-first-token slots never need a decode row.
+            self._compact_slots(order, list(range(len(prompts))))
+        active = self._active_bucket(len(order))
         if use_trace:
-            self.capture(tokens, positions, active)
+            self.capture(self._slot_view(tokens, order), self._slot_view(positions, order), active)
+
         while not all(done):
+            slot_tokens = self._slot_view(tokens, order)
+            slot_positions = self._slot_view(positions, order)
             if use_trace:
-                ids = self.read_ids(self.replay(tokens, positions))
+                ids = self.read_ids(self.replay(slot_tokens, slot_positions, active=active))
             else:
-                ids = self.read_ids(self.decode_step(*self.decode_inputs(tokens, positions, on_device=True),
-                                                     active=active))
-            for user in range(len(prompts)):
+                ids = self.read_ids(self.decode_step(*self.decode_inputs(slot_tokens, slot_positions,
+                                                                        on_device=True), active=active))
+            for slot, user in enumerate(order):
                 if done[user]:
                     continue
-                token = int(ids[user])
+                token = int(ids[slot])
                 generated[user].append(token)
                 done[user] = token in eos or len(generated[user]) >= max_new_tokens
                 tokens[user], positions[user] = token, positions[user] + 1
+
+            if shrink_active:
+                remaining = [user for user in order if not done[user]]
+                if len(remaining) < len(order):
+                    self._compact_slots(remaining, order)
+                    order = remaining
+                    width = self._active_bucket(len(order))
+                    if width != active:
+                        active = width
+                        if use_trace:
+                            self.capture(self._slot_view(tokens, order),
+                                         self._slot_view(positions, order), active)
         if use_trace:
             self.release()
         for user in range(len(prompts)):
             self.pool.release(user)
         self._sync_page_table()
         return generated
+
+    def _slot_view(self, values: Sequence[int], order: Sequence[int]) -> list:
+        """Per-slot view of a per-user array, padded to the decode width."""
+
+        return [values[user] for user in order] + [0] * (self.users - len(order))
 
 
 __all__ = [

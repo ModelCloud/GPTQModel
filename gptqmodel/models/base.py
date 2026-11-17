@@ -134,6 +134,7 @@ from ._const import (
 )
 from .fusable import FusableConfig, require_fusable_config
 from .loader import ModelLoader, _setup_rotation_online_had
+from .local import LocalModelLoader
 from .module_plan import ModulePlan
 from .quantization_run_plan import ProcessorStep, QuantizationRunPlan, processor_class
 from .shared_input import SharedInputPlan, build_shared_input_plan
@@ -156,8 +157,10 @@ if TYPE_CHECKING:
 # Processor steps whose quantization GEMMs must run on rocBLAS to be
 # reproducible across processes (issues #4075, #4092, #4123, #4460).
 #
-# GPTQ, QQQ, VPTQ, MACaQ and calibrated FP8 GSQ accumulate an input
+# GPTQ, QQQ, VPTQ, MACaQ, calibrated FP8 GSQ and EoRA accumulate an input
 # Hessian/Gram from the calibration activations; EXL3 reuses GPTQ's capture.
+# EoRA runs after the primary, so an AWQ + EoRA plan would otherwise keep its
+# adapter Gram on hipBLASLt and produce a different adapter per process (#4614).
 # ParoQuant accumulates no Hessian, but its rotation optimization runs
 # fp16/bf16 GEMMs and hipBLASLt selects kernels per process, so two runs with
 # the same seed produced different checkpoints (21.26 vs 21.44 PPL on ROCm).
@@ -171,6 +174,7 @@ _DETERMINISTIC_BLAS_PROCESSOR_STEPS = frozenset({
     ProcessorStep.PARO,
     ProcessorStep.EXL3,
     ProcessorStep.FP8_GSQ,
+    ProcessorStep.EORA,
 })
 
 
@@ -180,6 +184,8 @@ def _needs_deterministic_hessian(run_plan: QuantizationRunPlan) -> bool:
     The name predates ParoQuant: the original set accumulated an input
     Hessian/Gram. ParoQuant is included because hipBLASLt chooses GEMM kernels
     per process, which made checkpoints from identical seeded runs differ.
+    EoRA is included for its own fp32 input Gram and `eigh`; without it an
+    AWQ + EoRA plan produced a different adapter in every process (#4614).
     """
 
     return not _DETERMINISTIC_BLAS_PROCESSOR_STEPS.isdisjoint(run_plan.processors)
@@ -1068,7 +1074,15 @@ class BaseQModel(nn.Module):
         self.quant_log = []
 
         if self.require_load_processor:
-            self.processor = AutoProcessor.from_pretrained(model_local_path, trust_remote_code=self.trust_remote_code)
+            loader = type(self).loader
+            if isinstance(loader, LocalModelLoader) and loader.processor_class is not None:
+                self.processor = loader.load_processor(
+                    model_local_path,
+                    config=self.model.config,
+                    tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+                )
+            else:
+                self.processor = AutoProcessor.from_pretrained(model_local_path, trust_remote_code=self.trust_remote_code)
 
         # apply patching of broken trust_remote_code models here
         if self.require_monkeypatch:
@@ -5895,6 +5909,25 @@ class BaseQModel(nn.Module):
             if spec is not None and AWQ_NO_SCALE_SOURCE_FLAG in spec.flags:
                 log.debug(
                     "awq_get_modules_for_scaling: skipping scaling group with declared non-source prev_op `%s`",
+                    prev_name,
+                )
+                continue
+            # An excluded projection is not a compensated producer: dividing its
+            # output rows changes a module that stays in the source dtype and
+            # nothing multiplies it back, so the group cannot be
+            # output-preserving. Only a gain norm (1-D gain, divided through
+            # `scale_ln_fcs`) or a projection the plan quantizes may absorb a
+            # fold. #4651: Jamba's excluded `mamba.dt_proj` became the source
+            # for `mamba.x_proj` and was rescaled by up to 70%.
+            source_weight = getattr(prev_op, "weight", None)
+            if (
+                spec is not None
+                and not spec.quantize
+                and isinstance(source_weight, torch.Tensor)
+                and source_weight.ndim == 2
+            ):
+                log.debug(
+                    "awq_get_modules_for_scaling: skipping scaling group with non-quantized prev_op `%s`",
                     prev_name,
                 )
                 continue

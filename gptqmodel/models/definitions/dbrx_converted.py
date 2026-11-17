@@ -4,17 +4,31 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 class DbrxConvertedQModel(BaseQModel):
-    # dbrx_converted requires custom model code
-    require_trust_remote_code = True
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.dbrx_converted.configuration_dbrx.DbrxConfig",
+        model_class="gptqmodel.models.ports.dbrx_converted.modeling_dbrx.DbrxForCausalLM",
+    )
 
     # DBRX stores its expert cardinality under the nested ``ffn_config``; the
     # base ``_expert_count_config`` resolver follows that nesting.
     dynamic_expert_index = "moe_num_experts"
 
     pre_lm_head_norm_module = "transformer.norm_f"
+
+    @classmethod
+    def awq_input_feature_aggregation(cls, module_name):
+        # Plain quantization has no scale group consuming the shared pre-router input.
+        if module_name == "ffn":
+            return {"mode": "token_rows"}
+        return super().awq_input_feature_aggregation(module_name)
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Clipped QKV and routed expert fan-out are not qualified for scale folding.
+        return []
 
     module_tree= [
         "transformer",

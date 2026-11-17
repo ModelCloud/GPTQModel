@@ -48,7 +48,7 @@
     },
     "agnes": {
       "definition": "AgnesQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned hybrid multimodal implementation; fusion executor and recurrent replay remain unqualified."
     },
     "apertus": {
       "definition": "ApertusQModel",
@@ -89,11 +89,11 @@
     },
     "apertus1p5": {
       "definition": "Apertus1p5QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned multimodal implementation; fusion executor remains unqualified."
     },
     "apertus1p5_text": {
       "definition": "Apertus1p5TextQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned Apertus 1.5 text implementation; fusion executor remains unqualified."
     },
     "axk2": {
       "definition": "AXK2QModel",
@@ -101,15 +101,15 @@
     },
     "baichuan": {
       "definition": "BaiChuanQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned fused-QKV Baichuan implementation; fusion executor remains unqualified."
     },
     "bailing_hybrid": {
       "definition": "BailingMoeQModel",
-      "reason": "No compatible native projection forward: projections already combined, conditional, or preprocessed."
+      "reason": "Package-owned dense/MLA/recurrent/MoE layouts; no qualified fused executor."
     },
     "bailing_moe": {
       "definition": "BailingMoeQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned dense/MLA/recurrent/MoE layouts; no qualified fused executor."
     },
     "bloom": {
       "definition": "BloomQModel",
@@ -117,7 +117,7 @@
     },
     "brumby": {
       "definition": "BrumbyQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned power-retention implementation; fusion executor and retention replay remain unqualified."
     },
     "chatglm": {
       "definition": "ChatGLMQModel",
@@ -363,11 +363,11 @@
     },
     "dbrx_converted": {
       "definition": "DbrxConvertedQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned converted DBRX eager attention; fused projection execution has not been qualified."
     },
     "deci": {
       "definition": "DeciLMQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Heterogeneous no-op, linear and GQA attention/MLP layouts have no qualified fused executor."
     },
     "deepseek_ocr2": {
       "definition": "DeepSeekOCR2QModel",
@@ -464,11 +464,11 @@
     },
     "deepseek_v2": {
       "definition": "DeepSeekV2QModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "MLA has normalized low-rank Q/KV stages; no dense or expert projection fusion is qualified."
     },
     "deepseek_v3": {
       "definition": "DeepSeekV3QModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Native MLA low-rank attention and routed/shared experts have no independently qualified fused executor."
     },
     "deepseek_v32": {
       "definition": "DeepSeekV32QModel",
@@ -476,7 +476,7 @@
     },
     "deepseek_v4": {
       "definition": "DeepSeekV4QModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Native sliding/compressed attention and hash/routed experts have no independently qualified fused executor."
     },
     "deepseek_vl": {
       "definition": "DeepSeekVLQModel",
@@ -659,7 +659,7 @@
     },
     "dream": {
       "definition": "DreamQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Bidirectional diffusion attention and gated MLP have no qualified fused executor."
     },
     "ernie4_5": {
       "definition": "Ernie4_5QModel",

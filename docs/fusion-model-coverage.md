@@ -206,26 +206,26 @@ layout alone does not authorize it.
 
 | Model type | Definition | Reason |
 | --- | --- | --- |
-| `agnes` | `AgnesQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `apertus1p5` | `Apertus1p5QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `apertus1p5_text` | `Apertus1p5TextQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `agnes` | `AgnesQModel` | Package-owned hybrid multimodal implementation; fusion executor and recurrent replay remain unqualified. |
+| `apertus1p5` | `Apertus1p5QModel` | Package-owned multimodal implementation; fusion executor remains unqualified. |
+| `apertus1p5_text` | `Apertus1p5TextQModel` | Package-owned Apertus 1.5 text implementation; fusion executor remains unqualified. |
 | `axk2` | `AXK2QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `baichuan` | `BaiChuanQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `bailing_hybrid` | `BailingMoeQModel` | No compatible native projection forward: projections already combined, conditional, or preprocessed. |
-| `bailing_moe` | `BailingMoeQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `baichuan` | `BaiChuanQModel` | Package-owned fused-QKV Baichuan implementation; fusion executor remains unqualified. |
+| `bailing_hybrid` | `BailingMoeQModel` | Package-owned dense/MLA/recurrent/MoE layouts; no qualified fused executor. |
+| `bailing_moe` | `BailingMoeQModel` | Package-owned dense/MLA/recurrent/MoE layouts; no qualified fused executor. |
 | `bloom` | `BloomQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `brumby` | `BrumbyQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `brumby` | `BrumbyQModel` | Package-owned power-retention implementation; fusion executor and retention replay remain unqualified. |
 | `chatglm` | `ChatGLMQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `codegen` | `CodeGenQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `dbrx` | `DbrxQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `dbrx_converted` | `DbrxConvertedQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `deci` | `DeciLMQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `deepseek_v2` | `DeepSeekV2QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `deepseek_v3` | `DeepSeekV3QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
+| `dbrx_converted` | `DbrxConvertedQModel` | Package-owned converted DBRX eager attention; fused projection execution has not been qualified. |
+| `deci` | `DeciLMQModel` | Heterogeneous no-op, linear and GQA attention/MLP layouts have no qualified fused executor. |
+| `deepseek_v2` | `DeepSeekV2QModel` | MLA has normalized low-rank Q/KV stages; no dense or expert projection fusion is qualified. |
+| `deepseek_v3` | `DeepSeekV3QModel` | Native MLA low-rank attention and routed/shared experts have no independently qualified fused executor. |
 | `deepseek_v32` | `DeepSeekV32QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `deepseek_v4` | `DeepSeekV4QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
+| `deepseek_v4` | `DeepSeekV4QModel` | Native sliding/compressed attention and hash/routed experts have no independently qualified fused executor. |
 | `deepseek_vl_v2` | `DeepSeekVLV2QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `dream` | `DreamQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `dream` | `DreamQModel` | Bidirectional diffusion attention and gated MLP have no qualified fused executor. |
 | `ernie4_5_moe_vl` | `Ernie4_5_VLMoeQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `exaone` | `ExaOneQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `exaone4_5_text` | `Exaone4QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |

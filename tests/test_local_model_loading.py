@@ -3,6 +3,7 @@
 """The loading policy applies before config Python, including retries/reloads."""
 
 import json
+import struct
 from types import SimpleNamespace
 
 import pytest
@@ -91,6 +92,33 @@ def test_native_model_ignores_checkpoint_model_code(tmp_path, monkeypatch, bypas
     assert not marker.exists()
 
 
+def test_public_load_preserves_native_max_seq_len(tmp_path):
+    from transformers import MptConfig, MptForCausalLM
+
+    from gptqmodel.quantization import QuantizeConfig
+    from tests.test_internlm_local_port import _write_tokenizer
+
+    torch.manual_seed(31)
+    config = MptConfig(
+        vocab_size=32, d_model=16, n_heads=2, n_layers=1, max_seq_len=8192,
+        expansion_ratio=2,
+    )
+    model = MptForCausalLM(config).eval()
+    model.save_pretrained(tmp_path)
+    _write_tokenizer(tmp_path)
+    assert "max_position_embeddings" not in config.to_dict()
+    assert config.to_dict()["max_seq_len"] == 8192
+
+    loaded = GPTQModel.load(
+        str(tmp_path), device="cpu", dtype=torch.float32,
+        quantize_config=QuantizeConfig(bits=4, group_size=16, offload_to_disk=False),
+    )
+    assert loaded.model.seqlen == 8192
+    ids = torch.tensor([[1, 7, 9]])
+    with torch.inference_mode():
+        torch.testing.assert_close(loaded.model(ids).logits, model(ids).logits)
+
+
 def test_local_config_and_loader_win_over_auto_map_even_with_bypass(tmp_path, monkeypatch):
     path = tmp_path / "local"
     marker = checkpoint(path, "minimax")
@@ -122,6 +150,57 @@ def test_config_selection_uses_subfolder_for_policy_and_dispatch(tmp_path):
     marker = checkpoint(root / "nested", "llama")
     assert load_model_config(root, subfolder="nested", trust_remote_code=True).model_type == "llama"
     assert check_and_get_model_definition(str(root), trust_remote_code=True, subfolder="nested").__name__ == "LlamaQModel"
+    assert not marker.exists()
+
+
+def _gguf_config(path):
+    """Tiny metadata-only GGUF, parsed by Transformers' actual reader."""
+    def string(value):
+        encoded = value.encode()
+        return struct.pack("<Q", len(encoded)) + encoded
+
+    fields = [("general.architecture", 8, string("llama"))]
+    for key, value in {"context_length": 32, "embedding_length": 16,
+                       "feed_forward_length": 32, "block_count": 1,
+                       "attention.head_count": 2, "attention.head_count_kv": 1}.items():
+        fields.append(("llama." + key, 4, struct.pack("<I", value)))
+    payload = b"GGUF" + struct.pack("<IQQ", 3, 0, len(fields))
+    for key, tag, value in fields:
+        payload += string(key) + struct.pack("<I", tag) + value
+    path.write_bytes(payload + b"\0" * (-len(payload) % 32))
+
+
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("decoy_config", [False, True])
+@pytest.mark.parametrize("subfolder", ["", "nested"])
+def test_gguf_policy_reads_selected_metadata_instead_of_json(tmp_path, monkeypatch, trust, decoy_config, subfolder):
+    from gptqmodel.utils.hf import _patch_transformers_prism_gguf_compat
+
+    # This is the runtime installed by the normal public GGUF path; do not
+    # replace the decoder or stub the metadata returned by Transformers.
+    _patch_transformers_prism_gguf_compat(api_name="test")
+    root = tmp_path / "checkpoint"
+    path = root / subfolder
+    if decoy_config:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        marker = checkpoint(path, "bailing_hybrid")
+        decoy = json.loads((path / "config.json").read_text())
+        decoy["q_lora_rank"] = 8
+        (path / "config.json").write_text(json.dumps(decoy))
+    else:
+        path.mkdir(parents=True)
+        marker = path / "EXECUTED"
+    _gguf_config(path / "tiny.gguf")
+    selected = {"gguf_file": "tiny.gguf", "subfolder": subfolder, "local_files_only": True}
+    assert check_and_get_model_definition(str(root), trust_remote_code=trust, **selected).__name__ == "LlamaQModel"
+    config = load_model_config(root, trust_remote_code=trust, **selected)
+    assert config.model_type == "llama"
+    assert config.hidden_size == 16
+    assert config.num_hidden_layers == 1
+    # Permission changes must not make an unrelated JSON config authoritative.
+    monkeypatch.setenv(BYPASS_ENV, "1")
+    assert load_model_config(root, trust_remote_code=trust, **selected).hidden_size == 16
+    assert check_and_get_model_definition(str(root), trust_remote_code=trust, **selected).__name__ == "LlamaQModel"
     assert not marker.exists()
 
 
@@ -185,15 +264,22 @@ def test_external_engine_helpers_require_security_bypass(monkeypatch, backend):
         load("unported-model", trust_remote_code=True)
 
 
-def test_unported_layout_fails_instead_of_loading_incompatible_native_model(tmp_path):
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("bypass", [False, True])
+def test_local_mla_layout_ignores_checkpoint_python(tmp_path, monkeypatch, trust, bypass):
+    from gptqmodel.models.ports.bailing_moe.configuration_bailing import BailingConfig
+
+    if bypass:
+        monkeypatch.setenv(BYPASS_ENV, "1")
     path = tmp_path / "ling"
     marker = checkpoint(path, "bailing_hybrid")
     payload = json.loads((path / "config.json").read_text())
     payload["q_lora_rank"] = 16
     (path / "config.json").write_text(json.dumps(payload))
-    for trust in (False, True):
-        with pytest.raises(RemoteCodeSecurityError):
-            load_model_config(path, trust_remote_code=trust)
+    config = load_model_config(path, trust_remote_code=trust)
+    assert isinstance(config, BailingConfig)
+    assert config.q_lora_rank == 16
+    assert resolve_trust_remote_code(path, trust_remote_code=trust) is False
     assert not marker.exists()
 
 

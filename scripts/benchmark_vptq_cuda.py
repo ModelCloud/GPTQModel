@@ -164,6 +164,13 @@ def _benchmark_module(
         torch_forward = lambda: VPTQLinear.forward(module, x)
         from gptqmodel.utils.vptq_cuda import vptq_cuda_linear
 
+        # The native op requires the bias in the activation dtype; the module
+        # forward narrows an exactly representable stored bias itself. Narrow
+        # it here too, or the direct call rejects the stored FP32 buffer.
+        narrow_bias = getattr(module, "bias", None)
+        if narrow_bias is not None and narrow_bias.dtype != x.dtype:
+            narrow_bias = narrow_bias.to(dtype=x.dtype)
+
         fused_forward = lambda: vptq_cuda_linear(
             x.contiguous(), module.indices, module.centroids.weight,
             module.res_centroids.weight if module.enable_residual else None,
@@ -172,7 +179,7 @@ def _benchmark_module(
             module.inverse_perm if module.enable_perm else None,
             module.weight_scale if module.enable_norm else None,
             module.weight_bias if module.enable_norm else None,
-            getattr(module, "bias", None),
+            narrow_bias,
             group_size=module.group_size, in_features=module.in_features,
             out_features=module.out_features, vector_len=module.vector_len,
             outlier_size=module.outlier_size,

@@ -18,7 +18,7 @@ class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Ling-2.6-flash"  # inclusionAI/Ling-2.6-flash
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     # TODO, update scores
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {

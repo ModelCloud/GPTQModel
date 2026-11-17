@@ -15,7 +15,7 @@ class TestDeepseekV4(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW = NATIVE_ARC_CHALLENGE_ACC_NORM
     NATIVE_ARC_CHALLENGE_ACC_FAST = NATIVE_ARC_CHALLENGE_ACC_SLOW
     NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "chat_template": True,
@@ -28,6 +28,5 @@ class TestDeepseekV4(ModelTest):
     USE_FLASH_ATTN = False
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
 
-    def test_deepseekv2lite(self):
+    def test_deepseek_v4(self):
         self.quantize_and_evaluate()
-

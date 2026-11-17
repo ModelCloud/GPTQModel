@@ -172,3 +172,199 @@ def test_concurrent_first_use_of_the_exl3_dispatch_caches(attempt):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "OK" in result.stdout
+
+
+_STREAM_SCRATCH_SCRIPT = """
+import os
+import sys
+import threading
+import time
+
+import torch
+
+from gptqmodel.exllamav3.ext import prewarm_exllamav3_extension
+from gptqmodel.exllamav3.modules.quant.exl3 import LinearEXL3
+
+if not torch.cuda.is_available() or torch.version.hip is not None:
+    print("NO_CUDA")
+    sys.exit(4)
+if not prewarm_exllamav3_extension():
+    print("EXTENSION_UNAVAILABLE")
+    sys.exit(5)
+
+device = torch.device("cuda:0")
+
+
+def make(k, n, seed, K=4):
+    torch.manual_seed(seed)
+    trellis = torch.randint(-32768, 32767, (k // 16, n // 16, 16 * K), dtype=torch.int16, device=device)
+    suh = (torch.randint(0, 2, (k,), device=device) * 2 - 1).half()
+    svh = (torch.randint(0, 2, (n,), device=device) * 2 - 1).half()
+    mcg = torch.tensor(3417055213 - 2**32, dtype=torch.int32, device=device)
+    return LinearEXL3(None, k, n, suh=suh, svh=svh, trellis=trellis, mcg=mcg, out_dtype=torch.half)
+
+
+# M <= 32 takes the tensor-core GEMM: M == 1 exercises the bsz-1 Hadamard
+# buffer, M == 4/8 the split-K lock array.  M == 256 takes hgemm and its cuBLAS
+# workspace.  Two modules per case mean two threads share a module, so a
+# per-module buffer is not enough either.
+K, N = 2048, 512
+CASES = [(1, 400), (4, 300), (8, 300), (256, 300)]
+THREADS = 4
+ITERATIONS = {m: iters for m, iters in CASES}
+
+modules = [make(K, N, seed) for seed in (11, 12)]
+xs = {}
+refs = {}
+for m, _ in CASES:
+    torch.manual_seed(1000 + m)
+    xs[m] = torch.randn((m, K), dtype=torch.float16, device=device)
+    refs[m] = [module.forward(xs[m], {}).clone() for module in modules]
+torch.cuda.synchronize()
+
+bad = [0] * (THREADS * len(CASES))
+done = [0] * (THREADS * len(CASES))
+rel = [0.0] * (THREADS * len(CASES))
+errors = []
+
+
+def worker(slot, module_index, m):
+    try:
+        stream = torch.cuda.Stream(device=device)
+        with torch.cuda.stream(stream):
+            for _ in range(ITERATIONS[m]):
+                y = modules[module_index].forward(xs[m], {})
+                if not torch.equal(y, refs[m][module_index]):
+                    bad[slot] += 1
+                    rel[slot] = max(
+                        rel[slot],
+                        ((y - refs[m][module_index]).abs().max() / refs[m][module_index].abs().max()).item(),
+                    )
+                done[slot] += 1
+        stream.synchronize()
+    except BaseException as exc:  # noqa: BLE001 - report, do not mask
+        errors.append(f"{type(exc).__name__}: {exc}")
+
+
+workers = []
+for case_index, (m, _) in enumerate(CASES):
+    for thread_index in range(THREADS):
+        slot = case_index * THREADS + thread_index
+        workers.append(threading.Thread(target=worker, args=(slot, thread_index % len(modules), m)))
+
+for item in workers:
+    item.start()
+
+last = None
+progress_at = time.time()
+while any(item.is_alive() for item in workers):
+    time.sleep(1)
+    if done != last:
+        last = list(done)
+        progress_at = time.time()
+    elif time.time() - progress_at > 90:
+        print("HANG", list(done), list(bad), flush=True)
+        os._exit(3)
+
+if errors:
+    print("ERRORS:", errors)
+    sys.exit(8)
+
+for case_index, (m, _) in enumerate(CASES):
+    for thread_index in range(THREADS):
+        slot = case_index * THREADS + thread_index
+        if done[slot] != ITERATIONS[m]:
+            print("INCOMPLETE", m, slot, done[slot])
+            sys.exit(6)
+        if bad[slot]:
+            print(f"MISMATCH M={m} thread={thread_index} bad={bad[slot]}/{ITERATIONS[m]} rel={rel[slot]:.3f}")
+            sys.exit(6)
+
+print("OK")
+sys.exit(0)
+"""
+
+
+def test_exl3_linears_do_not_share_a_writable_kernel_buffer(monkeypatch):
+    """Two EXL3 layers with the same shape must not alias kernel scratch.
+
+    The bsz == 1 decode path used to take the Hadamard input from
+    ``g_tensor_cache``, keyed by ``(device, (1, in_features), dtype)``, so
+    every module with the same width shared one writable buffer (issue
+    #4619).  A stub kernel object records the tensors the module hands it, and
+    the test asserts the two modules have no tensor in common and leave no
+    process-wide bsz-1 buffer behind.  The kernel itself is not needed, so this
+    runs on a host without the EXL3 extension.
+    """
+
+    import gptqmodel.exllamav3.modules.quant.exl3 as exl3_module
+    from gptqmodel.exllamav3.util.tensor import g_tensor_cache
+
+    class _RecordingBC:
+        def __init__(self, *args):
+            self.tensors = [arg for arg in args if isinstance(arg, torch.Tensor)]
+
+    monkeypatch.setattr(exl3_module.ext, "BC_LinearEXL3", _RecordingBC)
+    saved_cache = dict(g_tensor_cache.cache)
+    g_tensor_cache.cache.clear()
+    try:
+        def build(seed):
+            torch.manual_seed(seed)
+            k, n, K = 256, 128, 4
+            return exl3_module.LinearEXL3(
+                None,
+                k,
+                n,
+                suh=(torch.randint(0, 2, (k,)) * 2 - 1).half(),
+                svh=(torch.randint(0, 2, (n,)) * 2 - 1).half(),
+                trellis=torch.randint(-32768, 32767, (k // 16, n // 16, 16 * K), dtype=torch.int16),
+                mcg=torch.tensor(3417055213 - 2**32, dtype=torch.int32),
+                out_dtype=torch.half,
+            )
+
+        first, second = build(1), build(2)
+        first_ptrs = {tensor.data_ptr() for tensor in first.bc.tensors}
+        second_ptrs = {tensor.data_ptr() for tensor in second.bc.tensors}
+
+        assert first_ptrs and second_ptrs
+        assert first_ptrs.isdisjoint(second_ptrs), "two EXL3 layers alias a kernel buffer"
+        assert g_tensor_cache.cache == {}, "EXL3 kept a process-wide bsz-1 scratch buffer"
+    finally:
+        g_tensor_cache.cache.clear()
+        g_tensor_cache.cache.update(saved_cache)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="EXL3 tensor-core GEMM is NVIDIA-only",
+)
+def test_concurrent_streams_do_not_share_exl3_kernel_scratch():
+    """Concurrent EXL3 forwards on separate streams must be bitwise correct.
+
+    Each M exercises a different shared buffer: M == 1 the bsz-1 Hadamard
+    input, M == 4/8 the split-K lock array, M == 256 the cuBLAS hgemm
+    workspace.  Four threads over two modules also cover two callers of the
+    same module, which a per-module buffer would still corrupt.  The failure
+    mode includes a GPU deadlock, so the child process is bounded by its own
+    watchdog and by the outer subprocess timeout.
+    """
+
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root)
+    env["PYTHON_GIL"] = "0"
+    result = subprocess.run(
+        [sys.executable, "-c", _STREAM_SCRATCH_SCRIPT],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+
+    if "NO_CUDA" in result.stdout:
+        pytest.skip("CUDA is not available")
+    if "EXTENSION_UNAVAILABLE" in result.stdout:
+        pytest.skip("the EXL3 extension could not be built on this host")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OK" in result.stdout

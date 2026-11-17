@@ -44,7 +44,10 @@ def test_gemv_awq_pack_registers_bias_when_created_without_buffers():
     assert "bias" in module._buffers
     assert module.bias is not None
     assert module.bias.shape == (out_features,)
-    assert torch.equal(module.bias, linear.bias.detach().half())
+    # The bias is not a quantization operand: it is kept at the source width and
+    # added by the wide FP32 epilogue in `forward`.
+    assert module.bias.dtype is linear.bias.dtype
+    assert torch.equal(module.bias, linear.bias.detach())
 
 
 def test_gemv_awq_pack_sets_bias_none_when_layer_has_no_bias():

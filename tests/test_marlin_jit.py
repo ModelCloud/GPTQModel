@@ -848,7 +848,10 @@ def test_marlin_quant_linear_post_init_pads_weight_scales_and_bias(monkeypatch):
     assert module.out_features == 200
     assert module.qweight.shape == (20, 512)
     assert module.scales.shape == (10, 256)
-    assert module.bias.shape == (256,)
+    # The registered bias is checkpoint state: post_init records the tile
+    # padding and the launch derivation applies it per call.
+    assert module.bias.shape == (200,)
+    assert module._marlin_bias_padding == (200, 256)
     assert module._marlin_tile_padding == (256, 320)
     assert captured == {
         "qweight": ((40, 256), 320, 256, torch.float16),
@@ -994,7 +997,8 @@ def test_awq_marlin_quant_linear_post_init_pads_packed_tensors(monkeypatch):
     assert module.qweight.shape == (20, 512)
     assert module.scales.shape == (10, 256)
     assert module.qzeros.shape == (10, 32)
-    assert module.bias.shape == (256,)
+    assert module.bias.shape == (200,)
+    assert module._marlin_bias_padding == (200, 256)
     assert module._marlin_tile_padding == (256, 320)
     assert captured == {
         "qweight": ((320, 32), 320, 256, 4, torch.float16),
@@ -1117,7 +1121,7 @@ def test_awq_marlin_quant_linear_registers_nonpersistent_runtime_state(monkeypat
     assert runtime_names.isdisjoint(module.state_dict())
 
 
-def test_marlin_quant_linear_forward_promotes_bias_to_input_dtype(monkeypatch):
+def test_marlin_quant_linear_forward_keeps_bias_wide_and_stored(monkeypatch):
     captured = {}
 
     monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
@@ -1176,12 +1180,14 @@ def test_marlin_quant_linear_forward_promotes_bias_to_input_dtype(monkeypatch):
 
     out = module(torch.randn(2, 128, dtype=torch.bfloat16))
 
+    # The kernel adds the bias to its FP32 accumulator, so the launch operand
+    # is FP32 while the stored buffer keeps the checkpoint width.
     assert captured == {
         "input_dtype": torch.bfloat16,
         "scale_dtype": torch.bfloat16,
-        "bias_dtype": torch.bfloat16,
+        "bias_dtype": torch.float32,
     }
-    assert module.bias.dtype == torch.bfloat16
+    assert module.bias.dtype == torch.float16
     assert out.dtype == torch.bfloat16
 
 

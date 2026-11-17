@@ -1,6 +1,9 @@
 #include <cuda_fp16.h>
 #include "exl3_gemm.cuh"
 
+#include <algorithm>
+
+#include <ATen/ATen.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
 #include "../util.h"
@@ -88,7 +91,6 @@ int exl3_gemm
                 "EXL3 device ordinal ", device, " exceeds MAX_DEVICES=", MAX_DEVICES);
     int num_sms = force_num_sms ? force_num_sms : DevCtx::instance().get_num_sms(device);
     int cc = DevCtx::instance().get_cc(device);
-    int* locks = DevCtx::instance().get_locks(device);
 
     // Dispatch
     int K = B.size(2) / 16;
@@ -127,6 +129,21 @@ int exl3_gemm
         "ExLlamaV3 tensor-core GEMM is not available in this build (ROCm/HIP); "
         "use the reconstruct + hgemm path (torch_mode) instead."
     );
+
+    // Cross-CTA split-K barrier state.  The kernel increments and resets these
+    // counters while it runs and leaves them zeroed, so the array belongs to
+    // exactly one launch.  A per-device array was shared by every stream: two
+    // co-resident launches (a kernel that does not fill the SMs, e.g. a narrow
+    // N) then read and reset each other's counters, which produced wrong
+    // output or deadlocked the device (#4619).  Allocate zeroed storage for
+    // this call from the caching allocator; the block is released once the
+    // launch is enqueued, and the allocator only hands it to ordered work on
+    // the same stream.  The kernel indexes `locks[slice_m * blocks_n +
+    // slice2_n]`, where blocks_n = size_n / 16, so that product is the bound.
+    const int tiles_m = (size_m + EXL3_GEMM_TILESIZE_M - 1) / EXL3_GEMM_TILESIZE_M;
+    const int64_t num_locks = std::max<int64_t>(1, (int64_t) tiles_m * (size_n / 16));
+    at::Tensor locks_tensor = at::zeros({num_locks}, A.options().dtype(at::kInt));
+    int* locks = (int*) locks_tensor.data_ptr();
 
     // Launch
     bool attr_ready;

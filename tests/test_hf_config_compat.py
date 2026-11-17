@@ -22,6 +22,7 @@ from gptqmodel.utils.hf import (
     prepare_remote_model_init_compat,
     resolve_trust_remote_code,
 )
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 class _LegacyRemoteRopeConfig:
@@ -222,10 +223,9 @@ def test_patch_transformers_prism_gguf_compat_wraps_load_checkpoint_for_torch_lo
         calls["torch_dtype"] = kwargs["torch_dtype"]
         return {"variant": "direct", "path": kwargs["gguf_checkpoint_path"]}
 
-    monkeypatch.setenv("GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER", "1")
     monkeypatch.delitem(sys.modules, "gguf", raising=False)
     monkeypatch.setattr(gguf_utils, "load_gguf_checkpoint", _original_load_gguf_checkpoint)
-    monkeypatch.delattr(gguf_utils, "_GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER_PATCHED", raising=False)
+    monkeypatch.delattr(gguf_utils, "_GPTQMODEL_GGUF_TORCH_LOADER_PATCHED", raising=False)
     monkeypatch.delattr(gguf_utils, "_gptqmodel_original_load_gguf_checkpoint", raising=False)
     monkeypatch.setattr(gguf_utils, "is_gguf_available", lambda *args, **kwargs: False)
     monkeypatch.setattr(hf_import_utils, "is_gguf_available", lambda *args, **kwargs: False)
@@ -233,6 +233,7 @@ def test_patch_transformers_prism_gguf_compat_wraps_load_checkpoint_for_torch_lo
     monkeypatch.setattr(hf_utils, "_load_gguf_checkpoint_torch_direct", _direct_loader)
 
     hf_utils._patch_transformers_prism_gguf_compat(api_name="test")
+    configure_kernel(KernelConfig(gguf_torch_dequant_loader=True))
     result = gguf_utils.load_gguf_checkpoint(
         "bonsai.gguf",
         return_tensors=True,
@@ -367,6 +368,34 @@ def test_normalize_hf_config_compat_restores_default_rope_init_alias(monkeypatch
 
     torch.testing.assert_close(inv_freq, torch.tensor([1.0, 0.1, 0.01, 0.001]))
     assert attention_factor == 1.0
+
+
+@pytest.mark.parametrize("trust", [False, True])
+def test_local_brumby_normalization_ignores_remote_compatibility_shims(monkeypatch, trust):
+    import transformers.modeling_rope_utils as rope_utils
+
+    from gptqmodel.models.ports.brumby.configuration_brumby import BrumbyConfig
+    from gptqmodel.models.ports.brumby.modeling_brumby import BrumbyForCausalLM
+
+    monkeypatch.delitem(rope_utils.ROPE_INIT_FUNCTIONS, "default", raising=False)
+    config = BrumbyConfig(
+        vocab_size=24, hidden_size=16, intermediate_size=24, num_hidden_layers=1,
+        num_attention_heads=2, num_key_value_heads=1, head_dim=8,
+        max_position_embeddings=32, chunk_size=4,
+    )
+    original_rope = dict(config.rope_parameters)
+    normalize_hf_config_compat(config, trust_remote_code=trust)
+    assert config.rope_parameters == original_rope
+    assert "default" not in rope_utils.ROPE_INIT_FUNCTIONS
+
+    model = BrumbyForCausalLM(config).eval()
+    tokens = torch.tensor([[2, 4, 6, 8, 10]])
+    with torch.inference_mode():
+        expected = model(tokens, use_cache=False).logits
+        prefix = model(tokens[:, :3], use_cache=True)
+        actual = model(tokens[:, 3:], past_key_values=prefix.past_key_values, use_cache=True).logits
+    assert expected.std() > 0.001
+    torch.testing.assert_close(actual, expected[:, 3:], rtol=1e-4, atol=1e-5)
 
 
 def test_normalize_hf_config_compat_restores_legacy_cache_length_helpers(monkeypatch):

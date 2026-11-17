@@ -190,8 +190,10 @@ at BF16 and checks every buffer against the safetensors bytes.
 | BitsAndBytes 8-bit | `weight_scb` FP32 | **rounded to BF16** | restored |
 | BitsAndBytes 4-bit | absmax / quant maps | restored | restored |
 
-Parameters are outside this contract. Marlin, Machete and Swordfish keep their
-scales as parameters and the forward converts them to the activation dtype.
+Parameters are outside this contract. Machete and Swordfish keep their scales
+as parameters and the forward converts them to the activation dtype. Marlin
+does too; its `bias` is a buffer and declares
+`MODEL_DTYPE_BUFFERS = ()` because the kernel adds it to its FP32 accumulator.
 VPTQ codebooks are `nn.Embedding` parameters allocated in the model dtype.
 
 ### Measured

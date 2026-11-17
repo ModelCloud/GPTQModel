@@ -15,6 +15,7 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class LocateAnythingQModel(BaseQModel):
@@ -95,16 +96,10 @@ class LocateAnythingQModel(BaseQModel):
         self.model.vision_model = move_to(self.model.vision_model, device=CPU)
         self.model.mlp1 = move_to(self.model.mlp1, device=CPU)
 
-    def prepare_dataset(
-        self,
-        calibration_dataset,
-        batch_size: int = 1,
-        **kwargs,
-    ) -> list[Dict[str, Any]]:
-        del batch_size, kwargs
+    def _prepare_calibration_batches(self, conversations):
         processor = self.load_processor()
         calibration_data = []
-        for batch in batched_conversations(calibration_dataset, 1):
+        for batch in batched_conversations(conversations, 1):
             messages = batch[0]
             text = processor.py_apply_chat_template(
                 messages,
@@ -120,8 +115,21 @@ class LocateAnythingQModel(BaseQModel):
                     return_tensors="pt",
                 )
             )
-        del processor
         return calibration_data
+
+    def prepare_dataset(
+        self,
+        calibration_dataset,
+        batch_size: int = 1,
+        **kwargs,
+    ) -> list[Dict[str, Any]]:
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=self._prepare_calibration_batches,
+        )
 
     def move_input_capture_example(
         self,

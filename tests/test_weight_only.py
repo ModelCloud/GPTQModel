@@ -1843,119 +1843,54 @@ def test_gguf_forward_uses_fused_k_path_for_small_cpu_batches():
     assert calls == {"dense": 1, "fused": 0}
 
 
-def test_gguf_forward_autotunes_once_per_instance_with_fused_plan_on_cpu(monkeypatch):
+def test_gguf_forward_uses_the_static_gates_not_a_timed_plan(monkeypatch):
+    """The path is chosen from the shape gates only; nothing times the paths (#4590)."""
+
     case = _build_rtn_microbench_case(torch.bfloat16, bits="q4_k_m")
     module = _build_rtn_gguf_module(case).cpu().eval()
     inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
 
     module.gguf_fused_cpu_max_rows = inputs.shape[0]
     module.gguf_fused_cpu_min_matrix_elements = 0
-    module.autotune_enabled = True
-    module.clear_autotune()
     module.clear_weight_cache()
+
+    def timing_forbidden(*args, **kwargs):
+        raise AssertionError("GGUF fused dispatch must not benchmark the two paths")
+
+    for attr in ("_autotune", "_benchmark_forward_runner", "_benchmark_dense_forward", "_benchmark_fused_forward"):
+        if hasattr(GGUFTorchLinear, attr):
+            monkeypatch.setattr(GGUFTorchLinear, attr, timing_forbidden)
 
     calls = {"dense": 0, "fused": 0}
 
-    def _dense(self, x_flat):
+    def _dense(self, x_flat, bias=None):
         calls["dense"] += 1
-        return 2.0
+        return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
 
-    def _fused(self, x_flat):
+    def _fused(self, x_flat, bias=None):
         calls["fused"] += 1
-        return 1.0
+        return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
 
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_dense_forward", _dense)
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_fused_forward", _fused)
+    module._forward_dequant_matmul = _dense.__get__(module, GGUFTorchLinear)
+    module._forward_fused_k = _fused.__get__(module, GGUFTorchLinear)
 
-    module(inputs)
+    with torch.inference_mode():
+        module(inputs)
+        module(inputs)
+        assert calls == {"dense": 0, "fused": 2}
+        assert module.get_autotune_result() is None
 
-    assert calls == {"dense": 1, "fused": 1}
-    assert module.get_autotune_result() is True
+        module.gguf_fused_cpu_max_rows = 1
+        calls = {"dense": 0, "fused": 0}
+        module(inputs)
+        assert calls == {"dense": 1, "fused": 0}
 
-    def _fail(self, x_flat):
-        raise AssertionError("autotune benchmark should not rerun for cached fused plan")
-
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_dense_forward", _fail)
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_fused_forward", _fail)
-
-    module(inputs)
-    assert module.get_autotune_result() is True
-
-
-def test_gguf_forward_autotunes_once_per_instance_with_dense_plan_on_cpu(monkeypatch):
-    case = _build_rtn_microbench_case(torch.bfloat16, bits="q4_k_m")
-    module = _build_rtn_gguf_module(case).cpu().eval()
-    inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
-
-    module.gguf_fused_cpu_max_rows = inputs.shape[0]
-    module.gguf_fused_cpu_min_matrix_elements = 0
-    module.autotune_enabled = True
-    module.clear_autotune()
-    module.clear_weight_cache()
-
-    calls = {"dense": 0, "fused": 0}
-
-    def _dense(self, x_flat):
-        calls["dense"] += 1
-        return 1.0
-
-    def _fused(self, x_flat):
-        calls["fused"] += 1
-        return 2.0
-
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_dense_forward", _dense)
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_fused_forward", _fused)
-
-    module(inputs)
-
-    assert calls == {"dense": 1, "fused": 1}
-    assert module.get_autotune_result() is False
-
-    def _fail(self, x_flat):
-        raise AssertionError("autotune benchmark should not rerun for cached dense plan")
-
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_dense_forward", _fail)
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_fused_forward", _fail)
-
-    module(inputs)
-    assert module.get_autotune_result() is False
-
-
-def test_gguf_forward_autotunes_once_per_module_instance(monkeypatch):
-    case = _build_rtn_microbench_case(torch.bfloat16, bits="q4_k_m")
-    inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
-    module_a = _build_rtn_gguf_module(case).cpu().eval()
-    module_b = _build_rtn_gguf_module(case).cpu().eval()
-
-    for module in (module_a, module_b):
+        # Widening the gate again returns to the fused path: the choice is not
+        # cached from an earlier shape.
         module.gguf_fused_cpu_max_rows = inputs.shape[0]
-        module.gguf_fused_cpu_min_matrix_elements = 0
-        module.autotune_enabled = True
-        module.clear_autotune()
-        module.clear_weight_cache()
-
-    calls = {"dense": 0, "fused": 0}
-
-    def _dense(self, x_flat):
-        calls["dense"] += 1
-        return 2.0
-
-    def _fused(self, x_flat):
-        calls["fused"] += 1
-        return 1.0
-
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_dense_forward", _dense)
-    monkeypatch.setattr(GGUFTorchLinear, "_benchmark_fused_forward", _fused)
-
-    module_a(inputs)
-
-    assert calls == {"dense": 1, "fused": 1}
-    assert module_a.get_autotune_result() is True
-
-    module_b(inputs)
-
-    assert calls == {"dense": 2, "fused": 2}
-    assert module_b.get_autotune_result() is True
+        calls = {"dense": 0, "fused": 0}
+        module(inputs)
+        assert calls == {"dense": 0, "fused": 1}
 
 
 @pytest.mark.parametrize(

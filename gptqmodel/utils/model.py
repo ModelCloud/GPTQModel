@@ -4061,6 +4061,49 @@ def _get_local_expert_count(module: nn.Module) -> Optional[int]:
     return None
 
 
+def _install_phimoe_topk_override(router: nn.Module) -> None:
+    """Make ``PhimoeTopKRouter`` honour a changed ``top_k``.
+
+    Transformers 5.22 passes ``top_k`` into ``sparsemixer``, but that function
+    always selects exactly two experts (the argmax and the argmax of the
+    remainder).  Writing ``router.top_k`` alone is therefore a silent no-op.
+    Keep the native sparse-mixer path for the model's configured value, and
+    only replace the forward when the override actually changes it.
+    """
+
+    if getattr(router, "_gptqmodel_phimoe_topk_aware", False):
+        return
+
+    native_top_k = getattr(router, "top_k", None)
+    if not isinstance(native_top_k, int):
+        return
+
+    original_forward = router.forward
+
+    def forward_with_topk(hidden_states):
+        if getattr(router, "top_k", None) == native_top_k:
+            return original_forward(hidden_states)
+
+        input_jitter_noise = getattr(router, "input_jitter_noise", 0.0)
+        if router.training and input_jitter_noise > 0:
+            hidden_states = hidden_states * torch.empty_like(hidden_states).uniform_(
+                1.0 - input_jitter_noise, 1.0 + input_jitter_noise
+            )
+
+        router_logits = nn.Linear.forward(router, hidden_states)
+        top_k = int(router.top_k)
+        num_experts = getattr(router, "num_experts", None)
+        if isinstance(num_experts, int) and num_experts > 0:
+            top_k = min(top_k, num_experts)
+        top_k = max(1, top_k)
+        routing_weights = torch.softmax(router_logits, dim=-1)
+        topk_weights, topk_indices = torch.topk(routing_weights, top_k, dim=-1)
+        return router_logits, topk_weights, topk_indices
+
+    router.forward = forward_with_topk
+    router._gptqmodel_phimoe_topk_aware = True
+
+
 def set_moe_topk(model: nn.Module, new_topk: int) -> MoETopKState:
     routers = find_moe_routing_modules(model)
     state: MoETopKState = []
@@ -4068,6 +4111,8 @@ def set_moe_topk(model: nn.Module, new_topk: int) -> MoETopKState:
         local_count = _get_local_expert_count(r)
         if local_count is None:
             continue
+        if r.__class__.__name__ == "PhimoeTopKRouter":
+            _install_phimoe_topk_override(r)
         for name in MOE_TOPK_FIELD_NAMES:
             if hasattr(r, name):
                 old = getattr(r, name)

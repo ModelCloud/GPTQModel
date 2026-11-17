@@ -204,6 +204,10 @@ class AwqGEMMLinear(AWQuantLinear):
 
     REQUIRES_FORMAT_V2 = False
 
+    # The bias is added after a wide FP32 reduction, so it keeps its checkpoint
+    # width instead of following the model dtype at load time.
+    MODEL_DTYPE_BUFFERS = ()
+
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemm"
 
@@ -299,15 +303,21 @@ class AwqGEMMLinear(AWQuantLinear):
         return scales
 
     def _bias_for_compute(self, dtype: torch.dtype) -> Optional[torch.Tensor]:
-        """Return the stored bias converted for this computation only.
+        """Return the stored bias for this call without narrowing its width.
 
-        Like :meth:`_scales_for_compute`, the conversion is a temporary
-        operand; the checkpoint bias keeps its original dtype.
+        Both GEMM paths add the bias inside an FP32 epilogue (the split-K
+        partials and the dequantize-then-matmul product are already FP32), so
+        the kernel never needs a half-precision bias. Narrowing here would
+        destroy a finite value the dtype cannot hold: an FP32 ``-65520``
+        becomes ``-inf`` in FP16 before it can cancel the product. ``dtype``
+        only documents the activation width the result is rounded to.
         """
 
         bias = self.bias
-        if bias is not None and (bias.dtype != dtype or not bias.is_contiguous()):
-            bias = bias.to(dtype=dtype).contiguous()
+        if bias is None:
+            return None
+        if not bias.is_contiguous():
+            bias = bias.contiguous()
         return bias
 
     def post_init(self):
@@ -379,10 +389,16 @@ class AwqGEMMLinear(AWQuantLinear):
         # Validate the storage cast before replacing any module state: a scale
         # that overflows or underflows here would silently corrupt every code.
         stored_scales = scale_to_storage_dtype(scales, scale_dtype).clone()
-        self.register_buffer("scales", stored_scales)
         if linear.bias is not None:
-            bias_dtype = linear.bias.dtype if linear.bias.dtype in (torch.float16, torch.bfloat16) else scale_dtype
-            self.register_buffer("bias", linear.bias.clone().to(bias_dtype))
+            # The bias is not a quantization operand. Keep the source precision:
+            # the forward epilogue adds it in FP32, so narrowing it to the scale
+            # dtype would only risk turning a finite value into ``inf``/zero.
+            stored_bias = linear.bias.detach().clone()
+        else:
+            stored_bias = None
+        self.register_buffer("scales", stored_scales)
+        if stored_bias is not None:
+            self.register_buffer("bias", stored_bias)
         else:
             self.bias = None
 

@@ -14,6 +14,7 @@ from ...utils.offload import offload_to_disk
 from ...utils.torch import as_torch_device
 from .._const import CPU
 from ..base import BaseQModel
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class Ovis2_5QModel(BaseQModel):
@@ -99,9 +100,9 @@ class Ovis2_5QModel(BaseQModel):
 
         return sample
 
-    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+    def _prepare_calibration_batches(self, conversations, batch_size):
         calib_data = []
-        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(conversations, batch_size, process_func=self.preprocess_dataset):
             for sample in batch:
                 sample = self.replace_image_with_pil(sample)
                 input_ids, pixel_values, grid_thws = self.model.preprocess_inputs(
@@ -122,3 +123,12 @@ class Ovis2_5QModel(BaseQModel):
                     }
                 )
         return calib_data
+
+    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=lambda rows: self._prepare_calibration_batches(rows, batch_size),
+        )

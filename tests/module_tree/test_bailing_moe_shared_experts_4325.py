@@ -66,6 +66,7 @@ def test_shared_expert_down_proj_is_its_own_subset():
     # Remote-code Ling-2.6-flash MLA branch (issue #4373): q_a/kv_a/g_proj
     # produce the low-rank latents, q_b/kv_b consume them, and `dense` follows.
     assert [
+        "attention.q_proj",
         "attention.query_key_value",
         "attention.q_a_proj",
         "attention.kv_a_proj_with_mqa",

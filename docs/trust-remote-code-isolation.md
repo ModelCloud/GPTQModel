@@ -38,6 +38,44 @@ continue to override remote trust. A known remote-only checkpoint layout
 (currently Bailing Hybrid MLA, selected by `q_lora_rank`) cannot silently fall
 back to an incompatible native model.
 
+`normalize_hf_config_compat` also resolves definition ownership before applying
+remote compatibility shims. Local configs retain their own field contract even
+when a direct caller passes raw trust; ordinary RoPE metadata backfill still
+runs. The old Brumby remote RoPE/padding rewrites are removed because its
+packaged config/model own those fields.
+
+```mermaid
+flowchart TD
+    A["normalize_hf_config_compat: caller trust and config.model_type"] --> B{"local_model_loader selects a package loader?"}
+    B -- yes --> C["Disable remote compatibility; preserve local field contract"]
+    B -- no --> D["Keep caller remote compatibility permission"]
+    C --> E["_normalize_rope_parameters_config_compat: ordinary metadata backfill"]
+    D --> E
+    E --> F{"Remote compatibility still permitted?"}
+    F -- no --> G["Return without checkpoint-code field shims"]
+    F -- yes --> H["_patch_transformers_remote_code_compat and legacy field normalization"]
+    H --> I["Invalid legacy config: propagate construction error"]
+    style I fill:#ffcdd2,stroke:#b71c1c
+```
+
+For GGUF checkpoints, the explicitly selected `gguf_file` remains the config
+source through the data read, trust preflight and final construction, including
+when a subfolder is selected. An unrelated `config.json` cannot veto that
+selection or introduce a remote-only layout marker. This also allows a
+GGUF-only subfolder to load without a JSON config.
+
+```mermaid
+flowchart TD
+    A["load_model_config: gguf_file and subfolder"] --> B["PreTrainedConfig.get_config_dict: selected GGUF metadata"]
+    B --> C["local_model_loader: metadata model_type"]
+    C --> D{"Definition owns local classes?"}
+    D -- yes --> E["LocalModelLoader.load_config: same GGUF selection"]
+    D -- no --> F["resolve_trust_remote_code: preserve gguf_file and subfolder"]
+    F --> G["AutoConfig.from_pretrained: same GGUF selection"]
+    F --> H["Unsupported selected metadata: permission gate or clear error"]
+    style H fill:#ffcdd2,stroke:#b71c1c
+```
+
 Tokenizers receive remote trust only when both explicit trust and the safety
 bypass are present. This gate does not change Tokenicer normalization.
 Tokenizer construction also receives the policy-selected config as Transformers'
@@ -59,7 +97,29 @@ flowchart TD
     style I fill:#ffcdd2,stroke:#b71c1c
 ```
 
-Processor loads use the resolved model trust. Definition pre-load hooks that
+Definitions can also declare `LocalModelLoader.processor_class`. For models
+requiring a processor, `BaseQModel.__init__` selects that packaged class
+directly and passes the already-selected model config and the underlying
+Tokenicer-normalized tokenizer. Checkpoint processor `auto_map`, API trust and
+the bypass cannot replace it. Class paths are validated by the same
+`gptqmodel.` package restriction. The packaged processor must construct its
+packaged image/video components directly rather than rediscovering checkpoint
+classes through an auto loader.
+
+```mermaid
+flowchart TD
+    A["BaseQModel.__init__"] --> B{"require_load_processor?"}
+    B -- no --> C["No processor load"]
+    B -- yes --> D{"LocalModelLoader declares processor_class?"}
+    D -- yes --> E["LocalModelLoader.load_processor: selected config and tokenizer"]
+    E --> F["Direct package processor; strip checkpoint code options"]
+    D -- no --> G["AutoProcessor.from_pretrained: resolved model trust"]
+    G --> H["Native processor or explicitly permitted checkpoint code"]
+    G --> I["Unsupported processor: load error"]
+    style I fill:#ffcdd2,stroke:#b71c1c
+```
+
+Other processor loads use the resolved model trust. Definition pre-load hooks that
 import checkpoint modules declare `before_model_load_requires_remote_code` and
 run only when remote trust has been resolved and the bypass is enabled.
 
@@ -76,6 +136,8 @@ from ..local import LocalModelLoader
 loader = LocalModelLoader(
     config_class="gptqmodel.models.model_name.configuration_model_name.ModelConfig",
     model_class="gptqmodel.models.model_name.modeling_model_name.ModelForCausalLM",
+    # Optional for definitions with require_load_processor=True.
+    processor_class="gptqmodel.models.model_name.processing_model_name.ModelProcessor",
 )
 ```
 
@@ -114,6 +176,7 @@ the responsibility of those engines.
 | Re-save | Loaded config directly through AutoConfig (`gptqmodel/models/writer.py:2587`) | Uses the same local/native/security policy |
 | Remote pre-load hooks | Could import checkpoint modules on a native load (`gptqmodel/models/loader.py:917-933`) | Declared remote hooks require resolved trust and the bypass |
 | Tokenizer config discovery | AutoTokenizer could reload checkpoint `AutoConfig` despite a policy-selected local config | `load_hf_tokenizer` supplies the selected config through the existing Tokenicer API |
+| Processor selection | Always entered `AutoProcessor.from_pretrained` (`464cfb05f:gptqmodel/models/base.py:1071`) | Optional definition-owned processor class receives selected config/tokenizer directly |
 
 Tests in `tests/test_local_model_loading.py` exercise public load rejection,
 actual checkpoint config and model imports under explicit bypass, permission

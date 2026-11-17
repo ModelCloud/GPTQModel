@@ -268,9 +268,13 @@ def test_cpu_only_max_memory_rejects_an_explicit_accelerator_device():
         _resolve_max_memory_device({"cpu": "10GiB"}, torch.device("cuda:0"))
 
 
-def test_max_memory_with_an_accelerator_keeps_device_resolution():
-    assert _resolve_max_memory_device({"cuda:0": "1GiB", "cpu": "1GiB"}, "cuda:0") is None
-    assert _resolve_max_memory_device({0: "1GiB"}, DEVICE.CUDA) is None
+def test_max_memory_with_an_accelerator_resolves_to_the_budget_devices():
+    """#4632: kernel selection sees exactly the accelarators the budget names."""
+
+    assert _resolve_max_memory_device({"cuda:0": "1GiB", "cpu": "1GiB"}, "cuda:0") == (
+        torch.device("cuda:0"),
+    )
+    assert _resolve_max_memory_device({0: "1GiB"}, DEVICE.CUDA) == (torch.device("cuda:0"),)
     assert _resolve_max_memory_device(None, "cuda:0") is None
 
 
