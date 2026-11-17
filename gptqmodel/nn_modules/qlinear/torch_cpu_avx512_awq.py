@@ -60,9 +60,10 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
 
     QUANT_TYPE = "torch_cpu_avx512_awq"
 
-    # Not buildable on this host: AVX512-BF16 needs x86-64 and this is aarch64.
-    # The forward also holds `_cpu_transform_lock` (RLock), which dynamo cannot
-    # enter; CPU-only, so no CUDA graph capture applies.
+    # Measured on an x86-64 AVX512-BF16 host (torch 2.15): the extension
+    # builds and the fused BF16 forward runs, but `forward` holds
+    # `_cpu_transform_lock` (RLock), which dynamo cannot enter: EAGER.
+    # CPU-only, so no CUDA-graph capture applies.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
     SUPPORTS_GRAPH_CAPTURE = False
 

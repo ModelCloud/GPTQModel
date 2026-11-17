@@ -433,11 +433,14 @@ def _buffer_spec_4bit(
 
 
 class BitsAndBytesLinear(WeightOnlyQuantLinear):
-    # bitsandbytes is not installed on this host, so nothing is measurable.
-    # Statically the forward calls bnb custom ops and branches on grad/device
-    # state, and `graph_unsafe_constructs` finds `data_ptr()`: EAGER, no capture.
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    # Measured on RTX 4090 (sm_89), RTX 5090 (sm_120) and Radeon R9700
+    # (gfx1201) with torch 2.15/2.16: dynamo, aot_eager, inductor and
+    # reduce-overhead all pass, and an explicit eager CUDA-graph capture
+    # replays the eager output. The accelerator path is straight-line; the CPU
+    # packing branch is never taken on a device. (The old static `data_ptr()`
+    # hit came from a comment, not an executed call.)
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    SUPPORTS_GRAPH_CAPTURE = True
 
     @staticmethod
     def _weight_to_matrix(linear: nn.Module) -> torch.Tensor:
