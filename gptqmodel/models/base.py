@@ -4027,16 +4027,41 @@ class BaseQModel(nn.Module):
     def _resolve_layer_replay_type(layer: nn.Module, layer_types: Sequence[str]) -> Optional[str]:
         """Layer type declared by the decoder layer being replayed."""
 
+        def _declared(value: Any) -> Optional[str]:
+            # Only a value the model actually declared is usable: a stray
+            # `layer_type` attribute outside the declared list cannot be
+            # looked up in `by_type`.
+            return value if isinstance(value, str) and value in layer_types else None
+
         attention = getattr(layer, "self_attn", None)
-        declared = getattr(attention, "layer_type", None)
-        if not isinstance(declared, str):
-            declared = getattr(layer, "layer_type", None)
-        if isinstance(declared, str):
+        declared = _declared(getattr(attention, "layer_type", None))
+        if declared is None:
+            declared = _declared(getattr(layer, "layer_type", None))
+        if declared is None:
+            # Hybrid definitions such as GraniteMoE-Hybrid name the slot
+            # `block_type`; a recurrent mixer is a sibling (`mamba`, `conv`)
+            # rather than `self_attn` and carries its own `layer_type`
+            # (issue #4671).
+            declared = _declared(getattr(layer, "block_type", None))
+        if declared is None:
+            for child in layer.children():
+                declared = _declared(getattr(child, "layer_type", None))
+                if declared is not None:
+                    break
+        if declared is not None:
             return declared
 
         index = getattr(attention, "layer_idx", None)
         if not isinstance(index, int):
             index = getattr(layer, "layer_idx", None)
+        if not isinstance(index, int):
+            # A mixer sibling is also a reliable per-layer index source when
+            # the decoder layer itself does not store one.
+            for child in layer.children():
+                candidate = getattr(child, "layer_idx", None)
+                if isinstance(candidate, int):
+                    index = candidate
+                    break
         if isinstance(index, int) and 0 <= index < len(layer_types):
             return layer_types[index]
         return None
