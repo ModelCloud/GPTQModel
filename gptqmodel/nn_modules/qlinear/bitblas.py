@@ -25,6 +25,7 @@ from ...utils import BACKEND
 from ...utils.kernel import get_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 
 
 log = setup_logger()
@@ -945,6 +946,12 @@ class BitblasLinear(BitblasBaseQuantLinear):
     SUPPORTS_ADAPTERS = [Lora]
 
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
+    # bitblas is not installed on this host. The forward hands raw pointers to
+    # a ctypes CUDA library and enters a device context, so dynamo breaks:
+    # conservative EAGER, no capture measured.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     QUANT_TYPE = "gptq_bitblas"
     SUPPORTS_METHODS = [METHOD.GPTQ]

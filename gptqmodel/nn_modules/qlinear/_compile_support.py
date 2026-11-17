@@ -9,6 +9,8 @@ ask a kernel what it is safe under instead of guessing from its class name:
     The highest ``torch.compile`` level the kernel's ``forward`` reaches, in
     ascending order. Each level implies every lower one:
 
+    * ``NOT_APPLICABLE`` - the class never runs as a torch module (MLX, TTNN,
+      XLA); its own compiler owns the graph.
     * ``EAGER`` - dynamo cannot trace the forward (graph break, an op without a
       meta implementation, or compile is a measured pessimization).
     * ``DYNAMO`` - ``torch.compile(fullgraph=True, backend="eager")`` traces the
@@ -29,6 +31,14 @@ ask a kernel what it is safe under instead of guessing from its class name:
     of dynamo: a kernel that calls a custom op without a fake implementation
     can be capture-safe and still fail to trace, and a traceable kernel can
     still sync the host inside ``forward``.
+
+The declaration describes the **default runtime state** on the kernel's
+primary device: a freshly loaded model, with no opt-in beyond what loading
+already does. A kernel that only reaches a higher level after an explicit
+opt-in (``TorchLinear.optimize()`` on CPU compiles its decode path, which then
+traces to ``CUDAGRAPH``) declares the default level and records the opt-in in
+its evidence comment, so a caller that enables a compiled path from the
+declaration alone never over-claims.
 
 ``SUPPORTS_COMPILE`` (the pre-existing policy flag) stays separate and means
 "compiling this forward is not a pessimization" for the static-cache

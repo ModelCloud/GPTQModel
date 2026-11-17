@@ -34,9 +34,21 @@ callers never guess from a class name:
   data-dependent branch. Independent of dynamo: a custom op without a fake
   implementation can be capture-safe yet untraceable.
 
+The levels are the `torch.compile` API surface of torch 2.13+ (the project's
+floor is 2.13 for Python < 3.11 and 2.15 otherwise): `backend="eager"`,
+`backend="aot_eager"`, `backend="inductor"`, and `mode="reduce-overhead"`.
+`max-autotune` is a tuning mode of `INDUCTOR`, not a separate capability, so it
+is not a level. A declaration records the torch version it was measured on.
+
 `SUPPORTS_COMPILE` remains the separate #4669 policy answer to "is compiling
 this forward not a pessimization for static-cache `generate()`". A traceable
 kernel can still keep it `False` when eager is faster.
+
+Two MLX kernels (`AwqMlxQuantLinear`, `AWQMarlinMlxQuantLinear`) inherit
+`SUPPORTS_COMPILE = True` from `AwqTorchLinear`. That flag is not consulted on
+the MLX runtime (the model is not a `torch.nn.Module`), so their
+`torch.compile` level is still `NOT_APPLICABLE`; the column shows the inherited
+policy flag for completeness.
 
 `tests/kernels/test_kernel_compile_protocol.py` enforces that every registered
 kernel declares both attributes, that a capture claim has no host-sync

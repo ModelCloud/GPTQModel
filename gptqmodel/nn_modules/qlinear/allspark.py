@@ -48,6 +48,7 @@ from ...utils.allspark_hip import (
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 from ._runtime_cache import tensor_cache_key
 
 
@@ -82,6 +83,12 @@ class AllSparkLinear(GPTQQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = []
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
+    # AllSpark's capability window is 80-120; this GB10 is sm_121, so the
+    # extension cannot run here. The custom gemm has no fake/meta impl:
+    # conservative EAGER, no capture measured on this host.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     @classmethod
     def validate_device(cls, device):

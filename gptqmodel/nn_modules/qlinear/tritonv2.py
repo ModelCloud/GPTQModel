@@ -13,6 +13,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.python import has_gil_disabled
+from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
 from .torch import TorchLinear
 
@@ -50,6 +51,12 @@ class TritonV2Linear(TorchLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = True
+
+    # GB10 (sm_121), torch 2.11.0+cu130: eager=True, graph_breaks=2 (the tensor
+    # `_version` read in the weight-cache key), so dynamo/aot/inductor reject
+    # it; explicit CUDA-graph capture succeeds and matches eager.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "tritonv2"

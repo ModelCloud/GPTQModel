@@ -11,6 +11,7 @@ callers never guess from a class name:
 
   | Level | Probe |
   | --- | --- |
+  | `NOT_APPLICABLE` | not a torch module (MLX/TTNN/XLA); its own compiler owns the graph |
   | `EAGER` | eager forward only; dynamo breaks the graph (or compile is a measured pessimization) |
   | `DYNAMO` | `torch.compile(fullgraph=True, backend="eager")` traces with zero graph breaks |
   | `AOT_EAGER` | `backend="aot_eager"` (meta/fake tensors and `aot_autograd`) |
@@ -23,9 +24,21 @@ callers never guess from a class name:
   data-dependent branch. Independent of dynamo: a custom op without a fake
   implementation can be capture-safe yet untraceable.
 
+The levels are the `torch.compile` API surface of torch 2.13+ (the project's
+floor is 2.13 for Python < 3.11 and 2.15 otherwise): `backend="eager"`,
+`backend="aot_eager"`, `backend="inductor"`, and `mode="reduce-overhead"`.
+`max-autotune` is a tuning mode of `INDUCTOR`, not a separate capability, so it
+is not a level. A declaration records the torch version it was measured on.
+
 `SUPPORTS_COMPILE` remains the separate #4669 policy answer to "is compiling
 this forward not a pessimization for static-cache `generate()`". A traceable
 kernel can still keep it `False` when eager is faster.
+
+Two MLX kernels (`AwqMlxQuantLinear`, `AWQMarlinMlxQuantLinear`) inherit
+`SUPPORTS_COMPILE = True` from `AwqTorchLinear`. That flag is not consulted on
+the MLX runtime (the model is not a `torch.nn.Module`), so their
+`torch.compile` level is still `NOT_APPLICABLE`; the column shows the inherited
+policy flag for completeness.
 
 `tests/kernels/test_kernel_compile_protocol.py` enforces that every registered
 kernel declares both attributes, that a capture claim has no host-sync
@@ -38,70 +51,70 @@ python -m tests.kernels.gen_compile_matrix
 
 | Kernel | Module | Level | Graph capture | Compiled generation |
 | --- | --- | --- | --- | --- |
-| `AWQBitBLASMlxQuantLinear` | `mlx` | `EAGER` | no | no |
+| `AWQBitBLASMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
 | `AWQBitBlasKernel` | `bitblas_awq` | `EAGER` | no | no |
-| `AWQMarlinMlxQuantLinear` | `mlx` | `EAGER` | no | yes |
+| `AWQMarlinMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | yes |
 | `AllSparkAwqLinear` | `allspark_awq` | `EAGER` | no | no |
 | `AllSparkLinear` | `allspark` | `EAGER` | no | no |
 | `AwqExllamaV2Linear` | `exllamav2_awq` | `EAGER` | no | no |
 | `AwqGEMMLinear` | `gemm_awq` | `EAGER` | no | no |
-| `AwqGEMMTritonLinear` | `gemm_awq_triton` | `EAGER` | no | no |
+| `AwqGEMMTritonLinear` | `gemm_awq_triton` | `EAGER` | yes | no |
 | `AwqGEMVFastLinear` | `gemv_fast_awq` | `EAGER` | no | no |
 | `AwqGEMVLinear` | `gemv_awq` | `EAGER` | no | no |
-| `AwqGEMVTorchLinear` | `gemv_awq` | `EAGER` | no | no |
-| `AwqGEMVTritonLinear` | `gemv_awq` | `EAGER` | no | no |
-| `AwqGemvFastMlxQuantLinear` | `mlx` | `EAGER` | no | no |
-| `AwqGemvMlxQuantLinear` | `mlx` | `EAGER` | no | no |
+| `AwqGEMVTorchLinear` | `gemv_awq` | `CUDAGRAPH` | yes | no |
+| `AwqGEMVTritonLinear` | `gemv_awq` | `CUDAGRAPH` | yes | no |
+| `AwqGemvFastMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
+| `AwqGemvMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
 | `AwqMacheteLinear` | `machete_awq` | `EAGER` | no | no |
 | `AwqMarlinLinear` | `marlin_awq` | `EAGER` | no | no |
-| `AwqMlxQuantLinear` | `mlx` | `EAGER` | no | yes |
+| `AwqMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | yes |
 | `AwqSwordfishLinear` | `swordfish` | `EAGER` | no | no |
-| `AwqTorchLinear` | `torch_awq` | `EAGER` | no | yes |
+| `AwqTorchLinear` | `torch_awq` | `CUDAGRAPH` | no | yes |
 | `BitblasLinear` | `bitblas` | `EAGER` | no | no |
 | `BitsAndBytesLinear` | `bitsandbytes` | `EAGER` | no | no |
-| `BitsAndBytesMlxQuantLinear` | `mlx` | `EAGER` | no | no |
+| `BitsAndBytesMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
 | `ExllamaV2Linear` | `exllamav2` | `EAGER` | no | no |
-| `FP8MlxQuantLinear` | `mlx` | `EAGER` | no | no |
+| `FP8MlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
 | `GGUFCppKernel` | `gguf_cpp` | `EAGER` | no | no |
 | `GGUFCudaKernel` | `gguf_cpp` | `EAGER` | no | no |
-| `GGUFMlxQuantLinear` | `mlx` | `EAGER` | no | no |
-| `GGUFTorchLinear` | `gguf` | `EAGER` | no | no |
-| `GGUFTritonKernel` | `gguf_triton` | `EAGER` | no | no |
-| `GPTQBitBLASMlxQuantLinear` | `mlx` | `EAGER` | no | no |
-| `GPTQMarlinMlxQuantLinear` | `mlx` | `EAGER` | no | no |
+| `GGUFMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
+| `GGUFTorchLinear` | `gguf` | `EAGER` | yes | no |
+| `GGUFTritonKernel` | `gguf_triton` | `EAGER` | yes | no |
+| `GPTQBitBLASMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
+| `GPTQMarlinMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
 | `LLMAwqLinear` | `gemv_fast_awq` | `EAGER` | no | no |
-| `LLMAwqMlxQuantLinear` | `mlx` | `EAGER` | no | no |
-| `MacaqLinear` | `macaq` | `EAGER` | no | no |
-| `MacaqMlxQuantLinear` | `mlx` | `EAGER` | no | no |
-| `MacaqTritonLinear` | `macaq` | `EAGER` | no | no |
+| `LLMAwqMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
+| `MacaqLinear` | `macaq` | `CUDAGRAPH` | no | no |
+| `MacaqMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
+| `MacaqTritonLinear` | `macaq` | `EAGER` | yes | no |
 | `MacheteLinear` | `machete` | `EAGER` | no | no |
 | `MarlinLinear` | `marlin` | `EAGER` | no | no |
-| `MlxQuantLinear` | `mlx` | `EAGER` | no | no |
+| `MlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
 | `NF12Linear` | `nf12` | `EAGER` | no | no |
-| `NF12MlxQuantLinear` | `mlx` | `EAGER` | no | no |
+| `NF12MlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
 | `ParoLinear` | `paroquant` | `EAGER` | no | no |
-| `ParoMlxQuantLinear` | `mlx` | `EAGER` | no | no |
-| `ParoQuantTritonLinear` | `paroquant_triton` | `EAGER` | no | no |
+| `ParoMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
+| `ParoQuantTritonLinear` | `paroquant_triton` | `CUDAGRAPH` | yes | no |
 | `QQQLinear` | `qqq` | `EAGER` | no | no |
-| `QQQMlxQuantLinear` | `mlx` | `EAGER` | no | no |
-| `QQQTorchLinear` | `qqq` | `EAGER` | no | no |
+| `QQQMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
+| `QQQTorchLinear` | `qqq` | `CUDAGRAPH` | no | no |
 | `SwordfishLinear` | `swordfish` | `EAGER` | no | no |
 | `TTBlockfloatLinear` | `tt_blockfloat` | `EAGER` | no | no |
-| `TTNNBlockFloat8Linear` | `ttnn_blockfloat` | `EAGER` | no | no |
-| `TTNNLinear` | `ttnn` | `EAGER` | no | no |
+| `TTNNBlockFloat8Linear` | `ttnn_blockfloat` | `NOT_APPLICABLE` | no | no |
+| `TTNNLinear` | `ttnn` | `NOT_APPLICABLE` | no | no |
 | `TorchAtenAwqLinear` | `torch_aten_kernel_awq` | `EAGER` | no | no |
 | `TorchAtenLinear` | `torch_aten_kernel` | `EAGER` | no | no |
 | `TorchCpuAvx512AwqLinear` | `torch_cpu_avx512_awq` | `EAGER` | no | no |
 | `TorchCpuAvx512Linear` | `torch_cpu_avx512` | `EAGER` | no | no |
-| `TorchFP8Linear` | `fp8` | `EAGER` | no | no |
+| `TorchFP8Linear` | `fp8` | `CUDAGRAPH` | yes | no |
 | `TorchFusedAwqLinear` | `torch_fused_awq` | `EAGER` | no | no |
 | `TorchFusedLinear` | `torch_fused` | `EAGER` | no | no |
 | `TorchInt8AwqLinear` | `torch_int8_awq` | `EAGER` | no | no |
 | `TorchInt8Linear` | `torch_int8` | `EAGER` | no | no |
-| `TorchLinear` | `torch` | `EAGER` | no | no |
-| `TritonV2Linear` | `tritonv2` | `EAGER` | no | no |
+| `TorchLinear` | `torch` | `EAGER` | yes | no |
+| `TritonV2Linear` | `tritonv2` | `EAGER` | yes | no |
 | `VPTQCudaLinear` | `vptq_cuda` | `EAGER` | no | no |
-| `VPTQLinear` | `vptq_torch` | `EAGER` | no | no |
-| `W4AFP8Linear` | `w4a_floatx` | `EAGER` | no | no |
-| `W4ANVFP4Linear` | `w4a_nvfp4` | `EAGER` | no | no |
-| `XLALinear` | `tt_xla` | `EAGER` | no | no |
+| `VPTQLinear` | `vptq_torch` | `CUDAGRAPH` | yes | no |
+| `W4AFP8Linear` | `w4a_floatx` | `EAGER` | yes | no |
+| `W4ANVFP4Linear` | `w4a_nvfp4` | `EAGER` | yes | no |
+| `XLALinear` | `tt_xla` | `NOT_APPLICABLE` | no | no |

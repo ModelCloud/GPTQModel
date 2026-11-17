@@ -34,6 +34,7 @@ from ...utils.logger import setup_logger
 from ...utils.planar_packing import planar_decode_rows
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import torch_compile
+from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
 from ._numerics import (
     _wants_fp32_reduce,
@@ -205,6 +206,12 @@ class TorchLinear(PackableQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = True
+
+    # GB10 (sm_121), torch 2.11.0+cu130: eager=True, graph_breaks=2 (the
+    # tensor `_version` read in the weight-cache key), so dynamo/aot/inductor
+    # all reject it; explicit CUDA-graph capture succeeds and matches eager.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "torch"

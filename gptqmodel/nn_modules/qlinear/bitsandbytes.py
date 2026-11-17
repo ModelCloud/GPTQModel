@@ -25,6 +25,7 @@ from ...utils.cpu_features import cpu_bf16x3_matmul, has_avx512_bf16
 from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
+from ._compile_support import COMPILE_LEVEL
 from .gguf import _apply_optional_smoother
 
 
@@ -432,6 +433,12 @@ def _buffer_spec_4bit(
 
 
 class BitsAndBytesLinear(WeightOnlyQuantLinear):
+    # bitsandbytes is not installed on this host, so nothing is measurable.
+    # Statically the forward calls bnb custom ops and branches on grad/device
+    # state, and `graph_unsafe_constructs` finds `data_ptr()`: EAGER, no capture.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
+
     @staticmethod
     def _weight_to_matrix(linear: nn.Module) -> torch.Tensor:
         """Expose the weight-only processor's reference-weight conversion hook."""

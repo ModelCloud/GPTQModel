@@ -113,6 +113,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Kernel dispatch caching](kernel-dispatch-caching.md)
 - [CPU and offload kernel dispatch](kernel-dispatch-cpu.md)
 - [Kernel input contiguity and launch contracts](kernel-input-contiguity.md)
+- [Kernel compile and graph-capture matrix](kernel-compile-matrix.md)
 - [Low-precision bias epilogues](low-precision-bias-epilogue.md)
 - [Marlin bias epilogue and storage](marlin-bias-epilogue.md)
 - [MLX runtime generation and export flow](mlx-runtime.md)
