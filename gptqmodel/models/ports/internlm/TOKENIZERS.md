@@ -54,7 +54,8 @@ flowchart TD
     C --> E["LocalModelLoader.load_tokenizer<br/>strip trust_remote_code and code_revision"]
     D --> E
     E --> F["Owned class.from_pretrained<br/>SentencePiece tokenizer.model plus JSON metadata"]
-    F --> G{"Valid asset?"}
+    F --> S["InternLMTokenizer snapshots vocabulary bytes<br/>LoadFromSerializedProto parses that snapshot"]
+    S --> G{"Valid asset?"}
     G -->|yes| H["Tokenicer.load(owned instance)<br/>generic normalization only"]
     G -->|no| X["Raise missing/corrupt asset error<br/>Never import checkpoint Python"]
     H --> I["Return native tokenizer<br/>BaseQModel adds runtime Tokenicer wrapper"]
@@ -89,7 +90,9 @@ without rebuilding the entire vocabulary per tokenizer.
 SentencePiece imports lazily inside construction. Its assets are loaded by HF's
 data-file resolver; no global AutoTokenizer registration or `_auto_class`
 checkpoint-source export is enabled. `save_vocabulary` supports filename
-prefixes and serializes the in-memory model if the original file was deleted.
+prefixes and retains the original loaded bytes if the source file is deleted.
+The processor parses the same immutable byte snapshot retained for that recovery
+path; its in-memory normalized protobuf is not a substitute for the source asset.
 
 Transformers 5.23's base `save_pretrained` discards `add_bos_token` and
 `add_eos_token` for native tokenizer.json post-processors. This Python
@@ -106,7 +109,7 @@ flowchart TD
     E --> F["Owned _save_pretrained persists current<br/>add_bos_token and add_eos_token"]
     F --> G["Owned from_pretrained reloads flags and assets"]
     G --> A
-    E -->|missing original file| H["save_vocabulary writes serialized_model_proto"]
+    E -->|missing original file| H["save_vocabulary writes original _vocab_bytes snapshot"]
     H --> F
     E -->|invalid destination or serialization error| X["Raise error; no checkpoint-code fallback"]
     classDef failure fill:#ffe4e4,stroke:#b00020
@@ -183,6 +186,37 @@ Static validation: pinned Ruff 0.14.2 full gate (`ruff check gptqmodel docs/eora
 tests setup.py`), `compileall` on both ports and the tokenizer suite, and
 `git diff --check` passed. Both Mermaid blocks have balanced fences and marked
 failure paths; each port README links this reference.
+
+### SentencePiece 0.2.3 source-deletion recovery
+
+The original source-deletion test passes on 0.2.1 but fails for both vocabularies
+on 0.2.3: **2 failed, 76 deselected in 4.74 seconds**, at strict original-byte
+equality after saving the deleted-source tokenizer. This is not only protobuf
+field ordering. Parsing both protos shows only vocabulary piece 354, NUL,
+changes from implicit NORMAL to explicit UNUSED when 0.2.3 loads it; the native
+serializer adds two bytes. Original versus reserialized fresh 0.2.3 processors
+produce identical checked Latin, NUL, mixed-NUL, CJK/emoji and special-text IDs
+and decode strings. The complete protobuf content nevertheless differs, so the
+test is not weakened to ignore it.
+
+The owned constructor now retains the exact loaded bytes and parses that
+snapshot with `LoadFromSerializedProto`. When the original asset is missing,
+`save_vocabulary` writes the immutable snapshot, not
+`SentencePieceProcessor.serialized_model_proto()`. Ordinary existing-file saves
+keep the original copy path. The regression retains exact bytes and adds
+NUL-containing encode/decode parity and a second save cycle.
+
+Using the same complete command above after this repair:
+
+| SentencePiece | Combined result | Duration |
+| --- | --- | --- |
+| 0.2.3 | 216 passed, no skips, 12 warnings | 32.75 seconds |
+| 0.2.1 | 216 passed, no skips, 14 warnings | 44.85 seconds |
+
+Both runs use released Tokenicer 0.0.17 and preserve the existing strict byte
+assertion. Invalid serialized-model errors are wrapped with the owned class and
+vocabulary path so HF5 does not rewrite them into a misleading TikToken-fallback
+message; no alternate backend is attempted.
 
 ## Limits and integration
 
