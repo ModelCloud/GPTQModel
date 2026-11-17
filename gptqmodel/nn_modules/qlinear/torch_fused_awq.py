@@ -428,6 +428,13 @@ class TorchFusedAwqLinear(AWQuantLinear):
             self.linear_mode = None
             self.torch_fused_op = None
             self.scales_and_zeros = None
+        elif not mode and self.linear_mode == LinearMode.TRAIN:
+            # The dense-dequant path holds no derived state, so clearing the
+            # latch lets the next forward choose the fused layout again.
+            # Without this a forward taken while the module was in training
+            # mode pinned it to dense dequantization for the rest of its life,
+            # so a later `eval()` could never recover (#4907, #5018).
+            self.linear_mode = None
         return super().train(mode=mode)
 
     def forward(self, x: torch.Tensor):

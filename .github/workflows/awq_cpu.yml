@@ -8,6 +8,7 @@ on:
       - 'gptqmodel/quantization/**'
       - 'gptqmodel/models/**'
       - 'gptqmodel/nn_modules/qlinear/torch_awq.py'
+      - 'gptqmodel/nn_modules/qlinear/torch_fused_awq.py'
       - 'gptqmodel/utils/calibration.py'
       - 'gptqmodel/nn_modules/qlinear/_numerics.py'
       - 'gptqmodel/nn_modules/qlinear/gemm_awq.py'
@@ -68,6 +69,7 @@ jobs:
                 tests/test_calibration_tools_formats_4934.py \
                 tests/test_awq_hybrid_moe_root_4903.py \
                 tests/test_awq_deepseek_v4_hash_moe_4880.py \
+                tests/test_awq_torch_fused_mode_5018.py \
                 tests/test_awq_hash_moe_kept_rows_5015.py \
                 tests/test_awq_cohere2_moe_parallel_norm_4898.py \
                 tests/test_training_kernel_inplace_4974.py \
