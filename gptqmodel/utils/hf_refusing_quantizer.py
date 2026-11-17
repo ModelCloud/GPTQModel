@@ -13,7 +13,7 @@ from __future__ import annotations
 from transformers.quantizers import HfQuantizer
 from transformers.utils.quantization_config import QuantizationConfigMixin
 
-from .._quant_methods import REFUSED_HF_QUANT_METHODS
+from .._quant_methods import REFUSED_HF_QUANT_METHODS, refused_hf_load_remedy
 
 
 class GPTQModelRefusingQuantizationConfig(QuantizationConfigMixin):
@@ -70,7 +70,7 @@ class GPTQModelRefusingHfQuantizer(HfQuantizer):
         label = REFUSED_HF_QUANT_METHODS.get(method, method)
         raise ValueError(
             f"GPT-QModel {label} checkpoints cannot be loaded by `transformers`; "
-            "load them with `GPTQModel.load` or vLLM. "
+            f"load them with {refused_hf_load_remedy(method)}. "
             f"(quant_method: {method!r})"
         )
 
