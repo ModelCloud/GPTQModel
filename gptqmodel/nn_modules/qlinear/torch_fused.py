@@ -91,6 +91,17 @@ def _validate_cpu_int4pack_group_size(
         resolved = in_features
     else:
         resolved = group_size
+    if (
+        getattr(cls, "CPU_INT4PACK_REQUIRES_DIVISIBLE_IN_FEATURES", True)
+        and in_features is not None
+        and in_features % resolved
+    ):
+        return False, NotImplementedError(
+            f"{cls}: CPU int4pack requires in_features to be divisible by the "
+            f"resolved group_size: actual in_features = `{in_features}`, "
+            f"resolved group_size = `{resolved}`. Select "
+            "`backend=\"gptq_torch\"` for this checkpoint on CPU."
+        )
     if resolved in CPU_INT4PACK_GROUP_SIZES:
         return True, None
     return False, NotImplementedError(
@@ -509,24 +520,25 @@ class TorchFusedLinear(PackableQuantLinear):
         # The CPU fused op now returns FP32 when a bias is present, so both
         # FP16 and BF16 can add the bias before the single output cast.
         fused_bias_safe = self.bias is None or x.dtype in (torch.bfloat16, torch.float16)
-        if (
-            not self.training
-            and not x.requires_grad
-            and self.linear_mode is None
-            and TORCH_HAS_FUSED_OPS
-            and fused_bias_safe
-        ):
-            # one-time transform per module for xpu aten fused ops
-            capture_fused_train_state(self)
-            self.transform(x.dtype, x.device.type)
-            self.linear_mode = LinearMode.INFERENCE
-            if x.device.type == "cpu":
-                self._refresh_fused_op()
-                # self.torch_fused_op.forward = torch.compile(
-                #     self.torch_fused_op.forward, options={"max_autotune": True}
-                # )
-        elif self.linear_mode is None:
-            self.linear_mode = LinearMode.TRAIN
+        with self._cpu_transform_lock:
+            if (
+                not self.training
+                and not x.requires_grad
+                and self.linear_mode is None
+                and TORCH_HAS_FUSED_OPS
+                and fused_bias_safe
+            ):
+                # one-time transform per module for xpu aten fused ops
+                capture_fused_train_state(self)
+                self.transform(x.dtype, x.device.type)
+                self.linear_mode = LinearMode.INFERENCE
+                if x.device.type == "cpu":
+                    self._refresh_fused_op()
+                    # self.torch_fused_op.forward = torch.compile(
+                    #     self.torch_fused_op.forward, options={"max_autotune": True}
+                    # )
+            elif self.linear_mode is None:
+                self.linear_mode = LinearMode.TRAIN
 
         if self.linear_mode == LinearMode.INFERENCE:
             out = self._fused_op_forward(x)

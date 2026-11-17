@@ -902,6 +902,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                     self.weight.device,
                     compute_dtype,
                     x.numel() // self.in_features,
+                    kernel=self.kernel,
                 )
             ):
                 quant_state = self._refresh_quant_state()
@@ -1001,8 +1002,11 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
         # kernels. Flatten arbitrary leading activation dimensions and restore
         # them afterwards. Without the flatten, a [batch, seq, K] activation
         # reduces the wrong axis in the row quantizer and the rank-2 row scale
-        # no longer matches the rank-3 product in the epilogue.
-        x_flat = x.reshape(-1, self.in_features)
+        # no longer matches the rank-3 product in the epilogue. The copy is
+        # required: ``reshape`` can return a row-strided view (for example
+        # ``hidden[:, -1:, :]``), and the native quantizer reads ``data_ptr()``
+        # as packed [M, K] rows instead of honoring the tensor strides.
+        x_flat = x.reshape(-1, self.in_features).contiguous()
 
         if x.dtype == torch.float16:
             x_int8, x_stats, outlier_cols = bnb.functional.int8_vectorwise_quant(
@@ -1016,6 +1020,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                 "BitsAndBytesLinear only supports the direct int8 vectorwise path without outlier routing."
             )
 
+        x_int8 = x_int8.contiguous()
         mm_out = bnb.functional.int8_linear_matmul(x_int8, self.weight)
         if x.dtype == torch.float16 and bias is None:
             # The native fused epilogue is safe without a bias: there is no

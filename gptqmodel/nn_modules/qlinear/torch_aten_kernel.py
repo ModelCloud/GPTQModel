@@ -447,28 +447,29 @@ class TorchAtenLinear(PackableQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        if (
-            not self.training
-            and not x.requires_grad
-            and self.linear_mode is None
-            and self._cpu_fused_available()
-            and x.device.type == "cpu"
-            and self._fused_input_dtype(x)
-            # The fused kernel writes the activation dtype before a separate
-            # bias add unless ``_fused_op_forward`` asks for an FP32 product.
-            # Biased FP16 layers take that path so the pre-bias sum cannot
-            # overflow before the bias cancels it.
-            and (
-                self.bias is None
-                or self._fused_op_handles_bias
-                or x.dtype in (torch.bfloat16, torch.float16)
-            )
-        ):
-            capture_fused_train_state(self)
-            self.transform(x.device.type, dtype=x.dtype)
-            self.linear_mode = "inference"
-        elif self.linear_mode is None:
-            self.linear_mode = "train"
+        with self._cpu_transform_lock:
+            if (
+                not self.training
+                and not x.requires_grad
+                and self.linear_mode is None
+                and self._cpu_fused_available()
+                and x.device.type == "cpu"
+                and self._fused_input_dtype(x)
+                # The fused kernel writes the activation dtype before a
+                # separate bias add unless ``_fused_op_forward`` asks for an
+                # FP32 product. Biased FP16 layers take that path so the
+                # pre-bias sum cannot overflow before the bias cancels it.
+                and (
+                    self.bias is None
+                    or self._fused_op_handles_bias
+                    or x.dtype in (torch.bfloat16, torch.float16)
+                )
+            ):
+                capture_fused_train_state(self)
+                self.transform(x.device.type, dtype=x.dtype)
+                self.linear_mode = "inference"
+            elif self.linear_mode is None:
+                self.linear_mode = "train"
 
         # A fused op or a dense matmul both write the activation dtype before a
         # separate bias add. Keep the biased product in FP32 instead so a

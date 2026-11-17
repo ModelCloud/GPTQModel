@@ -3576,6 +3576,308 @@ def test_native_checkpoint_restores_a_fresh_model(tmp_path):
     assert fresh.model.decoder.layers[0].proj.weight.detach().equal(w)
 
 
+def _mixed_grid_and_dense_model(dtype=torch.float32):
+    """One decoder block with an on-grid linear and an off-grid dense linear."""
+
+    block = torch.nn.Module()
+    block.grid = torch.nn.Linear(16, 2, bias=True, dtype=dtype)
+    block.dense = torch.nn.Linear(16, 2, bias=True, dtype=dtype)
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.decoder = torch.nn.Module()
+    model.model.decoder.layers = torch.nn.ModuleList([block])
+    return model
+
+
+def test_native_checkpoint_roundtrips_dense_fallback_layers(tmp_path):
+    """The dense fallback must be loadable, not only written.
+
+    A decoder linear that is not on the grid is stored as ``<layer>.weight``, but
+    it used to be left out of ``blockfloat.json``, so the reader skipped it and
+    the loader returned success with the target layer still at its initial
+    values. Its bias was never written at all. Both kinds of layer are now listed
+    in the manifest and restored weight-for-weight and bias-for-bias.
+    """
+
+    import importlib
+    import json
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    src = _mixed_grid_and_dense_model()
+    block = src.model.decoder.layers[0]
+    with torch.no_grad():
+        block.grid.weight.fill_(1.0)       # exactly on the bf4_b grid
+        block.grid.bias.fill_(0.5)
+        block.dense.weight.fill_(0.1)      # off-grid, so it stays dense
+        block.dense.bias.fill_(3.0)
+
+    out = str(tmp_path / "mixed")
+    info = bq.save_blockfloat_checkpoint(src, out, bits=4)
+    assert info["layers"] == 1 and info["dense_layers"] == 1
+
+    payload = bq._load_blockfloat_payload(out)
+    # Both biases are written, and the dense weight is stored at its source dtype.
+    assert payload["0.dense.weight"].dtype is torch.float32
+    assert torch.equal(payload["0.dense.weight"], block.dense.weight.detach())
+    assert torch.equal(payload["0.dense.bias"], block.dense.bias.detach())
+    assert torch.equal(payload["0.grid.bias"], block.grid.bias.detach())
+
+    meta = json.loads((tmp_path / "mixed" / "blockfloat.json").read_text())
+    assert meta["layers"]["0.grid"]["kind"] == "blockfloat"
+    assert meta["layers"]["0.dense"]["kind"] == "dense"
+    assert meta["layers"]["0.dense"]["dtype"] == "float32"
+    assert meta["layers"]["0.dense"]["has_bias"] is True
+    # Only quantized layers carry a width, so mixed-width bookkeeping is unchanged.
+    assert "bits" not in meta["layers"]["0.dense"]
+
+    read_back = bq.read_blockfloat_checkpoint(out)
+    assert set(read_back["layers"]) == {"0.grid", "0.dense"}
+    assert read_back["layers"]["0.dense"]["kind"] == "dense"
+    assert bq.expand_native_layer(read_back["layers"]["0.dense"]).equal(
+        block.dense.weight.detach()
+    )
+
+    fresh = _mixed_grid_and_dense_model()
+    with torch.no_grad():
+        for param in fresh.parameters():
+            param.fill_(-9.0)
+    restored = bq.load_native_checkpoint_into_dense_model(fresh, out)
+    assert set(restored) == {"0.grid", "0.dense"}
+    target = fresh.model.decoder.layers[0]
+    assert torch.equal(target.grid.weight.detach(), block.grid.weight.detach())
+    assert torch.equal(target.grid.bias.detach(), block.grid.bias.detach())
+    assert torch.equal(target.dense.weight.detach(), block.dense.weight.detach())
+    assert torch.equal(target.dense.bias.detach(), block.dense.bias.detach())
+
+
+def test_native_checkpoint_with_only_dense_layers(tmp_path):
+    """A checkpoint with no on-grid layer is still loadable.
+
+    ``layers`` reports the block-float count, ``dense_layers`` the fallback
+    count, and the manifest is the only list of what the payload holds.
+    """
+
+    import importlib
+    import json
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    block = torch.nn.Module()
+    block.proj = torch.nn.Linear(16, 2, bias=True)
+    with torch.no_grad():
+        block.proj.weight.fill_(0.1)
+        block.proj.bias.fill_(3.0)
+    src = torch.nn.Module()
+    src.model = torch.nn.Module()
+    src.model.decoder = torch.nn.Module()
+    src.model.decoder.layers = torch.nn.ModuleList([block])
+
+    out = str(tmp_path / "dense")
+    info = bq.save_blockfloat_checkpoint(src, out, bits=4)
+    assert info["layers"] == 0
+    assert info["dense_layers"] == 1
+    assert info["bits_per_layer"] == []
+
+    meta = json.loads((tmp_path / "dense" / "blockfloat.json").read_text())
+    assert set(meta["layers"]) == {"0.proj"}
+    assert meta["layers"]["0.proj"]["kind"] == "dense"
+    assert "bits_per_layer" not in meta
+
+    fresh_block = torch.nn.Module()
+    fresh_block.proj = torch.nn.Linear(16, 2, bias=True)
+    fresh = torch.nn.Module()
+    fresh.model = torch.nn.Module()
+    fresh.model.decoder = torch.nn.Module()
+    fresh.model.decoder.layers = torch.nn.ModuleList([fresh_block])
+    with torch.no_grad():
+        for param in fresh.parameters():
+            param.fill_(-9.0)
+    restored = bq.load_native_checkpoint_into_dense_model(fresh, out)
+    assert restored == {"0.proj": [2, 16]}
+    target = fresh.model.decoder.layers[0].proj
+    assert torch.equal(target.weight.detach(), block.proj.weight.detach())
+    assert torch.equal(target.bias.detach(), block.proj.bias.detach())
+
+
+def test_native_checkpoint_dense_fallback_keeps_source_precision(tmp_path):
+    """A dense fallback keeps bf16 exactly; it used to be narrowed to fp16."""
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    src = _mixed_grid_and_dense_model(dtype=torch.bfloat16)
+    block = src.model.decoder.layers[0]
+    values = torch.tensor([0.1234567, -0.98765], dtype=torch.bfloat16)
+    with torch.no_grad():
+        block.grid.weight.fill_(1.0)
+        block.grid.bias.copy_(values)
+        block.dense.weight.fill_(0.1)
+        block.dense.bias.copy_(values)
+
+    out = str(tmp_path / "bf16")
+    bq.save_blockfloat_checkpoint(src, out, bits=4)
+
+    payload = bq._load_blockfloat_payload(out)
+    assert payload["0.dense.weight"].dtype is torch.bfloat16
+    assert payload["0.dense.bias"].dtype is torch.bfloat16
+    assert torch.equal(payload["0.dense.bias"], values)
+    assert torch.equal(payload["0.grid.bias"], values)
+
+    fresh = _mixed_grid_and_dense_model(dtype=torch.bfloat16)
+    with torch.no_grad():
+        for param in fresh.parameters():
+            param.fill_(-9.0)
+    bq.load_native_checkpoint_into_dense_model(fresh, out)
+    target = fresh.model.decoder.layers[0]
+    assert torch.equal(target.dense.weight.detach(), block.dense.weight.detach())
+    assert torch.equal(target.dense.bias.detach(), values)
+
+
+def test_native_checkpoint_rejects_layers_with_no_target_module(tmp_path):
+    """A manifest entry the target model cannot hold must not pass silently."""
+
+    import importlib
+
+    import pytest
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    src = _mixed_grid_and_dense_model()
+    with torch.no_grad():
+        src.model.decoder.layers[0].grid.weight.fill_(1.0)
+        src.model.decoder.layers[0].dense.weight.fill_(0.1)
+    out = str(tmp_path / "mixed")
+    bq.save_blockfloat_checkpoint(src, out, bits=4)
+
+    # Same shape of model, but the dense fallback layer is gone.
+    block = torch.nn.Module()
+    block.grid = torch.nn.Linear(16, 2, bias=True)
+    other = torch.nn.Module()
+    other.model = torch.nn.Module()
+    other.model.decoder = torch.nn.Module()
+    other.model.decoder.layers = torch.nn.ModuleList([block])
+
+    with pytest.raises(ValueError, match="0.dense"):
+        bq.load_native_checkpoint_into_dense_model(other, out)
+
+
+def test_native_loader_rejects_a_bias_the_target_cannot_hold(tmp_path):
+    """A stored bias with no target module bias must not be dropped."""
+
+    import importlib
+
+    import pytest
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    src = _mixed_grid_and_dense_model()
+    with torch.no_grad():
+        src.model.decoder.layers[0].grid.weight.fill_(1.0)
+        src.model.decoder.layers[0].dense.weight.fill_(0.1)
+    out = str(tmp_path / "mixed")
+    bq.save_blockfloat_checkpoint(src, out, bits=4)
+
+    block = torch.nn.Module()
+    block.grid = torch.nn.Linear(16, 2, bias=False)
+    block.dense = torch.nn.Linear(16, 2, bias=False)
+    target = torch.nn.Module()
+    target.model = torch.nn.Module()
+    target.model.decoder = torch.nn.Module()
+    target.model.decoder.layers = torch.nn.ModuleList([block])
+
+    with pytest.raises(ValueError, match="stores a bias"):
+        bq.load_native_checkpoint_into_dense_model(target, out)
+
+
+def test_native_checkpoint_reads_a_version_1_manifest(tmp_path):
+    """Version 1 checkpoints still load their quantized layers.
+
+    Version 1 listed only block-float layers and wrote the dense fallback (and no
+    bias for it) without a manifest entry. Those unreachable tensors cannot be
+    attributed to a layer afterwards -- the payload key is the only evidence --
+    so the reader keeps loading every entry the manifest does list, and a
+    cross-check now fails the load for a declared layer whose codes are missing.
+    """
+
+    import importlib
+    import json
+    import os
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    src = _mixed_grid_and_dense_model()
+    with torch.no_grad():
+        src.model.decoder.layers[0].grid.weight.fill_(1.0)
+        src.model.decoder.layers[0].dense.weight.fill_(0.1)
+    out = str(tmp_path / "v1")
+    bq.save_blockfloat_checkpoint(src, out, bits=4)
+
+    path = os.path.join(out, "blockfloat.json")
+    with open(path) as handle:
+        meta = json.load(handle)
+    # Reconstruct the pre-change manifest: only the quantized layer is listed,
+    # with no ``kind`` and no bias record.
+    quantized = {
+        key: {k: v for k, v in entry.items() if k in (
+            "shape", "bits", "codes_bytes", "numel", "exponent_bytes"
+        )}
+        for key, entry in meta["layers"].items()
+        if entry["kind"] == "blockfloat"
+    }
+    meta["version"] = 1
+    meta["layers"] = quantized
+    with open(path, "w") as handle:
+        json.dump(meta, handle, indent=1)
+
+    payload = bq.read_blockfloat_checkpoint(out)
+    assert set(payload["layers"]) == {"0.grid"}
+    assert payload["layers"]["0.grid"]["kind"] == "blockfloat"
+
+    fresh = _mixed_grid_and_dense_model()
+    with torch.no_grad():
+        for param in fresh.parameters():
+            param.fill_(-9.0)
+    # The unlisted dense tensor is not reachable, so it is not a target layer.
+    block = torch.nn.Module()
+    block.grid = torch.nn.Linear(16, 2, bias=True)
+    target = torch.nn.Module()
+    target.model = torch.nn.Module()
+    target.model.decoder = torch.nn.Module()
+    target.model.decoder.layers = torch.nn.ModuleList([block])
+    restored = bq.load_native_checkpoint_into_dense_model(target, out)
+    assert restored == {"0.grid": [2, 16]}
+    assert target.model.decoder.layers[0].grid.weight.detach().eq(1.0).all()
+
+
+def test_native_reader_rejects_a_layer_whose_codes_are_missing(tmp_path):
+    """A listed layer with no payload tensor is a broken checkpoint, not a skip."""
+
+    import importlib
+    import os
+
+    import pytest
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    src = _mixed_grid_and_dense_model()
+    with torch.no_grad():
+        src.model.decoder.layers[0].grid.weight.fill_(1.0)
+        src.model.decoder.layers[0].dense.weight.fill_(0.1)
+    out = str(tmp_path / "broken")
+    bq.save_blockfloat_checkpoint(src, out, bits=4)
+
+    payload = bq._load_blockfloat_payload(out)
+    payload.pop("0.dense.weight")
+    from safetensors.torch import save_file
+
+    save_file(payload, os.path.join(out, bq.BLOCKFLOAT_PAYLOAD))
+
+    with pytest.raises(ValueError, match="0.dense.weight is missing"):
+        bq.read_blockfloat_checkpoint(out)
+
+
 def test_blockfloat_pack_roundtrips_exactly():
     """Codes plus exponents must reconstruct the grid weights bit-for-bit.
 

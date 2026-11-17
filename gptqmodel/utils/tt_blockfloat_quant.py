@@ -1124,7 +1124,11 @@ def _quantize_embedding_on_grid(
 # the hardware grid, the loader can either expand them to floats or feed them
 # straight to a TT kernel, with no host-side re-quantisation.
 
-BLOCKFLOAT_SAVE_FORMAT_VERSION = 1
+#: Version 2 lists every decoder layer in the manifest, including the ones stored
+#: dense because they are not on the grid, and records each layer's kind, shape,
+#: dtype and whether it has a bias. Version 1 listed only the quantized layers,
+#: so the dense tensors it wrote to the payload could not be found again.
+BLOCKFLOAT_SAVE_FORMAT_VERSION = 2
 
 #: Tensor payload file. safetensors is the format: no pickle, memory-mappable, and
 #: it is what the rest of the repo already ships. ``blockfloat.pt`` is still read
@@ -1254,12 +1258,18 @@ def save_blockfloat_checkpoint(
     bits=4,
     metadata: "Optional[dict]" = None,
 ) -> dict:
-    """Write grid-quantized decoder linears as a bf4_b/bf8_b-native checkpoint.
+    """Write decoder linears as a bf4_b/bf8_b-native checkpoint.
 
     Weights become ``<layer>.blockfloat_codes`` (uint8) plus
     ``<layer>.blockfloat_exponents`` (int8), so the stored payload is 1 byte per
     element for bf4_b -- the same order as int4 packing without a second quantisation
     step at load. Returns a summary of what was written.
+
+    A decoder linear that is not exactly on the block-float grid cannot be stored
+    as codes. It is written as a dense ``<layer>.weight`` at its source dtype and
+    listed in the manifest with ``kind: "dense"``, so the matching reader and
+    loader can find and restore it. Both kinds record their bias when they have
+    one: a layer that is saved must be loadable, or the save has to fail.
 
     ``bits`` may be a single width, or a mapping of layer-name pattern to width
     with an optional ``"*"`` default. Mixed widths are what a real checkpoint
@@ -1277,8 +1287,13 @@ def save_blockfloat_checkpoint(
     log = setup_logger()
     blocks = _decoder_blocks(model)
     tensors: dict = {}
+    #: Per-layer manifest. Quantized *and* dense layers are listed: the reader
+    #: dispatches on ``kind``, so nothing the writer emits is unreachable.
     summary: dict = {}
     default_bits = _default_bits(bits)
+
+    def _dtype_name(tensor) -> str:
+        return str(tensor.dtype).replace("torch.", "")
 
     for index, block in enumerate(blocks):
         for name, module in block.named_modules():
@@ -1290,6 +1305,7 @@ def save_blockfloat_checkpoint(
             layer_bits = _layer_bits(bits, key)
             source_weight = module.weight.detach()
             bias = getattr(module, "bias", None)
+            bias = bias.detach() if isinstance(bias, torch.Tensor) else None
             # The grid check needs float32 arithmetic, but that cast is only for
             # the encoder. Anything stored as a dense float keeps the module's
             # own dtype: narrowing a bf16/fp32 weight or bias to float16 turns
@@ -1298,26 +1314,43 @@ def save_blockfloat_checkpoint(
             try:
                 codes, exponents = decompose_blockfloat(w, bits=layer_bits)
             except ValueError:
-                # Not quantized (or not on the grid): keep it as a dense float
-                # at the source precision, bias included. The old code both
-                # narrowed this weight and dropped the bias entirely.
-                tensors[f"{key}.weight"] = source_weight.contiguous()
+                # Not quantized (or not on the grid): keep it as a dense float at
+                # the source precision, bias included, and record it in the
+                # manifest. A saved tensor the reader cannot find is a checkpoint
+                # that loads with that layer still at its initial values.
+                dense = source_weight.contiguous()
+                tensors[f"{key}.weight"] = dense
+                summary[key] = {
+                    "kind": "dense",
+                    "shape": list(dense.shape),
+                    "dtype": _dtype_name(dense),
+                    "has_bias": bias is not None,
+                }
                 if bias is not None:
-                    tensors[f"{key}.bias"] = bias.detach().contiguous()
+                    stored_bias = bias.contiguous()
+                    tensors[f"{key}.bias"] = stored_bias
+                    summary[key]["bias_dtype"] = _dtype_name(stored_bias)
                 continue
             tensors[f"{key}.blockfloat_codes"] = _pack_codes(codes, layer_bits)
             tensors[f"{key}.blockfloat_code_shape"] = torch.tensor(codes.shape)
             tensors[f"{key}.blockfloat_exponents"] = exponents
-            if bias is not None:
-                tensors[f"{key}.bias"] = bias.detach().contiguous()
             packed = tensors[f"{key}.blockfloat_codes"]
             summary[key] = {
+                "kind": "blockfloat",
                 "shape": list(w.shape),
                 "bits": layer_bits,
                 "codes_bytes": int(packed.numel()),
                 "numel": int(codes.numel()),
                 "exponent_bytes": int(exponents.numel()),
+                "has_bias": bias is not None,
             }
+            if bias is not None:
+                # The bias is dense state, not part of the grid, and the source
+                # dtype is what inference loads. Narrowing it to float16 here made
+                # the round trip lossy for an fp32 or bf16 model.
+                stored_bias = bias.contiguous()
+                tensors[f"{key}.bias"] = stored_bias
+                summary[key]["bias_dtype"] = _dtype_name(stored_bias)
 
     os.makedirs(output_dir, exist_ok=True)
     from safetensors.torch import save_file
@@ -1344,20 +1377,30 @@ def save_blockfloat_checkpoint(
         "stored_mantissa_bits": stored_mantissa_bits(default_bits),
         "layers": summary,
     })
-    widths = sorted({entry["bits"] for entry in summary.values()})
+    quantized = {
+        key: entry for key, entry in summary.items() if entry["kind"] == "blockfloat"
+    }
+    widths = sorted({entry["bits"] for entry in quantized.values()})
     if len(widths) > 1:
         meta["mixed_bits"] = True
-        meta["bits_per_layer"] = {key: entry["bits"] for key, entry in summary.items()}
+        meta["bits_per_layer"] = {
+            key: entry["bits"] for key, entry in quantized.items()
+        }
     with open(os.path.join(output_dir, "blockfloat.json"), "w") as handle:
         json.dump(meta, handle, indent=1)
-    total = sum(v["codes_bytes"] + v["exponent_bytes"] for v in summary.values())
+    # Count what actually reaches disk: packed codes and exponents, the dense
+    # fallback weights, and every bias.
+    total = sum(t.numel() * t.element_size() for t in tensors.values())
+    dense_layers = len(summary) - len(quantized)
     log.info(
         f"TTBlockFloat: wrote {len(summary)} layers to {output_dir} "
-        f"({total / 1024 / 1024:.2f} MiB payload, "
-        f"{'/'.join(str(w) for w in widths)}-bit)"
+        f"({len(quantized)} block-float, {dense_layers} dense; "
+        f"{total / 1024 / 1024:.2f} MiB payload, "
+        f"{'/'.join(str(w) for w in widths) or 'none'}-bit)"
     )
     return {
-        "layers": len(summary),
+        "layers": len(quantized),
+        "dense_layers": dense_layers,
         "payload_bytes": total,
         "bits": default_bits,
         "bits_per_layer": widths,
@@ -1406,10 +1449,12 @@ def load_blockfloat_into_model(model, checkpoint_dir: str) -> dict:
 # with ordinary PyTorch where a TT kernel is not appropriate.
 
 def read_blockfloat_checkpoint(checkpoint_dir: str) -> dict:
-    """Read a native checkpoint into ``{layer_name: (codes, exponents, bias)}``.
+    """Read a native checkpoint into ``{layer_name: entry}``.
 
-    Codes stay packed exactly as stored; use :func:`recompose_blockfloat` (or the
-    un-packed helper) to expand one layer.
+    Every layer the manifest lists is returned, including the ones stored dense
+    because they were not on the grid; ``entry["kind"]`` is ``"blockfloat"`` or
+    ``"dense"``. Quantized codes stay packed exactly as stored; use
+    :func:`expand_native_layer` to reconstruct either kind as floats.
     """
 
     import json
@@ -1422,32 +1467,64 @@ def read_blockfloat_checkpoint(checkpoint_dir: str) -> dict:
         raise ValueError(f"{meta_path} is not a tt-blockfloat checkpoint")
     bits = int(meta["bits"])
     tensors = _load_blockfloat_payload(checkpoint_dir)
+    declared = meta.get("layers", {})
 
     layers = {}
-    for key in meta.get("layers", {}):
+    for key, record in declared.items():
+        record = dict(record or {})
+        # Version 1 stored no ``kind``: every entry it listed was block-float, and
+        # any dense tensor it wrote was unreachable. Treat a missing kind as
+        # quantized so old checkpoints keep loading.
+        kind = str(record.get("kind", "blockfloat"))
+        bias = tensors.get(f"{key}.bias")
+        if kind == "dense":
+            weight = tensors.get(f"{key}.weight")
+            if weight is None:
+                raise ValueError(
+                    f"{meta_path}: layer {key!r} is declared dense but "
+                    f"{key}.weight is missing from the payload"
+                )
+            layers[key] = {
+                "kind": "dense",
+                "weight": weight,
+                "bias": bias,
+                "shape": tuple(int(v) for v in weight.shape),
+                "dtype": str(weight.dtype).replace("torch.", ""),
+            }
+            continue
+        if kind != "blockfloat":
+            raise ValueError(f"{meta_path}: layer {key!r} has unknown kind {kind!r}")
         # A mixed-width checkpoint records the width per layer; older ones only
         # have the global value.
-        layer_bits = int(meta["layers"][key].get("bits", bits))
+        layer_bits = int(record.get("bits", bits))
         codes = tensors.get(f"{key}.blockfloat_codes")
         exponents = tensors.get(f"{key}.blockfloat_exponents")
         if codes is None or exponents is None:
-            continue
+            # A manifest entry whose codes vanished would leave the caller with a
+            # silently partially restored model.
+            raise ValueError(
+                f"{meta_path}: layer {key!r} is declared block-float but its "
+                "codes or exponents are missing from the payload"
+            )
         shape = tensors.get(f"{key}.blockfloat_code_shape")
         if shape is not None:
             codes = _unpack_codes(codes, layer_bits, tuple(int(v) for v in shape))
         layers[key] = {
+            "kind": "blockfloat",
             "codes": codes,
             "exponents": exponents,
-            "bias": tensors.get(f"{key}.bias"),
-            "shape": tuple(meta["layers"][key]["shape"]),
+            "bias": bias,
+            "shape": tuple(record["shape"]),
             "bits": layer_bits,
         }
     return {"bits": bits, "block": int(meta["block"]), "layers": layers, "meta": meta}
 
 
 def expand_native_layer(entry: dict) -> torch.Tensor:
-    """Expand one native layer's codes to float weights (exact, no rounding)."""
+    """Expand one native layer to its stored float weights (exact, no rounding)."""
 
+    if entry.get("kind") == "dense":
+        return entry["weight"].reshape(entry["shape"])
     return recompose_blockfloat(
         entry["codes"], entry["exponents"], bits=entry["bits"]
     ).reshape(entry["shape"])
@@ -1460,6 +1537,9 @@ def load_native_checkpoint_into_dense_model(model, checkpoint_dir: str) -> dict:
     the exact grid weights with no quantisation, so the result matches
     :func:`load_blockfloat_into_model` bit-for-bit while allowing callers to build
     the model however they like (for example on `meta` to skip a float allocation).
+
+    Layers the manifest lists but the target model does not have are an error:
+    a caller that gets a result back must not be left with un-restored weights.
     """
 
     payload = read_blockfloat_checkpoint(checkpoint_dir)
@@ -1473,14 +1553,30 @@ def load_native_checkpoint_into_dense_model(model, checkpoint_dir: str) -> dict:
                 entry = tensors.get(key)
                 if entry is None or getattr(module, "weight", None) is None:
                     continue
-                weights = recompose_blockfloat(
-                    entry["codes"], entry["exponents"], bits=entry["bits"]
-                ).reshape(entry["shape"])
+                weights = expand_native_layer(entry)
                 module.weight.copy_(weights.to(module.weight.dtype))
-                if entry["bias"] is not None and getattr(module, "bias", None) is not None:
+                if entry["bias"] is not None:
+                    if getattr(module, "bias", None) is None:
+                        # The checkpoint holds a bias this module cannot receive,
+                        # so keeping the weight alone would drop saved state.
+                        raise ValueError(
+                            f"{checkpoint_dir}: layer {key!r} stores a bias but the "
+                            "target module has none"
+                        )
                     module.bias.copy_(entry["bias"].to(module.bias.dtype))
                 restored[key] = list(entry["shape"])
+    unreachable = sorted(set(tensors) - set(restored))
+    if unreachable:
+        # The target model does not own everything the checkpoint stores, so the
+        # caller would get a success while those weights stayed at their initial
+        # values.
+        raise ValueError(
+            f"{checkpoint_dir}: {len(unreachable)} checkpoint layer(s) have no "
+            f"target module in this model, e.g. {unreachable[:3]}"
+        )
     return restored
+
+
 # --- standard Hugging Face checkpoint layout -------------------------------
 #
 # A published checkpoint is an ordinary HF model directory: ``model.safetensors``

@@ -73,3 +73,78 @@ def test_apply_online_hadamard_short_circuits_an_empty_operand():
 
     assert y.shape == x.shape
     assert y.dtype == x.dtype
+
+
+@pytest.mark.parametrize(
+    "rows, expected_calls",
+    [(0, []), (2, ["had_r_128", "hgemm", "had_r_128"])],
+)
+def test_exl3_forward_guards_empty_batch_before_kernel_launch(monkeypatch, rows, expected_calls):
+    """The torch_mode path must not hand a zero-row operand to the kernels."""
+
+    from gptqmodel.exllamav3.modules.quant import exl3 as native_exl3
+
+    calls = []
+
+    class FakeExt:
+        @staticmethod
+        def had_r_128(x, y, suh, svh, scale):
+            calls.append("had_r_128")
+
+        @staticmethod
+        def hgemm(x, weight, y):
+            calls.append("hgemm")
+
+    class FakeBC:
+        def run(self, x, y):
+            calls.append("bc")
+
+    monkeypatch.setattr(native_exl3, "ext", FakeExt)
+    inner = object.__new__(native_exl3.LinearEXL3)
+    inner.in_features = inner.out_features = 128
+    inner.out_dtype = torch.float16
+    inner.suh = inner.svh = inner.bias = None
+    inner.bc = FakeBC()
+    inner.get_inner_weight_tensor = lambda: torch.eye(128, dtype=torch.float16)
+
+    x = torch.empty((rows, 128), dtype=torch.float16)
+    actual = inner.forward(x, {"reconstruct": True})
+
+    assert actual.shape == (rows, 128)
+    assert actual.dtype == torch.float16
+    assert calls == expected_calls
+
+
+@requires_cuda
+@pytest.mark.cuda
+def test_exllamav3_had_r_128_accepts_an_empty_batch():
+    ext = pytest.importorskip("gptqmodel.exllamav3.ext")
+    if not ext.exllamav3_runtime_available():
+        pytest.skip("ExLlamaV3 extension is not built")
+
+    x = torch.empty((0, 128), device="cuda", dtype=torch.float16)
+    y = torch.empty_like(x)
+
+    ext.exllamav3_ext.had_r_128(x, y, None, None, 1.0)
+    torch.cuda.synchronize()
+
+    assert y.shape == (0, 128)
+    assert y.dtype == torch.float16
+
+
+@requires_cuda
+@pytest.mark.cuda
+def test_exllamav3_had_r_128_still_launches_for_nonempty_rows():
+    ext = pytest.importorskip("gptqmodel.exllamav3.ext")
+    if not ext.exllamav3_runtime_available():
+        pytest.skip("ExLlamaV3 extension is not built")
+
+    x = torch.ones((2, 128), device="cuda", dtype=torch.float16)
+    y = torch.empty_like(x)
+
+    ext.exllamav3_ext.had_r_128(x, y, None, None, 1.0)
+    torch.cuda.synchronize()
+
+    assert y.shape == x.shape
+    assert torch.isfinite(y).all()
+    assert not torch.equal(y, x)

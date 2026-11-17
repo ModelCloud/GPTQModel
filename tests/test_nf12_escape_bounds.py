@@ -7,6 +7,8 @@ The packed stream stores an escape-table index per escaped group; it is not
 bounded by the checkpoint loader.
 """
 
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -64,3 +66,47 @@ def test_nf12_weight_from_state_dict_validates_escape_indices():
     }
     with pytest.raises(ValueError, match="out of range"):
         NF12Weight.from_state_dict(state)
+
+
+SMALL_M_ASYNC = (
+    Path(__file__).resolve().parents[1]
+    / "gptqmodel_ext/nf12/csrc/linear/small_m_async.cu"
+)
+
+
+def _squashed(text: str) -> str:
+    import re
+
+    return re.sub(r"\s+", " ", text)
+
+
+def test_sm103_staged_escape_producer_and_consumer_bound_the_index():
+    """The staged path must honour ``num_escapes`` like every other path.
+
+    ``small_m_async_kernel`` copies the escaped rows into shared memory and reads
+    them back. Both halves must reject an index at or past the expert's slice
+    count; otherwise SM103 alone reads outside the table (issue #4552).
+    """
+
+    source = SMALL_M_ASYNC.read_text(encoding="utf-8")
+    squashed = _squashed(source)
+
+    producer = _squashed(
+        source[
+            source.index("} else if (StageEscapes && warp < 4) {") :
+            source.index("arrive_async(smem_addr(barriers + stage * Bars + Full));", source.index("StageEscapes && warp < 4"))
+        ]
+    )
+    assert "if (metadata[group] == 0u && indices[group] < p.num_escapes)" in producer
+    assert "cp_async_16(target, p.escapes + indices[group]);" in producer
+
+    consumer = _squashed(
+        source[
+            source.index("if constexpr (StageEscapes && S == WeightSource::kNF12) {") :
+            source.index("} else {", source.index("if constexpr (StageEscapes && S == WeightSource::kNF12) {"))
+        ]
+    )
+    assert "if (groups[group].meta == 0u && groups[group].lo0 < p.num_escapes)" in consumer
+
+    # Reference: the unstaged path bounds the same value through the codec.
+    assert "T::fragments(planes, p.base, p.escapes, p.num_escapes, fragments);" in squashed

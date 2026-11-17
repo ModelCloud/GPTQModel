@@ -340,6 +340,69 @@ def test_cached_mlp_accepts_short_final_microbatch(tmp_path):
     assert [batch[0].shape[0] for batch, _ in batches] == [2, 1]
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the post_quantize view path only runs for accelerator tensors",
+)
+def test_staged_awq_gpu_survives_post_quantize_views(tmp_path, monkeypatch):
+    """#4561: staged AWQ must not swap ``.data`` across the inference-mode boundary.
+
+    Layer parameters are created under the looper's inference mode, so they are
+    inference tensors. Replacing ``.data`` with a normal tensor left a parameter
+    without a version counter, and ``post_quantize`` ->
+    ``move_module_to_cpu_pinned`` raised ``Inference tensors do not track version
+    counter`` when it viewed the weight. The tiny model's tensors are below the
+    8 MiB pinned-copy threshold, so force that path to exercise the real staged
+    run past layer 0.
+    """
+
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
+
+    import gptqmodel.models.base as base_mod
+    from gptqmodel.models._const import DEVICE
+    from gptqmodel.models.definitions.llama import LlamaQModel
+    from gptqmodel.quantization import AWQConfig
+    from gptqmodel.utils.backend import BACKEND
+
+    torch.manual_seed(7)
+    config = LlamaConfig(vocab_size=128, hidden_size=64, intermediate_size=128,
+                         num_attention_heads=4, num_key_value_heads=4, num_hidden_layers=2)
+    config._attn_implementation = "eager"
+    from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
+
+    with torch.inference_mode():
+        model = LlamaForCausalLM(config).half().eval()
+        model.model.rotary_emb = LlamaRotaryEmbedding(config)
+    model.save_pretrained(tmp_path / "dense")
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(WordLevel({str(i): i for i in range(128)}, unk_token="0")),
+        unk_token="0", pad_token="0")
+
+    original_move = base_mod.move_module_to_cpu_pinned
+
+    def force_pinned_copy(module, **kwargs):
+        kwargs["pin_min_bytes"] = 0
+        return original_move(module, **kwargs)
+
+    monkeypatch.setattr(base_mod, "move_module_to_cpu_pinned", force_pinned_copy)
+    training = {"enabled": True, "initializer": "awq", "epochs": 1, "qk_steps": 2,
+                "batch_size": 1, "microbatch_size": 1}
+    quant_config = AWQConfig(bits=4, group_size=32, sym=False, device=DEVICE.CUDA,
+                             offload_to_disk=False, gsq_training=training)
+    wrapper = LlamaQModel(model=model, quantized=False, quantize_config=quant_config,
+                          tokenizer=tokenizer, model_local_path=str(tmp_path / "dense"))
+    wrapper.quantize([{"input_ids": list(range(1, 17))}], backend=BACKEND.TORCH,
+                     calibration_data_min_length=1)
+
+    assert wrapper.quantized
+    # Both layers completed their staged fit and post_quantize.
+    assert len(quant_config.meta["gsq_training_runs"]) == 2
+    assert all(torch.isfinite(torch.tensor(run["stages"]["attention"]["hard_loss_after"]))
+               for run in quant_config.meta["gsq_training_runs"])
+
+
 @pytest.mark.parametrize("method,bits,initializer", [
     ("gptq", 2, "gptq"), ("gptq", 3, "gptq"), ("gptq", 4, "gptq"),
     ("gptq", 4, "rtn"), ("awq", 4, "awq"),

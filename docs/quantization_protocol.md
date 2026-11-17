@@ -445,6 +445,45 @@ stage alone. Both accept multi-stage plans as long as exactly one rule carries a
 `weight` target, and its weight target still requires a global match (`"*"` or
 `["*", "-:..."]`).
 
+### Compilation validation
+
+`compile_plan_to_quantize_config` is the pure config stage: it validates action
+methods and arguments but never executes an action. Two fail-closed checks keep
+the plan from silently losing user intent (issue #4560):
+
+- A rule that requests `input`, `output`, or `kv_cache` is rejected with
+  `NotImplementedError`, even when the same rule also carries a `weight` target.
+  The initial compiler only emits weight configuration; activation and KV-cache
+  targets belong to later action stages. The error names the unsupported
+  targets.
+- `weight.quantize` keys are allow-listed per method. GPTQ accepts `bits`,
+  `group_size`, `sym`, `desc_act`, and `act_group_aware`; AWQ accepts `bits`,
+  `group_size`, `sym`, and `desc_act`; GGUF accepts `bits`. Any other key
+  (`act_order`, `damp_percent`, `symmetric`, `group-size`, `mse`,
+  `true_sequential`, ...) raises `ValueError` that names the unsupported keys
+  and lists the supported ones. Nothing is silently ignored.
+
+```mermaid
+flowchart TD
+    A["compile_plan_to_quantize_config"] --> B["normalize plan"]
+    B --> C{"rule has input, output,<br/>or kv_cache?"}
+    C -- "yes" --> X["NotImplementedError<br/>names the unsupported targets"]
+    C -- "no" --> D["validate rule.actions"]
+    D --> E{"weight target?"}
+    E -- "no" --> F["skip rule"]
+    E -- "yes" --> G["_validate_weight_quantize_args<br/>per method allow-list"]
+    G -- "unknown key" --> Y["ValueError<br/>unsupported + supported keys"]
+    G -- "known keys" --> H["_compile_weight_target"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X,Y failure;
+```
+
+| Old mechanism on `c280dfeba` | New contract |
+| --- | --- |
+| `if rule.weight is None:` guarded the non-weight target check (`protocol.py:268-273`) | The check runs for every rule and names the requested targets (`protocol.py:268-277`) |
+| `_compile_quantize_config_weight_target` read five keys and discarded the rest (`protocol.py:1116-1157`) | `_validate_weight_quantize_args` rejects unknown keys before reading them (`protocol.py:1112-1128`) |
+| `_compile_gguf_weight_target` read only `bits` and discarded the rest (`protocol.py:1088-1113`) | GGUF uses the same allow-list (`protocol.py:1138`) |
+
 `calibration` must run one or more forward passes through the model root.
 `smoothquant(alpha)` derives a per-channel scale from those activations, folds
 its inverse into the preceding norm, and multiplies every consumer of that norm
@@ -464,6 +503,23 @@ output by the same scale.
 - A consumer whose weight is shared with a module that does not consume the same
   norm output (a tied `lm_head` / `embed_tokens`) raises, because scaling one
   would silently change the other.
+- The 2-D `attention_mask` is recorded on **every** calibration pass, not only
+  the first. Each pass excludes its own padding before accumulating the channel
+  maxima, and a pass without a usable mask clears the holder so a stale mask
+  cannot leak forward (issue #4559).
+
+```mermaid
+sequenceDiagram
+    participant C as calibration
+    participant R as model root pre-hook
+    participant M as _accumulate_max
+    C->>R: pass 1 input_ids + mask A
+    R->>M: mask_holder = mask A
+    C->>R: pass 2 input_ids + mask B
+    R->>M: mask_holder = mask B
+    M-->>M: batch 2 maxima use mask B
+```
+
 - The fold is then **verified numerically**: the captured calibration call is
   replayed and the output must match the pre-fold output within
   `1e-3 + 8 * eps(dtype) * max|logits|`. Anything larger - a functional residual,
