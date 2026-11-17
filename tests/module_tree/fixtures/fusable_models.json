@@ -4216,15 +4216,15 @@
     },
     "ovis2_5": {
       "definition": "Ovis2_5QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned Ovis2.5 Qwen3/Siglip2 NaViT multimodal binding; fusion executor has not been qualified."
     },
     "ovis2_6_moe": {
       "definition": "Ovis2_6_MoeQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned Ovis2.6 NaViT/soft-visual-vocabulary wrapper with native Qwen3 MoE; fusion executor has not been qualified."
     },
     "ovis2_6_next": {
       "definition": "Ovis2_6_NextQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned Ovis2.6 NaViT/soft-visual-vocabulary wrapper with native Qwen3 Next linear-attention/MoE; fusion executor has not been qualified."
     },
     "phi": {
       "definition": "PhiQModel",

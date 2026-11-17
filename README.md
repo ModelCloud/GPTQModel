@@ -283,9 +283,9 @@ describe shared-KV calibration, recurrent cache recovery and packed QKV layout.
 [Package-owned tokenizer selection and LFM3 decoder ownership](docs/transformers5-model-ports.md#package-owned-tokenizer-selection)
 cover definition-specific scientific tokenizer dispatch and native gate/convolution
 exclusions. [Owned tokenizer construction and normalization](docs/owned-tokenizer-lifecycle.md)
-requires Tokenicer 0.0.19; the API is qualified from the unreleased candidate
-in [Tokenicer PR #66](https://github.com/ModelCloud/Tokenicer/pull/66).
-The checked source candidate also fixes Baichuan's legacy special-token map
+requires released [Tokenicer 0.0.19](https://github.com/ModelCloud/Tokenicer/releases/tag/v0.0.19),
+including merged [PR #66](https://github.com/ModelCloud/Tokenicer/pull/66).
+The release also fixes Baichuan's legacy special-token map
 precedence; exact source IDs and public safetensors reloads pass without
 changing the packaged tokenizer or its oracle assertions.
 [Klear and Kimi tokenizer/AttnRes selection](docs/transformers5-model-ports.md#klear-and-kimi-implementation-selection)
@@ -326,6 +326,9 @@ unestablished.
 [Ovis visual-vocabulary selection](docs/transformers5-model-ports.md#ovis-visual-vocabulary-selection)
 preserves Ovis 1.0/1.5/1.6 vision and image-token layouts with native text
 decoders and plain AWQ; native Ovis2 keeps its separate definition.
+[Ovis2.5 and Ovis2.6 decoder selection](docs/transformers5-model-ports.md#ovis25-and-ovis26-decoder-selection)
+binds their NaViT visual vocabulary to exact native Qwen3, Qwen3 MoE or Qwen3
+Next text decoders, with explicit ownership and image-calibrated plain AWQ.
 [Shared checkpoint ownership](docs/checkpoint-owned-materialization.md)
 explains generated device maps for tied aliases and native FP32 destinations
 during lazy offload, including the exclusions for packed weights.

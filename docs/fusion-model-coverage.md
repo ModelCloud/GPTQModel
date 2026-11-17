@@ -280,9 +280,9 @@ layout alone does not authorize it.
 | `openvla` | `OpenVLAQModel` | Package-owned OpenVLA Prismatic vision-language-action wrapper; fusion executor has not been qualified. |
 | `ouro` | `OuroQModel` | Package-owned Ouro recurrent shared decoder with sandwich norms and token-wise exit selection; fusion executor has not been qualified. |
 | `ovis` | `OvisQModel` | Package-owned Ovis 1.x visual-vocabulary wrapper with native Llama/Qwen2/Gemma2 decoder; fusion executor has not been qualified. |
-| `ovis2_5` | `Ovis2_5QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `ovis2_6_moe` | `Ovis2_6_MoeQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `ovis2_6_next` | `Ovis2_6_NextQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `ovis2_5` | `Ovis2_5QModel` | Package-owned Ovis2.5 Qwen3/Siglip2 NaViT multimodal binding; fusion executor has not been qualified. |
+| `ovis2_6_moe` | `Ovis2_6_MoeQModel` | Package-owned Ovis2.6 NaViT/soft-visual-vocabulary wrapper with native Qwen3 MoE; fusion executor has not been qualified. |
+| `ovis2_6_next` | `Ovis2_6_NextQModel` | Package-owned Ovis2.6 NaViT/soft-visual-vocabulary wrapper with native Qwen3 Next linear-attention/MoE; fusion executor has not been qualified. |
 | `phi3` | `Phi3QModel` | No compatible native projection forward: projections already combined, conditional, or preprocessed. |
 | `phi4mm` | `Phi4MMGPTQ` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `qwen` | `QwenQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |

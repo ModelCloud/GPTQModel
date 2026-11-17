@@ -16,10 +16,23 @@ definition ownership corrections alongside the package-owned ports.
 
 Current integrated qualification uses Python 3.14.6t with `PYTHON_GIL=0`,
 Torch 2.15.0 CPU, Transformers 5.23.0, SentencePiece 0.2.1, TikToken 0.12.0,
-timm 1.0.22 and Tokenicer's unreleased 0.0.19 runtime candidate
-`4f23746c7aeac3bf054d1d0dd7dc66e951468989` from
-[Tokenicer PR #66](https://github.com/ModelCloud/Tokenicer/pull/66).
-The dependency floor does not imply that this candidate is published.
+timm 1.0.22 and released
+[Tokenicer 0.0.19](https://github.com/ModelCloud/Tokenicer/releases/tag/v0.0.19),
+which includes merged [Tokenicer PR #66](https://github.com/ModelCloud/Tokenicer/pull/66).
+The earlier batches below used runtime candidate
+`4f23746c7aeac3bf054d1d0dd7dc66e951468989`; release reruns are labeled separately.
+
+| Integrated batch on published Tokenicer 0.0.19 | Result |
+| --- | --- |
+| InternVL and InternLM2 model/module plans, shared model/processor/tokenizer/options, registry/AWQ, Baichuan tokenizer and original MiniCPM | 1,143 passed, five fixture skips, 20 warnings; 179.91s |
+| Ovis2.5 model/module plan | 58 passed, no skips, six warnings; 8.80s |
+| Ovis2.6 MoE/Next model/module plans | 110 passed, no skips, nine warnings; 39.46s |
+| Updated Ovis central plans, fusion admission, ordering and generic AWQ policy | 707 passed, 465 skipped, six warnings; 29.83s |
+| AWQ fold-safety and norm guard/teacher lifecycle | 44 passed, no skips, two warnings; 10.70s |
+
+The five release-run skips are three unavailable Pangu checkpoints and the
+non-buildable `opt350` and `muse_glimmer` CausalLM fixtures.
+The central-plan batch additionally skips 460 NVIDIA-only Marlin cases.
 
 | Integrated batch on the final Tokenicer runtime candidate | Result |
 | --- | --- |
@@ -38,6 +51,8 @@ quality coverage on this checkout.
 
 | Definition / model type | Implementation and provenance | CPU validation | AWQ policy | Limits |
 | --- | --- | --- | --- | --- |
+| `Ovis2_5QModel` / `ovis2_5` | [Owned Qwen3/SigLIP2 NaViT soft-visual-vocabulary binding and Apache notices](../gptqmodel/models/ports/ovis2_5/README.md) | Both released header inventories, independent vision/merge equations, saved generation policy, hostile metadata, native decoder cache/generation and two safetensors cycles | Six public image-calibrated plain-AWQ cases, all 14 decoder linears and dense vision exclusions; no scale groups | Native Ovis2 remains separate; no trained-payload quality, GPU, fusion, concurrency or foreign-cache qualification |
+| `Ovis2_6_MoeQModel`, `Ovis2_6_NextQModel` | [Owned NaViT/visual-vocabulary wrapper and native Qwen3 MoE/Next decoders](../gptqmodel/models/ports/ovis2_6_moe/README.md) | Independent checkpoint inventories and media equations, hostile metadata, tokenizer/processor, dtype/cache/generation and repeated safetensors reloads | Public image-calibrated plain AWQ, native expert ownership and dense exclusions; linear-attention containers and routers excluded | No trained-payload quality, GPU, optimized FLA, fusion, concurrency or foreign-cache qualification |
 | `OvisQModel` / `ovis` | [Package-owned Ovis 1.0/1.5/1.6 visual vocabulary and pinned Apache notices](../gptqmodel/models/ports/ovis/README.md) | Eight release indexes and four full header inventories, independent vision/media merge equations, native Llama/Qwen2/Gemma2 decoders, released generation policy, hostile metadata, cache and safetensors reload | Eight public image-calibrated plain-AWQ cases, all 14 decoder linears, dense exclusions and two exact reloads; no scale groups | Native Ovis2 is separate; no trained weights, GPU, fusion, concurrent execution, foreign cache or AWQ fold/search qualification |
 | `KlearQModel` / `klear` | [Package-owned dense/MoE port, pinned Base/Instruct sources and Apache notices](../gptqmodel/models/ports/klear/README.md) | Full 25,059-key meta inventory, independent attention/routing equations, requested-dtype loading, cache/generation, hostile metadata and safetensors reload | Real public plain AWQ dense/MoE/mixed packing and two save/reload cycles; no scale groups | No trained-weight, GPU, FlashAttention, fusion, parallel or compiler qualification |
 | `KimiK3QModel`, `KimiLinearQModel` / AttnRes variants | [Package-owned MLA/KDA, vision and K3 TikToken/XTML; exact native delegation for ordinary KimiLinear](../gptqmodel/models/ports/kimi_k3/README.md) | Independent float64 MLA/KDA and MoE oracles, CPU/meta owners, exact tokenizer IDs, image-conditioned logits, cache/generation, failure/retry and public loads | AttnRes rejects ordinary GPTQ/AWQ before mutation; existing bounded runner retained | No trained-weight, GPU, fused FLA, FlashAttention, MTP, video, parallel or compiler qualification |
@@ -216,6 +231,54 @@ two exact reloads, real tokenizer assets, four red/green probes, Apache-2.0
 source attribution and limitations. No trained-model, accelerator, fusion,
 foreign-cache, concurrent execution or AWQ fold/search qualification is claimed.
 
+### Ovis2.5 and Ovis2.6 decoder selection
+
+Ovis2.5, Ovis2.6 MoE and Ovis2.6 Next each bind their config, visual vocabulary,
+media processor and wrapper through `LocalModelLoader`. Their text decoders
+remain exact native Qwen3, Qwen3 MoE and Qwen3 Next implementations. The
+package-owned NaViT/SigLIP2 path prepares the visual embeddings. Checkpoint
+Python cannot choose these classes, including with explicit trust and bypass.
+
+```mermaid
+flowchart TD
+    A["load_model_config / LocalModelLoader"] --> B{"Definition model_type"}
+    B -->|ovis2_5| C["Ovis2_5_Config / native Qwen3ForCausalLM"]
+    B -->|ovis2_6_moe| D["Ovis2_6_Moe_Config / native Qwen3MoeForCausalLM"]
+    B -->|ovis2_6_next| E["Ovis2_6_Next_Config / native Qwen3NextForCausalLM"]
+    C --> F["Owned NaViT, visual vocabulary and native decoder"]
+    D --> F
+    E --> F
+    F --> G["Plain AWQ decoder packing; dense vision and excluded routers"]
+    F -->|Invalid placeholders or missing media| X["ValueError before decoder mutation"]
+    classDef failure fill:#ffcdd2,stroke:#b71c1c
+    class X failure
+```
+
+```mermaid
+flowchart TD
+    A["Ovis2_5.generate"] --> B["Caller generation_config or root saved generation_config"]
+    B --> C["Source media expansion / inputs_embeds"]
+    C --> D["self.llm.generate with explicit generation_config"]
+    D --> E["Native sampling, EOS, scores and caller overrides"]
+    B --> F["Two save_pretrained / public load cycles"]
+    F --> A
+    C -->|Unsupported media input| X["Explicit error; no checkpoint custom_generate"]
+    classDef failure fill:#ffcdd2,stroke:#b71c1c
+    class X failure
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Class selection | `22bea1201:definitions/ovis2_5.py:19-20` used `AutoModelForCausalLM`; Ovis2.6 inherited it at `definitions/ovis2_6_moe.py:16` | Definition-owned config/model/processor, exact native text owners and explicit invalid-media failures |
+| Generation policy | Original Ovis2.5 native delegation omitted the root saved generation configuration | `ports/ovis2_5/modeling_ovis2_5.py:generate` forwards saved or caller policy; the original delegation fails both media/text regression cases |
+| Quantization ownership | Ovis2.5 omitted Q/K norm exclusions; Ovis2.6 Next omitted the linear-attention container exclusion and inherited an AWQ override | Explicit norm/container/router exclusions and tested plain AWQ; no fold/search or fusion admission |
+
+Both port references retain immutable source/asset hashes, Apache licenses and
+release notices. Header inventories contain tensor metadata only. Qualification
+uses small real-model CPU/meta fixtures; it does not establish trained-weight
+quality, accelerator execution, optimized attention/FLA, concurrent execution,
+extended context or foreign/static/offloaded/quantized-cache compatibility.
+
 ### MiniCPM, MiniCPM-V, MiniMax and MiMo-V2 selection
 
 Original MiniCPM owns scaled embeddings and residuals, optional W1/W3/W2 MoE,
@@ -223,9 +286,9 @@ and rotary/cache behavior. Configs omitting `model_type` can select this loader
 only through the package-declared `MiniCPMForCausalLM` architecture. Ambiguous,
 partial or conflicting architecture declarations fail before checkpoint Python.
 The real 128k serialized-BPE tokenizer exposed a reusable Tokenicer issue; the
-final 0.0.19 runtime candidate `4f23746c7aeac3bf054d1d0dd7dc66e951468989`
-preserves its original token IDs. This candidate is installed from source;
-publication of Tokenicer 0.0.19 remains a release prerequisite.
+0.0.19 release preserves its original token IDs. Initial source qualification
+used `4f23746c7aeac3bf054d1d0dd7dc66e951468989`; the published source archive
+is now installed for the integrated release checks.
 
 Legacy MiniCPM-V selects original/2/2.5/2.6/4/4.5 layouts with their own muP,
 Llama, Qwen2 or Qwen3 decoder, vision tower and spatial/temporal resampler.
@@ -616,7 +679,8 @@ flowchart TD
 | Corrective normalization | Tokenicer owns normalization | Tokenicer still receives the selected instance and model config; no GPT-QModel normalization shim |
 | Missing scientific assets | Auto-discovery could select checkpoint Python | Owned construction errors propagate; no generic tokenizer substitution or remote retry |
 
-The package requires `tokenicer>=0.0.17`. Its
+The initial security qualification used Tokenicer 0.0.17; the current package
+floor is `tokenicer>=0.0.19`. The earlier 0.0.17
 [published source](https://pypi.org/project/tokenicer/0.0.17/) archive has SHA-256
 `24ba4e1f503e652df757365dd8d08ad145fe7a0f52bd74fb32fda2741489cef0`.
 All five packaged Python files were independently compared byte-for-byte to the

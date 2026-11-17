@@ -238,7 +238,7 @@ equations exactly matched all 16 captured source cases before using those
 vectors to qualify the current public tokenizer load and serialized reload.
 
 The shared `LocalModelLoader` preloader uses the public
-`Tokenicer.prepare_load_kwargs` API from the 0.0.19 development line. The
+`Tokenicer.prepare_load_kwargs` API from released 0.0.19. The
 InternVL factory contains no replacement for that API. Source-qualified
 SentencePiece whitespace/BPE/pipeline corrections and malformed metadata
 guards belong to Tokenicer; the parent integration owns its dependency pin
@@ -275,9 +275,14 @@ or test-collection error.
 
 ## Tokenizer follow-up qualification
 
-The measured Tokenicer runtime is the **unreleased 0.0.19** source commit
+The original measurements below used the 0.0.19 runtime candidate
 [`4f23746c7aeac3bf054d1d0dd7dc66e951468989`](https://github.com/ModelCloud/Tokenicer/commit/4f23746c7aeac3bf054d1d0dd7dc66e951468989),
-submitted in [Tokenicer PR 66](https://github.com/ModelCloud/Tokenicer/pull/66).
+from merged [Tokenicer PR 66](https://github.com/ModelCloud/Tokenicer/pull/66).
+These APIs now ship in [released Tokenicer 0.0.19](https://github.com/ModelCloud/Tokenicer/releases/tag/v0.0.19).
+The parent integration reran this model/module-plan suite together with the
+shared loader/processor/tokenizer/options, InternLM2, registry, AWQ, Baichuan
+and MiniCPM suites using the SHA-256-verified published PyPI source archive:
+1,143 passed, five existing fixture skips, 20 warnings in 179.91 seconds.
 It includes the selected-asset preloader, malformed class guard, explicit
 historical profile and automatic authoritative-SP-JSON preservation. Released
 0.0.17/0.0.18 are not substitutes for this follow-up's shared API contract.

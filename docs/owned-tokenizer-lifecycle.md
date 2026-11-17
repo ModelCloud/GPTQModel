@@ -27,9 +27,10 @@ hash. Tokenicer owns the conversion and its native-provider eligibility gate.
 
 ```mermaid
 flowchart TD
-    A["load_hf_tokenizer: selected model_config"] --> B{"Definition declares tokenizer_class?"}
-    A --> O["Merge tokenicer_options defaults; explicit caller values win"]
-    O --> G
+    A["load_hf_tokenizer: selected model_config"] --> O["Merge tokenicer_options defaults; explicit caller values win"]
+    O --> P{"Path or constructed instance?"}
+    P -->|Instance| G
+    P -->|Path| B{"Definition declares tokenizer_class?"}
     B -->|Yes| C["LocalModelLoader.load_tokenizer: strip checkpoint code selectors"]
     C --> D["Tokenicer.prepare_load_kwargs: selected JSON metadata only"]
     D --> E["Owned class from_pretrained"]
@@ -52,12 +53,24 @@ flowchart TD
 | Internal loaders returned a normalized native tokenizer, and the constructor normalized it again | Internal calls request the wrapper; the constructor retains it | `utils/hf.py:2802-2845`, `models/loader.py` calls with `return_tokenicer=True`, `models/base.py:1054-1056` |
 | A generic processor fixture inherited a release-specific tokenizer binding | Explicitly declare the fixture's generic tokenizer; retain separate real-release source tests | `tests/test_local_processor_loading.py`, `tests/test_internlm_tokenizers_local_port.py` |
 
-The dependency floor is `tokenicer>=0.0.19`. At qualification time, the API is
-in the **unreleased** candidate
-[`c14e1c8c062c7b7cc9a981054366f98bde015fa1`](https://github.com/ModelCloud/Tokenicer/commit/c14e1c8c062c7b7cc9a981054366f98bde015fa1),
-[Tokenicer PR #66](https://github.com/ModelCloud/Tokenicer/pull/66).
-Published 0.0.18 lacks this API. The exact candidate was installed from source;
-this dependency floor is a release prerequisite, not a claim of a PyPI release.
+The dependency floor is `tokenicer>=0.0.19`. The API ships in
+[Tokenicer 0.0.19](https://github.com/ModelCloud/Tokenicer/releases/tag/v0.0.19),
+including the changes from merged [PR #66](https://github.com/ModelCloud/Tokenicer/pull/66).
+The published [PyPI source archive](https://pypi.org/project/tokenicer/0.0.19/)
+was downloaded, SHA-256 verified and installed directly for release validation:
+`aa2ca0a70ec1103ccfa98090d9e195417a673206ae142b34ece555e6b1d19bef`.
+Published 0.0.18 lacks this API. Earlier source-candidate measurements below
+remain identified by their tested revision.
+
+The release includes the Baichuan precedence repair described below and
+an explicit `normalize_sentencepiece` profile, defaulting to `False` upstream.
+InternVL declares `True` for its historical native Llama/Phi variants; the
+Tokenicer provider/class gate preserves InternLM2, Qwen and unrelated native
+tokenizers. Caller overrides remain authoritative. Revision, subfolder and
+other selected asset options reach Tokenicer for paths and constructed instances.
+An arbitrary remote JSON-only instance created outside this selection context
+cannot reveal its original revision: supply that revision explicitly instead
+of assuming the repository's default branch.
 
 ## Validation
 
@@ -88,11 +101,39 @@ normalization in dense and quantized public loads (five failing cases in
 0.45 seconds). Removing preloading fails at the intended native
 `List[Union[str, AddedToken]]` check in 0.47 seconds.
 
-The full real-release tokenizer matrix is not yet green on candidate
-`c14e1c8`: three Baichuan2-7B public cases expose special-token-map precedence
-in Tokenicer's preloader. They expect source IDs `[1, 46955, 2, 0]`; the
-candidate splits the embedded EOS. The source assertions remain intact; this
-requires an upstream repair before the dependency is releasable.
+Candidate `c14e1c8` exposed three Baichuan2-7B public failures: conflicting
+legacy special-token flags split embedded EOS instead of producing source IDs
+`[1, 46955, 2, 0]`. Upstream Tokenicer candidate
+`b330955a1feb5c0841cb12cea14717a843e4edbc` restores the legacy map's precedence
+while preserving explicit callers and modern decoder metadata. The integrated
+Baichuan model/tokenizer/rotary, profile and shared-tokenizer run now passes
+**206 tests, no skips, two warnings in 46.58 seconds**, with unchanged Baichuan
+code, source IDs and assertions. The 89 real-tokenizer cases independently
+pass on the same upstream pin. These measurements preceded the published
+Tokenicer 0.0.19 qualification.
+
+The final `4f23746c7` source candidate also passes **673 tests, no skips,
+two warnings in 114.24 seconds** on the integrated checkout. This combines the
+unchanged Baichuan source/reload cases with InternLM tokenizers, ChatGLM,
+DeepSeek-V3, MOSS and the generic tokenizer/profile consumers:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHON_GIL=0 python -s -m pytest -q \
+  --tb=short -ra -o addopts= -o log_cli=false \
+  tests/test_baichuan_tokenizer.py tests/test_baichuan_local_port.py \
+  tests/module_tree/test_baichuan_local_port.py tests/test_baichuan_rotary_buffers.py \
+  tests/test_local_tokenicer_options.py tests/test_local_tokenizer_loading.py \
+  tests/test_internlm_tokenizers_local_port.py tests/test_chatglm_local_port.py \
+  tests/test_deepseek_v3_local_port.py tests/test_moss_local_port.py
+```
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHON_GIL=0 python -s -m pytest -q \
+  --tb=short -ra -o addopts= tests/test_baichuan_tokenizer.py \
+  tests/test_baichuan_local_port.py tests/module_tree/test_baichuan_local_port.py \
+  tests/test_baichuan_rotary_buffers.py tests/test_local_tokenicer_options.py \
+  tests/test_local_tokenizer_loading.py
+```
 
 ```bash
 PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -s -m pytest \

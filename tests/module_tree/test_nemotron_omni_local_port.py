@@ -59,7 +59,8 @@ def test_all_released_tensor_shapes_and_defused_owners_match_exactly():
         _convert_model_with_defuser(NemotronOmniQModel, model, cleanup_original=False)
     expected = source_to_runtime_shapes(source)
     actual = {name: tuple(value.shape) for name, value in model.state_dict().items()}
-    assert actual.pop("vision_model.summary_idxs") == (2,)
+    summary_shape = actual.pop("vision_model.summary_idxs")
+    assert summary_shape == (2,)
     assert actual == expected
 
 
