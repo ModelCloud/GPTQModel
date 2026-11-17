@@ -2972,8 +2972,38 @@ def _dynamic_value_fingerprint(value):
         )
     if value is None or isinstance(value, (bool, int, float, str, bytes)):
         return (type(value).__name__, value, None, None)
+    if is_dataclass(value) and not isinstance(value, type):
+        # Typed configuration leaves such as ``MSEConfig`` are mutable and are
+        # deliberately left untracked by ``_track_dynamic_value``. Fingerprint
+        # their fields structurally so an in-place attribute edit changes the
+        # content key even when a class overrides ``__repr__``.
+        value_type = type(value)
+        return (
+            "dataclass",
+            value_type.__module__,
+            value_type.__qualname__,
+            tuple((item.name, _dynamic_value_fingerprint(getattr(value, item.name))) for item in fields(value)),
+        )
     value_type = type(value)
     return ("object", value_type.__module__, value_type.__qualname__, repr(value))
+
+
+def _dynamic_has_untracked_leaf(value) -> bool:
+    """Return True when ``value`` contains a mutable leaf outside tracking.
+
+    ``_TrackedDict``/``_TrackedList`` advance a shared mutation token for every
+    container edit, but typed leaves (for example ``MSEConfig``) are stored as
+    plain objects. Such a leaf can be edited in place without changing the
+    token, so the identity+version fast path is not a correctness proof for a
+    tree that contains one. Primitive and immutable leaves keep the fast path.
+    """
+    if isinstance(value, Mapping):
+        return any(_dynamic_has_untracked_leaf(item) for item in value.values())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_dynamic_has_untracked_leaf(item) for item in value)
+    if isinstance(value, Enum):
+        return False
+    return value is not None and not isinstance(value, (bool, int, float, str, bytes))
 
 
 def _dynamic_fingerprint(dynamic):
@@ -2983,16 +3013,38 @@ def _dynamic_fingerprint(dynamic):
     return hashlib.sha256(canonical).digest()
 
 
+def _dynamic_requires_content_key(dynamic) -> bool:
+    """Cache whether one tracked tree contains an untracked mutable leaf.
+
+    The answer only changes when the tracked container token advances, so it is
+    memoized on the root. Typed-leaf edits intentionally do not advance the
+    token; the memoized ``True`` then keeps every lookup content-keyed.
+    """
+    root = dynamic._root
+    token = root._mutation_version
+    cached = getattr(root, "_dynamic_content_key_cache", None)
+    if cached is not None and cached[0] == token:
+        return cached[1]
+    requires_content_key = _dynamic_has_untracked_leaf(dynamic)
+    root._dynamic_content_key_cache = (token, requires_content_key)
+    return requires_content_key
+
+
 def _dynamic_cache_key(dynamic):
     if isinstance(dynamic, _TrackedDict):
         with dynamic._root._dynamic_lock:
             identity_key = id(dynamic)
             version = dynamic._root._mutation_version
+            # Typed leaves can be edited in place without advancing the
+            # container token, so only a tree made entirely of tracked
+            # containers and immutable leaves may use the identity shortcut.
+            content_keyed = _dynamic_requires_content_key(dynamic)
             with _DYNAMIC_CACHE_LOCK:
-                record = _DYNAMIC_IDENTITY_CACHE.get(identity_key)
-                if record is not None and record[0]() is dynamic and record[1] == version:
-                    # Identity and version checks keep this acceleration safe.
-                    return record[2]
+                if not content_keyed:
+                    record = _DYNAMIC_IDENTITY_CACHE.get(identity_key)
+                    if record is not None and record[0]() is dynamic and record[1] == version:
+                        # Identity and version checks keep this acceleration safe.
+                        return record[2]
                 fingerprint = _dynamic_fingerprint(dynamic)
                 _DYNAMIC_IDENTITY_CACHE[identity_key] = (weakref.ref(dynamic), version, fingerprint)
                 return fingerprint
