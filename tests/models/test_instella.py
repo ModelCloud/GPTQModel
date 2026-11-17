@@ -17,7 +17,7 @@ class TestInstella(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW = NATIVE_ARC_CHALLENGE_ACC_NORM
     NATIVE_ARC_CHALLENGE_ACC_FAST = NATIVE_ARC_CHALLENGE_ACC_SLOW
     NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
 
     def test_instella(self):
         self.quantize_and_evaluate()
@@ -28,7 +28,7 @@ class TestInstella(ModelTest):
         model = GPTQModel.load(
             self.NATIVE_MODEL_ID,
             quantize_config=None,
-            trust_remote_code=True,
+            trust_remote_code=False,
             device="cuda:0",
             dtype=torch.bfloat16,
         )

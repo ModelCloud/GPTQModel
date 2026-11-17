@@ -3,13 +3,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from ..local import LocalModelLoader
 from . import LlamaQModel
 
 
 class InstellaQModel(LlamaQModel):
     fusable = None  # No qualified executor for this definition.
 
-    require_trust_remote_code = True
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.instella.InstellaConfig",
+        model_class="gptqmodel.models.ports.instella.InstellaForCausalLM",
+    )
 
     # Instella names its decoder norms `pre_attention_layernorm` and
     # `pre_feedforward_layernorm` (modeling_instella.py:663-664), not the Llama
@@ -22,8 +26,16 @@ class InstellaQModel(LlamaQModel):
         "#",
         {
             "pre_attention_layernorm": ("pre_attention_layernorm:!:norm",),
-            "self_attn": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "o_proj:1:o"),
+            "self_attn": (
+                "q_norm:!:norm", "k_norm:!:norm",
+                "q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "o_proj:1:o",
+            ),
             "pre_feedforward_layernorm": ("pre_feedforward_layernorm:!:norm",),
             "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
         },
     ]
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Full-width Q/K RMSNorm and per-layer rotary/cache replay have not
+        # qualified scale search/folding. Keep every linear in plain AWQ.
+        return []
