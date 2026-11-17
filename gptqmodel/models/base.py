@@ -134,6 +134,7 @@ from ._const import (
 )
 from .fusable import FusableConfig, require_fusable_config
 from .loader import ModelLoader, _setup_rotation_online_had
+from .local import LocalModelLoader
 from .module_plan import ModulePlan
 from .quantization_run_plan import ProcessorStep, QuantizationRunPlan, processor_class
 from .shared_input import SharedInputPlan, build_shared_input_plan
@@ -1068,7 +1069,15 @@ class BaseQModel(nn.Module):
         self.quant_log = []
 
         if self.require_load_processor:
-            self.processor = AutoProcessor.from_pretrained(model_local_path, trust_remote_code=self.trust_remote_code)
+            loader = type(self).loader
+            if isinstance(loader, LocalModelLoader) and loader.processor_class is not None:
+                self.processor = loader.load_processor(
+                    model_local_path,
+                    config=self.model.config,
+                    tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+                )
+            else:
+                self.processor = AutoProcessor.from_pretrained(model_local_path, trust_remote_code=self.trust_remote_code)
 
         # apply patching of broken trust_remote_code models here
         if self.require_monkeypatch:
