@@ -1973,6 +1973,10 @@ def save_blockfloat_model(
         .replace("{BASE_CLASS}", base_class)
     )
     config["auto_map"] = {"AutoModelForCausalLM": f"{MODELING_FILE[:-3]}.TTBlockfloatForCausalLM"}
+    # Tell the HF refusing-quantizer guard that this checkpoint carries the
+    # loader named by ``auto_map``, so the documented transformers entry point
+    # is not refused along with bare packed checkpoints that have no loader.
+    quantization_config["shipped_modeling_file"] = MODELING_FILE
     with open(os.path.join(output_dir, "config.json"), "w") as handle:
         json.dump(config, handle, indent=2)
     with open(os.path.join(output_dir, MODELING_FILE), "w") as handle:
