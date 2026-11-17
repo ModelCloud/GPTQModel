@@ -212,6 +212,7 @@ def make_paroquant_config(
     opt_sgd_dampening: float = 0.0,
     opt_sgd_nesterov: bool = False,
     opt_gradient_checkpointing: Optional[bool] = None,
+    opt_fused_rotation: bool = True,
     offload_to_disk: bool = False,
 ) -> QuantizeConfig:
     if sym is not True:
@@ -242,6 +243,7 @@ def make_paroquant_config(
         opt_sgd_dampening=opt_sgd_dampening,
         opt_sgd_nesterov=opt_sgd_nesterov,
         opt_gradient_checkpointing=opt_gradient_checkpointing,
+        opt_fused_rotation=opt_fused_rotation,
     )
 
 
@@ -614,6 +616,7 @@ def _run_paroquant_case(
         opt_train_samples=opt_train_samples,
         opt_validation_samples=opt_validation_samples,
         opt_batch_size=opt_batch_size,
+        opt_fused_rotation=fused_opt_rotation,
     )
     model = GPTQModel.load(
         model_path,
@@ -622,6 +625,12 @@ def _run_paroquant_case(
         dtype=normalized_dtype,
     )
     _prepare_eval_tokenizer(model)
+    # Layer-scope live optimization pins the portable PyTorch rotation path
+    # regardless of the requested toggle (see ParoQuantProcessor). Record the
+    # path the run actually selected so benchmark rows cannot mislabel an
+    # unfused run as fused.
+    effective_fused_opt_rotation = False if qcfg.opt_scope == "layer" else qcfg.opt_fused_rotation
+
     try:
         quant_start = time.perf_counter()
         quant_logs = model.quantize(
@@ -655,7 +664,7 @@ def _run_paroquant_case(
             "mode": "paroquant_prefix_layers",
             "device": _visible_cuda_device_name(),
             "dtype": _dtype_label(normalized_dtype),
-            "fused_opt_rotation": fused_opt_rotation,
+            "fused_opt_rotation": effective_fused_opt_rotation,
             "opt_scope": opt_scope,
             "sym": sym,
             "quant_wall_s": quant_wall_s,
