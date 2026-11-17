@@ -21,6 +21,7 @@ import pytest
 import torch
 
 import tests.module_tree.test_parallel_branch_calibration as branch_fixture
+from gptqmodel import CalibrationConfig
 from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
 from gptqmodel.quantization.config import ParoConfig
@@ -75,9 +76,11 @@ def _quantize_with_mask_recorders(tmp_path, monkeypatch):
     ]
     try:
         model.quantize(
-            branch_fixture._calibration(tokenizer, include_pixel_values=True),
-            batch_size=1,
-            calibration_data_min_length=1,
+            CalibrationConfig(
+                dataset=branch_fixture._calibration(tokenizer, include_pixel_values=True),
+                batch_size=1,
+                min_length=1,
+            ),
         )
     finally:
         for handle in handles:

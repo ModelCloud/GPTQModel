@@ -15,7 +15,7 @@ import os
 import pytest
 import torch
 
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.quantization.awq.utils.packing_utils import pack_awq, unpack_awq
 from gptqmodel.quantization.config import (
@@ -335,7 +335,7 @@ def test_untied_lm_head_quantizes_and_reloads(tmp_path):
     model_dir = _build_tiny_qwen2(str(tmp_path / "untied"), tied=False)
 
     model = GPTQModel.load(model_dir, QuantizeConfig(bits=4, group_size=32, lm_head=True))
-    model.quantize(CALIBRATION_TEXT, batch_size=2)
+    model.quantize(CalibrationConfig(dataset=CALIBRATION_TEXT, batch_size=2))
 
     assert isinstance(model.model.lm_head, BaseQuantLinear)
 
@@ -360,7 +360,7 @@ def test_tied_lm_head_is_rejected_with_the_explicit_error(tmp_path):
     model = GPTQModel.load(model_dir, QuantizeConfig(bits=4, group_size=32, lm_head=True))
 
     with pytest.raises(NotImplementedError, match="tied weights"):
-        model.quantize(CALIBRATION_TEXT, batch_size=2)
+        model.quantize(CalibrationConfig(dataset=CALIBRATION_TEXT, batch_size=2))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="lm_head quantization needs an accelerator")
@@ -371,7 +371,7 @@ def test_tied_lm_head_with_stored_head_is_still_rejected(tmp_path):
     model = GPTQModel.load(model_dir, QuantizeConfig(bits=4, group_size=32, lm_head=True))
 
     with pytest.raises(NotImplementedError, match="tied weights"):
-        model.quantize(CALIBRATION_TEXT, batch_size=2)
+        model.quantize(CalibrationConfig(dataset=CALIBRATION_TEXT, batch_size=2))
 
 
 def test_hf_compat_warning_for_defused_moe_checkpoint():

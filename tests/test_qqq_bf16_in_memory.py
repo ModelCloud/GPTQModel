@@ -18,7 +18,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import GPTQModel, QQQConfig
+from gptqmodel import CalibrationConfig, GPTQModel, QQQConfig
 from gptqmodel.nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
 
 
@@ -101,7 +101,7 @@ def test_qqq_bf16_in_memory_model_uses_the_torch_kernel(tmp_path):
         ),
         dtype=torch.bfloat16,
     )
-    model.quantize(_calibration(), batch_size=1)
+    model.quantize(CalibrationConfig(dataset=_calibration(), batch_size=1))
 
     fp16_only, torch_kernels = _kernels(model.model)
     assert fp16_only == [], "BF16 QQQ must not build the FP16-only kernel"

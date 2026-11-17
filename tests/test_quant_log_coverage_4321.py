@@ -16,6 +16,7 @@ import os
 import pytest
 import torch
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.looper.loop_processor import record_quant_log
 
 
@@ -176,7 +177,7 @@ def test_every_quantizer_writes_quant_log_csv(method, tmp_path):
 
     source = _tiny_llama(tmp_path / "source")
     model = GPTQModel.load(source, quantize_config=_configs()[method](), device=device)
-    model.quantize([{"input_ids": list(range(1, 33))}], calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=[{"input_ids": list(range(1, 33))}], min_length=1))
 
     assert len(model.quant_log) > 0, f"{method}: quant_log is empty"
     for entry in model.quant_log:

@@ -26,7 +26,7 @@ from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.utils.model import load_checkpoint_in_model_then_tie_weights
 
 
@@ -280,7 +280,7 @@ def qqq_checkpoint(tmp_path_factory):
         ),
         backend=BACKEND.TORCH,
     )
-    model.quantize(CALIBRATION, batch_size=1, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=CALIBRATION, batch_size=1, min_length=1))
     quantized = root / "quantized"
     model.save(str(quantized))
     return quantized

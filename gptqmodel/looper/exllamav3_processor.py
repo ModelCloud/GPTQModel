@@ -32,7 +32,6 @@ from ..exllamav3.modules.quant.exl3_lib.quantize import (
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
-    CalibrationConfig,
     CheckpointSupport,
     ForwardConfig,
     ProcessorLifecycleConfig,
@@ -55,7 +54,7 @@ from ..models.writer import (
 )
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, METHOD, EXL3Config, GPTQConfig
+from ..quantization.config import FORMAT, METHOD, CalibrationConfig, EXL3Config, GPTQConfig
 from ..quantization.gptq import GPTQ
 from ..utils.device import get_device
 from ..utils.exl3_capture_batch_spool import (

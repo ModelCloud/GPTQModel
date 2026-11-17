@@ -14,10 +14,10 @@ import torch
 
 from gptqmodel.looper import gptq_processor as gptq_processor_module
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig, ForwardConfig
+from gptqmodel.looper.loop_processor import ForwardConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
-from gptqmodel.quantization.config import QuantizeConfig
+from gptqmodel.quantization.config import CalibrationConfig, QuantizeConfig
 from gptqmodel.utils.threadx import DeviceThreadPool
 
 

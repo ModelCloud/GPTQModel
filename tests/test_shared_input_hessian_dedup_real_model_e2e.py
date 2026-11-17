@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.looper import stage_subset
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.quantization.config import (
@@ -144,12 +144,13 @@ def test_shared_input_dedup_real_model_quantize_save_reload_generate(
 
     calibration = _calibration(model.tokenizer)
     model.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            sort=None,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_concat_size=0,
-        calibration_sort=None,
-        calibration_data_min_length=1,
     )
 
     assert sum(event["adopted_followers"] for event in dedup_telemetry) == expected_dedup_count

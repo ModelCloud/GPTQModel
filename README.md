@@ -153,7 +153,7 @@ Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kerne
   [calibration row trimming](https://github.com/ModelCloud/GPTQModel/blob/main/docs/calibration-row-trimming.md).
 - **Keep VLM calibration rows intact.** Pre-tokenized rows (`input_ids`) take the
   base text path instead of a chat template, columnar mappings are unpacked, and
-  conversations reject `calibration_concat_size`. See
+  conversations reject `CalibrationConfig.concat_size`. See
   [VLM calibration input normalization](https://github.com/ModelCloud/GPTQModel/blob/main/docs/vlm-calibration-input-normalization.md).
 
 ### Inference and deployment 🚢
@@ -292,7 +292,7 @@ settings affect the quality of the resulting model.
 
 ```python
 from datasets import load_dataset
-from gptqmodel import GPTQConfig, GPTQModel
+from gptqmodel import CalibrationConfig, GPTQConfig, GPTQModel
 
 dataset = load_dataset(
     "allenai/c4",
@@ -305,9 +305,15 @@ calibration = [row["text"] for row in dataset.take(256)]
 model = GPTQModel.load(
     "Qwen/Qwen3-0.6B", GPTQConfig(bits=4, group_size=128),
 )
-model.quantize(calibration, batch_size=1)
+model.quantize(CalibrationConfig(dataset=calibration, batch_size=1))
 model.save("Qwen3-0.6B-GPTQ-4bit")
 ```
+
+`quantize()` takes every calibration choice in one `CalibrationConfig`: `dataset`,
+`concat_size`, `sort` (`"desc"`), `batch_size` (`1`), `min_length` (`10`),
+`concat_separator`, `exclude_attention_sinks` (`False`) and the EoRA
+`adapter_dataset`. See
+[the calibration API](https://github.com/ModelCloud/GPTQModel/blob/main/docs/calibration-config.md).
 
 The [end-to-end guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md) covers other methods,
 calibration, saving, reloading, and validation.

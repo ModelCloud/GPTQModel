@@ -3,11 +3,11 @@
 ## Usage
 
 ```python
-from gptqmodel import CheckpointConfig, CheckpointStopped
+from gptqmodel import CalibrationConfig, CheckpointConfig, CheckpointStopped
 
 try:
     model.quantize(
-        calibration,
+        CalibrationConfig(dataset=calibration),
         checkpoint=CheckpointConfig(
             # Defaults to the quantization config's offload_to_disk_path.
             path="auto",

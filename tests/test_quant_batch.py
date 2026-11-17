@@ -16,7 +16,10 @@ import torch  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel import (
+    CalibrationConfig,
+    GPTQModel,  # noqa: E402
+)
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 
 
@@ -55,7 +58,7 @@ class TestQuantBatch(ModelTest):
             quantize_config=quantize_config,
         )
 
-        model.quantize(self.calibration_dataset, batch_size=1)
+        model.quantize(CalibrationConfig(dataset=self.calibration_dataset, batch_size=1))
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save(
@@ -75,7 +78,7 @@ class TestQuantBatch(ModelTest):
                 quantize_config=quantize_config,
             )
 
-        model.quantize(self.calibration_dataset, batch_size=256)
+        model.quantize(CalibrationConfig(dataset=self.calibration_dataset, batch_size=256))
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save(
                 tmp_dir,

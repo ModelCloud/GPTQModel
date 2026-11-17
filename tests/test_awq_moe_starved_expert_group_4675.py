@@ -43,10 +43,9 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
 from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization import FORMAT, METHOD
-from gptqmodel.quantization.config import AWQConfig
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
 
 pytestmark = [pytest.mark.cpu]
@@ -311,10 +310,12 @@ def test_starved_expert_keeps_awq_for_its_group(tmp_path: Path, caplog):
 
     with caplog.at_level(logging.WARNING):
         model.quantize(
-            calibration,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.TORCH,
-            calibration_data_min_length=1,
         )
 
     rows = {str(row["module"]): row for row in model.quant_log}

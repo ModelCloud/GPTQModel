@@ -658,9 +658,7 @@ def quantize_llama_gsq_prepared(wrapper, prepared, *, gsq):
     return run
 
 
-def quantize_llama_gsq_public(wrapper, *, calibration, tokenizer, backend,
-                              calibration_concat_size, calibration_sort, calibration_data_min_length,
-                              calibration_concat_separator, unsupported):
+def quantize_llama_gsq_public(wrapper, *, calibration, tokenizer, backend, unsupported):
     """Experimental public GPTQ dispatch for a uniform materialized Llama model.
 
     GSQTrainingConfig owns the staged prior and optimization recipe. Additional
@@ -670,7 +668,7 @@ def quantize_llama_gsq_public(wrapper, *, calibration, tokenizer, backend,
     from ..utils.backend import BACKEND, normalize_backend
 
     qcfg = wrapper.quantize_config
-    if wrapper.quantized or calibration is None:
+    if wrapper.quantized or calibration.dataset is None:
         raise ValueError('Staged GSQ requires an unquantized model and calibration')
     if qcfg.method != METHOD.GPTQ or qcfg.format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
         raise ValueError('Public staged GSQ requires GPTQ scalar export')
@@ -702,11 +700,13 @@ def quantize_llama_gsq_public(wrapper, *, calibration, tokenizer, backend,
         raise ValueError('Public staged GSQ requires eager attention')
     if tokenizer is not None:
         wrapper.tokenizer = tokenizer
+    # Staged GSQ trains on single-document rows, so ``calibration.batch_size``
+    # does not apply here.
     prepared = wrapper.prepare_dataset(
-        calibration, calibration_dataset_concat_size=calibration_concat_size,
-        calibration_dataset_sort=calibration_sort, batch_size=1,
-        calibration_data_min_length=calibration_data_min_length,
-        calibration_concat_separator=calibration_concat_separator)
+        calibration.dataset, calibration_dataset_concat_size=calibration.concat_size,
+        calibration_dataset_sort=calibration.sort, batch_size=1,
+        calibration_data_min_length=calibration.min_length,
+        calibration_concat_separator=calibration.concat_separator)
     staged = qcfg.gsq_training
     if layer_bits is None:
         run = quantize_llama_gsq_prepared(wrapper, prepared, gsq=staged)

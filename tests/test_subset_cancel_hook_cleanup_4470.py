@@ -17,7 +17,7 @@ import torch
 from tokenizers import Tokenizer, models
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND
+from gptqmodel import BACKEND, CalibrationConfig
 from gptqmodel.looper.module_looper import StopMainLoop
 from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.nn_modules.hooked_linear import HookedLinear
@@ -111,10 +111,12 @@ def test_cancelled_subset_releases_capture_hooks(tmp_path, error):
 
     with pytest.raises(error):
         qmodel.quantize(
-            CALIBRATION,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=CALIBRATION,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.GPTQ_TORCH,
-            calibration_data_min_length=1,
         )
 
     assert _leaked_capture_hooks(qmodel.model) == []
@@ -142,10 +144,12 @@ def test_forward_exception_releases_capture_hooks(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="forward failure"):
         qmodel.quantize(
-            CALIBRATION,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=CALIBRATION,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.GPTQ_TORCH,
-            calibration_data_min_length=1,
         )
 
     state["armed"] = False

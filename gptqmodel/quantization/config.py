@@ -110,7 +110,7 @@ META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 META_FIELD_MSE = "mse"
 META_FIELD_ACT_GROUP_AWARE = "act_group_aware"
 
-# Provenance of `quantize(calibration_exclude_attention_sinks=True)`. Written
+# Provenance of `CalibrationConfig(exclude_attention_sinks=True)`. Written
 # only when the option was on, so a default run's config stays byte-identical.
 META_FIELD_CALIBRATION_EXCLUDE_ATTENTION_SINKS = "calibration_exclude_attention_sinks"
 
@@ -243,6 +243,107 @@ class QuantizeEmbed(str, Enum):
 class QuantizeEmbedConfig:
     embed_quant_mode: QuantizeEmbed = QuantizeEmbed.OUTPUT
     embed_only: bool = True
+
+
+CALIBRATION_SORT_ORDERS = ("asc", "desc", "shuffle")
+
+
+def _require_optional_positive_int(name: str, value: Any) -> None:
+    if value is None:
+        return
+    if type(value) is not int:
+        raise TypeError(f"CalibrationConfig.{name} must be an int or None, got {type(value).__name__}.")
+    if value <= 0:
+        raise ValueError(f"CalibrationConfig.{name} must be positive, got {value}.")
+
+
+@dataclass(frozen=True)
+class CalibrationConfig:
+    """Calibration data and preparation policy for ``quantize()``/``requantize()``.
+
+    One object owns every calibration choice of a run: the samples, how they
+    are concatenated, sorted, filtered and batched, which token rows feed the
+    calibration statistics, and the optional EoRA adapter samples. The same
+    class is consumed by every looper processor.
+    """
+
+    # Calibration samples: strings, token-id lists, ``{"input_ids", ...}``
+    # rows, a Hugging Face dataset, a DataFrame, or an iterable of those.
+    dataset: Any = None
+    # Concatenate samples into fixed-length rows of this many tokens.
+    concat_size: Optional[int] = None
+    # Sample order before batching: "asc", "desc", "shuffle", or ``None``
+    # to keep the input order.
+    sort: Optional[str] = "desc"
+    batch_size: int = 1
+    # Rows with this many or fewer non-padding tokens are dropped.
+    min_length: int = 10
+    # Text inserted between samples joined by ``concat_size``.
+    concat_separator: Optional[str] = None
+    # Drop attention-sink tokens (every attended BOS token: the leading one
+    # and each document-boundary BOS of concatenated calibration) from every
+    # calibration statistic (issue #4393). Tokenizers without a BOS token have
+    # no sink to drop, so nothing changes for them (issue #4459). The tokens
+    # still run through the forward, so later tokens keep attending to them;
+    # only the per-token rows each processor accumulates (Hessians, AWQ
+    # features, sample counts) skip them. Applied once, by
+    # ``LoopProcessor.calibration_keep_mask``.
+    exclude_attention_sinks: bool = False
+    # EoRA adapter samples, prepared with this same policy. ``None`` reuses
+    # ``dataset``. Only valid with a ``Lora`` adapter.
+    adapter_dataset: Any = None
+    # The model's dataset preparer, bound by ``quantize()`` through ``bind()``.
+    # It is not a constructor argument: preparation belongs to the model.
+    prepare_dataset: Optional[Any] = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        for name in ("dataset", "adapter_dataset"):
+            value = getattr(self, name)
+            if isinstance(value, (str, bytes)):
+                raise TypeError(
+                    f"CalibrationConfig.{name} must be an iterable of samples, not a single "
+                    f"{type(value).__name__}."
+                )
+            if isinstance(value, CalibrationConfig):
+                raise TypeError(f"CalibrationConfig.{name} must hold samples, not a CalibrationConfig.")
+        _require_optional_positive_int("concat_size", self.concat_size)
+        if self.sort is not None and self.sort not in CALIBRATION_SORT_ORDERS:
+            raise ValueError(
+                f"CalibrationConfig.sort must be one of {CALIBRATION_SORT_ORDERS} or None, got {self.sort!r}."
+            )
+        if type(self.batch_size) is not int:
+            raise TypeError(f"CalibrationConfig.batch_size must be an int, got {type(self.batch_size).__name__}.")
+        if self.batch_size <= 0:
+            raise ValueError(f"CalibrationConfig.batch_size must be positive, got {self.batch_size}.")
+        if type(self.min_length) is not int:
+            raise TypeError(f"CalibrationConfig.min_length must be an int, got {type(self.min_length).__name__}.")
+        if self.min_length < 0:
+            raise ValueError(f"CalibrationConfig.min_length must be non-negative, got {self.min_length}.")
+        if self.concat_separator is not None and not isinstance(self.concat_separator, str):
+            raise TypeError(
+                "CalibrationConfig.concat_separator must be a str or None, "
+                f"got {type(self.concat_separator).__name__}."
+            )
+        # Strict, like `QuantizeConfig._validate_bool_fields` (#4668):
+        # `bool("False")` would silently turn the option on.
+        if not isinstance(self.exclude_attention_sinks, bool):
+            raise TypeError(
+                "CalibrationConfig.exclude_attention_sinks must be a bool, "
+                f"got {type(self.exclude_attention_sinks).__name__} ({self.exclude_attention_sinks!r})."
+            )
+
+    def bind(self, prepare_dataset, **changes) -> "CalibrationConfig":
+        """Return a validated copy with ``changes`` that prepares data with ``prepare_dataset``.
+
+        ``prepare_dataset`` follows ``BaseQModel.prepare_dataset``'s keyword
+        contract. ``quantize()`` binds the model's preparer; tests bind a stub.
+        """
+
+        if not callable(prepare_dataset):
+            raise TypeError("CalibrationConfig.bind() requires a callable prepare_dataset.")
+        bound = replace(self, **changes)
+        object.__setattr__(bound, "prepare_dataset", prepare_dataset)
+        return bound
 
 
 class NormType(str, Enum):
@@ -4165,7 +4266,7 @@ def _validate_dynamic_layer_keys(owner, layer_name: str, layer_dict: Mapping) ->
         # option that does apply it (#4393).
         raise ValueError(
             f"{owner.__class__.__name__}: `dynamic['{layer_name}'].exclude_attention_sinks` is "
-            "not a per-module option; use `quantize(calibration_exclude_attention_sinks=True)`."
+            "not a per-module option; use `CalibrationConfig(exclude_attention_sinks=True)`."
         )
     if unknown:
         details = []

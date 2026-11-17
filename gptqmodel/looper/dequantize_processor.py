@@ -8,7 +8,6 @@ from typing import Dict, Optional
 import torch
 
 from ..looper.loop_processor import (
-    CalibrationConfig,
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
@@ -16,6 +15,7 @@ from ..looper.loop_processor import (
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..nn_modules.qlinear.torch import TorchLinear
+from ..quantization.config import CalibrationConfig
 from ..utils.logger import setup_logger
 
 

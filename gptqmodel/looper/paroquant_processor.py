@@ -36,7 +36,6 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
-    CalibrationConfig,
     CalibrationTypes,
     CheckpointSupport,
     ForwardConfig,
@@ -60,7 +59,7 @@ from ..models.writer import (
 )
 from ..nn_modules.hooked_linear import HookedLinear
 from ..nn_modules.qlinear.paroquant import ParoLinear
-from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
+from ..quantization.config import FORMAT, METHOD, CalibrationConfig, QuantizeConfig, resolve_quant_format
 from ..quantization.paroquant.optimization import (
     _activate_stage_params,
     _backward_scalar_loss,
@@ -250,7 +249,7 @@ class ParoQuantProcessor(LoopProcessor):
             # outputs, not per-token calibration rows; refusing is better than
             # silently ignoring the request.
             raise ValueError(
-                "ParoQuant does not support `calibration_exclude_attention_sinks`; leave it False."
+                "ParoQuant does not support `CalibrationConfig.exclude_attention_sinks`; leave it False."
             )
         capture_group_layer_context = str(getattr(qcfg, "opt_scope", "module")).strip().lower() != "module"
         if forward is None:

@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from gptqmodel.models.base import BaseQModel
-from gptqmodel.quantization import METHOD
+from gptqmodel.quantization import METHOD, CalibrationConfig
 from gptqmodel.utils.calibration import batched_conversations, normalize_chat_calibration_sample
 from gptqmodel.utils.data import collate_data
 
@@ -285,7 +285,7 @@ def test_prepare_dataset_collapses_causal_attention_mask():
     assert batches[0]["attention_mask"].int().tolist() == [[1, 1, 1]]
 
 
-def test_quantize_with_calibration_honors_calibration_data_min_length(monkeypatch):
+def test_quantize_with_calibration_honors_calibration_min_length(monkeypatch):
     from gptqmodel.looper import gptq_processor, module_looper
 
     qmodel = _make_qmodel()
@@ -308,6 +308,7 @@ def test_quantize_with_calibration_honors_calibration_data_min_length(monkeypatc
                 calibration_dataset_concat_size=calibration.concat_size,
                 calibration_dataset_sort=calibration.sort,
                 batch_size=calibration.batch_size,
+                calibration_data_min_length=calibration.min_length,
                 calibration_concat_separator=calibration.concat_separator,
             )
             prepared_datasets.append(self.calibration_dataset)
@@ -324,14 +325,8 @@ def test_quantize_with_calibration_honors_calibration_data_min_length(monkeypatc
     monkeypatch.setattr(module_looper, "ModuleLooper", _StubModuleLooper)
 
     result = qmodel._quantize_with_calibration(
-        calibration=["short"],
-        calibration_concat_size=None,
-        calibration_sort=None,
-        calibration_data_min_length=1,
-        batch_size=1,
+        calibration=CalibrationConfig(dataset=["short"], sort=None, min_length=1),
         backend=None,
-        adapter_calibration_dataset=None,
-        calibration_concat_separator=None,
         embed_quant_config=None,
     )
 
@@ -373,6 +368,7 @@ def test_calibrated_preprocessor_factory_omits_primary_only_arguments(monkeypatc
                 calibration_dataset_concat_size=calibration.concat_size,
                 calibration_dataset_sort=calibration.sort,
                 batch_size=calibration.batch_size,
+                calibration_data_min_length=calibration.min_length,
                 calibration_concat_separator=calibration.concat_separator,
             )
             constructed.append(self)
@@ -392,14 +388,8 @@ def test_calibrated_preprocessor_factory_omits_primary_only_arguments(monkeypatc
     monkeypatch.setattr(module_looper, "ModuleLooper", _StubModuleLooper)
 
     result = qmodel._quantize_with_calibration(
-        calibration=["short"],
-        calibration_concat_size=None,
-        calibration_sort=None,
-        calibration_data_min_length=1,
-        batch_size=1,
+        calibration=CalibrationConfig(dataset=["short"], sort=None, min_length=1),
         backend=None,
-        adapter_calibration_dataset=None,
-        calibration_concat_separator=None,
         embed_quant_config=None,
         run_plan=SimpleNamespace(
             weight_only=False,

@@ -19,7 +19,7 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 from torch import nn
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.models._const import DEVICE
 from gptqmodel.models.base import rehome_quantized_kernel, select_in_session_quant_linear
 from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear, AwqGEMVTorchLinear
@@ -164,7 +164,7 @@ def test_awq_gemv_quantize_save_and_reload_on_cpu(tmp_path):
 
     # The CPU quantize path used to raise before calibration because no packing
     # kernel advertised CPU support.
-    model.quantize(_calibration(), batch_size=1, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=_calibration(), batch_size=1, min_length=1))
 
     quant_linear = [m for m in model.model.modules() if isinstance(m, AwqGEMVLinear)]
     assert quant_linear

@@ -120,7 +120,7 @@ except Exception:  # pragma: no cover - availability check
     def is_flash_attn_2_available():  # type: ignore
         return False
 
-from gptqmodel import BACKEND, DEBUG_ON, GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, DEBUG_ON, CalibrationConfig, GPTQModel  # noqa: E402
 from gptqmodel.looper.module_looper import StopMainLoop  # noqa: E402
 from gptqmodel.models.base import BaseQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
@@ -1723,13 +1723,15 @@ class ModelTest(unittest.TestCase):
             temp_dir_context = None
             try:
                 model.quantize(
-                    calibration_dataset,
-                    calibration_concat_size=dataset_concat_size,
-                    calibration_concat_separator=self.DATASET_CONCAT_SEPARATOR,
-                    calibration_sort=self.DATASET_SORT,
+                    CalibrationConfig(
+                        dataset=calibration_dataset,
+                        concat_size=dataset_concat_size,
+                        concat_separator=self.DATASET_CONCAT_SEPARATOR,
+                        sort=self.DATASET_SORT,
+                        batch_size=batch_size,
+                        exclude_attention_sinks=self.EXCLUDE_ATTENTION_SINKS,
+                    ),
                     backend=self.QUANT_BACKEND,
-                    batch_size=batch_size,
-                    calibration_exclude_attention_sinks=self.EXCLUDE_ATTENTION_SINKS,
                 )
 
                 self.check_kernel(model, self.KERNEL_QUANT)

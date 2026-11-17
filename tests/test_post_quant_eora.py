@@ -27,7 +27,7 @@ import pytest  # noqa: E402
 from datasets import load_dataset
 from models.model_test import ModelTest  # noqa: E402
 
-from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from tests.eval import evaluate  # noqa: E402
@@ -80,7 +80,7 @@ class TestEoraPostQuant(ModelTest):
     def test_post_quant_eora(self):
         rank = 256
         calibration_dataset_rows = 512
-        calibration_dataset_concat_size = 0  # disable
+        calibration_dataset_concat_size = None  # disable
 
         dataset_id = "allenai/c4"
         dataset_files = "en/c4-train.00001-of-01024.json.gz"
@@ -103,8 +103,10 @@ class TestEoraPostQuant(ModelTest):
                 adapter=eora,
                 model_id_or_path=self.NATIVE_MODEL_ID,
                 quantized_model_id_or_path=self.QUANTIZED_MODEL_PATH,
-                calibration_dataset=calibration_dataset,
-                calibration_dataset_concat_size=calibration_dataset_concat_size,
+                calibration=CalibrationConfig(
+                    dataset=calibration_dataset,
+                    concat_size=calibration_dataset_concat_size,
+                ),
             )
 
             # for backend in [BACKEND.MARLIN]:  # BACKEND.TORCH_FUSED, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN

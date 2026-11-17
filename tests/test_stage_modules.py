@@ -390,7 +390,7 @@ def _make_forward_executor_looper(
     return types.SimpleNamespace(
         _resolve_batch_total=lambda _num_batches, layer_inputs: len(layer_inputs),
         _collect_row_counts=lambda layer_inputs: [int(batch[0].shape[0]) for batch in layer_inputs],
-        _set_processor_mask=lambda _processor, _mask: None,
+        _set_processor_mask=lambda _processor, _mask, padding_mask=None: None,
         _batch_row_count=lambda batch_inputs: int(batch_inputs[0].shape[0]),
         support_batch_quantize=False,
         gptq_model=types.SimpleNamespace(

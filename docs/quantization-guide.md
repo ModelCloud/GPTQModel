@@ -52,7 +52,7 @@ import gc
 
 import torch
 from datasets import load_dataset
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.quantization import GPTQConfig
 
 model_id = "Qwen/Qwen3-0.6B"
@@ -63,7 +63,7 @@ backend = BACKEND.TORCH
 
 # Calibration-based recipes need representative text. Streaming avoids
 # downloading the entire C4 shard. Weight-only recipes skip this step.
-calibration = None
+calibration = None  # weight-only recipes call `model.quantize()` without one
 if qcfg.requires_calibration_dataset():
     dataset = load_dataset(
         "allenai/c4",
@@ -71,10 +71,13 @@ if qcfg.requires_calibration_dataset():
         split="train",
         streaming=True,
     )
-    calibration = [row["text"] for row in dataset.take(256)]
+    calibration = CalibrationConfig(
+        dataset=[row["text"] for row in dataset.take(256)],
+        batch_size=1,
+    )
 
 model = GPTQModel.load(model_id, qcfg, device="cuda:0", dtype=torch.float16)
-model.quantize(calibration, batch_size=1, backend=backend)
+model.quantize(calibration, backend=backend)
 model.save(quant_path)
 
 # Release the first model before loading the saved checkpoint.
@@ -170,13 +173,13 @@ do not explicitly enable both `desc_act` and `act_group_aware`.
 Tokenizers that prepend a BOS token make it an attention sink: its activation
 norm can exceed the text tokens by hundreds of times, so a few rows dominate the
 input Hessian and the quantizer stops optimizing for text tokens (issue #4393).
-`calibration_exclude_attention_sinks=True` drops every attended BOS token (the
+`CalibrationConfig(exclude_attention_sinks=True)` drops every attended BOS token (the
 leading one and each document-boundary BOS of concatenated calibration) from
 every calibration method's statistics (GPTQ, GPTAQ, FOEM, QQQ, MACaQ, EXL3, AWQ,
 calibrated FP8 GSQ) while still running it through the forward:
 
 ```python
-model.quantize(calibration, calibration_exclude_attention_sinks=True)
+model.quantize(CalibrationConfig(dataset=texts, exclude_attention_sinks=True))
 ```
 
 The default is `False`, which keeps the historical statistics bit for bit. A

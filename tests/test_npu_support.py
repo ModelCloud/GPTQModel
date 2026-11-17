@@ -8,7 +8,6 @@ import torch.nn as nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
 from gptqmodel.looper.qqq_processor import QQQProcessor
 from gptqmodel.looper.weight_only_processor import WeightOnlyProcessor
@@ -22,7 +21,14 @@ from gptqmodel.nn_modules.qlinear.torch import TorchLinear, _right_shift_unpack
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.awq.utils.packing_utils import unpack_awq
-from gptqmodel.quantization.config import AWQConfig, GGUFConfig, ParoConfig, QQQConfig, QuantizeConfig
+from gptqmodel.quantization.config import (
+    AWQConfig,
+    CalibrationConfig,
+    GGUFConfig,
+    ParoConfig,
+    QQQConfig,
+    QuantizeConfig,
+)
 from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import auto_select_device, get_kernel_for_backend, select_quant_linear

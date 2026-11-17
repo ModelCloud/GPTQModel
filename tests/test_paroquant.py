@@ -26,14 +26,13 @@ import gptqmodel.utils.paroquant as paroquant_utils_module
 import gptqmodel.utils.paroquant_benchmark as paroquant_benchmark_module
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.input_cache import InputCache
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.module_looper import _restrict_quant_devices_for_method
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
 from gptqmodel.looper.stage_layer import _capture_pristine_group_context
 from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
-from gptqmodel.quantization.config import FORMAT, METHOD, ParoConfig, QuantizeConfig
+from gptqmodel.quantization.config import FORMAT, METHOD, CalibrationConfig, ParoConfig, QuantizeConfig
 from gptqmodel.quantization.paroquant import optimization as paroquant_optimization
 from gptqmodel.quantization.paroquant.optimization import (
     GroupLinearQuantizer,

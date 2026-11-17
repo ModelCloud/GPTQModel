@@ -61,7 +61,7 @@ The run plan is immutable after preflight. `BaseQModel.quantization_run_plan` ex
 ```python
 from gptqmodel.models import ProcessorStep, QuantizationRunPlan
 
-model.quantize(calibration, backend=BACKEND.AUTO)
+model.quantize(CalibrationConfig(dataset=calibration), backend=BACKEND.AUTO)
 print(model.quantization_run_plan.describe())
 
 assert ProcessorStep.GPTQ in model.quantization_run_plan.processors

@@ -28,7 +28,7 @@ The pipeline is:
 
 No. GPT-QModel accumulates the Hessian online while it streams the calibration
 dataset through the model, exactly like GPTQ. You only need to pass a
-calibration dataset to `model.quantize(...)`; no offline Hessian files are
+calibration dataset to `model.quantize(CalibrationConfig(dataset=...))`; no offline Hessian files are
 required. Quantization without calibration is not supported for VPTQ and
 raises a `ValueError`.
 
@@ -48,7 +48,7 @@ non-finite), so a never-invoked module is never silently zeroed.
 
 ```py
 from datasets import load_dataset
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.quantization import VPTQConfig
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
@@ -67,7 +67,7 @@ qcfg = VPTQConfig(
 )
 
 model = GPTQModel.load(model_id, qcfg)
-model.quantize(calibration_dataset, batch_size=1, backend=BACKEND.VPTQ_TORCH)
+model.quantize(CalibrationConfig(dataset=calibration_dataset, batch_size=1), backend=BACKEND.VPTQ_TORCH)
 model.save(quant_path)
 ```
 

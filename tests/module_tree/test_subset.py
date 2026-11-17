@@ -32,7 +32,7 @@ if repo_str not in sys.path:
     sys.path.insert(0, repo_str)
 
 from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState
-from gptqmodel.looper.loop_processor import CalibrationConfig, ForwardConfig, LoopProcessor
+from gptqmodel.looper.loop_processor import ForwardConfig, LoopProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_subset import build_subset_plan, run_subset_stage
@@ -43,7 +43,7 @@ from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 from gptqmodel.nn_modules.hooked_linear import HookedLinear, StopForward, replace_module_with_hooked_legacy
 from gptqmodel.quantization import FORMAT, METHOD, AutoDtypeCast
-from gptqmodel.quantization.config import QuantizeConfig, VramStrategy
+from gptqmodel.quantization.config import CalibrationConfig, QuantizeConfig, VramStrategy
 from gptqmodel.utils.model import find_modules, get_module_by_name_prefix, restore_moe_topk, set_moe_topk
 
 
@@ -326,10 +326,7 @@ def test_awq_processor_enables_subset_early_stop():
     processor = AWQProcessor(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=CalibrationConfig(
-            dataset=calibration,
-            prepare_dataset=_prepare_dataset_func,
-        ),
+        calibration=CalibrationConfig(dataset=calibration).bind(_prepare_dataset_func),
         gptq_model=dummy_gptq_model,
         model=dummy_model,
     )
@@ -407,10 +404,7 @@ class _StubAWQProcessor(LoopProcessor):
         super().__init__(
             tokenizer=None,
             qcfg=qcfg,
-            calibration=CalibrationConfig(
-                dataset=calibration,
-                prepare_dataset=_prepare_dataset_func,
-            ),
+            calibration=CalibrationConfig(dataset=calibration).bind(_prepare_dataset_func),
             forward=ForwardConfig(
                                                  required=True,
                                                  replay_after_process=False,

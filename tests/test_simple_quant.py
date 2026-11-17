@@ -9,7 +9,7 @@ import pytest
 from datasets import load_dataset
 from logbar import LogBar
 
-from gptqmodel import GPTAQConfig, GPTQModel, QuantizeConfig
+from gptqmodel import CalibrationConfig, GPTAQConfig, GPTQModel, QuantizeConfig
 from gptqmodel.quantization import FORMAT
 from tests.eval import evaluate, format_eval_result_table, get_eval_task_metrics
 
@@ -75,7 +75,7 @@ def _run_simple_quant_eval():
         # load calibration data
         calibration_dataset = get_calib_data(tokenizer=model.tokenizer, rows=256)
 
-        model.quantize(calibration_dataset, batch_size=1)
+        model.quantize(CalibrationConfig(dataset=calibration_dataset, batch_size=1))
 
         model.save(QUANT_SAVE_PATH)
         log.info(f"Quant Model Saved to: {QUANT_SAVE_PATH}")

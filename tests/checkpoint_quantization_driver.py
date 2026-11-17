@@ -82,6 +82,7 @@ def main():
         }
         for _ in range(4)
     ]
+    from gptqmodel import CalibrationConfig
     from gptqmodel.adapter.adapter import Lora
     from gptqmodel.quantization import FORMAT, METHOD
     from gptqmodel.quantization.config import (
@@ -317,10 +318,12 @@ def main():
     CheckpointExtension.on_boundary = boundary
     try:
         model.quantize(
-            calibration,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=backend,
-            calibration_data_min_length=1,
             checkpoint=None
             if args.mode == "baseline"
             else CheckpointConfig(args.checkpoint),

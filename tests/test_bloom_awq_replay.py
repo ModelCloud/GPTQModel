@@ -16,12 +16,11 @@ from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.looper.awq_processor import AWQProcessor, _AWQScaleGroupError
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.definitions.bloom import BloomQModel
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.awq.quantize.scale import apply_scale
-from gptqmodel.quantization.config import AWQConfig
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
 
 @pytest.fixture(autouse=True)
@@ -380,7 +379,7 @@ def test_bloom_awq_cpu_quantization_completes(tmp_path, post_layernorm):
         {"input_ids": torch.tensor([[4, 5, 6, 7, 4, 5, 6, 7]]), "attention_mask": torch.ones(1, 8, dtype=torch.long)}
         for _ in range(2)
     ]
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     assert sum(isinstance(module, AwqTorchLinear) for module in model.model.modules()) == 4
     with torch.inference_mode():
         logits = model.model(**calibration[0], use_cache=False).logits

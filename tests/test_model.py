@@ -46,6 +46,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.quantization.dtype import (
     available_float8_dtype_names,
     dequantize_f4_e2m1,
@@ -496,7 +497,7 @@ class TestModelSave(unittest.TestCase):
             self.pretrained_model_id,
             quantize_config=quantize_config,
         )
-        model.quantize(self.calibration_dataset, batch_size=1)
+        model.quantize(CalibrationConfig(dataset=self.calibration_dataset, batch_size=1))
         with tempfile.TemporaryDirectory() as tmp_dir_name:
             model.save(tmp_dir_name)
 
@@ -518,7 +519,7 @@ class TestModelSave(unittest.TestCase):
         )
 
         assert len(self.calibration_dataset) == 1
-        model.quantize(self.calibration_dataset, batch_size=1)
+        model.quantize(CalibrationConfig(dataset=self.calibration_dataset, batch_size=1))
 
         with tempfile.TemporaryDirectory() as tmp_dir_name:
             model.save(tmp_dir_name)

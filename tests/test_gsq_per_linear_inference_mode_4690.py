@@ -29,7 +29,7 @@ from tokenizers.trainers import WordLevelTrainer
 from transformers import PreTrainedTokenizerFast
 from transformers.models.qwen2.modeling_qwen2 import Qwen2Config, Qwen2ForCausalLM
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.config import AWQConfig, GSQConfig
 from gptqmodel.quantization.gsq_scalar import refine_affine_scalar
@@ -170,10 +170,12 @@ def test_tiny_awq_gsq_quantizes_and_reloads(tmp_path: Path):
         backend=BACKEND.TORCH,
     )
     model.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
 
     assert model.quant_log, "AWQ must publish per-module rows"
