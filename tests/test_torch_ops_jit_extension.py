@@ -1196,10 +1196,14 @@ def test_exllamav3_arch_list_scope_restores_on_exception(monkeypatch):
     monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
     _fake_two_arch_cuda_host(monkeypatch)
 
-    with pytest.raises(RuntimeError, match="build failed"):
+    try:
         with scoped_arch_list_env():
             assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.9;12.0+PTX"
             raise RuntimeError("build failed")
+    except RuntimeError as exc:
+        assert str(exc) == "build failed"
+    else:
+        raise AssertionError("expected scoped_arch_list_env() to propagate the build failure")
 
     assert "TORCH_CUDA_ARCH_LIST" not in os.environ
 
