@@ -4,14 +4,20 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class DeepSeekV3QModel(BaseQModel):
     shared_input_verified_model_types = frozenset({"deepseek_v3"})
 
-    # deepseek_v3 requires custom model code
-    require_trust_remote_code = True
+    # Standalone Kimi-K2 uses the same architecture but has no native AutoConfig alias.
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.deepseek_v3.DeepseekV3Config",
+        model_class="gptqmodel.models.ports.deepseek_v3.DeepseekV3ForCausalLM",
+    )
+
+    require_trust_remote_code = False
 
     require_fast_init = False
 
@@ -20,6 +26,10 @@ class DeepSeekV3QModel(BaseQModel):
     dynamic_expert_index = "n_routed_experts"
 
     pre_lm_head_norm_module = "model.norm"
+    rotary_embedding = "model.rotary_emb"
+
+    # The published DeepSeek-V3 checkpoint includes its non-decoder MTP layer.
+    out_of_model_tensors = {"prefixes": ["model.layers.61"]}
 
     # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
@@ -41,10 +51,15 @@ class DeepSeekV3QModel(BaseQModel):
             # Moonlight:
             #   self_attn uses a single Q projection:
             #     - q_proj
-            "self_attn": ("q_proj:0", "q_a_proj:0:in=h", "kv_a_proj_with_mqa:0:in=h", "q_b_proj:1:in=q_a", "kv_b_proj:1:in=kv_a", "o_proj:2"),
+            "self_attn": (
+                "q_a_layernorm:!", "kv_a_layernorm:!",
+                "q_proj:0:q", "q_a_proj:0:q:in=h", "kv_a_proj_with_mqa:0:k:v:in=h",
+                "q_b_proj:1:q:in=q_a", "kv_b_proj:1:k:v:in=kv_a", "o_proj:2:o",
+            ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
+                "gate": ("gate:!", "e_score_correction_bias:!"),
                 "experts": {
                     "#": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
                 },
@@ -52,3 +67,7 @@ class DeepSeekV3QModel(BaseQModel):
             },
         }
     ]
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # MLA latent norms and routed/shared consumers are not qualified for scale folding.
+        return []
