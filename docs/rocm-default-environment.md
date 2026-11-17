@@ -73,9 +73,12 @@ calibration activations (`_needs_deterministic_hessian` in
 | MACaQ | `X^T X` | `quantization/macaq.py:668` |
 | EXL3 | reuses GPTQ's capture | `looper/exllamav3_processor.py:192` |
 | FP8 GSQ | fp32 input Gram | `quantization/gsq_calibration.py:56` |
+| EoRA | fp32 input Gram + `eigh` | `eora/eora.py:44` |
 
 AWQ, ParoQuant and weight-only (RTN) accumulate none of these and keep
-hipBLASLt.
+hipBLASLt. EoRA is included even though it is a secondary processor: an
+AWQ + EoRA plan would otherwise keep the adapter Gram on hipBLASLt, and the
+saved adapter differed in 39/42 LoRA tensors between identical runs (#4614).
 
 #4105 scoped the pin to `ProcessorStep.GPTQ in run_plan.processors`, which was
 too narrow: QQQ also builds a Hessian, so it accumulated on hipBLASLt and lost
@@ -111,7 +114,7 @@ same-target runs share the refcount and different-target runs serialize.
 ```mermaid
 flowchart TD
     A["GPTQModel.quantize"] --> B{"_needs_deterministic_hessian"}
-    B -- "yes: GPTQ, QQQ, VPTQ, MACaQ, EXL3, FP8 GSQ, ParoQuant" --> C["want rocBLAS"]
+    B -- "yes: GPTQ, QQQ, VPTQ, MACaQ, EXL3, FP8 GSQ, ParoQuant, EoRA" --> C["want rocBLAS"]
     B -- "no: AWQ, RTN" --> D["want hipBLASLt"]
     C --> E{"another run holds the other backend?"}
     D --> E
@@ -133,6 +136,7 @@ flowchart TD
 | AWQ / RTN | forced rocBLAS for the whole run | pinned hipBLASLt for the whole run |
 | ParoQuant | forced rocBLAS for the whole run | pinned rocBLAS (no Hessian, but hipBLASLt kernel choice made seeded runs differ) |
 | QQQ / VPTQ / MACaQ / EXL3 / FP8 GSQ | forced rocBLAS | pinned rocBLAS (they build a Hessian) |
+| EoRA | forced rocBLAS | pinned rocBLAS (fp32 input Gram + `eigh`; #4614) |
 | GPTQ calibration forward and replay | forced rocBLAS | pinned rocBLAS (their activations feed the Hessian) |
 | Hessian `X^T X` and inversion | rocBLAS | rocBLAS, plus a nested per-call context |
 | Nested scopes | not reference counted | reentrant refcount, restores only after the last worker exits |
