@@ -5,8 +5,8 @@ Derived from OpenMOSS/MOSS, revision
 checkpoint source files pinned in source_inventory.json.
 
 Original modeling, configuration and tokenization source is licensed under
-Apache License 2.0. Copyright OpenMOSS and the HuggingFace teams; portions of
-the upstream modeling source carry Microsoft and NVIDIA copyright notices.
+Apache License 2.0. Attribution: OpenMOSS and the HuggingFace teams. The
+upstream source identifies GPT-J/EleutherAI rotary, block and MLP derivations.
 See LICENSE and the retained attribution headers. Modifications copyright
 2026 ModelCloud.ai, under Apache License 2.0.
 

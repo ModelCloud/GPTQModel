@@ -9,6 +9,22 @@
     "tokenizer_config.json": "26cb82be993f1738a94fb55643f24972a021553ec8453a84949c4bdad471edaf",
     "special_tokens_map.json": "e0eb0b3291bcd6004f59653eca3e393f235ab412c01b019efd70e15b62157058"
   },
+  "variant_assets": {
+    "base": {
+      "repo": "fnlp/moss-moon-003-base",
+      "revision": "ea9e13408a4fef2f6b996b46a34e3eaaf100e732",
+      "eos_token_id": 106028,
+      "vocab_merges_added_tokens": "Same SHA256 values as top-level SFT assets",
+      "tokenizer_config_sha256": "ab39ef607d22ffd0fa6d47414f1183a1162d666e3c215b2e090bab377a011b9a",
+      "special_tokens_map_sha256": "c1bf3b198ca1d6c07a378061cd8a2797d1033de875d088b4ec77e0e71e06b337"
+    },
+    "sft-plugin": {
+      "repo": "fnlp/moss-moon-003-sft-plugin",
+      "revision": "e04cc85bb5cd9803c52266d8fd4599c749519c61",
+      "eos_token_id": 106068,
+      "assets": "All five SHA256 values identical to top-level SFT assets"
+    }
+  },
   "cases": [
     {
       "text": "Hello, world!",
