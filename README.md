@@ -135,6 +135,10 @@ Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kerne
   Compression settings trade model size, calibration cost, speed, and quality.
 - **Preserve causal replay.** Bloom AWQ keeps captured attention context and
   rejects unsafe residual folds; see [Bloom replay safety](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-bloom-replay.md).
+- **Capture masks a model passes positionally.** GPT-2 hands its causal mask to
+  each block as a positional argument; reading only keyword arguments dropped it
+  and replayed every layer without causality. See
+  [positional replay mask capture](https://github.com/ModelCloud/GPTQModel/blob/main/docs/positional-replay-mask-capture.md).
 - **Replay each calibration document separately.** AWQ token-row replay rebuilds
   a block-diagonal per-document mask and keeps each row's original position;
   additive masks treat `0` as attended. See

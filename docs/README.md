@@ -40,6 +40,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [FP4 effective-weight range in the decode path](fp4-effective-weight-range.md)
 - [FP8 dequantization scaling and AWQ GEMM dispatch](fp8-dequant-scaling.md)
 - [Packed payloads and save-time source materialization](fp8-save-offload.md)
+- [Positional replay mask capture](positional-replay-mask-capture.md)
 - [FP8 checkpoint scale semantics](fp8-scale-semantics.md)
 - [FP8 weight-only dispatch: W8A16 vs W8A8](fp8-weight-only-dispatch.md)
 - [Native fusion inference on CPU, CUDA and ROCm](fusion-device-validation.md)
