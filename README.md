@@ -150,7 +150,9 @@ Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kerne
 
 ### Inference and deployment 🚢
 
-Run compatible checkpoints directly with GPT-QModel, integrate with Transformers,
+Run compatible checkpoints directly with GPT-QModel, integrate with Transformers
+(import `gptqmodel` first so packed MoE experts load through the
+[native bridge](https://github.com/ModelCloud/GPTQModel/blob/main/docs/hf-interop.md)),
 or deploy supported GPTQ/AWQ formats through vLLM and SGLang. Apple silicon has
 native MLX quantization and packed inference. Optional projection fusion can
 combine supported attention and MLP operations without changing the saved format.

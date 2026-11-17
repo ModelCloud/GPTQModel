@@ -58,10 +58,56 @@ The wrapper is installed by `_patch_optimum_gptqmodel_load_bridge` in
 | Per-module `dynamic` bits/group size | Global config wins | `QuantizeConfig.from_pretrained` manifest wins |
 | Optimum not installed | ImportError from Transformers | Same; the patch is skipped |
 
+### AWQ: the second loader Transformers owns
+
+`quant_method: "awq"` never reaches Optimum. Transformers runs its own
+`AwqQuantizer`, whose pre-weight hook calls
+`integrations/awq.py::replace_with_awq_linear`; that function only swaps
+`nn.Linear` modules. A GPT-QModel AWQ checkpoint that stores per-expert
+`experts.<n>.*.qweight` tensors therefore kept the fused 3-D expert parameters
+dense, reported every packed expert tensor as UNEXPECTED, and loaded with
+randomly initialized experts and no error. GPTQ checkpoints were unaffected
+because #4084 patched Optimum only.
+
+```mermaid
+flowchart TD
+    A["AutoModelForCausalLM.from_pretrained"] --> B{"quant_method"}
+    B -->|"gptq"| C["GptqHfQuantizer"]
+    C --> D["patched GPTQQuantizer.convert_model"]
+    B -->|"awq"| E["AwqQuantizer"]
+    E --> F["patched _process_model_before_weight_loading"]
+    D --> G{"hf_gptqmodel_prepare_model_for_load"}
+    F --> G
+    G -->|"not a native GPT-QModel checkpoint"| H["original loader path"]
+    G -->|"native provenance"| I["defuser expands fused blocks and MoE experts"]
+    I --> J["make_quant per serialized module with dynamic config"]
+    J --> K["Transformers assigns checkpoint tensors"]
+    K --> L["patched post-weight hook"]
+    L --> M["hf_gptqmodel_post_init_for_load"]
+    style H fill:#fff3cd,stroke:#997404
+    style M fill:#d9f2d9,stroke:#2e7d32
+```
+
+`_patch_transformers_awq_gptqmodel_load_bridge` wraps
+`AwqQuantizer._process_model_before_weight_loading` and
+`_process_model_after_weight_loading` with the same contract as the Optimum
+wrapper: a native checkpoint gets the manifest-driven module build, and any
+other checkpoint keeps Transformers' own AWQ path because the bridge returns
+`None`.
+
+| Situation | Before | After |
+| --- | --- | --- |
+| Native AWQ MoE checkpoint, `import gptqmodel` first | Attention quantized; every routed expert random | Every serialized expert module rebuilt as a packed kernel |
+| AWQ checkpoint written by another tool | Transformers' AWQ path | Unchanged; bridge declines it |
+| Native AWQ checkpoint, no `gptqmodel` import | Random experts, no error | Unchanged; only the save-time warning applies |
+| Native AWQ attention-only checkpoint | Transformers' AWQ path | Bridge rebuilds the same modules |
+
 The save path reports the same hazard loudly through `hf_compat_warnings`
 (`gptqmodel/models/writer.py`). A checkpoint that stores per-expert
-`experts.<n>.*.qweight` tensors now emits a warning naming the missing /
-unexpected tensor failure and points at `GPTQModel.load`.
+`experts.<n>.*.qweight` tensors emits a warning naming the missing /
+unexpected tensor failure, the fact that both built-in GPTQ and AWQ loaders
+only replace `nn.Linear`, and the remedy: import `gptqmodel` before
+Transformers so the native bridge is installed, or load with `GPTQModel.load`.
 
 ## 2. Legacy checkpoint key layouts
 
