@@ -1,0 +1,2 @@
+# Preserve the upstream license's intentional trailing spaces byte-for-byte.
+LICENSE.Qwen3B whitespace=-blank-at-eol
