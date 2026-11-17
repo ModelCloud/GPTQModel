@@ -771,8 +771,15 @@ def test_bridge_raises_for_a_backend_the_device_cannot_run(tmp_path, monkeypatch
 
 
 def test_awq_bridge_forwards_the_quantizer_backend(monkeypatch):
-    """The AWQ bridge has the same forwarding contract as the GPTQ one (#4680)."""
+    """The AWQ bridge forwards `quantization_config.backend` (#4680, #4729).
 
+    A real `AwqQuantizer` has no `.backend` attribute: the choice lives on its
+    `quantization_config`. The old test set `.backend` by hand on a bare
+    `__new__` instance, so it passed against a bridge that could never read a
+    real AWQ backend.
+    """
+
+    from transformers import AwqConfig
     from transformers.quantizers.quantizer_awq import AwqQuantizer
 
     from gptqmodel.utils import hf_load
@@ -785,8 +792,8 @@ def test_awq_bridge_forwards_the_quantizer_backend(monkeypatch):
 
     monkeypatch.setattr(hf_load, "hf_gptqmodel_prepare_model_for_load", fake_prepare)
 
-    quantizer = AwqQuantizer.__new__(AwqQuantizer)
-    quantizer.backend = "awq_torch"
+    quantizer = AwqQuantizer(AwqConfig(bits=4, group_size=128, backend="torch_awq"))
+    assert not hasattr(quantizer, "backend"), "a real AwqQuantizer has no `.backend`"
 
     try:
         quantizer._process_model_before_weight_loading(
@@ -798,4 +805,112 @@ def test_awq_bridge_forwards_the_quantizer_backend(monkeypatch):
         pass
 
     assert seen, "the AWQ bridge never called the prepare helper"
-    assert seen[0]["backend"] == "awq_torch"
+    assert seen[0]["backend"] == "torch_awq"
+
+
+def test_awq_bridge_forwards_a_trainable_backend_alias(monkeypatch):
+    """`auto_trainable` must reach the selector unchanged, not become AUTO."""
+
+    from transformers import AwqConfig
+    from transformers.quantizers.quantizer_awq import AwqQuantizer
+
+    from gptqmodel.utils import hf_load
+
+    seen = []
+
+    def fake_prepare(model, **kwargs):
+        seen.append(kwargs)
+        return None
+
+    monkeypatch.setattr(hf_load, "hf_gptqmodel_prepare_model_for_load", fake_prepare)
+
+    quantizer = AwqQuantizer(AwqConfig(bits=4, group_size=128, backend="auto_trainable"))
+    try:
+        quantizer._process_model_before_weight_loading(
+            torch.nn.Linear(4, 4), checkpoint_files=["/tmp/model.safetensors"]
+        )
+    except Exception:
+        pass
+
+    assert seen and seen[0]["backend"] == "auto_trainable"
+
+
+@pytest.mark.slow
+def test_awq_hf_load_honours_the_config_backend(tmp_path):
+    """A documented `quantization_config["backend"]` must select that kernel.
+
+    The repro from #4729: a GPT-QModel AWQ checkpoint loaded through plain
+    `AutoModelForCausalLM` silently used the AUTO kernel for every backend, so
+    `docs/peft.md`'s `torch_awq` training recipe and an impossible `marlin` on
+    CPU both came back as the same kernel. Only the GPTQ bridge honoured it.
+    """
+
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from transformers import AutoConfig, LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
+
+    from gptqmodel import CalibrationConfig, GPTQModel
+    from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+    from gptqmodel.quantization.config import AWQConfig
+
+    source = tmp_path / "source"
+    checkpoint = tmp_path / "awq"
+    torch.manual_seed(0)
+    LlamaForCausalLM(
+        LlamaConfig(
+            vocab_size=64,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=64,
+            pad_token_id=0,
+            bos_token_id=1,
+            eos_token_id=2,
+            tie_word_embeddings=False,
+        )
+    ).save_pretrained(source)
+    tokenizer = Tokenizer(WordLevel(unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = Whitespace()
+    PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        bos_token="[BOS]",
+        eos_token="[EOS]",
+        unk_token="[UNK]",
+        pad_token="[PAD]",
+    ).save_pretrained(source)
+
+    model = GPTQModel.load(
+        str(source),
+        quantize_config=AWQConfig(bits=4, group_size=32, device="cpu", offload_to_disk=False),
+        backend=BACKEND.TORCH,
+    )
+    model.quantize(
+        CalibrationConfig(
+            dataset=[{"input_ids": torch.randint(0, 64, (1, 16))} for _ in range(2)],
+            batch_size=1,
+            min_length=1,
+        ),
+        backend=BACKEND.TORCH,
+    )
+    model.save(str(checkpoint))
+
+    config = AutoConfig.from_pretrained(str(checkpoint))
+    config.quantization_config["backend"] = "torch_awq"
+    loaded = AutoModelForCausalLM.from_pretrained(
+        str(checkpoint), config=config, device_map="cpu", dtype=torch.float16
+    )
+    q_proj = loaded.model.layers[0].self_attn.q_proj
+    assert isinstance(q_proj, AwqTorchLinear), (
+        f"backend 'torch_awq' was dropped: kernel is {type(q_proj).__name__}, "
+        "so AUTO was resolved instead"
+    )
+
+    config = AutoConfig.from_pretrained(str(checkpoint))
+    config.quantization_config["backend"] = "marlin"
+    with pytest.raises(ValueError, match="Marlin"):
+        AutoModelForCausalLM.from_pretrained(
+            str(checkpoint), config=config, device_map="cpu", dtype=torch.float16
+        )
