@@ -94,6 +94,28 @@ def _cache_validation_status(validate_once):
 PACK_GPU_MAX_BLOCK_ELEMS = 4 << 20
 
 
+#: Element budget for one ``pack_block`` input block. The CPU packer keeps the
+#: fp32 block, its int32 codes, and the int64 pack view live at once, so a
+#: whole-matrix block on a 4096x4096 layer peaks at several times the weight.
+#: The block only partitions the input axis, so capping it bounds the transient
+#: without changing the packed words.
+PACK_BLOCK_MAX_BLOCK_ELEMS = 1 << 20
+
+
+def _pack_block_block_in(out_features: int, block_in: int, word_bits: int) -> int:
+    """Cap ``pack_block``'s input block by :data:`PACK_BLOCK_MAX_BLOCK_ELEMS`.
+
+    Rounded down to a whole packing word so every block ends on a word
+    boundary, and never below one word.
+    """
+
+    max_block_in = (
+        PACK_BLOCK_MAX_BLOCK_ELEMS // max(out_features, 1) // word_bits * word_bits
+    )
+    block_in = min(block_in, max_block_in)
+    return max(word_bits, (block_in // word_bits) * word_bits)
+
+
 def _pack_gpu_block_in(out_features: int, block_in: int, word_bits: int) -> int:
     """Cap ``pack_gpu``'s input block by :data:`PACK_GPU_MAX_BLOCK_ELEMS`.
 
@@ -236,42 +258,34 @@ def _pack_codes_to_words(
 
 
 @t.inference_mode()
-def _pack_block_rows_2_4_8(
-        block_32xN: t.Tensor,
-        dst: t.Tensor,
-        dst_rows_base: int,
-        bits: int,
-        pack_factor: int,
-        shifts: t.Tensor,
-):
-    """Pack one 32-input block into ``bits`` rows of ``dst`` (32-bit words)."""
-    dst[dst_rows_base:dst_rows_base + bits] = _pack_codes_to_words(
-        block_32xN, pack_factor, 32, shifts
-    )
+def _pack_rows_3(codes: t.Tensor) -> t.Tensor:
+    """Pack every 32-input group of ``codes`` with the 10 | 1 | 10 | 1 | 10 scheme.
 
-
-@t.inference_mode()
-def _pack_block_rows_3(block_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
-    """Pack one 32-input block into 3 rows using the 10 | 1 | 10 | 1 | 10 scheme.
+    ``codes`` is ``[rows, N]`` with ``rows`` a multiple of 32; the result is
+    ``[rows // 32 * 3, N]``. One vectorized shift/reduce covers every 32-row
+    group instead of one small dispatch chain per group, and the result is
+    bit-identical to packing the groups one at a time.
 
     int32 arithmetic wraps exactly like the old uint32 path, so the shifts and
     sums below need no explicit 32-bit mask.
     """
-    x = block_32xN.to(t.int32)  # [32, N]
-    offsets = t.arange(10, dtype=t.int32).view(-1, 1) * 3
+    rows, cols = codes.shape
+    if rows % 32 != 0:
+        raise ValueError(f"3-bit packing expects 32-aligned rows, got shape {tuple(codes.shape)}")
+    groups = rows // 32
+    x = codes.to(t.int32).view(groups, 32, cols)
+    offsets = t.arange(10, dtype=t.int32).view(1, -1, 1) * 3
     # A: first 10 values at bit offsets {0,3,6,...,27} plus low 2 bits of the 11th at bit 30
-    A = (x[0:10] << offsets).sum(dim=0, dtype=t.int32)
-    A = A | (x[10] << 30)
+    A = (x[:, 0:10] << offsets).sum(dim=1, dtype=t.int32)
+    A = A | (x[:, 10] << 30)
     # B: carry bit 2 of the 11th into bit 0, then 10 values at offsets {1,4,7,...,28}, then bit 31 from the 22nd
-    B = (x[10] >> 2) & 1
-    B = B | (x[11:21] << (offsets + 1)).sum(dim=0, dtype=t.int32)
-    B = B | (x[21] << 31)
+    B = (x[:, 10] >> 2) & 1
+    B = B | (x[:, 11:21] << (offsets + 1)).sum(dim=1, dtype=t.int32)
+    B = B | (x[:, 21] << 31)
     # C: carry bits 1..0 of the 22nd into bits 0..1, then 10 values at offsets {2,5,8,...,29}
-    C = (x[21] >> 1) & 0x3
-    C = C | (x[22:32] << (offsets + 2)).sum(dim=0, dtype=t.int32)
-    dst[dst_rows_base + 0] = A
-    dst[dst_rows_base + 1] = B
-    dst[dst_rows_base + 2] = C
+    C = (x[:, 21] >> 1) & 0x3
+    C = C | (x[:, 22:32] << (offsets + 2)).sum(dim=1, dtype=t.int32)
+    return t.stack((A, B, C), dim=1).reshape(groups * 3, cols)
 
 
 @t.inference_mode()
@@ -292,11 +306,12 @@ def _pack_code_cols_2_4_8(values: t.Tensor, bits: int, pack_factor: int) -> t.Te
 def _pack_code_cols_3(values: t.Tensor) -> t.Tensor:
     """Pack 3-bit codes stored along the last dimension (10 | 1 | 10 | 1 | 10)."""
     rows, count = values.shape
+    if count % 32 != 0:
+        raise ValueError(
+            f"3-bit packing expects a 32-aligned code count, got shape {tuple(values.shape)}"
+        )
     transposed = values.T.contiguous()  # [count, rows]: codes become the 32-row axis
-    packed = t.zeros((count // 32 * 3, rows), dtype=t.int32)
-    for block in range(count // 32):
-        _pack_block_rows_3(transposed[block * 32:(block + 1) * 32], packed, block * 3)
-    return packed.T.contiguous()
+    return _pack_rows_3(transposed).T.contiguous()
 
 
 class BaseQuantLinear(nn.Module):
@@ -2259,14 +2274,36 @@ class PackableQuantLinear(GPTQQuantLinear):
             shifts_pf64 = _pack_shifts(bits, pack_factor)
 
         # ---------- thread task: process a single [i0,i1) block ----------
-        block_in = max(word_bits, (block_in // word_bits) * word_bits)
+        # Cap the block by an element budget: the quant math transient, the
+        # int32 codes and the pack view are all [block_in, out_features], so a
+        # wide matrix must not force a whole-matrix block. Blocks partition the
+        # input axis only and every block ends on a packing-word boundary, so
+        # the packed words do not depend on the block size.
+        block_in = _pack_block_block_in(out_features, block_in, word_bits)
+
+        @t.inference_mode()
+        def _pack_block_code_rows(i0: int, int_block: t.Tensor):
+            """Pack ``int_block`` (``[blk, out]`` codes) into its qweight rows.
+
+            Every supported layout packs whole 32-input groups, so the whole
+            block is packed by one vectorized shift/reduce instead of ``bits``
+            small dispatch chains per 32-row group.
+            """
+            dst_rows = (i0 // word_bits) * rows_per_group
+            if bits in (2, 4, 8):
+                packed = _pack_codes_to_words(int_block, pack_factor, word_bits, shifts_pf64)
+            elif bits == 3 and not planar:
+                packed = _pack_rows_3(int_block)
+            elif planar:
+                packed = planar_pack_rows(int_block, bits)
+            else:
+                raise NotImplementedError(f"Unsupported bits={bits}")
+            qweight[dst_rows:dst_rows + packed.shape[0]] = packed
 
         @t.inference_mode()
         def _process_block(i0: int, i1: int):
             blk = i1 - i0
-            # [out, blk]
-            Wblk = W[:, i0:i1]
-            # select group rows for these inputs from [G, out] -> [blk, out], then T -> [out, blk]
+            # select group rows for these inputs from [G, out] -> [blk, out]
             gsel = g_idx[i0:i1].to(dtype=t.int64, copy=False)  # [blk]
             if gsel.numel() == 0:
                 return
@@ -2283,37 +2320,26 @@ class PackableQuantLinear(GPTQQuantLinear):
                     f"pack_block: g_idx values out of range after normalization (min={gsel_min}, max={gsel_max}, groups={num_groups})."
                 )
 
-            sz_blk_T = scale_zeros.index_select(0, gsel).T  # [out, blk]
-            s_blk_T = scales.index_select(0, gsel).T  # [out, blk]
-
             # int_block = round((W + scale_zeros[g_idx]^T) / scales[g_idx]^T)
-            # The add allocates the one temporary we need; divide/round/clamp
-            # then run in place instead of materializing two more full copies.
-            int_block = Wblk.to(t.float32) + sz_blk_T  # [out, blk]
-            int_block.div_(s_blk_T)
+            # Quantize directly in the [blk, out] layout the packer consumes:
+            # the transpose happens once on the fp16 weight instead of on the
+            # larger fp32 intermediate. `copy_` always allocates, so an fp32
+            # caller weight is never mutated by the in-place math below.
+            int_block = t.empty((blk, out_features), dtype=t.float32)  # [blk, out]
+            int_block.copy_(W[:, i0:i1].T)
+            int_block += scale_zeros.index_select(0, gsel)
+            int_block /= scales.index_select(0, gsel)
             int_block.round_()
             # Values that drift outside the representable range must saturate.
             # Bit-packing an unchecked value wraps it modulo 2**bits and turns
             # a small reconstruction error into a full-range weight error.
             int_block.clamp_(0, self.maxq)
-            int_block = int_block.to(t.int32).T.contiguous()  # [blk, out]
+            int_block = int_block.to(t.int32)  # [blk, out]
 
-            groups32 = blk // word_bits
-            base_group = (i0 // word_bits)
-            for g in range(groups32):
-                sub = int_block[g * word_bits:(g + 1) * word_bits]  # [32, out] int32
-                dst_rows = (base_group + g) * rows_per_group
-                if bits in (2, 4, 8):
-                    _pack_block_rows_2_4_8(sub, qweight, dst_rows, bits, pack_factor, shifts_pf64)
-                elif bits == 3 and not planar:
-                    _pack_block_rows_3(sub, qweight, dst_rows)
-                elif planar:
-                    qweight[dst_rows:dst_rows + bits] = planar_pack_rows(sub, bits)
-                else:
-                    raise NotImplementedError(f"Unsupported bits={bits}")
+            _pack_block_code_rows(i0, int_block)
 
             # free temps
-            del Wblk, gsel, sz_blk_T, s_blk_T, int_block
+            del gsel, int_block
 
         # ---------- schedule blocks across a thread pool ----------
         starts = list(range(0, in_features, block_in))
@@ -2489,7 +2515,7 @@ class PackableQuantLinear(GPTQQuantLinear):
         range10 = t.arange(10, dtype=t.int64, device=target_device).view(-1, 1)
 
         @t.inference_mode()
-        def _pack_rows_3_values(int32_blk_32xN: t.Tensor) -> t.Tensor:
+        def _pack_gpu_rows_3_values(int32_blk_32xN: t.Tensor) -> t.Tensor:
             x = int32_blk_32xN.to(t.int64)
             A = ((x[0:10] << (range10 * 3)).sum(dim=0, dtype=t.int64)) & mask_tensor
             A = (A | ((x[10] << 30) & mask_tensor)) & mask_tensor
@@ -2503,8 +2529,8 @@ class PackableQuantLinear(GPTQQuantLinear):
 
             return t.stack([A, B, C], dim=0)
 
-        def _pack_rows_3(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
-            packed = _pack_rows_3_values(int32_blk_32xN)
+        def _pack_gpu_rows_3(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
+            packed = _pack_gpu_rows_3_values(int32_blk_32xN)
             dst[dst_rows_base:dst_rows_base + 3] = packed.to(self.pack_dtype)
 
         # Derive the block from an element budget instead of trusting the
@@ -2546,7 +2572,7 @@ class PackableQuantLinear(GPTQQuantLinear):
                     sub = int_block[g * word_bits:(g + 1) * word_bits]
                     dst_rows = (base_group + g) * rows_per_group
                     if bits == 3 and not self.planar:
-                        _pack_rows_3(sub, qweight_dev, dst_rows)
+                        _pack_gpu_rows_3(sub, qweight_dev, dst_rows)
                     elif self.planar:
                         qweight_dev[dst_rows:dst_rows + bits] = planar_pack_rows(sub, bits).to(self.pack_dtype)
                     else:
@@ -2578,7 +2604,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             qzeros_chunks: List[t.Tensor] = []
             for g in range(groups):
                 block = zeros_int[:, g * word_bits:(g + 1) * word_bits]
-                packed = _pack_rows_3_values(block.T).transpose(0, 1)
+                packed = _pack_gpu_rows_3_values(block.T).transpose(0, 1)
                 qzeros_chunks.append(packed.to(dtype=self.pack_dtype))
             qzeros_dev = t.cat(qzeros_chunks, dim=1)
         elif self.planar:
@@ -2678,10 +2704,7 @@ class PackableQuantLinear(GPTQQuantLinear):
                             qweight[row] |= int_weight[row * self.pack_factor + j] << (self.bits * j)
             elif self.bits == 3 and not self.planar:
                 if self.pack_dtype_bits == 32 and int_weight.shape[0] % 32 == 0:
-                    for blk in range(int_weight.shape[0] // 32):
-                        _pack_block_rows_3(
-                            int_weight[blk * 32:(blk + 1) * 32], qweight, blk * 3
-                        )
+                    qweight = _pack_rows_3(int_weight)
                 else:
                     qweight = t.zeros_like(qweight)
                     i = 0
