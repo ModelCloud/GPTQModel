@@ -2965,6 +2965,8 @@ def load_hf_tokenizer(
     from tokenicer import Tokenicer
 
     trust_remote_code = bool(trust_remote_code and safety_checks_bypassed())
+    if model_config is not None:
+        kwargs.setdefault("config", model_config)
     tokenicer = Tokenicer.load(
         tokenizer_or_path,
         model_config=model_config,
