@@ -5620,6 +5620,19 @@ class BaseQModel(nn.Module):
                     consumers.append(extra_name)
             return consumers
 
+        def _block_moe_root(block):
+            """Return the declared MoE root template that owns ``block``."""
+
+            for spec in plan.moe_roots():
+                template = spec.template
+                if any(
+                    strip_non_quantize_flags(name) == template
+                    or strip_non_quantize_flags(name).startswith(f"{template}.")
+                    for name in block
+                ):
+                    return template
+            return None
+
         def _moe_block_consumers(block, width, excluded):
             """Direct children of the MoE block that read its input.
 
@@ -5630,16 +5643,7 @@ class BaseQModel(nn.Module):
             module hierarchy keeps the rule structural instead of name-based.
             """
 
-            moe_root = None
-            for spec in plan.moe_roots():
-                template = spec.template
-                if any(
-                    strip_non_quantize_flags(name) == template
-                    or strip_non_quantize_flags(name).startswith(f"{template}.")
-                    for name in block
-                ):
-                    moe_root = template
-                    break
+            moe_root = _block_moe_root(block)
             if moe_root is None:
                 return []
             root_module, _ = get_module_by_name_prefix(module, moe_root)
@@ -5825,8 +5829,22 @@ class BaseQModel(nn.Module):
                             last_module_root = root
                             module2inspect, _ = get_module_by_name_prefix(module, root)
 
+                    # A MoE gate/up block always reads the MoE block input, which
+                    # is captured once per calibration batch. Sibling blocks that
+                    # share the root (a shared expert, or a dense MLP declared next
+                    # to `mlp:moe`) move `last_module_root` to the root before the
+                    # experts block, so the `root != last_module_root` gate above
+                    # leaves `module2inspect` unset and anchors the group on one of
+                    # its own members. #4675's partial split then never runs
+                    # (#4760). Prefer the root capture whenever it exists.
+                    moe_gate_up_root = (
+                        _block_moe_root(block) if has_gate_up_roles and is_moe_family else None
+                    )
+                    if moe_gate_up_root is not None and moe_gate_up_root in input_feat:
+                        feature_name = moe_gate_up_root
+                        inp = input_feat[moe_gate_up_root]
                     # process ['mlp.experts.#.gate_proj', 'mlp.experts.#.gup_proj']
-                    if is_moe_gate_up_block and module2inspect is not None:
+                    elif is_moe_gate_up_block and module2inspect is not None:
                         if last_module_root not in input_feat:
                             log.debug(
                                 "awq_get_modules_for_scaling: missing input feature for `%s` while processing experts block (layer block size=%s)",
