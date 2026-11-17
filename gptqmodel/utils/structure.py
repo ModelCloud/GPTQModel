@@ -1197,6 +1197,14 @@ class LazyTurtle:
         alias_items = self._normalize_runtime_to_checkpoint_renamings(conversion_aliases)
         self._runtime_to_checkpoint_renamings = tuple(alias_items)
         self._runtime_to_checkpoint_converters = self._normalize_runtime_to_checkpoint_converters(conversion_aliases)
+        # These are needed while resolving the tie below: `_checkpoint_shard_path`
+        # takes `_lock` and reads `_active_source_root`. Initializing them after
+        # the snapshot call made the checkpoint comparison raise `AttributeError`,
+        # which the defensive wrapper swallowed as "unknown" -- so a distinct
+        # `lm_head` was never refuted (#4799, #4973).
+        self._lock = threading.RLock()
+        self._active_source_root: Optional[str] = None
+        self._active_source_provenance: Optional[Dict[str, Any]] = None
         # Resolve tying once from the decoder config and the checkpoint itself.
         # `materialize_submodule` re-applies this snapshot instead of calling
         # `tie_weights()`, which would recompute from the wrapper config and
@@ -1212,9 +1220,6 @@ class LazyTurtle:
         self._no_placement_params = tuple(
             pattern for pattern in (no_placement_params or ()) if isinstance(pattern, str) and pattern
         )
-        self._lock = threading.RLock()
-        self._active_source_root: Optional[str] = None
-        self._active_source_provenance: Optional[Dict[str, Any]] = None
 
     def close(self) -> None:
         """Release the converted checkpoint directory held by this turtle.
