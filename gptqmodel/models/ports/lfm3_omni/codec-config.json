@@ -1,0 +1,27 @@
+{
+  "architectures": [
+    "LiquidCodecModel"
+  ],
+  "decoder_window": 30,
+  "dtype": "bfloat16",
+  "encoder_conv_dim": 256,
+  "encoder_dim": 512,
+  "frame_samples": 1920,
+  "fsq_levels": [
+    8,
+    7,
+    6,
+    6
+  ],
+  "initializer_range": 0.02,
+  "model_type": "liquid_codec",
+  "n_q": 12,
+  "quantizer_dim": 256,
+  "sample_rate": 24000,
+  "sampling_rate": 24000,
+  "stft_frame_stack": 6,
+  "stft_hop_length": 320,
+  "stft_n_fft": 1280,
+  "stft_win_length": 1280,
+  "transformers_version": "5.19.0.dev0"
+}

@@ -5,11 +5,12 @@
 
 from typing import Dict
 
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
+from ..local import LocalModelLoader
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .lfm3 import LFM3QModel
 
@@ -26,7 +27,11 @@ class LFM3OmniQModel(LFM3QModel):
     `model.depth_decoder.*`, ...), so no HF conversion map is needed.
     """
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.lfm3_omni.configuration_lfm3_omni.Lfm3OmniConfig",
+        model_class="gptqmodel.models.ports.lfm3_omni.modeling_lfm3_omni.Lfm3OmniForConditionalGeneration",
+        processor_class="gptqmodel.models.ports.lfm3_omni.processing_lfm3_omni.Lfm3OmniProcessor",
+    )
 
     pre_lm_head_norm_module = "model.language_model.embedding_norm"
     rotary_embedding = "model.language_model.rotary_emb"
@@ -62,7 +67,7 @@ class LFM3OmniQModel(LFM3QModel):
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
     require_load_processor = True
-    require_trust_remote_code = True
+    require_trust_remote_code = False
     layer_modules_strict = False
 
     _NON_TEXT_MODULES = (
@@ -122,7 +127,16 @@ class LFM3OmniQModel(LFM3QModel):
             setattr(parent, name, move_to(getattr(parent, name), device=CPU))
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=self.trust_remote_code)
+        return self.loader.load_processor(
+            self.model_local_path,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+        )
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Hybrid gated convolution, head gates and sandwich norms have not been
+        # qualified for AWQ folding/search. Quantize the declared linears plainly.
+        return []
 
     def preprocess_dataset(self, sample: Dict) -> Dict:
         return sample
