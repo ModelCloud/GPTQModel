@@ -44,3 +44,25 @@ class. All hashes below describe upstream bytes before formatting/adaptation.
 K2, K2.5 and K3 share vocabulary asset bytes but **not** their architecture chat
 encoding contract. This implementation intentionally does not replace the K2
 or K2.5 tokenizers.
+
+## Ordinary Kimi-Linear tokenizer and padded K3 tensor provenance
+
+The ordinary source is
+[`moonshotai/Kimi-Linear-48B-A3B-Instruct@e1df551a447157d4658b573f9a695d57658590e9`](https://huggingface.co/moonshotai/Kimi-Linear-48B-A3B-Instruct/tree/e1df551a447157d4658b573f9a695d57658590e9).
+Its pinned model card declares MIT, without a separate LICENSE file or tokenizer
+copyright header. The shared K3 implementation retains the K3 license above;
+it is not relabelled MIT. Ordinary sorted-tools/Jinja semantics are distinct
+from K3 XTML. Source/asset SHA-256 values:
+
+| Asset | SHA-256 |
+| --- | --- |
+| `tokenization_kimi.py` | `b6b304f63d355f29f5f5aa27694337c824c90e1ac80559ca537909824729761f` |
+| `tokenizer_config.json` | `5ba77d5822137ac3cb9337d2b84561d10425562cf8b8f2c74c91a832516a778d` |
+| `chat_template.jinja` | `75e3cd76bd26b77c02507eb35073b66c8ffd0c88eab185ebc6f8c6e425161809` |
+| `tiktoken.model` | `b6c497a7469b33ced9c38afb1ad6e47f03f5e5dc05f15930799210ec050c5103` |
+
+`a_log_reference.json` reproduces 512 tensor bytes from K3 at the same pinned
+revision/license above: `model-00013-of-000096.safetensors`, header length824104,
+tensor offsets[3584,4096), file bytes[827696,828208), SHA-256
+`13f756b245c0f444a480166b5398f1ba788de4e4926f04b351edc0f4378643dd`.
+These are small source-reference data, not a complete trained checkpoint.

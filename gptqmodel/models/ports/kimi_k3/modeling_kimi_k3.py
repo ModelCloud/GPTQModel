@@ -37,8 +37,9 @@ from transformers.generation import GenerationMixin
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.llava.modeling_llava import LlavaCausalLMOutputWithPast
 
+from .checkpoint import KimiCheckpointMixin
 from .configuration_kimi_k3 import KimiK3Config
-from .modeling_kimi_linear import KimiLinearForCausalLM
+from .modeling_kimi_linear import KimiDynamicCache, KimiLinearForCausalLM
 
 
 def multihead_attention(
@@ -737,7 +738,7 @@ class PatchMergerMLPV2(nn.Module):
         return x
 
 
-class KimiK3PreTrainedModel(PreTrainedModel):
+class KimiK3PreTrainedModel(KimiCheckpointMixin, PreTrainedModel):
     config_class = KimiK3Config
     base_model_prefix = "model"
     _no_split_modules = [
@@ -1036,14 +1037,55 @@ class KimiK3ForConditionalGeneration(KimiK3PreTrainedModel, GenerationMixin):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        input_mask = None
+        cached_mask = getattr(past_key_values, "multimodal_attention_mask", None)
+        if (
+            inputs_embeds is None
+            and cached_mask is None
+            and pixel_values is not None
+            and len(pixel_values) > 0
+            and attention_mask is not None
+        ):
+            if (
+                attention_mask.ndim != 2
+                or attention_mask.shape != input_ids.shape
+                or not bool(((attention_mask == 0) | (attention_mask == 1)).all())
+            ):
+                raise ValueError("image attention_mask must be a binary mask matching input_ids")
+        if cached_mask is not None:
+            if cached_mask.shape[1] != past_key_values.get_seq_length():
+                raise ValueError("multimodal attention_mask does not match the cached prefix")
+            query_length = inputs_embeds.shape[1] if inputs_embeds is not None else input_ids.shape[1]
+            raw_mask = past_key_values.multimodal_input_mask
+            if attention_mask is None:
+                suffix = cached_mask.new_ones(cached_mask.shape[0], query_length)
+            else:
+                if attention_mask.ndim != 2 or attention_mask.shape[0] != cached_mask.shape[0]:
+                    raise ValueError("multimodal attention_mask must include the cached prefix")
+                prefix = attention_mask[:, :-query_length]
+                if not (
+                    (prefix.shape == cached_mask.shape and torch.equal(prefix, cached_mask))
+                    or (prefix.shape == raw_mask.shape and torch.equal(prefix, raw_mask))
+                ):
+                    raise ValueError("multimodal attention_mask must preserve the cached prefix")
+                suffix = attention_mask[:, -query_length:]
+                if not bool(((suffix == 0) | (suffix == 1)).all()):
+                    raise ValueError("multimodal attention_mask must be binary")
+            attention_mask = torch.cat((cached_mask, suffix.to(cached_mask)), -1)
+            input_mask = torch.cat((raw_mask, suffix.to(raw_mask)), -1)
+            position_ids = (attention_mask.long().cumsum(-1) - 1).masked_fill(attention_mask == 0, 1)[
+                :, -query_length:
+            ]
+
         if inputs_embeds is None:
             # 1. Extra the input embeddings
             inputs_embeds = self.get_input_embeddings()(input_ids)
 
             # 2. Merge text and images
-            if pixel_values is not None and len(pixel_values) > 0 and input_ids.shape[1] != 1:
+            if pixel_values is not None and len(pixel_values) > 0 and cached_mask is None:
                 if attention_mask is None:
                     attention_mask = torch.ones_like(input_ids)
+                input_mask = attention_mask.clone()
                 image_features = self._extract_image_features(pixel_values, grid_thws)
                 if self.mm_projector:
                     image_features = self.mm_projector(image_features)
@@ -1072,6 +1114,12 @@ class KimiK3ForConditionalGeneration(KimiK3PreTrainedModel, GenerationMixin):
         )
 
         logits = outputs[0]
+        returned_cache = getattr(outputs, "past_key_values", None)
+        if isinstance(outputs, tuple) and len(outputs) > 1 and isinstance(outputs[1], KimiDynamicCache):
+            returned_cache = outputs[1]
+        if input_mask is not None and returned_cache is not None:
+            returned_cache.multimodal_attention_mask = attention_mask.clone()
+            returned_cache.multimodal_input_mask = input_mask.clone()
 
         loss = None
         if labels is not None:
@@ -1112,7 +1160,12 @@ class KimiK3ForConditionalGeneration(KimiK3PreTrainedModel, GenerationMixin):
         attention_mask=None,
         **kwargs,
     ):
-        if past_key_values is not None:
+        if getattr(past_key_values, "multimodal_input_mask", None) is not None:
+            processed = past_key_values.multimodal_input_mask.shape[1]
+            if input_ids.shape[1] > processed:
+                input_ids = input_ids[:, processed:]
+            pixel_values = grid_thws = None
+        elif past_key_values is not None:
             if hasattr(past_key_values, "get_seq_length"):
                 cache_length = past_key_values.get_seq_length()
                 past_length = getattr(past_key_values, "seen_tokens", cache_length)
@@ -1162,6 +1215,32 @@ class KimiK3ForConditionalGeneration(KimiK3PreTrainedModel, GenerationMixin):
             }
         )
         return model_inputs
+
+    def _expand_inputs_for_generation(self, expand_size=1, is_encoder_decoder=False, input_ids=None, **model_kwargs):
+        pixels = model_kwargs.pop("pixel_values", None)
+        grids = model_kwargs.pop("grid_thws", None)
+        if pixels is not None and expand_size > 1:
+            if input_ids is None or grids is None:
+                raise ValueError("K3 image beam expansion requires input_ids and grid_thws")
+            counts = (input_ids == self.config.media_placeholder_token_id).sum(-1).tolist()
+            patch_counts = grids.prod(-1).tolist()
+            if sum(counts) != len(grids) or sum(patch_counts) != len(pixels):
+                raise ValueError("K3 image placeholders, grids and patches must agree before beam expansion")
+            expanded_pixels, expanded_grids, image, patch = [], [], 0, 0
+            for count in counts:
+                size = sum(patch_counts[image : image + count])
+                expanded_pixels.extend([pixels[patch : patch + size]] * expand_size)
+                expanded_grids.extend([grids[image : image + count]] * expand_size)
+                image, patch = image + count, patch + size
+            pixels, grids = torch.cat(expanded_pixels), torch.cat(expanded_grids)
+        input_ids, model_kwargs = super()._expand_inputs_for_generation(
+            expand_size=expand_size,
+            is_encoder_decoder=is_encoder_decoder,
+            input_ids=input_ids,
+            **model_kwargs,
+        )
+        model_kwargs.update(pixel_values=pixels, grid_thws=grids)
+        return input_ids, model_kwargs
 
     def _reorder_cache(self, past_key_values, beam_idx):
         past_key_values.reorder_cache(beam_idx)

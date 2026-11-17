@@ -63,11 +63,14 @@ def test_kimi_linear_registry_still_names_the_k3_definition():
         ),
     ],
 )
-def test_kimi_linear_dispatch_uses_config_fields(monkeypatch, config, expected):
+def test_kimi_linear_dispatch_uses_config_fields(monkeypatch, tmp_path, config, expected):
+    import json
+
+    (tmp_path / "config.json").write_text(json.dumps(vars(config)))
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda *args, **kwargs: False)
     monkeypatch.setattr(auto, "load_model_config", lambda *args, **kwargs: config)
 
-    assert auto.check_and_get_model_definition("tiny-kimi-linear") is expected
+    assert auto.check_and_get_model_definition(tmp_path) is expected
 
 
 def test_native_kimi_linear_tree_resolves_every_declared_spec():

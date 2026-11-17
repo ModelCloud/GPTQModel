@@ -30,6 +30,87 @@ from gptqmodel.utils.security import BYPASS_ENV
 
 
 PIN = "f831ab66814297da540d832a5235f8e904f29d06"
+LINEAR_PIN = "e1df551a447157d4658b573f9a695d57658590e9"
+
+
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("bypass", [None, "0", "1"])
+def test_native_linear_real_tokenizer_contractions_match_pinned_source(tmp_path, monkeypatch, trust, bypass):
+    import ast
+    from shutil import copyfile
+
+    import tiktoken
+    from tiktoken.load import load_tiktoken_bpe
+
+    asset = (
+        Path.home() / ".cache/huggingface/hub/models--moonshotai--Kimi-Linear-48B-A3B-Instruct/snapshots" / LINEAR_PIN
+    )
+    if not (asset / "tiktoken.model").is_file():
+        pytest.skip("pinned ordinary Kimi-Linear tokenizer asset is not cached")
+    if bypass is None:
+        monkeypatch.delenv(BYPASS_ENV, raising=False)
+    else:
+        monkeypatch.setenv(BYPASS_ENV, bypass)
+    for file in ("config.json", "tokenizer_config.json", "tiktoken.model", "chat_template.jinja"):
+        copyfile(asset / file, tmp_path / file)
+    raw = json.loads((tmp_path / "config.json").read_text())
+    config = load_model_config(tmp_path, trust_remote_code=trust)
+    assert type(config) is NativeConfig and not hasattr(config, "attn_res_block_size")
+    marker = hostile_checkpoint(tmp_path, config)
+    assert raw["model_type"] == config.model_type
+    # Read the pinned literal regex, never import or execute checkpoint Python.
+    tree = ast.parse((asset / "tokenization_kimi.py").read_text())
+    source_class = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "TikTokenTokenizer")
+    pattern = next(n.value for n in source_class.body if isinstance(n, ast.Assign) and n.targets[0].id == "pat_str")
+    pattern = "|".join(ast.literal_eval(pattern.args[0]))
+    oracle = tiktoken.Encoding(
+        name="pinned-linear-oracle",
+        pat_str=pattern,
+        mergeable_ranks=load_tiktoken_bpe(str(asset / "tiktoken.model")),
+        special_tokens={},
+    )
+    actual = load_hf_tokenizer(tmp_path, model_config=config, trust_remote_code=trust, local_files_only=True)
+    texts = ["it's", "I'm sure we'll see it's fine", "DON'T can't shouldn't they've I'd", "你好 1234!\n"]
+    for text in texts:
+        expected = oracle.encode_ordinary(text)
+        assert actual.encode(text) == expected
+        assert actual(text, return_tensors="pt")["input_ids"].tolist() == [expected]
+        assert actual.decode(expected) == text
+    assert len(actual.encode(texts[1])) == 6
+    actual.save_pretrained(tmp_path)
+    retry = load_hf_tokenizer(tmp_path, model_config=config, trust_remote_code=trust, local_files_only=True)
+    assert retry.encode(texts[1]) == oracle.encode_ordinary(texts[1])
+    assert retry.encode("[BOS][EOS]") == [163584, 163585]
+    assert retry.decode([163584, 163585]) == "[BOS][EOS]"
+    assert retry.num_reserved_special_tokens == 258
+    (tmp_path / "tiktoken.model").write_text("invalid-bpe")
+    with pytest.raises(ValueError):
+        load_hf_tokenizer(tmp_path, model_config=config, trust_remote_code=trust, local_files_only=True)
+    copyfile(asset / "tiktoken.model", tmp_path / "tiktoken.model")
+    repaired = load_hf_tokenizer(tmp_path, model_config=config, trust_remote_code=trust, local_files_only=True)
+    assert repaired.encode(texts[1]) == oracle.encode_ordinary(texts[1])
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "weather",
+                "description": "weather",
+                "parameters": {"type": "object", "properties": {"z": {"type": "string"}, "a": {"type": "integer"}}},
+            },
+        }
+    ]
+    sorted_tools = json.loads(json.dumps(tools, sort_keys=True))
+    from transformers.tokenization_python import PythonBackend
+
+    chat = [{"role": "user", "content": "What's the weather?"}]
+    expected_chat = PythonBackend.apply_chat_template(
+        repaired, chat, tools=sorted_tools, tokenize=False, add_generation_prompt=True
+    )
+    assert repaired.apply_chat_template(chat, tools=tools) == expected_chat
+    assert repaired.apply_chat_template(chat, tools=tools, tokenize=True, return_dict=False) == repaired.encode(
+        expected_chat
+    )
+    assert not marker.exists()
 
 
 @pytest.fixture(autouse=True)
@@ -99,6 +180,384 @@ def tiny_k3(**kwargs):
         _attn_implementation="eager",
     )
     return KimiK3Config(text_config=tiny_config(**kwargs), vision_config=vision, media_placeholder_token_id=31)
+
+
+@pytest.mark.parametrize("kind", ["attnres", "k3"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+def test_published_padded_a_log_first_load_and_two_safetensors_roundtrips(tmp_path, kind, dtype):
+    from safetensors.torch import load_file, save_file
+
+    config = tiny_config() if kind == "attnres" else tiny_k3()
+    text = config if kind == "attnres" else config.text_config
+    text.linear_attn_config["num_heads"] = 96
+    model = (KimiLinearForCausalLM(config) if kind == "attnres" else KimiK3ForConditionalGeneration(config)).eval()
+    model.save_pretrained(tmp_path)
+    payload_path = tmp_path / "model.safetensors"
+    state = load_file(payload_path)
+    expected = {name: value.clone() for name, value in state.items()}
+    keys = [name for name in state if name.endswith(".self_attn.A_log")]
+    assert len(keys) == 2
+    from gptqmodel.models.ports import kimi_k3
+
+    reference = json.loads((Path(kimi_k3.__file__).parent / "a_log_reference.json").read_text())
+    raw = base64.b64decode(reference["base64"])
+    assert hashlib.sha256(raw).hexdigest() == reference["sha256"]
+    assert reference["revision"] == PIN and reference["shape"] == [128] and reference["active_heads"] == 96
+    assert (
+        json.loads((Path(kimi_k3.__file__).parent / "checkpoint_config.json").read_text())["text_config"][
+            "linear_attn_config"
+        ]["num_heads"]
+        == 96
+    )
+    published = torch.frombuffer(bytearray(raw), dtype=torch.float32).clone()
+    assert not bool(published[96:].view(torch.uint8).count_nonzero())
+    for name in keys:
+        state[name] = published.clone()
+        expected[name] = published[:96].clone()
+    save_file(state, payload_path, metadata={"format": "pt"})
+    loader = KimiLinearQModel.loader if kind == "attnres" else KimiK3QModel.loader
+    restored = loader.from_pretrained(tmp_path, local_files_only=True, dtype=dtype)
+    ids = torch.tensor([[1, 4, 7]])
+    for iteration in range(2):
+        actual = restored.state_dict()
+        assert set(actual) == set(expected)
+        for name, original in expected.items():
+            target_dtype = torch.float32 if name.endswith((".A_log", ".dt_bias")) else dtype
+            assert actual[name].dtype == target_dtype
+            torch.testing.assert_close(actual[name], original.to(target_dtype), rtol=0, atol=0)
+        with torch.no_grad():
+            logits = restored(ids, use_cache=False).logits
+            prefix = restored(ids[:, :2], use_cache=True)
+            continuation = restored(ids[:, 2:], past_key_values=prefix.past_key_values).logits
+        torch.testing.assert_close(continuation, logits[:, 2:], atol=0.003, rtol=0.003)
+        saved = tmp_path / f"normalized-{iteration}"
+        restored.save_pretrained(saved)
+        saved_state = load_file(saved / "model.safetensors")
+        for name in keys:
+            assert saved_state[name].shape == (96,)
+            torch.testing.assert_close(saved_state[name], expected[name], rtol=0, atol=0)
+        restored = loader.from_pretrained(saved, local_files_only=True, dtype=dtype)
+    assert not list(tmp_path.rglob("*.bin"))
+
+
+@pytest.mark.parametrize("bad", ["short", "long", "rank", "nonzero", "negative-zero", "dtype", "wrong-heads"])
+def test_a_log_invalid_padding_fails_even_ignore_mismatch_then_retries(tmp_path, bad):
+    from safetensors.torch import load_file, save_file
+
+    config = tiny_config()
+    config.linear_attn_config["num_heads"] = 96 if bad != "wrong-heads" else 2
+    model = KimiLinearForCausalLM(config).eval()
+    model.save_pretrained(tmp_path)
+    file = tmp_path / "model.safetensors"
+    state = load_file(file)
+    key = "model.layers.0.self_attn.A_log"
+    original = state[key].clone()
+    state[key] = torch.zeros({"short": 95, "long": 129}.get(bad, 128), dtype=torch.float32)
+    if bad == "rank":
+        state[key] = state[key].reshape(1, -1)
+    elif bad == "dtype":
+        state[key] = state[key].to(torch.float16)
+    elif bad == "nonzero":
+        state[key][-1] = 0.001
+    elif bad == "negative-zero":
+        state[key][-1] = -0.0
+    save_file(state, file, metadata={"format": "pt"})
+    with pytest.raises(ValueError, match="A_log padding"):
+        KimiLinearQModel.loader.from_pretrained(tmp_path, local_files_only=True, ignore_mismatched_sizes=True)
+    state[key] = original
+    save_file(state, file, metadata={"format": "pt"})
+    restored = KimiLinearQModel.loader.from_pretrained(tmp_path, local_files_only=True)
+    torch.testing.assert_close(restored.state_dict()[key], original, rtol=0, atol=0)
+    torch.testing.assert_close(restored(torch.tensor([[1, 4, 7]])).logits, model(torch.tensor([[1, 4, 7]])).logits)
+
+
+@pytest.mark.parametrize("kind", ["attnres", "k3"])
+def test_padded_a_log_disk_offload_restore_and_resave(tmp_path, kind):
+    from safetensors import safe_open
+    from safetensors.torch import load_file, save_file
+
+    config = tiny_config() if kind == "attnres" else tiny_k3()
+    text = config if kind == "attnres" else config.text_config
+    text.linear_attn_config["num_heads"] = 96
+    model = (KimiLinearForCausalLM(config) if kind == "attnres" else KimiK3ForConditionalGeneration(config)).eval()
+    model.save_pretrained(tmp_path)
+    state = load_file(tmp_path / "model.safetensors")
+    prefix = "model.layers.0.self_attn" if kind == "attnres" else "language_model.model.layers.0.self_attn"
+    key = prefix + ".A_log"
+    expected = state[key].clone()
+    state[key] = torch.cat((expected, torch.zeros(32)))
+    save_file(state, tmp_path / "model.safetensors", metadata={"format": "pt"})
+    loader = KimiLinearQModel.loader if kind == "attnres" else KimiK3QModel.loader
+    offload = tmp_path / "offload"
+    device_map = {
+        name: ("disk" if name == prefix else "cpu")
+        for name, module in model.named_modules()
+        if name and (not list(module.children()) or list(module.parameters(recurse=False)))
+    }
+    device_map[prefix] = "disk"
+    device_map = {name: device for name, device in device_map.items() if not name.startswith(prefix + ".")}
+    restored = loader.from_pretrained(tmp_path, local_files_only=True, device_map=device_map, offload_folder=offload)
+    assert restored.get_parameter(key).device.type == "meta"
+    converted = offload / f"{key}.safetensors"
+    with safe_open(converted, framework="pt") as file:
+        torch.testing.assert_close(file.get_tensor(key), expected, rtol=0, atol=0)
+    ids = torch.tensor([[1, 4, 7]])
+    torch.testing.assert_close(restored(ids, use_cache=False).logits, model(ids, use_cache=False).logits)
+    assert restored.get_parameter(key).device.type == "meta"
+    saved = tmp_path / "restored"
+    restored.save_pretrained(saved)
+    reloaded = loader.from_pretrained(saved, local_files_only=True)
+    torch.testing.assert_close(reloaded.state_dict()[key], expected, rtol=0, atol=0)
+    torch.testing.assert_close(reloaded(ids, use_cache=False).logits, model(ids, use_cache=False).logits)
+    assert not list(tmp_path.rglob("*.bin"))
+
+
+@pytest.mark.parametrize("beams", [1, 3])
+@pytest.mark.parametrize("mode", ["mla", "hybrid", "kda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("text_only_row", [False, True])
+def test_padded_mixed_images_generate_matches_independent_merge_and_text_oracle(mode, beams, dtype, text_only_row):
+    model = KimiK3ForConditionalGeneration(tiny_k3(mode=mode)).to(dtype).eval()
+    ids = torch.tensor([[0, 0, 1, 7] if text_only_row else [0, 1, 31, 7], [1, 31, 31, 8]])
+    mask = ids.ne(0).long()
+    grids = torch.tensor([[1, 4, 4], [1, 2, 2]] if text_only_row else [[1, 2, 2], [1, 4, 4], [1, 2, 2]])
+    pixels = torch.randn(20 if text_only_row else 24, 3, 2, 2)
+    # Independently substitute each placeholder, then left-pad complete rows.
+    with torch.no_grad():
+        features = model.mm_projector(model._extract_image_features(pixels, grids))
+        rows, image = [], 0
+        for row, valid in zip(ids, mask):
+            pieces = []
+            for token in row[valid.bool()]:
+                if token == 31:
+                    pieces.append(features[image])
+                    image += 1
+                else:
+                    pieces.append(model.get_input_embeddings()(token.view(1)))
+            rows.append(torch.cat(pieces))
+        length = max(row.shape[0] for row in rows)
+        embeddings = torch.stack([F.pad(row, (0, 0, length - len(row), 0)) for row in rows])
+        expanded_mask = torch.stack(
+            [F.pad(torch.ones(len(row), dtype=torch.long), (length - len(row), 0)) for row in rows]
+        )
+        assert length == 7 and int(expanded_mask[0].sum()) == (2 if text_only_row else 3)
+        oracle_positions = (expanded_mask.cumsum(-1) - 1).masked_fill(expanded_mask == 0, 1)
+        oracle = model.language_model(
+            inputs_embeds=embeddings, attention_mask=expanded_mask, position_ids=oracle_positions, use_cache=False
+        ).logits
+        actual = model(ids, attention_mask=mask, pixel_values=pixels, grid_thws=grids, use_cache=False).logits
+        torch.testing.assert_close(actual[expanded_mask.bool()], oracle[expanded_mask.bool()])
+        expected = model.language_model.generate(
+            inputs_embeds=embeddings,
+            attention_mask=expanded_mask,
+            max_new_tokens=3,
+            num_beams=beams,
+            do_sample=False,
+            eos_token_id=None,
+            pad_token_id=0,
+            return_dict_in_generate=True,
+            output_scores=True,
+        )
+        observed_masks = []
+
+        def observe(module, args, kwargs):
+            observed_masks.append((kwargs["attention_mask"].clone(), kwargs["position_ids"].clone()))
+
+        handle = model.language_model.register_forward_pre_hook(observe, with_kwargs=True)
+        try:
+            result = model.generate(
+                ids,
+                attention_mask=mask,
+                pixel_values=pixels,
+                grid_thws=grids,
+                max_new_tokens=3,
+                num_beams=beams,
+                do_sample=False,
+                eos_token_id=None,
+                pad_token_id=0,
+                return_dict_in_generate=True,
+                output_scores=True,
+            )
+        finally:
+            handle.remove()
+        torch.testing.assert_close(result.sequences[:, -3:], expected.sequences[:, -3:], rtol=0, atol=0)
+        for actual_score, expected_score in zip(result.scores, expected.scores):
+            tolerance = 2e-6 if dtype == torch.float32 else 0.003
+            torch.testing.assert_close(actual_score, expected_score, atol=tolerance, rtol=tolerance)
+        assert [m.shape[1] for m, p in observed_masks] == [7, 8, 9]
+        for step, (observed, positions) in enumerate(observed_masks):
+            wanted = F.pad(expanded_mask, (0, step), value=1).repeat_interleave(beams, 0)
+            torch.testing.assert_close(observed, wanted, rtol=0, atol=0)
+            wanted_positions = (wanted.cumsum(-1) - 1).masked_fill(wanted == 0, 1)
+            torch.testing.assert_close(positions, wanted_positions if step == 0 else wanted_positions[:, -1:])
+
+
+@pytest.mark.parametrize("assign", [False, True])
+def test_padded_a_log_direct_state_load_fresh_existing_assign_and_retry(assign):
+    config = tiny_config()
+    config.linear_attn_config["num_heads"] = 96
+    original = KimiLinearForCausalLM(config).eval()
+    state = {name: value.clone() for name, value in original.state_dict().items()}
+    for name in state:
+        if name.endswith(".self_attn.A_log"):
+            state[name] = torch.cat([state[name], torch.zeros(32)])
+    target = KimiLinearForCausalLM(config).eval()
+    for _ in range(2):
+        target.load_state_dict(state, assign=assign)
+        for name, value in original.state_dict().items():
+            torch.testing.assert_close(target.state_dict()[name], value, rtol=0, atol=0)
+    key = "model.layers.0.self_attn.A_log"
+    state[key][-1] = 0.01
+    with pytest.raises(ValueError, match="A_log padding"):
+        target.load_state_dict(state, assign=assign)
+    state[key][-1] = 0
+    target.load_state_dict(state, assign=assign)
+    ids = torch.tensor([[1, 4, 7]])
+    torch.testing.assert_close(target(ids, use_cache=False).logits, original(ids, use_cache=False).logits)
+
+
+@pytest.mark.parametrize("mask_kind", ["raw", "expanded", "none"])
+@pytest.mark.parametrize("return_dict", [False, True])
+def test_multimodal_bad_cached_mask_is_transactional_and_retry_matches_full(mask_kind, return_dict):
+    model = KimiK3ForConditionalGeneration(tiny_k3()).eval()
+    ids = torch.tensor([[0, 1, 31, 7], [1, 4, 31, 8]])
+    mask = ids.ne(0).long()
+    media = {"pixel_values": torch.randn(20, 3, 2, 2), "grid_thws": torch.tensor([[1, 4, 4], [1, 2, 2]])}
+    with torch.no_grad():
+        prefix = model(ids, attention_mask=mask, **media, use_cache=True, return_dict=return_dict)
+        cache = prefix.past_key_values if return_dict else prefix[1]
+        before = copy.deepcopy(cache)
+        tokens = torch.tensor([[5, 9], [6, 10]])
+        with pytest.raises(ValueError, match="cached prefix"):
+            model(tokens, past_key_values=cache, attention_mask=torch.ones(2, 2))
+        assert cache.seen_tokens == before.seen_tokens == 7
+        torch.testing.assert_close(cache.multimodal_attention_mask, before.multimodal_attention_mask)
+        for key in ("key_cache", "value_cache", "conv_states", "recurrent_states"):
+            for actual, expected in zip(getattr(cache, key), getattr(before, key)):
+                if isinstance(actual, tuple):
+                    for a, b in zip(actual, expected):
+                        torch.testing.assert_close(a, b)
+                elif actual is not None:
+                    torch.testing.assert_close(actual, expected)
+        raw = F.pad(mask, (0, 2), value=1)
+        expanded = F.pad(before.multimodal_attention_mask, (0, 2), value=1)
+        full = model(torch.cat((ids, tokens), -1), attention_mask=raw, **media, use_cache=False).logits
+        attention = {"raw": raw, "expanded": expanded, "none": None}[mask_kind]
+        result = model(tokens, past_key_values=cache, attention_mask=attention).logits
+        torch.testing.assert_close(result, full[:, -2:], atol=2e-6, rtol=2e-6)
+        assert cache.seen_tokens == 9
+        torch.testing.assert_close(cache.multimodal_attention_mask, expanded)
+        permutation = torch.tensor([1, 0, 1])
+        cache.reorder_cache(permutation)
+        torch.testing.assert_close(cache.multimodal_attention_mask, expanded[permutation])
+        torch.testing.assert_close(cache.multimodal_input_mask, raw[permutation])
+
+
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("bypass", [None, "0", "1"])
+def test_public_native_linear_model_retains_native_implementation_and_real_source_tokenizer(
+    tmp_path, monkeypatch, trust, bypass
+):
+    from shutil import copyfile
+
+    from gptqmodel.models.ports.kimi_k3.tokenization_kimi import KimiLinearTokenizer
+
+    asset = (
+        Path.home() / ".cache/huggingface/hub/models--moonshotai--Kimi-Linear-48B-A3B-Instruct/snapshots" / LINEAR_PIN
+    )
+    if not (asset / "tiktoken.model").is_file():
+        pytest.skip("pinned ordinary Kimi-Linear tokenizer asset is not cached")
+    if bypass is None:
+        monkeypatch.delenv(BYPASS_ENV, raising=False)
+    else:
+        monkeypatch.setenv(BYPASS_ENV, bypass)
+    config = native_config()
+    config.vocab_size = 163842
+    original = NativeModel(config).eval()
+    original.save_pretrained(tmp_path)
+    marker = hostile_checkpoint(tmp_path, config)
+    for name in ("tokenizer_config.json", "tiktoken.model", "chat_template.jinja"):
+        copyfile(asset / name, tmp_path / name)
+    wrapper = GPTQModel.load(
+        str(tmp_path), device="cpu", backend="torch", trust_remote_code=trust, dtype=torch.float32
+    )
+    assert type(wrapper) is KimiLinearNativeQModel and type(wrapper.model) is NativeModel
+    assert type(wrapper.model.config) is NativeConfig
+    assert type(wrapper.tokenizer.tokenizer) is KimiLinearTokenizer
+    expected_ids = [17172, 3287, 20944, 2050, 4643, 8201]
+    actual_ids = wrapper.tokenizer.encode("I'm sure we'll see it's fine")
+    assert actual_ids == expected_ids
+    ids = torch.tensor([actual_ids])
+    with torch.no_grad():
+        torch.testing.assert_close(
+            wrapper.model(ids, use_cache=False).logits, original(ids, use_cache=False).logits, rtol=0, atol=0
+        )
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("bypass", [None, "0", "1"])
+def test_public_k3_published_padding_and_padded_images_first_load_retry_and_reload(
+    tmp_path, monkeypatch, trust, bypass
+):
+    from safetensors.torch import load_file, save_file
+
+    if bypass is None:
+        monkeypatch.delenv(BYPASS_ENV, raising=False)
+    else:
+        monkeypatch.setenv(BYPASS_ENV, bypass)
+    config = tiny_k3(vocab_size=512, pad_token_id=259, bos_token_id=256, eos_token_id=257)
+    config.text_config.linear_attn_config["num_heads"] = 96
+    config.media_placeholder_token_id = 266
+    original = KimiK3ForConditionalGeneration(config).eval()
+    original.save_pretrained(tmp_path)
+    state = load_file(tmp_path / "model.safetensors")
+    keys = [name for name in state if name.endswith(".self_attn.A_log")]
+    original_state = {name: value.clone() for name, value in state.items()}
+    for key in keys:
+        state[key] = torch.cat((state[key], torch.zeros(32)))
+    save_file(state, tmp_path / "model.safetensors", metadata={"format": "pt"})
+    marker = hostile_checkpoint(tmp_path, config)
+    write_tokenizer_assets(tmp_path)
+    write_image_processor(tmp_path)
+    state[keys[0]][-1] = 0.01
+    save_file(state, tmp_path / "model.safetensors", metadata={"format": "pt"})
+    with pytest.raises(ValueError, match="A_log padding"):
+        GPTQModel.load(str(tmp_path), device="cpu", backend="torch", trust_remote_code=trust, dtype=torch.float32)
+    state[keys[0]][-1] = 0
+    save_file(state, tmp_path / "model.safetensors", metadata={"format": "pt"})
+    wrapper = GPTQModel.load(
+        str(tmp_path), device="cpu", backend="torch", trust_remote_code=trust, dtype=torch.float32
+    )
+    assert type(wrapper) is KimiK3QModel
+    for name, value in wrapper.model.state_dict().items():
+        torch.testing.assert_close(value, original_state[name], rtol=0, atol=0)
+    ids = torch.tensor([[259, 1, 266, 7], [1, 266, 266, 8]])
+    mask = ids.ne(259).long()
+    media = {"pixel_values": torch.randn(24, 3, 2, 2), "grid_thws": torch.tensor([[1, 2, 2], [1, 4, 4], [1, 2, 2]])}
+    with torch.no_grad():
+        expected = original.generate(
+            ids, attention_mask=mask, **media, num_beams=2, max_new_tokens=3, eos_token_id=None, do_sample=False
+        )
+        result = wrapper.generate(
+            input_ids=ids,
+            attention_mask=mask,
+            **media,
+            num_beams=2,
+            max_new_tokens=3,
+            eos_token_id=None,
+            do_sample=False,
+        )
+        torch.testing.assert_close(result, expected, rtol=0, atol=0)
+    saved = tmp_path / "canonical"
+    wrapper.model.save_pretrained(saved)
+    wrapper.tokenizer.save_pretrained(saved)
+    wrapper.processor.save_pretrained(saved)
+    reloaded = GPTQModel.load(str(saved), device="cpu", backend="torch", trust_remote_code=trust, dtype=torch.float32)
+    for key in keys:
+        assert reloaded.model.state_dict()[key].shape == (96,)
+        torch.testing.assert_close(reloaded.model.state_dict()[key], original_state[key], rtol=0, atol=0)
+    assert not marker.exists() and not list(tmp_path.rglob("*.bin"))
 
 
 def native_config():
