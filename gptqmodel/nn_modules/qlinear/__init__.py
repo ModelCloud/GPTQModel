@@ -33,7 +33,7 @@ from ...utils.planar_packing import (
 )
 from ...utils.safe import threadpool_limits
 from ..compiled_state import compiled_module_getstate
-from ._fused_train_state import QZEROS_FORMAT_BUFFER
+from ._fused_train_state import QZEROS_FORMAT_BUFFER, _materialize_snapshot_entry
 from ._runtime_cache import tensor_cache_key
 
 
@@ -1208,6 +1208,60 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
             for flag in ("_marlin_repacked", "_native_shuffled", "_awq_repacked")
         )
 
+    #: CPU int4pack family whose runtime words have a verified inverse:
+    #: ``"gptq"`` or ``"awq"``. ``None`` keeps a full checkpoint snapshot.
+    _FUSED_TRAIN_STATE_REBUILD = None
+
+    def _can_rebuild_checkpoint_qweight(self) -> bool:
+        """Whether the checkpoint ``qweight`` can be rebuilt on demand.
+
+        Only the ATen CPU int4pack permutation has an inverse. The AVX512
+        extension and the XPU packing use different layouts, so their
+        subclasses leave ``_FUSED_TRAIN_STATE_REBUILD`` as ``None``.
+
+        This is only a cheap pre-filter: the clone is dropped by
+        ``finalize_fused_train_state`` only after the rebuilt words match the
+        checkpoint bytes this module actually carried.
+        """
+
+        if self._FUSED_TRAIN_STATE_REBUILD is None:
+            return False
+        weight = getattr(self, "qweight", None)
+        if not isinstance(weight, t.Tensor) or weight.device.type != "cpu":
+            return False
+        if weight.dtype != t.int32:
+            # The rebuilt words are int32; any other checkpoint dtype keeps
+            # its snapshot.
+            return False
+        from ._cpu_int4pack_layout import int4pack_block_size
+
+        if int4pack_block_size() is None:
+            return False
+        identity = getattr(self, "_ret_idx_is_identity", None)
+        if (
+            self._FUSED_TRAIN_STATE_REBUILD == "gptq"
+            and callable(identity)
+            and not identity()
+        ):
+            # The fused transform reorders the input rows by ``ret_idx``; only
+            # the identity order leaves the packed words invertible here.
+            return False
+        return True
+
+    def _rebuild_checkpoint_qweight(self) -> t.Tensor:
+        """Rebuild the checkpoint ``qweight`` from the live runtime layout."""
+
+        kind = self._FUSED_TRAIN_STATE_REBUILD
+        if kind is None:
+            raise RuntimeError(
+                f"{self.__class__.__name__} cannot rebuild its checkpoint qweight"
+            )
+        from ._cpu_int4pack_layout import rebuild_awq_qweight, rebuild_gptq_qweight
+
+        if kind == "awq":
+            return rebuild_awq_qweight(self)
+        return rebuild_gptq_qweight(self)
+
     def _write_fused_train_state_snapshot(self, destination, prefix: str, keep_vars: bool) -> None:
         """Emit the checkpoint-layout tensors captured before a CPU transform.
 
@@ -1216,8 +1270,9 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         runtime operands are not a checkpoint: the integer v1/v2 conversion
         turns float offsets into `inf`/`65536`, and the int4pack `qweight` has a
         different shape. The snapshot taken by `capture_fused_train_state`
-        still holds the checkpoint tensors, so serialization emits those
-        instead of the transformed buffers.
+        holds the checkpoint tensors (or, for `qweight`, the verified inverse
+        rebuilt on demand), so serialization emits those instead of the
+        transformed buffers.
 
         A modified runtime layout has no inverse snapshot; exporting it must
         fail closed rather than write garbage.
@@ -1232,8 +1287,8 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
                 "that cannot be converted back to the checkpoint layout. Load "
                 "checkpoint-layout weights before saving."
             )
-        for name, buffer_name in snapshot.items():
-            tensor = self._buffers.get(buffer_name)
+        for name, entry in snapshot.items():
+            tensor = _materialize_snapshot_entry(self, entry)
             if isinstance(tensor, t.Tensor):
                 destination[prefix + name] = tensor if keep_vars else tensor.detach()
 

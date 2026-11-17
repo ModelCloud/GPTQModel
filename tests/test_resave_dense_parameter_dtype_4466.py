@@ -26,6 +26,7 @@ from test_resave_preserves_checkpoint_dtypes_4379 import (
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.models._const import DEVICE
+from gptqmodel.nn_modules.qlinear._fused_train_state import checkpoint_layout_tensor
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.quantization import FORMAT, QuantizeConfig
 from gptqmodel.utils.packing import hf_pack_layer, hf_repack_layer
@@ -146,11 +147,12 @@ def test_repack_after_cpu_forward_uses_checkpoint_snapshot():
     with torch.inference_mode():
         output = module(torch.ones(1, 128, dtype=torch.bfloat16))
     assert torch.equal(output, torch.full_like(output, 128))
-    # The forward replaced the live operand with the int4pack runtime layout
-    # and retained the checkpoint tensor in the snapshot.
+    # The forward replaced the live operand with the int4pack runtime layout;
+    # the checkpoint tensor is rebuilt from the verified inverse snapshot.
     assert module._fused_train_state is not None
     assert module.qweight.shape != checkpoint_qweight.shape
-    snapshot_qweight = module._buffers[module._fused_train_state["qweight"]]
+    snapshot_qweight = checkpoint_layout_tensor(module, "qweight")
+    assert snapshot_qweight is not None
     assert torch.equal(snapshot_qweight, checkpoint_qweight)
 
     target = hf_repack_layer(module, BACKEND.GPTQ_TORCH, device="cpu").eval()

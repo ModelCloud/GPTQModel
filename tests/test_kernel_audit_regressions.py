@@ -18,6 +18,7 @@ from gptqmodel.nn_modules.qlinear import (
     gemm_awq,
     machete,
 )
+from gptqmodel.nn_modules.qlinear._fused_train_state import _materialize_snapshot_entry
 from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, pack_intweight
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCudaKernel, _GGMLBridge
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
@@ -787,7 +788,9 @@ def test_transformed_cpu_layer_round_trips_its_own_state_dict(class_name, module
     # ``scales`` is shape-identical across both layouts; it must never be the
     # operand that decides the load.
     live_qweight = tuple(layer.qweight.shape)
-    snapshot_qweight = tuple(layer._buffers[layer._fused_train_state["qweight"]].shape)
+    snapshot_qweight = tuple(
+        _materialize_snapshot_entry(layer, layer._fused_train_state["qweight"]).shape
+    )
     assert live_qweight != snapshot_qweight
     if class_name.startswith("TorchCpuAvx512"):
         # The AVX512 transform widens ``scales`` in place, so it remains a
@@ -829,8 +832,8 @@ def test_edited_checkpoint_scales_export_instead_of_stale_snapshot():
     holder, _x, _baseline = _transformed_layer(TorchAtenLinear)
     state = {name: value.clone() for name, value in holder.proj.state_dict().items()}
     checkpoint = dict(state)
-    for name, buffer_name in holder.proj._fused_train_state.items():
-        checkpoint[name] = holder.proj._buffers[buffer_name].clone()
+    for name, entry in holder.proj._fused_train_state.items():
+        checkpoint[name] = _materialize_snapshot_entry(holder.proj, entry).clone()
     state["scales"].mul_(2)
     holder.proj.load_state_dict(state, assign=True)
 
@@ -890,14 +893,14 @@ def test_checkpoint_layout_gate_uses_discriminating_operands(class_name, module_
     holder, _x, _baseline = _transformed_layer(cls)
     layer = holder.proj
     runtime = {name: value.clone() for name, value in layer.state_dict().items()}
-    for name, buffer_name in layer._fused_train_state.items():
+    for name in layer._fused_train_state:
         runtime[name] = getattr(layer, name).clone()
     assert state_dict_matches_runtime_layout(layer, runtime)
     assert not state_dict_matches_checkpoint_layout(layer, runtime)
 
     checkpoint = {
-        name: layer._buffers[buffer_name].clone()
-        for name, buffer_name in layer._fused_train_state.items()
+        name: _materialize_snapshot_entry(layer, entry).clone()
+        for name, entry in layer._fused_train_state.items()
     }
     assert state_dict_matches_checkpoint_layout(layer, checkpoint)
     assert not state_dict_matches_runtime_layout(layer, checkpoint)
@@ -923,7 +926,7 @@ def test_transformed_cpu_layer_accepts_partial_checkpoint_state(class_name, modu
         pytest.skip(f"{class_name} does not support bfloat16")
     holder, x, baseline = _transformed_layer(cls)
     layer = holder.proj
-    saved = layer._buffers[layer._fused_train_state["qweight"]].clone()
+    saved = _materialize_snapshot_entry(layer, layer._fused_train_state["qweight"]).clone()
     missing = holder.load_state_dict({"proj.qweight": saved}, strict=False, assign=assign)
     assert "proj.qzeros" in missing.missing_keys
     assert torch.equal(layer.qweight, saved)
@@ -981,7 +984,9 @@ def test_transformed_cpu_layer_rejects_mixed_layout_without_mutation():
     holder, _x, _baseline = _transformed_layer(TorchAtenLinear)
     layer = holder.proj
     runtime_qweight = layer.qweight.clone()
-    checkpoint_qweight = layer._buffers[layer._fused_train_state["qweight"]].clone()
+    checkpoint_qweight = _materialize_snapshot_entry(
+        layer, layer._fused_train_state["qweight"]
+    ).clone()
     with pytest.raises(RuntimeError, match="mixed or invalid CPU int4pack"):
         layer.load_state_dict({"qweight": checkpoint_qweight, "qzeros": layer.qzeros.clone()}, strict=False)
     assert torch.equal(layer.qweight, runtime_qweight)

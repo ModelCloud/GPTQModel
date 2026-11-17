@@ -34,6 +34,9 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
     # ``transform_cpu`` widens scales *and* bias to FP32 in place, so both must
     # be restored before a checkpoint load or save.
     _FUSED_TRAIN_STATE_NAMES = ("qweight", "qzeros", "scales", "bias")
+    # The AVX512 extension packs a different layout with no verified inverse;
+    # keep the full checkpoint snapshot.
+    _FUSED_TRAIN_STATE_REBUILD = None
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [16, 32, 64, 128, 256, 512]
     SUPPORTS_DESC_ACT = [True, False]

@@ -24,6 +24,7 @@ from . import AWQuantLinear
 from ._fused_train_state import (
     bind_runtime_qzeros,
     capture_fused_train_state,
+    finalize_fused_train_state,
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
@@ -174,6 +175,10 @@ class TorchFusedAwqLinear(AWQuantLinear):
         super().post_init()
         self.optimize()
 
+    # The CPU ATen int4pack permutation has a verified inverse, so the
+    # checkpoint qweight is rebuilt on save instead of kept resident.
+    _FUSED_TRAIN_STATE_REBUILD = "awq"
+
     def _fused_train_state_names(self):
         """Checkpoint operands the current fused transform rewrites.
 
@@ -276,6 +281,9 @@ class TorchFusedAwqLinear(AWQuantLinear):
         self.scales_and_zeros = pack_scales_and_zeros(compute_scales, self.qzeros)
         bind_runtime_qzeros(self)
         self._cpu_transform_dtype = dtype
+        # ``qweight`` now holds int4pack words: drop the checkpoint clone if
+        # the inverse reproduces exactly the bytes captured before the pack.
+        finalize_fused_train_state(self)
 
     def transform_xpu_awq(self, dtype):
         # Unpack AWQ weights directly to integer form
