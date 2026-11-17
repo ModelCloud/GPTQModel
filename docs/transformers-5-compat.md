@@ -218,7 +218,7 @@ default `{"rope_type": "default", "rope_theta": ...}` dict, and their legacy
 (`gptqmodel/utils/hf.py:1512`).
 
 The policy is now decided from the config class itself:
-`_declares_legacy_rope_field()` (`gptqmodel/utils/hf.py:1540`) returns True for
+`_declares_legacy_rope_field()` (`gptqmodel/utils/hf.py:1860`) returns True for
 a remote config whose `__init__` declares `rope_scaling` and not
 `rope_parameters`. For such a config, `_normalize_rope_parameters_config_compat`
 (`gptqmodel/utils/hf.py:1572`) clears both aliases when the effective RoPE is
@@ -466,7 +466,7 @@ flowchart TD
 ```
 
 Cache-side surface, installed once per process by
-`_patch_transformers_remote_code_compat` (`gptqmodel/utils/hf.py:858`):
+`_patch_transformers_remote_code_compat` (`gptqmodel/utils/hf.py:1137`):
 
 | Symbol | Added by | Why |
 | --- | --- | --- |

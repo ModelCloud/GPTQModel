@@ -21,8 +21,8 @@ flowchart TD
 
 | Before this extraction layer | Carried implementation |
 |---|---|
-| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/utils/exl3_projection_checkpoint.py:89`: `build_projection_request` |
-| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/utils/exl3_projection_checkpoint.py:179`: `EXL3ProjectionCheckpointStore` |
+| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/utils/exl3_projection_checkpoint.py:109`: `build_projection_request` |
+| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/utils/exl3_projection_checkpoint.py:223`: `EXL3ProjectionCheckpointStore` |
 
 The previous stack layer supplies dependencies. Standalone store/policy APIs are connected by the later processor, looper and model layers rather than being enabled implicitly here.
 

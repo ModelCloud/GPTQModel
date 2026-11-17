@@ -41,7 +41,7 @@ form, and a boolean there has one unambiguous meaning.
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| boolean `meta.gptaq` | rejected (`config.py:3513` on the parent commit) | `False` maps to `None`, `True` maps to `GPTAQConfig` (`config.py:3545`) |
+| boolean `meta.gptaq` | rejected (`config.py:3513` on the parent commit) | `False` maps to `None`, `True` maps to `GPTAQConfig` (`config.py:2187`) |
 | `meta.gptaq_alpha` | no config field, dropped as unknown | folded into `GPTAQConfig.alpha` |
 | `meta.gptaq_memory_device` | no config field, dropped as unknown | folded into `GPTAQConfig.device` |
 | boolean `meta.foem` | rejected (`config.py:3523` on the parent commit) | same on/off mapping (`config.py:3578`) |
@@ -78,7 +78,7 @@ Two independent defects lived in that path:
 | --- | --- | --- |
 | stage reference after subset planning | stale `HookedLinear`, no longer in the tree, so direct-state materialization raised `Could not find the given module within the target model` (`structure.py:542`) | re-read from `model.named_modules()` (`stage_layer.py:948`) |
 | AUTO_NF12 packing of the head | packed the head as a forward wrapper, detaching the quant source from the tree so `post_quantize` never moved it and `create_quant_module` saw CUDA tensors | the head is excluded from the calibration-source pack (`models/base.py:3938`); its dense source stays the module in the tree |
-| tied head | identity check missed lazily loaded shells, so quantization ran until `Cannot reload quantization source: missing checkpoint tensors ['weight']` (`models/base.py:3607` on the parent commit) | `_lm_head_is_tied` also asks the checkpoint (`module_looper.py:1309`) |
+| tied head | identity check missed lazily loaded shells, so quantization ran until `Cannot reload quantization source: missing checkpoint tensors ['weight']` (`models/base.py:3607` on the parent commit) | `_lm_head_is_tied` also asks the checkpoint (`module_looper.py:1384`) |
 
 ## 3. Detecting a tied head in a lazy shell
 
@@ -133,7 +133,7 @@ flowchart LR
 | Mechanism | Before | After |
 | --- | --- | --- |
 | AWQ `-:` exclusions in the payload | absent (`config.py:5200` on the parent commit), so HF built uninitialized AWQ layers | written to `modules_to_not_convert` (`config.py:5299`) |
-| quantized `lm_head` | silent | save-time warning from `hf_compat_warnings` (`writer.py:213`) |
+| quantized `lm_head` | silent | save-time warning from `hf_compat_warnings` (`writer.py:292`) |
 | 8-bit AWQ | silent | save-time warning from `hf_compat_warnings` |
 
 `modules_to_not_convert` is a compatibility mirror, not a second source of
