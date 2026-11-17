@@ -84,7 +84,15 @@ def refine_awq_staged_layer(processor, teacher_capture, modules, *, layer_index)
             named = modules[name]
             named.stream_state_payload_to_cpu({'q_scales': exported['scales'], 'q_zeros': exported['zeros']})
             named.state['wq'] = weight
-            linear.weight.data = weight
+            # The parameter was created under the looper's inference mode, so
+            # it is an inference tensor. Swapping ``.data`` for a normal tensor
+            # here leaves a parameter that reports ``is_inference() == False``
+            # but has no version counter, and the next view taken by
+            # ``post_quantize`` raises "Inference tensors do not track version
+            # counter". Copy the values into the existing inference tensor
+            # instead; that keeps the parameter's inference state consistent.
+            with torch.inference_mode():
+                linear.weight.copy_(weight)
     diagnostics = {stage: {key: value for key, value in record.items()
                            if key in ('history', 'elapsed_seconds', 'objective', 'initializer_timing',
                                       'hard_loss_before', 'hard_loss_after', 'hard_loss_delta')}
