@@ -297,7 +297,7 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.W_pack"],
+        ["self_attn.W_pack", "self_attn.rotary_emb:!"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
         ["mlp.gate_proj", "mlp.up_proj"],

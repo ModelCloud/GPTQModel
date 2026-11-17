@@ -210,7 +210,7 @@ layout alone does not authorize it.
 | `apertus1p5` | `Apertus1p5QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `apertus1p5_text` | `Apertus1p5TextQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `axk2` | `AXK2QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `baichuan` | `BaiChuanQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `baichuan` | `BaiChuanQModel` | Package-owned fused-QKV Baichuan implementation; fusion executor remains unqualified. |
 | `bailing_hybrid` | `BailingMoeQModel` | No compatible native projection forward: projections already combined, conditional, or preprocessed. |
 | `bailing_moe` | `BailingMoeQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `bloom` | `BloomQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |

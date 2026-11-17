@@ -101,7 +101,7 @@
     },
     "baichuan": {
       "definition": "BaiChuanQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned fused-QKV Baichuan implementation; fusion executor remains unqualified."
     },
     "bailing_hybrid": {
       "definition": "BailingMoeQModel",
