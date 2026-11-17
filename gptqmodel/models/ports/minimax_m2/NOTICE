@@ -1,0 +1,18 @@
+GPT-QModel MiniMax Transformers 5 binding
+
+The original MiniMax-Text-01 adapter follows the equations and optional
+pre/postnorm and shared-expert branches in MiniMaxAI/MiniMax-Text-01,
+revision a7351bf2bee0e1253919d349f1ad304e6dac13e9,
+modeling_minimax_text_01.py. Copyright 2025 MiniMax AI.
+The upstream MIT license is preserved byte-for-byte in LICENSE-MINIMAX-CODE.
+
+Native Transformers 5.23.0 MiniMax and MiniMax-M2 implementations are imported
+from the installed Transformers distribution, not copied into this package.
+Transformers is Copyright the HuggingFace Inc. team and its contributors,
+licensed under Apache-2.0. GPT-QModel modifications are Copyright 2026
+ModelCloud.ai, Apache-2.0. See LICENSE-APACHE-2.0 and provenance.json.
+
+Checkpoint inventories and configuration metadata are pinned to the released
+MiniMaxAI repositories named in provenance.json. No trained tensor payloads
+are redistributed. Model weights retain their respective upstream licenses;
+the code license does not grant additional rights to those weights.
