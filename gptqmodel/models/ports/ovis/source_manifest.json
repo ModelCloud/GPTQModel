@@ -1,0 +1,157 @@
+{
+  "Ovis1.6-Llama3.2-3B": {
+    "revision": "b8d93d7468f47fd803eb26ec2c1bc2d7e5fba60e",
+    "generation_config_sha256": "8ea51edb2b8b502adbc6135d38846d59c3ac3fb0487ae4b68b4deaaf66fff63c",
+    "tokenizer_sha256": {
+      "tokenizer.json": "79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4",
+      "tokenizer_config.json": "c43d03fc4be78e8fb5d9ccf5df34765316093d59beee2feccc6f019690ba75ad",
+      "special_tokens_map.json": "7a6d7fa83a01e8192333cd7b848541159709c4b206739071980432612f807807"
+    },
+    "sha256": {
+      "preprocessor_config.json": "ec1f371074fb4867ea1c654e00bc5ea99d706f409aaebf8dc614d67c0735aff8",
+      "modeling_ovis.py": "ab04d670ae68220ab410c444cd7c2695af12188560c6c48961279da81e94dde9",
+      "config.json": "e8f8efbdeb04452686ce1ceb94f38834a74fcd20d3fbb91fc158a1d6dbcd23cc",
+      "model.safetensors.index.json": "b6d7b5bf2518808f81bc98fb97b626cd863afe1ab1a510f6fe876a448f1d2aea",
+      "README.md": "53ea517911eab9a9ec06a43d2b9036b74345dcb4911ebd4145ef3fcad9b9043b",
+      "configuration_ovis.py": "66002980ed324d44b2226f257a7299fe4ac563f32c5c9bb3deffefd30bbbe3fe"
+    },
+    "header_sha256": {
+      "model-00001-of-00002.safetensors": "4664c74198666a6f3f4d335bdadc8bab7fe5dd83122aea507cba14fafcd4893f",
+      "model-00002-of-00002.safetensors": "37abf5843dc2484f76b0cae1b74b152eca7123397dea3ea735f091401c9712e2"
+    }
+  },
+  "Ovis1.6-Gemma2-9B": {
+    "revision": "12bef7aa20342acad19134979ba275b49ead2523",
+    "generation_config_sha256": "8a080dedc8ee338fdab755a8c0641abaecb4759f8a5dd82ce279395db83cab2a",
+    "tokenizer_sha256": {
+      "tokenizer.json": "7da53ca29fb16f6b2489482fc0bc6a394162cdab14d12764a1755ebc583fea79",
+      "tokenizer_config.json": "ee86abd85a5ddbbf0801ba60c8589953adf81f950fe140f31c2285f750dc8264",
+      "special_tokens_map.json": "baec30ea10906f16adb8c18af7a34023002c1746542612b8b41c9f09e1351351",
+      "tokenizer.model": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2"
+    },
+    "sha256": {
+      "preprocessor_config.json": "ec1f371074fb4867ea1c654e00bc5ea99d706f409aaebf8dc614d67c0735aff8",
+      "modeling_ovis.py": "86fbc661b666e90693b1ae93e7a4ea7cfd1aac04bc73f2d85135ecd56a5faad0",
+      "config.json": "c00dbed6c813c35a29bc673bda3b21a491111fe4239020b72ca7dcd4178b4949",
+      "model.safetensors.index.json": "49d4c3fa9f0179ef4af83697b5a59f37a7850fc28b29bcfed769a41ef32b6bf4",
+      "README.md": "b777596c934930e48f4f84ecc9732c09ccb512f3e696122f6a4fd7573a0f8287",
+      "configuration_ovis.py": "515498f2efcd5f588228e7580726ff1d880ea96cfbed7f97daf6b06c4ee18985"
+    },
+    "header_sha256": {
+      "model-00001-of-00005.safetensors": "2f5ed5b30ee62e47ad50c72b311cdfd4b72be7a6615fc25e51ea53fd16163ee5",
+      "model-00002-of-00005.safetensors": "89e52329b4c77af51e87305aa2928b4a9e50138233b4efea443b817fd58f9b9b",
+      "model-00003-of-00005.safetensors": "876df0032f83aa7473764fda5c6cf40cd8c729b262c191fabe0a27ef65c137ef",
+      "model-00004-of-00005.safetensors": "953d2346c039b2c9da123b16b8f92760b2be1f0a45ea5b2b521fe37fbf27e7ba",
+      "model-00005-of-00005.safetensors": "159856fd9e54cc2badfbf6dbe871167db0ec8e34e08cc9ade8f8e719ec2de1c7"
+    }
+  },
+  "Ovis1.6-Gemma2-27B": {
+    "revision": "52949012466af8838f133c240bb3c3550dc161db",
+    "sha256": {
+      "preprocessor_config.json": "ec1f371074fb4867ea1c654e00bc5ea99d706f409aaebf8dc614d67c0735aff8",
+      "modeling_ovis.py": "be27dd498abaab3517c858bc25d0971a86115b9ebfb72bc3e32c76031bfd0087",
+      "config.json": "fac48bad74c90723b74fc9fa46e5308dec84d1f38bc8a72962489572de1fd401",
+      "model.safetensors.index.json": "1e806584c3babd1accc532812a62a01829cc6240049835deb7bd808e5a17268a",
+      "README.md": "b967c1ba6dbd623869669b763654bc6fc18dac725e15db7127c8324c8507ad2a",
+      "configuration_ovis.py": "515498f2efcd5f588228e7580726ff1d880ea96cfbed7f97daf6b06c4ee18985"
+    },
+    "header_sha256": {
+      "model-00001-of-00012.safetensors": "e7ec0b9381429bf3c61efec3ac52ac611821d3911ea24711c8bebf6202341f46",
+      "model-00002-of-00012.safetensors": "cf92a8af540df507ed8247d811ad35132f818fe4a3b3cdb2933aa23f2ed924bb",
+      "model-00003-of-00012.safetensors": "09cf4df452b25a1072a2b00264a1b0f0625c4340041386ff433b2b9957716821",
+      "model-00004-of-00012.safetensors": "6c002eae74624348a4e769e0caf70e7daf34f77753be2c67a9ff4e043b057b03",
+      "model-00005-of-00012.safetensors": "dcc51ff7b09a95d6570f88c03fc554c68f0c4f585825e7b035ab27614f5d51ec",
+      "model-00006-of-00012.safetensors": "83c6dad1aef42d9bb7951e38f5cf28ba034dc3ed638e3311fb3c064eababf2fb",
+      "model-00007-of-00012.safetensors": "76f6bf565e7333cb183aa0fb7321a7d5ead1c334646f247feda599a7a14275e5",
+      "model-00008-of-00012.safetensors": "3d55d0c4f031ac445ffe766c41104817fcfafdb82d9a9240be0bc5972efecaff",
+      "model-00009-of-00012.safetensors": "be1c87cf7315ff494e36ce6c449020b7f172fff897d3946fcbcd7588f0246f25",
+      "model-00010-of-00012.safetensors": "52e17bc70105cfade9391caeb96aac97f3e839fbf5e206cbe01ece2391fe3180",
+      "model-00011-of-00012.safetensors": "0060237380385dfb77333371cb5d4a31a6f27ebb7a69526790c2c1e633e36030",
+      "model-00012-of-00012.safetensors": "fe4e6190faa463c0c6569e426acab12eddf959d9d6c91f4b441db3e8a4d13c04"
+    }
+  },
+  "Ovis1.5-Llama3-8B": {
+    "revision": "96e1ad0c86847b123325b8cad3632014de603133",
+    "sha256": {
+      "preprocessor_config.json": "ec1f371074fb4867ea1c654e00bc5ea99d706f409aaebf8dc614d67c0735aff8",
+      "modeling_ovis.py": "f4724e4a29aa4ed57540640cd621b1fd2257b63a7651a4ad635154494f573d33",
+      "config.json": "62ba5ea5cb79c4dc1763585a5e1bb140796f052f9d1e3926a848ed258527fdac",
+      "README.md": "c725ddb3ddd20c83d53e935378a0f3ca3421a8ab496650a8e70c076930222624",
+      "configuration_ovis.py": "de2ce7ce30b2330a3059923449a9d730536669a7fe2a3f9a2c383adbd41e32c2",
+      "pytorch_model.bin.index.json": "6761cb1cfa5ff53164566e3c4760f37b40dc127101e5a9f09512c3da86cd2d94"
+    },
+    "header_sha256": {}
+  },
+  "Ovis1.5-Gemma2-9B": {
+    "revision": "f46106687c865757e9f62b86729f03ee9b34e5fd",
+    "sha256": {
+      "preprocessor_config.json": "ec1f371074fb4867ea1c654e00bc5ea99d706f409aaebf8dc614d67c0735aff8",
+      "modeling_ovis.py": "56a29fbd9a116f58d9bdd76801d3bca9159f74f454c4e007a113d03ddaefca7c",
+      "config.json": "b55f3fafa43a945afe2617cd2b11f9d0a6b3e070a0038f958f7ebdaeb0d93f16",
+      "model.safetensors.index.json": "a86f01171fdc69390b78934f33f3eecd8622d1228276660fd7cb4866df7e8b2d",
+      "README.md": "726f9719355d0ccb2687d3eaf19cfc0f05a23884101eba07884d2d78ea22323a",
+      "configuration_ovis.py": "fbb157912da3129f22288277cd9ace9d2a3133049ed5d3c49dda1924edcfc4cf"
+    },
+    "header_sha256": {
+      "model-00001-of-00005.safetensors": "2f5ed5b30ee62e47ad50c72b311cdfd4b72be7a6615fc25e51ea53fd16163ee5",
+      "model-00002-of-00005.safetensors": "89e52329b4c77af51e87305aa2928b4a9e50138233b4efea443b817fd58f9b9b",
+      "model-00003-of-00005.safetensors": "876df0032f83aa7473764fda5c6cf40cd8c729b262c191fabe0a27ef65c137ef",
+      "model-00004-of-00005.safetensors": "9fa6247c499b4c60796f68a6623eeb1120b2e7b94b1c4b019de2d9d4fb25df91",
+      "model-00005-of-00005.safetensors": "65b2068a0b6a1493d2295e8eac42fb5a9abffe14c83ee714026faece77e7d7f4"
+    }
+  },
+  "Ovis-Clip-Llama3-8B": {
+    "revision": "82f62bfb08f147934de86012e9137cc557de2dfd",
+    "sha256": {
+      "utils.py": "dc84e0a877caa9471d58a4b2dabe0e17f8f80cf83fb06d4ddb4a6972e7d863ff",
+      "preprocessor_config.json": "6d76b3905de91019bd4bdd5a3b8621751d5b2f8e5ee697ed9f38062e00a93ea0",
+      "modeling_ovis.py": "a8ac5721d974e3238a3c51cec6a694162b22b5c7c041c83c42e24d245a97aa88",
+      "config.json": "025364ccea3f03c00b0c9c257063438de2bf3e14fc3c8bfb6fb8fee68fcecbc5",
+      "README.md": "f87c7a35634f8a90f9746078173f662e92084b3ba94624c01a46d28051deffb5",
+      "pytorch_model.bin.index.json": "bb557ea630689de54325b9b25d40103933e0cdc4c440c9105ca4379d0cc68020",
+      "conversation_formatter.py": "f7315fc4594132e710fadcf7b23290c1dde6436509d3f37d1675b1e783319417",
+      "configuration_ovis.py": "0ed37607edfc3232fa790f5b3e0577fda80d07dd9c1d7fb857e7c10cd15d4de4",
+      "visual_tokenizer.py": "fdefd47f184a65ee2afd6931e672d99be62a61036d254004824a077e6d9cef1c"
+    },
+    "header_sha256": {}
+  },
+  "Ovis-Clip-Qwen1_5-7B": {
+    "revision": "a77263ae81657e63a4bc67576cebb7ebaaef0130",
+    "generation_config_sha256": "05d13910a35c801b5ab66df88606c8685ced0d0963af83c1f6dabb95f9c0852a",
+    "tokenizer_sha256": {
+      "tokenizer.json": "f7c9b2dba4a296b1aa76c16a34b8225c0c118978400d4bb66bff0902d702f5b8",
+      "tokenizer_config.json": "c8f4ae7809a0d555cce69fa8632f03e1294c779f0103df48b2b1f85acb82d1d3",
+      "special_tokens_map.json": "f4f79e08d97f4d1c87f8d89264f525c8789da3b73b3bb55d1e12f692f41a7b1b",
+      "added_tokens.json": "6a475432c61f8d6154d10d28c37671a36e5717daf3d15002a988968fee54a500",
+      "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+      "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+    },
+    "sha256": {
+      "utils.py": "dc84e0a877caa9471d58a4b2dabe0e17f8f80cf83fb06d4ddb4a6972e7d863ff",
+      "preprocessor_config.json": "6d76b3905de91019bd4bdd5a3b8621751d5b2f8e5ee697ed9f38062e00a93ea0",
+      "modeling_ovis.py": "a8ac5721d974e3238a3c51cec6a694162b22b5c7c041c83c42e24d245a97aa88",
+      "config.json": "770051f5acdd5dbf78e97081aa533e7b1df14430a8220aa1add979e711921879",
+      "README.md": "72e28cac93a026eb7914b7c06a0a06d270768556f5cc2f6a91836a8c5d415317",
+      "pytorch_model.bin.index.json": "45a95a23ebdcfd33867dabe5c7e67fb9d6ae6384e55017d56a1b908df55085be",
+      "conversation_formatter.py": "f7315fc4594132e710fadcf7b23290c1dde6436509d3f37d1675b1e783319417",
+      "configuration_ovis.py": "0ed37607edfc3232fa790f5b3e0577fda80d07dd9c1d7fb857e7c10cd15d4de4",
+      "visual_tokenizer.py": "fdefd47f184a65ee2afd6931e672d99be62a61036d254004824a077e6d9cef1c"
+    },
+    "header_sha256": {}
+  },
+  "Ovis-Clip-Qwen1_5-14B": {
+    "revision": "5c7f6a334ffa534e5a2f3c3d248b3aac254e56de",
+    "sha256": {
+      "utils.py": "dc84e0a877caa9471d58a4b2dabe0e17f8f80cf83fb06d4ddb4a6972e7d863ff",
+      "preprocessor_config.json": "6d76b3905de91019bd4bdd5a3b8621751d5b2f8e5ee697ed9f38062e00a93ea0",
+      "modeling_ovis.py": "a8ac5721d974e3238a3c51cec6a694162b22b5c7c041c83c42e24d245a97aa88",
+      "config.json": "1299ba90ffdb4cec1d85a45053dc30eca8d75d0f687760a3d1067b45f34a60f9",
+      "README.md": "a704de961ea02fdeba0cb22022111f4a44e9a1054d08fd6e2ffce7c2b31d4537",
+      "pytorch_model.bin.index.json": "7cc08b1a46c9886987531353b636078f798af4e9cfc42b60abce971e06201c18",
+      "conversation_formatter.py": "f7315fc4594132e710fadcf7b23290c1dde6436509d3f37d1675b1e783319417",
+      "configuration_ovis.py": "0ed37607edfc3232fa790f5b3e0577fda80d07dd9c1d7fb857e7c10cd15d4de4",
+      "visual_tokenizer.py": "fdefd47f184a65ee2afd6931e672d99be62a61036d254004824a077e6d9cef1c"
+    },
+    "header_sha256": {}
+  }
+}
