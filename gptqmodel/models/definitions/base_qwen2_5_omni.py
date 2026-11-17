@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import os
-from types import SimpleNamespace
 from typing import Dict, Optional
 
 import torch
@@ -16,9 +15,9 @@ from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, thinker_multimodal_model, thinker_text_model, thinker_text_prefix
 from ...utils.offload import offload_to_disk
-from ...utils.structure import LazyTurtle
 from .._const import CPU
 from ..base import BaseQModel
+from ._omni_thinker_layout import OmniThinkerCheckpointLayoutMixin
 from ._thinker_embeddings import ThinkerEmbeddingsMixin
 from ._vlm_calibration import (
     finalize_conversation_batches,
@@ -85,59 +84,12 @@ def _patch_qwen2_5_omni_talker_prepare_inputs_for_generation(talker_cls):
     talker_cls.prepare_inputs_for_generation = prepare_inputs_for_generation
 
 
-class BaseQwen2_5_OmniGPTQ(ThinkerEmbeddingsMixin, BaseQModel):
+class BaseQwen2_5_OmniGPTQ(OmniThinkerCheckpointLayoutMixin, ThinkerEmbeddingsMixin, BaseQModel):
     ATTENTION_MASKS_REQUIRED_FOR_INPUT = True
     ATTENTION_MASKS_DTYPE = torch.long
     require_monkeypatch = True
 
     HF_WRAPPER_CLASS_NAME = "Qwen2_5OmniForConditionalGeneration"
-
-    # Transformers 5.22 registers the checkpoint -> runtime renames for the
-    # Qwen2.5-Omni thinker (``thinker.visual`` -> ``thinker.model.visual``, and
-    # likewise for the audio tower and ``language_model``) under the nested
-    # ``qwen2_5_omni_thinker`` model type, not the top-level ``qwen2_5_omni``.
-    # Resolving the top-level type therefore finds no conversion map, and the
-    # lazy disk loader leaves the towers and ``embed_tokens`` on META. Declare
-    # the runtime -> checkpoint aliases explicitly so both layouts resolve.
-    HF_CONVERSION_MAP_REVERSED = (
-        SimpleNamespace(
-            source_patterns=[r"^thinker\.model\.visual\.(.+)$"],
-            target_patterns=[r"^thinker.visual.\1"],
-            operations=[],
-        ),
-        SimpleNamespace(
-            source_patterns=[r"^thinker\.model\.audio_tower\.(.+)$"],
-            target_patterns=[r"^thinker.audio_tower.\1"],
-            operations=[],
-        ),
-        SimpleNamespace(
-            source_patterns=[r"^thinker\.model\.language_model\.(.+)$"],
-            target_patterns=[r"^thinker.model.\1"],
-            operations=[],
-        ),
-    )
-
-    @classmethod
-    def checkpoint_key_for_save(cls, name: str) -> str:
-        """Write checkpoint keys in the source HF layout (issue #4758).
-
-        Transformers 5.22 keeps the thinker towers under ``thinker.model.*``
-        and the decoder under ``thinker.model.language_model.*`` in memory, but
-        a Qwen2.5-Omni checkpoint stores ``thinker.audio_tower.*``,
-        ``thinker.visual.*`` and ``thinker.model.embed_tokens.*``. Saving the
-        in-memory names wrote a checkpoint the loader could not map back, so
-        the towers and embeddings reloaded as ``torch.empty`` garbage.
-        """
-        return LazyTurtle.convert_hf_checkpoint_key(name, cls.HF_CONVERSION_MAP_REVERSED)
-
-    @classmethod
-    def checkpoint_key_for_load(cls, name: str) -> str:
-        """Map a source-layout checkpoint key back onto the runtime module."""
-        return LazyTurtle.convert_hf_checkpoint_key(
-            name,
-            cls.HF_CONVERSION_MAP_REVERSED,
-            to_runtime=True,
-        )
 
     loader = AutoModelForTextToWaveform
 
