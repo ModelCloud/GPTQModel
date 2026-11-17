@@ -2504,7 +2504,7 @@
     },
     "intern_s2_preview": {
       "definition": "InternS2PreviewQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned Intern-S2 Preview hybrid attention/MoE port; fusion executor has not been qualified."
     },
     "internlm": {
       "definition": "InternLMQModel",
@@ -2516,7 +2516,7 @@
     },
     "interns1": {
       "definition": "InternS1QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned Intern-S1 dense/MoE multimodal implementation; fusion executor has not been qualified."
     },
     "internvl": {
       "definition": "InternVLQModel",
@@ -2590,7 +2590,7 @@
     },
     "internvl_chat": {
       "definition": "InternVLChatQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned legacy wrapper; decoder-specific fusion execution is unqualified."
     },
     "jamba": {
       "definition": "JambaQModel",
@@ -2634,7 +2634,7 @@
     },
     "k2_horizon": {
       "definition": "K2HorizonQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned K2-Horizon dense/MoVA implementation; fusion executor has not been qualified."
     },
     "kimi_k2": {
       "definition": "DeepSeekV3QModel",

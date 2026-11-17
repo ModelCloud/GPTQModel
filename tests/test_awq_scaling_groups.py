@@ -32,6 +32,11 @@ from gptqmodel.quantization.awq.utils.module import get_op_name
 # automatically tracks its registered definition.
 FAMILY_MODEL_TYPES = [
     "agnes",
+    "exaone",
+    "grinmoe",
+    "hymba",
+    "internlm2",
+    "internvl_chat",
     # Dense decoder families.
     "llama",
     "mistral",
@@ -72,9 +77,7 @@ FAMILY_MODEL_TYPES = [
     "gemma4",
     "gemma4_unified",
     "nemotron_h",
-    # Remote-code families from issue #4093 items 1-2. Their definitions live in
-    # the checkpoint's own code, so the tiny config is derived from the local
-    # checkpoint config.json instead of `AutoConfig.for_model`.
+    # Package-owned ports from issue #4093 items 1-2.
     "instella",
     "k2_horizon",
     # Issue #4121 item 7: PanGu's top-query layer reads `custom_query` instead
@@ -116,12 +119,8 @@ _BASE_CONFIG = {
     "bos_token_id": 0,
 }
 
-# Architectures that only exist in a checkpoint's remote code. The values are
-# the fixtures used to build the tiny model; the invariant is skipped with a
-# precise reason when a fixture is absent.
+# Unported checkpoint architecture; skip precisely when its fixture is absent.
 REMOTE_CODE_MODEL_PATHS = {
-    "instella": "/monster/data/model/Instella-3B-Instruct",
-    "k2_horizon": "/monster/data/model/K2-Horizon-0.9B",
     "gpt_pangu": "/monster/data/model/pangu_alpha_2_6B",
 }
 
@@ -221,6 +220,12 @@ def _field_names(config):
 
 
 def _tiny_config(model_type):
+    if model_type in {"exaone", "grinmoe", "hymba", "instella", "internlm2", "internvl_chat"}:
+        return importlib.import_module(f"tests.test_{model_type}_local_port").tiny_config()
+    if model_type == "k2_horizon":
+        from tests.test_k2_horizon_local_port import variant_config
+
+        return variant_config("yarn")
     if model_type == "agnes":
         # The CPU decoder invariant must not import the image/video test suite:
         # that suite requires torchvision, which is optional for text execution.
@@ -390,11 +395,12 @@ def _in_features(module):
 
 
 def _vocab_size(config) -> int:
-    """Vocabulary size of the decoder, which composite configs keep in `text_config`."""
+    """Resolve native and legacy-wrapper decoder vocabularies."""
 
-    text_config = getattr(config, "text_config", None)
-    if text_config is not None and hasattr(text_config, "vocab_size"):
-        return int(text_config.vocab_size)
+    for name in ("text_config", "llm_config"):
+        text_config = getattr(config, name, None)
+        if text_config is not None and hasattr(text_config, "vocab_size"):
+            return int(text_config.vocab_size)
     return int(config.vocab_size)
 
 
@@ -437,7 +443,7 @@ def _features(layer, plan):
 def _tiny_model(model_type):
     qmodel_cls = MODEL_MAP[model_type]
     torch.manual_seed(0)
-    if model_type == "agnes":
+    if model_type in {"agnes", "exaone", "grinmoe", "hymba", "instella", "internlm2", "internvl_chat", "k2_horizon"}:
         hf_model = qmodel_cls.loader.from_config(_tiny_config(model_type)).eval()
     else:
         hf_model = AutoModelForCausalLM.from_config(
@@ -509,6 +515,7 @@ def _worst_relative_change(hf_model, ids, layer, groups):
 
 # Families whose decoder layer has no foldable AWQ group and is quantized plainly.
 PLAIN_QUANTIZATION_FAMILIES = {
+    "exaone", "grinmoe", "hymba", "internlm2", "internvl_chat", "k2_horizon",
     "afmoe", "agnes", "apertus", "codegen", "deepseek_v2", "deepseek_v3", "deepseek_v4", "deepseek_vl_v2", "exaone4", "gpt2", "instella", "minimax"
 }
 

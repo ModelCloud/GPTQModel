@@ -40,8 +40,11 @@ definition ownership corrections alongside the package-owned ports.
 | `BrumbyQModel` / `brumby` | [Manifest AI 14B/4B and retention 1.0.7 provenance](../gptqmodel/models/ports/brumby/PROVENANCE.md); Apache-2.0 | Exact full-size meta/index schemas; portable degree-2 retention, GQA, Q/K norms, dynamic/linear/default RoPE, independent CPU recurrence oracle, cache continuation/compression/rollback, padding, generation, repeated safetensors reload and public trust/bypass isolation | Actual CPU plain AWQ quantization and packing of all seven linears; gates and norms stay dense; no scale groups | No publisher CUDA/Triton-kernel parity, GPU packing or trained-checkpoint quality qualification; KV-only/static/offloaded caches and speculative rollback rejected |
 | `AfMoeQModel` / `afmoe` | [Native Afmoe / Trinity qualification](../gptqmodel/models/ports/afmoe/README.md); Transformers 5.23.0 Apache-2.0 implementation; pinned Mini/Nano/Large index schemas and checkpoint license recorded locally | Full meta inventories match all three checkpoint schemas; unequal attention/residual widths; dense/MoE ownership, native conversion and routing oracle, cache/generation, public trust/bypass matrix, safetensors retry/round trips | Tested plain quantization for all declared linears; norms, router and expert bias stay dense | CPU pseudoquantization; no GPU packing/kernel or trained-checkpoint quality qualification; no scaling/folding claim |
 | `InternLMQModel` / `internlm` | [InternLM 1 port](../gptqmodel/models/ports/internlm/README.md); Apache-2.0; upstream revision `96e127d08d851a88cac736a9b091dd953ae1b873` | Independent FP32/FP16/BF16 numerical oracle; biased/unbiased origin/dynamic rotary; eager/SDPA; generation/cache/beam lifecycle; public dense load and safetensors reload; live meta-model weight ownership; all 14 linears in two-layer AWQ quantization/reload | Tested plain quantization, zero scale-fold groups | No GPU or trained 7B numerical/quality qualification; fusion and foreign/static/quantized KV caches unsupported |
-
 | `LFM3QModel`, `LFM3VLQModel`, `LFM3OmniQModel` | [Native decoder ownership and conservative AWQ](../gptqmodel/models/ports/lfm3/COVERAGE.md) | Real CPU/meta text and VL decoders plus Omni text-prefix coverage; native/legacy gate spelling, explicit depthwise exclusions, actual packing and failure/retry | Plain quantization only, including `fallback=None`; five convolution-layer or seven attention-layer projections remain eligible | No trained-checkpoint, accelerator, VL media or full Omni/audio qualification |
+| `InternVLChatQModel` / `internvl_chat` | [Package-owned legacy wrapper/vision port and pinned licenses](../gptqmodel/models/ports/internvl_chat/README.md); native decoders and package-owned InternLM2 | Six decoder layouts, actual tiled PIL inputs, 657-key checkpoint inventory, cache/generation, safetensors and hostile nested metadata | Public CPU plain-AWQ quantize/pack/infer/save/reload for all six decoder layouts, preserving vision weights | Eager vision only; unmerged LoRA requires adapter merge; no trained weights, GPU/FlashAttention, distributed or fusion qualification |
+| `K2HorizonQModel` / `k2_horizon` | [Pinned IFM dense/MoVA/sparse-MoE sources, Apache license and notice](../gptqmodel/models/ports/k2_horizon/README.md) | Exact 255/16998/34076-key meta inventories, independent eager/SDPA routing/attention oracles, cache/generation, dtype preservation and hostile metadata | Real processor coverage across variants; public dense/MoVA CPU plain-AWQ packing and safetensors reload with `fallback=None` | DynamicCache only; no trained weights, GPU/FlashAttention/FlexAttention, sliding-window, distributed or fusion qualification |
+| `InternS2PreviewQModel` / `intern_s2_preview` | [Pinned hybrid model, processor and distinct scientific tokenizer](../gptqmodel/models/ports/intern_s2_preview/README.md), [Apache-2.0 provenance](../gptqmodel/models/ports/intern_s2_preview/PROVENANCE.md) | Exact 1313-key non-MTP schema, independent DeltaNet oracle, four attention orders/bias variants, cache continuations, image/video generation and FP32/FP16/BF16 time series | Public plain AWQ packs all 31 tiny hybrid decoder linears; exact packed/dense state and time-series save/reload parity | PROT/XNA semantics differ from S1; no trained weights, GPU/fused FLA/FlashAttention, concurrent execution, static/offloaded/arbitrary-beam caches or MTP qualification |
+| `InternS1QModel` / `interns1` | [Pinned dense/MoE model, vision, media processor and scientific tokenizer](../gptqmodel/models/ports/interns1/README.md); Apache-2.0 | Actual 841/37630-key dense/MoE meta schemas; native Qwen3/Qwen3-MoE numerics, image/video/cache/generation, hostile metadata and repeated exact safetensors | Four public plain-AWQ pack/infer/media/save/reload layouts with `fallback=None`; every packed and dense tensor preserved | IUPAC/FASTA semantics differ from S2; no trained weights, GPU/FlashAttention/FlexAttention, concurrent execution, training, RDKit chemistry or video-file decoding qualification |
 
 Only integrated implementations are listed here. This table does not qualify
 other definitions, architectures, kernels, or trained checkpoints by analogy.
@@ -396,6 +399,53 @@ serialized-tokenizer preference/opt-out and supplied-instance identity, exercise
 hostile outer/nested metadata across trust and bypass combinations, and verify
 missing/corrupt owned assets fail without fallback and can be retried after repair.
 
+Intern-S2 Preview declares its own
+`gptqmodel.models.ports.intern_s2_preview.tokenization_interns1.InternS1Tokenizer`
+path, alongside its local config, model and processor. Its five tokenizer assets
+include separate SMILES, PROT and XNA vocabularies. The checkpoint's shared
+`InternS1Tokenizer` class name does not select S1's IUPAC/FASTA implementation.
+Missing XNA data fails even when a generic `tokenizer.json` exists; restoring the
+asset permits retry. Its package processor creates native image/video components
+directly and receives the normalized owned tokenizer instance. The
+[S2 flow and numerical evidence](../gptqmodel/models/ports/intern_s2_preview/README.md)
+also document the `linear_attn:!` state-parameter exclusion and mixed-dtype
+time-series positional-buffer fix.
+
+Intern-S1 selects its distinct
+`gptqmodel.models.ports.interns1.tokenization_interns1.InternS1Tokenizer`
+and package-owned multimodal model/processor, retaining native Qwen3/Qwen3-MoE
+decoder execution. Both scientific ports validate all five required assets
+before construction. This preserves the missing filename when Transformers
+5.23 wraps vocabulary I/O errors: the independent combined run reproduced two
+S2 and three S1 failures before the explicit guard. Filename-specific errors
+and repaired same-path retries are checked for all five assets per port.
+
+The combined S1/S2 scientific, public model/processor/tokenizer/security,
+registry/fusion, shared AWQ and VLM calibration suites passed **1078 tests with
+473 skips**, 63 warnings, in 37.92 seconds against the published Tokenicer
+0.0.17. This includes the parent calibration-helper integration: an already
+loaded package processor is reused and pretokenized inputs preserve the shared
+text path. The exact command is:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHON_GIL=0 python -s -m pytest \
+  tests/test_interns1_local_port.py tests/module_tree/test_interns1_local_port.py \
+  tests/test_intern_s2_preview_local_port.py tests/module_tree/test_intern_s2_preview_local_port.py \
+  tests/test_local_tokenizer_loading.py tests/test_local_processor_loading.py \
+  tests/test_local_model_loading.py tests/test_local_model_paths.py tests/test_trust_remote_code_isolation.py \
+  tests/module_tree/test_registered_module_plans.py tests/module_tree/test_fusable_models.py \
+  tests/test_awq_scaling_groups.py tests/test_awq_empty_groups.py \
+  tests/test_vlm_mapping_calibration_4308.py tests/test_vlm_multimodal_calibration_4371.py \
+  tests/test_vlm_pretokenized_calibration.py tests/test_vlm_calibration_metadata_columns_4455.py \
+  -q --tb=short -o log_cli=false
+```
+
+The isolated Tenstorrent dependency manifest also pins Transformers 5.23.0 and
+Tokenicer 0.0.17. Its new dependency contract first failed on both older pins
+while the defuser control passed; after updating them, dependency and Torch
+safety-gate suites passed **52 tests** in 10.57 seconds. This checks dependency
+consistency, not a new TT hardware qualification.
+
 ## LFM3 native decoder ownership
 
 LFM3 retains the Transformers 5.23 decoder. Its native `conv.conv` depthwise
@@ -428,3 +478,60 @@ full leaf inventory, registry and required AWQ baseline passed **759 tests with
 24 skips and 3 expected failures** in 83.56 seconds. Missing checkpoint/GPU
 fixtures and existing expected failures remain unqualified. No trained weights,
 VL media processing, full Omni wrapper/audio or accelerator behavior is claimed.
+
+## InternVL wrapper and K2-Horizon selection
+
+InternVL-chat selects a package-owned vision/wrapper implementation and its
+declared decoder. Llama, Qwen2, Qwen3, Qwen3-MoE and Phi3 retain their native
+Transformers implementations; InternLM2 uses the sibling package port and
+preserves checkpoint `output.*` keys. K2-Horizon selects its exact dense,
+MoVA and sparse-MoE implementation. Neither path delegates to checkpoint Python.
+
+```mermaid
+flowchart TD
+    A["load_model_config: definition LocalModelLoader"] --> B{"Selected model_type"}
+    B -->|internvl_chat| C["InternVLChatConfig / InternVLChatModel"]
+    C --> D{"Declared llm_config architecture"}
+    D -->|Llama/Qwen2/Qwen3/Qwen3MoE/Phi3| E["Native decoder; package-owned vision"]
+    D -->|InternLM2| F["Package-owned InternLM2; output head alias"]
+    D -->|unsupported or unmerged LoRA| X["Explicit error; no checkpoint import"]
+    B -->|k2_horizon| G["K2HorizonConfig / K2HorizonForCausalLM"]
+    G --> H["Dense / MoVA / sparse-MoE layers"]
+    E --> Q["awq_get_modules_for_scaling: empty list"]
+    F --> Q
+    H --> Q
+    Q --> R["Plain AWQ packs declared decoder linears; vision/norms/routers preserved"]
+    classDef failure fill:#fdd,stroke:#b00
+    class X failure
+```
+
+| Mechanism | Before | Shipped behavior |
+| --- | --- | --- |
+| InternVL wrapper | `22bea1201`, `definitions/internvl_chat.py:13,33`: `AutoModel` relied on checkpoint discovery | `definitions/internvl_chat.py:35-38`: exact package classes; six decoder layouts independently tested |
+| K2-Horizon | `22bea1201`, `definitions/k2_horizon.py`: no native Transformers 5 mapping or local loader | `definitions/k2_horizon.py:124-127`: package-owned config/model preserves all three published checkpoint layouts |
+| Shared AWQ fixture | `tests/test_awq_scaling_groups.py` derived K2/Instella from optional `/monster` checkpoints, skipping when absent | Real tiny package configurations run without trained weights; InternVL resolves `llm_config.vocab_size` |
+| Fusion qualification | Fixture called both architectures missing custom/remote implementations | Explicit package-owned exclusions; no fusion backend newly admitted |
+
+Combined InternVL/K2-Horizon, tokenizer/model/processor/security, registry,
+fusion and shared AWQ validation passed **931 tests with 473 skips** and
+23 warnings in 38.51 seconds. The command is:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHON_GIL=0 python -s -m pytest \
+  tests/test_internvl_chat_local_port.py tests/module_tree/test_internvl_chat_local_port.py \
+  tests/test_k2_horizon_local_port.py tests/module_tree/test_k2_horizon_local_port.py \
+  tests/test_local_tokenizer_loading.py tests/test_local_model_loading.py \
+  tests/test_local_processor_loading.py tests/test_local_model_paths.py \
+  tests/test_trust_remote_code_isolation.py tests/test_awq_scaling_groups.py \
+  tests/test_awq_empty_groups.py tests/test_awq_moe_router_scaling.py \
+  tests/test_awq_moe_bypass_4223.py tests/module_tree/test_registered_module_plans.py \
+  tests/module_tree/test_fusable_models.py -q --tb=short -o log_cli=false
+```
+
+Skips concern unavailable NVIDIA fusion execution and unrelated optional model
+fixtures. The two port suites run without skips. Central AWQ tests now use
+real package-owned Instella/K2 configs, add EXAONE 3, GRIN-MoE, Hymba,
+InternLM2 and InternVL decoder cases, and explicitly keep these families plain.
+Wheel and sdist inspection verified all **87** then-integrated port audit,
+font, license and notice assets, including Hymba's PDF license and both
+InternVL licenses, alongside the Python/Transformers/Tokenicer dependency floors.

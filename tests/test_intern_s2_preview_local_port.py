@@ -137,6 +137,20 @@ def save_tiny_owned_checkpoint(path):
     return model, tokenizer
 
 
+@pytest.mark.parametrize("asset", InternS1Tokenizer.vocab_files_names.values())
+def test_missing_owned_asset_identifies_filename_and_retries(tmp_path, asset):
+    tokenizer = tiny_scientific_tokenizer(tmp_path)
+    path = tmp_path / asset
+    content = path.read_bytes()
+    path.unlink()
+    with pytest.raises(RuntimeError, match=asset):
+        InternS1Tokenizer.from_pretrained(tmp_path, local_files_only=True)
+    path.write_bytes(content)
+    restored = InternS1Tokenizer.from_pretrained(tmp_path, local_files_only=True)
+    text = "<SMILES>CCO</SMILES>"
+    assert restored(text)["input_ids"] == tokenizer(text)["input_ids"]
+
+
 def test_scientific_tokenizer_real_domain_ids_rendering_save_reload_and_retry(tmp_path):
     tokenizer = tiny_scientific_tokenizer(tmp_path / "source")
     protein = "MKWVTFISLLFLFSSAYSRGVFRRDTHKSEIAHRFKDLGE"

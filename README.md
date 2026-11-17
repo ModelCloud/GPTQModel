@@ -278,6 +278,9 @@ describe shared-KV calibration, recurrent cache recovery and packed QKV layout.
 cover definition-specific scientific tokenizer dispatch and native gate/convolution
 exclusions. Tokenizer normalization and trust enforcement require Tokenicer 0.0.17
 or newer.
+[InternVL-chat and K2-Horizon loading](docs/transformers5-model-ports.md#internvl-wrapper-and-k2-horizon-selection)
+documents the package-owned wrapper/vision and dense/MoVA/MoE implementations,
+decoder selection, pinned licenses and CPU plain-AWQ validation.
 Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
 Re-saving a loaded fused-expert MoE defuses the export shell and fails closed on

@@ -843,6 +843,11 @@ compatible base GPT-QModel dependencies plus the TT tools. After installing
 that complete set, the script installs the local GPT-QModel checkout with
 `--no-deps` so pip does not re-resolve and replace the validated Torch ABI.
 
+The Transformers 5 migration raises this manifest to Transformers 5.23.0 and
+Tokenicer 0.0.17 so that isolated installs retain package-owned model dispatch
+and the tokenizer trust policy. Dependency compatibility is checked by
+`tests/test_require_pkgs.py`; this update has not been requalified on TT hardware.
+
 ```bash
 PYTHON_BIN="$HOME/.pyenv/versions/3.12.16/bin/python" \
   requirements/install-tenstorrent-py312.sh /path/to/gptqmodel

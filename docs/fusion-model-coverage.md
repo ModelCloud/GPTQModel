@@ -245,12 +245,12 @@ layout alone does not authorize it.
 | `grinmoe` | `GrinMoeQModel` | Package-owned GRIN-MoE implementation; attention and SparseMixer expert fusion have not been qualified. |
 | `hymba` | `HymbaQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `instella` | `InstellaQModel` | Package-owned Instella implementation; full-width Q/K normalization and projection fusion have not been qualified. |
-| `intern_s2_preview` | `InternS2PreviewQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `intern_s2_preview` | `InternS2PreviewQModel` | Package-owned Intern-S2 Preview hybrid attention/MoE port; fusion executor has not been qualified. |
 | `internlm` | `InternLMQModel` | Package-owned InternLM 1 port; fusion executor has not been qualified. |
 | `internlm2` | `InternLM2QModel` | Package-owned InternLM2/2.5 packed KV-group-interleaved QKV; fusion executor has not been qualified. |
-| `interns1` | `InternS1QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `internvl_chat` | `InternVLChatQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `k2_horizon` | `K2HorizonQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `interns1` | `InternS1QModel` | Package-owned Intern-S1 dense/MoE multimodal implementation; fusion executor has not been qualified. |
+| `internvl_chat` | `InternVLChatQModel` | Package-owned legacy wrapper; decoder-specific fusion execution is unqualified. |
+| `k2_horizon` | `K2HorizonQModel` | Package-owned K2-Horizon dense/MoVA implementation; fusion executor has not been qualified. |
 | `kimi_k2` | `DeepSeekV3QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `kimi_k25` | `KimiK25QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `klear` | `KlearQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |

@@ -352,15 +352,15 @@ def test_public_load_owned_scientific_tokenizer_processor_and_media(tokenizer_as
         torch.testing.assert_close(generated, expected)
 
 
-@pytest.mark.parametrize("domain", ["SMILES", "IUPAC", "FASTA"])
-def test_owned_tokenizer_missing_science_asset_fails_then_same_path_retries(tokenizer_assets, monkeypatch, domain):
+@pytest.mark.parametrize("asset", InternS1Tokenizer.vocab_files_names.values())
+def test_owned_tokenizer_missing_science_asset_fails_then_same_path_retries(tokenizer_assets, monkeypatch, asset):
     monkeypatch.setattr(AutoTokenizer, "from_pretrained", reject_checkpoint_discovery)
     config = load_model_config(tokenizer_assets)
-    path = tokenizer_assets / f"tokenizer_{domain}.model"
-    asset = path.read_bytes()
+    path = tokenizer_assets / asset
+    content = path.read_bytes()
     path.unlink()
-    with pytest.raises(RuntimeError, match="NOT_FOUND"):
+    with pytest.raises(RuntimeError, match=asset):
         load_hf_tokenizer(str(tokenizer_assets), model_config=config)
-    path.write_bytes(asset)
+    path.write_bytes(content)
     tokenizer = load_hf_tokenizer(str(tokenizer_assets), model_config=config)
     assert tokenizer.decode(tokenizer("<IUPAC>carbon acid</IUPAC>")["input_ids"]) == "<IUPAC>carbon acid</IUPAC>"

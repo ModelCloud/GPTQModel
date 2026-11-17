@@ -509,6 +509,15 @@ class InternS1Tokenizer(PreTrainedTokenizer):
         special_tokens_pattern="none",
         **kwargs,
     ):
+        # Transformers can resolve a missing asset to None before construction.
+        # Fail with its canonical name before generic vocabulary error wrapping.
+        asset_paths = {"vocab_file": vocab_file, "merges_file": merges_file}
+        for key, filename in VOCAB_FILES_NAMES.items():
+            path = asset_paths.get(key) if key in asset_paths else kwargs.get(
+                key, os.path.join(os.path.dirname(vocab_file) if vocab_file else "", filename)
+            )
+            if path is None or not os.path.isfile(path):
+                raise RuntimeError(f"Missing required Intern-S2 tokenizer asset: {filename}")
         bos_token = (
             AddedToken(bos_token, lstrip=False, rstrip=False, special=True, normalized=False)
             if isinstance(bos_token, str)
