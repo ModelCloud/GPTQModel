@@ -6,7 +6,7 @@
 # FP8 encoding layouts: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
 # Marlin format: IST-DASLab contributors, MIT, https://github.com/IST-DASLab/marlin
 # BitBLAS format: Microsoft Research contributors, Apache-2.0, https://github.com/microsoft/BitBLAS
-# Quantization format references: ParoQuant, QQQ, GGUF, bitsandbytes, and EXL3;
+# Quantization format references: Paro, QQQ, GGUF, bitsandbytes, and EXL3;
 # format-specific credit and licenses are recorded in their converter modules.
 
 from copy import copy
@@ -44,7 +44,7 @@ from ..nn_modules.qlinear.mlx import (
     QQQMlxQuantLinear,
 )
 from ..nn_modules.qlinear.nf12 import NF12Linear
-from ..nn_modules.qlinear.paroquant import ParoLinear
+from ..nn_modules.qlinear.paro import ParoLinear
 from ..nn_modules.qlinear.qqq import QQQTorchLinear
 from ..nn_modules.qlinear.torch import TorchLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -533,7 +533,7 @@ def _convert_gptq_to_mlx_weights(
     if quant_format not in [FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.GPTQ_P, FORMAT.GEMM,
                             FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ,
                             FORMAT.MARLIN, FORMAT.BITBLAS,
-                            FORMAT.PAROQUANT, FORMAT.QQQ, FORMAT.GGUF, FORMAT.FP8,
+                            FORMAT.PARO, FORMAT.QQQ, FORMAT.GGUF, FORMAT.FP8,
                             FORMAT.BITSANDBYTES, FORMAT.EXL3,
                             FORMAT.MXFP4_MACAQ, FORMAT.MXFP4, FORMAT.NF12]:
         raise ValueError("MLX conversion requires a supported GPT-QModel quantization format")
@@ -562,7 +562,7 @@ def _convert_gptq_to_mlx_weights(
     if packed is not None:
         log.info("MLX: transferred source weights without requantization")
         return packed
-    if quant_format in (FORMAT.PAROQUANT, FORMAT.QQQ, FORMAT.GGUF, FORMAT.FP8,
+    if quant_format in (FORMAT.PARO, FORMAT.QQQ, FORMAT.GGUF, FORMAT.FP8,
                         FORMAT.BITSANDBYTES, FORMAT.EXL3, FORMAT.GEMV,
                         FORMAT.GEMV_FAST, FORMAT.LLM_AWQ, FORMAT.MARLIN,
                         FORMAT.BITBLAS, FORMAT.MXFP4_MACAQ, FORMAT.MXFP4, FORMAT.NF12):

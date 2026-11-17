@@ -63,6 +63,7 @@ from ...utils.ttnn_runtime import (
     open_mesh,
     to_host_replica,
 )
+from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
 
 
@@ -308,6 +309,10 @@ class _TTNNBlockFloatMixin:
 
 class TTNNBlockFloat8Linear(_TTNNBlockFloatMixin, GPTQQuantLinear):
     """GPTQ linear stored as ``bf8_b`` (hardware-unpacked, ~1 % error)."""
+
+    # TTNN device tensors; no torch graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
 
     WEIGHT_FORMAT = "bfloat8_b"
     WEIGHT_BITS = 8

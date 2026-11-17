@@ -80,8 +80,8 @@ Import configurations from `gptqmodel.backend` or `gptqmodel`.
 | `GGUFTorchConfig` | `GGUF_TORCH` | Fused CPU/CUDA row and matrix-size gates and chunk sizes |
 | `GGUFCPPConfig` | `GGUF_CPP_CPU` | GGUF options plus `native_matmul`, `threads` |
 | `GGUFCUDAConfig` | `GGUF_CPP_CUDA` | Default selection; ggml-cuda runs every matmul, so the Torch fused-forward gates do not apply |
-| `ParoQuantConfig` | `PAROQUANT_CUDA` | `fp32_accum`, `fused_splitk_reduce`, runtime/rotation dtype caching, `cpu_avx512` |
-| `ParoQuantTritonConfig` | `PAROQUANT_TRITON` | ParoQuant options plus autotuning and `decode_max_rows` |
+| `ParoCUDAConfig` | `PARO_CUDA` | `fp32_accum`, `fused_splitk_reduce`, runtime/rotation dtype caching, `cpu_avx512` |
+| `ParoTritonConfig` | `PARO_TRITON` | Paro options plus autotuning and `decode_max_rows` |
 | `BitsAndBytesConfig` | `BITSANDBYTES` | `cpu_packed`, `cpu_int8_dense`, `triton` |
 | `TTBlockFloatConfig` | `TT_BLOCKFLOAT` | `cublas` |
 

@@ -33,6 +33,7 @@ from ...utils.cpu_features import cpu_bf16x3_matmul
 from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
+from ._compile_support import COMPILE_LEVEL
 from ._numerics import matmul_fp32_reduce
 from ._runtime_cache import tensor_cache_key
 
@@ -1172,6 +1173,12 @@ def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
 
 
 class GGUFTorchLinear(WeightOnlyQuantLinear):
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager runs and an explicit
+    # torch.cuda.graph capture succeeds, but dynamo breaks on
+    # `tensor.is_inference()` in `tensor_cache_key`, so only EAGER is reachable.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
+
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TORCH]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 15}

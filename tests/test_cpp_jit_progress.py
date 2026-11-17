@@ -20,7 +20,7 @@ from gptqmodel.utils.jit_compile_baselines import get_jit_compile_baseline_secon
 def test_known_jit_compile_baselines_are_recorded():
     assert get_jit_compile_baseline_seconds("gptqmodel_marlin_fp16_ops") == pytest.approx(116.863)
     assert get_jit_compile_baseline_seconds("gptqmodel_awq_ops") == pytest.approx(61.640)
-    assert get_jit_compile_baseline_seconds("gptqmodel_paroquant_rotation") == pytest.approx(78.430)
+    assert get_jit_compile_baseline_seconds("gptqmodel_paro_rotation") == pytest.approx(78.430)
 
 
 def test_compile_progress_ratio_tracks_baseline_without_hitting_completion():

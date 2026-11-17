@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import torch
 
 from gptqmodel.utils.calibration import prepare_calibration_dataset
-from gptqmodel.utils.paroquant_benchmark import _tokenize_calibration_sample
+from gptqmodel.utils.paro_benchmark import _tokenize_calibration_sample
 
 
 class _ChatTokenizer:
@@ -165,7 +165,7 @@ def test_concat_separator_that_fits_fills_the_block():
     assert prepared[1]["input_ids"][0].tolist() == [11, 12, 13, 14, 15, 16, 17, 18, 0]
 
 
-def test_paroquant_benchmark_messages_row_has_exactly_one_bos():
+def test_paro_benchmark_messages_row_has_exactly_one_bos():
     tokenizer = _ChatTokenizer()
     model = SimpleNamespace(tokenizer=tokenizer)
 

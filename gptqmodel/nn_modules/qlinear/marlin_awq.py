@@ -38,6 +38,7 @@ from ...utils.marlin import (
 )
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 
 
 log = setup_logger()
@@ -78,6 +79,12 @@ class AwqMarlinLinear(AWQuantLinear):
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_marlin"
+
+    # Calls the Marlin custom op through `apply_awq_marlin_linear` (no
+    # fake/meta kernel), so dynamo breaks. The JIT extension could not build on
+    # this host (no CUDA_HOME/nvcc); EAGER is the conservative static answer.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     # num_bits -> type
     TYPE_MAP = {

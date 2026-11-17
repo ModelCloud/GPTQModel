@@ -1,0 +1,635 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
+# Paro runtime implementation adapted from the Paro paper and public
+# project:
+# https://arxiv.org/html/2511.10645v2
+# https://github.com/z-lab/paroquant
+
+"""Paro CUDA-backed quantized linear layer."""
+
+from __future__ import annotations
+
+from typing import Optional, Tuple
+
+import torch
+
+from ...adapter.adapter import Adapter, Lora
+from ...models._const import DEVICE, PLATFORM
+from ...quantization import FORMAT, METHOD
+from ...utils.backend import BACKEND
+from ...utils.kernel import resolve_kernel_config
+from ...utils.logger import setup_logger
+from ...utils.paro import (
+    apply_paro_rotation,
+    apply_paro_rotation_vectorized,
+    build_identity_rotation_buffers,
+    is_identity_rotation,
+    validate_rotation_buffers,
+)
+from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
+from ._numerics import linear_wide_bias
+from ._runtime_cache import tensor_cache_key
+from .gemm_awq import (
+    _awq_cuda_gemm_forward,
+    _awq_cuda_gemm_forward_fp32_reduce,
+)
+from .torch_awq import AwqTorchLinear
+
+
+log = setup_logger()
+
+# INT4 AWQ stores eight codes per int32, so `pack_awq` rejects a packed
+# dimension that is not a multiple of eight. Paro reuses that packer for
+# every path (CPU ATen, dense fallback, AWQ CUDA, Triton), so the alignment is
+# a property of the format rather than of one kernel. Declaring it here keeps
+# backend selection, the constructor, and the packer on one source of truth
+# instead of accepting a width that can only fail later at packing.
+PARO_OUT_FEATURES_ALIGN = 8
+
+# Rotated activations benchmark faster with a shallower K split than generic AWQ.
+_PARO_AWQ_SPLIT_K = 4
+
+
+def awq_gemm_shape_supported(*, bits: int, in_features: int, out_features: int, groups: int) -> bool:
+    """Whether the native AWQ GEMM accepts a packed layer of this shape.
+
+    Mirrors ``validate_awq_gemm_args`` in
+    ``gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu``: uint4b codes only, a
+    group size divisible by 32, an output width divisible by the 64-column CTA
+    tile, and an output width divisible by the group size. ``groups`` is the
+    packed scale-row count, so ``group_size`` is derived exactly as the kernel
+    derives it from ``scaling_factors.size(0)``.
+    """
+
+    if bits != 4 or groups <= 0 or in_features <= 0 or out_features <= 0:
+        return False
+    if in_features % groups:
+        return False
+    group_size = in_features // groups
+    if group_size % 32 or out_features % 64:
+        return False
+    return out_features % group_size == 0
+
+
+def awq_gemm_bf16_supported(device: torch.device) -> bool:
+    """Whether the native AWQ BF16 kernel can run on ``device`` (SM 8.0+)."""
+
+    try:
+        return torch.cuda.get_device_capability(device)[0] >= 8
+    except Exception:  # noqa: BLE001 - device probe
+        return False
+
+
+class ParoLinear(AwqTorchLinear):
+    """Run Paro inference by rotating inputs and reusing AWQ packed GEMM."""
+
+    # The fused AWQ CUDA GEMM is a JIT extension that cannot build on this host
+    # (no CUDA toolkit), and the forward branches on host row counts around the
+    # rotation custom op. Static: EAGER, no capture.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
+
+    SUPPORTS_BACKENDS = [BACKEND.PARO_CUDA]
+    SUPPORTS_METHODS = [METHOD.PARO]
+    SUPPORTS_FORMATS = {FORMAT.PARO: 55}
+    SUPPORTS_BITS = [4]
+    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = True
+    # The rotation and fused AWQ GEMM branch on host-side row counts and call
+    # custom ops, so a compiled decode loop cannot capture this forward. Do not
+    # inherit the Torch-AWQ declaration.
+    SUPPORTS_COMPILE = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
+    # The inherited INT4 AWQ packer writes eight codes per int32, so an output
+    # width that is not a multiple of eight cannot be packed at all. Advertising
+    # 1 here let backend selection accept such a layer and fail later inside
+    # `pack_awq`; every Paro inference path consumes the same packed
+    # layout, so the constraint is a declaration, not a per-kernel detail.
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [PARO_OUT_FEATURES_ALIGN]
+
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU, DEVICE.MPS]
+    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_ADAPTERS = [Lora]
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
+    REQUIRES_FORMAT_V2 = False
+    QUANT_TYPE = "awq_paro"
+    # Unlike Torch AWQ, the forward adds an activation-dtype runtime bias.
+    MODEL_DTYPE_BUFFERS = ("bias",)
+
+    def __init__(
+        self,
+        bits: int,
+        group_size: int,
+        sym: bool,
+        desc_act: bool,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
+        register_buffers: bool = False,
+        krot: int = 8,
+        fp32_accum: bool = None,
+        cache_runtime_dtype: bool = None,
+        auto_cache_bf16_runtime_dtype: bool = None,
+        cache_rotation_dtype: bool = None,
+        auto_cache_bf16_rotation_dtype: bool = None,
+        **kwargs,
+    ):
+        """Initialize AWQ buffers plus the extra Paro rotation state."""
+        self.krot = int(krot)
+        if self.krot <= 0:
+            raise ValueError(f"ParoLinear: `krot` must be positive, got {krot}.")
+        # Backend selection already rejects this through
+        # `SUPPORTS_OUT_FEATURES_DIVISIBLE_BY`, but a directly constructed layer
+        # must fail here with the real reason instead of inside `pack_awq`.
+        if int(out_features) % PARO_OUT_FEATURES_ALIGN:
+            raise ValueError(
+                f"ParoLinear: `out_features` must be a multiple of "
+                f"{PARO_OUT_FEATURES_ALIGN}, got {out_features}. INT4 AWQ packs "
+                "eight codes per int32, and Paro reuses that layout for every "
+                "inference path, so a narrower output cannot be packed."
+            )
+        kernel = resolve_kernel_config(kwargs.get("kernel") or kwargs.get("backend"))
+        self._paro_cpu_avx512 = kernel.paro_cpu_avx512
+        self.fp32_accum = bool(kernel.fp32_accum if fp32_accum is None else fp32_accum)
+        self.cache_runtime_dtype = bool(
+            kernel.paro_cache_runtime_dtype if cache_runtime_dtype is None else cache_runtime_dtype
+        )
+        self.auto_cache_bf16_runtime_dtype = bool(
+            kernel.paro_auto_cache_bf16_runtime_dtype
+            if auto_cache_bf16_runtime_dtype is None
+            else auto_cache_bf16_runtime_dtype
+        )
+        self.cache_rotation_dtype = bool(
+            kernel.paro_cache_rotation_dtype if cache_rotation_dtype is None else cache_rotation_dtype
+        )
+        self.auto_cache_bf16_rotation_dtype = bool(
+            kernel.paro_auto_cache_bf16_rotation_dtype
+            if auto_cache_bf16_rotation_dtype is None
+            else auto_cache_bf16_rotation_dtype
+        )
+        self._rotation_runtime_dtype: Optional[torch.dtype] = None
+        self._rotation_runtime_device: Optional[torch.device] = None
+        self._runtime_theta: Optional[torch.Tensor] = None
+        self._runtime_channel_scales: Optional[torch.Tensor] = None
+        self._rotation_runtime_key = None
+
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            desc_act=desc_act,
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            pack_dtype=pack_dtype,
+            adapter=adapter,
+            register_buffers=register_buffers,
+            backend=kwargs.pop("backend", BACKEND.PARO_CUDA),
+            **kwargs,
+        )
+        self._cpu_aten_layer = None
+        self._cpu_aten_key = None
+        self._cpu_aten_failed_key = None
+        self._cpu_aten_warning_logged = False
+        self._register_rotation_buffers()
+        self._rotation_identity = True
+
+    def _register_rotation_buffers(self) -> None:
+        """Allocate the per-layer buffers that encode runtime rotations."""
+        # Fresh runtime modules must start from a valid identity matching so the
+        # fused kernel never sees duplicate pair indices before optimized
+        # buffers are loaded from quantization or checkpoints.
+        pairs, theta, channel_scales = build_identity_rotation_buffers(
+            in_features=self.in_features,
+            group_size=self.group_size,
+            krot=self.krot,
+            dtype=torch.float16,
+        )
+
+        if "theta" not in self._buffers:
+            self.register_buffer("theta", theta)
+        else:
+            self.theta = theta
+
+        if "pairs" not in self._buffers:
+            self.register_buffer("pairs", pairs)
+        else:
+            self.pairs = pairs
+
+        if "channel_scales" not in self._buffers:
+            self.register_buffer("channel_scales", channel_scales)
+        else:
+            self.channel_scales = channel_scales
+
+    def clear_weight_cache(self) -> None:
+        """Drop packed-weight and rotation-derived state after a mutation."""
+        super().clear_weight_cache()
+        self._clear_rotation_runtime_cache()
+        # A meta/offloaded buffer has no values to inspect. Keep the shortcut
+        # disabled until a materialized load or move clears the cache again.
+        self._rotation_identity = (
+            not self.theta.is_meta
+            and not self.channel_scales.is_meta
+            and is_identity_rotation(self.theta, self.channel_scales)
+        )
+
+    def post_init(self) -> None:
+        super().post_init()
+        # Rotation pairs are checkpoint data used as shared-memory indices by
+        # the fused CUDA kernel. Validate them once after the weights load.
+        validate_rotation_buffers(
+            self.pairs,
+            self.theta,
+            self.channel_scales,
+            group_size=self.group_size,
+            in_features=self.in_features,
+            krot=self.krot,
+            layer_name=f"Paro `{self.name}`",
+        )
+
+    @classmethod
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        """Paro relies on AWQ validation and needs no extra one-time checks here."""
+        return True, None
+
+    def extra_repr(self) -> str:
+        """Expose Paro-specific fields in `repr(module)` for debugging."""
+        return (
+            f"in_features={self.in_features}, out_features={self.out_features}, "
+            f"bias={self.bias is not None}, bits={self.bits}, group_size={self.group_size}, "
+            f"krot={self.krot}, awq_split_k={_PARO_AWQ_SPLIT_K}, "
+            f"cache_runtime_dtype={self.cache_runtime_dtype}, "
+            f"auto_cache_bf16={self.auto_cache_bf16_runtime_dtype}, "
+            f"cache_rotation_dtype={self.cache_rotation_dtype}, "
+            f"auto_cache_bf16_rotation={self.auto_cache_bf16_rotation_dtype}, "
+            f"fp32_accum={self.fp32_accum}"
+        )
+
+    def _clear_rotation_runtime_cache(self) -> None:
+        self._rotation_runtime_dtype = None
+        self._rotation_runtime_device = None
+        self._runtime_theta = None
+        self._runtime_channel_scales = None
+        self._rotation_runtime_key = None
+        self._cpu_aten_layer = None
+        self._cpu_aten_key = None
+        self._cpu_aten_failed_key = None
+        self._runtime_dtype_key = None
+        self._runtime_scales = None
+        self._runtime_bias = None
+
+    def _runtime_dtype_tensors(
+        self,
+        device: torch.device,
+        dtype: torch.dtype,
+        *,
+        cache: bool,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        runtime_key = (
+            tensor_cache_key(self.scales),
+            tensor_cache_key(self.bias),
+            device,
+            dtype,
+        )
+        if cache and self._runtime_dtype_key == runtime_key:
+            return self._runtime_scales, self._runtime_bias
+
+        scales = self.scales
+        if (
+            scales.device != device
+            or scales.dtype != dtype
+            or not scales.is_contiguous()
+        ):
+            scales = scales.to(device=device, dtype=dtype).contiguous()
+
+        bias = self.bias
+        if (
+            bias is not None
+            and (
+                bias.device != device
+                or bias.dtype != dtype
+                or not bias.is_contiguous()
+            )
+        ):
+            bias = bias.to(device=device, dtype=dtype).contiguous()
+
+        if cache:
+            self._runtime_dtype_key = runtime_key
+            self._runtime_scales = scales
+            self._runtime_bias = bias
+        return scales, bias
+
+    def _ensure_rotation_runtime_dtype(
+        self,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        runtime_key = (
+            tensor_cache_key(self.theta),
+            tensor_cache_key(self.channel_scales),
+            device,
+            dtype,
+        )
+        if (
+            self._rotation_runtime_key != runtime_key
+            or self._runtime_theta is None
+            or self._runtime_channel_scales is None
+            or not self._runtime_theta.is_contiguous()
+            or not self._runtime_channel_scales.is_contiguous()
+        ):
+            self._runtime_theta = self.theta.to(device=device, dtype=dtype).contiguous()
+            self._runtime_channel_scales = self.channel_scales.to(device=device, dtype=dtype).contiguous()
+            self._rotation_runtime_device = device
+            self._rotation_runtime_dtype = dtype
+            self._rotation_runtime_key = runtime_key
+        return self._runtime_theta, self._runtime_channel_scales
+
+    def _rotate_inputs(self, x_flat: torch.Tensor) -> torch.Tensor:
+        """Apply the learned input transform before quantized matmul."""
+        if self._rotation_identity:
+            return x_flat
+        if (
+            x_flat.device.type == "cpu"
+            and not self.training
+            and not x_flat.requires_grad
+        ):
+            theta, channel_scales = self._ensure_rotation_runtime_dtype(
+                x_flat.device,
+                x_flat.dtype,
+            )
+            return apply_paro_rotation_vectorized(
+                x_flat,
+                self.pairs,
+                theta,
+                scales=channel_scales,
+                group_size=self.group_size,
+            )
+        use_cached_rotation_dtype = self.cache_rotation_dtype or (
+            self.auto_cache_bf16_rotation_dtype and x_flat.dtype == torch.bfloat16
+        )
+        theta = self.theta
+        channel_scales = self.channel_scales
+        if use_cached_rotation_dtype:
+            theta, channel_scales = self._ensure_rotation_runtime_dtype(x_flat.device, x_flat.dtype)
+        return apply_paro_rotation(
+            x_flat,
+            self.pairs,
+            theta,
+            scales=channel_scales,
+            group_size=self.group_size,
+        )
+
+    def _forward_dense(self, x_flat: torch.Tensor) -> torch.Tensor:
+        """Fallback reference path: dequantize AWQ weights and run dense matmul."""
+        # Keep the reconstructed grid, the reduction and the stored bias in
+        # FP32, then round once.  Decoding to the activation dtype first makes
+        # a finite FP16/BF16 result overflow before the bias can cancel it.
+        compute_dtype = (
+            torch.float32
+            if x_flat.dtype in (torch.float16, torch.bfloat16)
+            else x_flat.dtype
+        )
+        weight = self._dequantize_weight_for_inference(x_flat, dtype=compute_dtype)
+        return linear_wide_bias(
+            x_flat,
+            # AWQ reconstructs [in_features, out_features]; the wide epilogue
+            # takes the F.linear operand order.
+            weight.t(),
+            self._bias_for_compute(device=x_flat.device),
+        )
+
+    def _cuda_awq_kernel_supported(self, compute_dtype: torch.dtype) -> bool:
+        """Whether the native AWQ GEMM can accept this layer's packed shape.
+
+        The kernel's own validator (``validate_awq_gemm_args``) requires an
+        output width that is a multiple of its 64-column CTA tile, a group size
+        that is a multiple of 32, and an output width divisible by that group
+        size. Paro advertises ``group_size=16`` and output widths that the
+        shared INT4 packer accepts (multiples of eight) even though they miss
+        this tile, because the CPU, ATen and dense paths support them; the
+        native path is skipped for those configurations instead of raising from
+        inside the kernel.
+
+        The group size is derived from the packed tensors the kernel actually
+        reads, not from the config value: ``group_size=-1`` packs one scale row
+        per input channel, which the kernel turns into
+        ``in_features / scales.size(0)``. The extension is also CUDA-only, so a
+        HIP build always takes the portable path.
+        """
+
+        if IS_ROCM or self.qweight.device.type != "cuda":
+            return False
+        qweight, scales = self.qweight, self.scales
+        if qweight.numel() == 0 or scales.numel() == 0:
+            return False
+        if self.bits != 4:
+            # The native kernel decodes uint4b codes only.
+            return False
+        if not awq_gemm_shape_supported(
+            bits=self.bits,
+            in_features=self.in_features,
+            out_features=qweight.size(1) * (32 // self.bits),
+            groups=scales.size(0),
+        ):
+            return False
+        if compute_dtype == torch.bfloat16 and not awq_gemm_bf16_supported(qweight.device):
+            # ``validate_bf16_device`` rejects the BF16 kernel below SM 8.0.
+            return False
+        return True
+
+    def _forward_cuda_awq_kernel(self, x_flat: torch.Tensor) -> Optional[torch.Tensor]:
+        """Fast path that feeds rotated activations into the AWQ CUDA GEMM kernel."""
+        compute_dtype = x_flat.dtype if x_flat.dtype in (torch.float16, torch.bfloat16) else torch.float16
+        if not self._cuda_awq_kernel_supported(compute_dtype):
+            return None
+        kernel_input = (
+            x_flat
+            if x_flat.dtype == compute_dtype and x_flat.is_contiguous()
+            else x_flat.to(device=x_flat.device, dtype=compute_dtype).contiguous()
+        )
+        use_cached_runtime_dtype = self.cache_runtime_dtype or (
+            self.auto_cache_bf16_runtime_dtype and compute_dtype == torch.bfloat16
+        )
+        kernel_scales, kernel_bias = self._runtime_dtype_tensors(
+            kernel_input.device,
+            compute_dtype,
+            cache=use_cached_runtime_dtype,
+        )
+        kernel_input_2d = kernel_input.reshape(-1, kernel_input.shape[-1])
+        if self.bias is not None and self.fp32_accum:
+            # The split-K partials are already FP32.  Ask for an FP32 result
+            # and add the stored bias there, so a finite sum that overflows the
+            # activation dtype is not rounded before the bias cancels it.
+            out = _awq_cuda_gemm_forward_fp32_reduce(
+                kernel_input_2d,
+                self.qweight,
+                kernel_scales,
+                self.qzeros,
+                _PARO_AWQ_SPLIT_K,
+                kernel=self.kernel,
+            )
+            bias = self._bias_for_compute(device=x_flat.device).float()
+            return (out + bias).to(dtype=x_flat.dtype)
+
+        out = _awq_cuda_gemm_forward(
+            kernel_input_2d,
+            self.qweight,
+            kernel_scales,
+            self.qzeros,
+            _PARO_AWQ_SPLIT_K,
+            fp32_accum=self.fp32_accum,
+            kernel=self.kernel,
+        )
+        if kernel_bias is not None:
+            out = out + kernel_bias
+        if out.dtype != x_flat.dtype:
+            out = out.to(dtype=x_flat.dtype)
+        return out
+
+    def _forward_cpu_aten(self, x_flat: torch.Tensor) -> Optional[torch.Tensor]:
+        """Use ATen's native CPU int4pack GEMM for FP16/BF16 activations."""
+        if (
+            x_flat.device.type != "cpu"
+            or self.training
+            or x_flat.requires_grad
+            or x_flat.dtype not in (torch.float16, torch.bfloat16)
+            or self.bits != 4
+            or getattr(self, "requested_group_size", self.group_size) == -1
+            or self.group_size not in (32, 64, 128, 256)
+        ):
+            return None
+
+        from .torch_aten_kernel import _has_local_int4pack_cpu_ops
+
+        if not _has_local_int4pack_cpu_ops():
+            return None
+
+        key = (
+            tensor_cache_key(self.qweight),
+            tensor_cache_key(self.qzeros),
+            tensor_cache_key(self.scales),
+            self.bits,
+            self.group_size,
+            self.in_features,
+            self.out_features,
+            x_flat.dtype,
+        )
+        if self._cpu_aten_failed_key == key:
+            return None
+
+        layer = self._cpu_aten_layer
+        if layer is None or self._cpu_aten_key != key:
+            from .torch_aten_kernel_awq import TorchAtenAwqLinear
+
+            ok, _ = TorchAtenAwqLinear.cached_validate_once()
+            if not ok:
+                return None
+
+            try:
+                layer = TorchAtenAwqLinear(
+                    bits=self.bits,
+                    group_size=self.group_size,
+                    sym=self.sym,
+                    desc_act=self.desc_act,
+                    in_features=self.in_features,
+                    out_features=self.out_features,
+                    bias=False,
+                    pack_dtype=self.pack_dtype,
+                    adapter=None,
+                    register_buffers=False,
+                    name=f"{self.name}.cpu_aten",
+                    backend=BACKEND.AWQ_TORCH_ATEN,
+                )
+                layer.qweight = self.qweight
+                layer.qzeros = self.qzeros
+                layer.scales = self.scales
+                layer.bias = None
+                layer.eval()
+                layer.transform_cpu(dtype=x_flat.dtype)
+            except Exception as exc:
+                if not self._cpu_aten_warning_logged:
+                    log.warning(
+                        "Paro ATen CPU int4pack unavailable for `%s`; using dense fallback: %s",
+                        self.name,
+                        exc,
+                    )
+                    self._cpu_aten_warning_logged = True
+                self._cpu_aten_layer = None
+                self._cpu_aten_key = None
+                self._cpu_aten_failed_key = key
+                return None
+
+            self._cpu_aten_layer = layer
+            self._cpu_aten_key = key
+            self._cpu_aten_failed_key = None
+
+        try:
+            # The child has no bias: the parent adds it after return. Ask for
+            # the wide product so a finite sum is not rounded to infinity
+            # before the outer bias epilogue (issue #4471).
+            out = layer._fused_op_forward(
+                x_flat,
+                out_dtype=torch.float32 if self.bias is not None else None,
+            )
+        except Exception as exc:
+            if not self._cpu_aten_warning_logged:
+                log.warning(
+                    "Paro ATen CPU int4pack failed for `%s`; using dense fallback: %s",
+                    self.name,
+                    exc,
+                )
+                self._cpu_aten_warning_logged = True
+            self._cpu_aten_layer = None
+            self._cpu_aten_key = None
+            self._cpu_aten_failed_key = key
+            return None
+
+        if self.bias is not None:
+            # Accumulate the bias in FP32 before the visible dtype cast. ATen
+            # returns a BF16/FP16 result, and a same-dtype add would round both
+            # the bias and the sum again.
+            out = (out.float() + self.bias.float()).to(dtype=x_flat.dtype)
+        if out.dtype != x_flat.dtype:
+            out = out.to(dtype=x_flat.dtype)
+        return out
+
+    def forward(self, x: torch.Tensor):
+        """Rotate inputs, run quantized matmul, then apply adapters in input space."""
+        original_shape = x.shape[:-1] + (self.out_features,)
+        if self.input_rows(x) == 0:
+            # Rotation and AWQ GEMM both require a positive row count; keep the
+            # empty batch on the shared shape-preserving path instead.
+            return self.empty_linear_output(x)
+        # The fused rotation op requires a densely packed operand and rejects
+        # a strided `reshape` view (for example `hidden_states[:, -1:, :]`).
+        x_flat = x.reshape(-1, x.shape[-1]).contiguous()
+        rotated = self._rotate_inputs(x_flat)
+
+        out = self._forward_cuda_awq_kernel(rotated)
+        if out is None:
+            out = self._forward_cpu_avx512(
+                rotated,
+                enabled=self._paro_cpu_avx512 and rotated.dtype == torch.bfloat16,
+            )
+        if out is None:
+            out = self._forward_cpu_aten(rotated)
+        if out is None:
+            out = self._forward_dense(rotated)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x_flat, out=out)
+
+        return out.reshape(original_shape)
+
+
+__all__ = ["ParoLinear"]

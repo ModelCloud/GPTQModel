@@ -34,6 +34,7 @@ from ...utils.logger import setup_logger
 from ...utils.planar_packing import planar_decode_rows
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import torch_compile
+from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
 from ._numerics import (
     _wants_fp32_reduce,
@@ -205,6 +206,12 @@ class TorchLinear(PackableQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = True
+
+    # GB10 (sm_121), torch 2.11.0+cu130: eager=True, graph_breaks=2 (the
+    # tensor `_version` read in the weight-cache key), so dynamo/aot/inductor
+    # all reject it; explicit CUDA-graph capture succeeds and matches eager.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "torch"
@@ -1131,6 +1138,12 @@ class TorchQuantEmbeddings(TorchLinear):
     # not be discovered as a general backend: their forward contract accepts
     # integer token IDs, not hidden states.
     SUPPORTS_BACKEND_SELECTION = False
+    # The forward branches on host values (`input_ids.numel()` against the
+    # row-decode limit, dtype/device checks) before choosing a dense decode or
+    # `F.embedding`, so dynamo breaks and a CUDA-graph capture cannot cross the
+    # branch. Not probed: the branches are unconditional on every call.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
     SUPPORTS_BITS = [2, 3, 4, 5, 6, 7, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 512, 1024]
     SUPPORTS_DESC_ACT = [True, False]

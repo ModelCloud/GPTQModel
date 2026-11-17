@@ -14,10 +14,16 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ._compile_support import COMPILE_LEVEL
 
 
 class TorchInt8AwqLinear(AWQuantLinear):
     """Retired backend entry retained to provide actionable migration errors."""
+
+    # Retired backend: __init__ always raises NotImplementedError, so there is
+    # no forward to compile or capture. Declared conservatively for the registry.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH_INT8]
     SUPPORTS_METHODS = [METHOD.AWQ]

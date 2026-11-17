@@ -50,7 +50,7 @@ not counted as validated. A registry declaration alone is not an executed test.
 | `MlxQuantLinear` | — | — | — |
 | `ParoLinear` | Other format | Other format | Other format |
 | `ParoMlxQuantLinear` | — | — | — |
-| `ParoQuantTritonLinear` | — | Other format | Other format |
+| `ParoTritonLinear` | — | Other format | Other format |
 | `QQQLinear` | — | Other format | — |
 | `QQQMlxQuantLinear` | — | — | — |
 | `QQQTorchLinear` | Other format | Other format | Other format |
@@ -83,7 +83,7 @@ GQA QKV is explicitly rejected; its gate/up and MHA QKV are tested.
 - BitBLAS GPTQ/AWQ: the installed 0.1.0.post1 wheel needs CUDA 12 libraries in this CUDA 13.2 environment. An isolated CUDA 12.9 runtime/NVRTC probe imports it but construction fails with “could not build a runnable matmul” for FP16 INT4, group 128, FP32 accumulation. Neither adapter is qualified.
 - Machete: requires SM90+; Swordfish: Blackwell; W4ANVFP4: SM121+. None is an RTX 4090 path.
 - Metal classes require Apple hardware. Retired AWQ INT8 expands lower-bit storage and remains unavailable.
-- Bitsandbytes, GGUF, FP8, ParoQuant, QQQ and VPTQ registry kernels have no projection-fusion adapter. Their standalone inference support does not imply fusion eligibility.
+- Bitsandbytes, GGUF, FP8, Paro, QQQ and VPTQ registry kernels have no projection-fusion adapter. Their standalone inference support does not imply fusion eligibility.
 - `ExllamaV3Linear`, `ExllamaV3TorchLinear`, and `TorchFP4Linear` use specialized format loaders outside the qlinear registry and have no projection-fusion adapter.
 - W4AFP8 qualifies ordinary tensor inputs only. Encoded W4A activation streams and ExLlamaV2 activation ordering require separate executors and are rejected.
 

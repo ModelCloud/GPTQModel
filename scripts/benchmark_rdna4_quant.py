@@ -4,7 +4,7 @@
 
 """Stage-by-stage quantization benchmark for RDNA4 (gfx1200/gfx1201/gfx1250).
 
-Measures, per quantization method (GPTQ / AWQ / QQQ / ParoQuant):
+Measures, per quantization method (GPTQ / AWQ / QQQ / Paro):
 
 * load time        - ``GPTQModel.load`` with the quantization config attached
 * calibration time - tokenizer encode of the built-in calibration text
@@ -45,7 +45,7 @@ import torch
 
 
 DEFAULT_MODEL = "/monster/data/model/Llama-3.2-1B-Instruct"
-METHOD_CHOICES = ("gptq", "awq", "qqq", "paroquant")
+METHOD_CHOICES = ("gptq", "awq", "qqq", "paro")
 
 # Deterministic calibration text: this benchmark measures wall time and VRAM,
 # not quantization quality, so a network/dataset dependency would only add
@@ -166,7 +166,7 @@ def _quant_config(method: str, bits: int, group_size: int):
         "gptq": (METHOD.GPTQ, FORMAT.GPTQ),
         "awq": (METHOD.AWQ, FORMAT.GEMM),
         "qqq": (METHOD.QQQ, FORMAT.QQQ),
-        "paroquant": (METHOD.PARO, FORMAT.PAROQUANT),
+        "paro": (METHOD.PARO, FORMAT.PARO),
     }[method]
     kwargs: dict[str, Any] = {
         "method": method_format[0],
@@ -174,7 +174,7 @@ def _quant_config(method: str, bits: int, group_size: int):
         "bits": bits,
         "group_size": group_size,
     }
-    if method == "paroquant":
+    if method == "paro":
         kwargs["krot"] = 8
     return QuantizeConfig(**kwargs)
 
