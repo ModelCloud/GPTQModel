@@ -461,7 +461,10 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             self.register_buffer("weight_scale_inv", weight_scale_inv)
 
         if linear.bias is not None:
-            bias = linear.bias.detach().to(device="cpu").contiguous()
+            # Match ``_allocate_buffers`` and the loader's FP32 FP8 bias
+            # buffers: a reload always builds an FP32 bias, so an in-session
+            # module must hold the same dtype or the two run different GEMMs.
+            bias = linear.bias.detach().to(device="cpu", dtype=torch.float32).contiguous()
             if "bias" in self._buffers:
                 self.bias = bias
             else:
@@ -494,7 +497,10 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         else:
             self.register_buffer("weight_scale_inv", packed_scale)
         if linear.bias is not None:
-            bias = linear.bias.detach().to(device="cpu").contiguous()
+            # Match ``_allocate_buffers`` and the loader's FP32 FP8 bias
+            # buffers: a reload always builds an FP32 bias, so an in-session
+            # module must hold the same dtype or the two run different GEMMs.
+            bias = linear.bias.detach().to(device="cpu", dtype=torch.float32).contiguous()
             if "bias" in self._buffers:
                 self.bias = bias
             else:
