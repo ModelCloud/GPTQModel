@@ -27,9 +27,13 @@ This page documents the contracts consumed by
    norm, a norm with an input-dependent gate, a `Conv1D`, or a
    `HyperConnection` has no plain gain to divide; the group is dropped and the
    layer stays quantized plainly.
+6. **An excluded projection is never a fold source.** A `:!`/`:?` Linear has
+   no compensation step: dividing its output rows would change a tensor the
+   checkpoint keeps in the source dtype. The group is dropped and the consumer
+   is quantized plainly.
 
 Introduced by the fixes for issues #4005, #4017, #4039, #4093 (items 1-6) and
-#4121 (items 6-10).
+#4121 (items 6-10). Rule 6 was added for #4651.
 
 ## Flow
 
@@ -47,7 +51,7 @@ flowchart TD
     L --> M["update tracker to block[-1]"]
     M --> N["_merge_shared_source_nodes<br/>one group per gain norm"]
     N --> O["_filter_awq_scaling_sources"]
-    O --> P{"prev_op nosrc<br/>or width mismatch?"}
+    O --> P{"prev_op nosrc,<br/>non-quantized Linear,<br/>or width mismatch?"}
     P -- "yes" --> Q["drop group<br/>consumer uses plain quantization"]
     P -- "no" --> R["keep group"]
     Q --> S["AWQProcessor._quantize_layer"]
@@ -62,6 +66,17 @@ flowchart TD
 The tracker update runs for every block, including blocks skipped because
 `prev_op is None`. That keeps the "previous linear in tree order" fallback
 available for the next block instead of leaving `last_module` unset.
+
+`_filter_awq_scaling_sources` therefore rejects a 2-D source that the plan
+declares `:!`/`:?`. Tree order alone cannot tell a sequential producer from a
+sibling declared inside a consumer's block: Jamba declares
+`mamba: ("in_proj:0", "x_proj:1", "out_proj:2", "conv1d:!", "dt_proj:!")`, so
+`block[-1]` was the excluded `mamba.dt_proj` and the next block (`mamba.x_proj`)
+folded its scale there. `x_proj` reads `silu(conv1d(in_proj(x)))`; `dt_proj`
+reads `x_proj`'s own output, so the width check passed while the data flow did
+not. `mamba.x_proj` is now quantized with no fold, and `dt_proj` keeps its
+checkpoint weights. A gain norm (1-D `weight`, divided by `scale_ln_fcs`) and a
+quantized Linear remain valid sources.
 
 ## Scale-search safety
 

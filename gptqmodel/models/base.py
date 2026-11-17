@@ -5903,6 +5903,25 @@ class BaseQModel(nn.Module):
                     prev_name,
                 )
                 continue
+            # An excluded projection is not a compensated producer: dividing its
+            # output rows changes a module that stays in the source dtype and
+            # nothing multiplies it back, so the group cannot be
+            # output-preserving. Only a gain norm (1-D gain, divided through
+            # `scale_ln_fcs`) or a projection the plan quantizes may absorb a
+            # fold. #4651: Jamba's excluded `mamba.dt_proj` became the source
+            # for `mamba.x_proj` and was rescaled by up to 70%.
+            source_weight = getattr(prev_op, "weight", None)
+            if (
+                spec is not None
+                and not spec.quantize
+                and isinstance(source_weight, torch.Tensor)
+                and source_weight.ndim == 2
+            ):
+                log.debug(
+                    "awq_get_modules_for_scaling: skipping scaling group with non-quantized prev_op `%s`",
+                    prev_name,
+                )
+                continue
             # A gain norm can only absorb the consumer's input scale when its
             # width matches that input. A stale tracker entry (for example a
             # norm followed by a projection the definition does not list) would

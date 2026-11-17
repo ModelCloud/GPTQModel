@@ -168,7 +168,9 @@ independent oracles.
   the historical `last_module` fallback is retained unless that module is a
   post-norm, in which case the block is skipped.
 - The selected norm must be a module that `apply_scale` can fold into
-  (`scale_ln_fcs`). A non-norm candidate is never selected.
+  (`scale_ln_fcs`). A non-norm candidate is never selected. A `:!`/`:?`
+  Linear is not a norm and has no compensation step, so it is never a fold
+  source either (rule 6 in [AWQ scaling groups](awq-scaling-groups.md)).
 - An unresolvable gain is fail-closed: the group is skipped, not folded with
   an assumed offset.
 - Low-precision checkpoints keep their stored dtype; only the intermediate
