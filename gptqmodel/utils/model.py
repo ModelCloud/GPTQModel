@@ -970,25 +970,44 @@ def hf_convert_gptq_v1_to_v2_format(
         source_format = resolve_quant_format(checkpoint_format, METHOD.GPTQ)
     except (TypeError, ValueError):
         source_format = None
+    converted = False
     if source_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
         # Optimum calls this before `save_pretrained()` can run. Record the
-        # on-disk layout here so the state-dict hook can undo the runtime v2
-        # conversion for a v1 checkpoint.
+        # on-disk layout here so the state-dict hook emits the checkpoint
+        # convention instead of the kernel's runtime one.
         for module in model.modules():
-            if isinstance(module, GPTQQuantLinear):
-                module._checkpoint_format_on_disk = source_format
+            if not isinstance(module, GPTQQuantLinear):
+                continue
+            module._checkpoint_format_on_disk = source_format
+            if source_format == FORMAT.GPTQ_V2:
+                # A v2 file already stores logical zero points and the kernel
+                # decodes v2, so no word conversion runs. Mark the runtime
+                # layout anyway: without it the module keeps the constructor's
+                # v1 placeholder, `checkpoint_layout_qzeros` mistakes the live
+                # v2 words for v1, and the next save adds one to every zero
+                # point (issue #4952). The call also initializes the persistent
+                # `qzeros_format` marker, which an HF-loaded module otherwise
+                # leaves as uninitialized memory.
+                module.qzero_format(format=2)
 
-    if source_format == FORMAT.GPTQ:
-        # Skip v1 to v2 conversion when no loaded quant module requires v2.
-        if not any(
-            isinstance(m, BaseQuantLinear) and getattr(m, "REQUIRES_FORMAT_V2", False)
-            for m in model.modules()
-        ):
-            return model, False
-
-        cfg = QuantizeConfig(bits=bits)
-        return convert_gptq_v1_to_v2_format(model, cfg, qlinear_kernel), True
-    return model, False
+        if source_format == FORMAT.GPTQ:
+            # Skip v1 to v2 conversion when no loaded quant module requires v2.
+            if any(
+                isinstance(m, BaseQuantLinear) and getattr(m, "REQUIRES_FORMAT_V2", False)
+                for m in model.modules()
+            ):
+                cfg = QuantizeConfig(bits=bits)
+                model = convert_gptq_v1_to_v2_format(model, cfg, qlinear_kernel)
+                converted = True
+            # A v1 checkpoint that no kernel converted still holds v1 words.
+            # Initialize its marker too; a converted module was marked by the
+            # conversion itself.
+            for module in model.modules():
+                if isinstance(module, GPTQQuantLinear) and not getattr(
+                    module, "_qzeros_format_established", False
+                ):
+                    module.qzero_format(format=module._runtime_qzeros_format())
+    return model, converted
 
 def convert_gptq_v1_to_v2_format_module(module: BaseQuantLinear, bits: int, pack_dtype: torch.dtype) -> nn.Module:
     assert isinstance(module, BaseQuantLinear)
