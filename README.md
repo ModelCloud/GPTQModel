@@ -208,7 +208,9 @@ pip install gptqmodel
 PyTorch **2.13.x or >= 2.15.0** is required; known-vulnerable versions are
 blocked by the [runtime safety check](https://github.com/ModelCloud/GPTQModel/blob/main/docs/torch-runtime-safety-gate.md).
 Compiled package backends build and cache extensions on first use (JIT),
-so install the compiler and CUDA/ROCm toolkit required by your backend.
+so install the compiler and CUDA/ROCm toolkit required by your backend. HIP
+builds stage their sources under the cache; see
+[HIP JIT source staging](https://github.com/ModelCloud/GPTQModel/blob/main/docs/hip-jit-source-staging.md).
 
 See [installation and optional extras](https://github.com/ModelCloud/GPTQModel/wiki/Installation-and-Quickstart)
 for source installs and platform setup. Install vLLM or SGLang in a separate
