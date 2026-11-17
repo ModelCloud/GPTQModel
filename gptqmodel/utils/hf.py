@@ -2965,6 +2965,13 @@ def load_hf_tokenizer(
     from tokenicer import Tokenicer
 
     trust_remote_code = bool(trust_remote_code and safety_checks_bypassed())
+    # Qualification prerequisite: parent 5423ad629 and 5de766e7f policy.
+    from ..models.local import local_model_loader
+
+    if local_model_loader(getattr(model_config, "model_type", None)) is not None:
+        trust_remote_code = False
+    if model_config is not None:
+        kwargs["config"] = model_config
     tokenicer = Tokenicer.load(
         tokenizer_or_path,
         model_config=model_config,
