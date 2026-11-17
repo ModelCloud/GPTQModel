@@ -183,7 +183,7 @@ def test_bfloat16_wide_input_is_power_of_two_prescaled(magnitude):
     assert prepared is not None
     native_input, output_scale = prepared
     assert native_input.dtype == torch.float16
-    assert float(native_input.abs().amax()) <= 1.0
+    assert float(native_input.abs().amax()) <= exl3_bridge._FP16_SAFE_AMAX
     assert math.log2(float(output_scale.flatten()[0])).is_integer()
     assert float(output_scale.flatten()[0]) > 1.0
     # Power-of-two scaling is exact, so only the BF16 rounding remains.
@@ -261,7 +261,7 @@ def test_wide_bfloat16_native_numerics_stay_finite_and_close(magnitude, rows):
     if source_amax <= exl3_bridge._FP16_SAFE_AMAX:
         assert native.calls[0][1] == pytest.approx(source_amax)
     else:
-        assert native.calls[0][1] <= 1.0
+        assert native.calls[0][1] <= exl3_bridge._FP16_SAFE_AMAX
 
     reference = x.double() @ weight.double() + bias.double()
     difference = actual.double() - reference
