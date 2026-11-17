@@ -415,67 +415,73 @@ def split_intraop_threads(worker_count: int, total: Optional[int] = None) -> int
 
 
 _INTRAOP_SCOPE_LOCK = threading.RLock()
-_INTRAOP_SCOPE_DEPTH = 0
-_INTRAOP_SCOPE_ORIGINAL: Optional[int] = None
 
 
-@contextlib.contextmanager
-def _scoped_intraop_threads(target: Optional[int]):
-    """Apply ``target`` to this thread for one task, then restore the process.
+def _restore_global_intraop_threads(ambient: int) -> None:
+    """Restore the process-global intra-op budget from a helper thread.
 
-    ``torch.set_num_threads`` updates libtorch's process-global ``num_threads``
-    as well as the calling thread's intra-op setting. A thread created later
-    reads that global when its intra-op pool is lazily initialized, so leaving
-    a worker budget installed would cap every later caller thread (#4601).
-    This scope sets the target only while the worker runs its task and restores
-    the previous value on exit, including on exception. The last active scope
-    also restores the process value captured before the first pool task.
+    ``torch.set_num_threads`` rewrites the calling thread's intra-op ICV as
+    well as the process-global value, so a worker cannot restore the global
+    itself without undoing the budget it just installed. This short-lived
+    thread changes only the global, which is the value later threads read when
+    they initialize their own team (#4796).
     """
 
-    global _INTRAOP_SCOPE_DEPTH, _INTRAOP_SCOPE_ORIGINAL
+    for _ in range(3):
+        try:
+            torch.set_num_threads(int(ambient))
+            return
+        except Exception:  # pragma: no cover - defensive
+            continue
+    log.warn.once(
+        "Could not restore the process intra-op thread count to %s; threads "
+        "created later may inherit the pool worker budget.",
+        ambient,
+    )
+
+
+def install_worker_intraop_threads(target: Optional[int]) -> None:
+    """Give the calling pool worker its own intra-op team, leaving the process alone.
+
+    libtorch reads the process-global ``num_threads`` only when a thread
+    initializes its intra-op team, at its first ATen call. Installing the
+    worker budget with ``torch.set_num_threads`` for the duration of a task
+    therefore pinned every thread whose first torch op ran while a task was
+    active, for the rest of that thread's life (#4796). Instead each worker
+    installs the budget once, at startup, and the global is restored
+    immediately from a helper thread: this worker keeps its team, every other
+    thread keeps reading the ambient value, and pool tasks never touch the
+    global at all. The pool waits for that install before construction
+    returns, so the transient value is only visible to threads that start
+    while the pool itself is being built.
+    """
 
     if target is None or int(target) <= 0:
-        yield
         return
     target = int(target)
 
     with _INTRAOP_SCOPE_LOCK:
-        previous = torch.get_num_threads()
-        if _INTRAOP_SCOPE_DEPTH == 0:
-            _INTRAOP_SCOPE_ORIGINAL = previous
-        _INTRAOP_SCOPE_DEPTH += 1
+        ambient = torch.get_num_threads()
+        if ambient == target:
+            return
         try:
             torch.set_num_threads(target)
         except Exception as exc:  # pragma: no cover - defensive
-            _INTRAOP_SCOPE_DEPTH -= 1
-            if _INTRAOP_SCOPE_DEPTH == 0:
-                _INTRAOP_SCOPE_ORIGINAL = None
             log.warn.once(
-                "Could not set intra-op threads to %s for this pool task (%s); "
+                "Could not set intra-op threads to %s for this pool worker (%s); "
                 "the worker keeps the inherited pool.",
                 target,
                 exc,
             )
-            yield
             return
-
-    try:
-        yield
-    finally:
-        with _INTRAOP_SCOPE_LOCK:
-            try:
-                torch.set_num_threads(previous)
-            except Exception:  # pragma: no cover - defensive
-                pass
-            _INTRAOP_SCOPE_DEPTH -= 1
-            if _INTRAOP_SCOPE_DEPTH == 0:
-                original = _INTRAOP_SCOPE_ORIGINAL
-                _INTRAOP_SCOPE_ORIGINAL = None
-                if original is not None:
-                    try:
-                        torch.set_num_threads(original)
-                    except Exception:  # pragma: no cover - defensive
-                        pass
+        restorer = threading.Thread(
+            target=_restore_global_intraop_threads,
+            args=(ambient,),
+            name="threadx-intraop-restore",
+            daemon=True,
+        )
+        restorer.start()
+        restorer.join()
 
 
 class _DeviceWorker:
@@ -526,6 +532,10 @@ class _DeviceWorker:
         self._inference_mode = inference_mode
         self._target_cpu_core = cpu_core
         self._affinity_applied = False
+        # Set once the intra-op budget is installed and the process-global
+        # value is ambient again, so the pool can avoid handing back control
+        # (or running tasks) during that transient window (#4796).
+        self._intraop_ready = threading.Event()
         self._thread = threading.Thread(target=self._run, name=self.name, daemon=True)
         self._thread.start()
         if DEBUG_ON: log.debug(f"Spawned worker '{self.name}' for {self.key}")
@@ -612,7 +622,15 @@ class _DeviceWorker:
         Workers default to inference mode for throughput but individual tasks
         may override via `inference_mode`.
         """
-        self._apply_cpu_affinity()
+        # Install the worker's intra-op budget once, before this thread's first
+        # ATen call, so tasks run with it while the process-global value stays
+        # ambient for every other thread (#4796). The event is set even when
+        # startup fails so the pool does not block on a dead worker.
+        try:
+            self._apply_cpu_affinity()
+            install_worker_intraop_threads(self._intraop_threads)
+        finally:
+            self._intraop_ready.set()
         # Exit on the sentinel, not on `_stop`. `stop()` enqueues its sentinel
         # after every task the pool already accepted, so reaching the sentinel
         # means the queue is drained and every accepted future is resolved.
@@ -628,8 +646,7 @@ class _DeviceWorker:
 
                 try:
                     self._ensure_device_activated()
-                    with _scoped_intraop_threads(self._intraop_threads):
-                        self._run_warmup()
+                    self._run_warmup()
                 except BaseException as exc:
                     # Warmup runs on the worker thread before the task. Report
                     # the failure through the pending future and keep the
@@ -649,15 +666,12 @@ class _DeviceWorker:
                 use_inference = self._inference_mode if override_inference is None else bool(override_inference)
 
                 # Tasks take a **read** lock so janitor's write lock can't interleave.
-                # The intra-op budget is scoped to the task so libtorch's
-                # process-global value is restored before the worker goes idle.
-                with _scoped_intraop_threads(self._intraop_threads):
-                    with ctx(self.rwlock.reader(), _device_ctx(self.device)):
-                        inference_ctx = torch.inference_mode() if use_inference else contextlib.nullcontext()
-                        with inference_ctx:
-                            if event is not None and self.device.type == "cuda":
-                                event.synchronize()
-                            result = fn(*args, **kwargs)
+                with ctx(self.rwlock.reader(), _device_ctx(self.device)):
+                    inference_ctx = torch.inference_mode() if use_inference else contextlib.nullcontext()
+                    with inference_ctx:
+                        if event is not None and self.device.type == "cuda":
+                            event.synchronize()
+                        result = fn(*args, **kwargs)
                 # Counters must be updated before resolving futures to prevent
                 # tests reading stats mid-transition and seeing stale totals.
                 self._on_task_finished(self.key)
@@ -1305,6 +1319,16 @@ class DeviceThreadPool:
             intraop_threads=self._intraop_threads_per_worker,
             key_override=key,
         )
+        # A worker publishes its budget to the process-global intra-op value
+        # for a moment while installing it. Do not return from construction
+        # (or start running tasks) until it has restored the ambient value, so
+        # threads started after the pool exists cannot latch the worker budget.
+        if not w._intraop_ready.wait(timeout=60):
+            log.warn.once(
+                "Pool worker %s did not install its intra-op budget within 60s; "
+                "threads started now may inherit it.",
+                name or key,
+            )
         return w
 
     def _on_worker_exit(self, key: str, worker: _DeviceWorker) -> None:
