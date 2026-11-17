@@ -3090,15 +3090,16 @@ class BaseQModel(nn.Module):
     ):
         from ..looper.loop_processor import (
             _reusable_calibration_dataset,
+            prepare_calibration_dataset_once,
             release_failed_run_processors,
         )
         from ..looper.module_looper import ModuleLooper
 
-        # The native and EoRA steps each prepare their calibration input, so a
-        # one-shot iterator must be materialised once here or the second
-        # processor sees an exhausted dataset (issue #4307). A rotation run
-        # already prepared (and validated) its input before the model was
-        # mutated, so reuse those batches instead (#4935).
+        # A one-shot iterator must be materialised once here or a later
+        # traversal sees an exhausted dataset (issue #4307); the batches
+        # themselves are prepared once below and shared by every processor
+        # (#4869). A rotation run already prepared (and validated) its input
+        # before the model was mutated, so reuse those batches instead (#4935).
         if prepared_dataset is not None:
             dataset = prepared_dataset
         else:
@@ -3139,6 +3140,27 @@ class BaseQModel(nn.Module):
             adapter_dataset=None,
             batch_size=run_plan.batch_size,
         )
+        # Prepare the calibration batches once for the whole run: GPTAQ/FOEM
+        # pair the native and quantized captures by batch index, so two
+        # independent preparations of `sort="shuffle"` would pair unrelated
+        # sequences (#4869). Every calibrated processor replays this list, and
+        # a rotation run keeps the batches it already prepared (#4935).
+        if prepared_dataset is None:
+            prepared_dataset = prepare_calibration_dataset_once(calibration_config)
+        if (
+            prepared_adapter_dataset is None
+            and adapter_dataset is not None
+            and ProcessorStep.EORA in run_plan.processors
+        ):
+            prepared_adapter_dataset = prepare_calibration_dataset_once(
+                calibration_config.bind(self.prepare_dataset, dataset=adapter_dataset)
+            )
+        calibration_config = calibration.bind(
+            _already_prepared_calibration_dataset,
+            dataset=prepared_dataset,
+            adapter_dataset=None,
+            batch_size=run_plan.batch_size,
+        )
         args = {
             "tokenizer": self.tokenizer,
             "qcfg": self.quantize_config,
@@ -3175,12 +3197,16 @@ class BaseQModel(nn.Module):
                         )
                     )
                 elif step is ProcessorStep.EORA:
-                    # EoRA prepares its samples with the same policy; its rows are
-                    # not quantizer statistics, so the attention-sink row policy
-                    # does not apply to them.
+                    # EoRA replays the same prepared batches (or its own prepared
+                    # adapter samples). Its rows are not quantizer statistics, so
+                    # the attention-sink row policy does not apply to them.
                     eora_calibration = calibration_config.bind(
-                        prepare_dataset,
-                        dataset=adapter_dataset if adapter_dataset is not None else dataset,
+                        _already_prepared_calibration_dataset,
+                        dataset=(
+                            prepared_adapter_dataset
+                            if prepared_adapter_dataset is not None
+                            else prepared_dataset
+                        ),
                         exclude_attention_sinks=False,
                     )
                     processors.append(factory(
