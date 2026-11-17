@@ -63,6 +63,15 @@ def test_every_midpoint_and_nextafter_neighbours(element, last):
             assert torch.equal(encode_elements(sign * positive, element), expected)
 
 
+@pytest.mark.parametrize("element,last", [("e2m1", 7), ("e4m3", 126), ("e5m2", 123)])
+def test_saturating_finite_overflow_and_nonfinite_input_rejection(element, last):
+    sign = 8 if element == "e2m1" else 128
+    actual = encode_elements(torch.tensor([1e100, -1e100], dtype=torch.float64), element)
+    assert actual.tolist() == [last, last | sign]
+    with pytest.raises(ValueError, match="finite CPU"):
+        encode_elements(torch.tensor([float("inf")]), element)
+
+
 @pytest.mark.parametrize("element,dtype,last", [("e4m3", torch.float8_e4m3fn, 126),
                                                ("e5m2", torch.float8_e5m2, 123)])
 def test_emulation_matches_native_torch_fp8_when_available(element, dtype, last):
@@ -143,6 +152,17 @@ def test_scale_storage_rounding_happens_before_payload_rounding():
         for col in range(64):
             scale = scalar_decode(grid.scales[row, col // 16].item(), "e4m3") * grid.tensor_scale.item()
             assert grid.encode(x)[row, col].item() == scalar_encode(x[row, col].item() / scale, "e2m1")
+
+
+@pytest.mark.parametrize("name,maximum", [("mxfp4", 6), ("mxfp8_e4m3", 448), ("mxfp8_e5m2", 57344)])
+@pytest.mark.parametrize("exponent", [-127, -10, 0, 10, 127])
+def test_e8m0_scale_selection_at_power_boundary_neighbours(name, maximum, exponent):
+    boundary = math.ldexp(float(maximum), exponent)
+    for value, expected_exp in ((math.nextafter(boundary, 0.), exponent), (boundary, exponent),
+                                (math.nextafter(boundary, math.inf), min(exponent + 1, 127))):
+        weight = torch.full((1, 32), value, dtype=torch.float64)
+        grid = fit_grid(weight, name)
+        assert grid.scales.item() == expected_exp + 127
 
 
 @pytest.mark.parametrize("name", ["nvfp8", "unknown"])

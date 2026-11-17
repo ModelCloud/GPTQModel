@@ -220,7 +220,12 @@ def fit_grid(weight, name):
         zeros = (-low / scales.double()).round().clamp(0, 15).to(torch.uint8)
     elif spec.scale == "e8m0":
         maximum = positive_grid(spec.element)[-1]
-        exponent = torch.ceil(torch.log2(amax / maximum)).clamp(-127, 127)
+        ratio = amax / maximum
+        mantissa, exponent = torch.frexp(ratio)
+        # log2 rounds nextafter(power_of_two, +inf) back onto the boundary
+        # for large exponents. frexp preserves the mantissa comparison.
+        exponent = exponent - (mantissa == .5).int()
+        exponent = torch.where(ratio == 0, -127, exponent).clamp(-127, 127)
         scales = torch.where(amax == 0, 127, exponent + 127).to(torch.uint8)
     elif spec.scale == "e4m3":
         tensor_scale = (amax.max() / (6 * 448)).clamp(min=torch.finfo(torch.float32).tiny).float()
