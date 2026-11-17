@@ -138,6 +138,20 @@ the accelerator family for kernel validation. The loader then runs
 moves them to the execution device only for `forward`
 (`simple_dispatch_model` -> `cpu_offload_with_hook`).
 
+Two placement rules keep that path runnable (#4866):
+
+* A tied group is never split across devices. `retie_parameters` rebinds the
+  whole group to one tensor, so a map with `lm_head` on `cpu` and
+  `model.embed_tokens` on the accelerator would put the shared weight on CPU
+  while the embedding's `AlignDevicesHook` kept moving `input_ids` to the
+  accelerator. The group follows the accelerator of its GPU member, and the
+  hooks share one materialized copy per device through Accelerate's
+  `tied_params_map`.
+* A module with no parameters (rotary embeddings) cannot carry
+  `CpuOffload.pre_forward`, which reads `next(module.parameters())`. Such a
+  module mapped to `cpu` stays on `main_device` with an `AlignDevicesHook`
+  instead, the same choice `max_memory` makes for structural modules.
+
 A CUDA-only kernel such as `MarlinLinear` or `ExllamaV2Linear` needs CUDA during
 `post_init`, so it cannot serve that map. `TritonV2Linear` is CUDA-only for
 execution but its `post_init` only validates `g_idx` bounds with Torch ops, so
