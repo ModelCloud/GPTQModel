@@ -67,6 +67,16 @@ def _foem_group_kernel(return_residuals):
     )
 
 
+def _apply_group_boundary_beta(column, raw_column, beta):
+    """Pull a group's first column toward its raw value (FOEM #4046 rule).
+
+    The Metal kernel applies the ``beta`` correction only to columns inside a
+    group (``k + 1 < G``).  The host loop applies the same rule to the first
+    column of the next group so the group boundary matches the Torch path.
+    """
+    return column - beta * (column - raw_column)
+
+
 def foem_quantize_weight_mlx(
     weight,
     inverse_hessian,
@@ -154,6 +164,20 @@ def foem_quantize_weight_mlx(
             remaining = remaining[:, group_size:] - _accurate_matmul_mlx(
                 error,
                 inverse_hessian[start:end, end:],
+            )
+            # The kernel only corrects columns inside a group.  The first
+            # column of the next group is the block boundary, so pull it
+            # toward its raw value here before that group is quantized;
+            # otherwise MLX keeps the pre-#4046 behaviour and diverges from
+            # the Torch path.
+            corrected = _apply_group_boundary_beta(
+                remaining[:, 0],
+                raw[:, end],
+                beta,
+            )
+            remaining = mx.concatenate(
+                [mx.expand_dims(corrected, axis=1), remaining[:, 1:]],
+                axis=1,
             )
             mx.eval(remaining)
 
