@@ -427,11 +427,11 @@ def test_native_inference_created_bias_keeps_versioned_refresh(outputs, dtype):
     x = (torch.randn((1, 2, 128), generator=gen) * .01).to(device="cuda", dtype=dtype)
     reference = x.float().reshape(-1, 128) @ weight + packed["bias"].to("cuda").float()
 
-    # ``forward`` serves FP16 through the native ``LinearEXL3`` handle and
-    # every other dtype through the bounded torch reconstruction, so the
+    # ``forward`` serves FP16 and BF16 through the native ``LinearEXL3``
+    # handle and FP32 through the bounded torch reconstruction, so the
     # refreshed handle is the one the chosen path owns (see
     # ``ExllamaV3Linear.forward``).
-    inner_attribute = "_inner" if dtype == torch.float16 else "_torch_inner"
+    inner_attribute = "_inner"
 
     with torch.inference_mode():
         module = _native_module(packed, outputs, "cuda")
@@ -464,9 +464,8 @@ def test_native_inference_created_bias_keeps_versioned_refresh(outputs, dtype):
         not isinstance(value, torch.Tensor) or tuple(value.shape) != (128, stored_outputs)
         for holder in holders for value in vars(holder).values()
     )
-    if dtype == torch.float16:
-        # The native handle aliases the packed trellis instead of copying it.
-        assert module._inner.trellis is module.trellis
+    # The native handle aliases the packed trellis instead of copying it.
+    assert module._inner.trellis is module.trellis
 
 
 @pytest.mark.cuda

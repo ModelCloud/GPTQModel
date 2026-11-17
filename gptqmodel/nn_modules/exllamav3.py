@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
@@ -22,6 +23,15 @@ if TYPE_CHECKING:
 
 
 _EXL3_BUFFER_NAMES = ("trellis", "suh", "svh", "su", "sv", "bias", "mcg", "mul1")
+
+# The native EXL3 kernels accept FP16 only. A BF16 activation inside FP16's
+# finite range converts exactly, so the default BF16 checkpoint can use them.
+# Above this magnitude the activation is normalized to <= 1 by a power of two:
+# the Hadamard rotation is bounded by sqrt(128) times the input maximum, and the
+# GEMM accumulation stays far below FP16's 65504 limit. Inputs at or below the
+# threshold are passed through untouched, so ordinary activations are bit-exact
+# with the plain FP16 path.
+_FP16_SAFE_AMAX = 64.0
 
 
 def _torch_dtype(value: Any) -> torch.dtype:
@@ -308,19 +318,82 @@ class ExllamaV3Linear(nn.Module):
         self._coerce_buffer_dtypes()
         return result
 
+    def _native_bf16_input(
+        self, x: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, float]]:
+        """Map a BF16 activation onto the FP16-only native kernel contract.
+
+        BF16's 8-bit significand is a subset of FP16's 11-bit one, so every BF16
+        value inside FP16's finite range converts exactly. Above ``_FP16_SAFE_AMAX`` the
+        activation is divided by a power of two before the cast and the kernel
+        output is multiplied back, which keeps the Hadamard rotation and the
+        GEMM accumulation inside FP16's range without changing the relative
+        rounding (power-of-two scaling is exact in FP16).
+
+        Returns ``(fp16_input, output_scale)``. The kernel result must have the
+        bias removed, be multiplied by ``output_scale``, and have the bias
+        restored. Returns ``None`` for non-finite activations so they keep the
+        FP32 Torch reconstruction path.
+        """
+        if x.numel() == 0:
+            # A zero-row batch has no inf-norm identity; LinearEXL3 already
+            # returns an empty output for it, so no scaling is needed.
+            return x.to(torch.float16), 1.0
+        # ``vector_norm(inf)`` is the max-abs reduction without materializing
+        # an ``abs`` copy, and it is the cheapest form on CUDA.
+        amax = float(torch.linalg.vector_norm(x.detach(), ord=float("inf")))
+        if not math.isfinite(amax):
+            return None
+        if amax <= _FP16_SAFE_AMAX:
+            return x.to(torch.float16), 1.0
+        # ``math.frexp`` yields ``amax < 2**exponent``, so the scaled magnitude
+        # lies in (0.5, 1] and every power-of-two step is exact.
+        exponent = math.frexp(amax)[1]
+        output_scale = math.ldexp(1.0, exponent)
+        return (x * (1.0 / output_scale)).to(torch.float16), output_scale
+
+    def _rescale_native_output(
+        self, result: torch.Tensor, output_scale: float
+    ) -> torch.Tensor:
+        """Undo ``_native_bf16_input``'s pre-scale, keeping the bias unscaled."""
+        bias = getattr(self, "bias", None)
+        output = result.to(torch.float32)
+        if bias is None:
+            return output * output_scale
+        bias = bias[:self.out_features].to(torch.float32)
+        return (output - bias) * output_scale + bias
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
-        if input_dtype != torch.float16:
-            return self._ensure_torch_inner().forward(x)
+        if input_dtype == torch.float16:
+            inner = self._ensure_inner()
+            result = inner.forward(
+                x.to(dtype=torch.float16),
+                {},
+                out_dtype=torch.float16,
+            )
+            return result[..., :self.out_features].to(input_dtype)
 
-        inner = self._ensure_inner()
-        runtime_dtype = torch.float16
-        result = inner.forward(
-            x.to(dtype=runtime_dtype),
-            {},
-            out_dtype=runtime_dtype,
-        )
-        return result[..., :self.out_features].to(input_dtype)
+        # BF16 is the default dtype of most EXL3 checkpoints. Keep it on the
+        # native kernels instead of the ~20-200x slower Torch reconstruction
+        # (#4767); the pre-scale keeps #3731's wide-input guarantee.
+        if input_dtype == torch.bfloat16 and x.is_cuda:
+            prepared = self._native_bf16_input(x)
+            if prepared is not None:
+                inner = self._ensure_inner()
+                native_input, output_scale = prepared
+                result = inner.forward(
+                    native_input,
+                    {},
+                    out_dtype=torch.float16,
+                )[..., :self.out_features]
+                if output_scale != 1.0:
+                    result = self._rescale_native_output(result, output_scale)
+                return result.to(input_dtype)
+
+        # FP32 (and non-finite BF16) keep the bounded FP32 reconstruction: a
+        # cast would silently drop precision, and the wide path is exact.
+        return self._ensure_torch_inner().forward(x)
 
     def _multiplier_value(self, name: str) -> Optional[int]:
         tensor = getattr(self, name, None)
