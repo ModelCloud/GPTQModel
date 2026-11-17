@@ -1,0 +1,39 @@
+{
+  "minimax": {
+    "repo": "MiniMaxAI/MiniMax-Text-01-hf",
+    "revision": "f7ce01366e8585a8948f19aedc8e20628c6965e5",
+    "key_count": 8243,
+    "source_sha256": {
+      "config.json": "1aabc3ed6909534c7a8fea1163e836d6346f8d7cd5a262550fb6b30ded723cf7",
+      "model.safetensors.index.json": "5f92e251fdf23642b6e7fe909867b020361befb0908b5433e29788bec647cb99"
+    },
+    "fixture_sha256": "c90cf24231d432d930f41ea5c32aa1e99f39c41bd71de237ab542f1ea5ecdffa"
+  },
+  "minimax_m2": {
+    "repo": "MiniMaxAI/MiniMax-M2",
+    "revision": "04312f0cfbdeefb912575595b7c045512a29293c",
+    "key_count": 96103,
+    "source_sha256": {
+      "config.json": "03d0b726553f72ee799f30f52f77b9292b873714abda76ee7e2683953373db87",
+      "model.safetensors.index.json": "27f213c423ab1824390ffb4adad22cdda24809d56d38f0363c0e2090527dfeeb"
+    },
+    "fixture_sha256": "719a2c93c344f0d1e3510c2eb97c69e7af946aa7e0c88a5546e9623a3b5bcad9"
+  },
+  "original_equations": {
+    "repo": "MiniMaxAI/MiniMax-Text-01",
+    "revision": "a7351bf2bee0e1253919d349f1ad304e6dac13e9",
+    "sha256": {
+      "modeling_minimax_text_01.py": "ab1a67af846499682f5218f7121b3951ebbe154b2a25f7df358431dcaeaba498",
+      "LICENSE-CODE": "56d475e4677b1ccb260f0703030c6b6c3c6a2bd4844bf927f966c54cc753883e"
+    }
+  },
+  "native_transformers": {
+    "version": "5.23.0",
+    "sha256": {
+      "minimax/modeling_minimax.py": "6a6e6b994bff2dd3ba0d15611514e754cde2fdebb2fd8ac44b49438dab1c7119",
+      "minimax/configuration_minimax.py": "52c8be9bde8670cb3cf39368f55e5ae22392019089ac9291aab47bf38f49878b",
+      "minimax_m2/modeling_minimax_m2.py": "d78bed030d8fef776b22904c41e057597a853b1971c300def0110c930495ee19",
+      "minimax_m2/configuration_minimax_m2.py": "150c5c2c2954beff177eaf5751146f2dd50127129252b8069e1afa04f2bd7ce2"
+    }
+  }
+}
