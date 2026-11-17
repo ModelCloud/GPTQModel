@@ -1,0 +1,18 @@
+Ovis 1.x local modeling and preprocessing port for GPT-QModel
+
+Portions adapted from Ovis, Copyright (C) 2024 AIDC-AI, Apache-2.0.
+Authoritative project: https://github.com/AIDC-AI/Ovis
+Pinned release sources and SHA-256 digests: source_manifest.json and README.md.
+The original Apache-2.0 license text is retained in LICENSE.
+
+Changes: package-owned Transformers 5 configuration/model/processor binding;
+explicit native Llama/Qwen2/Gemma2 and CLIP/SigLIP construction; preserved
+released tensor prefixes and visual/formatter protocols; current cache,
+attention and Gemma2 embedding-gain adaptation; safetensors-only publication;
+conservative decoder-only plain-AWQ policy and independent CPU regressions.
+
+Installed Hugging Face Transformers provides its native decoder and vision
+implementations under Apache-2.0. No native model source is copied here.
+No trained tensor payload or tokenizer vocabulary is redistributed here.
+The licenses/conditions for underlying Llama, Gemma, Qwen, CLIP and SigLIP
+weights, tokenizer assets and datasets remain separate and unchanged.
