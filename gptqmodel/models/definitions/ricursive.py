@@ -1,16 +1,18 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-from ...utils.ricursive_patch import apply_ricursive_generate_patch
+from copy import deepcopy
+
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 class RicursiveQModel(BaseQModel):
     """Ricursive Ripple: thin-and-deep Gemma-3N-like hybrid-attention model.
 
-    Ripple ships custom code (``RicursiveForCausalLM``), so the checkpoint must
-    be loaded with ``trust_remote_code=True``. The module layout is Llama-like
-    with three additions:
+    The package owns Ripple's config, modeling and generation preparation.
+    Checkpoint Python and trust flags never select the implementation.
+    The module layout is Llama-like with four additions:
 
     * **PeriNorm** adds ``pre_feedforward_layernorm`` and
       ``post_feedforward_layernorm`` around the MLP, on top of the usual
@@ -27,7 +29,12 @@ class RicursiveQModel(BaseQModel):
     change which weights are quantized.
     """
 
-    require_trust_remote_code = True
+    loader = LocalModelLoader(
+        "gptqmodel.models.ports.ricursive.configuration_ricursive.RicursiveConfig",
+        "gptqmodel.models.ports.ricursive.modeling_ricursive.RicursiveForCausalLM",
+        tokenizer_class="gptqmodel.models.ports.ricursive.tokenization_ricursive.RicursiveTokenizer",
+    )
+    fusable = None  # The executor is unqualified for value residuals and MLP chunks.
 
     pre_lm_head_norm_module = "model.norm"
 
@@ -54,8 +61,7 @@ class RicursiveQModel(BaseQModel):
                 # `lerp(value_residual, normed, sigmoid(value_res_lambda))`,
                 # which is not the norm output; keep it in its own stage so it
                 # is quantized plainly (the fold into `g_proj` is then dropped).
-                # `o_proj` still consumes `v_proj`'s output and keeps that fold
-                # when the value width matches the attention output width.
+                # AWQ currently selects no folding groups for either variant.
                 "q_proj:0:q:in=x",
                 "k_proj:0:k:in=x",
                 "g_proj:0:in=x:nosrc",
@@ -69,11 +75,20 @@ class RicursiveQModel(BaseQModel):
         },
     ]
 
-    def after_model_load(self, model, load_quantized_model=False):
-        # Ripple's shipped `prepare_inputs_for_generation` injects a spurious axis under
-        # transformers >= 5 and breaks `generate()` on the very first prefill.
-        apply_ricursive_generate_patch(model)
-        return model
+    @classmethod
+    def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
+        tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
+        if not getattr(getattr(model, "config", None), "use_gated_attention", True):
+            tree = deepcopy(tree)
+            attention = tree[-1]["self_attn:!"]
+            tree[-1]["self_attn:!"] = tuple(spec for spec in attention if not spec.startswith("g_proj:"))
+        return tree
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Value blending, the sigmoid output gate, and clipped MLP activations
+        # cross scale boundaries. No fold/search/replay group is qualified.
+        # The normal AWQ path still quantizes every declared decoder linear.
+        return []
 
 
 __all__ = ["RicursiveQModel"]
