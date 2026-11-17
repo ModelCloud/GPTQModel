@@ -3,19 +3,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import json
+from pathlib import Path
+
 import torch
 from accelerate import init_empty_weights
 from model_test import ModelTest
-from transformers import AutoConfig, AutoModelForCausalLM
 
 from gptqmodel import GPTQModel
 from gptqmodel.models.definitions.chatglm import ChatGLMQModel
-from gptqmodel.utils.hf import prepare_remote_code_compat
+from gptqmodel.models.ports.chatglm import __file__ as chatglm_package
+from gptqmodel.models.ports.chatglm.configuration_chatglm import ChatGLMConfig
 
 
-# The official THUDM/chatglm3-6b's tokenization_chatglm.py has compatibility issues with transformers.
-# It will throw a TypeError: ChatGLMTokenizer._pad() got an unexpected keyword argument 'padding_side'
-# Adding a temporary padding_side parameter to the _pad method in tokenization_chatglm.py can prevent errors.
+# Corrective tokenizer compatibility belongs to ModelCloud/Tokenicer.
 class TestChatGlm(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/chatglm3-6b"  # "THUDM/chatglm3-6b"
     NATIVE_ARC_CHALLENGE_ACC = 0.3319
@@ -24,15 +25,14 @@ class TestChatGlm(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW = NATIVE_ARC_CHALLENGE_ACC_NORM
     NATIVE_ARC_CHALLENGE_ACC_FAST = NATIVE_ARC_CHALLENGE_ACC_SLOW
     NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
 
     def test_chatglm_from_config_compat(self):
-        config = AutoConfig.from_pretrained(self.NATIVE_MODEL_ID, trust_remote_code=True)
-        prepare_remote_code_compat(config)
+        config = self._checkpoint_config()
 
         with init_empty_weights(include_buffers=True):
-            model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+            model = ChatGLMQModel.loader.from_config(config)
 
         assert model.max_sequence_length == config.seq_length
         assert isinstance(model.all_tied_weights_keys, dict)
@@ -47,15 +47,15 @@ class TestChatGlm(ModelTest):
         model = GPTQModel.load(
             self.NATIVE_MODEL_ID,
             quantize_config=None,
-            trust_remote_code=True,
+            trust_remote_code=False,
             device="cuda:0",
         )
         self._assert_generate(model)
 
     def test_chatglm_generate_after_config_compat(self):
-        """Tiny from-config model: `max_length` alias must not leak into generation."""
+        """Tiny local model uses its real KV cache on Transformers 5."""
 
-        config = AutoConfig.from_pretrained(self.NATIVE_MODEL_ID, trust_remote_code=True)
+        config = self._checkpoint_config()
         config.hidden_size = 32
         config.ffn_hidden_size = 64
         config.num_layers = 1
@@ -65,14 +65,17 @@ class TestChatGlm(ModelTest):
         config.padded_vocab_size = 64
         config.seq_length = 32
         config.torch_dtype = "float32"
-        prepare_remote_code_compat(config)
 
-        model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
-        ChatGLMQModel._patch_generation_compat(model)
+        model = ChatGLMQModel.loader.from_config(config)
 
-        assert model.config.max_length == 32
-        assert "max_length" not in model.config._get_generation_parameters()
+        assert model.max_sequence_length == 32
+        assert model.generation_config.use_cache is True
         self._assert_generate(model, device="cpu")
+
+    @staticmethod
+    def _checkpoint_config():
+        contracts = json.loads(Path(chatglm_package).with_name("checkpoint_contracts.json").read_text())
+        return ChatGLMConfig.from_dict(contracts["THUDM/chatglm3-6b"]["config"])
 
     @staticmethod
     def _assert_generate(model, device=None):
