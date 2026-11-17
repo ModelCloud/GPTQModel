@@ -136,7 +136,7 @@ restore path. Retaining a GGUF filename and qualifying its metadata selection
 does **not** add or qualify a native GGUF weight-resave lifecycle. No new tensor
 container is introduced: published tensor payloads remain safetensors.
 
-This change does not widen `GPTQModel.export` or `dequantize_model`, which do
-not expose subfolder/revision selectors. Callers of those APIs must provide
-the already-selected directory. GPU kernels, external inference engines and
+This change does not widen `dequantize_model`, which does not expose
+subfolder/revision selectors. Callers must provide the already-selected
+directory. GPU kernels, external inference engines and
 uncached Hub downloads are not qualified by this CPU/local-source regression.

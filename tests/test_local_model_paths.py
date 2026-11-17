@@ -15,10 +15,16 @@ from gptqmodel.utils.hf import INTERNAL_HF_GGUF_FILE_KWARG
 from gptqmodel.utils.structure import LazyTurtle
 
 
+def _loaded_model_stub():
+    """A loaded-model double: ``GPTQModel.load`` logs the KV-cache estimate."""
+
+    return SimpleNamespace(log_kv_cache_estimate=lambda: None)
+
+
 def test_load_treats_missing_absolute_path_as_local(monkeypatch):
     model_path = "/monster/data/model/Qwen3.5-35B-A3B"
     fake_config = SimpleNamespace(quantization_config=None)
-    sentinel = SimpleNamespace(log_kv_cache_estimate=lambda: None)
+    sentinel = _loaded_model_stub()
 
     monkeypatch.setattr(auto, "load_model_config", lambda *args, **kwargs: fake_config)
     monkeypatch.setattr(auto, "_is_supported_quantization_config", lambda config: False)
@@ -169,7 +175,7 @@ def test_gptqmodel_load_rejects_public_gguf_file_kwarg():
 
 def test_gptqmodel_load_normalizes_direct_gguf_path_for_config_probe(monkeypatch):
     fake_config = SimpleNamespace(quantization_config=None)
-    sentinel = SimpleNamespace(log_kv_cache_estimate=lambda: None)
+    sentinel = _loaded_model_stub()
     config_calls = []
     captured = {}
 
@@ -209,7 +215,7 @@ def test_gptqmodel_load_normalizes_direct_gguf_path_for_config_probe(monkeypatch
 
 def test_gptqmodel_load_forwards_backend_and_profile_to_from_pretrained(monkeypatch):
     fake_config = SimpleNamespace(quantization_config=None)
-    sentinel = SimpleNamespace(log_kv_cache_estimate=lambda: None)
+    sentinel = _loaded_model_stub()
     captured = {}
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False, **kw: trust_remote_code)
@@ -255,7 +261,7 @@ def test_gptqmodel_load_treats_supported_floatx_checkpoint_as_source_with_auto_d
         bits=2.0,
         preprocessors=[AutoModuleDecoderConfig(target_dtype=torch.bfloat16)],
     )
-    sentinel = SimpleNamespace(log_kv_cache_estimate=lambda: None)
+    sentinel = _loaded_model_stub()
     captured = {}
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False, **kw: trust_remote_code)
@@ -321,7 +327,7 @@ def test_gptqmodel_load_routes_quantized_source_with_auto_decoder_to_from_quanti
         bits=2.0,
         preprocessors=[AutoModuleDecoderConfig(target_dtype=torch.bfloat16)],
     )
-    sentinel = SimpleNamespace(log_kv_cache_estimate=lambda: None)
+    sentinel = _loaded_model_stub()
     captured = {}
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False, **kw: trust_remote_code)
@@ -459,7 +465,7 @@ def test_from_pretrained_redirect_rejects_inapplicable_profile(monkeypatch):
 
 def test_gptqmodel_load_forwards_profile_without_explicit_backend(monkeypatch):
     fake_config = SimpleNamespace(quantization_config=None)
-    sentinel = SimpleNamespace(log_kv_cache_estimate=lambda: None)
+    sentinel = _loaded_model_stub()
     captured = {}
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False, **kw: trust_remote_code)

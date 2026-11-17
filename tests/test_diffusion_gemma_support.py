@@ -308,6 +308,8 @@ def test_diffusion_gemma_post_quantize_syncs_encoder_layer():
     wrapper = object.__new__(DiffusionGemmaQModel)
     nn.Module.__init__(wrapper)
     wrapper.model = model
+    # The base ``post_quantize`` reads ``quantize_config.activation_mode``.
+    wrapper.quantize_config = SimpleNamespace(activation_mode=None)
     encoder_layer = model.model.encoder.language_model.layers[0]
     quantized = TorchLinear(
         bits=4,
