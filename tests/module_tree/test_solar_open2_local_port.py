@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import gzip
+import hashlib
 import json
 from pathlib import Path
 
@@ -15,6 +16,22 @@ from tests.test_solar_open2_local_port import tiny_values
 
 
 PORT = Path(__file__).resolve().parents[2] / "gptqmodel/models/ports/solar_open2"
+
+
+def test_pinned_release_fixture_and_license_hashes():
+    manifest = json.loads((PORT / "source_manifest.json").read_text())
+    for local, source in [
+        ("LICENSE", "TRANSFORMERS_LICENSE"),
+        ("SOLAR_LICENSE", "LICENSE"),
+        ("released_config.json", "config.json"),
+        ("released_generation_config.json", "generation_config.json"),
+    ]:
+        assert hashlib.sha256((PORT / local).read_bytes()).hexdigest() == manifest["sha256"][source]
+    assert (
+        hashlib.sha256((PORT / "released_shapes.json.gz").read_bytes()).hexdigest()
+        == manifest["header_inventory"]["sha256"]
+    )
+    assert len(json.loads((PORT / "header_manifest.json").read_text())) == manifest["header_inventory"]["shards"] == 94
 
 
 def test_entire_released_checkpoint_inventory_matches_real_meta_model():

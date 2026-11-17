@@ -1,0 +1,2 @@
+# Preserve the pinned license's original Markdown hard-break spaces.
+SOLAR_LICENSE whitespace=-blank-at-eol

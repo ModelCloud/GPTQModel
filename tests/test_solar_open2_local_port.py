@@ -360,7 +360,7 @@ def test_public_dense_hostile_checkpoint_policy_two_reloads(tmp_path, monkeypatc
 @pytest.mark.parametrize("offload", [False, True])
 @pytest.mark.parametrize("full_proj,dense_first", [(False, False), (True, False), (False, True)])
 def test_public_plain_awq_all_projections_two_exact_reloads(tmp_path, offload, full_proj, dense_first):
-    from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
 
@@ -390,7 +390,7 @@ def test_public_plain_awq_all_projections_two_exact_reloads(tmp_path, offload, f
             "attention_mask": torch.ones(1, 16, dtype=torch.long),
         }
     ]
-    wrapper.quantize(samples, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=samples, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     packed = {name for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
     expected = set()
     for index, layer in enumerate(source.model.layers):
