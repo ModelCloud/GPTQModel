@@ -186,6 +186,19 @@ def clone_gptq_config_for_module(
 
         qcfg_clone.validate_gsq()
 
+    # `dynamic` is mutable after construction, so re-check the invariant here:
+    # GPTAQ/FOEM never consult the sink mask and would silently ignore it.
+    # Non-GPTQ configs (AWQ/ParoQuant) share this clone helper but have no such
+    # field, hence the `getattr`.
+    if getattr(qcfg_clone, "exclude_attention_sinks", False) and (
+        qcfg_clone.gptaq is not None or qcfg_clone.foem is not None
+    ):
+        raise ValueError(
+            "QuantizeConfig: `exclude_attention_sinks` is only implemented for the "
+            f"plain GPTQ Hessian path; module `{module_full_name}` runs GPTAQ/FOEM, "
+            "which accumulate their own Hessian and ignore it. Leave it False."
+        )
+
     return qcfg_clone
 
 class GPTQProcessor(LoopProcessor):
