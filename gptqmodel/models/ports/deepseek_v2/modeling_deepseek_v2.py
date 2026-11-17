@@ -8,7 +8,7 @@ Adapted from the pinned Apache-2.0 sources documented in README.md. No
 checkpoint Python or global Transformers registration is used.
 """
 
-from copy import copy
+from contextlib import contextmanager
 from functools import wraps
 
 import torch
@@ -96,16 +96,20 @@ class DeepseekV2RotaryEmbedding(NativeDeepseekV2RotaryEmbedding):
         return result
 
 
-def _fork_cache(cache, num_layers):
-    """Fork append-only native caches; mutations belong to the returned output.
+@contextmanager
+def _cache_transaction(cache, num_layers):
+    """Keep native in-place success and restore the caller's state on failure.
 
-    Native DynamicLayer.update replaces its tensors with torch.cat results, so
-    copying cache/layer metadata is sufficient: no prefix tensors are cloned or
-    changed. This also protects callers from failures AFTER the decoder (head,
-    loss, output hooks) without trying to undo writes to shared mutable state.
+    Qualified DynamicLayer.update appends with torch.cat, replacing rather than
+    modifying prefix tensors. Retain their references and the complete layer
+    metadata, including lazy-initialization state. Rollback also removes layers
+    appended to an empty lazy cache, retaining the original list/layer objects.
+    The CausalLM boundary covers head, loss and native tuple conversion failures;
+    the decoder boundary also protects direct DeepseekV2Model callers.
     """
     if cache is None:
-        return None
+        yield
+        return
     if (
         type(cache) is not DynamicCache or cache.offloading
         or cache.layer_class_to_replicate not in (None, DynamicLayer)
@@ -115,9 +119,17 @@ def _fork_cache(cache, num_layers):
     lengths = [layer.get_seq_length() for layer in cache.layers]
     if len(cache.layers) not in (0, num_layers) or len(set(lengths)) > 1:
         raise ValueError("DeepSeek V2 cache must have a complete, uniform decoder prefix")
-    fork = copy(cache)
-    fork.layers = [copy(layer) for layer in cache.layers]
-    return fork
+    layers = cache.layers
+    states = [(layer, vars(layer).copy()) for layer in layers]
+    try:
+        yield
+    except BaseException:
+        for layer, state in states:
+            vars(layer).clear()
+            vars(layer).update(state)
+        layers[:] = [layer for layer, _ in states]
+        cache.layers = layers
+        raise
 
 
 class DeepseekV2Moe(NativeDeepseekV2Moe):
@@ -156,6 +168,10 @@ class DeepseekV2DecoderLayer(NativeDeepseekV2DecoderLayer):
 
 
 class _NativeCheckpointLayout:
+    # Cache rollback uses eager Python metadata snapshots; do not inherit the
+    # native fullgraph/static-cache generation capability advertisement.
+    _can_compile_fullgraph = False
+
     def _init_weights(self, module):
         super()._init_weights(module)
         if isinstance(module, DeepseekV2RotaryEmbedding):
@@ -192,11 +208,11 @@ class DeepseekV2Model(_NativeCheckpointLayout, NativeDeepseekV2Model):
         self, input_ids=None, attention_mask=None, position_ids=None,
         past_key_values=None, inputs_embeds=None, use_cache=None, **kwargs,
     ):
-        return super().forward(
-            input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
-            past_key_values=_fork_cache(past_key_values, self.config.num_hidden_layers),
-            inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs,
-        )
+        with _cache_transaction(past_key_values, self.config.num_hidden_layers):
+            return super().forward(
+                input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
+                past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs,
+            )
 
 
 class DeepseekV2ForCausalLM(_NativeCheckpointLayout, NativeDeepseekV2ForCausalLM):
@@ -208,3 +224,16 @@ class DeepseekV2ForCausalLM(_NativeCheckpointLayout, NativeDeepseekV2ForCausalLM
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
+
+    @wraps(NativeDeepseekV2ForCausalLM.forward)
+    def forward(
+        self, input_ids=None, attention_mask=None, position_ids=None,
+        past_key_values=None, inputs_embeds=None, labels=None, use_cache=None,
+        logits_to_keep=0, **kwargs,
+    ):
+        with _cache_transaction(past_key_values, self.config.num_hidden_layers):
+            return super().forward(
+                input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
+                past_key_values=past_key_values, inputs_embeds=inputs_embeds,
+                labels=labels, use_cache=use_cache, logits_to_keep=logits_to_keep, **kwargs,
+            )

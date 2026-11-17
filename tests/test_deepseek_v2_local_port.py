@@ -88,7 +88,8 @@ def test_native_numerics_conversion_and_compressed_cache(q_rank, method):
     assert cache.layers[0].keys.shape[-1] == actual.config.kv_lora_rank
     assert cache.layers[0].values.shape[-1] == actual.config.qk_rope_head_dim
     continuation = actual(ids[:, 3:], attention_mask=mask, past_key_values=cache, use_cache=True)
-    assert cache.get_seq_length() == 3
+    assert cache.get_seq_length() == 5
+    assert continuation.past_key_values is cache
     assert continuation.past_key_values.get_seq_length() == 5
     torch.testing.assert_close(continuation.logits, expected[:, 3:], rtol=2e-5, atol=2e-6)
     changed = ids.clone()
@@ -160,14 +161,24 @@ def test_normalized_routing_ignores_even_extreme_finite_scale(method, scale):
 
 @pytest.mark.parametrize("return_dict", [False, True])
 @pytest.mark.parametrize("stage", ["decoder0", "decoder1", "head", "loss"])
+@pytest.mark.parametrize("q_rank", [None, 8], ids=["lite", "full"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16], ids=["fp32", "fp16", "bf16"])
+@pytest.mark.parametrize("routed,freq", [(None, 1), (4, 1), (4, 2)], ids=["dense", "mixed", "periodic"])
 @torch.inference_mode()
-def test_public_cache_failure_retry_is_transactional(monkeypatch, return_dict, stage):
-    hf_model = model()
+def test_public_cache_failure_retry_is_transactional(monkeypatch, return_dict, stage, q_rank, dtype, routed, freq):
+    hf_model = model(
+        q_lora_rank=q_rank, num_hidden_layers=3, n_routed_experts=routed,
+        n_shared_experts=2 if routed else None, moe_layer_freq=freq, initializer_range=0.2,
+    ).to(dtype)
     ids = torch.tensor([[1, 4, 7, 9, 12]])
     prefix = hf_model(ids[:, :2], use_cache=True).past_key_values
+    layers = prefix.layers
+    metadata = [(layer, vars(layer).copy()) for layer in layers]
     before = [(layer.keys.clone(), layer.values.clone()) for layer in prefix.layers]
+    observed = []
 
     def fail(*args, **kwargs):
+        observed.append([layer.get_seq_length() for layer in prefix.layers])
         raise RuntimeError("injected after cache update")
 
     kwargs = {"labels": ids[:, 2:]} if stage == "loss" else {}
@@ -184,7 +195,14 @@ def test_public_cache_failure_retry_is_transactional(monkeypatch, return_dict, s
         finally:
             if handle is not None:
                 handle.remove()
-    assert [layer.get_seq_length() for layer in prefix.layers] == [2, 2]
+    updated = int(stage[-1]) + 1 if stage.startswith("decoder") else 3
+    assert observed == [[5] * updated + [2] * (3 - updated)]
+    assert prefix.layers is layers
+    assert [layer.get_seq_length() for layer in prefix.layers] == [2, 2, 2]
+    for layer, (original, state) in zip(prefix.layers, metadata):
+        assert layer is original
+        assert vars(layer).keys() == state.keys()
+        assert all(vars(layer)[key] is value for key, value in state.items())
     for layer, (keys, values) in zip(prefix.layers, before):
         torch.testing.assert_close(layer.keys, keys, rtol=0, atol=0)
         torch.testing.assert_close(layer.values, values, rtol=0, atol=0)
@@ -193,19 +211,154 @@ def test_public_cache_failure_retry_is_transactional(monkeypatch, return_dict, s
     logits = retry.logits if return_dict else retry[1 if kwargs else 0]
     cache = retry.past_key_values if return_dict else retry[2 if kwargs else 1]
     assert type(cache) is DynamicCache
-    assert cache is not prefix
-    assert [layer.get_seq_length() for layer in cache.layers] == [5, 5]
-    assert prefix.get_seq_length() == 2
+    assert cache is prefix
+    assert cache.layers is layers
+    assert [layer.get_seq_length() for layer in cache.layers] == [5, 5, 5]
+    assert prefix.get_seq_length() == 5
     full = hf_model(ids, use_cache=True)
-    torch.testing.assert_close(logits, full.logits[:, 2:], rtol=2e-5, atol=2e-6)
+    rtol, atol = {torch.float32: (2e-5, 2e-6), torch.float16: (2e-3, 2e-3), torch.bfloat16: (2e-2, 2e-2)}[dtype]
+    torch.testing.assert_close(logits, full.logits[:, 2:], rtol=rtol, atol=atol)
     for layer, expected in zip(cache.layers, full.past_key_values.layers):
-        torch.testing.assert_close(layer.keys, expected.keys, rtol=2e-5, atol=2e-6)
-        torch.testing.assert_close(layer.values, expected.values, rtol=2e-5, atol=2e-6)
+        torch.testing.assert_close(layer.keys, expected.keys, rtol=rtol, atol=atol)
+        torch.testing.assert_close(layer.values, expected.values, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("return_dict", [False, True])
+@pytest.mark.parametrize("q_rank", [None, 8], ids=["lite", "full"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16], ids=["fp32", "fp16", "bf16"])
+@pytest.mark.parametrize("routed,freq,native_dense", [(None, 1, 3), (4, 1, 1), (4, 2, 2)], ids=["dense", "mixed", "periodic"])
+@torch.inference_mode()
+def test_external_cache_manual_1_4_1_native_identity_and_reload(tmp_path, return_dict, q_rank, dtype, routed, freq, native_dense):
+    hf_model = model(
+        q_lora_rank=q_rank, num_hidden_layers=3, n_routed_experts=routed,
+        n_shared_experts=2 if routed else None, moe_layer_freq=freq, norm_topk_prob=False,
+        initializer_range=0.2,
+    ).to(dtype)
+    # Independent native layout: for three layers, first dense 3/1/2 gives
+    # respectively all-dense / dense+MoE+MoE / dense+dense+MoE.
+    native = NativeModel._from_config(tiny_config(
+        q_lora_rank=q_rank, num_hidden_layers=3, first_k_dense_replace=native_dense,
+        norm_topk_prob=False, initializer_range=0.2,
+    ), experts_implementation="eager").eval().to(dtype)
+    native.load_state_dict(hf_model.state_dict(), strict=True)
+    native.model.rotary_emb = NativeRotaryEmbedding(config=native.config)
+    ids = torch.tensor([[1, 4, 7, 9, 12, 6], [1, 8, 5, 3, 11, 4]])
+
+    def manual(consumer):
+        # Intentionally reuse the caller-owned object without assigning outputs
+        # back to it: this is HF's mutable-cache public contract.
+        external = DynamicCache()
+        layers = external.layers
+        chunks = []
+        for start, end in ((0, 1), (1, 5), (5, 6)):
+            output = consumer(ids[:, start:end], past_key_values=external, return_dict=return_dict)
+            logits, published = (output.logits, output.past_key_values) if return_dict else output[:2]
+            assert published is external
+            assert external.layers is layers
+            assert [layer.get_seq_length() for layer in external.layers] == [end] * 3
+            chunks.append(logits)
+        return torch.cat(chunks, dim=1), external
+
+    expected, native_cache = manual(native)
+    actual, cache = manual(hf_model)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    for layer, reference in zip(cache.layers, native_cache.layers):
+        torch.testing.assert_close(layer.keys, reference.keys, rtol=0, atol=0)
+        torch.testing.assert_close(layer.values, reference.values, rtol=0, atol=0)
+    rtol, atol = {torch.float32: (2e-5, 2e-6), torch.float16: (2e-3, 2e-3), torch.bfloat16: (2e-2, 2e-2)}[dtype]
+    torch.testing.assert_close(actual, native(ids, use_cache=False).logits, rtol=rtol, atol=atol)
+    hf_model.save_pretrained(tmp_path, safe_serialization=True)
+    restored = DeepseekV2ForCausalLM.from_pretrained(tmp_path, dtype=dtype, experts_implementation="eager").eval()
+    assert set(restored.state_dict()) == set(hf_model.state_dict())
+    for name, tensor in hf_model.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[name], tensor, rtol=0, atol=0)
+    reloaded, reloaded_cache = manual(restored)
+    torch.testing.assert_close(reloaded, expected, rtol=0, atol=0)
+    for layer, reference in zip(reloaded_cache.layers, native_cache.layers):
+        torch.testing.assert_close(layer.keys, reference.keys, rtol=0, atol=0)
+        torch.testing.assert_close(layer.values, reference.values, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("return_dict", [False, True])
+@pytest.mark.parametrize("kind", ["lazy", "configured", "reset"])
+@pytest.mark.parametrize("stage", ["decoder", "lm_decoder", "head", "loss"])
+@torch.inference_mode()
+def test_empty_cache_failure_restores_initialization_and_retry(monkeypatch, return_dict, kind, stage):
+    hf_model = model(initializer_range=0.2)
+    consumer = hf_model.model if stage == "decoder" else hf_model
+    ids = torch.tensor([[1, 4, 7]])
+    cache = DynamicCache() if kind == "lazy" else DynamicCache(config=hf_model.config)
+    if kind == "reset":
+        hf_model(ids[:, :1], past_key_values=cache, use_cache=True)
+        cache.reset()
+    layers = cache.layers
+    states = [(layer, vars(layer).copy()) for layer in layers]
+    observed = []
+
+    def fail(*args, **kwargs):
+        observed.append(cache.get_seq_length())
+        raise RuntimeError("injected empty cache failure")
+
+    kwargs = {"labels": ids} if stage == "loss" else {}
+    with monkeypatch.context() as patch:
+        handle = None
+        if stage == "loss":
+            patch.setattr(hf_model, "loss_function", fail)
+        else:
+            target = hf_model.lm_head if stage == "head" else hf_model.model.layers[0]
+            handle = target.register_forward_hook(fail)
+        try:
+            with pytest.raises(RuntimeError, match="injected empty cache failure"):
+                consumer(ids, past_key_values=cache, use_cache=True, return_dict=return_dict, **kwargs)
+        finally:
+            if handle is not None:
+                handle.remove()
+    assert observed == [3]
+    assert cache.layers is layers
+    assert len(cache.layers) == len(states)
+    for layer, (original, state) in zip(cache.layers, states):
+        assert layer is original
+        assert vars(layer).keys() == state.keys()
+        assert all(vars(layer)[key] is value for key, value in state.items())
+    assert cache.get_seq_length() == 0
+    retry = consumer(ids, past_key_values=cache, use_cache=True, return_dict=return_dict, **kwargs)
+    published = retry.past_key_values if return_dict else retry[2 if kwargs else 1]
+    assert published is cache
+    assert [layer.get_seq_length() for layer in cache.layers] == [3, 3]
+    reference = consumer(ids, use_cache=True)
+    torch.testing.assert_close(retry[1 if kwargs else 0], reference[0], rtol=0, atol=0)
+    for layer, expected in zip(cache.layers, reference.past_key_values.layers):
+        torch.testing.assert_close(layer.keys, expected.keys, rtol=0, atol=0)
+        torch.testing.assert_close(layer.values, expected.values, rtol=0, atol=0)
+
+
+@torch.inference_mode()
+def test_tuple_conversion_failure_rolls_back_public_cache(monkeypatch):
+    from transformers.modeling_outputs import MoeCausalLMOutputWithPast
+
+    hf_model = model(initializer_range=0.2)
+    ids = torch.tensor([[1, 4, 7, 9, 12]])
+    cache = hf_model(ids[:, :2], use_cache=True).past_key_values
+    before = [(layer.keys, layer.values) for layer in cache.layers]
+
+    def fail(*args, **kwargs):
+        assert [layer.get_seq_length() for layer in cache.layers] == [5, 5]
+        raise RuntimeError("injected tuple conversion failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(MoeCausalLMOutputWithPast, "to_tuple", fail)
+        with pytest.raises(RuntimeError, match="injected tuple conversion failure"):
+            hf_model(ids[:, 2:], past_key_values=cache, use_cache=True, return_dict=False)
+    assert [layer.get_seq_length() for layer in cache.layers] == [2, 2]
+    assert all(layer.keys is keys and layer.values is values for layer, (keys, values) in zip(cache.layers, before))
+    retry = hf_model(ids[:, 2:], past_key_values=cache, use_cache=True, return_dict=False)
+    assert retry[1] is cache
+    torch.testing.assert_close(retry[0], hf_model(ids, use_cache=False).logits[:, 2:], rtol=2e-5, atol=2e-6)
 
 
 @pytest.mark.parametrize("return_dict", [False, True])
 @torch.inference_mode()
-def test_native_cache_conversion_fork_methods_and_reset_replay(return_dict):
+def test_native_cache_conversion_methods_and_reset_replay(return_dict):
     hf_model = model()
     ids = torch.tensor([[1, 4, 7, 9, 12], [1, 3, 8, 5, 6]])
     prefix = hf_model(ids[:, :3], use_cache=True).past_key_values
@@ -221,7 +374,8 @@ def test_native_cache_conversion_fork_methods_and_reset_replay(return_dict):
     logits = result.logits if return_dict else result[0]
     continued = result.past_key_values if return_dict else result[1]
     torch.testing.assert_close(logits, hf_model(reordered, use_cache=False).logits[:, 2:], rtol=2e-5, atol=2e-6)
-    assert cache.get_seq_length() == 2
+    assert cache.get_seq_length() == 5
+    assert continued is cache
     assert continued.get_seq_length() == 5
     assert prefix.get_seq_length() == 3
     continued.reset()
@@ -229,7 +383,8 @@ def test_native_cache_conversion_fork_methods_and_reset_replay(return_dict):
     replay = hf_model(ids, past_key_values=continued, use_cache=True)
     torch.testing.assert_close(replay.logits, hf_model(ids, use_cache=False).logits, rtol=0, atol=0)
     assert replay.past_key_values.get_seq_length() == 5
-    assert continued.get_seq_length() == 0
+    assert continued.get_seq_length() == 5
+    assert replay.past_key_values is continued
 
 
 @pytest.mark.parametrize("decoder_only", [False, True])
@@ -240,8 +395,9 @@ def test_empty_native_cache_publishes_through_public_output(decoder_only):
     cache = DynamicCache()
     ids = torch.tensor([[1, 4]])
     output = consumer(ids, past_key_values=cache, use_cache=True)
-    assert cache.layers == []
-    assert cache.get_seq_length() == 0
+    assert len(cache.layers) == hf_model.config.num_hidden_layers
+    assert cache.get_seq_length() == 2
+    assert output.past_key_values is cache
     assert type(output.past_key_values) is DynamicCache
     assert output.past_key_values.get_seq_length() == 2
     expected = consumer(ids, use_cache=False)
@@ -268,6 +424,35 @@ def test_unsupported_cache_fails_before_decoder_mutation(kind):
     with pytest.raises(TypeError, match="DeepSeek V2.*cache"):
         hf_model(torch.tensor([[1, 4]]), past_key_values=cache, use_cache=True)
     assert all(layer.get_seq_length() == 0 for layer in cache.layers)
+
+
+def test_static_cache_compilation_is_not_advertised():
+    hf_model = model()
+    assert hf_model._can_compile_fullgraph is False
+    assert hf_model.model._can_compile_fullgraph is False
+
+
+@pytest.mark.parametrize("kind", ["partial", "unequal", "extra"])
+@torch.inference_mode()
+def test_invalid_cache_prefix_rejected_without_mutation(kind):
+    hf_model = model()
+    cache = hf_model(torch.tensor([[1, 4]]), use_cache=True).past_key_values
+    if kind == "partial":
+        cache.layers.pop()
+    elif kind == "unequal":
+        cache.layers[0].crop(-1)
+    else:
+        cache.layers.append(DynamicLayer())
+    layers = cache.layers
+    states = [(layer, vars(layer).copy()) for layer in layers]
+    with pytest.raises(ValueError, match="complete, uniform decoder prefix"):
+        hf_model(torch.tensor([[7]]), past_key_values=cache, use_cache=True)
+    assert cache.layers is layers
+    assert len(cache.layers) == len(states)
+    for layer, (original, state) in zip(cache.layers, states):
+        assert layer is original
+        assert vars(layer).keys() == state.keys()
+        assert all(vars(layer)[key] is value for key, value in state.items())
 
 
 @pytest.mark.parametrize("q_rank", [None, 8], ids=["lite", "full"])
