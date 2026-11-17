@@ -103,8 +103,6 @@ _TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED: set[tuple[str, str, str]] = set()
 _MISSING = object()
 INTERNAL_HF_GGUF_FILE_KWARG = "_gptqmodel_hf_gguf_file"
 _DENSE_MODEL_FILE_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
-_INTERNAL_GGUF_TORCH_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER"
-_FALSEY_ENV_VALUES = {"", "0", "false", "off", "no"}
 
 _QWEN_DRIVE_MODEL_TYPE = "qwen_drive"
 _QWEN_DRIVE_INSTALL_HINT = (
@@ -696,11 +694,15 @@ def _transformers_has_native_prism_gguf_support() -> bool:
     return hasattr(gguf_utils, "_dequantize_prism_q1_0_g128")
 
 
-def _internal_gguf_torch_loader_enabled() -> bool:
-    raw = os.getenv(_INTERNAL_GGUF_TORCH_LOADER_ENV)
-    if raw is not None:
-        return str(raw).strip().lower() not in _FALSEY_ENV_VALUES
-    return bool(os.getenv("GPTQMODEL_INTERNAL_GGUF_DEQUANT_DEVICE", "").strip())
+def _internal_gguf_torch_loader_enabled(policy=None) -> bool:
+    """Read the load policy, never the process environment.
+
+    ``None`` resolves the policy this load installed; a direct caller may pass
+    the explicit ``KernelConfig`` it wants the dense import to honour.
+    """
+    from . import internal_gguf
+
+    return internal_gguf.torch_dequant_loader_enabled(policy)
 
 
 def _load_gguf_checkpoint_torch_direct(
@@ -711,10 +713,11 @@ def _load_gguf_checkpoint_torch_direct(
     return_tensors: bool = False,
     model_to_load=None,
     torch_dtype=None,
+    policy=None,
 ):
     from ..utils import internal_gguf
 
-    if not return_tensors or model_to_load is None or not _internal_gguf_torch_loader_enabled():
+    if not return_tensors or model_to_load is None or not _internal_gguf_torch_loader_enabled(policy):
         return original_load_gguf_checkpoint(
             gguf_checkpoint_path,
             return_tensors=return_tensors,
@@ -749,7 +752,7 @@ def _load_gguf_checkpoint_torch_direct(
 
     processor = processor_cls(config=config)
     tensor_key_mapping = gguf_utils.get_gguf_hf_weights_map(model_to_load, processor)
-    target_device = internal_gguf._resolve_torch_dequant_device()
+    target_device = internal_gguf._resolve_torch_dequant_device(policy)
     dequantize_kwargs = {"device": target_device}
     if torch_dtype is not None:
         dequantize_kwargs["dtype"] = torch_dtype
@@ -796,7 +799,7 @@ def _load_gguf_checkpoint_torch_direct(
 
 def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
     with _MONKEY_PATCH_LOCK:
-        if getattr(gguf_utils, "_GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER_PATCHED", False):
+        if getattr(gguf_utils, "_GPTQMODEL_GGUF_TORCH_LOADER_PATCHED", False):
             return
 
         original_load_gguf_checkpoint = gguf_utils.load_gguf_checkpoint
@@ -826,7 +829,7 @@ def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
 
         gguf_utils._gptqmodel_original_load_gguf_checkpoint = original_load_gguf_checkpoint
         gguf_utils.load_gguf_checkpoint = _wrapped_load_gguf_checkpoint
-        gguf_utils._GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER_PATCHED = True
+        gguf_utils._GPTQMODEL_GGUF_TORCH_LOADER_PATCHED = True
 
 
 def _patch_transformers_prism_gguf_compat(*, api_name: str) -> None:

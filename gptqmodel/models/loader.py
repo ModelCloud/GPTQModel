@@ -169,15 +169,16 @@ def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
     return convert
 
 
-_GGUF_QUANTIZED_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER"
+def _native_quantized_loader_enabled(policy: Optional[KernelConfig] = None) -> bool:
+    """Resolve the GGUF parser selection from the load policy.
 
+    ``policy`` is the ``KernelConfig`` the public call resolved; ``None`` uses the
+    policy installed for the current load. Nothing here reads the environment:
+    the same call options must select the same parser in every process.
+    """
+    from ..utils.kernel import resolve_kernel_config
 
-def _native_quantized_loader_enabled() -> bool:
-    """Mirror internal_gguf's env check without importing its NumPy-backed module."""
-    raw = os.getenv(_GGUF_QUANTIZED_LOADER_ENV)
-    if raw is None:
-        return True
-    return str(raw).strip().lower() not in {"", "0", "false", "off", "no"}
+    return bool(resolve_kernel_config(policy).gguf_native_quantized_loader)
 
 
 def _ggml_quantization_type():
@@ -1695,8 +1696,10 @@ def _resolve_local_gguf_checkpoint_path(model_local_path: str, hf_gguf_load_kwar
 def _resolve_native_quantized_gguf_checkpoint(
     model_local_path: str,
     hf_gguf_load_kwargs: Dict[str, str],
+    *,
+    policy: Optional[KernelConfig] = None,
 ) -> tuple[Optional[str], Optional[internal_gguf.GGUFQuantizedCheckpointSpec]]:
-    if not _native_quantized_loader_enabled():
+    if not _native_quantized_loader_enabled(policy):
         return None, None
 
     gguf_checkpoint_path = _resolve_local_gguf_checkpoint_path(model_local_path, hf_gguf_load_kwargs)
@@ -2040,6 +2043,7 @@ def ModelLoader(cls):
         gguf_checkpoint_path, native_gguf_qspec = _resolve_native_quantized_gguf_checkpoint(
             model_local_path,
             hf_gguf_load_kwargs,
+            policy=kernel,
         )
         effective_profile = _resolve_native_gguf_profile(
             native_gguf_qspec=native_gguf_qspec,
@@ -2081,6 +2085,12 @@ def ModelLoader(cls):
                         **redirect_kwargs,
                     )
 
+            if hf_gguf_load_kwargs:
+                # The dense GGUF import runs inside transformers, whose checkpoint
+                # hook is process-wide. Install this call's policy first (we hold
+                # the model-load lock) so the dequant device and loader choice
+                # come from these arguments rather than the previous load.
+                configure_kernel(kernel)
             hf_model_init_kwargs = dict(model_init_kwargs_without_internal)
             hf_model_init_kwargs["device_map"] = device_map if device_map else "auto"
             set_dtype_compat(hf_model_init_kwargs, dtype)
@@ -2555,6 +2565,7 @@ def ModelLoader(cls):
         gguf_checkpoint_path, native_gguf_qspec = _resolve_native_quantized_gguf_checkpoint(
             model_local_path,
             hf_gguf_load_kwargs,
+            policy=kernel,
         )
         if native_gguf_qspec is not None:
             qcfg = QuantizeConfig(
