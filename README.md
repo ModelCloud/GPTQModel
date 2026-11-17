@@ -284,6 +284,10 @@ describe shared-KV calibration, recurrent cache recovery and packed QKV layout.
 cover definition-specific scientific tokenizer dispatch and native gate/convolution
 exclusions. Tokenizer normalization and trust enforcement require Tokenicer 0.0.17
 or newer.
+[Klear and Kimi tokenizer/AttnRes selection](docs/transformers5-model-ports.md#klear-and-kimi-implementation-selection)
+documents dense/MoE ownership, distinct tokenizer semantics and the explicit
+AttnRes quantization boundary. Packaged TikToken implementations require
+`tiktoken>=0.12.0`.
 [InternVL-chat and K2-Horizon loading](docs/transformers5-model-ports.md#internvl-wrapper-and-k2-horizon-selection)
 documents the package-owned wrapper/vision and dense/MoVA/MoE implementations,
 decoder selection, pinned licenses and CPU plain-AWQ validation.

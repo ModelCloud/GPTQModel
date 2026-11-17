@@ -16,8 +16,10 @@ definition ownership corrections alongside the package-owned ports.
 
 | Definition / model type | Implementation and provenance | CPU validation | AWQ policy | Limits |
 | --- | --- | --- | --- | --- |
+| `KlearQModel` / `klear` | [Package-owned dense/MoE port, pinned Base/Instruct sources and Apache notices](../gptqmodel/models/ports/klear/README.md) | Full 25,059-key meta inventory, independent attention/routing equations, requested-dtype loading, cache/generation, hostile metadata and safetensors reload | Real public plain AWQ dense/MoE/mixed packing and two save/reload cycles; no scale groups | No trained-weight, GPU, FlashAttention, fusion, parallel or compiler qualification |
+| `KimiK3QModel`, `KimiLinearQModel` / AttnRes variants | [Package-owned MLA/KDA, vision and K3 TikToken/XTML; exact native delegation for ordinary KimiLinear](../gptqmodel/models/ports/kimi_k3/README.md) | Independent float64 MLA/KDA and MoE oracles, CPU/meta owners, exact tokenizer IDs, image-conditioned logits, cache/generation, failure/retry and public loads | AttnRes rejects ordinary GPTQ/AWQ before mutation; existing bounded runner retained | No trained-weight, GPU, fused FLA, FlashAttention, MTP, video, parallel or compiler qualification |
 | `DeepSeekV2QModel` / `deepseek_v2` | [Native-derived compatibility and pinned legacy source](../gptqmodel/models/ports/deepseek_v2/README.md) | Lite/full MLA, dense/periodic/shared MoE, top-k normalization, native expert conversion, cache/generation and safetensors round trips, malicious metadata matrix | Actual CPU plain quantization and packing; no scale groups | No GPU/trained-checkpoint quality, FlashAttention, distributed experts or full packed-checkpoint round trip; expert parallelism rejected |
-| `DeepSeekV3QModel` / `deepseek_v3`, `kimi_k2` | [Native bridge, checkpoint conversion and pinned Kimi/DeepSeek provenance](../gptqmodel/models/ports/deepseek_v3/PROVENANCE.md) | Dense/split-Q MLA, published-layout grouped routing, cache/generation, MTP ownership, malicious metadata isolation and safetensors reload | Real CPU plain AWQ/INT4 packing, no scale folding | Kimi partial-group routing rejected; no GPU, trained-checkpoint accuracy or production FP8 qualification |
+| `DeepSeekV3QModel` / `deepseek_v3`, `kimi_k2` | [Native bridge, checkpoint conversion and pinned Kimi/DeepSeek provenance](../gptqmodel/models/ports/deepseek_v3/PROVENANCE.md) | Dense/split-Q MLA, grouped routing, cache/generation, MTP ownership, standalone K2 TikToken IDs/chat/tools, native DeepSeek ByteLevel BPE IDs, hostile metadata and safetensors reload | Real CPU plain AWQ/INT4 packing, no scale folding | Kimi partial-group routing rejected; no GPU, trained-checkpoint accuracy or production FP8 qualification |
 | `DeepSeekV4QModel` / `deepseek_v4` | [Native Transformers 5.23 and pinned BF16 checkpoint schema](../gptqmodel/models/ports/deepseek_v4/README.md) | Six sliding/CSA/HCA and expert variants, full 34,223-key target schema, source routing oracle, cache/generation and malicious metadata isolation | Plain AWQ packs 16 tiny linears across six layouts; no scale groups | BF16 checkpoint metadata gated (HTTP 401); no trained weights, GPU, FP8/FP4, MTP accuracy or packed export qualification |
 | `DeepSeekVLV2QModel` / `deepseek_vl_v2` | [Local vision, language and processor port; pinned source, licenses and notices](../gptqmodel/models/ports/deepseek_vl_v2/PORTING.md) | Published tiny/small/base meta key inventories (2582/5639/6973); independent dense/MLA, vision and MoE oracles, image-dependent logits, cache/generation, safetensors reload and hostile metadata isolation | Actual CPU plain AWQ staging/packing for decoder linears; no scale groups | Eager text attention only; no trained-weight accuracy, GPU/FlashAttention, tensor/expert parallel or fusion qualification |
 | `DeciLMQModel` / `deci`, `nemotron-nas` | [Heterogeneous GQA, sink cache, pinned source and Apache license](../gptqmodel/models/ports/decilm/README.md) | Nine NAS attention/FFN combinations, exact published meta ownership, sink boundaries, cache failure/retry through LM output, generation and safetensors reload | Actual CPU plain AWQ pack/save/reload; no scale groups | No GPU/trained evaluation or native AWQ folding; shifted-sink continuation chunks must be shorter than window minus sinks; eager/SDPA only |
@@ -558,3 +560,97 @@ InternLM2 and InternVL decoder cases, and explicitly keep these families plain.
 Wheel and sdist inspection verified all **87** then-integrated port audit,
 font, license and notice assets, including Hymba's PDF license and both
 InternVL licenses, alongside the Python/Transformers/Tokenicer dependency floors.
+
+## Klear and Kimi implementation selection
+
+Klear uses the packaged `KlearConfig` and `KlearMoeForCausalLM`. Its independent
+published-checkpoint inventory includes dense, routed and shared expert state,
+per-head Q/K norms and learned expert mixing. These exclusions are explicit in
+the central registry case. Public dense/MoE/mixed plain-AWQ round trips preserve
+the nonzero strict-FP32 routing bias and every excluded tensor; no scale-search
+groups or fusion executor are admitted.
+
+K3's `KimiConfigFactory` and `KimiModelFactory` distinguish the packaged AttnRes
+implementation from ordinary native KimiLinear. The ordinary looper cannot
+carry AttnRes `prefix_sum` and `block_residual` between layers, so its GPTQ/AWQ
+entry points reject before mutation. The existing bounded runner remains the
+explicit supported quantization boundary.
+
+```mermaid
+flowchart TD
+    A["KimiConfigFactory.from_dict"] --> B{"model_type and is_kimi_k3_config"}
+    B -- kimi_k3 --> C["Packaged KimiK3Config"]
+    B -- kimi_linear_AttnRes --> D{"attn_res_block_size present?"}
+    D -- yes --> E["Packaged KimiLinearConfig"]
+    D -- no --> X["ValueError: explicit AttnRes layout required"]
+    B -- ordinary_kimi_linear --> F["Native Transformers KimiLinearConfig"]
+    B -- other_type --> X
+    C --> G["KimiModelFactory: packaged multimodal model"]
+    E --> H["KimiModelFactory: packaged AttnRes decoder"]
+    F --> I["KimiModelFactory: native KimiLinearForCausalLM"]
+    H --> J["KimiK3Source bounded runner"]
+    H --> Y["Ordinary GPTQ/AWQ: NotImplementedError before mutation"]
+    G --> J
+    G --> Y
+    style X fill:#ffcdd2,stroke:#b71c1c
+    style Y fill:#ffcdd2,stroke:#b71c1c
+```
+
+Tokenizer architecture is selected separately. Kimi-K2 uses its own pinned
+DeepSeek-V3-owned TikToken implementation, including all 256 reserved IDs and
+its native chat/tool rendering. K3 uses its distinct TikToken/XTML implementation.
+Their qualified shared dependency floor is `tiktoken>=0.12.0`. Generic corrective
+normalization still runs once in Tokenicer; model-specific tokenizer code does
+not replace that normalization boundary.
+
+```mermaid
+flowchart TD
+    A["load_hf_tokenizer: definition-owned tokenizer_class"] --> B["LocalModelLoader.load_tokenizer: trust/code revision removed"]
+    B --> C{"Selected package factory"}
+    C -- DeepseekV3Tokenizer --> D{"model_type/source_model_type = kimi_k2?"}
+    D -- yes --> E["DeepSeek-V3-owned TikTokenTokenizer"]
+    D -- no --> F{"Known native class and serialized ByteLevel BPE?"}
+    F -- yes --> G["Native TokenizersBackend: explicit class selection"]
+    F -- no --> H{"No remote ambiguity; qualified native metadata?"}
+    H -- yes --> I["AutoTokenizer: explicit config, trust_remote_code=False"]
+    H -- no --> X["Reject unknown class, foreign registration or ambiguous auto_map"]
+    C -- KimiTokenizerFactory --> J{"Packaged AttnRes config?"}
+    J -- yes --> K["K3 TikTokenTokenizer / XTML"]
+    J -- no --> L["Native tokenizer: selected config, trust_remote_code=False"]
+    C -- KimiK3QModel --> K
+    E --> M["Tokenicer.load: normalize selected instance"]
+    G --> M
+    I --> M
+    K --> M
+    L --> M
+    B --> Y["Missing or malformed asset: propagate; no checkpoint-code fallback"]
+    style X fill:#ffcdd2,stroke:#b71c1c
+    style Y fill:#ffcdd2,stroke:#b71c1c
+```
+
+| Mechanism | Before | After and evidence |
+| --- | --- | --- |
+| Klear architecture | `definitions/klear.py:11` at `dbdc9a9c6`: generic/remote model resolution | `definitions/klear.py:12`: definition-owned config/model and full checkpoint-state exclusions; [source, flow and red/green evidence](../gptqmodel/models/ports/klear/README.md) |
+| K3/native dispatch | `definitions/kimi_k3.py:26` at `dbdc9a9c6`: checkpoint implementation required for AttnRes | `ports/kimi_k3/configuration_kimi_k3.py:291` and `modeling_kimi_linear.py:1242`: exact native or packaged implementations; [pinned source and independent MLA/KDA oracles](../gptqmodel/models/ports/kimi_k3/README.md) |
+| K2 tokenizer | `definitions/deepseek_v3.py:15-18` at `dbdc9a9c6`: no direct tokenizer declaration; AutoTokenizer could select the wrong slow tokenizer from hostile metadata | `ports/deepseek_v3/tokenization_deepseek_v3.py:15`: selects K2 directly, pins ordinary ByteLevel BPE to `TokenizersBackend`, and rejects ambiguity; [source SHA and red/green probes](../gptqmodel/models/ports/deepseek_v3/PROVENANCE.md) |
+
+The combined parent-branch Klear/K3/K2-tokenizer/LFM3, registry, fusion,
+tokenizer-boundary and strict-FP32 suite passed **1,049 tests with 475 skips**.
+Skips concern unavailable trained-checkpoint fixtures and NVIDIA fusion execution.
+The owned Klear, K3, K2-tokenizer and LFM3 suites passed. This CPU/meta evidence
+does not qualify trained-weight quality, GPU/FlashAttention/fused FLA, multi-GPU,
+concurrent execution, compilation, MTP or additional cache implementations.
+
+```bash
+OMP_NUM_THREADS=1 PYTHON_GIL=0 python -s -m pytest -q \
+  tests/test_klear_local_port.py tests/module_tree/test_klear_local_port.py \
+  tests/test_kimi_k3_local_port.py tests/module_tree/test_kimi_k3_local_port.py \
+  tests/test_kimi_k3_support.py tests/module_tree/test_kimi_linear_native_tree.py \
+  tests/module_tree/test_kimi_k3_fork_plan.py tests/module_tree/test_kimi_linear_fork_plan.py \
+  tests/test_deepseek_v3_local_port.py tests/module_tree/test_deepseek_v3_local_port.py \
+  tests/test_lfm3_local_port.py tests/module_tree/test_lfm3_local_port.py \
+  tests/test_lfm3_support.py gptqmodel/models/ports/lfm3/tests/test_native_coverage.py \
+  tests/module_tree/test_registered_module_plans.py tests/module_tree/test_fusable_models.py \
+  tests/test_local_tokenizer_loading.py tests/test_native_fp32_checkpoint_loading.py \
+  -xq --disable-warnings
+```

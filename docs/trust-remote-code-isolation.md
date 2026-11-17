@@ -90,9 +90,13 @@ trust and the bypass are both enabled.
 flowchart TD
     A["load_model_config: selected config"] --> B["load_hf_tokenizer: model_config"]
     B --> J{"local_model_loader selects package model?"}
-    J -- yes --> K["Force tokenizer trust_remote_code=False; select declared tokenizer if any"]
+    J -- yes --> K["Force tokenizer trust_remote_code=False"]
     J -- no --> C
-    K --> C["Tokenicer.load: model_config and config both receive selected config"]
+    K --> L{"LocalModelLoader declares tokenizer_class?"}
+    L -- yes --> M["LocalModelLoader.load_tokenizer: package class"]
+    M --> N["Tokenicer.load: normalize selected tokenizer instance"]
+    M --> O["Missing or malformed assets: propagate error; no auto fallback"]
+    L -- no --> C["Tokenicer.load: model_config and config both receive selected config"]
     C --> D["AutoTokenizer: reuse config; skip AutoConfig discovery"]
     D --> E{"Tokenizer checkpoint Python requested?"}
     E -- no --> F["Native tokenizer"]
@@ -100,6 +104,7 @@ flowchart TD
     G -- yes --> H["Checkpoint tokenizer allowed"]
     G -- no --> I["Native fallback or rejection; no checkpoint Python"]
     style I fill:#ffcdd2,stroke:#b71c1c
+    style O fill:#ffcdd2,stroke:#b71c1c
 ```
 
 Definitions can also declare `LocalModelLoader.processor_class`. For models

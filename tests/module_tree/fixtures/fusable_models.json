@@ -2646,7 +2646,7 @@
     },
     "klear": {
       "definition": "KlearQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned Klear MoE with per-head Q/K norms and learned routed/shared expert mixing; fusion executor has not been qualified."
     },
     "laguna": {
       "definition": "LagunaQModel",
@@ -2870,7 +2870,7 @@
     },
     "lfm3": {
       "definition": "LFM3QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Native Transformers 5 LFM3 hybrid short-convolution/gated-attention; fusion executor has not been qualified."
     },
     "lfm3_omni": {
       "definition": "LFM3OmniQModel",

@@ -1435,13 +1435,18 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.q_norm:!", "self_attn.k_norm:!"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.coefficient:!"],
         ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
         ["mlp.shared_experts.down_proj"],
-        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
-        ["mlp.experts.{expert_index}.down_proj"]
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"]
       ]
     },
     "LagunaQModel/gptq": {
@@ -2683,6 +2688,15 @@
     "KimiK3QModel/gptq": {
       "layers": ["language_model.model.layers"],
       "blocks": [
+        ["input_layernorm:!"],
+        ["post_attention_layernorm:!"],
+        ["self_attention_res_norm:!"],
+        ["self_attention_res_proj:!"],
+        ["mlp_res_norm:!"],
+        ["mlp_res_proj:!"],
+        ["self_attn:!"],
+        ["self_attn.q_proj:!", "self_attn.k_proj:!", "self_attn.v_proj:!", "self_attn.b_proj:!", "self_attn.q_a_proj:!", "self_attn.q_a_layernorm:!", "self_attn.q_b_proj:!", "self_attn.kv_a_proj_with_mqa:!", "self_attn.kv_a_layernorm:!", "self_attn.kv_b_proj:!", "self_attn.o_proj:!", "self_attn.g_proj:!", "self_attn.f_a_proj:!", "self_attn.f_b_proj:!", "self_attn.g_a_proj:!", "self_attn.g_b_proj:!", "self_attn.q_conv1d:!", "self_attn.k_conv1d:!", "self_attn.v_conv1d:!", "self_attn.o_norm:!"],
+        ["mlp.gate_proj:!", "mlp.up_proj:!", "mlp.down_proj:!"],
         ["block_sparse_moe.gate:!"],
         ["block_sparse_moe.routed_expert_down_proj:!"],
         ["block_sparse_moe.routed_expert_up_proj:!"],
@@ -2695,6 +2709,15 @@
     "KimiLinearQModel/gptq": {
       "layers": ["model.layers"],
       "blocks": [
+        ["input_layernorm:!"],
+        ["post_attention_layernorm:!"],
+        ["self_attention_res_norm:!"],
+        ["self_attention_res_proj:!"],
+        ["mlp_res_norm:!"],
+        ["mlp_res_proj:!"],
+        ["self_attn:!"],
+        ["self_attn.q_proj:!", "self_attn.k_proj:!", "self_attn.v_proj:!", "self_attn.b_proj:!", "self_attn.q_a_proj:!", "self_attn.q_a_layernorm:!", "self_attn.q_b_proj:!", "self_attn.kv_a_proj_with_mqa:!", "self_attn.kv_a_layernorm:!", "self_attn.kv_b_proj:!", "self_attn.o_proj:!", "self_attn.g_proj:!", "self_attn.f_a_proj:!", "self_attn.f_b_proj:!", "self_attn.g_a_proj:!", "self_attn.g_b_proj:!", "self_attn.q_conv1d:!", "self_attn.k_conv1d:!", "self_attn.v_conv1d:!", "self_attn.o_norm:!"],
+        ["mlp.gate_proj:!", "mlp.up_proj:!", "mlp.down_proj:!"],
         ["block_sparse_moe.gate:!"],
         ["block_sparse_moe.routed_expert_down_proj:!"],
         ["block_sparse_moe.routed_expert_up_proj:!"],
