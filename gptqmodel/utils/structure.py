@@ -1198,6 +1198,7 @@ class LazyTurtle:
             pattern for pattern in (no_placement_params or ()) if isinstance(pattern, str) and pattern
         )
         self._lock = threading.RLock()
+        self._native_fp32_names = weakref.WeakKeyDictionary()
         self._active_source_root: Optional[str] = None
         self._active_source_provenance: Optional[Dict[str, Any]] = None
 
@@ -1476,6 +1477,55 @@ class LazyTurtle:
 
     def eval(self) -> "LazyTurtle":
         return self
+
+    def _prepare_native_fp32_slots(self, target_model, target_submodule, module_path, *, recurse=True):
+        from ..nn_modules.qlinear import BaseQuantLinear
+        from .model import _native_fp32_checkpoint_names
+
+        names = self._native_fp32_names.get(target_model)
+        if names is None:
+            if not (getattr(target_model, "_keep_in_fp32_modules", None)
+                    or getattr(target_model, "_keep_in_fp32_modules_strict", None)):
+                self._native_fp32_names[target_model] = frozenset()
+                return
+            dtype = self._model_init_kwargs.get("dtype", self._model_init_kwargs.get("torch_dtype"))
+            if dtype in (None, "auto"):
+                dtype = getattr(target_model, "dtype", None)
+                if dtype is None:
+                    dtype = next((value.dtype for value in target_model.parameters() if value.is_floating_point()), None)
+            names = frozenset(_native_fp32_checkpoint_names(target_model, dtype))
+            self._native_fp32_names[target_model] = names
+        if not names:
+            return
+
+        # Resolve the root's policy once, but check current owners after packed
+        # modules replace dense linears. Packed payloads retain their own ABI.
+        modules = target_submodule.named_modules() if recurse else [("", target_submodule)]
+        for relative, module in modules:
+            prefix = ".".join(part for part in (module_path, relative) if part)
+            slots = {**module._parameters, **module._buffers}
+            selected = [(name, value) for name, value in slots.items()
+                        if (f"{prefix}.{name}" if prefix else name) in names
+                        and isinstance(value, torch.Tensor) and value.is_floating_point()]
+            if not selected:
+                continue
+            ancestors = [target_model]
+            if prefix:
+                ancestors.extend(target_model.get_submodule(".".join(prefix.split(".")[:end]))
+                                 for end in range(1, len(prefix.split(".")) + 1))
+            if any(isinstance(owner, BaseQuantLinear) or getattr(owner, "MODEL_DTYPE_BUFFERS", None) is not None
+                   for owner in ancestors):
+                continue
+            for name, value in selected:
+                if value.dtype != torch.float32:
+                    converted = value.to(dtype=torch.float32)
+                    if name in module._parameters:
+                        converted = nn.Parameter(converted, requires_grad=value.requires_grad)
+                        converted.__dict__.update(value.__dict__)
+                        module.register_parameter(name, converted)
+                    else:
+                        persistent = name not in module._non_persistent_buffers_set
+                        module.register_buffer(name, converted, persistent=persistent)
 
     def materialize_submodule(
         self,
@@ -1814,6 +1864,7 @@ class LazyTurtle:
 
         try:
             with self._lock, torch.inference_mode():
+                self._prepare_native_fp32_slots(shell_model, shell_model, "")
                 for idx, (qname, shell_sub) in enumerate(modules):
                     if isinstance(shell_sub, skip_module_types):
                         continue
@@ -1870,6 +1921,7 @@ class LazyTurtle:
 
         path = _get_qualified_name(target_model, target_submodule)
         with self._lock, torch.inference_mode():
+            self._prepare_native_fp32_slots(target_model, target_submodule, path, recurse=False)
             self._materialize_direct_meta_tensors(
                 shell_sub=target_submodule,
                 module_path=path,
@@ -2771,7 +2823,12 @@ class LazyTurtle:
                 return []
 
             fused_parts = parts[: expert_pos + 1] + [fused_leaf]
-            return [(".".join(fused_parts), expert_index, split_index, split_dim)]
+            candidates = [(".".join(fused_parts), expert_index, split_index, split_dim)]
+            if proj_name in {"gate_proj", "up_proj"}:
+                separate_leaf = proj_name if tensor_name == "weight" else f"{proj_name}_bias"
+                separate_parts = parts[: expert_pos + 1] + [separate_leaf]
+                candidates.append((".".join(separate_parts), expert_index, None, None))
+            return candidates
 
         if len(parts) < 2:
             return []
@@ -3604,6 +3661,7 @@ class LazyTurtle:
     ) -> int:
         """Materialize checkpoint tensors into a shell submodule and rebuild missing init-only buffers."""
 
+        self._prepare_native_fp32_slots(target_model, target_submodule, module_path, recurse=recurse)
         t_params = dict(target_submodule.named_parameters(recurse=recurse))
         t_bufs = dict(target_submodule.named_buffers(recurse=recurse))
         # `skip_module_types` names module classes that own a packed
