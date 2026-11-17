@@ -20,6 +20,9 @@ pytest.importorskip("mlx.core")
     ("bitsandbytes", "bitsandbytes", 4, -1, True, "BitsAndBytesMlxQuantLinear"),
 ])
 def test_mlx_registry_has_method_holder(method, fmt, bits, group, sym, expected):
+    if method == "bitsandbytes":
+        # The MLX BNB holder reuses BitsAndBytesLinear's dependency probe.
+        pytest.importorskip("bitsandbytes")
     from gptqmodel.models._const import DEVICE
     from gptqmodel.quantization.config import FORMAT, METHOD
     from gptqmodel.utils.backend import BACKEND

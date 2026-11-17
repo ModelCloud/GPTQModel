@@ -19,6 +19,9 @@ nn = pytest.importorskip("mlx.nn")
     ("BitsAndBytesMlxQuantLinear", 4, 3),
 ])
 def test_dense_holder_validates_without_affine_group_limits(holder, bits, invalid_bits):
+    if holder == "BitsAndBytesMlxQuantLinear":
+        # The MLX BNB holder reuses BitsAndBytesLinear's dependency probe.
+        pytest.importorskip("bitsandbytes")
     from gptqmodel.models._const import DEVICE
     from gptqmodel.nn_modules.qlinear import mlx as mlx_holders
 
