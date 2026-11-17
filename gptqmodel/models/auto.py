@@ -1306,10 +1306,19 @@ class GPTQModel:
             backend = BACKEND.GPTQ_TORCH
 
         # load gptq model
+        # The MLX converter only reads packed tensors on the host, and the
+        # portable readers for the GEMV layouts (AWQ_TORCH -> AwqGEMVTorchLinear
+        # / AwqGEMVFastTorchLinear) are CPU-only, so a visible accelerator made
+        # this export fail with `does not support device: cuda:0` (#4809).
+        # Paro's export backend is CUDA-only, so it keeps the default device.
+        load_kwargs = (
+            {} if normalized_method == METHOD.PARO.value else {"device": "cpu"}
+        )
         gptq_model = GPTQModel.load(
             model_id_or_path,
             backend=backend,
             trust_remote_code=trust_remote_code,
+            **load_kwargs,
         )
 
         if normalized_format == "mlx":
