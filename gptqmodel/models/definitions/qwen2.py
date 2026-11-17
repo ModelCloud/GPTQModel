@@ -10,6 +10,8 @@ from .llama import LlamaQModel
 
 
 class Qwen2QModel(LlamaQModel):
+    solver_format_support = frozenset({("gptq", "mxfp4", "cpu")})
+
     # Qwen2 keeps the Llama decoder layout (an `x * w` RMSNorm and a
     # post-attention norm that feeds the MLP), so model-wide rotation is
     # exact. The declaration is per model type and is never inherited; see

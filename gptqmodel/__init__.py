@@ -865,7 +865,10 @@ from .quantization import (
     RTNConfig,
     TelemetryConfig,
     WeightOnlyConfig,
+    formats,
+    solvers,
 )
+from .quantization.targeting import MatchedQuantizeConfig, Matcher
 from .reshard import ShardConfig, ShardLayout, reshard
 from .utils import BACKEND, PROFILE
 from .utils.p2p import P2PConfig

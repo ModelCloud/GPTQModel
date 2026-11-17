@@ -11,8 +11,10 @@ objective; converting an INT4 solution afterward is not the same optimization.
 
 This is an executable mathematical feasibility study, **not production support**.
 `format_reference.py` implements finite CPU codecs; `format_solver_reference.py`
-implements small linear reconstruction experiments. Neither is wired into
-`QuantizeConfig`, the looper, checkpoint writers, or inference dispatch.
+implements small linear reconstruction experiments. The separate
+[matched solver/format CPU lifecycle](matched-solver-format.md) now reuses the
+MXFP4 codec for a narrowly qualified Qwen2 GPTQ path; other combinations below
+remain mathematical references, not enabled model lifecycles.
 `GPTQModel.export` and protocol `export` fields are deliberately unchanged.
 
 ## Format contracts
@@ -207,8 +209,8 @@ is introduced; decoding is temporary inside the reference forward operation.
 The code is intentionally small-matrix/single-threaded and retains full FP64
 solver scratch, not a production memory-scalable implementation.
 
-**Next architectural step (not implemented):** separate solver choice, target
-numeric format, checkpoint container/layout, and runtime kernel capability.
-Then migrate the public API only with consumer-level conformance tests. A
+**First architectural step:** the [matched config API](matched-solver-format.md)
+separates solver choice and target format, validates per-module plans, and
+qualifies CPU GPTQ → MXFP4 on Qwen2 with save/load conformance tests. A
 format name alone is not a promise that every solver, model graph, or device
 can execute it.

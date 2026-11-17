@@ -4682,6 +4682,8 @@ class QuantizeConfigMeta(type):
         return super().__subclasscheck__(subclass)
 
     def __call__(cls, *args, **kwargs):
+        if (cls is QuantizeConfig and "solver" in kwargs) or getattr(cls, "_matched_solver_config", False):
+            return type.__call__(cls, *args, **kwargs)
         kwargs = _normalize_quantize_config_constructor_kwargs(kwargs)
         if cls is QuantizeConfig:
             # A serialized `to_dict()` payload keeps calibration/meta settings
@@ -5948,8 +5950,28 @@ class PreProcessorConfig(BaseQuantizeConfig):
 class QuantizeConfig(BaseQuantizeConfig, metaclass=QuantizeConfigMeta):
     """Backward-compatible quantization config factory.
 
-    Direct construction dispatches to a concrete method-specific config class.
+    Legacy construction dispatches to a method-specific config class. Supplying
+    a typed solver constructs a solver/format policy for model.quantize(config=...).
     """
+
+    def __init__(self, *, solver, format):
+        from . import formats, solvers
+
+        if not isinstance(solver, (solvers.GPTQ, solvers.AWQ)):
+            raise TypeError("solver must be a typed solvers.GPTQ or solvers.AWQ configuration")
+        if not isinstance(format, (formats.MXFP4, formats.MXFP8)):
+            raise TypeError("format must be a typed target format")
+        self.solver = solver
+        self.format = format
+
+    def to_dict(self):
+        return {"solver": self.solver.to_dict(), "format": self.format.to_dict()}
+
+    def __repr__(self):
+        return f"{type(self).__name__}({self.to_dict()!r})"
+
+    def __eq__(self, other):
+        return type(self) is type(other) and self.to_dict() == other.to_dict()
 
 
 @dataclass

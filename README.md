@@ -335,6 +335,7 @@ and [quantization recipes](https://github.com/ModelCloud/GPTQModel/blob/main/doc
 | --- | --- |
 | Choose precision, format, and backend | [Quantization recipes](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md) · [Support matrix](https://github.com/ModelCloud/GPTQModel/blob/main/docs/support-matrix.md) |
 | Investigate solver/format separation | [CPU hardware-format feasibility proofs](docs/format-solver-feasibility.md) (research reference, not production support) |
+| Target modules with solver/format configs | [Matched configs, automatic planning, and CPU GPTQ → MXFP4](docs/matched-solver-format.md) (Qwen2 correctness lifecycle) |
 | Configure mixed precision and advanced options | [Configuration reference](https://github.com/ModelCloud/GPTQModel/wiki/QuantizeConfig-Reference) · [Protocols](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization_protocol.md) |
 | Quantize large or MoE models | [Multi-GPU and memory](https://github.com/ModelCloud/GPTQModel/blob/main/docs/multi_gpu_quantization.md) · [MoE and multimodal](https://github.com/ModelCloud/GPTQModel/wiki/Multimodal-and-MoE-Models) |
 | Select and tune execution backends | [Typed backend configuration](https://github.com/ModelCloud/GPTQModel/blob/main/docs/backend-selection.md), [kernel and thread reference](https://github.com/ModelCloud/GPTQModel/blob/main/docs/kernel-config.md) |

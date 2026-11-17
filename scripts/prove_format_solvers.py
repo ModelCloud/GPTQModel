@@ -100,7 +100,7 @@ def markdown(report):
     lines.extend(["", f"RCO uses {rco['used_bits']} of {rco['budget_bits']} bits including format scales; "
                   f"selected formats: {', '.join(rco['formats'])}. Its additive reconstruction objective matches exhaustive enumeration.",
                   "", "AWQ includes explicit FP32 input scaling; its storage overhead is recorded in JSON. "
-                  "No NVFP8 encoding is assumed. Existing production APIs, checkpoints, and kernels are unchanged.",
+                  "No NVFP8 encoding is assumed. This reference does not qualify native kernels or model graphs.",
                   "", "## Run configuration", "", "```json", json.dumps({k: v for k, v in report.items() if k != "measurements"}, indent=2), "```", ""])
     return "\n".join(lines)
 

@@ -1169,6 +1169,14 @@ class BaseQModel(nn.Module):
             )
         return plan
 
+    def plan(self, *, config):
+        """Print and return the compatibility-checked solver/format target plan."""
+        from ..quantization.targeting import resolve_plan
+
+        plan = resolve_plan(self, config)
+        print(plan.summary())
+        return plan
+
     def fuse(self, enabled: bool = True, *, overrides: Optional[Dict[str, bool]] = None) -> Optional[FusionPlanner]:
         """Apply optional QKV/gate-up fusion and return its FusionPlanner.
 
@@ -2114,7 +2122,21 @@ class BaseQModel(nn.Module):
         # Drop attention-sink tokens (every attended BOS token) from every
         # processor's calibration statistics (issue #4393).
         calibration_exclude_attention_sinks: bool = False,
+        config=None,
     ) -> Dict[str, List[Dict[str, str]]]:
+        if config is not None:
+            plan = self.plan(config=config)
+            if not plan.success:
+                raise ValueError("Unsupported quantization plan: " + "; ".join(plan.errors))
+            if (adapter is not None or adapter_calibration_dataset is not None or checkpoint is not None
+                    or embed_quant_config is not None or embed_quant_mode is not None or fuse
+                    or calibration_exclude_attention_sinks or calibration_concat_size is not None
+                    or calibration_concat_separator is not None or backend not in (None, BACKEND.AUTO)
+                    or calibration_sort not in (None, "desc") or calibration_data_min_length != 10):
+                raise ValueError("Solver/format quantization does not support these legacy quantize options")
+            from ..quantization.solver_format import quantize_model
+
+            return quantize_model(self, calibration, plan, tokenizer=tokenizer, batch_size=batch_size)
         run_started = time.perf_counter()
         if type(calibration_exclude_attention_sinks) is not bool:
             raise TypeError("`calibration_exclude_attention_sinks` must be a bool")
@@ -3382,6 +3404,14 @@ class BaseQModel(nn.Module):
             split_by: Optional[str] = None,
             **kwargs,
     ):
+        if getattr(self, "_solver_format_partial", False):
+            raise ValueError("Cannot save an incomplete solver/format run; reload the dense source")
+        if getattr(self, "_format_solutions", None):
+            if kwargs or eora_path is not None or split_by is not None or meta_quantizer is not None:
+                raise TypeError("Unsupported save options for a solver/format checkpoint")
+            from .solver_format_checkpoint import save_checkpoint
+
+            return save_checkpoint(self, save_dir, max_shard_size=max_shard_size, metadata=safetensors_metadata)
         timer = getattr(self, "quant_region_timer", None)
         start_time = time.perf_counter() if timer else None
 

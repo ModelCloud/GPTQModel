@@ -1935,6 +1935,8 @@ def ModelLoader(cls):
             runtime: Optional[RuntimeConfig] = None,
             **model_init_kwargs,
     ):
+        if hasattr(quantize_config, "solver"):
+            raise ValueError("Pass solver/format configuration to model.quantize(config=...), not from_pretrained()")
         backend, kernel = resolve_quantize_backend(backend, quantize_config, kernel, runtime)
         if p2p is not None and quantize_config is not None:
             # The loopers read this field and install it before enabling peers.
@@ -2474,7 +2476,16 @@ def ModelLoader(cls):
         # guards above still apply -- this path builds the model through
         # transformers like any other, so the same version and
         # trust_remote_code rules hold.
+        from .solver_format_checkpoint import load_checkpoint, read_manifest
         from .tt_blockfloat_loader import is_tt_blockfloat_checkpoint
+
+        solution_dir = resolve_checkpoint_subfolder(model_local_path, kwargs_without_internal.get("subfolder", ""))
+        if read_manifest(solution_dir).get("quant_method") == "solver_format":
+            if (requested_device_map is not None
+                    or (requested_device is not None and str(requested_device) != "cpu")
+                    or backend != BACKEND.AUTO or fuse or adapter is not None or max_memory is not None):
+                raise ValueError("Solver/format checkpoints currently require CPU, AUTO backend, and no fusion/adapter")
+            return load_checkpoint(cls, solution_dir, dtype=dtype)
 
         if is_tt_blockfloat_checkpoint(model_local_path):
             if requested_device_map is not None or (
