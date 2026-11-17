@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""``GPTQModel.export(..., "hf")`` must emit a loadable dense model.
+"""``dequantize_model()`` must emit a loadable dense model.
 
-The export routes through the checkpoint-level dequantizer so AWQ layouts,
-quantized embeddings, and legacy ``quantize_config.json``-only checkpoints are
-all covered. The synthetic cases below build the packed tensors from explicit
-codes, zero points, and scales, then compare the exported dense weights against
-an independent fp64 oracle.
+The checkpoint-level dequantizer covers AWQ layouts, quantized embeddings, and
+legacy ``quantize_config.json``-only checkpoints. The synthetic cases below
+build the packed tensors from explicit codes, zero points, and scales, then
+compare the dense weights against an independent fp64 oracle.
 """
 
 import json
@@ -18,8 +17,12 @@ import torch
 from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM
 
-from gptqmodel import GPTQModel
-from gptqmodel.utils.model_dequant import dequantize_model, detect_format, pack_cols
+from gptqmodel.utils.model_dequant import (
+    copy_aux_files,
+    dequantize_model,
+    detect_format,
+    pack_cols,
+)
 
 
 _LOCAL_AWQ = "/monster/data/model/AWQ-Llama-3.2-1B-g128-gemm"
@@ -154,7 +157,7 @@ def _tiny_llama_checkpoint(path: Path, *, bits: int, lm_head_bits: int, legacy_c
 
 
 @pytest.mark.parametrize("bits,lm_head_bits", [(3, 4), (4, 8)])
-def test_export_hf_quantized_embeddings_and_dynamic_bits(tmp_path, bits, lm_head_bits):
+def test_dequantize_model_quantized_embeddings_and_dynamic_bits(tmp_path, bits, lm_head_bits):
     source = tmp_path / "source"
     source.mkdir()
     expected = _tiny_llama_checkpoint(
@@ -162,7 +165,7 @@ def test_export_hf_quantized_embeddings_and_dynamic_bits(tmp_path, bits, lm_head
     )
 
     out = tmp_path / "out"
-    GPTQModel.export(str(source), str(out), "hf")
+    dequantize_model(source, out)
 
     saved_config = json.loads((out / "config.json").read_text(encoding="utf-8"))
     assert "quantization_config" not in saved_config
@@ -182,7 +185,7 @@ def test_export_hf_quantized_embeddings_and_dynamic_bits(tmp_path, bits, lm_head
             )
 
 
-def test_export_hf_accepts_legacy_quantize_config_only(tmp_path):
+def test_dequantize_model_accepts_legacy_quantize_config_only(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     expected = _tiny_llama_checkpoint(
@@ -190,7 +193,7 @@ def test_export_hf_accepts_legacy_quantize_config_only(tmp_path):
     )
 
     out = tmp_path / "out"
-    GPTQModel.export(str(source), str(out), "hf")
+    dequantize_model(source, out)
 
     assert (out / "model.safetensors").is_file()
     model = AutoModelForCausalLM.from_pretrained(str(out))
@@ -206,9 +209,9 @@ def test_export_hf_accepts_legacy_quantize_config_only(tmp_path):
 
 
 @pytest.mark.skipif(not Path(_LOCAL_AWQ).is_dir(), reason="local AWQ checkpoint not present")
-def test_export_hf_awq_checkpoint_reloads(tmp_path):
+def test_dequantize_model_awq_checkpoint_reloads(tmp_path):
     out = tmp_path / "out"
-    GPTQModel.export(_LOCAL_AWQ, str(out), "hf")
+    dequantize_model(_LOCAL_AWQ, out)
 
     saved_config = json.loads((out / "config.json").read_text(encoding="utf-8"))
     assert "quantization_config" not in saved_config
@@ -234,7 +237,7 @@ def test_export_hf_awq_checkpoint_reloads(tmp_path):
         ("exl3", "exl3"),
     ],
 )
-def test_export_hf_refuses_a_method_without_a_dense_decoder(tmp_path, method, format_name):
+def test_dequantize_model_refuses_a_method_without_a_dense_decoder(tmp_path, method, format_name):
     """Tensor-name sniffing decoded these with a different layout (#4786).
 
     Paro carries ``.qweight`` without ``.g_idx`` and was decoded as AWQ;
@@ -265,3 +268,38 @@ def test_export_hf_refuses_a_method_without_a_dense_decoder(tmp_path, method, fo
 
     # The declared method decides; its `format` is only a sub-format of it.
     assert detect_format(model_dir, payload) == method
+_QUANT_METADATA_FILES = ("quantize_config.json", "quant_config.json", "quant_log.csv")
+
+
+def test_dequantize_model_drops_quantization_metadata(tmp_path):
+    """A dense checkpoint must not keep metadata that makes it look quantized."""
+
+    source = tmp_path / "source"
+    source.mkdir()
+    _tiny_llama_checkpoint(source, bits=4, lm_head_bits=4, legacy_config=True)
+    (source / "quant_config.json").write_text("{}", encoding="utf-8")
+    (source / "quant_log.csv").write_text("layer,bits\n", encoding="utf-8")
+
+    out = tmp_path / "out"
+    dequantize_model(source, out)
+
+    assert (out / "model.safetensors").is_file()
+    for name in _QUANT_METADATA_FILES:
+        assert not (out / name).exists(), f"dense output kept quantization metadata: {name}"
+        assert (source / name).exists(), f"dequantization must not delete the source file: {name}"
+
+
+def test_copy_aux_files_still_copies_quantization_metadata(tmp_path):
+    """Quantized checkpoints keep their metadata; only the dense output drops it."""
+
+    source = tmp_path / "source"
+    source.mkdir()
+    for name in _QUANT_METADATA_FILES:
+        (source / name).write_text("{}", encoding="utf-8")
+
+    out = tmp_path / "out"
+    out.mkdir()
+    copy_aux_files(source, out, skip=set())
+
+    for name in _QUANT_METADATA_FILES:
+        assert (out / name).is_file()
