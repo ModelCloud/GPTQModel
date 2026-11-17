@@ -5,8 +5,13 @@ Checkpoint `auto_map`, API trust, and the safety bypass cannot replace these
 config/model classes. See [implementation selection](trust-remote-code-isolation.md)
 for the complete selection and failure flow.
 
+Definitions with exact native Transformers 5 support retain their native
+implementation. Their rows record checkpoint/layout qualification and any
+definition ownership corrections alongside the package-owned ports.
+
 | Definition / model type | Implementation and provenance | CPU validation | AWQ policy | Limits |
 | --- | --- | --- | --- | --- |
+| `AfMoeQModel` / `afmoe` | [Native Afmoe / Trinity qualification](../gptqmodel/models/ports/afmoe/README.md); Transformers 5.23.0 Apache-2.0 implementation; pinned Mini/Nano/Large index schemas and checkpoint license recorded locally | Full meta inventories match all three checkpoint schemas; unequal attention/residual widths; dense/MoE ownership, native conversion and routing oracle, cache/generation, public trust/bypass matrix, safetensors retry/round trips | Tested plain quantization for all declared linears; norms, router and expert bias stay dense | CPU pseudoquantization; no GPU packing/kernel or trained-checkpoint quality qualification; no scaling/folding claim |
 | `InternLMQModel` / `internlm` | [InternLM 1 port](../gptqmodel/models/ports/internlm/README.md); Apache-2.0; upstream revision `96e127d08d851a88cac736a9b091dd953ae1b873` | Independent FP32/FP16/BF16 numerical oracle; biased/unbiased origin/dynamic rotary; eager/SDPA; generation/cache/beam lifecycle; public dense load and safetensors reload; live meta-model weight ownership; all 14 linears in two-layer AWQ quantization/reload | Tested plain quantization, zero scale-fold groups | No GPU or trained 7B numerical/quality qualification; fusion and foreign/static/quantized KV caches unsupported |
 
 Only integrated implementations are listed here. This table does not qualify
