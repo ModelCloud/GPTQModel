@@ -33,15 +33,34 @@ from gptqmodel.utils.security import BYPASS_ENV
 
 
 PORT = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/kimi_k25"
+TOKENIZER_FIXTURES = Path(__file__).resolve().parent / "fixtures/kimi_k25"
 
 
 def save_real_tokenizer(path):
-    for asset in (PORT / "qualification_assets").iterdir():
+    for filename in ("tiktoken.model", "chat_template.jinja", "tokenizer_config.json"):
+        asset = TOKENIZER_FIXTURES / filename
         shutil.copyfile(asset, path / asset.name)
     data = json.loads((path / "tokenizer_config.json").read_text())
     data["auto_map"] = {"AutoTokenizer": ["hostile.Tokenizer", None]}
     data["tokenizer_class"] = "HostileTokenizer"
     (path / "tokenizer_config.json").write_text(json.dumps(data))
+
+
+def test_tokenizer_qualification_assets_are_pinned_test_only_data():
+    expected = {
+        "tiktoken.model": "b6c497a7469b33ced9c38afb1ad6e47f03f5e5dc05f15930799210ec050c5103",
+        "chat_template.jinja": "7c91e4b3578b518bfb388d2e3dc645daf0fbf843656e887db75d12891e0030ff",
+        "tokenizer_config.json": "12fcab43d2b6068f46769f5ff373960bf7c17a94d7abbc50e2491306b2f6cf58",
+        "LICENSE": "c524b41658421b8b143c5b50637ef008909da56013ad12ccaba0536139ee35b0",
+    }
+    for filename, digest in expected.items():
+        assert hashlib.sha256((TOKENIZER_FIXTURES / filename).read_bytes()).hexdigest() == digest
+    assert (TOKENIZER_FIXTURES / "LICENSE").read_bytes() == (PORT / "LICENSE").read_bytes()
+    assert not (PORT / "qualification_assets").exists()
+    assert not (PORT / "tiktoken.model").exists()
+    assert hashlib.sha256((PORT / "LICENSE-APACHE-2.0").read_bytes()).hexdigest() == (
+        "77fd4710def9ec3c0f6225800e0235f15a425abd4a8b03559127fcd782612049"
+    )
 
 
 def assert_shared_tokenizer_contract(tokenizer, reference):
@@ -240,7 +259,7 @@ def test_public_load_ignores_checkpoint_python(tmp_path, monkeypatch, trust, byp
     assert type(loaded.tokenizer.tokenizer) is TikTokenTokenizer
     assert loaded.processor.tokenizer is loaded.tokenizer.tokenizer
     assert_shared_tokenizer_contract(loaded.tokenizer.tokenizer, TikTokenTokenizer.from_pretrained(
-        PORT / "qualification_assets",
+        TOKENIZER_FIXTURES,
     ))
     assert loaded.tokenizer.encode("Hello, 世界!") == [19180, 11, 220, 2243, 0]
     assert not loaded.trust_remote_code
@@ -259,7 +278,7 @@ def test_shared_tokenizer_survives_failed_processor_and_two_live_consumers(tmp_p
     save_real_tokenizer(tmp_path)
     config = load_model_config(tmp_path)
     tokenizer = load_hf_tokenizer(tmp_path, model_config=config)
-    reference = TikTokenTokenizer.from_pretrained(PORT / "qualification_assets")
+    reference = TikTokenTokenizer.from_pretrained(TOKENIZER_FIXTURES)
     assert tokenizer.all_special_ids == reference.all_special_ids
     initialize = NativeProcessor.__init__
     failed = []
@@ -299,7 +318,7 @@ def test_public_plain_awq_preserves_shared_tokenizer_across_two_save_reloads(tmp
         image_token_id=163605, video_token_id=163840, pad_token_id=163839, bos_token_id=163584, eos_token_id=163585,
     )
     save_real_tokenizer(tmp_path)
-    reference = TikTokenTokenizer.from_pretrained(PORT / "qualification_assets")
+    reference = TikTokenTokenizer.from_pretrained(TOKENIZER_FIXTURES)
     config = AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=False)
     wrapper = GPTQModel.load(str(tmp_path), quantize_config=config, backend=BACKEND.TORCH,
                             dtype=torch.float16, attn_implementation="eager", trust_remote_code=False)
@@ -342,7 +361,7 @@ def test_public_plain_awq_preserves_shared_tokenizer_across_two_save_reloads(tmp
 
 
 def test_pinned_tokenizer_ids_chat_tools_and_roundtrip(tmp_path):
-    assets = PORT / "qualification_assets"
+    assets = TOKENIZER_FIXTURES
     assert hashlib.sha256((assets / "tiktoken.model").read_bytes()).hexdigest() == (
         "b6c497a7469b33ced9c38afb1ad6e47f03f5e5dc05f15930799210ec050c5103"
     )
