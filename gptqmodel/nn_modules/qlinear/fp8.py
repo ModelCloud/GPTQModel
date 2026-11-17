@@ -694,22 +694,25 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
     def _forward_dequant_matmul(
         self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        if (
-            bias is not None
-            and x_flat.dtype in (torch.float16, torch.bfloat16)
-            and (
-                x_flat.device.type != "cuda"
-                or bias.dtype != x_flat.dtype
-                or autocast_active(x_flat.device.type)
-            )
+        if x_flat.dtype in (torch.float16, torch.bfloat16) and (
+            bias is None
+            or x_flat.device.type != "cuda"
+            or bias.dtype != x_flat.dtype
+            or autocast_active(x_flat.device.type)
         ):
-            # The bias and the reduction can cancel outside the activation
-            # range. Decode into temporary FP32 storage and round only after
-            # their sum; autocast must not narrow this matmul again.
+            # The stored weights can lie outside the activation dtype's finite
+            # range (for example 65536 decoded from an FP8 row scale), so
+            # narrowing them before the reduction turns a finite dot product
+            # into NaN/inf even with no bias. The bias can also cancel a sum
+            # outside the activation range. Decode into temporary FP32 storage
+            # and round only after the reduction and optional bias; autocast
+            # must not narrow this matmul again.
             with torch.autocast(device_type=x_flat.device.type, enabled=False):
                 weight = self.dequantize_weight(device=x_flat.device, dtype=torch.float32)
                 output = torch.matmul(x_flat.float(), weight)
-                return (output + bias.to(device=x_flat.device, dtype=torch.float32)).to(x_flat.dtype)
+                if bias is not None:
+                    output = output + bias.to(device=x_flat.device, dtype=torch.float32)
+                return output.to(x_flat.dtype)
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
         return matmul_fp32_reduce(x_flat, weight, bias=bias)
 
