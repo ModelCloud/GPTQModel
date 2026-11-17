@@ -1087,6 +1087,20 @@ void qqq_gemm(
   int sms = -1,
   int max_par = 8
 ) {
+  // ``qqq_cuda`` indexes A/B/C/D through their data_ptr with no stride
+  // argument, so every operand must be densely packed. A strided INT8
+  // activation (a transposed prefill view) used to be read row-major and
+  // multiplied as garbage instead of failing here (#4740).
+  if (A.dim() != 2)
+    AT_ERROR("A must be 2-D, but got ", A.dim(), " dimensions.");
+  if (A.scalar_type() != torch::kChar)
+    AT_ERROR("A dtype must be int8, but got ", A.scalar_type(), ".");
+  if (!A.is_contiguous())
+    AT_ERROR("A must be contiguous; pack the quantized activation before the GEMM.");
+  if (D.scalar_type() != torch::kFloat16)
+    AT_ERROR("D dtype must be float16, but got ", D.scalar_type(), ".");
+  if (!D.is_contiguous())
+    AT_ERROR("D must be contiguous.");
   int prob_m = A.size(0);
   int prob_n = C.size(1);
   int prob_k = A.size(1);
