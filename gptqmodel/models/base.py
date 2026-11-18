@@ -1053,7 +1053,7 @@ class BaseQModel(nn.Module):
     # Preserve adapter-supplied position_embeddings during AWQ replay instead of rebuilding them from the root rotary.
     awq_preserve_explicit_position_embeddings = False
 
-    # some models require trust_remove_code = True (dbrx_converted)
+    # Some definitions require an explicit request to execute checkpoint Python.
     require_trust_remote_code = None
 
     # some models require extra python packages and/or specific version of pkgs such as transformer version(internalm require '<=4.42.2')

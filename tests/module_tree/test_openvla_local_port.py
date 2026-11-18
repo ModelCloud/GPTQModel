@@ -14,7 +14,8 @@ from gptqmodel.models.definitions.openvla import OpenVLAQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.ports.openvla.configuration_prismatic import LLM_BACKBONE_TO_HF_METACLASS, OpenVLAConfig
 from gptqmodel.models.ports.openvla.modeling_prismatic import OpenVLAForActionPrediction
-from tests.test_openvla_local_port import _asset, _config, _write_assets
+from tests.port_assets import read_port_json
+from tests.test_openvla_local_port import FIXTURES, _asset, _config, _write_assets
 
 
 @pytest.fixture(scope="module")
@@ -71,7 +72,7 @@ def test_openvla_real_weight_owners_and_module_plans(llm, kv_heads, bias, device
 
 
 def test_openvla_full_pinned_release_header_inventory():
-    inventory = json.loads(_asset("checkpoint_inventory.json"))
+    inventory = read_port_json(FIXTURES / "checkpoint_inventory.json")
     config = OpenVLAConfig(**json.loads(_asset("config.json")))
     with torch.device("meta"):
         model = OpenVLAForActionPrediction(config)

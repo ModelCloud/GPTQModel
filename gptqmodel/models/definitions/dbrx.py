@@ -6,7 +6,5 @@
 from ..base import BaseQModel
 
 
-# placer=holder only as dbrx original models are not supported
-# supported dbrx_converted models can be found on https://hf.co/ModelCloud
 class DbrxQModel(BaseQModel):
-    info = {"notes": "Dbrx is only supported using defused/converted models on https://hf.co/ModelCloud with `trust_remote_code=True`"}
+    info = {"notes": "Use a defused `dbrx_converted` checkpoint from https://hf.co/ModelCloud with the package-owned loader."}

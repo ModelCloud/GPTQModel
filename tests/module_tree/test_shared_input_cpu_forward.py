@@ -95,7 +95,7 @@ def _jamba_cfg():
 def _spark_cfg():
     # Use the pinned release config through the package-owned class, then shrink it.
     cfg = Spark2_5Config.from_pretrained(
-        Path(__file__).resolve().parents[2] / "gptqmodel/models/ports/spark2_5/fixtures"
+        Path(__file__).resolve().parents[1] / "fixtures/ports/spark2_5/fixtures"
     )
     cfg.vocab_size = VOCAB
     cfg.hidden_size = 32
