@@ -238,6 +238,53 @@ The failure path is an empty filtered list, which `_filter_forward_devices`
 already resolves by keeping the unfiltered pool; `run` then falls back to
 `cur_layer_device`.
 
+## AWQ scale groups on a balanced MoE pool
+
+`VramStrategy.BALANCED` assigns the routed experts of one MoE family to devices
+round-robin, and `build_subset_plan` keys that assignment by expert. An AWQ
+scale group is anchored on the tensor that produces its input (for a MoE block,
+the shared `post_attention_layernorm`), so a single group can contain the
+gate/up projections of every expert and therefore span every device of the
+pool.
+
+AWQ therefore treats a scaling group as *one source, many devices*:
+
+* the weight-mean reduction gathers each member's per-channel sum onto the
+  accumulator's device;
+* the 20-candidate grid multiplies each member by the shared channel scale on
+  that member's own device;
+* the final fold divides the norm on the norm's device and multiplies each
+  consumer on the consumer's device, so a norm-anchored group is never
+  co-located.
+
+A linear- or activation-anchored group still co-locates its consumers, because
+those folds reshape the source weight itself.
+
+```mermaid
+flowchart TD
+    A["AWQ group for one prev_op"] --> B{"_is_norm_source prev_op?"}
+    B -- "yes" --> C["fold norm on its device"]
+    C --> D["scale_ln_fcs: each fc applies s<br/>on fc weight device"]
+    B -- "no" --> E["co-locate consumers on layers[0]"]
+    E --> F["scale_fc_fcs / scale_gelu_fc"]
+    D --> G["restore norm placement"]
+    F --> G
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| `_accumulate_awq_weight_mean` (`gptqmodel/looper/awq_processor.py`) | `w_sum += member.sum(0)` on `layers[0]`'s device | Reductions gathered with `.to(w_sum.device)` |
+| `_compute_best_scale` candidate replay | Scale applied to every member on `layers[0]`'s device | Scale moved to each member's device |
+| `apply_scale` (`gptqmodel/quantization/awq/quantize/scale.py`) | Whole group moved onto `layers[0]`'s device | Norm anchored groups fold in place; only linear/activation groups co-locate |
+
+The pre-fix flow raised `RuntimeError: Expected all tensors to be on the same
+device` in layer 0 after calibration capture for every MoE model with a
+balanced pool (`#5104`). Regression coverage lives in
+`tests/test_awq_balanced_moe_5104.py` (end-to-end balanced vs exclusive
+quantization on a tiny 16-expert Qwen3-MoE) and
+`tests/test_awq_balanced_moe_group_5104.py` (weight mean, candidate grid and
+fold over a group split across two devices).
+
 ## Excluded devices stay unclaimed
 
 A run may exclude a visible GPU either with `device=("cuda:1",)` or with the

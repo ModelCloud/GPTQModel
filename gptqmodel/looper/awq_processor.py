@@ -154,7 +154,14 @@ def _accumulate_awq_weight_mean(
     layers: List[nn.Linear],
     group_size: int | List[int],
 ) -> Tuple[torch.Tensor, int]:
-    """Accumulates normalized per-channel weight sums across a group of linears."""
+    """Accumulates normalized per-channel weight sums across a group of linears.
+
+    A scaling group is anchored on one source tensor (a norm, a linear or a
+    MoE block), not on one device. With ``VramStrategy.BALANCED`` the routed
+    experts of a norm-anchored MoE group live on every device of the MoE pool,
+    so each member's reduction is gathered onto the accumulator's device
+    instead of relying on an implicit same-device add.
+    """
 
     if not layers:
         raise ValueError("Expected at least one linear layer to compute the AWQ weight mean.")
@@ -193,7 +200,9 @@ def _accumulate_awq_weight_mean(
         weight_view = weight_abs.reshape(rows, -1, effective_group_size)
         group_scale = weight_view.amax(dim=2, keepdim=True)
         weight_view.div_(group_scale.add_(1e-6))
-        w_sum += weight_abs.sum(dim=0, dtype=torch.float32)
+        # `to()` is a no-op on the accumulator's own device, so a single-device
+        # group keeps the previous allocation-free add.
+        w_sum += weight_abs.sum(dim=0, dtype=torch.float32).to(w_sum.device)
         row_count += rows
 
     return w_sum, row_count
@@ -4243,7 +4252,11 @@ class AWQProcessor(LoopProcessor):
                 master = orig_weights[fc]
                 if master.device != fc.weight.device or master.dtype != fc.weight.dtype:
                     master = master.to(device=fc.weight.device, dtype=fc.weight.dtype)
-                torch.mul(master, scales_view, out=fc.weight)
+                # Members of one group can live on different devices when a
+                # balanced MoE pool splits a norm-anchored group (#5104). The
+                # channel scale is one tensor; each member reads it from its own
+                # device.
+                torch.mul(master, scales_view.to(fc.weight.device), out=fc.weight)
 
         try:
             device = next(module2inspect.parameters()).device
@@ -4321,7 +4334,7 @@ class AWQProcessor(LoopProcessor):
                         fc.weight,
                         **quantize_kwargs,
                     )
-                    fc.weight.div_(scales_view)
+                    fc.weight.div_(scales_view.to(fc.weight.device))
 
                 # W * X
                 if use_chunked_scale_search:
