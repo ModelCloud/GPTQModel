@@ -15,4 +15,4 @@ uv pip uninstall "${packages[@]}" || true
 
 echo "===== install ModelCloud git deps ====="
 printf '  - %s\n' "${urls[@]}"
-uv pip install "${urls[@]}"
+uv pip install --torch-backend cu132 "${urls[@]}"

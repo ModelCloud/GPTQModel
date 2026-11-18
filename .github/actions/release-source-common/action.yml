@@ -29,6 +29,10 @@ inputs:
     description: Whether uploading to PyPI requires PYPI_RELEASE_CONFIRMATION=1.
     required: false
     default: 'false'
+  publish:
+    description: Allow release-event and manual publication requests after the install smoke passes.
+    required: false
+    default: 'false'
   pypi-token:
     description: PyPI API token.
     required: false
@@ -53,6 +57,7 @@ runs:
         bash .github/scripts/ci_release_check_dist.sh
 
     - name: Test installation
+      id: install
       if: ${{ inputs.test-install == 'true' }}
       shell: bash
       run: |
@@ -74,7 +79,7 @@ runs:
 
     - name: Upload package to release
       uses: svenstaro/upload-release-action@v2
-      if: ${{ (github.event_name == 'release' || github.event.inputs.upload_release == 'true') && !cancelled() }}
+      if: ${{ success() && steps.install.outcome == 'success' && inputs.publish == 'true' && (github.event_name == 'release' || github.event.inputs.upload_release == 'true') }}
       with:
         file: dist/${{ env.PKG_NAME }}
         tag: ${{ env.ref }}
@@ -82,16 +87,16 @@ runs:
         overwrite: true
 
     - name: Waiting for confirmation
-      if: ${{ (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled() }}
+      if: ${{ success() && steps.install.outcome == 'success' && inputs.publish == 'true' && (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') }}
       shell: bash
       run: |
         bash .github/scripts/ci_release_wait_for_confirmation.sh "${{ inputs.confirmation-mode }}"
 
     - name: Upload sdist to pypi
-      if: ${{ (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled() && (inputs.require-pypi-confirmation != 'true' || env.PYPI_RELEASE_CONFIRMATION == '1') }}
+      if: ${{ success() && steps.install.outcome == 'success' && inputs.publish == 'true' && (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && (inputs.require-pypi-confirmation != 'true' || env.PYPI_RELEASE_CONFIRMATION == '1') }}
       shell: bash
       env:
         TWINE_USERNAME: "__token__"
         TWINE_PASSWORD: ${{ inputs.pypi-token }}
       run: |
-        python -m twine upload dist/*.tar.gz
+        python -m twine upload "dist/$PKG_NAME"
