@@ -1,69 +1,33 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Instance-local accessors for upstream streaming code on Transformers 5 caches."""
+"""Layer-API helpers for MiniCPM-o streaming code on Transformers 5.23 ``DynamicCache``.
 
-from collections.abc import MutableSequence
+Upstream streaming code edits KV tensors directly (sliding windows, RoPE reindexing, round
+dropping). These helpers express those edits through ``Cache.layers`` instead of tuple caches.
+"""
 
-from transformers.cache_utils import DynamicCache as NativeDynamicCache
-
-
-class _TensorView(MutableSequence):
-    def __init__(self, cache, field):
-        self.cache = cache
-        self.field = field
-
-    def __len__(self):
-        return len(self.cache.layers)
-
-    def __getitem__(self, index):
-        if isinstance(index, slice):
-            return [getattr(layer, self.field) for layer in self.cache.layers[index]]
-        return getattr(self.cache.layers[index], self.field)
-
-    def __setitem__(self, index, value):
-        layer = self.cache.layers[index]
-        setattr(layer, self.field, value)
-
-    def __delitem__(self, index):
-        raise TypeError("Remove cache tokens with crop, not individual layers.")
-
-    def insert(self, index, value):
-        raise TypeError("Initialize cache layers with update.")
+from transformers.cache_utils import DynamicCache
 
 
-class DynamicCache(NativeDynamicCache):
-    @property
-    def key_cache(self):
-        return _TensorView(self, "keys")
+def cache_length(cache) -> int:
+    """Sequence length held by ``cache`` (0 for ``None``)."""
+    return 0 if cache is None else cache.get_seq_length()
 
-    @property
-    def value_cache(self):
-        return _TensorView(self, "values")
 
-    @property
-    def seen_tokens(self):
-        return self.get_seq_length()
+def cache_pairs(cache):
+    """``[(keys, values), ...]`` for every initialized layer of ``cache``."""
+    return [(layer.keys, layer.values) for layer in cache.layers if layer.is_initialized]
 
-    def get_usable_length(self, new_seq_length, layer_idx=0):
-        return self.get_seq_length(layer_idx)
 
-    def to_legacy_cache(self):
-        return tuple((layer.keys, layer.values) for layer in self.layers)
+def cache_from_pairs(pairs) -> DynamicCache:
+    """A new ``DynamicCache`` holding ``pairs`` of ``(keys, values)`` per layer."""
+    cache = DynamicCache()
+    for index, (keys, values) in enumerate(pairs):
+        cache.update(keys, values, index)
+    return cache
 
-    @classmethod
-    def from_legacy_cache(cls, values=None):
-        if isinstance(values, cls):
-            return values
-        if isinstance(values, NativeDynamicCache):
-            values = ((layer.keys, layer.values) for layer in values.layers if layer.is_initialized)
-        cache = cls()
-        for index, (keys, vals) in enumerate(values or ()):
-            cache.update(keys, vals, index)
-        return cache
 
-    def __getitem__(self, index):
-        layer = self.layers[index]
-        return layer.keys, layer.values
-
-    def __iter__(self):
-        return iter(self.to_legacy_cache())
+def set_layer_states(cache, layer_idx: int, keys, values) -> None:
+    """Replace the cached tensors of one initialized layer in place."""
+    layer = cache.layers[layer_idx]
+    layer.keys, layer.values = keys, values

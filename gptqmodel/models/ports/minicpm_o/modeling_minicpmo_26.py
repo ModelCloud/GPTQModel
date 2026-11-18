@@ -28,6 +28,7 @@ from torch import nn
 from transformers import Qwen2Config
 from transformers.modeling_outputs import ModelOutput
 
+from .cache import cache_from_pairs, cache_pairs
 from .modeling_minicpmo import MiniCPMO, MiniCPMOPreTrainedModel, MultiModalProjector
 from .native import Qwen2ForCausalLM
 from .processing_minicpmo import MiniCPMOProcessor
@@ -314,7 +315,7 @@ class MiniCPMO26(MiniCPMO):
             max_seq_len = (max_mel_seq_len - 1) // 2 + 1
 
             if self.audio_past_key_values is not None:
-                cache_length = self.audio_past_key_values[0][0].shape[2]
+                cache_length = self.audio_past_key_values.get_seq_length()
                 apm_max_len = self.apm.embed_positions.weight.shape[0]
                 if cache_length + max_seq_len >= apm_max_len:
                     logger.warning(
@@ -1006,7 +1007,7 @@ class MiniCPMO26(MiniCPMO):
             self.audio_past_key_values = None
 
         if self.llm_past_key_values is not None:
-            cache_length = self.llm_past_key_values[0][0].shape[2]
+            cache_length = self.llm_past_key_values.get_seq_length()
         else:
             cache_length = 0
 
@@ -1075,7 +1076,7 @@ class MiniCPMO26(MiniCPMO):
             torch.hstack([(spk_start_idx + 1).unsqueeze(-1), spk_end_idx.unsqueeze(-1)])
         ]  # List[Tensor], (1,2)
 
-        cache_length = self.llm_past_key_values[0][0].shape[2]
+        cache_length = self.llm_past_key_values.get_seq_length()
         attention_mask = torch.ones((1, cache_length + input_ids.shape[1]), dtype=torch.bool, device=self.device)
 
         generation_config["max_new_tokens"] = max_new_tokens
@@ -1134,7 +1135,7 @@ class MiniCPMO26(MiniCPMO):
 
             self.llm_past_key_values = outputs.past_key_values
             input_ids = outputs.sequences[:, -1:]
-            cache_length = self.llm_past_key_values[0][0].shape[2]
+            cache_length = self.llm_past_key_values.get_seq_length()
             attention_mask = torch.ones((1, cache_length + input_ids.shape[1]), dtype=torch.bool, device=self.device)
 
             res = {"text": text}
@@ -1215,7 +1216,7 @@ class MiniCPMO26(MiniCPMO):
 
         dtype = self.tts.emb_text.weight.dtype
         emb = torch.zeros(1, condition_length, self.tts.num_vq, dtype=dtype, device=self.tts.device)
-        past_key_values = [
+        past_key_values = cache_from_pairs(
             (
                 torch.zeros(
                     1,
@@ -1235,7 +1236,7 @@ class MiniCPMO26(MiniCPMO):
                 ),
             )
             for _ in range(self.tts.config.num_hidden_layers)
-        ]
+        )
 
         audio_input_ids = torch.zeros(1, condition_length, self.tts.num_vq, dtype=torch.long, device=self.tts.device)
 
@@ -1388,7 +1389,7 @@ class MiniCPMO26(MiniCPMO):
         )
         tts_start_token_len = 1 + self.tts.use_speaker_embedding * self.tts.num_spk_embs
         dtype = self.tts.emb_text.weight.dtype
-        past_key_values = [
+        past_key_values = cache_from_pairs(
             (
                 torch.zeros(
                     1,
@@ -1408,7 +1409,7 @@ class MiniCPMO26(MiniCPMO):
                 ),
             )
             for _ in range(self.tts.config.num_hidden_layers)
-        ]
+        )
         audio_input_ids = torch.zeros(1, condition_length, self.tts.num_vq, dtype=torch.long, device=self.tts.device)
 
         # prefill prev segment for smooth
@@ -1543,14 +1544,9 @@ class MiniCPMO26(MiniCPMO):
                     voice_checker.reset()
                     # regenerate
                     N = output_chunk_size if prev_wav is None else output_chunk_size * 2
-                    past_kv = []
-                    for i in range(len(past_key_values)):
-                        past_kv.append(
-                            (
-                                past_key_values[i][0][:, :, :-N, :],  # .clone(),
-                                past_key_values[i][1][:, :, :-N, :],  # .clone(),
-                            )
-                        )
+                    past_kv = cache_from_pairs(
+                        (keys[:, :, :-N, :], values[:, :, :-N, :]) for keys, values in cache_pairs(past_key_values)
+                    )
                     outputs = self.tts.generate(
                         input_ids=audio_input_ids[:, :-N, :],
                         past_key_values=past_kv,
@@ -1654,14 +1650,9 @@ class MiniCPMO26(MiniCPMO):
                     voice_checker.reset()
                     # regenerate
                     N = output_chunk_size if prev_wav is None else output_chunk_size * 2
-                    past_kv = []
-                    for i in range(len(past_key_values)):
-                        past_kv.append(
-                            (
-                                past_key_values[i][0][:, :, :-N, :],  # .clone(),
-                                past_key_values[i][1][:, :, :-N, :],  # .clone(),
-                            )
-                        )
+                    past_kv = cache_from_pairs(
+                        (keys[:, :, :-N, :], values[:, :, :-N, :]) for keys, values in cache_pairs(past_key_values)
+                    )
                     outputs = self.tts.generate(
                         input_ids=audio_input_ids[:, :-N, :],
                         past_key_values=past_kv,

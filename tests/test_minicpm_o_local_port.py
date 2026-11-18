@@ -675,3 +675,42 @@ def test_definition_selects_local_omni_without_global_cache_mutation():
     assert not MiniCPMOQModel.require_trust_remote_code
     assert cache_utils.Cache is cache
     assert cache_utils.DynamicCache is dynamic
+
+
+def test_streaming_whisper_encoder_and_cache_edits_use_transformers_cache_layers():
+    from transformers import WhisperConfig
+    from transformers.cache_utils import DynamicCache, EncoderDecoderCache
+
+    from gptqmodel.models.ports.minicpm_o.modeling_minicpmo import MiniCPMWhisperEncoder
+    from gptqmodel.models.ports.minicpm_o.utils import drop_tokens_from_cache
+
+    config = WhisperConfig(num_mel_bins=8, d_model=16, encoder_layers=2, encoder_attention_heads=2,
+                           encoder_ffn_dim=32, max_source_positions=64, decoder_layers=1,
+                           decoder_attention_heads=2, vocab_size=10, pad_token_id=0, bos_token_id=1,
+                           eos_token_id=2, decoder_start_token_id=1)
+    config._attn_implementation = "eager"
+    torch.manual_seed(0)
+    encoder = MiniCPMWhisperEncoder(config).eval()
+    first, second = torch.randn(1, 8, 8), torch.randn(1, 8, 8)
+    with torch.no_grad():
+        prefix = encoder(first, use_cache=True, output_hidden_states=True)
+        cache = prefix.past_key_values
+        assert isinstance(cache, EncoderDecoderCache) and cache.get_seq_length() == 4
+        assert len(prefix.hidden_states) == config.encoder_layers + 1
+        torch.testing.assert_close(prefix.hidden_states[-1], prefix.last_hidden_state)
+        step = encoder(second, past_key_values=cache, use_cache=True, attention_mask=torch.zeros(1, 1, 4, 8))
+        assert step.past_key_values is cache and cache.get_seq_length() == 8
+        # Bidirectional streaming: the second chunk attends to the cached first chunk.
+        alone = encoder(second, use_cache=True, attention_mask=None).last_hidden_state
+        assert not torch.allclose(step.last_hidden_state, alone)
+        assert isinstance(encoder(first, return_dict=False), tuple)
+
+    cache = DynamicCache()
+    keys = [torch.randn(1, 2, 10, 4) for _ in range(2)]
+    for index, key in enumerate(keys):
+        cache.update(key, key + 1, index)
+    edited, offset, ok = drop_tokens_from_cache(cache, length=3, preserve=2, position_offset=0)
+    assert ok and edited is cache and offset == 3 and cache.get_seq_length() == 7
+    for index, key in enumerate(keys):
+        torch.testing.assert_close(cache.layers[index].keys[:, :, :2], key[:, :, :2])
+        torch.testing.assert_close(cache.layers[index].values[:, :, 2:], key[:, :, 5:] + 1)

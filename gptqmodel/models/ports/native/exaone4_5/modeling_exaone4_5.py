@@ -33,6 +33,7 @@ from transformers.integrations import use_kernel_forward_from_hub
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, BaseModelOutputWithPooling, CausalLMOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, torch_compilable_check
 from transformers.utils.generic import (
@@ -504,7 +505,7 @@ class Exaone4_5_DecoderLayer(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class Exaone4_5_PreTrainedModel(PreTrainedModel):
+class Exaone4_5_PreTrainedModel(NativePreTrainedModel):
     config: Exaone4_5_Config
     base_model_prefix = "model"
     supports_gradient_checkpointing = True

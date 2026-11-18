@@ -13,8 +13,23 @@ from importlib import import_module
 
 from transformers.configuration_utils import PreTrainedConfig
 from transformers.configuration_utils import SubConfigSpec as _FrameworkSubConfigSpec
+from transformers.modeling_utils import PreTrainedModel
 
 from . import _registry
+
+
+class NativePreTrainedModel(PreTrainedModel):
+    """Base for vendored Transformers 5.23 models.
+
+    Transformers treats any class outside ``transformers.*`` as custom code and
+    then skips its checkpoint conversion mappings (key renames, expert fusion),
+    native weight-init and missing-key handling. Vendored classes are the
+    library's own 5.23 code, so they must behave exactly like it.
+    """
+
+    @classmethod
+    def is_custom_code(cls) -> bool:
+        return cls.is_remote_code()
 
 
 def _resolve(table, model_type, kind):
@@ -227,6 +242,7 @@ class NativeProcessor:
 
 
 __all__ = [
+    "NativePreTrainedModel",
     "NativeConfig",
     "NativeForCausalLM",
     "NativeForImageTextToText",

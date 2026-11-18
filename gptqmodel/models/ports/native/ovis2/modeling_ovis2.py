@@ -1,4 +1,5 @@
 # Vendored from huggingface/transformers v5.23.0 (Apache-2.0) by GPT-QModel.
+# GPT-QModel: modernized to Transformers 5.23 conventions (no legacy return paths).
 # Do not edit by hand except to keep it on the 5.23 ABI; see docs/transformers5-model-ports.md.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
 #           This file was automatically generated from src/transformers/models/ovis2/modular_ovis2.py.
@@ -35,6 +36,7 @@ from transformers.integrations import use_kernel_forward_from_hub
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPast, BaseModelOutputWithPooling
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import ModelOutput, TransformersKwargs, auto_docstring, can_return_tuple, torch_compilable_check
 from transformers.utils.generic import merge_with_config_defaults
@@ -365,14 +367,13 @@ class Ovis2VisualEmbeddingTable(nn.Embedding):
         return torch.matmul(visual_tokens, self.weight)
 
 
-class Ovis2PreTrainedModel(PreTrainedModel):
+class Ovis2PreTrainedModel(NativePreTrainedModel):
     config: Ovis2Config
     base_model_prefix = "model"
     input_modalities = ("image", "text")
     supports_gradient_checkpointing = True
     _no_split_modules = ["Ovis2VisionAttention"]
     _skip_keys_device_placement = ["past_key_values"]
-    _supports_cache_class = True
     _supports_flash_attn = True
     _supports_flex_attn = True
     _supports_sdpa = True
