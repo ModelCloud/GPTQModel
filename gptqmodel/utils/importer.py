@@ -1281,6 +1281,38 @@ def device_map_uses_cpu(device_map) -> bool:
     return False
 
 
+def is_offload_placement(value) -> bool:
+    """Whether one resolved device-map entry offloads its layer to CPU or disk.
+
+    An integer is a device ordinal, not an offload. `"disk"` is accelerate's
+    disk-offload spelling and is not CPU-resident, but it still leaves the layer
+    without tensors during `post_init` (#5194).
+    """
+
+    if value is None or isinstance(value, int):
+        return False
+    if isinstance(value, str) and value.strip().lower() == "disk":
+        return True
+    try:
+        return torch.device(value).type == "cpu"
+    except (RuntimeError, ValueError):
+        return False
+
+
+def device_map_offloads_layers(device_map) -> bool:
+    """Whether a placement map sends any layer to CPU *or* disk.
+
+    `device_map_uses_cpu` answers the narrower "is a layer CPU-resident"
+    question. Kernel selection needs the wider one: a disk-mapped layer has no
+    tensors at all during `post_init`, so a kernel that needs resident CUDA
+    tensors fails exactly like it does for a CPU-mapped layer (#5194).
+    """
+
+    if not isinstance(device_map, dict):
+        return False
+    return any(is_offload_placement(value) for value in device_map.values())
+
+
 def validate_device_map_capability_groups(device_map) -> None:
     """Refuse a *resolved* placement that spans GPU compute capabilities.
 
@@ -1334,17 +1366,21 @@ def validate_device_map_capability_groups(device_map) -> None:
 
 
 def auto_cpu_offload(backend, device_map) -> bool:
-    """Whether AUTO must skip a kernel whose ``post_init`` needs CUDA.
+    """Whether AUTO must skip a kernel whose ``post_init`` needs resident CUDA.
 
     Only AUTO selection consults the ``SUPPORTS_CPU_OFFLOAD`` declaration: an
     explicit backend is the caller's choice, and
     ``_post_init_cpu_offloaded_marlin`` repacks a CPU-offloaded layer from an
     in-memory offload weights map (#5022).
+
+    A disk-mapped layer counts as offloaded even though it is not CPU-resident:
+    its tensors live in the offload map during `post_init`, so the same
+    declaration decides whether the kernel can initialize at all (#5194).
     """
 
     if backend not in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
         return False
-    return device_map_uses_cpu(device_map)
+    return device_map_offloads_layers(device_map)
 
 
 # public/stable api exposed to transformer/optimum

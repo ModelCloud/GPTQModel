@@ -47,6 +47,7 @@ __all__ = [
     "hf_gptqmodel_post_init_for_load",
     "hf_gptqmodel_prepare_model_for_load",
     "hf_gptqmodel_repair_awq_load",
+    "hf_gptqmodel_reselect_offloaded_kernels",
     "is_native_gptqmodel_checkpoint",
 ]
 
@@ -60,6 +61,11 @@ class HFGPTQModelLoadContext:
 
     quantize_config: QuantizeConfig
     quant_linear: Type[BaseQuantLinear]
+    # Needed to rebuild modules once Transformers resolves `device_map="auto"`
+    # from `max_memory`; see `hf_gptqmodel_reselect_offloaded_kernels` (#5194).
+    backend: Optional[BACKEND] = None
+    dtype: Optional[torch.dtype] = None
+    lm_head_name: Optional[str] = None
 
 
 def _checkpoint_files(checkpoint_files) -> List[str]:
@@ -390,7 +396,130 @@ def hf_gptqmodel_prepare_model_for_load(
         "Transformers/Optimum: prepared `%s` native GPTQModel modules from the checkpoint manifest.",
         len(quantized_module_names),
     )
-    return HFGPTQModelLoadContext(quantize_config=qcfg, quant_linear=quant_linear)
+    return HFGPTQModelLoadContext(
+        quantize_config=qcfg,
+        quant_linear=quant_linear,
+        backend=backend,
+        dtype=dtype,
+        lm_head_name=model_definition.lm_head,
+    )
+
+
+def _resolved_placement(device_map: Dict[str, Any], module_name: str):
+    """Return the placement a resolved `hf_device_map` gives `module_name`.
+
+    Accelerate maps whole modules, so a quantized projection inherits the
+    entry of its nearest named ancestor.
+    """
+
+    name = module_name
+    while True:
+        if name in device_map:
+            return device_map[name]
+        if not name:
+            return None
+        name = name.rpartition(".")[0]
+
+
+def hf_gptqmodel_reselect_offloaded_kernels(
+    model: nn.Module,
+    context: Optional[HFGPTQModelLoadContext],
+    device_map,
+) -> bool:
+    """Rebuild kernels that cannot initialize on a CPU/disk-offloaded layer.
+
+    Transformers hands the bridge the *unresolved* `device_map` keyword
+    (`"auto"`, `"balanced"`, ...) during `preprocess_model` and only computes the
+    real placement from `max_memory` afterwards, so `auto_cpu_offload` cannot see
+    the spill and AUTO keeps `MarlinLinear` / `AwqMarlinLinear`. Those kernels
+    need resident CUDA tensors in `post_init`, so the load crashed once
+    Accelerate placed a layer on CPU or disk (#5194).
+
+    This runs after the placement is known but before any checkpoint tensor is
+    assigned: the affected modules are still meta placeholders, so they are
+    rebuilt in place with an offload-safe kernel and no weights are copied.
+    Returns whether any module was rebuilt.
+    """
+
+    if not isinstance(device_map, dict) or not device_map:
+        return False
+    if context is None:
+        return False
+    # An explicit backend is the caller's choice, exactly as in
+    # `auto_cpu_offload`: only AUTO may be re-routed here.
+    if context.backend not in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
+        return False
+
+    from .importer import (
+        hf_normalize_device_device_map,
+        is_offload_placement,
+        select_quant_linear,
+    )
+    from .kernel import snapshot_kernel_config
+    from .model import create_quant_layer, find_modules
+
+    modules = find_modules(model, layers=[BaseQuantLinear])
+    offloaded = {
+        name: module
+        for name, module in modules.items()
+        if is_offload_placement(_resolved_placement(device_map, name))
+        and not getattr(type(module), "SUPPORTS_CPU_OFFLOAD", False)
+    }
+    if not offloaded:
+        return False
+
+    qcfg = context.quantize_config
+    format_code = resolve_quant_format(qcfg.format, qcfg.method)
+    backend = context.backend
+    device = hf_normalize_device_device_map(None, device_map)
+    init_kwargs = qcfg.quant_linear_init_kwargs()
+    init_kwargs["kernel"] = snapshot_kernel_config(qcfg)
+
+    candidates = select_quant_linear(
+        bits=qcfg.runtime_bits,
+        group_size=qcfg.group_size,
+        desc_act=qcfg.desc_act,
+        sym=qcfg.sym,
+        backend=backend,
+        format=format_code,
+        quant_method=qcfg.export_quant_method(),
+        pack=False,
+        dynamic=qcfg.dynamic,
+        pack_dtype=qcfg.pack_dtype,
+        device=device,
+        dtype=context.dtype,
+        multi_select=True,
+        cpu_offload=True,
+    )
+    if not isinstance(candidates, (list, tuple)):
+        candidates = [candidates]
+
+    names = sorted(offloaded)
+    log.info(
+        "Transformers/Optimum: rebuilding `%s` CPU/disk-offloaded module(s) with an "
+        "offload-safe kernel: %s",
+        len(names),
+        ", ".join(names[:4]) + (", ..." if len(names) > 4 else ""),
+    )
+    create_quant_layer(
+        linear_candidates=list(candidates),
+        bits=qcfg.runtime_bits,
+        desc_act=qcfg.desc_act,
+        dynamic=qcfg.dynamic,
+        group_size=qcfg.group_size,
+        quant_result=dict.fromkeys(names, True),
+        module=model,
+        sym=qcfg.sym,
+        device=device,
+        lm_head_name=context.lm_head_name,
+        pack_dtype=qcfg.pack_dtype,
+        backend=backend,
+        adapter=qcfg.adapter,
+        format=format_code,
+        init_kwargs=init_kwargs,
+        dtype=context.dtype,
+    )
+    return True
 
 
 def hf_gptqmodel_post_init_for_load(
