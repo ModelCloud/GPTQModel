@@ -381,6 +381,7 @@ def test_v41_source_loads_blocks_matching_the_port(built, tmp_path):
     config = model.config.to_dict()
     config["model_type"] = "deepseek_v41"
     state = {key: value.contiguous() for key, value in _source_state(("", model), ("mtp.", dspark)).items()}
+    state["embed.weight"] = state["embed.weight"].bfloat16()  # released dtype, required by load_main_input
     save_file(state, tmp_path / "model.safetensors")
     (tmp_path / "config.json").write_text(json.dumps(config))
     (tmp_path / "model.safetensors.index.json").write_text(
@@ -395,6 +396,22 @@ def test_v41_source_loads_blocks_matching_the_port(built, tmp_path):
         _close(actual.hidden, expected.hidden, atol=0, rtol=0)
         _close(actual.pre_mix, expected.pre_mix, atol=0, rtol=0)
         frontier = expected
+
+    # Main-input preparation reads the Engram rows through memory-mapped tables.
+    main = source.load_main_input(model.model.engram_hash, device="cpu")
+    try:
+        prepared = main.prepare(tokens)
+    finally:
+        main.close()
+    hashes = model.model.engram_hash(tokens)
+    for index, layer in enumerate(TINY_TEXT["engram_layer_ids"]):
+        torch.testing.assert_close(prepared.engram_rows[layer], model.model.engram_tables[str(layer)](hashes[:, :, index]),
+                                   rtol=0, atol=0)
+    positions = torch.arange(tokens.shape[1])[None].expand(tokens.shape[0], -1)
+    for kind in ("main", "compress"):
+        expected_cos, expected_sin = model.model.rotary_emb(tokens.float(), positions, kind)
+        torch.testing.assert_close(prepared.kwargs["position_embeddings"][kind][0], expected_cos, rtol=0, atol=0)
+        torch.testing.assert_close(prepared.kwargs["position_embeddings"][kind][1], expected_sin, rtol=0, atol=0)
 
 
 def _expected_text_inventory(index_keys):
