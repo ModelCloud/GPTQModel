@@ -27,7 +27,7 @@ reference inventories, not a promise that every combination works on every devic
 | FOEM                      | ✅          | ✅ | ✅ | ✅ | ✅             |
 | GSQ (GPTQ, AWQ, RTN, QQQ, FP8, Paro) | ✅ | Existing format† | Existing format† | Existing format† | Existing format† |
 
-`GGUF`, `FP8`, `EXL3`, `Paro`, `VPTQ`, `MACaQ`, and `NF12` are currently native GPT-QModel quantization/runtime paths. The FP8 Transformers cell covers GPT-QModel's default `row`/`tensor` scales, which publish `quant_method: "gptqmodel_fp8"` and are refused by transformers; only a `weight_scale_method="block"` export keeps `quant_method: "fp8"` and is readable by `FineGrainedFP8`. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
+`GGUF`, `FP8`, `EXL3`, `Paro`, `VPTQ`, `MACaQ`, and `NF12` are currently native GPT-QModel quantization/runtime paths. Every GPT-QModel FP8 export publishes `quant_method: "gptqmodel_fp8"` and is refused by transformers: GPT-QModel writes inverse scales for `row`, `tensor`, and `block`, while `FineGrainedFP8` reads block scales as multipliers. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
 
 † GSQ preserves the initializer's checkpoint format; it does not add a runtime format.
 

@@ -266,27 +266,26 @@ flowchart TD
     C --> E["AUTO_QUANTIZER_MAPPING.setdefault<br/>GPTQModelRefusingHfQuantizer"]
     A --> F["_patch_transformers_gptqmodel_gguf_quantizer_compat"]
     F --> F2["GGUF_EXPORT_QUANT_METHOD registered"]
-    S["save: _serialize_export_quant_method"] --> S2{"METHOD.FP8 and<br/>block layout?"}
-    S2 -- yes --> S3["quant_method: fp8<br/>FineGrainedFP8 reads it"]
-    S2 -- no --> S4["quant_method: gptqmodel_fp8"]
+    S["save: _serialize_export_quant_method"] --> S2{"METHOD.FP8?"}
+    S2 -- yes --> S4["quant_method: gptqmodel_fp8"]
+    S2 -- no --> S5["quant_method: method value"]
     S4 --> G
+    S5 --> G
     G["AutoModelForCausalLM.from_pretrained"] --> H["AutoHfQuantizer.from_config"]
     H --> I{"quant_method registered?"}
     I -- no --> J["warn and skip quantization<br/>random Linear weights"]
     I -- yes --> K["GPTQModelRefusingHfQuantizer.__init__<br/>raise ValueError"]
-    S3 --> T["FineGrainedFP8<br/>reads the block grid"]
     style J fill:#f8d7da,stroke:#b02a37
     style K fill:#d9f2d9,stroke:#2e7d32
-    style T fill:#d9f2d9,stroke:#2e7d32
 ```
 
 `setdefault` keeps any quantizer transformers already owns (`gptq`, `awq`,
 `fp8`, and its own `vptq`), so this table only covers names transformers does
 not implement. FP8 needed a split because transformers' `fp8` quantizer
-(`FineGrainedFP8`) expects a 2-D block `weight_scale_inv` grid, while
-GPT-QModel's default `row` scales are 1-D and `tensor` scales are scalar.
-Those layouts publish `gptqmodel_fp8` and are refused; only a
-`weight_scale_method="block"` layout keeps `fp8` (see
+(`FineGrainedFP8`) reads a 2-D block `weight_scale_inv` grid as a multiplier,
+while GPT-QModel always writes inverse scales — `row`, `tensor`, and `block`
+alike. Every GPT-QModel FP8 save publishes `gptqmodel_fp8` and is refused;
+`fp8` is reserved for third-party block/multiplier checkpoints (see
 [checkpoint interop](checkpoint-interop.md#10-hf-quant_method-for-rtn-awq-exports-packed-gguf-and-fp8)).
 In particular transformers 5 registers `bitsandbytes_4bit` and
 `bitsandbytes_8bit`, not the plain `bitsandbytes` that GPT-QModel writes, so
@@ -304,7 +303,7 @@ per-format table also appears in [the MACaQ page](macaq.md#transformers-interop)
 | save of a GPT-QModel-only layout | silent | `hf_compat_warnings` entry naming the method |
 | default FP8 checkpoint (`row`/`tensor` scales), `gptqmodel` imported | ~15 min of multi-billion-element broadcast, then a shape `RuntimeError` that never names GPT-QModel | immediate `ValueError` naming `gptqmodel_fp8` and `GPTQModel.load` |
 | default FP8 checkpoint, plain `transformers` | same broadcast, then the same misleading shape error | unknown `gptqmodel_fp8` warns and skips quantization; the save-time warning already named the method |
-| FP8 block layout (`weight_scale_method="block"`) | `quant_method: fp8` | unchanged; `FineGrainedFP8` reads the block grid |
+| FP8 block layout (`weight_scale_method="block"`) | `quant_method: fp8`, NaN in plain transformers | `gptqmodel_fp8`; refused with `import gptqmodel`, save-time warning otherwise |
 
 ## 6. Keyword `device_map` and `max_memory`
 

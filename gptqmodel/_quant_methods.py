@@ -13,12 +13,15 @@ import it before the quantization package finishes initializing.
 # `quant_method: "gguf"` (plus `method: "gguf"`) keep loading in GPT-QModel.
 GGUF_EXPORT_QUANT_METHOD = "gptqmodel_gguf"
 
-# GPT-QModel's default FP8 layout stores a per-row (or per-tensor) inverse
-# scale. transformers registers its own `fp8` quantizer (`FineGrainedFP8`),
-# which only reads 2-D block grids; a 1-D row scale makes it broadcast the
-# codes against the scale into a multi-billion-element temporary and fail with
-# a shape error that never names GPT-QModel. Publish a non-colliding name for
-# those layouts. Block-wise FP8, which FineGrainedFP8 can read, keeps `fp8`.
+# GPT-QModel's FP8 layout always stores an inverse scale (`weight = fp8 / scale`).
+# transformers registers its own `fp8` quantizer (`FineGrainedFP8`), which
+# reads a 2-D block grid as a multiplier (`weight = fp8 * scale`) and allocates
+# e4m3 weights. That mismatch makes every GPT-QModel layout — row, tensor and
+# block — unreadable: the load either broadcasts a 1-D scale into a
+# multi-billion-element temporary and fails with a shape error, or silently
+# multiplies where it should divide and produces NaN. Publish a non-colliding
+# name for every FP8 export; `fp8` is reserved for third-party block/multiplier
+# checkpoints.
 FP8_EXPORT_QUANT_METHOD = "gptqmodel_fp8"
 
 # Checkpoints written before the rename store this method and format name. It
