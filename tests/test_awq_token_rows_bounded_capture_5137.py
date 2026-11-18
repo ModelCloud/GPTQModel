@@ -360,7 +360,8 @@ def test_awq_token_row_quotas_skip_empty_batches():
 
     quotas, local = AWQProcessor._compute_token_row_quotas([0, 7, 3], 1)
     assert quotas == [0, 1, 0]
-    assert local[1].tolist() == [0]
+    # One retained row is the batch centre, not the BOS position (#5265).
+    assert local[1].tolist() == [3]
 
     quotas, local = AWQProcessor._compute_token_row_quotas([0, 7, 3], 4)
     assert quotas == [0, 2, 2]
