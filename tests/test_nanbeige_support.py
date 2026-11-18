@@ -82,3 +82,55 @@ def test_nanbeige_real_generation_bridge_trims_positions_and_matches_cache_conti
         actual = model(**prepared).logits
         torch.testing.assert_close(actual, model(ids, use_cache=False).logits[:, -1:], atol=1e-7, rtol=1e-5)
         assert len(cache.layers) == 4
+
+
+def test_nanbeige_dynamic_ntk_rope_does_not_leak_long_request_frequencies():
+    config = tiny_config()
+    config.rope_parameters = {"rope_type": "dynamic", "factor": 2.0, "rope_theta": config.rope_theta}
+    config.max_position_embeddings = 4
+    torch.manual_seed(0)
+    model = NanbeigeForCausalLM(config).eval()
+    fresh = NanbeigeForCausalLM(config).eval()
+    fresh.load_state_dict(model.state_dict())
+    short = torch.tensor([[1, 3, 5]])
+    with torch.inference_mode():
+        model(torch.arange(1, 12).unsqueeze(0), use_cache=False)
+        torch.testing.assert_close(model(short, use_cache=False).logits, fresh(short, use_cache=False).logits, atol=0, rtol=0)
+    for layer in model.model.layers:
+        torch.testing.assert_close(layer.self_attn.rotary_emb.inv_freq, fresh.model.layers[0].self_attn.rotary_emb.inv_freq)
+
+
+def test_nanbeige_partial_checkpoint_init_keeps_loaded_sibling_tensors(tmp_path):
+    from safetensors.torch import load_file, save_file
+
+    config = tiny_config()
+    config.attention_bias = True
+    torch.manual_seed(0)
+    model = NanbeigeForCausalLM(config)
+    model.save_pretrained(tmp_path)
+    path = tmp_path / "model.safetensors"
+    state = load_file(path)
+    del state["model.layers.0.self_attn.q_proj.bias"]
+    save_file(state, path, metadata={"format": "pt"})
+    loaded = NanbeigeForCausalLM.from_pretrained(tmp_path)
+    assert torch.equal(loaded.model.layers[0].self_attn.q_proj.weight, model.model.layers[0].self_attn.q_proj.weight)
+    assert torch.count_nonzero(loaded.model.layers[0].self_attn.q_proj.bias) == 0
+
+
+def test_nanbeige_attention_backend_switch_applies_to_built_layers(monkeypatch):
+    model = NanbeigeForCausalLM(tiny_config()).eval()
+    ids = torch.tensor([[1, 3, 5, 7]])
+    calls = []
+    sdpa = torch.nn.functional.scaled_dot_product_attention
+    monkeypatch.setattr(
+        torch.nn.functional, "scaled_dot_product_attention", lambda *a, **k: calls.append(1) or sdpa(*a, **k)
+    )
+    with torch.inference_mode():
+        model.set_attn_implementation("sdpa")
+        expected = model(ids, use_cache=False).logits
+        assert calls
+        calls.clear()
+        model.set_attn_implementation("eager")
+        actual = model(ids, use_cache=False).logits
+    assert not calls
+    torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)

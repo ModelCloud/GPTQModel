@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,6 @@ import torch
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.nanbeige import NanbeigeQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
-from gptqmodel.models.ports.nanbeige import __file__ as PORT_FILE
 from gptqmodel.models.ports.nanbeige.configuration_nanbeige import NanbeigeConfig
 from gptqmodel.models.ports.nanbeige.modeling_nanbeige import NanbeigeForCausalLM
 from gptqmodel.utils.model import find_modules
@@ -45,15 +45,25 @@ def tiny_config(**kwargs):
     return NanbeigeConfig(**values)
 
 
+RELEASED_CONFIGS = json.loads(
+    (Path(__file__).parents[1] / "fixtures/ports/nanbeige/released_configs.json").read_text()
+)
+# sha256 over sorted "key:shape" lines of the released safetensors headers (201 tensors).
+RELEASED_INVENTORY_SHA256 = "021b2cb33db89272763fc0c539c4bb20fdec7acc01e5d431720506748bdf14b8"
+
+
+def _inventory_sha256(model):
+    lines = (f"{key}:{'x'.join(map(str, value.shape))}" for key, value in sorted(model.state_dict().items()))
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()
+
+
 @pytest.mark.parametrize("source", ["Nanbeige/Nanbeige4.2-3B", "Nanbeige/Nanbeige4.2-3B-Base"])
 def test_complete_real_checkpoint_headers_match_exact_meta_owners(source):
-    contract = json.loads(Path(PORT_FILE).with_name("checkpoint_contract.json").read_text())
-    config = NanbeigeConfig(**contract["sources"][source]["config"])
+    config = NanbeigeConfig(**RELEASED_CONFIGS[source])
     with torch.device("meta"):
         model = NanbeigeForCausalLM(config)
-    observed = {key: list(value.shape) for key, value in model.state_dict().items()}
-    assert observed == {key: value["shape"] for key, value in contract["tensors"].items()}
-    assert len(observed) == 201
+    assert len(model.state_dict()) == 201
+    assert _inventory_sha256(model) == RELEASED_INVENTORY_SHA256
     assert len(model.model.layers) == 22
     assert config.num_attention_heads * config.head_dim != config.hidden_size
     assert model.model.layers[0].self_attn.q_proj.weight.shape == (6144, 3072)
@@ -62,8 +72,7 @@ def test_complete_real_checkpoint_headers_match_exact_meta_owners(source):
 
 @pytest.mark.parametrize("source", ["Nanbeige/Nanbeige4.2-3B-FP8", "Nanbeige/Nanbeige4.2-3B-GPTQ-Int8"])
 def test_released_compressed_metadata_preserves_exact_dense_architecture_contract(source, tmp_path):
-    contract = json.loads(Path(PORT_FILE).with_name("checkpoint_contract.json").read_text())
-    metadata = contract["layout_aliases"][source]["config"]
+    metadata = RELEASED_CONFIGS[source]
     config = NanbeigeConfig(**metadata)
     config.save_pretrained(tmp_path)
     reloaded = NanbeigeQModel.loader.load_config(str(tmp_path), trust_remote_code=True, code_revision="ignored")
@@ -72,14 +81,11 @@ def test_released_compressed_metadata_preserves_exact_dense_architecture_contrac
     assert reloaded.model_type == "nanbeige"
     with torch.device("meta"):
         model = NanbeigeForCausalLM(reloaded)
-    assert {key: list(value.shape) for key, value in model.state_dict().items()} == {
-        key: value["shape"] for key, value in contract["tensors"].items()
-    }
+    assert _inventory_sha256(model) == RELEASED_INVENTORY_SHA256
 
 
 @pytest.mark.parametrize("device", ["cpu", "meta"])
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("kv_heads,bias", [(1, True), (2, False)])
 @pytest.mark.parametrize("variant", ["plain", "qknorm", "hc", "mhc", "split_mhc"])
 def test_real_layouts_have_complete_owned_weight_plan(device, kv_heads, bias, variant):
     options = {

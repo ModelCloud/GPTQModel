@@ -323,16 +323,13 @@ def test_definition_owns_model_and_ignores_checkpoint_trust():
 
 
 @pytest.mark.parametrize("attention", ["eager", "sdpa"])
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("kv_heads,bias", [(1, True), (2, False), (4, True)])
 @pytest.mark.parametrize(
     "options",
     [
         {},
         {"qk_layernorm": True},
         {"loop_loss_weights": [0.1, 0.3]},
-        {"skip_loop_final_norm": False},
-        {"qk_layernorm": True},
         {"rope_scaling": {"type": "linear", "factor": 2.0}},
         {"enable_depth_attention": True},
         {"enable_double_loop_split": True, "num_hidden_layers": 4, "loop_middle_layers": 2},

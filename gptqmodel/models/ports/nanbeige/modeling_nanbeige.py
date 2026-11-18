@@ -11,19 +11,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-import warnings
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.nn import CrossEntropyLoss
+from transformers import initialization as init
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.masking_utils import create_causal_mask
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.utils import logging
 
 from .configuration_nanbeige import NanbeigeConfig
@@ -263,6 +262,21 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
+def eager_attention_forward(module, query, key, value, attention_mask, scaling, dropout=0.0, **kwargs):
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+    if attention_mask is not None:
+        if attention_mask.dtype == torch.bool:
+            attn_weights = attn_weights.masked_fill(~attention_mask, torch.finfo(attn_weights.dtype).min)
+        else:
+            attn_weights = attn_weights + attention_mask
+    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+    attn_output = torch.matmul(attn_weights, value_states).transpose(1, 2).contiguous()
+    return attn_output, attn_weights
+
+
 class NanbeigeRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-06):
         super().__init__()
@@ -378,32 +392,34 @@ class NanbeigeHyperConnectionModule(nn.Module):
             return
         self.alpha_res.requires_grad_(False)
 
-    def _build_static_mappings(self):
+    def _static_mappings(self):
         n = self.num_residual_streams
-        stream_index = self.layer_idx % n
         h_pre_static = torch.zeros(n)
-        h_pre_static[stream_index] = 1.0
-        h_post_static = torch.ones(n)
-        h_res_static = torch.eye(n)
-        self.register_buffer("h_pre_static", h_pre_static)
-        self.register_buffer("h_post_static", h_post_static)
-        self.register_buffer("h_res_static", h_res_static)
+        h_pre_static[self.layer_idx % n] = 1.0
+        return {"h_pre_static": h_pre_static, "h_post_static": torch.ones(n), "h_res_static": torch.eye(n)}
+
+    def _build_static_mappings(self):
+        for name, value in self._static_mappings().items():
+            self.register_buffer(name, value)
+
+    def _init_static_mappings(self):
+        for name, value in self._static_mappings().items():
+            init.copy_(getattr(self, name), value)
 
     def _init_dynamic_zero(self):
-        nn.init.zeros_(self.mapping_proj.weight)
+        init.zeros_(self.mapping_proj.weight)
         n = self.num_residual_streams
         if self.enable_mhc:
-            with torch.no_grad():
-                pre_init = self.bias.new_full((n,), -20.0)
-                pre_init[self.layer_idx % n] = 20.0
-                self.bias[:n] = pre_init
-                self.bias[n : 2 * n].zero_()
-                if not self.mhc_identity_nohresparam:
-                    h_res_init = self.bias.new_full((n, n), -20.0)
-                    h_res_init[torch.arange(n), torch.arange(n)] = 20.0
-                    self.bias[2 * n :] = h_res_init.reshape(-1)
+            bias = torch.zeros(self.bias.shape, dtype=self.bias.dtype, device=self.bias.device)
+            bias[:n] = -20.0
+            bias[self.layer_idx % n] = 20.0
+            if not self.mhc_identity_nohresparam:
+                h_res_init = bias.new_full((n, n), -20.0)
+                h_res_init[torch.arange(n), torch.arange(n)] = 20.0
+                bias[2 * n :] = h_res_init.reshape(-1)
+            init.copy_(self.bias, bias)
         else:
-            nn.init.zeros_(self.mapping_proj.bias)
+            init.zeros_(self.mapping_proj.bias)
 
     @staticmethod
     def input_expand(hidden_states: torch.Tensor, num_residual_streams: int) -> torch.Tensor:
@@ -737,24 +753,25 @@ class NanbeigeRotaryEmbedding(nn.Module):
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
-        inv_freq = 1.0 / self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim)
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.register_buffer("inv_freq", self._compute_inv_freq(device), persistent=False)
         self.max_seq_len_cached = max_position_embeddings
+
+    def _compute_inv_freq(self, device=None):
+        return 1.0 / self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64, device=device).float() / self.dim)
 
     def _apply(self, fn, recurse=True):
         inv_freq = self.inv_freq
         result = super()._apply(fn, recurse=recurse)
         if inv_freq.is_meta:
-            self.inv_freq = 1.0 / self.base ** (
-                torch.arange(0, self.dim, 2, device=self.inv_freq.device).float() / self.dim
-            )
+            self.inv_freq = self._compute_inv_freq(self.inv_freq.device)
         else:
             self.inv_freq = inv_freq.to(device=self.inv_freq.device, dtype=torch.float32)
         return result
 
     @torch.no_grad()
-    def forward(self, x, position_ids):
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+    def forward(self, x, position_ids, inv_freq=None):
+        inv_freq = self.inv_freq if inv_freq is None else inv_freq
+        inv_freq_expanded = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
         position_ids_expanded = position_ids[:, None, :].float()
         device_type = x.device.type
         device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
@@ -768,22 +785,21 @@ class NanbeigeRotaryEmbedding(nn.Module):
 
 class NanbeigeLinearScalingRotaryEmbedding(NanbeigeRotaryEmbedding):
     def forward(self, x, position_ids):
-        position_ids = position_ids.float() / self.scaling_factor
-        cos, sin = super().forward(x, position_ids)
-        return (cos, sin)
+        return super().forward(x, position_ids.float() / self.scaling_factor)
 
 
 class NanbeigeDynamicNTKScalingRotaryEmbedding(NanbeigeRotaryEmbedding):
     def forward(self, x, position_ids):
+        # Grown frequencies are per call (as in Transformers' dynamic_rope_update, which resets
+        # below the original length); never persist them into the shared buffer.
         seq_len = torch.max(position_ids) + 1
+        inv_freq = None
         if seq_len > self.max_position_embeddings:
             base = self.base * (
                 self.scaling_factor * seq_len / self.max_position_embeddings - (self.scaling_factor - 1)
             ) ** (self.dim / (self.dim - 2))
             inv_freq = 1.0 / base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(x.device) / self.dim)
-            self.register_buffer("inv_freq", inv_freq, persistent=False)
-        cos, sin = super().forward(x, position_ids)
-        return (cos, sin)
+        return super().forward(x, position_ids, inv_freq=inv_freq)
 
 
 class NanbeigeMLP(nn.Module):
@@ -877,12 +893,9 @@ class NanbeigeAttention(nn.Module):
         loop_share_kv_repeat_idx = kwargs.pop("loop_share_kv_repeat_idx", None)
         depth_attention_kv_cache = kwargs.pop("depth_attention_kv_cache", None)
         bsz, q_len, _ = hidden_states.size()
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
-        query_states = query_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+        query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         if self.q_layernorm is not None:
             query_states = self.q_layernorm(query_states)
         if self.k_layernorm is not None:
@@ -921,133 +934,25 @@ class NanbeigeAttention(nn.Module):
                 skip_cache_update=skip_cache_update,
                 softmax_scale=self.head_dim ** (-0.5),
             )
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-        if attention_mask is not None:
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            if causal_mask.dtype == torch.bool:
-                attn_weights = attn_weights.masked_fill(~causal_mask, torch.finfo(attn_weights.dtype).min)
-            else:
-                attn_weights = attn_weights + causal_mask
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states)
-        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is {attn_output.size()}"
-            )
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.head_dim)
-        attn_output = self.o_proj(attn_output)
-        if not output_attentions:
-            attn_weights = None
-        return (attn_output, attn_weights, past_key_value)
-
-
-class NanbeigeSdpaAttention(NanbeigeAttention):
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        loop_idx = kwargs.pop("loop_idx", 0)
-        loop_cache_layer_idx = kwargs.pop("loop_cache_layer_idx", None)
-        loop_share_kv_cache = kwargs.pop("loop_share_kv_cache", None)
-        loop_share_kv_repeat_idx = kwargs.pop("loop_share_kv_repeat_idx", None)
-        depth_attention_kv_cache = kwargs.pop("depth_attention_kv_cache", None)
-        if output_attentions:
-            return super().forward(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_value=past_key_value,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-                cache_position=cache_position,
-                loop_idx=loop_idx,
-                loop_cache_layer_idx=loop_cache_layer_idx,
-                loop_share_kv_cache=loop_share_kv_cache,
-                loop_share_kv_repeat_idx=loop_share_kv_repeat_idx,
-                depth_attention_kv_cache=depth_attention_kv_cache,
-                **kwargs,
-            )
-        bsz, q_len, _ = hidden_states.size()
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        if self.q_layernorm is not None:
-            query_states = self.q_layernorm(query_states)
-        if self.k_layernorm is not None:
-            key_states = self.k_layernorm(key_states)
-        cos, sin = self.rotary_emb(value_states, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-        use_loop_shared_kv = loop_share_kv_cache is not None and loop_share_kv_repeat_idx is not None
-        skip_cache_update = use_loop_shared_kv and loop_share_kv_repeat_idx > 0
-        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-        if depth_attention_kv_cache is None:
-            if past_key_value is not None and (not skip_cache_update):
-                cache_layer_idx = _get_loop_cache_layer_idx(
-                    self.layer_idx, loop_idx, _get_num_physical_layers(self.config), loop_cache_layer_idx
-                )
-                key_states, value_states = past_key_value.update(
-                    key_states, value_states, cache_layer_idx, cache_kwargs
-                )
-            key_states, value_states = _apply_loop_shared_kv(
-                loop_share_kv_cache, self.layer_idx, loop_share_kv_repeat_idx, key_states, value_states
-            )
-        else:
-            key_states, value_states = _apply_loop_shared_kv(
-                loop_share_kv_cache, self.layer_idx, loop_share_kv_repeat_idx, key_states, value_states
-            )
-            key_states, value_states = _apply_depth_attention_then_update_cache(
-                self.config,
-                self.layer_idx,
-                depth_attention_kv_cache,
-                query_states,
-                key_states,
-                value_states,
-                past_key_value,
-                loop_idx,
-                loop_cache_layer_idx,
-                cache_kwargs,
-                skip_cache_update=skip_cache_update,
-                softmax_scale=self.head_dim ** (-0.5),
-            )
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
         causal_mask = attention_mask
         if attention_mask is not None:
             causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
-        if query_states.device.type == "cuda" and causal_mask is not None:
-            query_states = query_states.contiguous()
-            key_states = key_states.contiguous()
-            value_states = value_states.contiguous()
-        is_causal = True if causal_mask is None and q_len > 1 else False
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
+        implementation = "eager" if output_attentions else self.config._attn_implementation
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(implementation, eager_attention_forward)
+        attn_output, attn_weights = attention_interface(
+            self,
             query_states,
             key_states,
             value_states,
-            attn_mask=causal_mask,
-            dropout_p=self.attention_dropout if self.training else 0.0,
-            is_causal=is_causal,
+            causal_mask,
+            dropout=self.attention_dropout if self.training else 0.0,
+            scaling=self.scaling,
         )
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(bsz, q_len, self.num_heads * self.head_dim)
+        if not output_attentions:
+            attn_weights = None
+        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.head_dim)
         attn_output = self.o_proj(attn_output)
-        return (attn_output, None, past_key_value)
-
-
-NANBEIGE_ATTENTION_CLASSES = {"eager": NanbeigeAttention, "sdpa": NanbeigeSdpaAttention}
+        return (attn_output, attn_weights, past_key_value)
 
 
 class NanbeigeDecoderLayer(nn.Module):
@@ -1065,7 +970,7 @@ class NanbeigeDecoderLayer(nn.Module):
             else False
         )
         self.num_residual_streams = self._get_layer_num_residual_streams()
-        self.self_attn = NANBEIGE_ATTENTION_CLASSES[config._attn_implementation](config=config, layer_idx=layer_idx)
+        self.self_attn = NanbeigeAttention(config=config, layer_idx=layer_idx)
         self.mlp = NanbeigeMLP(config)
         self.input_layernorm = NanbeigeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = NanbeigeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -1177,10 +1082,6 @@ class NanbeigeDecoderLayer(nn.Module):
         depth_attention_kv_cache: Optional[List[DepthAttentionCacheEntry]] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-        if "padding_mask" in kwargs:
-            warnings.warn(
-                "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
-            )
         residual = hidden_states
         if self.enable_hyper_connection:
             self_attn_hc = self._get_self_attn_hc(mhc_loop_idx)
@@ -1240,27 +1141,27 @@ class NanbeigePreTrainedModel(PreTrainedModel):
     def _supports_default_dynamic_cache(cls) -> bool:
         return False
 
+    @torch.no_grad()
     def _init_weights(self, module):
+        # transformers.initialization skips tensors already loaded from the checkpoint, so a
+        # partially missing module never re-initializes its loaded siblings.
         std = self.config.initializer_range
         if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=std)
+            init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
-                module.bias.data.zero_()
+                init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
+            init.normal_(module.weight, mean=0.0, std=std)
+            if module.padding_idx is not None and not getattr(module.weight, "_is_hf_initialized", False):
+                module.weight[module.padding_idx].zero_()
         elif isinstance(module, NanbeigeRMSNorm):
-            nn.init.ones_(module.weight)
+            init.ones_(module.weight)
         elif isinstance(module, NanbeigeRotaryEmbedding):
-            module.inv_freq = 1.0 / (
-                module.base
-                ** (torch.arange(0, module.dim, 2, dtype=torch.float32, device=module.inv_freq.device) / module.dim)
-            )
+            init.copy_(module.inv_freq, module._compute_inv_freq(module.inv_freq.device))
         elif isinstance(module, NanbeigeHyperConnectionModule):
             for name in ("alpha_pre", "alpha_post", "alpha_res"):
-                nn.init.constant_(getattr(module, name), self.config.mhc_init_gating_factor)
-            module._build_static_mappings()
+                init.constant_(getattr(module, name), self.config.mhc_init_gating_factor)
+            module._init_static_mappings()
             module._init_dynamic_zero()
 
 
@@ -1646,13 +1547,7 @@ class NanbeigeForCausalLM(NanbeigePreTrainedModel, GenerationMixin):
         logits = logits.float()
         loss = None
         if labels is not None:
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
