@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Real MOSS shells: every persistent checkpoint owner and conservative AWQ."""
+"""Real MOSS shells: every persistent checkpoint owner and neutral AWQ folds."""
 
 import hashlib
 import json
@@ -57,8 +57,29 @@ def test_moss_actual_owners_and_plan(device, heads, width, rotary, inner):
         assert layer.mlp.fc_in.bias is not None and layer.mlp.fc_out.bias is not None
     for key in ["attn_extra", "attn.qkv_proj_extra", "attn.qkv_proj.undeclared", "mlp.fc_input"]:
         assert plan.find(key) is None
-    assert wrapper.awq_get_modules_for_scaling(model.transformer.h[0], {}, {}) == []
     assert wrapper.fusable is None
+
+
+@pytest.mark.parametrize("rotary,inner", [(4, 64), (8, None)])
+def test_moss_shared_norm_folds_once_into_attention_and_mlp(rotary, inner):
+    from awq_neutrality import assert_awq_folds_neutral
+
+    from tests.test_moss_local_port import _model
+
+    model = _model(rotary_dim=rotary, n_inner=inner)
+    ids = torch.randint(2, 250, (1, 8))
+
+    def forward():
+        return model(input_ids=ids).logits
+
+    for layer in model.transformer.h:
+        checked = assert_awq_folds_neutral(MossQModel, model, layer, forward)
+        # `ln_1` feeds the packed Q/V/K projection and the GELU MLP in parallel:
+        # one group, folded once. The packed Q/V/K rows are not `out_proj`'s
+        # columns and GELU blocks `fc_in -> fc_out`.
+        assert [(source, targets) for source, targets, _consumers in checked] == [
+            ("ln_1", ["attn.qkv_proj", "mlp.fc_in"]),
+        ]
 
 
 def test_moss_complete_released_index_ownership():

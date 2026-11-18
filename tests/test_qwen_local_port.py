@@ -324,14 +324,21 @@ def test_public_hostile_load_tokenizer_generate_and_two_saves(tmp_path, monkeypa
 
 @pytest.mark.parametrize("no_bias", [False, True])
 @pytest.mark.parametrize("offload", [False, True])
-def test_public_plain_awq_all_linears_dense_exclusions_two_reloads(tmp_path, no_bias, offload):
+def test_public_awq_all_linears_dense_exclusions_two_reloads(tmp_path, no_bias, offload):
     path = tmp_path / "source"
     source, marker = checkpoint(path, no_bias=no_bias)
     qcfg = AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=offload)
     model = GPTQModel.load(
         str(path), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16, attn_implementation="eager"
     )
-    assert model.awq_get_modules_for_scaling(model.model.transformer.h[0], {}, {}) == []
+    planner, emitted = model.awq_get_modules_for_scaling, []
+
+    def record_groups(layer, input_feat, module_kwargs):
+        nodes = planner(layer, input_feat, module_kwargs)
+        emitted.append({id(node["prev_op"]) for node in nodes} == {id(layer.ln_1), id(layer.ln_2), id(layer.mlp.w1)})
+        return nodes
+
+    model.awq_get_modules_for_scaling = record_groups
     linears = {
         f"transformer.h.{i}.{name}"
         for i in range(2)
@@ -340,7 +347,9 @@ def test_public_plain_awq_all_linears_dense_exclusions_two_reloads(tmp_path, no_
     dense = {
         k: v.to(torch.float16).clone()
         for k, v in source.state_dict().items()
-        if k.rsplit(".", 1)[0] not in linears or k.endswith("bias")
+        if (k.rsplit(".", 1)[0] not in linears or k.endswith("bias"))
+        # AWQ folds its scales into both norms and the linear MLP branch bias.
+        and ".ln_" not in k and not k.endswith("mlp.w1.bias")
     }
     rows = [
         {"input_ids": torch.tensor([[2, 3, 5, 8, 7, 4, 6, 9]]), "attention_mask": torch.ones(1, 8, dtype=torch.long)},
@@ -350,6 +359,7 @@ def test_public_plain_awq_all_linears_dense_exclusions_two_reloads(tmp_path, no_
         CalibrationConfig(dataset=rows, batch_size=1, min_length=1),
         backend=BACKEND.TORCH,
     )
+    assert emitted == [True, True]
     assert {name for name, module in model.model.named_modules() if isinstance(module, AwqTorchLinear)} == linears
     for name in linears:
         assert model.model.get_submodule(name).qweight.dtype == torch.int32
