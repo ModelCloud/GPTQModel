@@ -47,7 +47,7 @@ class RicursiveQModel(BaseQModel):
             # `lerp(value_residual, input_layernorm(h), ...)`: folding a scale
             # into this norm changes only the lerp's normalized half, which no
             # single v_proj weight scale can undo. The norm therefore may not
-            # be a fold source; attention falls back to plain quantization.
+            # be a fold source (the effective tree lifts this without valres).
             "input_layernorm": ("input_layernorm:!:norm:nosrc",),
             # `value_res_lambda` is a direct parameter on the attention
             # container when value residuals are enabled.
@@ -60,8 +60,8 @@ class RicursiveQModel(BaseQModel):
                 # With `use_valres` `v_proj` reads
                 # `lerp(value_residual, normed, sigmoid(value_res_lambda))`,
                 # which is not the norm output; keep it in its own stage so it
-                # is quantized plainly (the fold into `g_proj` is then dropped).
-                # AWQ currently selects no folding groups for either variant.
+                # is quantized without an input-norm fold. `v_proj -> o_proj`
+                # stays a valid fold: the sigmoid gate is per channel.
                 "q_proj:0:q:in=x",
                 "k_proj:0:k:in=x",
                 "g_proj:0:in=x:nosrc",
@@ -75,20 +75,57 @@ class RicursiveQModel(BaseQModel):
         },
     ]
 
+    # Quantized projections whose output never reaches another quantized
+    # projection's input unchanged: q/k feed the per-head norms and RoPE, g_proj
+    # feeds the sigmoid gate. The planner may otherwise pick the last of them as
+    # the "previous op" of the next stage (e.g. `k_proj -> v_proj` when g_proj
+    # is absent), which is not a data-flow edge.
+    _AWQ_NON_PRODUCERS = frozenset({"self_attn.q_proj", "self_attn.k_proj", "self_attn.g_proj"})
+
     @classmethod
     def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
         tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
-        if not getattr(getattr(model, "config", None), "use_gated_attention", True):
-            tree = deepcopy(tree)
-            attention = tree[-1]["self_attn:!"]
-            tree[-1]["self_attn:!"] = tuple(spec for spec in attention if not spec.startswith("g_proj:"))
+        config = getattr(model, "config", None)
+        gated = getattr(config, "use_gated_attention", True)
+        valres = getattr(config, "use_valres", True)
+        if gated and valres:
+            return tree
+        tree = deepcopy(tree)
+        layer = tree[-1]
+        attention = layer["self_attn:!"]
+        if not gated:
+            attention = tuple(spec for spec in attention if not spec.startswith("g_proj:"))
+        if not valres:
+            # Without the value residual `v_proj` reads the input norm output
+            # exactly like q/k/g, so the norm is a valid fold source for all of
+            # them and `v_proj` joins their shared-input stage.
+            layer["input_layernorm"] = ("input_layernorm:!:norm",)
+            attention = tuple(
+                "v_proj:0:v:in=x" if spec.startswith("v_proj:") else spec for spec in attention
+            )
+        layer["self_attn:!"] = attention
         return tree
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Value blending, the sigmoid output gate, and clipped MLP activations
-        # cross scale boundaries. No fold/search/replay group is qualified.
-        # The normal AWQ path still quantizes every declared decoder linear.
-        return []
+        # The generic planner emits input_layernorm -> q/k/v(/g) (only without
+        # the value residual, see `_resolve_effective_module_tree`),
+        # v_proj -> o_proj (the sigmoid gate multiplies per channel, so it
+        # commutes with a channel scale), pre_feedforward_layernorm -> gate/up
+        # and up_proj -> down_proj. Drop the groups that are not neutral:
+        # * a source among q/k/g is a stage-ordering artefact, not a producer;
+        # * `ffn_clamp_threshold` clamps `up_proj`'s output before the product,
+        #   so a channel scale on `up_proj` does not commute with the clamp.
+        clamp = getattr(getattr(self.model, "config", None), "ffn_clamp_threshold", None)
+        kept = []
+        for node in super().awq_get_modules_for_scaling(module, input_feat, module_kwargs):
+            prev_op = node.get("prev_op")
+            source = next((name for name, child in module.named_modules() if child is prev_op), None)
+            if source in self._AWQ_NON_PRODUCERS:
+                continue
+            if clamp and source == "mlp.up_proj":
+                continue
+            kept.append(node)
+        return kept
 
 
 __all__ = ["RicursiveQModel"]
