@@ -264,11 +264,6 @@ class Phi4MMAudioFeatureExtractor(SequenceFeatureExtractor):
         self._hamming400 = np.hamming(400)
         self._hamming200 = np.hamming(200)
 
-    def duration_to_frames(self, duration):
-        frame_rate = 10
-        num_frames = duration * 1000 // frame_rate
-        return num_frames
-
     def __call__(self, audios: List[AudioInput], return_tensors: Optional[Union[str, TensorType]] = None):
         returned_input_audio_embeds = []
         returned_audio_embed_sizes = []
@@ -444,9 +439,6 @@ class Phi4MMProcessor(ProcessorMixin):
 
     @property
     def special_image_token_id(self):
-        return self.tokenizer.convert_tokens_to_ids(self.special_image_token)
-
-    def get_special_image_token_id(self):
         return self.tokenizer.convert_tokens_to_ids(self.special_image_token)
 
     @property
