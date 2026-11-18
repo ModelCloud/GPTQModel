@@ -53,7 +53,9 @@ flowchart TD
 | Internal loaders returned a normalized native tokenizer, and the constructor normalized it again | Internal calls request the wrapper; the constructor retains it | `utils/hf.py:2802-2845`, `models/loader.py` calls with `return_tokenicer=True`, `models/base.py:1054-1056` |
 | A generic processor fixture inherited a release-specific tokenizer binding | Explicitly declare the fixture's generic tokenizer; retain separate real-release source tests | `tests/test_local_processor_loading.py`, `tests/test_internlm_tokenizers_local_port.py` |
 
-The dependency floor is `tokenicer>=0.0.19`. The API ships in
+The dependency floor is `tokenicer>=0.0.20`, which includes the legacy Metaspace
+preparation fix from [Tokenicer PR #67](https://github.com/ModelCloud/Tokenicer/pull/67).
+The preparation API first shipped in
 [Tokenicer 0.0.19](https://github.com/ModelCloud/Tokenicer/releases/tag/v0.0.19),
 including the changes from merged [PR #66](https://github.com/ModelCloud/Tokenicer/pull/66).
 The published [PyPI source archive](https://pypi.org/project/tokenicer/0.0.19/)

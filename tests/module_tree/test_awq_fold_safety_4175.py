@@ -27,6 +27,7 @@ from test_awq_scaling_groups import _foldable_groups
 from torch import nn
 
 from gptqmodel.models.auto import MODEL_MAP
+from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.quantization.awq.quantize.scale import apply_scale
 from gptqmodel.quantization.awq.utils.module import get_op_name
@@ -87,14 +88,16 @@ def _quantized_features(layer, features, tree):
     return kept
 
 
-def _assert_neutral(definition, model, layer, forward, tree=None):
+def _assert_neutral(definition, model, layer, forward, tree=None, *, scaling_provider=None):
     """Apply every emitted fold once and require the full output to be unchanged."""
 
     tree = tree if tree is not None else definition.module_tree
     wrapper = _wrapper(definition, model, tree)
     reference, features = _capture(layer, forward)
     features = _quantized_features(layer, features, tree)
-    nodes = wrapper.awq_get_modules_for_scaling(layer, features, {})
+    if scaling_provider is None:
+        scaling_provider = definition.awq_get_modules_for_scaling
+    nodes = scaling_provider(wrapper, layer, features, {})
     groups = _foldable_groups(layer, nodes)
     assert groups, f"{type(definition).__name__}: no foldable AWQ group was emitted"
 
@@ -572,7 +575,7 @@ def _tiny_nemotron_h_mixers():
     return transformers.NemotronHForCausalLM(config).eval()
 
 
-def test_nemotron_h_mixer_norms_still_fold():
+def test_generic_planner_keeps_nemotron_h_mixer_norm_folds():
     from test_awq_scaling_groups import _mamba_ssm_cpu_unavailable_reason
 
     reason = _mamba_ssm_cpu_unavailable_reason()
@@ -588,7 +591,11 @@ def test_nemotron_h_mixer_norms_still_fold():
 
     checked = []
     for layer in model.model.layers:
-        checked.extend(_assert_neutral(definition, model, layer, forward))
+        # The registered Nemotron-H port uses plain AWQ. Exercise the generic
+        # planner here to retain the absent-sibling regression on this layout.
+        checked.extend(_assert_neutral(
+            definition, model, layer, forward, scaling_provider=BaseQModel.awq_get_modules_for_scaling,
+        ))
 
     norm_groups = [targets for source, targets, _consumers in checked if source == "norm"]
     # Mamba (`M`) layer: the SSM input projection reads the block norm.

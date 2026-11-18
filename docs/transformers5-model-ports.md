@@ -14,9 +14,9 @@ Definitions with exact native Transformers 5 support retain their native
 implementation. Their rows record checkpoint/layout qualification and any
 definition ownership corrections alongside the package-owned ports.
 
-Current integrated qualification uses Python 3.14.6t with `PYTHON_GIL=0`,
+Integrated qualification uses Python 3.14.6t with `PYTHON_GIL=0`,
 Torch 2.15.0 CPU, Transformers 5.23.0, SentencePiece 0.2.1, TikToken 0.12.0,
-timm 1.0.22 and released
+timm 1.0.22. The earlier runs in this table used released
 [Tokenicer 0.0.19](https://github.com/ModelCloud/Tokenicer/releases/tag/v0.0.19),
 which includes merged [Tokenicer PR #66](https://github.com/ModelCloud/Tokenicer/pull/66).
 The earlier batches below used runtime candidate
@@ -85,19 +85,17 @@ These overlapping runs are not additive:
 
 Both built wheel and sdist were checked byte-for-byte against all 883 port
 runtime/provenance/license assets, including 149 compressed JSON fixtures.
-Metadata retains Python `>=3.11`, Transformers `>=5.23.0`, Tokenicer `>=0.0.19`,
+Metadata now requires Python `>=3.11`, Transformers `>=5.23.0`, Tokenicer `>=0.0.20`,
 TikToken `>=0.12.0` and SentencePiece `>=0.2.1`; timm and einops are restricted
 to the vision extra. The moved Puzzle network inventory reader is excluded
 from both runtime artifacts. Licensing-held MiniCPM-o and Pangu implementations
 are also excluded.
 
-XVERSE's real legacy Metaspace tokenizer remains incompatible with released
-Tokenicer 0.0.19. Its candidate-only qualification uses unreleased commit
-`63abe8cfba72bb02d62b9df1d069d53d915883c5` in
-[Tokenicer PR #67](https://github.com/ModelCloud/Tokenicer/pull/67).
-This migration is not fully compatible with the latest released dependencies
-until that upstream correction is released and consumed. No downstream
-tokenizer normalization shim is included.
+XVERSE's legacy Metaspace tokenizer needs the correction from
+[Tokenicer PR #67](https://github.com/ModelCloud/Tokenicer/pull/67), now shipped
+in [Tokenicer 0.0.20](https://pypi.org/project/tokenicer/0.0.20/).
+Tokenicer prepares the selected tokenizer JSON before the backend parses it.
+GPT-QModel adds no tokenizer normalization shim.
 
 An independent audit of the integrated `0a9a08ea3` port tree plus the optional
 vision patch (`f0245b360`) ran all 145 local-port/module-plan files in 19 bounded
@@ -106,8 +104,8 @@ incomplete batches. Every failure was an XVERSE legacy Metaspace case on
 published Tokenicer 0.0.19: 12 hostile public loads, two warm-corruption retries,
 two tokenizer reload cases, four public plain-AWQ cases and three source-chat
 cases. The XVERSE-Ent tokenizer cases passed. The parent runs above separately
-verify the subsequent DeepSeek fixture and media-hygiene changes. Neither this
-audit nor the green CI result establishes complete released-Tokenicer support.
+verify the subsequent DeepSeek fixture and media-hygiene changes. These are
+historical 0.0.19 results.
 All 13 dedicated-audit skips were uncached Kimi tokenizer assets: six native
 contraction checks, six public native-load checks and one pinned K3 asset check.
 The transferable audit archive contains all 19 exact commands, environment/source
@@ -214,7 +212,7 @@ license, numerical oracles, negative probes and exact reproduction commands.
 | --- | --- | --- |
 | `RicursiveQModel` / `ricursive` | [Owned Ripple PeriNorm/value-residual decoder](../gptqmodel/models/ports/ricursive/README.md); both 1,203-key release schemas, serialized BPE, hybrid caches and explicit `config.mlp_chunk_size` (zero disables) | Six public plain-AWQ cases and two exact reloads; empty scale groups, no runtime chunking environment switch. No trained 65B/NVFP4 payload, full 2M context, GPU, general concurrent execution or fusion qualification |
 | `Xing4_0QModel` / `xing4_0` | [Owned MLA/hyperconnection dense and routed/shared MoE](../gptqmodel/models/ports/xing4_0/README.md); actual SentencePiece dialect and released checkpoint inventory, including auxiliary MTP | Public plain AWQ preserves excluded MTP state; no trained-payload, GPU, full-context or fusion qualification |
-| `XverseQModel` / `xverse` | [Owned dense/256K/routed/shared MoE](../gptqmodel/models/ports/xverse/README.md); thirteen pinned inventories and independent decoder equations | Six public plain-AWQ cases are qualified **only with unreleased Tokenicer candidate** `63abe8cfba72bb02d62b9df1d069d53d915883c5`. Released 0.0.19 cannot parse the legacy Metaspace tokenizer; migration remains incomplete for those assets. No trained-payload, full 256K context, GPU or fusion qualification |
+| `XverseQModel` / `xverse` | [Owned dense/256K/routed/shared MoE](../gptqmodel/models/ports/xverse/README.md); thirteen pinned inventories and independent decoder equations | Tokenicer 0.0.20 supplies legacy Metaspace support. No trained-payload, full 256K context, GPU or fusion qualification |
 | `UnlimitedOCRQModel` / `unlimited_ocr`, `unlimited-ocr` | [Exact native UnlimitedOcrForConditionalGeneration](../gptqmodel/models/ports/unlimited_ocr/README.md), native config/processor/BPE; 2,710 source tensors accounted, with the unused source vision patch preserved in exports | Six public image-calibrated plain-AWQ cases and two exact reloads on released Tokenicer 0.0.19. Native eager GQA is explicitly rejected with SDPA retry. No OCR-quality, trained-payload, GPU or fusion qualification |
 | `ZDTaichu5QModel` / `zdtaichu5_0` | [Owned C-RADIO/media wrapper and native Qwen3.5 decoder](../gptqmodel/models/ports/zdtaichu5/README.md); all 820 released key/shapes and source video-before-image order | Six public image-calibrated plain-AWQ cases and two exact reloads on released Tokenicer 0.0.19. NVIDIA Open Model License and notices retained; distinct from LocateAnything's noncommercial license. No trained-payload, GPU, encoded-container decoding or fusion qualification |
 
@@ -223,7 +221,7 @@ license, numerical oracles, negative probes and exact reproduction commands.
 | Ripple and Xing4 modeling | Checkpoint Python and obsolete Transformer APIs | Definition-owned config/model/tokenizer and explicit cache policies |
 | Unlimited-OCR task | Headless `AutoModel` and legacy `model.layers` assumptions | Exact native generative task and `model.language_model.layers` |
 | ZDTaichu5 vision and media | Checkpoint C-RADIO/wrapper code | Owned media/C-RADIO with exact native language decoder |
-| XVERSE legacy tokenizer | Modern Rust parser rejects legacy boolean-only Metaspace | Still blocked with published Tokenicer 0.0.19; generic upstream fix remains a release prerequisite |
+| XVERSE legacy tokenizer | Modern Rust parser rejects legacy boolean-only Metaspace on 0.0.19 | Tokenicer 0.0.20 prepares compatible JSON and preserves the source bytes |
 
 ```mermaid
 flowchart TD
@@ -232,9 +230,9 @@ flowchart TD
     B -->|unlimited_ocr / unlimited-ocr| D["UnlimitedOcrConfigLoader + native conditional generation"]
     B -->|zdtaichu5_0| E["Owned C-RADIO/media + native Qwen3.5"]
     B -->|xverse| F["Owned XVERSE decoder + selected serialized tokenizer"]
-    F --> G{"Selected JSON readable by released Tokenicer?"}
-    G -->|yes| H["One outer Tokenicer normalization"]
-    G -->|legacy Metaspace| X["Fail closed; upstream release required"]
+    F --> G["Tokenicer 0.0.20 prepares legacy Metaspace JSON"]
+    G -->|valid| H["One outer Tokenicer normalization"]
+    G -->|invalid| X["Fail closed before tokenizer construction"]
     C --> H
     D --> H
     E --> H
@@ -245,14 +243,16 @@ flowchart TD
     class X,Y failure
 ```
 
-This flow does not change the dependency to an unpublished candidate. The exact
-candidate is reviewed in [Tokenicer PR #67](https://github.com/ModelCloud/Tokenicer/pull/67).
+Before publication, the fix was validated at candidate commit
+`63abe8cfba72bb02d62b9df1d069d53d915883c5` in
+[Tokenicer PR #67](https://github.com/ModelCloud/Tokenicer/pull/67).
 The parent independently ran its complete suite: 219 passed, 28 skipped.
 The original three-bundle archive was independently SHA-checked and replayed
 under tokenizers 0.15.2 / Transformers 4.38.2 (30 raw/HF source comparisons)
 and the candidate (45 comparisons with repeated saves); all nine source assets
 remained byte-identical. The parent XVERSE-plus-shared-tokenizer run passed
-180 tests with two warnings on the exact candidate, not released 0.0.19.
+180 tests with two warnings on the candidate. The same suites passed all
+180 tests with no skips on published Tokenicer 0.0.20.
 
 ### Recurrent, Nemotron and diffusion implementation selection
 
@@ -860,7 +860,7 @@ flowchart TD
 | Missing scientific assets | Auto-discovery could select checkpoint Python | Owned construction errors propagate; no generic tokenizer substitution or remote retry |
 
 The initial security qualification used Tokenicer 0.0.17; the current package
-floor is `tokenicer>=0.0.19`. The earlier 0.0.17
+floor is `tokenicer>=0.0.20`. The earlier 0.0.17
 [published source](https://pypi.org/project/tokenicer/0.0.17/) archive has SHA-256
 `24ba4e1f503e652df757365dd8d08ad145fe7a0f52bd74fb32fda2741489cef0`.
 All five packaged Python files were independently compared byte-for-byte to the

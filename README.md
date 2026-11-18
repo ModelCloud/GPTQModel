@@ -298,9 +298,9 @@ describe shared-KV calibration, recurrent cache recovery and packed QKV layout.
 [Package-owned tokenizer selection and LFM3 decoder ownership](docs/transformers5-model-ports.md#package-owned-tokenizer-selection)
 cover definition-specific scientific tokenizer dispatch and native gate/convolution
 exclusions. [Owned tokenizer construction and normalization](docs/owned-tokenizer-lifecycle.md)
-requires released [Tokenicer 0.0.19](https://github.com/ModelCloud/Tokenicer/releases/tag/v0.0.19),
-including merged [PR #66](https://github.com/ModelCloud/Tokenicer/pull/66).
-The release also fixes Baichuan's legacy special-token map
+requires released [Tokenicer 0.0.20](https://github.com/ModelCloud/Tokenicer/releases/tag/v0.0.20),
+including the legacy Metaspace fix from [PR #67](https://github.com/ModelCloud/Tokenicer/pull/67).
+It also includes the earlier fix for Baichuan's legacy special-token map
 precedence; exact source IDs and public safetensors reloads pass without
 changing the packaged tokenizer or its oracle assertions.
 [Klear and Kimi tokenizer/AttnRes selection](docs/transformers5-model-ports.md#klear-and-kimi-implementation-selection)
@@ -368,10 +368,9 @@ the retained legacy license PDF does not grant later-version commercial rights.
 The [calibration consumer validation](docs/transformers5-model-ports.md#calibration-consumer-validation)
 records current public-API migration coverage and reproducible CPU test batches.
 [Ricursive, Xing4.0, XVERSE, Unlimited-OCR and ZDTaichu5 selection](docs/transformers5-model-ports.md#ripple-xing4-xverse-and-native-ocr-selection)
-documents the owned decoders, exact native OCR task and media bindings. XVERSE's
-legacy Metaspace tokenizer remains blocked on released Tokenicer 0.0.19; its
-upstream correction is qualified separately and does not establish released
-compatibility. ZDTaichu5 retains the NVIDIA Open Model License and notices.
+documents the owned decoders, exact native OCR task and media bindings.
+Tokenicer 0.0.20 prepares XVERSE's legacy Metaspace JSON before tokenizer
+construction. ZDTaichu5 retains the NVIDIA Open Model License and notices.
 [Checkpoint config selection](docs/checkpoint-config-selection.md)
 preserves the selected subfolder/revision when rebuilding a quantized save shell,
 including subsequent saves after a public reload.

@@ -112,25 +112,21 @@ looking text, combining Unicode, NUL and emoji.
 - Ent-A5.7B tokenizer SHA-256:
   `79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4`.
 
-Released Tokenicer **0.0.19** initially rejects the first two legacy Metaspace
+Tokenicer **0.0.19** rejected the first two legacy Metaspace
 JSONs before construction (`add_prefix_space does not match declared
-prepend_scheme`). The independently reproduced evidence was supplied upstream;
-do not mistake Ent's ByteLevel success for dense/MoE tokenizer qualification.
-The final validation record below states whether an upstream candidate or
-released fix was used. No GPT-QModel workaround is included.
+prepend_scheme`). Ent uses ByteLevel and did not have this failure.
+[Tokenicer 0.0.20](https://pypi.org/project/tokenicer/0.0.20/) ships the generic
+preparation fix from [PR #67](https://github.com/ModelCloud/Tokenicer/pull/67).
+No GPT-QModel workaround is included.
 
-**Validated upstream candidate, not a published release:** Tokenicer 0.0.20 at
-`63abe8cfba72bb02d62b9df1d069d53d915883c5`,
-[Tokenicer PR #67](https://github.com/ModelCloud/Tokenicer/pull/67).
-Installed `direct_url.json` was independently checked against that full SHA.
-Reproduce that environment without changing GPT-QModel's dependency files:
+Install the published package to reproduce the release qualification:
 
 ```bash
-uv pip install --python /home/ubuntu/.venvs/gptqmodel-tf5/bin/python --no-deps 'tokenicer @ git+https://github.com/ModelCloud/Tokenicer.git@63abe8cfba72bb02d62b9df1d069d53d915883c5'
+uv pip install --python /home/ubuntu/.venvs/gptqmodel-tf5/bin/python --index-url https://pypi.org/simple 'tokenicer==0.0.20'
 ```
 
-The parent owns eventual dependency/release integration. The released-19
-blocker is not represented as fixed in a published package.
+The source candidate used for the earlier runs was
+`63abe8cfba72bb02d62b9df1d069d53d915883c5`.
 
 ## AWQ source/consumer review
 
@@ -205,10 +201,17 @@ and two exact dense and packed safetensors cycles. The public hostile matrix
 uses `trust_remote_code=False/True` × bypass absent/0/1; sentinel checkpoint
 Python and custom generation code must remain unexecuted.
 
-### Final qualification record
+### Published-package qualification
+
+On the published Tokenicer 0.0.20 package, both XVERSE suites and the shared
+tokenizer loading suite passed **180 tests with no skips**. The run included
+the 18 public trust/bypass cases, six public plain-AWQ cases, tokenizer repair,
+and the dense and packed safetensors reloads.
+
+### Pre-release qualification record
 
 Python **3.14.6 free-threaded / GIL disabled**, Torch **2.15.0+cpu**,
-Transformers **5.23.0**, exact **unreleased** Tokenicer candidate above:
+Transformers **5.23.0**, on the Tokenicer source candidate identified above:
 
 | Gate | Observed result |
 | --- | --- |

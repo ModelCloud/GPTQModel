@@ -84,22 +84,23 @@ def _strip_flags(entry):
 
 
 def test_sensenova_loop_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="sensenova_loop")
+    checkpoint = "/monster/data/model/SenseNova-Loop-9B"
+
+    def load_config(model_dir, *, trust_remote_code):
+        assert model_dir == checkpoint
+        assert trust_remote_code is True
+        return SimpleNamespace(model_type="sensenova_loop")
 
     monkeypatch.setattr(
         auto,
         "resolve_trust_remote_code",
         lambda path, trust_remote_code=False: trust_remote_code,
     )
-    monkeypatch.setattr(
-        auto.AutoConfig,
-        "from_pretrained",
-        lambda *args, **kwargs: fake_config,
-    )
+    monkeypatch.setattr(auto, "load_model_config", load_config)
 
     assert (
         auto.check_and_get_model_definition(
-            "/monster/data/model/SenseNova-Loop-9B", trust_remote_code=True
+            checkpoint, trust_remote_code=True
         )
         is SenseNovaLoopQModel
     )

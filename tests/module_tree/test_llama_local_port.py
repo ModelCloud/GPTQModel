@@ -36,7 +36,7 @@ CASES = [
 
 
 def test_alias_loader_is_owned_by_this_definition_not_its_subclasses():
-    from transformers import AutoModelForCausalLM
+    from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
     assert isinstance(LlamaQModel.loader, LocalModelLoader)
 
@@ -44,13 +44,15 @@ def test_alias_loader_is_owned_by_this_definition_not_its_subclasses():
         pass
 
     assert DerivedDefinition.loader is AutoModelForCausalLM
+    # SenseNova-Loop inherits Qwen3.5's native image-text task factory.
+    inherited_loaders = {"sensenova_loop": AutoModelForImageTextToText}
     for family, definition in MODEL_MAP.items():
         if (
             issubclass(definition, LlamaQModel)
             and definition is not LlamaQModel
             and "loader" not in definition.__dict__
         ):
-            assert definition.loader is AutoModelForCausalLM, family
+            assert definition.loader is inherited_loaders.get(family, AutoModelForCausalLM), family
             assert local_model_loader(family) is None
 
 

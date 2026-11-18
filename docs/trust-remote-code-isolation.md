@@ -74,6 +74,10 @@ implementation passes the complete loader, processor, tokenizer, Tokenicer
 profile, trust-isolation, layout and Qwen-Drive support batch: **141 passed,
 zero skipped, 15 warnings, 4.97s**, on Python 3.14.6t (`PYTHON_GIL=0`),
 Transformers 5.23.0, Torch 2.15.0+cpu and released Tokenicer 0.0.19.
+With the current Tokenicer 0.0.20 floor, the shared loader, path, processor,
+tokenizer, trust-isolation, config, module-plan, fusion and AWQ-fold batch
+passed **715 tests**. It skipped 460 NVIDIA Marlin cases and one optional
+PEFT test on the CPU environment.
 
 `normalize_hf_config_compat` also resolves definition ownership before applying
 remote compatibility shims. Local configs retain their own field contract even
