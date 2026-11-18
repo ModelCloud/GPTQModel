@@ -13,6 +13,7 @@ import importlib
 import json
 from pathlib import Path
 
+import defuser
 import pytest
 import torch
 from safetensors.torch import load_file
@@ -157,8 +158,30 @@ def test_cases_cover_every_group_definition():
     assert all(isinstance(MODEL_MAP[model_type].loader, LocalModelLoader) for model_type in CASES)
 
 
-@pytest.mark.parametrize("model_type", sorted(CASES))
+# Defuser's REPLACE_MODULE patches swap Transformers' MoE block classes and the
+# global checkpoint conversion mapping. The vendored classes are not patched, so
+# a native checkpoint loads with missing fused expert weights.
+DEFUSER_CLASS_PATCHED = {"mixtral", "qwen3_omni_moe"}
+
+
+@pytest.mark.parametrize(
+    "model_type",
+    [
+        pytest.param(
+            model_type,
+            marks=pytest.mark.xfail(
+                strict=True, reason="defuser.replace_fused_blocks patches only transformers.models classes"
+            ),
+        )
+        if model_type in DEFUSER_CLASS_PATCHED
+        else model_type
+        for model_type in sorted(CASES)
+    ],
+)
 def test_definition_loader_builds_vendored_classes(model_type, tmp_path):
+    # GPTQModel.load runs this before every load; it is global process state,
+    # so apply it up front to keep the result independent of test order.
+    defuser.replace_fused_blocks(model_type)
     config, inputs = CASES[model_type]()
     assert type(config).__module__.startswith(NATIVE)
     assert config.model_type == model_type

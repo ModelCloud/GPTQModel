@@ -16,6 +16,8 @@ from gptqmodel import GPTQModel
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.afmoe import AfMoeQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.ports.native.afmoe.configuration_afmoe import AfmoeConfig as VendoredAfmoeConfig
+from gptqmodel.models.ports.native.afmoe.modeling_afmoe import AfmoeForCausalLM as VendoredAfmoeForCausalLM
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 
 
@@ -109,10 +111,10 @@ def test_public_load_ignores_malicious_auto_map(checkpoint, monkeypatch, trust, 
     else:
         monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
     assert resolve_trust_remote_code(str(path), trust_remote_code=trust) is False
-    assert type(load_model_config(str(path), trust_remote_code=trust)) is AfmoeConfig
+    assert type(load_model_config(str(path), trust_remote_code=trust)) is VendoredAfmoeConfig
     loaded = GPTQModel.load(str(path), device="cpu", dtype=torch.float32, trust_remote_code=trust)
     assert type(loaded) is AfMoeQModel
-    assert type(loaded.model) is AfmoeForCausalLM
+    assert type(loaded.model) is VendoredAfmoeForCausalLM
     assert not loaded.trust_remote_code
     ids = torch.tensor([[2, 4, 5, 7, 8, 6]])
     with torch.inference_mode():
