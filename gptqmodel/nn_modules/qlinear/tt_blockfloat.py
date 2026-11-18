@@ -310,10 +310,19 @@ class _BlockfloatStorage(nn.Module):
 class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
     """Linear over Tenstorrent block-float weights."""
 
-    # Conservative: the native block-float CUDA kernel is a custom op without
-    # fake/meta support, and the dense fallback's dequantize reads code_shape
-    # with int() (host sync), so no level above eager and no CUDA-graph capture.
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=2,
+    # dynamo/aot_eager/inductor all reach it (the breaks are the
+    # `lru_cache`-wrapped quantize helpers on the cold path, which dynamo
+    # inlines). The native block-float CUDA kernel is a custom op without
+    # fake/meta support, so CUDA stays eager; the CPU dense decode is plain
+    # tensor math. No CUDA-graph capture: the dequantize path reads
+    # `code_shape` with `int()` (host sync).
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: the portable CPU "
+        "block-float decode has no measured static-cache win (#4984)."
+    )
     SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.TT_BLOCKFLOAT]

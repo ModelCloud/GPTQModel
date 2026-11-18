@@ -405,11 +405,15 @@ class AwqGEMVFastTorchLinear(AwqGEMVFastLinear):
     # Consumed by select_quant_linear() when AUTO has no CPU kernel for the layout.
     PORTABLE_CPU_FALLBACK = True
 
-    # Measured on CPU, torch 2.15.0+cpu: torch.compile(fullgraph=True) traces
-    # the forward with backend="eager" and "aot_eager", bit-identical to eager.
-    # Inductor was not measured (no host C++ compiler). CPU-only, so no CUDA
-    # graph capture applies.
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.AOT_EAGER
+    # CPU-only kernel. Measured on torch 2.16.0.dev20261021+cpu: eager=True,
+    # graph_breaks=0, and dynamo/aot_eager/inductor all pass with output
+    # matching eager. CUDA-graph capture is CUDA-only, so it is not a CPU
+    # level.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
+    SUPPORTS_COMPILE = False
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "CPU-only portable GEMV_FAST fallback; no measured static-cache win (#4984)"
+    )
     SUPPORTS_GRAPH_CAPTURE = False
 
     def __init__(self, *args, **kwargs):
@@ -477,8 +481,13 @@ class LLMAwqTorchLinear(AwqGEMVFastTorchLinear, LLMAwqLinear):
     QUANT_TYPE = "awq_llm_awq_torch"
     PORTABLE_CPU_FALLBACK = True
 
-    # Same forward and measurement as AwqGEMVFastTorchLinear.
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.AOT_EAGER
+    # Same forward and measurement as AwqGEMVFastTorchLinear: CPU-only,
+    # INDUCTOR on torch 2.16.0.dev20261021+cpu.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
+    SUPPORTS_COMPILE = False
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "CPU-only portable GEMV_FAST fallback; no measured static-cache win (#4984)"
+    )
     SUPPORTS_GRAPH_CAPTURE = False
 
     zeros_name = "scaled_zeros"

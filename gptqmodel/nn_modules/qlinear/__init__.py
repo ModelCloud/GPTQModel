@@ -2173,14 +2173,28 @@ class PackableQuantLinear(GPTQQuantLinear):
         forwards stay O(1).
 
         Subclasses that reorder activations must implement ``_build_ret_idx``.
+
+        The verdict is stored as a plain Python ``bool``: every caller uses it
+        in an ``if``, and ``bool(tensor)`` would force a host read that a
+        traced graph cannot perform. ``tensor_cache_key``
+        (``is_inference``/``_version``/``data_ptr``) is a hard dynamo graph
+        break as well, so a traced forward reads the verdict the eager warmup
+        cached instead of re-keying the buffer.
         """
         cached = getattr(self, "_ret_idx_identity", None)
-        if cached is not None and getattr(self, "_ret_idx_key", None) == tensor_cache_key(self.g_idx):
-            return cached
+        if cached is not None:
+            if t.compiler.is_compiling():
+                return cached
+            if getattr(self, "_ret_idx_key", None) == tensor_cache_key(self.g_idx):
+                return cached
         ret_idx = self._build_ret_idx()
-        identity = t.equal(
-            ret_idx,
-            t.arange(ret_idx.numel(), dtype=ret_idx.dtype, device=ret_idx.device),
+        # ``torch.equal`` already returns a Python ``bool`` (it is not a
+        # 0-dim tensor), so this stays host-side without a tensor ``__bool__``.
+        identity = bool(
+            t.equal(
+                ret_idx,
+                t.arange(ret_idx.numel(), dtype=ret_idx.dtype, device=ret_idx.device),
+            )
         )
         self._ret_idx_identity = identity
         return identity

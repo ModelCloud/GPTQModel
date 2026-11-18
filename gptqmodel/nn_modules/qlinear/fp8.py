@@ -220,6 +220,10 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
     # inductor and reduce-overhead pass, and an explicit torch.cuda.graph
     # capture succeeds with output matching eager.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    # CPU, torch 2.16.0.dev20261021+cpu: the CPU forward is plain tensor
+    # math and reaches ``INDUCTOR`` (dynamo/aot_eager/inductor pass); only
+    # the CUDA path is capture-safe, so the base stays ``CUDAGRAPH``.
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
     SUPPORTS_GRAPH_CAPTURE = True
 
     SUPPORTS_BACKENDS = [BACKEND.FP8_TORCH]

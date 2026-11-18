@@ -172,11 +172,16 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
 
     REQUIRES_FORMAT_V2 = True
 
-    # Measured on an x86-64 AVX512-BF16 host (torch 2.15): the extension
-    # builds and the fused BF16 forward runs, but it inherits
-    # TorchAtenLinear's RLock-guarded forward, which dynamo cannot enter:
-    # EAGER. CPU-only, so no CUDA-graph capture applies.
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    # Measured on an x86-64 AVX512-BF16 host, torch 2.16.0.dev20261021+cpu:
+    # eager=True, graph_breaks=0, dynamo/aot_eager/inductor all reach it. It
+    # inherits TorchAtenLinear's forward, whose RLock-guarded one-time transform
+    # is now skipped while tracing. CPU-only, so no CUDA-graph capture applies.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for this kernel in this change; the INDUCTOR level is opt-in via "
+        "optimize() (#4984 policy unchanged)."
+    )
     SUPPORTS_GRAPH_CAPTURE = False
 
     QUANT_TYPE = "torch_cpu_avx512"

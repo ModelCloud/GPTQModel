@@ -525,10 +525,11 @@ class AwqGEMVTorchLinear(AwqGEMVLinear):
     # Consumed by select_quant_linear() when AUTO has no CPU kernel for GEMV.
     PORTABLE_CPU_FALLBACK = True
 
-    # Measured on NVIDIA GB10 (sm_121) and on CPU, torch 2.11.0+cu130: every
-    # compile level including reduce-overhead passes; the eager forward also
-    # captures into a CUDA graph on the GPU probe.
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    # CPU-only kernel (`SUPPORTS_DEVICES` above), so the CPU measurement is the
+    # declaration: on torch 2.16.0.dev20261021+cpu eager=True, graph_breaks=0,
+    # and dynamo/aot_eager/inductor all pass. CUDA-graph capture is CUDA-only,
+    # so it is not a CPU level.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
     SUPPORTS_GRAPH_CAPTURE = True
     # CPU-only portable fallback for the packed GEMV layout: compiling a CPU
     # static-cache decode has no measured win, so the #4669 policy stays off

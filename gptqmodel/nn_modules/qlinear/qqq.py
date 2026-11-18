@@ -693,6 +693,12 @@ class QQQTorchLinear(QQQLinear):
     # inductor and reduce-overhead all pass. Explicit torch.cuda.graph capture
     # fails: forward copies the CPU `_scale_perm_single_i` table to the device.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    # CPU, torch 2.16.0.dev20261021+cpu: EAGER. The portable FP32 path lazily
+    # imports the packing helper (`importlib.import_module`, a dynamo-skipped
+    # call) and its first forward builds the packed CPU cache; the QQQ custom
+    # op has no fake/meta implementation, so the graph cannot be traced
+    # through it. Documented rather than silently lowered.
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.EAGER}
     SUPPORTS_GRAPH_CAPTURE = False
     # ... and the static-cache `generate()` is still a loss: the QQQ decode
     # recompiles per step (172 graphs, 24-115 breaks) and measures 1.3-8x

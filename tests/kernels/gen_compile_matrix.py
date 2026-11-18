@@ -34,6 +34,15 @@ callers never guess from a class name:
   data-dependent branch. Independent of dynamo: a custom op without a fake
   implementation can be capture-safe yet untraceable.
 
+- `SUPPORTS_COMPILE_LEVEL_BY_DEVICE` - optional per-device override, keyed by
+  `torch.device.type`. The "Level" column is the default-device declaration;
+  the "CPU level" column is what a CPU-resident instance declares. A kernel
+  that runs on both devices records the CPU ceiling here when it differs (for
+  example `TorchLinear`: CUDA `EAGER` because its streaming path allocates a
+  `torch.cuda.Stream`, CPU `INDUCTOR`). Only the dict in the kernel's own class
+  body applies, so an MLX or Triton subclass never inherits its torch parent's
+  CPU answer.
+
 A class declaration answers for the kernel's default runtime state. Where one
 kernel class serves several stored formats, an instance may refine it through
 `supports_graph_capture()`, and `graph_capture_safe(instance)` returns that
@@ -47,6 +56,9 @@ floor is 2.13 for Python < 3.11 and 2.15 otherwise): `backend="eager"`,
 `backend="aot_eager"`, `backend="inductor"`, and `mode="reduce-overhead"`.
 `max-autotune` is a tuning mode of `INDUCTOR`, not a separate capability, so it
 is not a level. A declaration records the torch version it was measured on.
+The CPU levels in this table were re-measured on
+`torch 2.16.0.dev20261021+cpu`; the default-device levels keep their recorded
+GPU measurements.
 
 `SUPPORTS_COMPILE` remains the separate #4669 policy answer to "is compiling
 this forward not a pessimization for static-cache `generate()`". A traceable
@@ -71,8 +83,8 @@ Regenerate with:
 python -m tests.kernels.gen_compile_matrix
 ```
 
-| Kernel | Module | Level | Graph capture | Compiled generation | Policy reason |
-| --- | --- | --- | --- | --- | --- |
+| Kernel | Module | Level | CPU level | Graph capture | Compiled generation | Policy reason |
+| --- | --- | --- | --- | --- | --- | --- |
 """
 
 
@@ -84,6 +96,7 @@ def render() -> str:
         reason = (row["compiled_generation_reason"] or "-").replace("|", "\\|")
         rows.append(
             f"| `{row['kernel']}` | `{module}` | `{row['compile_level']}` | "
+            f"`{row['compile_level_cpu']}` | "
             f"{'yes' if row['graph_capture'] else 'no'} | "
             f"{'yes' if row['compiled_generation'] else 'no'} | {reason} |"
         )

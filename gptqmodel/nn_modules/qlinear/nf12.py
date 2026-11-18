@@ -110,9 +110,14 @@ class NF12Linear(WeightOnlyQuantLinear):
     weights apart from the kernel's accumulation order.
     """
 
-    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager only. Dynamo fails on
-    # the `tensor._version` guard, and explicit capture fails because forward
-    # calls `_exp_base()` -> `int(tensor.item())`, a host sync.
+    # ``EAGER`` on CPU and CUDA. Re-measured on torch 2.16.0.dev20261021+cpu:
+    # the first graph break is ``_exp_base()`` -> ``int(tensor.item())``, a
+    # data-dependent host read ("Unsupported Tensor.item() call with
+    # capture_scalar_outputs=False"), which then also fails the
+    # ``Eq(u0, 1)`` size guard. The exponent base is stored as a tensor so a
+    # checkpoint round trip keeps it exact; turning it into a Python int would
+    # need a load-time resolution step that does not exist yet. Explicit capture
+    # fails for the same host sync.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
     SUPPORTS_GRAPH_CAPTURE = False
 
