@@ -52,17 +52,16 @@ PENDING_MODEL_IMPORT_PORTS = frozenset({
 })
 
 PENDING_STALE_PATTERN_PORTS = frozenset({
-    "bailing_moe", "brumby", "decilm", "deepseek_vl_v2", "dream", "ernie4_5_vl_moe", "exaone", "grinmoe", "hymba",
-    "instella", "intern_s2_preview", "internlm2", "interns1", "internvl_chat", "k2_horizon", "kimi_k3", "klear",
-    "llada2", "llama", "locateanything", "mimo", "mimo_v2", "minicpm", "minicpm_o", "mobilellm", "nanbeige",
-    "native/bloom", "native/codegen", "native/cohere2_moe", "native/decision_transformer", "native/deepseek_v4",
-    "native/diffusion_gemma", "native/dots3_note", "native/falcon", "native/falcon_h1", "native/falcon_mamba",
-    "native/gemma3", "native/gemma3n", "native/gemma4", "native/gemma4_unified", "native/gpt_neo",
-    "native/gpt_neox", "native/gptj", "native/hunyuan_vl", "native/llama4", "native/minimax_m3_vl", "native/mpt",
-    "native/nemotron_h", "native/nemotron_h_omni", "native/olmo3", "native/ovis2", "native/phi3",
-    "native/phi4_multimodal", "native/qwen2_5_vl", "native/qwen2_vl", "native/voxtral", "native/zamba",
-    "native/zamba2", "nemotron_labs_diffusion", "nemotron_omni", "ouro", "ovis2_5", "ovis2_6_moe", "phi4",
-    "raon1_mini", "ricursive", "spark2_5", "telechat2", "xing4_0", "xverse",
+    "bailing_moe", "brumby", "decilm", "dream", "ernie4_5_vl_moe", "exaone", "instella", "internlm2",
+    "internvl_chat", "kimi_k3", "klear", "llada2", "llama", "locateanything", "mimo", "mimo_v2", "minicpm",
+    "minicpm_o", "mobilellm", "nanbeige", "native/bloom", "native/codegen", "native/cohere2_moe",
+    "native/decision_transformer", "native/deepseek_v4", "native/diffusion_gemma", "native/dots3_note",
+    "native/falcon", "native/falcon_h1", "native/falcon_mamba", "native/gemma3", "native/gemma3n", "native/gemma4",
+    "native/gemma4_unified", "native/gpt_neo", "native/gpt_neox", "native/gptj", "native/hunyuan_vl",
+    "native/llama4", "native/minimax_m3_vl", "native/mpt", "native/nemotron_h", "native/nemotron_h_omni",
+    "native/olmo3", "native/ovis2", "native/phi3", "native/phi4_multimodal", "native/qwen2_5_vl", "native/qwen2_vl",
+    "native/voxtral", "native/zamba", "native/zamba2", "nemotron_labs_diffusion", "ovis2_6_moe", "phi4",
+    "ricursive", "telechat2", "xing4_0", "xverse",
 })
 
 STALE_PATTERNS = re.compile(
