@@ -257,7 +257,7 @@ For ports that use timm or torchvision, install `pip install 'gptqmodel[vision]'
 with a torchvision build compatible with your PyTorch installation. These
 optional dependencies are loaded when the affected vision component is used;
 core text installations do not install them. See the
-[vision dependency boundary](docs/transformers5-model-ports.md#optional-vision-dependencies).
+[optional dependencies](docs/transformers5-model-ports.md#optional-dependencies).
 
 PyTorch **2.13.x or >= 2.15.0** is required; known-vulnerable versions are
 blocked by the [runtime safety check](https://github.com/ModelCloud/GPTQModel/blob/main/docs/torch-runtime-safety-gate.md).
@@ -292,115 +292,13 @@ print(model.tokenizer.decode(tokens))
 ```
 
 [Loading and inference](https://github.com/ModelCloud/GPTQModel/wiki/Loading-and-Inference)
-covers backend selection, generation, and adapters. GPT-QModel targets
-Transformers 5.x starting at 5.23.0 and requires Python 3.11 or newer. Model definitions
-use native Transformers implementations or
-local modeling code shipped with GPT-QModel; local ports always ignore
-checkpoint `auto_map`. Executing unsupported checkpoint Python requires both
-`trust_remote_code=True` and the existing `GPTQ_BYPASS_SAFETY_CHECKS=1` security
-bypass. See [model loading policy](docs/trust-remote-code-isolation.md) and
-[local Transformers 5 ports and validation](docs/transformers5-model-ports.md).
-[Bailing/Ling layout and MTP replay](docs/transformers5-model-ports.md#bailing--ling-selection-and-replay)
-cover the package-owned GQA/MLA/recurrent variants and their qualification limits.
-[CodeGen, ChatGLM and converted DBRX loading](docs/transformers5-model-ports.md#codegen-layout-and-chatglm--converted-dbrx-loading)
-documents partition selection, cache ownership and plain AWQ qualification.
-[DeepSeek V2/V3/V4/VL2, Kimi-K2, Deci/Nemotron-NAS, DBRX, Dream, native ERNIE MoE and EXAONE 4/4.5](docs/transformers5-model-ports.md#native-bridges-sparse-decoders-and-diffusion)
-have model-specific compatibility boundaries, source references and CPU validation.
-[GRIN-MoE, Instella, EXAONE 3 and both ERNIE VL aliases](docs/transformers5-model-ports.md#grin-moe-instella-exaone-3-and-ernie-vl-selection)
-use package-selected implementations with explicit plain AWQ policies; the
-reference records processor selection, cache failure behavior and provenance.
-[Hymba hybrid replay and InternLM2/2.5 packed attention](docs/transformers5-model-ports.md#hymba-hybrid-replay-and-internlm2-packed-attention)
-describe shared-KV calibration, recurrent cache recovery and packed QKV layout.
-[Package-owned tokenizer selection and LFM3 decoder ownership](docs/transformers5-model-ports.md#package-owned-tokenizer-selection)
-cover definition-specific scientific tokenizer dispatch and native gate/convolution
-exclusions. [Owned tokenizer construction and normalization](docs/owned-tokenizer-lifecycle.md)
-requires released [Tokenicer 0.0.20](https://github.com/ModelCloud/Tokenicer/releases/tag/v0.0.20),
-including the legacy Metaspace fix from [PR #67](https://github.com/ModelCloud/Tokenicer/pull/67).
-It also includes the earlier fix for Baichuan's legacy special-token map
-precedence; exact source IDs and public safetensors reloads pass without
-changing the packaged tokenizer or its oracle assertions.
-[Klear and Kimi tokenizer/AttnRes selection](docs/transformers5-model-ports.md#klear-and-kimi-implementation-selection)
-documents dense/MoE ownership, distinct tokenizer semantics and the explicit
-AttnRes quantization boundary. Packaged TikToken implementations require
-`tiktoken>=0.12.0`.
-[LFM3 media and Kimi-K2.5 loading](docs/transformers5-model-ports.md#lfm3-media-and-kimi-k25-loading)
-documents native versus package-owned media components, FP16 image calibration,
-ragged video pooling and checkpoint round trips.
-[LLaDA2 version selection and routing precision](docs/transformers5-model-ports.md#llada2-version-selection-and-routing-precision)
-explains explicit decoder versions, ambiguous checkpoint metadata and FP32
-routing state through lazy AWQ and repeated safetensors reloads.
-[Llama aliases, MiMo and flat LLaVA-Qwen2 selection](docs/transformers5-model-ports.md#llama-aliases-mimo-and-flat-llava-qwen2-selection)
-covers LongLLaMA memory, source-matched native aliases, dense auxiliary MTP
-and image-aware calibration through package-owned model selection.
-[LocateAnything model, media and localization selection](docs/transformers5-model-ports.md#locateanything-model-media-and-localization-selection)
-uses package-owned code. NVIDIA's license restricts this port and its derivatives
-to noncommercial research/evaluation, with the stated exception for NVIDIA and
-its affiliates; see the full [license](gptqmodel/models/ports/locateanything/LICENSE)
-and [notice](gptqmodel/models/ports/locateanything/NOTICE).
-[InternVL-chat and K2-Horizon loading](docs/transformers5-model-ports.md#internvl-wrapper-and-k2-horizon-selection)
-documents the package-owned wrapper/vision and dense/MoVA/MoE implementations,
-decoder selection, pinned licenses and CPU plain-AWQ validation.
-[MiniCPM, MiniCPM-V, MiniMax and MiMo-V2 selection](docs/transformers5-model-ports.md#minicpm-minicpm-v-minimax-and-mimo-v2-selection)
-records original scaled decoders, six legacy vision layouts, native MiniMax-M2,
-hybrid Text-01 attention and source-specific MiMo-V2. Native MiniCPM-V 4.6 keeps
-its separate Transformers loader. [MobileLLM](gptqmodel/models/ports/mobilellm/README.md)
-has public-source architecture coverage only; its FAIR Noncommercial Research
-License and acceptable-use policy do not grant commercial use.
-[MiniCPM-o](gptqmodel/models/ports/minicpm_o/README.md) uses a package-owned
-loader for versions 2.6 and 4.5. Install `gptqmodel[minicpm-o]` for the 2.6 TTS
-module.
-[Recurrent, Nemotron and diffusion selection](docs/transformers5-model-ports.md#recurrent-nemotron-and-diffusion-implementation-selection)
-also records Ouro's owned recurrent decoder and Nemotron-Omni's native media
-owners. [OpenVLA model and action selection](docs/transformers5-model-ports.md#openvla-model-and-action-selection)
-documents Prismatic vision/action processing and native text decoders, with
-Meta Llama 2 license/use-policy notices retained for released tokenizer assets.
-[PanGu-α](docs/transformers5-model-ports.md#pangu-alpha-top-query-loading-and-replay)
-uses a package-owned top-query decoder and the original Jieba/SentencePiece
-tokenizer pipeline. Install `gptqmodel[pangu-alpha]` to load its tokenizer.
-[Ovis visual-vocabulary selection](docs/transformers5-model-ports.md#ovis-visual-vocabulary-selection)
-preserves Ovis 1.0/1.5/1.6 vision and image-token layouts with native text
-decoders and plain AWQ; native Ovis2 keeps its separate definition.
-[Ovis2.5 and Ovis2.6 decoder selection](docs/transformers5-model-ports.md#ovis25-and-ovis26-decoder-selection)
-binds their NaViT visual vocabulary to exact native Qwen3, Qwen3 MoE or Qwen3
-Next text decoders, with explicit ownership and image-calibrated plain AWQ.
-[Qwen3 and Marin selection](docs/transformers5-model-ports.md#qwen3-and-marin-native-selection)
-uses exact native Qwen3 classes and tokenizers for the verified release layouts;
-unqualified raw `marin` metadata fails explicitly.
-[Original Qwen and legacy Phi-4 multimodal selection](docs/transformers5-model-ports.md#original-qwen-and-legacy-phi-4-multimodal-selection)
-preserves source Qwen attention/tokenizer behavior and Phi-4's image/audio LoRAs,
-media calibration and checkpoint owners. Original Qwen release-specific license
-and research restrictions remain separate from the port's Apache code license.
-[Qwen VL task and Qwen-Drive wrapper selection](docs/transformers5-model-ports.md#qwen-vl-task-and-qwen-drive-wrapper-selection)
-binds Qwen2/2.5-VL to exact native composite or headless text models and Qwen-Drive
-to its package-owned root VLM wrapper. Headless text artifacts support feature
-extraction and explicitly reject generation; Qwen-Drive support covers the VLM.
-[Solar-Open2 recurrent implementation selection](docs/transformers5-model-ports.md#solar-open2-recurrent-implementation-selection)
-documents the owned hybrid GQA/KDA decoder, request-owned recurrent cache,
-plain AWQ and exact FP32 routing state through repeated reloads. Released
-artifacts retain the separate Upstage Solar license and derivative-model terms.
-[Raon, Spark2.5, RW/Falcon and TeleChat selection](docs/transformers5-model-ports.md#raon-spark25-rwfalcon-and-telechat-selection)
-documents owned hybrid decoders, persistent MXFP8 storage, exact native Falcon
-reuse and the local eager ALiBi repair. Dense-source plain AWQ is qualified
-separately from source MXFP8 re-quantization, which rejects before mutation.
-TeleChat code notices and community-model artifact terms remain distinct;
-the retained legacy license PDF does not grant later-version commercial rights.
-The [calibration consumer validation](docs/transformers5-model-ports.md#calibration-consumer-validation)
-records current public-API migration coverage and reproducible CPU test batches.
-[Ricursive, Xing4.0, XVERSE, Unlimited-OCR and ZDTaichu5 selection](docs/transformers5-model-ports.md#ripple-xing4-xverse-and-native-ocr-selection)
-documents the owned decoders, exact native OCR task and media bindings.
-Tokenicer 0.0.20 prepares XVERSE's legacy Metaspace JSON before tokenizer
-construction. ZDTaichu5 retains the NVIDIA Open Model License and notices.
-[Checkpoint config selection](docs/checkpoint-config-selection.md)
-preserves the selected subfolder/revision when rebuilding a quantized save shell,
-including subsequent saves after a public reload.
-[Shared checkpoint ownership](docs/checkpoint-owned-materialization.md)
-explains generated device maps for tied aliases and native FP32 destinations
-during lazy offload, including the exclusions for packed weights.
-[MOSS, looped Nanbeige and the Nemotron execution layouts](docs/transformers5-model-ports.md#recurrent-nemotron-and-diffusion-implementation-selection)
-have distinct native or package-owned implementations, explicit plain AWQ,
-pinned licenses and CPU/meta qualification. MOSS covers Moon-003 base/SFT/plugin;
-historical MOSS2 remains unqualified. [Norm-teacher loading](docs/norm-teacher-loading.md)
-selects the teacher's own config and loader under the same security policy.
+covers backend selection, generation, and adapters. GPT-QModel requires
+Transformers 5.23+ and Python 3.11+. Model definitions use native Transformers
+implementations or model ports shipped with GPT-QModel; ports ignore checkpoint
+`auto_map`. Running unsupported checkpoint Python requires both
+`trust_remote_code=True` and `GPTQ_BYPASS_SAFETY_CHECKS=1`. See the
+[model loading policy](docs/trust-remote-code-isolation.md) and the
+[model port inventory](docs/transformers5-model-ports.md).
 Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
 Re-saving a loaded fused-expert MoE defuses the export shell and fails closed on
@@ -533,15 +431,8 @@ also appreciated. Ongoing sponsors will be credited on this README page.
 GPT-QModel is licensed under [Apache-2.0](https://github.com/ModelCloud/GPTQModel/blob/main/LICENSE). The optional, JIT-loaded
 Swordfish kernel is [AGPL-3.0-or-later](https://github.com/ModelCloud/GPTQModel/blob/main/licenses/SWORDFISH).
 
-Vendored model ports retain their upstream licenses and notices; see the
-[port coverage and licensing table](docs/transformers5-model-ports.md).
-In particular, MobileLLM and LocateAnything carry noncommercial restrictions,
-OpenVLA's tokenizer assets retain Meta Llama 2 terms, and Solar-Open2 artifacts
-retain Upstage Solar derivative-model naming and attribution terms. These components are
-not relicensed by GPT-QModel's Apache license.
-TeleChat's model cards also reference separate community terms and prior
-commercial authorization; the port preserves the available legacy license
-PDF and explicitly records uncertainty about later-version artifact terms.
+Model ports keep the copyright headers, notices and licenses of the code they
+derive from; see the [model port inventory](docs/transformers5-model-ports.md).
 
 ## Attributions and citations 📚
 
