@@ -36,6 +36,7 @@ from transformers.integrations import use_kernel_forward_from_hub
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPast, BaseModelOutputWithPooling
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import ModelOutput, TransformersKwargs, auto_docstring, torch_compilable_check, torch_int
 from transformers.utils.generic import can_return_tuple, merge_with_config_defaults
@@ -394,7 +395,7 @@ class InternVLVisionEncoder(nn.Module):
 
 
 @auto_docstring
-class InternVLVisionPreTrainedModel(PreTrainedModel):
+class InternVLVisionPreTrainedModel(NativePreTrainedModel):
     config: InternVLVisionConfig
     base_model_prefix = "internvl_vision"
     main_input_name = "pixel_values"
@@ -469,7 +470,7 @@ class InternVLVisionModel(InternVLVisionPreTrainedModel):
 
 
 @auto_docstring
-class InternVLPreTrainedModel(PreTrainedModel):
+class InternVLPreTrainedModel(NativePreTrainedModel):
     config: InternVLConfig
     base_model_prefix = "model"
     input_modalities = ("image", "text", "video")

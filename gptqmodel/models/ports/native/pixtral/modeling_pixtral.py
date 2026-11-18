@@ -25,6 +25,7 @@ from transformers.integrations import use_kernel_forward_from_hub, use_kernelize
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, logging
 from transformers.utils.generic import is_flash_attention_requested, merge_with_config_defaults
@@ -343,7 +344,7 @@ class PixtralTransformer(nn.Module):
 
 
 @auto_docstring
-class PixtralPreTrainedModel(PreTrainedModel):
+class PixtralPreTrainedModel(NativePreTrainedModel):
     config: PixtralVisionConfig
     base_model_prefix = "model"
     main_input_name = "pixel_values"

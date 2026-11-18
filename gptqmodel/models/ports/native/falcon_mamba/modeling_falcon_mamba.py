@@ -35,6 +35,7 @@ from transformers.integrations import use_kernel_forward_from_hub, use_kernel_fu
 from transformers.integrations.accelerate import force_accelerate_hooks
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_utils import PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.utils import ModelOutput, auto_docstring
 from transformers.utils.import_utils import (
     is_mambapy_available,
@@ -570,7 +571,7 @@ class FalconMambaBlock(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class FalconMambaPreTrainedModel(PreTrainedModel):
+class FalconMambaPreTrainedModel(NativePreTrainedModel):
     config: FalconMambaConfig
     base_model_prefix = "backbone"
     _no_split_modules = ["FalconMambaBlock", "FalconMambaMixer"]

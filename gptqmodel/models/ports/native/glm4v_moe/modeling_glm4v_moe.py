@@ -44,6 +44,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, torch_compilable_check
 from transformers.utils.generic import (
@@ -459,7 +460,7 @@ class Glm4vMoeTextDecoderLayer(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class Glm4vMoePreTrainedModel(PreTrainedModel):
+class Glm4vMoePreTrainedModel(NativePreTrainedModel):
     config: Glm4vMoeConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
