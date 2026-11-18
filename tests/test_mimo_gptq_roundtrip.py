@@ -4,7 +4,6 @@
 
 import json
 import math
-import shutil
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -48,8 +47,7 @@ def make_source(
     path: Path, tp: int, dtype: torch.dtype = torch.bfloat16
 ) -> tuple[torch.nn.Module, dict]:
     path.mkdir()
-    for file in (Path(__file__).parent / "fixtures/mimo_v2").glob("*.py"):
-        shutil.copyfile(file, path / file.name)
+    # auto_map names checkpoint Python that does not exist: the package-owned port must load.
     config = {
         "model_type": "mimo_v2",
         "architectures": ["MiMoV2ForCausalLM"],

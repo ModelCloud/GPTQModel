@@ -14,7 +14,7 @@ from torch import nn
 import gptqmodel.models.loader as loader_module
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.models.base import BaseQModel
-from gptqmodel.models.definitions.mimo_v2 import MimoV2QModel, _compatible_mask
+from gptqmodel.models.definitions.mimo_v2 import MimoV2QModel
 from gptqmodel.models.writer import (
     _merge_selected_tensors_into_state_dict,
     _normalize_out_of_model_tensors_entries,
@@ -510,21 +510,3 @@ def test_mtp_prefix_preservation_allows_absent_auxiliary(tmp_path: Path) -> None
         prefixes, suffixes, tensor_names, str(tmp_path), state_dict
     )
     assert state_dict == {}
-
-
-def test_mask_compatibility_is_local_and_idempotent() -> None:
-    def modern(*, inputs_embeds: torch.Tensor, position_ids: torch.Tensor) -> tuple:
-        return inputs_embeds, position_ids
-
-    def legacy(*, input_embeds: torch.Tensor, cache_position: torch.Tensor) -> tuple:
-        return input_embeds, cache_position
-
-    value = torch.ones(1)
-    adapted = _compatible_mask(modern)
-    assert adapted(input_embeds=value, cache_position=value, position_ids=value) == (
-        value,
-        value,
-    )
-    assert _compatible_mask(adapted) is adapted
-    assert _compatible_mask(legacy) is legacy
-    assert "input_embeds" not in __import__("inspect").signature(modern).parameters

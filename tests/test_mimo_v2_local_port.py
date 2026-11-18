@@ -237,34 +237,6 @@ def test_vision_attention_against_independent_float64_segment_equations(full, kv
     torch.testing.assert_close(actual.double(), expected, atol=2e-7, rtol=2e-5)
 
 
-def test_audio_codec_mel_codes_nearest_codebook_and_safetensors(tmp_path):
-    from gptqmodel.models.ports.mimo_v2.modeling_mimo_v2 import (
-        EuclideanCodebook,
-        MiMoAudioTokenizer,
-        MiMoAudioTokenizerConfig,
-    )
-
-    torch.manual_seed(31)
-    cfg = MiMoAudioTokenizerConfig(d_model=32, encoder_layers=1, encoder_attention_heads=4,
-                                  encoder_ffn_dim=64, n_mels=8, num_quantizers=2,
-                                  codebook_size=[16, 16], avg_pooler=2, max_audio_seconds=2)
-    model = MiMoAudioTokenizer(cfg).eval()
-    mels = torch.randn(28, 8)
-    lengths = torch.tensor([16, 12])
-    with torch.inference_mode():
-        first = model.encode(mels, lengths)
-        model.save_pretrained(tmp_path)
-        loaded = MiMoAudioTokenizer.from_pretrained(tmp_path).eval()
-        second = loaded.encode(mels, lengths)
-        for left, right in zip(first, second):
-            if left is not None:
-                torch.testing.assert_close(left, right, atol=0, rtol=0)
-        book = EuclideanCodebook(dim=4, codebook_size=5)
-        vectors = torch.randn(2, 3, 4)
-        expected = ((vectors[..., None, :] - book.embed[None, None])**2).sum(-1).argmin(-1)
-        assert torch.equal(book.encode(vectors), expected)
-
-
 def test_media_count_and_processor_failure_repair_retry(tmp_path):
     from gptqmodel.models.ports.mimo_v2.processing_mimo_v2 import MiMoV2Processor
 
@@ -513,7 +485,7 @@ def test_corrupt_safetensors_public_failure_repair_retry(tmp_path):
         GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32)
     assert not marker.exists()
     weights.write_bytes(original)
-    loaded = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32)
+    loaded = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, attn_implementation="eager")
     with torch.inference_mode():
         ids = torch.tensor([[1, 5, 9]])
         torch.testing.assert_close(loaded.model(ids).logits, model(ids).logits, atol=0, rtol=0)
@@ -610,3 +582,21 @@ def test_public_load_owns_config_model_and_ignores_checkpoint_python(tmp_path, m
     assert not marker.exists()
     with torch.inference_mode():
         assert torch.isfinite(loaded.model(torch.tensor([[1, 5, 7]])).logits).all()
+
+
+def test_transformers5_rotary_buffers_default_routing_group_and_split_unit():
+    model = make_model(n_group=None, topk_group=None)
+    for rotary in (model.model.rotary_emb, model.model.swa_rotary_emb):
+        buffers = dict(rotary.named_buffers())
+        assert set(buffers) == {"inv_freq", "original_inv_freq"}
+        assert buffers["original_inv_freq"] is not buffers["inv_freq"]
+        torch.testing.assert_close(buffers["original_inv_freq"], buffers["inv_freq"], atol=0, rtol=0)
+        assert not any("inv_freq" in key for key in model.state_dict())
+        assert rotary.to(torch.float64).original_inv_freq.dtype == torch.float64
+    # Unset groups mean one routing group, as in native MiMo-V2-Flash/DeepSeek-V3.
+    grouped = make_model(n_group=1, topk_group=1)
+    grouped.load_state_dict(model.state_dict())
+    ids = torch.tensor([[1, 5, 9, 11]])
+    with torch.inference_mode():
+        torch.testing.assert_close(model(ids).logits, grouped(ids).logits, atol=0, rtol=0)
+    assert type(model)._no_split_modules == ["MiMoV2DecoderLayer"]

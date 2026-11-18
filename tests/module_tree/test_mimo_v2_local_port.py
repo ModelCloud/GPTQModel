@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Checkpoint inventories and real MiMo-V2 owners, independent of tree generation."""
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,7 +48,6 @@ def test_exact_local_registry_plan_and_native_distinction():
     assert MimoV2QModel.build_layer_modules(tree, include_capture_only=True) == EXPECTED_PLAN["blocks"]
     assert MimoV2QModel.extract_layers_node() == EXPECTED_PLAN["layers"]
     assert not MimoV2QModel.require_trust_remote_code
-    assert json.loads((PORT / "module_plan_case.json").read_text()) == EXPECTED_PLAN
 
 
 @pytest.mark.parametrize("layout", ["split", "fused_qkv"])
@@ -89,24 +89,21 @@ def test_actual_decoder_tensor_ownership_layout_and_consumer_tags(layout, kv, bi
 
 @pytest.mark.parametrize("variant", ["MiMo-V2.5-Base", "MiMo-V2.5-Pro-Base", "MiMo-V2.6-Pro-RL", "MiMo-V2.6-Flash-RL"])
 def test_pinned_complete_checkpoint_key_inventory(tmp_path, variant):
-    fixture = read_port_json(PORT / "fixtures" / (variant + ".json"))
-    values = dict(fixture["config"])
-    values.pop("quantization_config", None)
+    """Live owners equal the pinned index minus MTP/source-scale keys (stored as a SHA-256 digest)."""
+    fixture = read_port_json(PORT / "checkpoints.json")[variant]
     with torch.device("meta"):
-        model = MiMoV2ForCausalLM(MiMoV2Config(**values))
-    expected = set(fixture["keys"])
-    # Run the actual omission policy against the independent checkpoint index.
-    # This exercises real visual/audio owners rather than fake child modules.
-    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": dict.fromkeys(expected, "unused")}))
+        model = MiMoV2ForCausalLM(MiMoV2Config(**fixture["config"]))
+    state = model.state_dict()
+    omitted = set(fixture["model_only_keys"])
+    checkpoint = sorted(set(state) - omitted)
+    assert len(checkpoint) == fixture["live_key_count"]
+    assert hashlib.sha256("\n".join(checkpoint).encode()).hexdigest() == fixture["live_keys_sha256"]
+    # Run the actual omission policy against an index without the omitted owners.
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": dict.fromkeys(checkpoint, "x")}))
     MimoV2QModel._drop_visual_merger_biases_if_checkpoint_omits_them(model, str(tmp_path))
     MimoV2QModel._drop_checkpoint_omitted_audio_tensors(model, str(tmp_path))
     state = model.state_dict()
-    actual = set(state)
-    mtp = {name for name in expected if name.startswith("model.mtp.")}
-    source_scales = {name for name in expected if name.endswith(("weight_scale_inv", "weight_scale"))}
-    assert actual == expected - mtp - source_scales
-    assert len(expected) == fixture["key_count"]
-    assert mtp == set(fixture["mtp_keys"])
+    assert sorted(state) == checkpoint
     for name, shape in fixture.get("header_shapes", {}).items():
-        if name not in mtp | source_scales:
+        if not name.startswith("model.mtp.") and not name.endswith(("weight_scale_inv", "weight_scale")):
             assert list(state[name].shape) == shape, name

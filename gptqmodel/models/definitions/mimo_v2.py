@@ -2,12 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
-import inspect
 import json
 import os
-from collections.abc import Callable
-from functools import wraps
-from typing import Any
 
 from safetensors import safe_open
 from torch import nn
@@ -23,26 +19,6 @@ from ..local import LocalModelLoader
 
 _REPLAY_INPUTS_KEY = "_mimo_v2_replay_inputs"
 _CAPTURE_ATTENTION_MASK_ATTR = "_mimo_v2_capture_attention_mask"
-
-
-def _compatible_mask(function: Callable) -> Callable:
-    """Adapt legacy MiMo keywords within its remote modeling module."""
-    if getattr(function, "_gptqmodel_mimo_mask_compat", False):
-        return function
-    parameters = inspect.signature(function).parameters
-    if "inputs_embeds" not in parameters:
-        return function
-
-    @wraps(function)
-    def mask(*args: Any, **kwargs: Any) -> Any:
-        if "input_embeds" in kwargs:
-            kwargs["inputs_embeds"] = kwargs.pop("input_embeds")
-        if "cache_position" not in parameters:
-            kwargs.pop("cache_position", None)
-        return function(*args, **kwargs)
-
-    mask._gptqmodel_mimo_mask_compat = True
-    return mask
 
 
 class MimoV2QModel(BaseQModel):
