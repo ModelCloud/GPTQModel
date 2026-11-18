@@ -26,10 +26,21 @@ def normalize_seq_mask(mask: torch.Tensor | None, seq_len: int | None = None) ->
     m = mask
     # Convert numeric to bool 'keep' (HF tends to use >0 for keep; extended masks use big negatives for masked)
     if m.dtype != torch.bool:
+        # A floating-point mask (or any rank >= 3 mask) that is entirely zero
+        # is the unpadded extended/additive form: additive masks encode
+        # "attend" as 0 and "masked" as a large negative bias, so an all-zero
+        # mask means "no padding at all". Without this rule the mask has no
+        # negative sentinel, falls through to the 0/1 inference below, and
+        # drops every token -- PanGu-alpha's `(1.0 - mask) * -10000.0` layer
+        # input mask hits exactly this case (#5134). A 2-D integer 0/1 mask
+        # keeps the opposite meaning: an all-zero row is all padding.
+        zero_is_keep = m.is_floating_point() or m.dim() >= 3
         if m.device.type in {"cuda", "mps"}:
             has_negative = (m < 0).any()
-            m = torch.where(has_negative, m >= 0, m > 0)
-        elif torch.any(m < 0):
+            all_zero = ~m.any()
+            additive = has_negative | (all_zero & bool(zero_is_keep))
+            m = torch.where(additive, m >= 0, m > 0)
+        elif torch.any(m < 0) or (zero_is_keep and not bool(m.any())):
             m = m >= 0
         else:
             m = m > 0

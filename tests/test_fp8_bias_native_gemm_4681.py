@@ -83,7 +83,12 @@ def test_out_of_range_weight_still_falls_back_on_cuda():
 
 
 def test_eligible_forward_forwards_the_wide_bias_to_the_fp32_reducer(monkeypatch):
-    """The fast path must hand the FP32 bias to the FP32 epilogue."""
+    """The non-lean fast path must hand the FP32 bias to the FP32 epilogue.
+
+    Row/tensor scales now add the bias in the lean path's own FP32 epilogue
+    (#5146); this exercises the block/fallback branch that still delegates to
+    ``matmul_fp32_reduce``.
+    """
 
     import gptqmodel.nn_modules.qlinear.fp8 as fp8_module
 
@@ -97,6 +102,7 @@ def test_eligible_forward_forwards_the_wide_bias_to_the_fp32_reducer(monkeypatch
 
     monkeypatch.setattr(fp8_module, "matmul_fp32_reduce", fake_reduce)
     monkeypatch.setattr(module, "_native_gemm_eligible", lambda *args, **kwargs: True)
+    monkeypatch.setattr(module, "_lean_epilogue_eligible", lambda *args, **kwargs: False)
 
     output = module._forward_dequant_matmul(x, bias=module.bias)
 

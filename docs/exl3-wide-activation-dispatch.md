@@ -15,23 +15,27 @@ flowchart TD
     A["ExllamaV3Linear.forward(x)"] --> B{"x.dtype"}
     B -->|float16| C["_ensure_inner"]
     B -->|bfloat16 on CUDA| D["_native_bf16_input"]
-    D --> E{"amax finite?"}
-    E -->|no| H["_ensure_torch_inner"]
-    E -->|yes| F{"amax <= 65504/sqrt(128)?"}
-    F -->|yes| G["cast to FP16 (exact)"]
-    F -->|no| P["divide each wide row by the smallest<br/>power of two that fits, cast to FP16"]
+    D --> E{"module warm and<br/>fused op present?"}
+    E -->|yes| S["bf16_prescale: one launch<br/>row amax, power-of-two scale, FP16 cast"]
+    E -->|no| N["first forward: isfinite probe"]
+    N -->|finite| R["eager reference: vector_norm, div,<br/>frexp, ldexp, where, divide, cast"]
+    N -->|non-finite| H["_ensure_torch_inner"]
+    S --> G["FP16 activations plus per-row FP32 scale"]
+    R --> G
     G --> C
-    P --> C
     C --> I["LinearEXL3.forward"]
     I --> J{"rows greater than 32?"}
     J -->|no| K["bc.run: FP16 native GEMM"]
     J -->|yes| L["ext.hgemm: FP16 native GEMM"]
-    P --> Q["multiply kernel output back; bias excluded from the scale"]
+    K --> Q{"fused op present?"}
+    L --> Q
+    Q -->|yes| T["bf16_rescale: (out - bias) * scale + bias<br/>in FP32, one BF16 cast, one launch"]
+    Q -->|no| U["eager re-scale: FP32, multiply, BF16 cast"]
     B -->|float32| H
     H --> M["ExllamaV3TorchLinear._forward_eager"]
-    M --> N["reshape rows; convert to FP32"]
-    N --> O["_forward_chunked: packed trellis decode and FP32 matmul"]
-    O --> R["add bias; cast to input dtype"]
+    M --> N2["reshape rows; convert to FP32"]
+    N2 --> O["_forward_chunked: packed trellis decode and FP32 matmul"]
+    O --> R2["add bias; cast to input dtype"]
 ```
 
 ## BF16 to FP16 conversion
@@ -76,8 +80,9 @@ the kernel output row is multiplied back:
   host, so a BF16 forward no longer drains the CUDA stream once per linear:
   that `float(amax)` read was 112 synchronizations per decoded token on a 1B
   model, 4-8x slower than the same math without it, and it also prevented CUDA
-  graph capture of the BF16 path. That is a couple of small kernels, against
-  the hundreds of launches the Torch reconstruction performs.
+  graph capture of the BF16 path. Since #5148 that is one fused launch per
+  half of the mapping, against the hundreds of launches the Torch
+  reconstruction performs.
 
 Non-finite BF16 activations (`inf`/`nan`) keep the FP32 Torch path: there is no
 power of two that would make them finite. `isfinite` is checked once per
@@ -86,6 +91,91 @@ module, on its first BF16 forward, instead of on every forward - a per-forward
 module whose first BF16 activation is non-finite keeps the FP32 reconstruction
 and probes again on its next forward; once an activation is finite the module
 stays on the native path.
+
+## BF16 activation adaptation launch cost (#5148)
+
+#4989 removed the per-forward host sync from this path, but the mapping was
+still a chain of about a dozen eager kernels per linear: `vector_norm(inf)`,
+`.float()`, `div`, `frexp`, `ones_like` x2, `ldexp`, `where`, `x / scale`,
+`.to(fp16)`, then `result.to(fp32)`, `- bias`, `* scale`, `+ bias`, `.to(bf16)`.
+At decode each is a microsecond kernel behind a full host dispatch, so the
+33 us GEMM starved behind ~90 us of launches: BF16 decode ran 2.7x slower than
+the same checkpoint in FP16.
+
+Before, per BF16 linear (`gptqmodel/nn_modules/exllamav3.py` at 17a488e41,
+`_native_bf16_input` + `_rescale_native_output`):
+
+```mermaid
+flowchart LR
+    X["BF16 x"] --> A1["vector_norm inf"]
+    A1 --> A2[".float"]
+    A2 --> A3["div by bound"]
+    A3 --> A4["frexp"]
+    A4 --> A5["ones_like x2"]
+    A5 --> A6["ldexp"]
+    A6 --> A7["where"]
+    A7 --> A8["x / scale"]
+    A8 --> A9["to FP16"]
+    A9 --> G["EXL3 GEMM"]
+    G --> B1["to FP32"]
+    B1 --> B2["- bias"]
+    B2 --> B3["* scale"]
+    B3 --> B4["+ bias"]
+    B4 --> B5["to BF16"]
+```
+
+After, the same math in two launches
+(`gptqmodel_ext/exllamav3/bf16_scale.cu`, reached through
+`gptqmodel/nn_modules/exllamav3_bf16_kernels.py`):
+
+```mermaid
+flowchart LR
+    X["BF16 x"] --> P["bf16_prescale<br/>one launch: row amax,<br/>power-of-two scale, FP16 cast"]
+    P --> G["EXL3 GEMM<br/>FP16 in, FP16 out"]
+    G --> R["bf16_rescale<br/>one launch: FP32 bias math,<br/>BF16 cast"]
+    R --> Y["BF16 y"]
+```
+
+The pre-scale is one program per row: the row `amax` has to be complete before
+that row is cast, and a launch has no grid-wide barrier, so the row stays in one
+block. `frexp(amax / bound)` becomes the exponent field of the `amax / bound`
+quotient (the quotient is always above 1 on the rows that use it), and the
+divide is a multiply by the exact power-of-two reciprocal. The re-scale keeps
+`(out - bias) * scale + bias` as three separate FP32 roundings (`__fsub_rn`,
+`__fmul_rn`, `__fadd_rn`, never an FMA) and casts once to BF16.
+
+**Failure contract.** The fused path declines instead of approximating:
+
+| Situation | Path |
+| --- | --- |
+| Extension build without `bf16_prescale`/`bf16_rescale` (stale prebuilt wheel) | eager reference |
+| Non-CUDA trellis | portable FP32 reconstruction (unchanged, #4789) |
+| Non-contiguous, FP16, FP32, or empty activation | eager reference |
+| First BF16 forward of a module (the one `isfinite` probe) | eager reference |
+| Non-finite BF16 activation | portable FP32 reconstruction (unchanged) |
+
+Both halves are bit-identical to the eager sequence, so a fallback is a pure
+performance choice. `tests/test_exl3_bf16_fused_prescale_5148.py` compares raw
+bits of the pre-scale, the re-scale (FP16/BF16/FP32/no bias, padded stored
+width) and the complete forward against the fallback branch at M=1/8/512/2048
+plus all-zero, denormal, `65504`, `3e38`, mixed-outlier and `inf`/`nan` rows.
+
+Measured on an RTX 5090 (sm_120, torch 2.15.0+cu132, CUDA 13.2), eight
+Llama-3.1-8B-geometry decoder layers quantized to EXL3 W4 with random weights
+(no EXL3 checkpoint was available offline; the projections, kernels and shapes
+are the real ones), batch 1 unless noted:
+
+| Configuration | decode step bs1 | decode step bs8 | prefill 2048 | `generate()` 128 tok |
+| --- | --- | --- | --- | --- |
+| dense HF BF16 | 3.74 ms | 4.22 ms | 48.0 ms | 267 tok/s |
+| EXL3 FP16 | 4.52 ms | 4.53 ms | 44.4 ms | 221 tok/s |
+| EXL3 BF16, eager (before) | 8.84 ms | 8.88 ms | 54.9 ms | 113 tok/s |
+| EXL3 BF16, fused (after) | 5.27 ms | 5.37 ms | 46.6 ms | 190 tok/s |
+
+Single `mlp.gate_proj` (4096 -> 14336), M=1, CUDA-event minimum per call:
+FP16 32.8 us, BF16 eager 88.2 us (2.69x), BF16 fused 35.8 us (1.09x). The
+fused cost is two launches of ~2 us of GPU time plus ~6 us of host dispatch,
+against ~60 us of dispatch for the eager chain.
 
 ## Dispatch contract
 
@@ -124,3 +214,11 @@ elements (amax 260 to 20000), a wide row is scaled to just inside the bound,
 the scale is per row, and a mixed-magnitude batch (64 rows of `N(0, 0.3)` with
 one outlier in row 0) keeps the ordinary rows at the plain FP16 path's
 accuracy.
+
+`tests/test_exl3_bf16_fused_prescale_5148.py` pins the fused path: raw-bit
+equality with the eager reference for the pre-scale, the re-scale and the whole
+forward at M=1/8/512/2048 and on adversarial rows, the fallbacks (missing fused
+op, non-contiguous, FP16/FP32, CPU), the absence of any retained dense weight,
+and an M=1 `bf16 <= 1.3x fp16` per-linear bound. That last test measures the
+eager chain in the same process with the fused ops disabled, so it fails on
+17a488e41 by construction (2.7x) rather than relying on a historical number.

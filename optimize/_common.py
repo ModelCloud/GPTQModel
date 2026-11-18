@@ -309,6 +309,3 @@ def add_requant_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Disable activation-group awareness.",
     )
-    parser.add_argument(
-        "--scale-search", default="activation", help="Scale-search objective."
-    )

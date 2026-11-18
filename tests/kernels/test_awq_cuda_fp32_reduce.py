@@ -202,3 +202,46 @@ def test_paro_fused_splitk_reduce_matches_default(dtype, monkeypatch):
         candidate = awq_gemm_forward(rotated, qweight, scales, qzeros, 4, True)
 
     assert torch.equal(candidate, baseline)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for AWQ wide split-K reduction test")
+def test_awq_cuda_fused_splitk_reduce_indexes_above_int32_element_count():
+    """Issue #5091: the fused reduce must address past 2^31 output elements.
+
+    ``fused_reduce_splitk_fp32_to_output`` narrowed ``result.numel()`` to
+    ``int`` and walked ``idx`` in 32 bits, so a wide prefill read and wrote the
+    wrong partial elements (or faulted) once the output crossed 2^31 elements.
+    The fused and eager ``sum(0)`` reductions must agree on the same partials.
+    """
+    if not awq_runtime_available():
+        pytest.skip("AWQ CUDA extension entrypoint unavailable.")
+
+    torch.manual_seed(0)
+    bits = 4
+    in_features = 256
+    out_features = 8192
+    group_size = 128
+    rows = 2**31 // out_features + (4096 + out_features - 1) // out_features
+    assert rows * out_features > 2**31
+    qweight, qzeros, scales = _make_packed_buffers(bits, in_features, out_features, group_size)
+
+    tail = 4
+    x = torch.zeros(rows, in_features, device="cuda", dtype=torch.float16)
+    x[-tail:] = torch.randn(tail, in_features, device="cuda", dtype=torch.float16)
+    qweight = qweight.cuda()
+    qzeros = qzeros.cuda()
+    scales = scales.cuda()
+
+    fused = awq_gemm_forward(x, qweight, scales, qzeros, 1, True, True)
+    eager = awq_gemm_forward(x, qweight, scales, qzeros, 1, True, False)
+    torch.cuda.synchronize()
+
+    assert fused.shape == eager.shape == (rows, out_features)
+    reference = _dense_reference(x[-tail:], qweight, qzeros, scales, bits=bits, group_size=group_size)
+    fused_abs = (fused[-tail:] - reference).abs()
+    eager_abs = (eager[-tail:] - reference).abs()
+    assert torch.isfinite(fused[-tail:]).all()
+    assert fused_abs.max().item() <= max(eager_abs.max().item(), 1e-3) * 1.01, (
+        "the fused split-K reduce no longer matches the dense reference above 2^31 "
+        "output elements"
+    )

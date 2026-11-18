@@ -34,7 +34,7 @@ from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.planar_packing import planar_decode_rows
 from ...utils.rocm import IS_ROCM
-from ...utils.torch import torch_compile
+from ...utils.torch import model_execution_device_scope, model_global_state_lock, torch_compile
 from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
 from ._numerics import (
@@ -88,7 +88,12 @@ class _CompiledDequantizeWeight:
         module = self._module_ref()
         if module is None:
             raise RuntimeError("compiled `dequantize_weight` called after its module was released")
-        return self._compiled(module, *args, **kwargs)
+        # The compiled kernel is reachable outside the model-forward proxy
+        # (e.g. a direct kernel call). Enter the module's device so inductor's
+        # device-less lazy patterns cannot resolve to the current, excluded
+        # GPU (#5101); the caller's device is restored on exit.
+        with model_execution_device_scope(module, args, kwargs):
+            return self._compiled(module, *args, **kwargs)
 
     def __repr__(self):
         return f"<compiled dequantize_weight {self._compiled!r}>"
@@ -462,13 +467,16 @@ class TorchLinear(PackableQuantLinear):
 
         # Compile the unbound function: compiling the bound method would store a
         # strong reference to this module inside the compiled wrapper (#4847).
-        compiled = torch_compile(type(self).dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
-        self.dequantize_weight = _CompiledDequantizeWeight(compiled, self)
+        # Construction imports dynamo and the first trace restores the process
+        # default dtype, so share the loader's global-state lock (#5127).
+        with model_global_state_lock():
+            compiled = torch_compile(type(self).dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
+            self.dequantize_weight = _CompiledDequantizeWeight(compiled, self)
 
-        if self.adapter:
-            self.adapter.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
+            if self.adapter:
+                self.adapter.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
-        super().optimize()
+            super().optimize()
 
     def __getstate__(self):
         """Drop the compiled ``dequantize_weight`` so the module stays picklable.
@@ -1282,6 +1290,23 @@ class TorchQuantEmbeddings(TorchLinear):
     EMBEDDING_ROW_DECODE_LIMIT = 1024
     EMBEDDING_ROW_DECODE_MIN_TABLE_BYTES = 64 * 1024 * 1024
 
+    #: Dtype the forward returns. A quantized embedding's stored ``scales`` keep
+    #: the checkpoint dtype (FP16 for GPTQ), which is not the model's compute
+    #: dtype; returning it promoted a BF16 residual stream to FP32 and made a
+    #: bf16 ``lm_head`` reject the activations (#5116). Set from the embedding
+    #: the module replaced, or from the model dtype on a requantize.
+    _embedding_output_dtype: Optional[torch.dtype] = None
+
+    def set_embedding_output_dtype(self, dtype: Optional[torch.dtype]) -> None:
+        """Record the dtype this embedding must return to the residual stream."""
+
+        self._embedding_output_dtype = dtype
+
+    def embedding_output_dtype(self) -> torch.dtype:
+        """The dtype ``forward`` returns: the recorded one, else the scale dtype."""
+
+        return self._embedding_output_dtype or self.scales.dtype
+
     def _embedding_row_decode_state(self):
         """Per-vocabulary index metadata for row decode, derived from packed tensors.
 
@@ -1408,10 +1433,11 @@ class TorchQuantEmbeddings(TorchLinear):
         return scales * (codes - zeros)
 
     def forward(self, input_ids: torch.Tensor):
+        output_dtype = self.embedding_output_dtype()
         if input_ids.numel() == 0:
             return torch.empty(
                 (*input_ids.shape, self.out_features),
-                dtype=self.scales.dtype,
+                dtype=output_dtype,
                 device=self.scales.device,
             )
         if (
@@ -1425,8 +1451,8 @@ class TorchQuantEmbeddings(TorchLinear):
             and self._embedding_row_decode_state() is not None
         ):
             rows = self._dequantize_embedding_rows(input_ids)
-            return rows.reshape(*input_ids.shape, self.out_features)
-        return F.embedding(input_ids, self.dequantize_weight())
+            return rows.to(output_dtype).reshape(*input_ids.shape, self.out_features)
+        return F.embedding(input_ids, self.dequantize_weight()).to(output_dtype)
 
 
 __all__ = ["TorchLinear", "TorchQuantEmbeddings", "dequantize_model"]

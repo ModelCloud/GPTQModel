@@ -596,6 +596,24 @@ def _tensor_nbytes(tensor: torch.Tensor) -> int:
     return tensor.numel() * itemsize
 
 
+def _module_has_tensors(module: nn.Module) -> bool:
+    """True when ``module`` owns state at any depth.
+
+    ``offload_to_disk`` bundles ``module.state_dict()``, which is recursive, so
+    the "is there anything to offload" gate must be recursive too. Checking
+    ``recurse=False`` made container modules (``model.visual`` and friends)
+    look empty and silently skipped their offload (#5145).
+    """
+
+    for parameter in module.parameters(recurse=True):
+        if parameter.numel() > 0:
+            return True
+    for buffer in module.buffers(recurse=True):
+        if buffer.numel() > 0:
+            return True
+    return False
+
+
 def _write_offload_index(index: dict, offload_dir: str) -> None:
     """Write an Accelerate-compatible ``index.json`` into ``offload_dir``."""
 
@@ -1360,10 +1378,13 @@ def _offload_disk_locked(
 
     # print(f"device_map base_modules: {device_map}")
 
-    # skip modules that have no parameters and no buffers since they can't be offloaded
-    has_params  = any(p.numel() > 0 for p in module.parameters(recurse=False))
-    has_buffers = any(b.numel() > 0 for b in module.buffers(recurse=False))
-    if not has_params and not has_buffers:
+    # Skip only a module whose recursive state is empty. The old check used
+    # recurse=False, so a container that owns no direct tensors (a multimodal
+    # ``model.visual`` tower, whose weights all live in its children) was
+    # skipped as "empty" and silently stayed on the accelerator for the whole
+    # layer loop (#5145). ``state_dict()`` below is recursive, so this check
+    # now matches what actually gets bundled.
+    if not _module_has_tensors(module):
         return
 
     module_offload_dir = os.path.join(disk_path, name)

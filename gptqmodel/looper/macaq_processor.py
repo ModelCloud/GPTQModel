@@ -53,7 +53,8 @@ from ..quantization.macaq import Macaq
 from ..utils.backend import BACKEND
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.model import create_quant_module, move_to
+from ..utils.model import create_quant_module, install_quant_module, move_to
+from ..utils.module_locks import parent_module_lock
 from ..utils.torch import CPU
 
 
@@ -318,7 +319,7 @@ class MacaqProcessor(SharedInputCaptureProcessor):
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
 
         with log_time_block("create_quant_module", logger=log, module_name=module_label):
-            create_quant_module(
+            qmodule = create_quant_module(
                 name=module.full_name,
                 linear_cls=linear_cls,
                 bits=self.qcfg.runtime_bits,
@@ -337,15 +338,25 @@ class MacaqProcessor(SharedInputCaptureProcessor):
                 init_kwargs=self.qcfg.quant_linear_init_kwargs(),
                 dtype=module.module_dtype,
                 resolved_module_config=get_resolved_module_config(module),
+                install=False,
+            )
+        if qmodule is None:
+            raise RuntimeError(
+                f"MacaqProcessor: module `{module.full_name}` resolved to an excluded "
+                "quant config but still reached packing."
             )
 
-        qmodule = model.model.get_submodule(module.full_name)
         with log_time_block("module.pack", logger=log, module_name=module_label):
             qmodule.pack(linear=layers[module.full_name], macaq_result=result)
 
         with self.lock:
             self.result_pop(module.full_name)
 
+        # Publish the packed kernel with one assignment; installing it before
+        # packing left an unusable projection behind when packing was
+        # interrupted (issue #5089).
+        with parent_module_lock(module.full_name):
+            install_quant_module(model.model, module.full_name, qmodule)
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):

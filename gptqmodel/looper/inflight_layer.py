@@ -81,6 +81,7 @@ class InflightLayerTracker:
             return
         module, home_device = inflight
         self._clear_layer_capture_hooks(module)
+        self._unwrap_hooked_linears(module)
         try:
             rehome_module_to_device(
                 module,
@@ -96,6 +97,47 @@ class InflightLayerTracker:
             log.warning(
                 "failed to restore in-flight quantization layer to %s",
                 home_device,
+                exc_info=True,
+            )
+
+    def _unwrap_failed_run_hooked_linears(self) -> None:
+        """Return every float projection of a failed run to a plain linear.
+
+        A cancelled run can be interrupted anywhere in finalization, and the
+        looper clears its in-flight tracker as soon as the layer's last
+        processor returns -- before the asynchronous packers drain. Recovery
+        therefore sweeps the whole finished model rather than only the tracked
+        layer. Quantized kernels are not ``HookedLinear``, so completed layers
+        are unaffected (issue #5089).
+        """
+
+        model = getattr(self.gptq_model, "model", None)
+        if model is None:
+            return
+        self._unwrap_hooked_linears(model)
+
+    @staticmethod
+    def _unwrap_hooked_linears(module: torch.nn.Module) -> None:
+        """Return the in-flight layer's float projections to plain linears.
+
+        A cancelled layer can hold both packed modules and float modules that
+        were staged for capture. ``HookedLinear.forward`` always runs in
+        inference mode, so a default grad-mode forward through a layer that
+        mixes its inference-mode outputs with a packed sibling's ordinary
+        outputs raises "Inference tensors cannot be saved for backward". That
+        is exactly the partially quantized layer a cancelled run leaves behind,
+        and the cancelled-run contract promises a plain forward works.
+        """
+
+        from ..nn_modules.hooked_linear import unwrap_hooked_linears
+
+        try:
+            unwrap_hooked_linears(module)
+        except Exception:
+            # Cleanup must never mask the cancellation/failure that got us
+            # here; the wrapper is only a capture convenience on a dead run.
+            log.warning(
+                "failed to restore the in-flight layer's float projections",
                 exc_info=True,
             )
 

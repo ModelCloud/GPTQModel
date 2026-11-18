@@ -26,6 +26,9 @@ class TestHymba(ModelTest):
     DESC_ACT = False
     LOAD_BACKEND = BACKEND.AUTO
     USE_FLASH_ATTN = False  # package-owned SDPA/portable SSM reference implementation
+    # ARC alone never calls generate(), so a broken transformers-5 cache
+    # contract stayed invisible (#5090).
+    ASSERT_INFERENCE = True
 
 
     def test_hymba(self):

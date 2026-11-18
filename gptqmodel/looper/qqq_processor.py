@@ -46,7 +46,8 @@ from ..quantization.qqq import QQQ
 from ..utils.backend import BACKEND
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.model import create_quant_module, move_to, pack_module
+from ..utils.model import create_quant_module, install_quant_module, move_to, pack_module
+from ..utils.module_locks import parent_module_lock
 from ..utils.rocm import IS_ROCM
 from ..utils.torch import CPU
 
@@ -385,7 +386,7 @@ class QQQProcessor(SharedInputCaptureProcessor):
             logger=log,
             module_name=module_label,
         ):
-            create_quant_module(
+            qmodule = create_quant_module(
                 name=module.full_name,
                 linear_cls=quant_linear_cls,
                 bits=self.qcfg.runtime_bits,
@@ -402,10 +403,15 @@ class QQQProcessor(SharedInputCaptureProcessor):
                 backend=backend,
                 register_buffers=False,
                 resolved_module_config=get_resolved_module_config(module),
+                install=False,
             )
 
+        if qmodule is None:
+            raise RuntimeError(
+                f"QQQProcessor: module `{module.full_name}` resolved to an excluded "
+                "quant config but still reached packing."
+            )
         # pack module
-        qmodule = model.model.get_submodule(module.full_name)
         qModules = (
             {module.full_name: qmodule}
             if isinstance(qmodule, quant_linear_cls)
@@ -434,6 +440,11 @@ class QQQProcessor(SharedInputCaptureProcessor):
         with self.lock:
             self.result_pop(module.full_name)
 
+        # Publish the packed kernel with one assignment; installing it before
+        # packing left an unusable projection behind when packing was
+        # interrupted (issue #5089).
+        with parent_module_lock(module.full_name):
+            install_quant_module(model.model, module.full_name, qmodule)
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):

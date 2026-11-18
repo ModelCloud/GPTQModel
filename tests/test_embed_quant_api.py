@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from pathlib import Path
 
 import pytest
+import torch
 from safetensors.torch import save_file
 from torch import nn
 
@@ -44,6 +46,134 @@ def test_normalize_embed_quant_config_rejects_conflicting_arguments():
             QuantizeEmbedConfig(embed_quant_mode=QuantizeEmbed.INPUT),
             QuantizeEmbed.OUTPUT,
         )
+
+
+@pytest.mark.parametrize("bad", ["inptu", "outputs", "Both ", "", None, 1, ["input"]])
+def test_quantize_embed_config_rejects_unknown_mode(bad):
+    """A mode that matches no consumer branch must not reach the looper (#5124)."""
+
+    with pytest.raises(
+        ValueError,
+        match=r"`embed_quant_mode` must be one of 'input', 'output', 'both'",
+    ):
+        QuantizeEmbedConfig(embed_quant_mode=bad)
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("input", QuantizeEmbed.INPUT),
+        ("output", QuantizeEmbed.OUTPUT),
+        ("both", QuantizeEmbed.BOTH),
+        (QuantizeEmbed.INPUT, QuantizeEmbed.INPUT),
+    ],
+)
+def test_quantize_embed_config_coerces_known_modes(value, expected):
+    assert QuantizeEmbedConfig(embed_quant_mode=value).embed_quant_mode is expected
+
+
+@pytest.mark.parametrize("bad", ["False", "True", 1, 0, None])
+def test_quantize_embed_config_rejects_non_bool_embed_only(bad):
+    """``bool("False")`` is True; #4668 rejects that coercion for config bools."""
+
+    with pytest.raises(TypeError, match=r"`embed_only` must be a bool"):
+        QuantizeEmbedConfig(embed_only=bad)
+
+
+def _mutated_embed_config(**fields):
+    """Build a valid config, then mutate it past ``__post_init__``."""
+
+    config = QuantizeEmbedConfig()
+    for name, value in fields.items():
+        setattr(config, name, value)
+    return config
+
+
+def test_normalize_embed_quant_config_revalidates_a_mutated_instance():
+    config = _mutated_embed_config(embed_quant_mode="inptu")
+    with pytest.raises(ValueError, match=r"`embed_quant_mode` must be one of"):
+        BaseQModel._normalize_embed_quant_config(config, None)
+
+
+def test_requantize_rejects_a_mutated_embed_config_before_quantizing():
+    model = _bare_model(quantized=True)
+    model.quantize = lambda **_kwargs: pytest.fail("must reject before the layer replay")
+
+    with pytest.raises(ValueError, match=r"`embed_quant_mode` must be one of"):
+        model.requantize(
+            CalibrationConfig(dataset=["sample"]),
+            embed_quant_config=_mutated_embed_config(embed_quant_mode="inptu"),
+        )
+
+
+def test_requantize_rejects_a_mutated_embed_only_before_quantizing():
+    model = _bare_model(quantized=True)
+    model.quantize = lambda **_kwargs: pytest.fail("must reject before the layer replay")
+
+    with pytest.raises(TypeError, match=r"`embed_only` must be a bool"):
+        model.requantize(
+            CalibrationConfig(dataset=["sample"]),
+            embed_quant_config=_mutated_embed_config(embed_only="False"),
+        )
+
+
+def test_quantize_rejects_a_mutated_embed_config_before_any_layer_work():
+    model = _bare_model(quantized=False)
+    model.quantize_config = QuantizeConfig(bits=4, group_size=128, device="cpu")
+    model.prepare_dataset = lambda **_kwargs: pytest.fail("must reject before dataset preparation")
+    model._quantize_with_calibration = lambda **_kwargs: pytest.fail("must reject before replay")
+
+    with pytest.raises(ValueError, match=r"`embed_quant_mode` must be one of"):
+        model.quantize(
+            CalibrationConfig(dataset=["sample"]),
+            embed_quant_config=_mutated_embed_config(embed_quant_mode="inptu"),
+        )
+
+
+def _cached_gptq_checkpoint():
+    """Local snapshot of the cached GPTQ checkpoint, or ``None``."""
+
+    from huggingface_hub.constants import HF_HUB_CACHE
+
+    root = (
+        Path(HF_HUB_CACHE)
+        / "models--Qwen--Qwen2.5-0.5B-Instruct-GPTQ-Int4"
+        / "snapshots"
+    )
+    if not root.is_dir():
+        return None
+    snapshots = sorted(path for path in root.iterdir() if (path / "config.json").is_file())
+    return str(snapshots[-1]) if snapshots else None
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA is required for the real-checkpoint requantize entry point",
+)
+def test_requantize_rejects_a_bad_mode_before_replaying_a_real_checkpoint():
+    """The real entry point must fail before ``quantize()`` replays any layer."""
+
+    checkpoint = _cached_gptq_checkpoint()
+    if checkpoint is None:
+        pytest.skip("Qwen/Qwen2.5-0.5B-Instruct-GPTQ-Int4 is not in the local HF cache")
+
+    from gptqmodel import GPTQModel
+    from gptqmodel.utils.backend import BACKEND
+
+    model = GPTQModel.load(checkpoint, device_map={"": "cuda:0"}, backend=BACKEND.AUTO)
+    model.quantize = lambda **_kwargs: pytest.fail("must reject before the layer replay")
+    embed_name = model.get_input_embeddings_name()
+    before = type(dict(model.model.named_modules())[embed_name])
+    try:
+        with pytest.raises(ValueError, match=r"`embed_quant_mode` must be one of"):
+            model.requantize(
+                CalibrationConfig(dataset=["The capital of France is Paris."]),
+                embed_quant_config=_mutated_embed_config(embed_quant_mode="inptu"),
+            )
+        assert type(dict(model.model.named_modules())[embed_name]) is before
+    finally:
+        del model
 
 
 def test_requantize_forwards_canonical_embedding_config():

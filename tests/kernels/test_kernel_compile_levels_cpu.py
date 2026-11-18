@@ -10,9 +10,9 @@ declares one, otherwise from ``SUPPORTS_COMPILE_LEVEL``.
 ``fullgraph=True`` is the "graph safe" bar here: reaching ``DYNAMO`` or above
 means dynamo traced the whole forward with zero graph breaks. A kernel whose
 CPU forward is documented as ``EAGER`` (``GGUFCppKernel``) only has to run
-eagerly; the technical reason is recorded next to its declaration. A biased
-FP16/BF16 AWQ/Paro layer is the documented #4068 exception and is exercised
-bias-free here.
+eagerly; the technical reason is recorded next to its declaration. The biased
+and BF16 int4pack layers are exercised separately, because the CPU AUTO dtype
+is BF16 and both used to be the documented #4068 exceptions (#5110).
 
 Kernels whose optional runtime is absent on this host are skipped with that
 reason, not silently counted as passing.
@@ -292,11 +292,9 @@ CASES = [
     # BF16 takes the AVX512-BF16 fused extension GEMM, not the dense fallback.
     Case(TorchCpuAvx512Linear, _pack_cpu_avx512, dtype=torch.bfloat16),
     Case(AwqTorchLinear, lambda: _pack_awq(AwqTorchLinear, bias=True)),
-    # A biased FP16/BF16 AWQ layer asks for an FP32 product so the pre-bias sum
-    # cannot overflow; inductor cannot lower the int4 op when that cast fuses
-    # into a Pointwise node (#4068). The declared CPU level is the bias-free
-    # path; the biased case is the documented break in
-    # ``torch_fused._cpu_int4pack_mm_cast``.
+    # The bias-free FP16 case is the plain extern-op path. The BF16 and biased
+    # variants (whose product needs an FP32 cast) are covered by
+    # ``INT4PACK_MATRIX`` below.
     Case(TorchFusedAwqLinear, lambda: _pack_awq(TorchFusedAwqLinear, bias=False)),
     Case(TorchFusedAwqLinear, lambda: _pack_awq(TorchFusedAwqLinear, bias=False), dtype=torch.float32),
     Case(TorchAtenAwqLinear, lambda: _pack_awq(TorchAtenAwqLinear, bias=False)),
@@ -317,7 +315,7 @@ CASES = [
     ),
     Case(NF12Linear, lambda: _pack_original(NF12Linear, bits=12)),
     # BF16 selects Paro's AVX512-BF16 fused path (bias included); FP16 is the
-    # ATen int4pack path, where a bias needs the documented #4068 FP32 cast.
+    # ATen int4pack path, where a biased layer asks for the FP32 product.
     Case(
         ParoLinear,
         lambda: _pack_awq(ParoLinear, bias=True).to(torch.bfloat16),
@@ -327,6 +325,80 @@ CASES = [
     Case(VPTQLinear, _pack_vptq),
     Case(GGUFCppKernel, None, lambda: _unavailable(GGUFCppKernel)),
 ]
+
+#: The int4pack CPU kernels (GPTQ and AWQ) declare ``INDUCTOR`` for their whole
+#: supported dtype/bias matrix, not just the fp16 bias-free case the ``CASES``
+#: table exercises. BF16 is the CPU AUTO dtype for them, and a biased layer
+#: takes the FP32-product path, so every combination was measured and has to
+#: reach the declared level (#5110).
+INT4PACK_KERNELS = (
+    (TorchFusedLinear, "gptq"),
+    (TorchAtenLinear, "gptq"),
+    (TorchFusedAwqLinear, "awq"),
+    (TorchAtenAwqLinear, "awq"),
+)
+INT4PACK_MATRIX = [
+    pytest.param(
+        cls,
+        biased,
+        dtype,
+        kind,
+        id=f"{cls.__name__}-{'biased' if biased else 'bias-free'}-"
+        f"{str(dtype).replace('torch.', '')}",
+    )
+    for cls, kind in INT4PACK_KERNELS
+    for biased in (False, True)
+    for dtype in (torch.float16, torch.bfloat16)
+]
+
+
+@pytest.mark.parametrize(
+    "cls,biased,dtype,kind",
+    INT4PACK_MATRIX,
+)
+def test_int4pack_cpu_kernel_reaches_declared_level_for_bf16_and_bias(
+    cls, biased, dtype, kind
+):
+    """BF16 (the CPU AUTO dtype) and biased layers trace too (#5110).
+
+    Before the casting product became a fake-able custom op, these layers broke
+    the graph on every quantized linear while the class still declared
+    ``INDUCTOR``.
+    """
+
+    if kind == "awq":
+        build = lambda: _pack_awq(cls, bias=biased)  # noqa: E731
+    else:
+        build = lambda: _pack_gptq(cls, bias=biased)  # noqa: E731
+
+    reason = _unavailable(cls)
+    if reason is not None:
+        pytest.skip(reason)
+    try:
+        module = build().to(dtype)
+    except Exception as error:
+        pytest.skip(
+            f"{cls.__name__}: cannot build on CPU: "
+            f"{type(error).__name__}: {str(error)[:200]}"
+        )
+
+    x = torch.randn(ROWS, IN_FEATURES, dtype=dtype)
+    result = probe(module, (x,), check_cuda_graph=False)
+    assert result.eager, f"{cls.__name__}: CPU eager forward failed: {result.eager_error}"
+    assert result.graph_breaks == 0, (
+        f"{cls.__name__} (dtype={dtype}, biased={biased}): "
+        f"graph_breaks={result.graph_breaks} {result.break_reasons[:2]}"
+    )
+    declared = compile_level(cls, device_type="cpu")
+    assert result.reached(declared), (
+        f"{cls.__name__} (dtype={dtype}, biased={biased}): declares CPU "
+        f"{declared.name} but the probe reported {result.summary()} "
+        f"errors={result.errors}"
+    )
+    assert result.output_close.get("inductor", True), (
+        f"{cls.__name__} (dtype={dtype}, biased={biased}): inductor output "
+        "does not match eager on CPU"
+    )
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.cls.__name__)
@@ -396,6 +468,66 @@ def test_paro_biased_fp16_compiles_before_the_first_eager_call():
     """A biased FP16 layer takes the traceable dense reference before a layout exists."""
 
     _compile_first(lambda: _pack_awq(ParoLinear, bias=True))
+
+
+def _pack_paro_rotated(*, dtype: torch.dtype = torch.bfloat16):
+    """A Paro layer whose rotation is learned, not the identity (#5115).
+
+    The ``CASES`` Paro entry starts from identity rotation buffers, so it never
+    reaches the rotation runtime-dtype cache that broke the graph for every
+    projection of a real Paro checkpoint.
+    """
+
+    from gptqmodel.utils.paro import build_identity_rotation_buffers
+
+    module = _pack_awq(ParoLinear, bias=True)
+    pairs, theta, channel_scales = build_identity_rotation_buffers(
+        in_features=IN_FEATURES,
+        group_size=GROUP_SIZE,
+        krot=module.krot,
+        dtype=torch.float16,
+    )
+    torch.manual_seed(0)
+    theta.normal_()
+    channel_scales.uniform_(0.75, 1.25)
+    module.pairs.copy_(pairs)
+    module.theta.copy_(theta)
+    module.channel_scales.copy_(channel_scales)
+    module = module.to(dtype)
+    module.clear_weight_cache()
+    assert module._rotation_identity is False
+    return module
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+def test_paro_rotated_cpu_layer_reaches_declared_level(dtype):
+    """A learned rotation keeps the CPU forward graph-safe (#5115).
+
+    Before the fix, ``_ensure_rotation_runtime_dtype`` keyed its cache with
+    ``tensor_cache_key`` (``is_inference()``) inside the traced region, and the
+    vectorized rotation read a padding mask with ``bool(...)``, so every
+    projection of a real Paro checkpoint broke the graph while the class
+    declared ``INDUCTOR``.
+    """
+
+    module = _pack_paro_rotated(dtype=dtype)
+    x = torch.randn(ROWS, IN_FEATURES, dtype=dtype)
+    result = probe(module, (x,), check_cuda_graph=False)
+    declared = compile_level(ParoLinear, device_type="cpu")
+
+    assert declared is COMPILE_LEVEL.INDUCTOR
+    assert result.eager, result.eager_error
+    assert result.levels.get("dynamo"), (
+        f"ParoLinear (rotated, {dtype}): the CPU forward is not graph-safe: "
+        f"{result.errors.get('dynamo')}"
+    )
+    assert result.reached(declared), (
+        f"ParoLinear (rotated, {dtype}): declares CPU {declared.name} but the "
+        f"probe reported {result.summary()} errors={result.errors}"
+    )
+    assert result.output_close.get("inductor", True), (
+        f"ParoLinear (rotated, {dtype}): inductor output does not match eager"
+    )
 
 
 def test_nf12_cpu_compiles_after_post_init_without_an_eager_call():

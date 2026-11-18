@@ -278,10 +278,15 @@ def test_selected_gpu_module_matches_oracle_without_expanded_storage(dtype, quan
     assert cls is bnb_module.BitsAndBytesLinear
     torch.manual_seed(155)
     source = torch.nn.Linear(512, 128, bias=True).to(dtype).eval()
+    # The module snapshots the kernel policy at construction (#4585), so the
+    # Triton opt-in has to be part of that construction. Configuring it after
+    # ``cls(...)`` left ``self.kernel`` on the old snapshot and the Triton
+    # cases then asserted against a module that never took the path (#4764).
     module = cls(
         bits=bits, group_size=-1, sym=True, desc_act=False, in_features=512,
         out_features=128, bias=True, dtype=dtype, register_buffers=False,
         format=quant_type, block_size=64, compress_statistics=bits == 4,
+        kernel=KernelConfig(bitsandbytes_triton=True) if path == "triton" else None,
     )
     module.pack_original(source, None, None)
     module = module.cuda().eval()
@@ -290,7 +295,6 @@ def test_selected_gpu_module_matches_oracle_without_expanded_storage(dtype, quan
     if path == "vendor":
         monkeypatch.setattr(bnb_module, "_triton_backend", lambda: None)
     else:
-        configure_kernel(KernelConfig(bitsandbytes_triton=True))
         triton_matmul = bt.matmul_4bit
 
         def counted_matmul(*args, **kwargs):

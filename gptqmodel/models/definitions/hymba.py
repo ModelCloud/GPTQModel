@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import torch
+
 from ..base import BaseQModel
 from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
@@ -70,11 +72,17 @@ class HymbaQModel(BaseQModel):
         mixer = getattr(module, "mamba", None)
         for node in nodes:
             if mixer is not None and node.get("module2inspect") is mixer:
-                # Score in_proj on its own output. Replaying the whole mixer needs
-                # this batch's producer K/V on KV-reusing layers and the layer's
-                # own SWA policy, which the generic AWQ replay kwargs (captured
-                # at layer 0) do not carry. The fold itself is exact either way.
-                node.pop("module2inspect")
+                # Score in_proj on its own output (#5098). Replaying the whole
+                # mixer needs this batch's producer K/V on KV-reusing layers and
+                # the layer's own SWA policy, which the per-linear activation
+                # capture does not record. `mamba.in_proj` is a plain Linear and
+                # `input_layernorm`'s only consumer, so its reconstruction error
+                # is exactly the group's objective; the fold is exact either way.
+                layers = node.get("layers") or []
+                if len(layers) == 1 and isinstance(layers[0], torch.nn.Linear):
+                    node["module2inspect"] = layers[0]
+                else:
+                    node.pop("module2inspect")
         return nodes
 
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):

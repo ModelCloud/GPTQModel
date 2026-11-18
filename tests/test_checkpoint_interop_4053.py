@@ -29,6 +29,7 @@ from tokenizers.models import WordLevel
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
 from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
+from gptqmodel._quant_methods import FP8_EXPORT_QUANT_METHOD
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
@@ -601,7 +602,7 @@ def _runtime_layout_shell(cls, flag: str):
 
 @pytest.mark.parametrize(
     "quant_method",
-    ["bitsandbytes", "exl3", "qqq", "paro", "macaq", "nf12", "tt-blockfloat"],
+    ["bitsandbytes", "exl3", FP8_EXPORT_QUANT_METHOD, "qqq", "paro", "macaq", "nf12", "tt-blockfloat"],
 )
 def test_hf_from_pretrained_refuses_every_refused_method(tmp_path, quant_method):
     """Plain transformers must raise instead of loading random weights (#4091 item 5)."""

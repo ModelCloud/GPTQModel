@@ -33,6 +33,7 @@ import torch
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.quantization import GPTQConfig
 from gptqmodel.quantization.config import CalibrationConfig
+from tests.accelerator_gates import requires_nvidia_cuda
 from tests.test_optimize_no_reference_cycle_4937 import _Harness, _TinyLM
 
 
@@ -56,6 +57,13 @@ def _cuda_ready() -> bool:
         return False
     free, _total = torch.cuda.mem_get_info()
     return free >= 2 * 2**30
+
+
+def _require_nvidia_for(backend) -> None:
+    """Skip a CUDA-only backend on a HIP build, like the #5056 gates."""
+
+    if backend == BACKEND.GPTQ_TRITON and not requires_nvidia_cuda():
+        pytest.skip(f"{backend.name} is CUDA-only; ROCm (HIP) is not supported")
 
 
 @pytest.fixture(scope="module")
@@ -187,6 +195,7 @@ def _run_optimized_generate(checkpoint, backend, baseline):
 def test_optimize_generate_does_not_pin_the_model(quantized_checkpoint, backend):
     """Dropping the model must free it with cyclic GC disabled (#5020)."""
 
+    _require_nvidia_for(backend)
     if not _cuda_ready():
         pytest.skip("needs a CUDA device with 2 GiB free for the regression")
 
@@ -220,6 +229,7 @@ def test_optimize_generate_does_not_pin_the_model(quantized_checkpoint, backend)
 def test_repeated_generate_does_not_accumulate(quantized_checkpoint):
     """A second generate re-traces decode frames; those must be released too."""
 
+    _require_nvidia_for(BACKEND.GPTQ_TRITON)
     if not _cuda_ready():
         pytest.skip("needs a CUDA device with 2 GiB free for the regression")
 
@@ -238,3 +248,14 @@ def test_repeated_generate_does_not_accumulate(quantized_checkpoint):
     finally:
         if gc_was_enabled:
             gc.enable()
+
+
+def test_triton_node_uses_the_shared_nvidia_gate(monkeypatch):
+    """``[gptq_triton]`` must skip on HIP through the #5056 predicate."""
+
+    monkeypatch.setattr(torch.version, "hip", "7.16.26385")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    with pytest.raises(pytest.skip.Exception):
+        _require_nvidia_for(BACKEND.GPTQ_TRITON)
+    # The portable Torch backend is not gated.
+    _require_nvidia_for(BACKEND.GPTQ_TORCH)

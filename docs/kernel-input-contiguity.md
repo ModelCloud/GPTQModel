@@ -121,6 +121,7 @@ flowchart LR
 | GGUF Q4_K/Q6_K fused matmuls | `offs_m * stride_xm` | `gguf_triton.py:416` and siblings cast `offs_m`. |
 | NVFP4 pack/decode | int32 row and element offsets | `w4a_nvfp4_triton.py` casts them. |
 | EXL3 Hadamard | `gridDim.y * 128 * blockIdx.x` in unsigned 32-bit | `hadamard.cu` uses `size_t`. |
+| BitsAndBytes 4-bit fused GEMM | int32 `rows * K` and `rows * N` | `bitsandbytes_triton.py` casts the activation and output row offsets. |
 
 Two launch limits are handled separately. `launch_linear_f32` and
 `launch_linear_fused` in `tt_blockfloat_cuda.cu` map rows to `gridDim.y`, which

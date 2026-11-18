@@ -53,8 +53,8 @@ EXCLUDED = {
     # (#4554, #4736). They dequantize to a dense tile per forward, so no
     # fused executor group can consume their packed storage.
     "AwqGEMVTorchLinear": "CPU-only portable GEMV reader (#4554); no fusion adapter",
-    "AwqGEMVFastTorchLinear": "CPU-only portable GEMV_FAST reader (#4736); no fusion adapter",
-    "LLMAwqTorchLinear": "CPU-only portable LLM_AWQ reader (#4736); no fusion adapter",
+    "AwqGEMVFastTorchLinear": "portable GEMV_FAST reader (#4736, #5109); no fusion adapter",
+    "LLMAwqTorchLinear": "portable LLM_AWQ reader (#4736, #5109); no fusion adapter",
 }
 
 

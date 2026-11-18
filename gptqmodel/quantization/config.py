@@ -26,7 +26,11 @@ import pcre
 import torch
 from packaging import version
 
-from .._quant_methods import GGUF_EXPORT_QUANT_METHOD, LEGACY_PARO_QUANT_METHOD
+from .._quant_methods import (
+    FP8_EXPORT_QUANT_METHOD,
+    GGUF_EXPORT_QUANT_METHOD,
+    LEGACY_PARO_QUANT_METHOD,
+)
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.backend_config import RuntimeConfig
 from ..utils.hf import resolve_checkpoint_subfolder
@@ -239,10 +243,47 @@ class QuantizeEmbed(str, Enum):
     BOTH = "both"
 
 
+def _normalize_embed_quant_mode(value: Any) -> QuantizeEmbed:
+    """Coerce ``embed_quant_mode`` to ``QuantizeEmbed`` or reject it (#5124).
+
+    A misspelled mode matches none of the consumer branches in
+    ``module_looper``/``stage_layer``/``weight_only_looper``, so a run replays
+    every layer, quantizes nothing and still returns a normal result. ``None``
+    reaches the layer planner and fails there with an unrelated missing-module
+    error. Both are rejected here instead.
+    """
+
+    try:
+        return QuantizeEmbed(value)
+    except (TypeError, ValueError):
+        valid = ", ".join(repr(mode.value) for mode in QuantizeEmbed)
+        raise ValueError(
+            f"QuantizeEmbedConfig: `embed_quant_mode` must be one of {valid} "
+            f"(a QuantizeEmbed value), got {value!r}."
+        ) from None
+
+
 @dataclass
 class QuantizeEmbedConfig:
+    """Embedding endpoints ``quantize()``/``requantize()`` should quantize."""
+
     embed_quant_mode: QuantizeEmbed = QuantizeEmbed.OUTPUT
     embed_only: bool = True
+
+    def __post_init__(self):
+        # `QuantizeEmbed("inptu")` would raise only where it is consumed; the
+        # consumers instead compare with `in (QuantizeEmbed.INPUT, ...)`, so a
+        # misspelled value silently matched nothing. Coerce (and reject) here.
+        self.embed_quant_mode = _normalize_embed_quant_mode(self.embed_quant_mode)
+        # `embed_only="False"` is truthy and behaves as True; #4668 made that
+        # coercion an error for every QuantizeConfig bool field.
+        _require_bool_value(type(self).__name__, "embed_only", self.embed_only)
+
+    def validate(self) -> "QuantizeEmbedConfig":
+        """Re-validate a passed instance; entry points call this before any work."""
+
+        self.__post_init__()
+        return self
 
 
 CALIBRATION_SORT_ORDERS = ("asc", "desc", "shuffle")
@@ -852,6 +893,38 @@ def _normalize_gguf_public_format(value: Any) -> Optional[str]:
     )
 
 
+def _gguf_bits_spec_from_format_value(value: Any) -> Optional[GGUFBits]:
+    """Return the width-bearing spec when ``value`` names a full GGUF alias.
+
+    A full subtype (``q8_0``, ``q4_k_m``, ``mxfp4``) carries its own bit width.
+    Projecting it to the width-less public token before comparing it with an
+    explicit ``bits`` discarded that width and let a conflict resolve to the
+    wrong subtype. Callers use this helper to compare the requested widths
+    first; width-less public tokens (``q_0``, ``q_k``) return ``None``.
+    """
+
+    if isinstance(value, GGUFBits):
+        return value
+    if isinstance(value, FORMAT):
+        value = value.value
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower().replace("-", "_")
+    if normalized in _GGUF_BITS_ALIAS_INFO:
+        return GGUFBits.from_alias(normalized)
+    return None
+
+
+def _gguf_requested_value_label(value: Any) -> str:
+    """Render a requested GGUF bits/format value for a rejection message."""
+
+    if isinstance(value, GGUFBits):
+        return value.to_string()
+    if isinstance(value, FORMAT):
+        return value.value
+    return str(value)
+
+
 def _default_gguf_public_format(bits: int) -> str:
     """Return the default GGUF subtype for a supported bit width."""
 
@@ -948,6 +1021,18 @@ def _normalize_gguf_config(
             )
         )
 
+    # A full subtype such as ``q8_0`` names its own width. Compare it with the
+    # explicit ``bits`` before projecting it to the width-less public token;
+    # otherwise the projection erases the 8 and the subtype is rebuilt from the
+    # conflicting width (issue #5106).
+    format_bits_spec = _gguf_bits_spec_from_format_value(format_value)
+    if format_bits_spec is not None and format_bits_spec.bits != normalized_bits:
+        raise ValueError(
+            "Unsupported GGUF combination: "
+            f"bits={_gguf_requested_value_label(bits)}, "
+            f"format={_gguf_requested_value_label(format_value)}."
+        )
+
     normalized_format = _normalize_gguf_public_format(format_value)
     if normalized_format is None:
         if bits_spec_from_bits is not None:
@@ -960,7 +1045,9 @@ def _normalize_gguf_config(
         bits_spec = _gguf_bits_from_components(normalized_bits, normalized_format)
         if bits_spec_from_bits is not None and bits_spec_from_bits != bits_spec:
             raise ValueError(
-                f"GGUFConfig: incompatible GGUF bits/format combination: bits={bits}, format={format_value}."
+                "Unsupported GGUF combination: "
+                f"bits={_gguf_requested_value_label(bits)}, "
+                f"format={_gguf_requested_value_label(format_value)}."
             )
 
     return normalized_bits, normalized_format, bits_spec
@@ -3523,59 +3610,128 @@ def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
             dict_scale_dtype_to_str(value)
 
 
+# Accepted payload fields and constructor converters per smoother type. The
+# dict/JSON parser and the protocol compiler share this table, so a new
+# smoother field cannot be accepted on one path and dropped on the other.
+# Defaults are read from the dataclasses themselves: `GPTQConfig(smoother=
+# "mad")` used to hard-code ``k=3.0`` while ``SmoothMAD()`` defaults to 2.75.
+_SMOOTH_METHOD_BUILDERS = {
+    "percentile": (SmoothPercentile, {"percentile": float}),
+    "percentile_asym": (SmoothPercentileAsymmetric, {"low": float, "high": float}),
+    "percentile_asymmetric": (SmoothPercentileAsymmetric, {"low": float, "high": float}),
+    "mad": (SmoothMAD, {"k": float}),
+    "mse": (SmoothMSE, {"steps": int, "maxshrink": float}),
+    "outlier": (SmoothOutlier, {"pct": float}),
+    "softnorm": (SmoothSoftNorm, {"k": float}),
+    "log": (SmoothLog, {"percentile": float, "mu": float}),
+    "rowcol": (SmoothRowCol, {"axis": str}),
+}
+_SMOOTH_METHOD_FIELDS: Dict[str, Tuple[str, ...]] = {
+    method_type: tuple(converters)
+    for method_type, (_, converters) in _SMOOTH_METHOD_BUILDERS.items()
+}
+_SMOOTH_METHOD_FIELDS["none"] = ()
+_SMOOTH_METHOD_COMMON_FIELDS = ("type", "name", "group_size_threshold")
+
+
+def _smooth_method_default(cls, field_name: str) -> Any:
+    """Read a smoother dataclass default so the dict path cannot drift."""
+
+    for field_info in fields(cls):
+        if field_info.name == field_name:
+            return field_info.default
+    raise KeyError(f"{cls.__name__} has no field `{field_name}`.")
+
+
+def _smooth_method_allowed_fields(method_type: str, *, allow_name: bool = True) -> Tuple[str, ...]:
+    common = tuple(
+        key for key in _SMOOTH_METHOD_COMMON_FIELDS if allow_name or key != "name"
+    )
+    return tuple(dict.fromkeys((*common, *_SMOOTH_METHOD_FIELDS[method_type])))
+
+
+def _reject_unknown_payload_keys(
+    owner: str,
+    context: str,
+    payload: Mapping[str, Any],
+    allowed: Tuple[str, ...],
+) -> None:
+    """Reject a key the payload owner never reads, with a close-match hint."""
+
+    unknown = sorted(str(key) for key in payload if key not in allowed)
+    if not unknown:
+        return
+    details = []
+    for key in unknown:
+        matches = difflib.get_close_matches(key, sorted(allowed), n=1)
+        details.append(f"`{key}`" + (f" (did you mean `{matches[0]}`?)" if matches else ""))
+    accepted = ", ".join(f"`{key}`" for key in sorted(allowed))
+    raise TypeError(
+        f"{owner}: unknown {context} key(s): "
+        + ", ".join(details)
+        + f". Accepted {context} keys: {accepted}."
+    )
+
+
+def _smooth_method_type(payload: Mapping[str, Any], *, owner: str = "QuantizeConfig") -> str:
+    """Return the normalized smoother type, requiring an explicit one.
+
+    A dict without ``type``/``name`` used to return ``None`` from the builder,
+    which disabled smoothing while the caller believed it was configured.
+    """
+
+    raw = payload.get("type") or payload.get("name")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        hints = []
+        for key in payload:
+            matches = difflib.get_close_matches(str(key), ["type", "name"], n=1)
+            if matches:
+                hints.append(f"`{key}` (did you mean `{matches[0]}`?)")
+        hint_text = f" Unknown key(s): {', '.join(hints)}." if hints else ""
+        raise ValueError(
+            f"{owner}: smoother dicts require a `type` field (for example "
+            "`{\"type\": \"mad\", \"k\": 2.75}`); without it smoothing is silently disabled."
+            + hint_text
+        )
+    return str(raw).strip().lower()
+
+
+def _validate_smooth_method_payload(
+    payload: Mapping[str, Any],
+    *,
+    owner: str = "QuantizeConfig",
+    allow_name: bool = True,
+) -> str:
+    """Validate one smoother dict and return its normalized type."""
+
+    method_type = _smooth_method_type(payload, owner=owner)
+    if method_type not in _SMOOTH_METHOD_FIELDS:
+        matches = difflib.get_close_matches(method_type, sorted(_SMOOTH_METHOD_FIELDS), n=1)
+        hint = f" (did you mean `{matches[0]}`?)" if matches else ""
+        raise ValueError(f"{owner}: Unknown smooth type `{method_type}`{hint}.")
+    _reject_unknown_payload_keys(
+        owner,
+        f"`{method_type}` smooth method",
+        payload,
+        _smooth_method_allowed_fields(method_type, allow_name=allow_name),
+    )
+    return method_type
+
+
 def _build_smooth_method_from_dict(payload: Dict[str, Any]) -> Optional[SmoothMethod]:
-    method_type = payload.get("type") or payload.get("name")
-    if not method_type:
-        return None
-    method_type = str(method_type).strip().lower()
-    group_size_threshold_raw = payload.get("group_size_threshold", 128)
-    group_size_threshold = int(group_size_threshold_raw) if group_size_threshold_raw is not None else 128
-    if method_type == "percentile":
-        return SmoothPercentile(
-            percentile=float(payload.get("percentile", 99.0)),
-            group_size_threshold=group_size_threshold,
-        )
-    if method_type in ("percentile_asym", "percentile_asymmetric"):
-        return SmoothPercentileAsymmetric(
-            low=float(payload.get("low", 0.5)),
-            high=float(payload.get("high", 99.5)),
-            group_size_threshold=group_size_threshold,
-        )
-    if method_type == "mad":
-        return SmoothMAD(
-            k=float(payload.get("k", 3.0)),
-            group_size_threshold=group_size_threshold,
-        )
-    if method_type == "mse":
-        return SmoothMSE(
-            steps=int(payload.get("steps", 32)),
-            maxshrink=float(payload.get("maxshrink", 0.8)),
-            group_size_threshold=group_size_threshold,
-        )
-    if method_type == "outlier":
-        return SmoothOutlier(
-            pct=float(payload.get("pct", 1.0)),
-            group_size_threshold=group_size_threshold,
-        )
-    if method_type == "softnorm":
-        return SmoothSoftNorm(
-            k=float(payload.get("k", 3.0)),
-            group_size_threshold=group_size_threshold,
-        )
-    if method_type == "log":
-        return SmoothLog(
-            percentile=float(payload.get("percentile", 99.0)),
-            mu=float(payload.get("mu", 8.0)),
-            group_size_threshold=group_size_threshold,
-        )
-    if method_type == "rowcol":
-        return SmoothRowCol(
-            axis=str(payload.get("axis", "row")),
-            group_size_threshold=group_size_threshold,
-        )
+    method_type = _validate_smooth_method_payload(payload)
     if method_type == "none":
         return None
-    raise ValueError(f"QuantizeConfig: Unknown smooth type `{method_type}`.")
+
+    cls, converters = _SMOOTH_METHOD_BUILDERS[method_type]
+    threshold = payload.get("group_size_threshold")
+    if threshold is None:
+        threshold = _smooth_method_default(cls, "group_size_threshold")
+    kwargs = {
+        name: converter(payload.get(name, _smooth_method_default(cls, name)))
+        for name, converter in converters.items()
+    }
+    return cls(group_size_threshold=int(threshold), **kwargs)
 
 
 def _parse_smooth_method(setting: Any) -> Optional[SmoothMethod]:
@@ -3647,8 +3803,23 @@ def _normalize_smoother_config(
         return None
     if isinstance(payload, SmootherConfig):
         return payload
-    if isinstance(payload, dict) and "smooth" in payload and "type" not in payload:
-        return SmootherConfig(smooth=payload.get("smooth"))
+    if isinstance(payload, dict):
+        if "type" in payload or "name" in payload:
+            return SmootherConfig(smooth=payload)
+        if "smooth" in payload:
+            _reject_unknown_payload_keys(
+                "QuantizeConfig", "smoother", payload, ("smooth",)
+            )
+            return SmootherConfig(smooth=payload.get("smooth"))
+        # Neither accepted shape is identified. Check against the union so a
+        # misspelled wrapper key such as `smoth` gets a close-match hint.
+        _reject_unknown_payload_keys(
+            "QuantizeConfig",
+            "smoother",
+            payload,
+            ("smooth", "type", "name", "group_size_threshold"),
+        )
+        return SmootherConfig(smooth=payload)
     return SmootherConfig(smooth=payload)
 
 
@@ -3677,11 +3848,12 @@ def _normalize_preprocessor_config(payload: Any) -> BasePreProcessorConfig:
             return TensorParallelPadderConfig()
         if code and code != PreProcessorCode.SMOOTHER.value:
             raise ValueError(f"QuantizeConfig: unsupported preprocessor code `{code}`.")
-        if "smooth" in payload:
+        if code == PreProcessorCode.SMOOTHER.value:
+            _reject_unknown_payload_keys(
+                "QuantizeConfig", "smoother preprocessor", payload, ("code", "smooth")
+            )
             return SmootherConfig(smooth=payload.get("smooth"))
-        if "type" in payload:
-            return SmootherConfig(smooth=payload)
-        return SmootherConfig(smooth=None)
+        return _normalize_smoother_config(payload)
     raise ValueError("QuantizeConfig: `preprocessors` entries must be preprocessor configs, smooth configs, dicts, or strings.")
 
 
@@ -4021,6 +4193,8 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
             return METHOD.EXL3
         if value == GGUF_EXPORT_QUANT_METHOD:
             return METHOD.GGUF
+        if value == FP8_EXPORT_QUANT_METHOD:
+            return METHOD.FP8
         if value == FORMAT.PARO:
             return METHOD.PARO
         try:
@@ -4090,10 +4264,33 @@ def _normalize_paro_best_state_dtype(best_state_dtype: Optional[Union[str, torch
     )
 
 
+# Fields one `fallback` dict may set. The legacy `smooth_*`/`clip_method`
+# aliases predate `smooth` and remain accepted.
+_FALLBACK_KEYS = ("strategy", "threshold", "smooth")
+_FALLBACK_LEGACY_KEYS = (
+    "smooth_method",
+    "clip_method",
+    "smooth_percentile",
+    "smooth_mad_k",
+    "smooth_mse_steps",
+    "smooth_mse_maxshrink",
+    "smooth_outlier_pct",
+    "smooth_rms_k",
+    "smooth_log_mu",
+    "smooth_axis",
+)
+
+
 def _normalize_fallback(fallback: Optional[Union[Fallback, Dict[str, Any], str, int, float]]) -> Optional[Fallback]:
     if fallback is None:
         return None
     if isinstance(fallback, dict):
+        _reject_unknown_payload_keys(
+            "QuantizeConfig",
+            "fallback",
+            fallback,
+            _FALLBACK_KEYS + _FALLBACK_LEGACY_KEYS,
+        )
         strategy = fallback.get("strategy", FallbackStrategy.RTN)
         # The dataclass default is the single source of truth.  A dict that only
         # sets `strategy` or `smooth` must not silently double the threshold from
@@ -4430,7 +4627,18 @@ _TYPE_HINTS_CACHE: Dict[type, Dict[str, Any]] = {}
 #: the top level; the BnB per-module normalizer still translates them, so the
 #: key check must let them through (#4728).
 _DYNAMIC_LEGACY_KEYS = frozenset(
-    {"fmt", "nested", "bnb_quant_type", "bnb_block_size", "bnb_compress_statistics"}
+    {
+        "fmt",
+        "nested",
+        "bnb_quant_type",
+        "bnb_block_size",
+        "bnb_compress_statistics",
+        # `optimize/requant_embed_lm_head.py` used to publish this no-op knob in
+        # every embed/lm_head override, so checkpoints it wrote carry it. No
+        # quantization config has the field; accept it on load (and strip it on
+        # save) instead of refusing a checkpoint GPT-QModel itself wrote (#5206).
+        "scale_search",
+    }
 )
 
 
@@ -4749,17 +4957,81 @@ def _resolve_export_quant_method(format_value: FORMAT, fallback_method: Optional
     return method
 
 
-def _serialize_export_quant_method(method: METHOD) -> str:
+def _fp8_dynamic_override_is_hf_readable(overrides: Mapping) -> bool:
+    """Whether one ``dynamic`` FP8 override keeps the HF-readable layout."""
+
+    scale_method = overrides.get("weight_scale_method")
+    if scale_method is not None and str(scale_method).strip().lower() != "block":
+        return False
+    if "weight_block_size" in overrides and overrides["weight_block_size"] is None:
+        return False
+    semantics = overrides.get("weight_scale_semantics")
+    if semantics is not None and str(semantics).strip().lower() != "multiplier":
+        return False
+    fmt = overrides.get(FORMAT_FIELD_CODE)
+    if fmt is not None and str(fmt).strip().lower() != "float8_e4m3fn":
+        return False
+    return True
+
+
+def _fp8_layout_is_hf_readable(quantize_config: Any) -> bool:
+    """Whether ``transformers``' ``FineGrainedFP8`` can read this FP8 layout.
+
+    ``FineGrainedFP8`` consumes a 2-D ``[out/block_rows, in/block_cols]``
+    ``weight_scale_inv`` grid **and treats it as a multiplier**
+    (``weight = fp8 * weight_scale_inv``). It also allocates
+    ``float8_e4m3fn`` weights, so an ``e5m2`` payload is not readable either.
+
+    GPT-QModel always quantizes with ``weight_scale_semantics="inverse"``
+    (``weight = fp8 / weight_scale_inv``), and
+    ``_normalize_fp8_scale_semantics`` rejects every other value. No
+    GPT-QModel FP8 save is therefore readable by ``FineGrainedFP8``: this
+    predicate only accepts a third-party-style block/multiplier/e4m3 payload,
+    and every GPT-QModel export publishes ``FP8_EXPORT_QUANT_METHOD`` instead
+    of ``fp8``.
+    """
+
+    if getattr(quantize_config, "weight_scale_method", None) != "block":
+        return False
+    if getattr(quantize_config, "weight_block_size", None) is None:
+        return False
+    if getattr(quantize_config, "weight_scale_semantics", None) != "multiplier":
+        return False
+    if getattr(quantize_config, "format", None) != "float8_e4m3fn":
+        return False
+    dynamic = getattr(quantize_config, "dynamic", None)
+    if isinstance(dynamic, Mapping):
+        for overrides in dynamic.values():
+            if not isinstance(overrides, Mapping):
+                continue
+            if not _fp8_dynamic_override_is_hf_readable(overrides):
+                return False
+    return True
+
+
+def _serialize_export_quant_method(
+    method: METHOD,
+    quantize_config: Any = None,
+) -> str:
     """Return the HF-facing ``quant_method`` name for an export method.
 
     ``METHOD.GGUF`` keeps its internal name but is published under
     ``GGUF_EXPORT_QUANT_METHOD``: transformers reserves ``gguf`` for its own
     ``GgufHfQuantizer``, which expects a ``.gguf`` file and otherwise loads the
     checkpoint as randomly initialized weights.
+
+    ``METHOD.FP8`` is split the same way. transformers registers ``fp8`` for
+    ``FineGrainedFP8``, which only reads a block ``weight_scale_inv`` grid
+    interpreted as a multiplier. GPT-QModel writes inverse scales for every
+    layout, so all GPT-QModel FP8 saves publish ``FP8_EXPORT_QUANT_METHOD``
+    and are refused by the import-time guard; ``fp8`` is reserved for
+    third-party block/multiplier checkpoints.
     """
 
     if method == METHOD.GGUF:
         return GGUF_EXPORT_QUANT_METHOD
+    if method == METHOD.FP8 and not _fp8_layout_is_hf_readable(quantize_config):
+        return FP8_EXPORT_QUANT_METHOD
     return method.value if isinstance(method, METHOD) else str(method)
 
 
@@ -6195,7 +6467,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "activation": self.activation,
             "auto_dtype_cast": self.auto_dtype_cast.value,
             METHOD_FIELD_CODE: self.method,
-            QUANT_METHOD_FIELD: _serialize_export_quant_method(self.export_quant_method()),
+            QUANT_METHOD_FIELD: _serialize_export_quant_method(
+                self.export_quant_method(),
+                quantize_config=self,
+            ),
             FORMAT_FIELD_CODE: self.format,
             FORMAT_FIELD_CHECKPOINT: self.format,
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
@@ -6210,10 +6485,16 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         dynamic = out["dynamic"]
         if dynamic:
             dynamic = copy.deepcopy(dynamic)
-            for _, overrides in dynamic.items():
+            for layer_name, overrides in dynamic.items():
                 if not isinstance(overrides, Mapping):
                     continue
+                # Refuse to write a checkpoint the loader would reject (#4668,
+                # #5206): a dynamic key that no config owns used to be saved
+                # silently and only failed on the next `GPTQModel.load()`.
+                _validate_dynamic_layer_keys(self, layer_name, overrides)
                 overrides.pop("adapter", None)
+                # No-op keys written by older tools must not propagate.
+                overrides.pop("scale_search", None)
                 for key, value in overrides.items():
                     if key == "bits":
                         overrides[key] = serialize_quant_bits(value)

@@ -282,6 +282,25 @@ def recurse_setattr(module, name, value):
         name, rest = name.split(".", 1)
         recurse_setattr(getattr(module, name), rest, value)
 
+def install_quant_module(
+    module_root: nn.Module,
+    name: str,
+    quant_module: nn.Module,
+) -> nn.Module:
+    """Publish a fully built and packed quant module with one assignment.
+
+    Finalization used to swap the float projection for an empty kernel
+    (``register_buffers=False``) and only then call ``pack_module()``, so a
+    Ctrl-C or exception inside packing left a module in the tree that owned no
+    ``qweight``/``qzeros``/``scales``/``g_idx``. Every later forward then
+    raised ``AttributeError`` (issue #5089). Callers build and pack the module
+    off-tree and call this function last, so the tree only ever sees a complete
+    module or the untouched float one.
+    """
+
+    recurse_setattr(module_root, name, quant_module)
+    return quant_module
+
 
 def _module_has_meta_tensors(module: nn.Module) -> bool:
     for param in module.parameters(recurse=True):
@@ -702,6 +721,7 @@ def create_quant_module(
     bias_dtype: Optional[torch.dtype] = None,
     resolved_module_config: Optional[ResolvedModuleConfig] = None,
     transfer_from: Optional[nn.Module] = None,
+    install: bool = True,
 
 ):
     # An adapter only covers the modules named by its PEFT target list and
@@ -851,6 +871,16 @@ def create_quant_module(
         **tmp_init_kwargs,
     )
     new_layer.device = ori_layer_device
+    if isinstance(new_layer, TorchQuantEmbeddings):
+        # An embedding returns hidden states, so it must emit the dtype the
+        # model computes in, not the checkpoint dtype its scales keep (#5116).
+        embedding_dtype = dtype
+        if embedding_dtype is None:
+            source_weight = getattr(submodule, "weight", None)
+            if isinstance(source_weight, torch.Tensor) and source_weight.is_floating_point():
+                embedding_dtype = source_weight.dtype
+        if embedding_dtype is not None:
+            new_layer.set_embedding_output_dtype(embedding_dtype)
     if transfer_from is not None:
         # The caller already loaded the checkpoint tensors into the module this
         # one replaces (a load started before the native bridge was installed,
@@ -871,7 +901,10 @@ def create_quant_module(
         # kernels pick their layout from `self.training` on the first forward
         # and latch it, so carry the replaced module's mode over (#4907).
         new_layer.train(transfer_from.training)
-    recurse_setattr(module, name, new_layer.to(ori_layer_device))
+    new_layer = new_layer.to(ori_layer_device)
+    if install:
+        install_quant_module(module, name, new_layer)
+    return new_layer
 
 def create_quant_layer(
         linear_candidates: List[Type[BaseQuantLinear]],
@@ -1829,6 +1862,42 @@ def _single_resident_device(model: nn.Module, device_map: Dict[str, Union[str, i
     if any(buffer.device.type == "meta" for buffer in model.buffers()):
         return None
     return device
+
+
+def has_cpu_offload_hooks(model: nn.Module) -> bool:
+    """Whether ``model`` carries an Accelerate hook that moves tensors per forward.
+
+    ``simple_dispatch_model`` attaches ``CpuOffload`` to every ``cpu`` map entry;
+    transformers' own dispatch attaches ``AlignDevicesHook(offload=True)``. Both
+    call ``Module._apply`` on every forward, so they materialize parameters and
+    buffers each time. Inside ``torch.inference_mode`` those materialized
+    tensors are inference tensors without a version counter (#4572); dynamo
+    reads version counters when it traces the forward installed by
+    ``optimize()``, so the first compiled ``generate()`` failed (#5099).
+
+    A hook may be wrapped in ``SequentialHook``; only a hook that actually
+    offloads counts, because a resident ``AlignDevicesHook`` does not move the
+    tensors back and forth.
+    """
+
+    if not isinstance(model, nn.Module):
+        return False
+
+    from accelerate.hooks import AlignDevicesHook, CpuOffload, SequentialHook
+
+    for module in model.modules():
+        pending = [getattr(module, "_hf_hook", None)]
+        while pending:
+            hook = pending.pop()
+            if hook is None:
+                continue
+            if isinstance(hook, SequentialHook):
+                pending.extend(hook.hooks)
+            elif isinstance(hook, CpuOffload):
+                return True
+            elif isinstance(hook, AlignDevicesHook) and hook.offload:
+                return True
+    return False
 
 
 def simple_dispatch_model(model, device_map):
@@ -3034,10 +3103,13 @@ def get_state_dict_for_save(
             if getattr(tensor, "is_meta", False) or tensor.device.type == "meta":
                 key = ("meta", id(tensor))
             elif tensor.numel() == 0:
-                # Every empty allocation reports the same null storage, so a
-                # storage key would collapse unrelated empty tensors (QQQ's
-                # per-channel `s_group`) into one and drop the rest (#4458).
-                key = ("tensor", id(tensor))
+                # Every zero-element tensor reports storage pointer 0, so
+                # storage identity cannot distinguish one empty buffer from
+                # another. They carry no data to share; keep each named entry
+                # so a required empty buffer (e.g. a per-channel QQQ
+                # `s_group`) is written instead of being removed as a
+                # duplicate (#5126).
+                key = ("empty", name)
             else:
                 try:
                     # Distinct checkpoint weights may be views into one fused
@@ -3186,6 +3258,11 @@ def validate_checkpoint_qweights(
     illegal-address fault or all-NaN logits (#5010). A truncated checkpoint
     must raise, not corrupt the context.
 
+    A suffix listed in ``CHECKPOINT_OPTIONAL_EMPTY_BUFFERS`` is not required
+    when the live module's buffer is empty: there is no data to restore, and
+    per-channel QQQ derives its empty ``s_group`` from ``s_channel`` (#5126).
+    A non-empty buffer of the same name stays required.
+
     ``format`` is kept for the call-site signature; the per-kernel declaration
     is the source of truth.
     """
@@ -3202,7 +3279,12 @@ def validate_checkpoint_qweights(
         required = getattr(module, "CHECKPOINT_REQUIRED_BUFFERS", ())
         if not required:
             continue
+        optional_empty = getattr(module, "CHECKPOINT_OPTIONAL_EMPTY_BUFFERS", ())
         for suffix in required:
+            if suffix in optional_empty:
+                buffer = getattr(module, suffix, None)
+                if isinstance(buffer, torch.Tensor) and buffer.numel() == 0:
+                    continue
             module_keys[(id(module), suffix)].add(f"{name}.{suffix}" if name else suffix)
     missing = sorted(
         min(keys) for keys in module_keys.values() if not keys & checkpoint_keys
@@ -4213,6 +4295,17 @@ def _load_key_converted_safetensors(
     return True
 
 
+def _load_dtype_is_half(dtype) -> bool:
+    """True for fp16/bf16 loads (dtype objects or their string spellings)."""
+
+    return dtype in (torch.float16, torch.bfloat16) or str(dtype) in {
+        "torch.float16",
+        "torch.bfloat16",
+        "float16",
+        "bfloat16",
+    }
+
+
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     checkpoint = kwargs.get("checkpoint")
     if checkpoint is None and args:
@@ -4224,6 +4317,9 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     native_fp32_names = _native_fp32_checkpoint_names(model, dtype)
     key_converter = kwargs.pop("key_converter", None)
     fp32_bf16_buffer_names = set(kwargs.pop("fp32_bf16_buffer_names", ()))
+    keep_in_fp32_strict_modules = list(
+        kwargs.pop("keep_in_fp32_strict_modules", ()) or ()
+    )
     packed_fp8_buffer_dtypes = dict(kwargs.pop("packed_fp8_buffer_dtypes", {}))
     restore_checkpoint_buffer_dtypes = bool(
         kwargs.pop("restore_checkpoint_buffer_dtypes", False)
@@ -4344,6 +4440,16 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
                 for runtime, source in restore_name_map.items()
                 if source in checkpoint_dtypes
             }
+        # transformers pins `_keep_in_fp32_modules_strict` tensors to fp32 for
+        # every half dtype (5.x rule). Accelerate only honors
+        # `keep_in_fp32_modules` for fp16, so a bf16 reload narrowed the
+        # DeepSeek-V3 / GLM-4.x router bias and the ERNIE router weight,
+        # silently re-routing 11-36% of tokens per layer (#5151). Restore them
+        # from the checkpoint at their stored dtype.
+        if keep_in_fp32_strict_modules and _load_dtype_is_half(kwargs.get("dtype")):
+            for name in keep_in_fp32_strict_modules:
+                if checkpoint_dtypes.get(name) == torch.float32:
+                    restore_dtypes[name] = torch.float32
         for name, module in model.named_modules():
             model_dtype_buffers = getattr(module, "MODEL_DTYPE_BUFFERS", None)
             if model_dtype_buffers is None and not restore_checkpoint_buffer_dtypes:

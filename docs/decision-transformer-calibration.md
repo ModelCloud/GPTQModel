@@ -61,7 +61,7 @@ tensor-input model can set either flag without the other, and an unknown
 | Tensor row reaches a `token_ids` model | Existing `unsupported calibration example structure` error |
 | `tensor_kwargs` row holds a non-tensor value | `ValueError` naming the offending keys |
 | `tensor_kwargs` row holds a 0-D tensor | `ValueError`: include the batch dimension |
-| `calibration_dataset_concat_size` with `tensor_kwargs` | `ValueError`: concatenation is token-based |
+| `CalibrationConfig.concat_size` with `tensor_kwargs` | `ValueError`: concatenation is token-based |
 | Empty tensor dataset | `ValueError` |
 | `batch_size != 1` with `tensor_kwargs` | Logged and ignored; each row already carries its own batch dimension |
 | Decision Transformer heads | Not quantized: 1-8 wide heads stay native dtype |

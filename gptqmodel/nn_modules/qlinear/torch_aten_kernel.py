@@ -116,14 +116,14 @@ class TorchAtenLinear(PackableQuantLinear):
 
     REQUIRES_FORMAT_V2 = True
 
-    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0,
-    # dynamo/aot_eager/inductor all reach it. The `_cpu_transform_lock` RLock
-    # around the one-time int4pack rewrite is skipped while tracing (the eager
-    # warmup builds the layout), and `_refresh_fused_state`'s
-    # `tensor_cache_key` is eager-only now. The remaining `EAGER` case is a
-    # biased FP16/BF16 layer: it asks for an FP32 product and inductor cannot
-    # lower `aten::_weight_int4pack_mm_for_cpu` when the operand cast fuses into
-    # a Pointwise node (#4068). CPU-only, so no CUDA-graph capture applies.
+    # CPU, torch 2.11.0+cu130: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all reach it for every dtype/bias combination,
+    # including BF16 and biased FP16. The `_cpu_transform_lock` RLock around the
+    # one-time int4pack rewrite is skipped while tracing (the eager warmup
+    # builds the layout), and `_refresh_fused_state`'s `tensor_cache_key` is
+    # eager-only now. The BF16/biased casting product is a custom op with a
+    # FakeTensor impl, so #4068 no longer forces those layers eager (#5110).
+    # CPU-only, so no CUDA-graph capture applies.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
     SUPPORTS_COMPILE_EAGER_REASON = (
         "static-cache generate() auto-compile stays off: no CPU win was measured "

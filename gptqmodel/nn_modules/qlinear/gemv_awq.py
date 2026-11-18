@@ -41,14 +41,18 @@ log = setup_logger()
 # stay CUDA-only and keep raising the message above; a ROCm user can now pick
 # the Triton backend explicitly (``BACKEND.AWQ_GEMV_TRITON``) and AUTO stays off
 # it so no existing checkpoint silently changes kernel.
+# ``FORMAT.GEMV_FAST``/``FORMAT.LLM_AWQ`` are excluded from this refusal: their
+# portable Torch readers declare ROCm and read the identical interleaved layout
+# (issue #5109).
 AWQ_GEMV_ROCM_UNSUPPORTED = (
-    "AWQ GEMV/GEMV_FAST/LLM_AWQ kernels require the native CUDA AWQ extension, "
-    "which is not available on ROCm (it includes cuda_fp16.h and CUDA-only inline "
-    "asm, and its hipified warp-sync reduction rejects wave32). Use the AWQ GEMM "
-    "layout with `backend=AUTO` or `BACKEND.AWQ_GEMM_TRITON`, which has a Triton "
-    "ROCm kernel, instead of FORMAT.GEMV/GEMV_FAST/LLM_AWQ. For a GEMV-layout "
-    "checkpoint, `BACKEND.AWQ_GEMV_TRITON` runs the same packed layout with a "
-    "portable Triton kernel on ROCm."
+    "AWQ FORMAT.GEMV requires the native CUDA AWQ extension, which is not "
+    "available on ROCm (it includes cuda_fp16.h and CUDA-only inline asm, and "
+    "its hipified warp-sync reduction rejects wave32). Use the AWQ GEMM layout "
+    "with `backend=AUTO` or `BACKEND.AWQ_GEMM_TRITON`, which has a Triton ROCm "
+    "kernel, or load this GEMV checkpoint with `BACKEND.AWQ_GEMV_TRITON`, which "
+    "runs the same packed layout with a portable Triton kernel on ROCm. "
+    "`FORMAT.GEMV_FAST`/`FORMAT.LLM_AWQ` pack and load through their portable "
+    "Torch readers here."
 )
 
 
@@ -498,7 +502,8 @@ class AwqGEMVTorchLinear(AwqGEMVLinear):
     It is a documented fallback, not an AUTO replacement: the priority-0
     ``SUPPORTS_FORMATS`` entry keeps the accelerator AUTO order (native CUDA
     GEMV, explicit Triton GEMV) untouched, and ``select_quant_linear`` only
-    reaches it for a CPU-only target through ``PORTABLE_CPU_FALLBACK``.
+    reaches it for a CPU-only target through ``PORTABLE_CPU_FALLBACK`` (ROCm
+    uses the Triton reader, which keeps the weights packed).
     """
 
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH]

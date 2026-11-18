@@ -35,6 +35,17 @@ class VPTQCudaLinear(VPTQLinear):
     # at EAGER on the lazy ``import_module`` in the op loader.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
     SUPPORTS_GRAPH_CAPTURE = True
+    # The portable sibling opts in (#5102), but the fused CUDA kernel does not:
+    # Qwen2.5-0.5B-Instruct VPTQ, fp16, RTX 4090 (sm_89), torch 2.15.0+cu132,
+    # 4 prompts x 32 greedy tokens: static-cache generate recompiles to 23
+    # graphs with 33 breaks (28 on the lazy op-loader ``import_module``, 5 on
+    # custom ops without fake tensors) and decodes 1.69 s vs 0.60 s eager.
+    # AUTO selects this kernel on CUDA, so it keeps the #4669 policy off.
+    SUPPORTS_COMPILE = False
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate recompiles the lazy op loader per step "
+        "(23 graphs, 33 breaks) and decodes 1.7x slower than eager (#5102)"
+    )
 
     SUPPORTS_BACKENDS = [BACKEND.VPTQ_CUDA]
     SUPPORTS_METHODS = [METHOD.VPTQ]

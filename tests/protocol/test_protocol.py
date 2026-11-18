@@ -244,6 +244,101 @@ def test_protocol_plan_compiles_to_expected_gguf_config():
     assert cfg.format == "q_k_m"
 
 
+def _gguf_protocol(bits, variant):
+    export = {"format": "gguf"}
+    if variant is not None:
+        export["variant"] = variant
+    return {
+        "version": 2,
+        "stages": [
+            Stage(
+                name="weight_only",
+                rules=[
+                    Rule(
+                        match="*",
+                        weight={
+                            "quantize": {"method": "gguf", "bits": bits},
+                            "export": export,
+                        },
+                    ),
+                ],
+            ),
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("bits", "variant"),
+    [
+        # The subtype exists at both widths, so only a real width comparison
+        # can reject these. `bits` may be numeric or a full subtype alias.
+        (4, "q8_0"),
+        (4, "q6_k"),
+        (6, "q4_k"),
+        (8, "q4_0"),
+        (4, "q5_k_m"),
+        (8, "q4_k_m"),
+        ("q8_0", "q4_0"),
+        ("q4_k_m", "q4_0"),
+    ],
+)
+def test_gguf_protocol_rejects_conflicting_bits_and_variant(bits, variant):
+    with pytest.raises(ValueError, match="incompatible bits/export variant") as excinfo:
+        compile_protocol_to_quantize_config(_gguf_protocol(bits, variant))
+
+    message = str(excinfo.value)
+    assert f"bits={bits}" in message
+    assert f"export.variant={variant}" in message
+
+
+@pytest.mark.parametrize(
+    ("bits", "variant", "expected"),
+    [
+        # Documented payload: a full subtype in both fields must agree.
+        ("q4_k_m", "q4_k_m", "q4_k_m"),
+        (4, "q4_k_m", "q4_k_m"),
+        ("q4_k_m", "q_k_m", "q4_k_m"),
+        (4, "q_k_m", "q4_k_m"),
+        (8, "q8_0", "q8_0"),
+        ("q8_0", "q8_0", "q8_0"),
+        (6, "q6_k", "q6_k"),
+        ("q6_k", None, "q6_k"),
+    ],
+)
+def test_gguf_protocol_accepts_consistent_bits_and_variant(bits, variant, expected):
+    cfg = compile_protocol_to_quantize_config(_gguf_protocol(bits, variant))
+
+    assert isinstance(cfg, GGUFConfig)
+    assert cfg.runtime_bits.to_string() == expected
+
+
+def test_documented_gguf_variant_q4_k_m_compiles():
+    # docs/quantization_protocol.md example: export variant names the full
+    # subtype rather than the projected `q_k_m` token.
+    cfg = compile_protocol_to_quantize_config(
+        {
+            "version": 2,
+            "stages": [
+                {
+                    "name": "weight_only",
+                    "rules": [
+                        {
+                            "match": "*",
+                            "weight": {
+                                "quantize": {"method": "gguf", "bits": "q4_k_m"},
+                                "export": {"format": "gguf", "variant": "q4_k_m"},
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert cfg.runtime_bits.to_string() == "q4_k_m"
+    assert cfg.format == "q_k_m"
+
+
 def test_protocol_python_and_yaml_compile_to_same_negative_match_plan():
     python_plan = compile_protocol(_python_protocol_with_negative_match())
     yaml_plan = compile_protocol_yaml_text(_yaml_protocol_with_negative_match())

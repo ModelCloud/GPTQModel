@@ -54,15 +54,14 @@ class VPTQLinear(WeightOnlyQuantLinear):
     # the portable CPU forward's ceiling is INDUCTOR.
     SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
     SUPPORTS_GRAPH_CAPTURE = True
-    # No measured static-cache win yet: AUTO selects the VPTQ CUDA kernel, and
-    # the issue's sweep found the forced compile there slower than eager
-    # (#4984). The portable torch path has not been timed under `generate()`,
-    # so it keeps the conservative policy until someone measures it.
-    SUPPORTS_COMPILE = False
-    SUPPORTS_COMPILE_EAGER_REASON = (
-        "no measured static-cache generate win for the portable torch path; "
-        "re-measure before opting in (#4984)"
-    )
+    # Static-cache `generate()` adds one model graph with zero breaks and
+    # decodes 3.5-5.0x faster than eager: Qwen2.5-0.5B-Instruct VPTQ, fp16,
+    # RTX 4090 (sm_89), torch 2.15.0+cu132, 4 left-padded prompts x 32 greedy
+    # tokens: 0.70 s -> 0.14 s (#5102). The layer-local `dequantize` compile
+    # exists on both paths, so the model graph is the delta. AUTO selects this
+    # kernel on ROCm (the CUDA kernel cannot run there), so the previous
+    # unmeasured opt-out cost every ROCm VPTQ checkpoint by default.
+    SUPPORTS_COMPILE = True
 
     SUPPORTS_BACKENDS = [BACKEND.VPTQ_TORCH]
     SUPPORTS_METHODS = [METHOD.VPTQ]

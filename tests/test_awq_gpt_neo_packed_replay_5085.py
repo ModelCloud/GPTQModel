@@ -4,8 +4,9 @@
 
 """Regression for #5085: packed AWQ replay must respect the position limit.
 
-``AWQProcessor._pack_token_rows`` concatenates the rows of several calibration
-documents into one ``[1, retained, hidden]`` replay sequence, so with
+AWQ samples the rows of several calibration documents into one
+``[1, retained, hidden]`` replay sequence (``_token_row_plan_for_module`` at
+capture time since #5175, ``_pack_token_rows`` on the legacy fallback), so with
 ``batch_size > 1`` the packed length is about ``batch_size * seq_len``. A
 block-diagonal mask and the retained rows' positions keep that semantically
 correct for mask-driven attention, but ``GPTNeoSelfAttention`` does not read
@@ -106,18 +107,25 @@ def _load(model_dir):
     )
 
 
-def _packed_lengths(monkeypatch):
-    """Record the packed replay length of every module the search reuses."""
+def _token_row_plans(monkeypatch):
+    """Record the capture-time token-row plan of every module the search sees.
+
+    #5175 moved token-row sampling from replay (``_pack_token_rows``) to
+    capture (``_token_row_plan_for_module``), so this is the plan that decides
+    how many rows the replay receives and it must stay inside the position
+    limit.
+    """
 
     seen = []
-    original = AWQProcessor._pack_token_rows
+    original = AWQProcessor._token_row_plan_for_module
 
-    def spy(tensors, *, max_tokens, with_provenance=False):
-        packed = original(tensors, max_tokens=max_tokens, with_provenance=with_provenance)
-        seen.append(int(packed[0].shape[-2]))
-        return packed
+    def spy(self, module_name, hidden, configured_max_tokens=None):
+        plan = original(self, module_name, hidden, configured_max_tokens)
+        if plan is not None:
+            seen.append(plan)
+        return plan
 
-    monkeypatch.setattr(AWQProcessor, "_pack_token_rows", staticmethod(spy))
+    monkeypatch.setattr(AWQProcessor, "_token_row_plan_for_module", spy)
     return seen
 
 
@@ -151,6 +159,19 @@ def test_token_row_budget_is_capped_at_the_position_limit():
     assert processor_no_limit._cap_token_rows(0) == 0
 
 
+def test_pack_token_rows_keeps_the_cap_it_is_given():
+    """The legacy packer (no-provenance fallback) still honours ``max_tokens``."""
+
+    tensors = [
+        torch.zeros(1, _ROW_TOKENS, 4),
+        torch.zeros(1, _ROW_TOKENS, 4),
+    ]
+    packed, raw_tokens = AWQProcessor._pack_token_rows(tensors, max_tokens=_LIMIT)
+
+    assert raw_tokens == 2 * _ROW_TOKENS
+    assert packed.shape == (1, _LIMIT, 4)
+
+
 @pytest.mark.cpu
 @pytest.mark.integration
 def test_awq_gpt_neo_batch_of_two_quantizes_within_the_limit(tmp_path, monkeypatch):
@@ -161,15 +182,21 @@ def test_awq_gpt_neo_batch_of_two_quantizes_within_the_limit(tmp_path, monkeypat
     """
 
     model_dir = _tiny_gpt_neo(tmp_path)
-    seen = _packed_lengths(monkeypatch)
+    plans = _token_row_plans(monkeypatch)
     model = _load(model_dir)
     model.quantize(
         CalibrationConfig(dataset=_calibration(), batch_size=2, min_length=1),
         backend=BACKEND.AWQ_TORCH,
     )
 
-    assert seen, "the search must pack token rows"
-    assert max(seen) <= _LIMIT
+    assert plans, "the capture must plan token rows"
+    # Two 40-token documents per batch ask for 80 replayed rows; only the cap
+    # to the model's 64 declared positions keeps that legal.
+    assert max(plan.budget for plan in plans) > _LIMIT
+    assert max(plan.max_tokens for plan in plans) == _LIMIT
+    for plan in plans:
+        assert plan.max_tokens <= _LIMIT
+        assert sum(plan.quotas) <= _LIMIT
     # Every quantizable GPT-Neo leaf is packed per block: q/k/v, out_proj,
     # c_fc and c_proj.
     packed = [m for m in model.model.modules() if m.__class__.__name__ == "AwqTorchLinear"]
@@ -185,14 +212,17 @@ def test_control_batch_of_one_keeps_every_row(tmp_path, monkeypatch):
     """A single document below the limit still contributes all of its rows."""
 
     model_dir = _tiny_gpt_neo(tmp_path)
-    seen = _packed_lengths(monkeypatch)
+    plans = _token_row_plans(monkeypatch)
     model = _load(model_dir)
     model.quantize(
-        CalibrationConfig(dataset=_calibration(rows=2), batch_size=1, min_length=1),
+        CalibrationConfig(dataset=_calibration(rows=1), batch_size=1, min_length=1),
         backend=BACKEND.AWQ_TORCH,
     )
 
-    assert seen and max(seen) == _ROW_TOKENS
+    assert plans
+    for plan in plans:
+        assert plan.max_tokens == _ROW_TOKENS
+        assert plan.quotas == [_ROW_TOKENS]
 
 
 def test_replay_geometry_error_becomes_a_scale_group_error(tmp_path, monkeypatch, caplog):

@@ -31,6 +31,7 @@ from gptqmodel.nn_modules.qlinear.bitsandbytes import (
     _cpu_packed_kernels,
     _cpu_packed_max_rows,
     _dequantize_int8_weight,
+    _int8_chunked_fp32_epilogue,
 )
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import BitsAndBytesConfig
@@ -289,6 +290,174 @@ def test_bitsandbytes_zero_row_input_does_not_terminate_process():
             shape = [*leading, 256]
             key = f"{bits}:{tuple(shape)}"
             assert results[key] == [shape, "torch.float16", 0], (key, results[key])
+
+
+@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("out_dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_bitsandbytes_int8_chunked_epilogue_matches_single_expression(
+    monkeypatch,
+    bias: bool,
+    out_dtype: torch.dtype,
+):
+    """#5097: chunking must not change a value the FP32 epilogue produces."""
+
+    bnb_module = sys.modules[BitsAndBytesLinear.__module__]
+    torch.manual_seed(5097)
+    rows, cols = 37, 19
+    mm_out = torch.randint(-(2**30), 2**30, (rows, cols), dtype=torch.int32)
+    x_stats = torch.rand(rows, dtype=torch.float32) * 32.0
+    weight_scb = torch.rand(cols, dtype=torch.float32) * 64.0 + 1.0
+    bias_tensor = torch.randn(cols, dtype=torch.float32) * 3.0 if bias else None
+
+    expected = mm_out.to(torch.float32) * x_stats.reshape(-1, 1) * weight_scb.reshape(1, -1) / (127.0 * 127.0)
+    if bias_tensor is not None:
+        expected = expected + bias_tensor
+
+    # Force a ragged 5-row chunking so the boundary rows are exercised.
+    monkeypatch.setattr(bnb_module, "_INT8_EPILOGUE_CHUNK_ELEMENTS", 5 * cols)
+    actual = _int8_chunked_fp32_epilogue(
+        mm_out,
+        x_stats,
+        weight_scb,
+        bias=bias_tensor,
+        out_dtype=out_dtype,
+    )
+
+    assert actual.shape == (rows, cols)
+    assert actual.dtype == out_dtype
+    torch.testing.assert_close(actual, expected.to(out_dtype), rtol=0, atol=0)
+
+
+def _int8_boundary_child_script(limit_rows: int, over_limit_rows: int) -> str:
+    """Forward a no-bias FP16 INT8 layer at and just below the 2**31 limit.
+
+    ``int8_mm_dequant`` answers an output with 2**31 elements or more with
+    ``Error invalid argument ... ops.cu``, which exits the interpreter instead
+    of raising, so the forward runs in a child process.
+    """
+
+    return textwrap.dedent(
+        f"""
+        import json
+        import torch
+        import torch.nn as nn
+        from gptqmodel.nn_modules.qlinear.bitsandbytes import (
+            BitsAndBytesLinear,
+            import_bitsandbytes,
+        )
+
+        in_features, out_features = 64, 2048
+        bnb = import_bitsandbytes()
+        native_calls = []
+        native = bnb.functional.int8_mm_dequant
+
+        def counted_native(*args, **kwargs):
+            native_calls.append(1)
+            return native(*args, **kwargs)
+
+        bnb.functional.int8_mm_dequant = counted_native
+
+        torch.manual_seed(5097)
+        linear = nn.Linear(in_features, out_features, bias=False).to(torch.float16).eval()
+        kernel = BitsAndBytesLinear(
+            bits=8,
+            group_size=-1,
+            sym=True,
+            desc_act=False,
+            in_features=in_features,
+            out_features=out_features,
+            bias=False,
+            dtype=torch.float16,
+        )
+        kernel.pack_original(linear=linear, scales=None, zeros=None)
+        kernel.post_init()
+        kernel = kernel.eval().cuda()
+
+        results = {{}}
+        for rows in ({limit_rows}, {over_limit_rows}):
+            native_calls.clear()
+            x = torch.randn(rows, in_features, device="cuda", dtype=torch.float16)
+            with torch.inference_mode():
+                out = kernel(x)
+            rows_out = out.reshape(-1, out_features)
+            # Independent FP64 A8W8 oracle over the first and last rows: it
+            # quantizes the activation rows itself and never reads a kernel
+            # intermediate.
+            weight64 = kernel.weight.to(torch.float64) * (
+                kernel.weight_scb.to(torch.float64) / 127.0
+            ).unsqueeze(1)
+            probe = torch.cat([x[:1], x[-1:]]).to(torch.float64)
+            absmax = probe.abs().amax(dim=1)
+            scale = (absmax / 127.0).clamp_min(torch.finfo(torch.float64).tiny)
+            codes = (probe / scale[:, None]).round().clamp(-127, 127)
+            expected = (codes * scale[:, None]) @ weight64.t()
+            expected = expected.to(torch.float16)
+            actual = torch.cat([rows_out[:1], rows_out[-1:]]).to(torch.float64)
+            reference = expected.to(torch.float64)
+            error = ((actual - reference).abs().max() / reference.abs().max()).item()
+            results[str(rows)] = {{
+                "shape": list(out.shape),
+                "dtype": str(out.dtype),
+                "finite": bool(torch.isfinite(out).all()),
+                "max_rel_error": error,
+                "native_epilogue_calls": len(native_calls),
+            }}
+            del out, rows_out
+            torch.cuda.empty_cache()
+        print("INT8_LIMIT_JSON:" + json.dumps(results))
+        """
+    )
+
+
+@pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the bitsandbytes INT8 epilogue limit is CUDA/HIP-only",
+)
+def test_bitsandbytes_int8_epilogue_above_int32_elements_does_not_terminate_process():
+    """#5097: rows x out_features >= 2**31 must not reach the native epilogue.
+
+    The layer holds 64 x 2048 weights, so M=1048576 rows is exactly 2**31
+    output elements. The native path aborts the interpreter there; the FP32
+    chunked epilogue must serve the call. One row fewer stays on the native
+    fused epilogue, which is the control that the guard is a boundary.
+    """
+
+    out_features = 2048
+    limit_rows = (2**31) // out_features
+    over_limit_rows = limit_rows - 1
+    # mm_out (INT32) plus the FP16 output and the activation dominate the footprint.
+    needed = limit_rows * out_features * (4 + 2)
+    free_bytes, _ = torch.cuda.mem_get_info()
+    if free_bytes < needed:
+        pytest.skip(f"needs about {needed // 2**30} GiB of free device memory for the 2**31-element output")
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _int8_boundary_child_script(limit_rows, over_limit_rows)],
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
+    assert completed.returncode == 0, completed.stderr[-4000:]
+
+    markers = [line for line in completed.stdout.splitlines() if line.startswith("INT8_LIMIT_JSON:")]
+    assert markers, completed.stdout[-4000:]
+    results = json.loads(markers[-1].split("INT8_LIMIT_JSON:", 1)[1])
+
+    below = results[str(over_limit_rows)]
+    assert below["shape"] == [over_limit_rows, out_features]
+    assert below["dtype"] == "torch.float16"
+    assert below["finite"]
+    assert below["native_epilogue_calls"] == 1
+    assert below["max_rel_error"] <= 2e-3
+
+    at_limit = results[str(limit_rows)]
+    assert at_limit["shape"] == [limit_rows, out_features]
+    assert at_limit["dtype"] == "torch.float16"
+    assert at_limit["finite"]
+    # The trigger must have been the size limit, not an unrelated reroute.
+    assert at_limit["native_epilogue_calls"] == 0
+    assert at_limit["max_rel_error"] <= 2e-3
 
 
 @pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")

@@ -128,13 +128,16 @@ rebound to the same replacement.
 | EXL3 reference-offloaded packed modules (`offload_to_safetensors_reference`) | Not hooked, so not restored; they remain an export-only path ([reference offload](safetensors-reference-offload.md)) |
 | `rehome_quantized_kernel` finds no CPU kernel for the format | Unchanged: `RuntimeError` with reload guidance |
 
-## AWQ CPU readers for the GEMV layouts
+## AWQ portable readers for the GEMV layouts
 
-The native GEMV, GEMV_FAST and LLM_AWQ kernels are CUDA-only, so AUTO finds no
-CPU kernel for those layouts. `select_quant_linear()` then picks the layout's
-`PORTABLE_CPU_FALLBACK` reader. These readers are explicit-only
-(`SUPPORTS_FORMATS` priority `0`), so the accelerator AUTO order does not
-change.
+The native GEMV, GEMV_FAST and LLM_AWQ kernels are CUDA-only. GEMV has a
+portable Triton reader for ROCm; GEMV_FAST and LLM_AWQ have portable Torch
+readers for CPU and ROCm (#4736, #5109). AUTO finds no kernel of its own for
+those layouts on a CPU or ROCm target, so `select_quant_linear()` then picks
+the layout's `PORTABLE_FALLBACK` reader, and only when that reader declares
+every family the target resolves to. These readers are explicit-only
+(`SUPPORTS_FORMATS` priority `0`), so the AUTO order on a family that has its
+own kernel does not change.
 
 ```mermaid
 flowchart TD
@@ -142,7 +145,7 @@ flowchart TD
     B --> C["select_in_session_quant_linear(qcfg, cpu)"]
     C --> D{"AUTO CPU kernel<br/>for the format?"}
     D -- "GEMM" --> E["AwqTorchLinear"]
-    D -- "no" --> F{"PORTABLE_CPU_FALLBACK<br/>reader for the format?"}
+    D -- "no" --> F{"PORTABLE_FALLBACK<br/>reader for the target?"}
     F -- "GEMV" --> G["AwqGEMVTorchLinear (#4554)"]
     F -- "GEMV_FAST" --> H["AwqGEMVFastTorchLinear (#4736)"]
     F -- "LLM_AWQ" --> I["LLMAwqTorchLinear (#4736)"]
@@ -158,6 +161,7 @@ flowchart TD
 | `FORMAT.GEMV_FAST` | `ValueError: No valid quant linear` -> `RuntimeError` after calibration; nothing saved | `AwqGEMVFastTorchLinear`; quantize -> save -> reload completes |
 | `FORMAT.LLM_AWQ` | Same `RuntimeError` (`LLMAwqLinear`) | `LLMAwqTorchLinear`; quantize -> save -> reload completes |
 | GEMV_FAST / LLM_AWQ quantize on a CPU-only host | Refused before calibration (`AwqGEMVFastLinear does not support device: DEVICE.CPU`) | Packs with `BACKEND.AWQ_TORCH`; the checkpoint keeps the requested format |
+| GEMV_FAST / LLM_AWQ quantize or load on ROCm | Refused before calibration: AUTO raised `No valid quant linear`, `AWQ_TORCH` refused `DEVICE.ROCM`, and `AWQ_GEMV_TRITON` does not declare these formats (#5109) | `awq_gemv_fast_pack_backend` resolves AUTO to `BACKEND.AWQ_TORCH`; the portable reader packs, runs in-session and serves the AUTO reload |
 
 [#4368]: https://github.com/ModelCloud/GPTQModel/issues/4368
 [#4380]: https://github.com/ModelCloud/GPTQModel/issues/4380

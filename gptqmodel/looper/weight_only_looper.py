@@ -1049,6 +1049,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
             fence=self._fence_run_work,
             release_processors=self._release_failed_run_processors,
             restore_inflight=self._restore_inflight_layer,
+            unwrap_hooked=self._unwrap_failed_run_hooked_linears,
             restore_offloaded=self._restore_offloaded_base_modules,
             materialize_unreached=self._materialize_unreached_meta_modules,
             rehome_kernels=lambda: rehome_failed_run_kernels(self.gptq_model),

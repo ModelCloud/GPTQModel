@@ -84,7 +84,7 @@ python -m tests.kernels.gen_compile_matrix
 | `AwqGEMMLinear` | `gemm_awq` | `EAGER` | `EAGER` | yes | no | - |
 | `AwqGEMMTritonLinear` | `gemm_awq_triton` | `EAGER` | `EAGER` | yes | no | - |
 | `AwqGEMVFastLinear` | `gemv_fast_awq` | `EAGER` | `EAGER` | yes | no | - |
-| `AwqGEMVFastTorchLinear` | `gemv_fast_awq` | `INDUCTOR` | `INDUCTOR` | no | no | CPU-only portable GEMV_FAST fallback; no measured static-cache win (#4984) |
+| `AwqGEMVFastTorchLinear` | `gemv_fast_awq` | `INDUCTOR` | `INDUCTOR` | no | no | portable GEMV_FAST fallback; no measured static-cache win (#4984) |
 | `AwqGEMVLinear` | `gemv_awq` | `EAGER` | `EAGER` | yes | no | - |
 | `AwqGEMVTorchLinear` | `gemv_awq` | `INDUCTOR` | `INDUCTOR` | yes | no | CPU-only portable GEMV fallback; no measured static-cache win (#4984) |
 | `AwqGEMVTritonLinear` | `gemv_awq` | `CUDAGRAPH` | `CUDAGRAPH` | yes | no | explicit-selection-only GEMV decode kernel; no static-cache generate win measured (#4984) |
@@ -94,7 +94,7 @@ python -m tests.kernels.gen_compile_matrix
 | `AwqMarlinLinear` | `marlin_awq` | `EAGER` | `EAGER` | yes | no | - |
 | `AwqMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | yes | - |
 | `AwqSwordfishLinear` | `swordfish` | `EAGER` | `EAGER` | no | no | - |
-| `AwqTorchLinear` | `torch_awq` | `CUDAGRAPH` | `INDUCTOR` | no | yes | - |
+| `AwqTorchLinear` | `torch_awq` | `CUDAGRAPH` | `INDUCTOR` | yes | yes | - |
 | `BitblasLinear` | `bitblas` | `EAGER` | `EAGER` | no | no | - |
 | `BitsAndBytesLinear` | `bitsandbytes` | `CUDAGRAPH` | `INDUCTOR` | yes | yes | - |
 | `BitsAndBytesMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
@@ -103,13 +103,13 @@ python -m tests.kernels.gen_compile_matrix
 | `GGUFCppKernel` | `gguf_cpp` | `EAGER` | `EAGER` | no | no | static-cache generate() auto-compile stays off: no CPU win was measured for this kernel in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
 | `GGUFCudaKernel` | `gguf_cpp` | `EAGER` | `EAGER` | no | no | static-cache generate() auto-compile stays off: no CPU win was measured for this kernel in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
 | `GGUFMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
-| `GGUFTorchLinear` | `gguf` | `INDUCTOR` | `INDUCTOR` | yes | no | static-cache generate() auto-compile stays off: no CPU win was measured for this kernel in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
+| `GGUFTorchLinear` | `gguf` | `EAGER` | `INDUCTOR` | yes | no | static-cache generate() auto-compile stays off: no CPU win was measured for this kernel in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
 | `GGUFTritonKernel` | `gguf_triton` | `EAGER` | `EAGER` | yes | no | static-cache generate() auto-compile stays off: no CPU win was measured for this kernel in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
 | `GPTQBitBLASMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
 | `GPTQMarlinMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
 | `LLMAwqLinear` | `gemv_fast_awq` | `EAGER` | `EAGER` | yes | no | - |
 | `LLMAwqMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
-| `LLMAwqTorchLinear` | `gemv_fast_awq` | `INDUCTOR` | `INDUCTOR` | no | no | CPU-only portable GEMV_FAST fallback; no measured static-cache win (#4984) |
+| `LLMAwqTorchLinear` | `gemv_fast_awq` | `INDUCTOR` | `INDUCTOR` | no | no | portable GEMV_FAST fallback; no measured static-cache win (#4984) |
 | `MacaqLinear` | `macaq` | `CUDAGRAPH` | `CUDAGRAPH` | no | yes | - |
 | `MacaqMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
 | `MacaqTritonLinear` | `macaq` | `EAGER` | `EAGER` | yes | no | - |
@@ -123,7 +123,7 @@ python -m tests.kernels.gen_compile_matrix
 | `ParoTritonLinear` | `paro_triton` | `CUDAGRAPH` | `CUDAGRAPH` | yes | no | single-layer trace is clean, but static-cache generate recompiles per step and is 1.3-8x slower than eager (#4984) |
 | `QQQLinear` | `qqq` | `EAGER` | `EAGER` | no | no | - |
 | `QQQMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
-| `QQQTorchLinear` | `qqq` | `CUDAGRAPH` | `INDUCTOR` | no | no | static-cache generate recompiles per step (172 graphs, 24-115 breaks) and is 1.3-8x slower than eager (#4984) |
+| `QQQTorchLinear` | `qqq` | `CUDAGRAPH` | `INDUCTOR` | no | yes | - |
 | `SwordfishLinear` | `swordfish` | `EAGER` | `EAGER` | no | no | - |
 | `TTBlockfloatLinear` | `tt_blockfloat` | `EAGER` | `INDUCTOR` | no | no | static-cache generate() auto-compile stays off: the portable CPU block-float decode has no measured static-cache win (#4984). |
 | `TTNNBlockFloat8Linear` | `ttnn_blockfloat` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
@@ -140,8 +140,8 @@ python -m tests.kernels.gen_compile_matrix
 | `TorchLinear` | `torch` | `EAGER` | `INDUCTOR` | yes | no | static-cache generate() auto-compile stays off: no CPU win was measured for the portable Torch decode in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
 | `TorchQuantEmbeddings` | `torch` | `EAGER` | `INDUCTOR` | no | no | static-cache generate() auto-compile stays off: no CPU win was measured for this kernel in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
 | `TritonV2Linear` | `tritonv2` | `EAGER` | `EAGER` | yes | no | static-cache generate() auto-compile stays off: no CPU win was measured for the portable Torch decode in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
-| `VPTQCudaLinear` | `vptq_cuda` | `EAGER` | `EAGER` | yes | no | no measured static-cache generate win for the portable torch path; re-measure before opting in (#4984) |
-| `VPTQLinear` | `vptq_torch` | `CUDAGRAPH` | `INDUCTOR` | yes | no | no measured static-cache generate win for the portable torch path; re-measure before opting in (#4984) |
+| `VPTQCudaLinear` | `vptq_cuda` | `EAGER` | `EAGER` | yes | no | static-cache generate recompiles the lazy op loader per step (23 graphs, 33 breaks) and decodes 1.7x slower than eager (#5102) |
+| `VPTQLinear` | `vptq_torch` | `CUDAGRAPH` | `INDUCTOR` | yes | yes | - |
 | `W4AFP8Linear` | `w4a_floatx` | `EAGER` | `EAGER` | yes | no | - |
 | `W4ANVFP4Linear` | `w4a_nvfp4` | `EAGER` | `EAGER` | yes | no | - |
 | `XLALinear` | `tt_xla` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |

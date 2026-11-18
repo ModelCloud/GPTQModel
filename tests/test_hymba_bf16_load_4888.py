@@ -99,6 +99,24 @@ def _construct(model_cls):
         return model_cls(_GuardConfig())
 
 
+def test_hymba_checkpoint_flex_hint_loads_with_supported_attention(tmp_path):
+    """#5090: the original checkpoint serializes a Transformers-4 `flex` hint.
+
+    Transformers 5 validates `_attn_implementation` before the remote
+    `HymbaModel.__init__` copied `attn_implementation_new` over it, so the
+    checkpoint failed to load. The package-owned `HymbaConfig` maps the hint to
+    its portable SDPA implementation instead of relying on a config shim.
+    """
+
+    from gptqmodel.models.ports.hymba.configuration_hymba import HymbaConfig
+    from tests.test_hymba_local_port import tiny_config
+
+    config = tiny_config(attn_implementation_new="flex")
+    config.save_pretrained(tmp_path)
+    reloaded = HymbaConfig.from_pretrained(tmp_path)
+    assert reloaded._attn_implementation == "sdpa"
+
+
 def test_dtype_guard_accepts_fp32_widened_from_bf16():
     assert_loaded_model_state(
         _construct(_GuardModel),

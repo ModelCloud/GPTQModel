@@ -794,6 +794,10 @@ class QQQMlxQuantLinear(_MlxLinearContract, QQQTorchLinear):
     # MLX arrays; mx.compile owns the graph
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
     SUPPORTS_GRAPH_CAPTURE = False
+    # The torch parent opts into the #4669 policy (#5102), but MLX runs
+    # mx.compile, not torch.compile: this holder was never traced or timed, so
+    # it must not inherit that opt-in.
+    SUPPORTS_COMPILE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.QQQ]

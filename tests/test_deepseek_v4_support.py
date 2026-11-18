@@ -1821,3 +1821,175 @@ def test_deepseek_v4_prefix_runtime_owns_exact_projector_anchor_and_embedding(
     )
     assert torch.all(anchors[decode_mask] >= 0)
     assert torch.all(anchors[~decode_mask] == -1)
+
+
+def _tiny_v4_quantizable_config() -> DeepseekV4Config:
+    """Tiny V4 whose smallest linear is wide enough for a CPU 4-bit pack.
+
+    ``_tiny_v4_config`` above keeps hidden size 16 for fast attention tests,
+    which no 4-bit kernel can pack (``in_features`` 8 is not divisible by a
+    supported group size). This variant keeps the same layer shape with hidden
+    size 64 so RTN can quantize it with ``group_size=-1`` on CPU.
+    """
+
+    return DeepseekV4Config(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=64,
+        moe_intermediate_size=64,
+        num_hidden_layers=3,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        q_lora_rank=8,
+        n_routed_experts=3,
+        num_experts_per_tok=2,
+        hc_mult=2,
+        o_groups=2,
+        o_lora_rank=8,
+        sliding_window=8,
+        layer_types=["sliding_attention"] * 3,
+        mlp_layer_types=["moe"] * 3,
+        dspark_target_layer_ids=[0, 1, 2],
+        dspark_markov_rank=4,
+        dspark_block_size=5,
+        dspark_noise_token_id=31,
+        partial_rotary_factor=0.5,
+        dtype="bfloat16",
+    )
+
+
+def _v4_runtime_names(model) -> set[str]:
+    names = {name for name, _ in model.named_parameters(remove_duplicate=False)}
+    names.update(name for name, _ in model.named_buffers(remove_duplicate=False))
+    return names
+
+
+def _saved_tensors(checkpoint_dir) -> dict:
+    from safetensors.torch import load_file
+
+    tensors = {}
+    for shard in sorted(checkpoint_dir.glob("*.safetensors")):
+        tensors.update(load_file(str(shard)))
+    return tensors
+
+
+def test_rtn_round_trip_keeps_the_deepseek_v4_final_norm(tmp_path):
+    """#5131: a GPT-QModel V4 checkpoint must reload its own runtime keys.
+
+    The writer stores runtime keys, so ``model.norm.weight`` is in the
+    checkpoint. The loader's HF conversion-map fallback used to apply
+    ``\\.norm\\.`` -> ``.kv_norm.`` to it, report ``model.norm.weight`` as
+    unmaterialized and raise. Before #4810 the same rename loaded the final
+    norm at its init value of 1.0, so this test also pins the tensor values.
+    """
+
+    from gptqmodel import GPTQModel
+    from gptqmodel.models.loader import _checkpoint_key_converter
+    from gptqmodel.quantization.config import FORMAT, CalibrationConfig, RTNConfig
+    from gptqmodel.utils.backend import BACKEND
+    from tests.tiny_remote_models import build_wordlevel_tokenizer
+
+    dense_dir = tmp_path / "dense"
+    quantized_dir = tmp_path / "quantized"
+
+    torch.manual_seed(0)
+    model = DeepseekV4ForCausalLM(_tiny_v4_quantizable_config())
+    # The final norm initializes to ones; a distinct ramp proves the saved
+    # tensor is loaded instead of the init value.
+    with torch.no_grad():
+        model.model.norm.weight.copy_(
+            torch.linspace(0.1, 2.0, model.model.norm.weight.numel())
+        )
+    model.save_pretrained(dense_dir)
+    build_wordlevel_tokenizer().save_pretrained(dense_dir)
+    source_norm = _saved_tensors(dense_dir)["model.norm.weight"].float()
+
+    generator = torch.Generator().manual_seed(0)
+    calibration = [
+        {
+            "input_ids": torch.randint(5, 120, (1, length), generator=generator),
+            "attention_mask": torch.ones(1, length, dtype=torch.long),
+        }
+        for length in (12, 20, 8)
+    ]
+
+    wrapped = GPTQModel.load(
+        str(dense_dir),
+        RTNConfig(bits=4, group_size=-1, format=FORMAT.GPTQ, device="cpu"),
+        dtype=torch.bfloat16,
+        backend=BACKEND.GPTQ_TORCH,
+    )
+    wrapped.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.GPTQ_TORCH,
+    )
+
+    input_ids = torch.tensor([[5, 6, 7, 8, 9, 10, 11, 12]])
+    with torch.inference_mode():
+        expected_logits = wrapped.model(input_ids).logits.float().clone()
+    expected_norm = wrapped.model.model.norm.weight.detach().float().clone()
+    # A final norm of exactly 1.0 is the pre-#4810 silent-load symptom.
+    assert abs(expected_norm.abs().mean().item() - 1.0) > 1e-2
+
+    wrapped.save(quantized_dir)
+
+    saved = _saved_tensors(quantized_dir)
+    assert "model.norm.weight" in saved
+    assert "model.kv_norm.weight" not in saved
+    assert torch.equal(saved["model.norm.weight"].float(), expected_norm)
+
+    reloaded = GPTQModel.load(
+        str(quantized_dir), dtype=torch.bfloat16, device="cpu", backend=BACKEND.GPTQ_TORCH
+    )
+    loaded_norm = reloaded.model.model.norm.weight.detach().float()
+    assert torch.equal(loaded_norm, expected_norm)
+    # The values come from the source checkpoint, not the 1.0 initializer.
+    torch.testing.assert_close(loaded_norm, source_norm, atol=1e-2, rtol=1e-2)
+
+    converter = _checkpoint_key_converter(DeepSeekV4QModel, wrapped.model, to_runtime=True)
+    assert converter("model.norm.weight") == "model.norm.weight"
+
+    with torch.inference_mode():
+        logits = reloaded.model(input_ids).logits.float()
+    assert torch.isfinite(logits).all()
+    torch.testing.assert_close(logits, expected_logits, atol=1e-2, rtol=1e-2)
+
+
+def test_deepseek_v4_source_layout_keys_convert_to_runtime_names(tmp_path):
+    """The conversion map must still rename the HF source layout.
+
+    ``layers.N.attn.norm.weight`` needs two declared renames before it reaches
+    the runtime ``self_attn.kv_norm.weight``. The idempotence guard must not
+    suppress them while it keeps runtime keys untouched.
+    """
+
+    from gptqmodel.models.loader import _checkpoint_key_converter
+
+    torch.manual_seed(0)
+    model = DeepseekV4ForCausalLM(_tiny_v4_quantizable_config())
+    model.save_pretrained(tmp_path)
+    source_keys = set(_saved_tensors(tmp_path))
+
+    converter = _checkpoint_key_converter(DeepSeekV4QModel, model, to_runtime=True)
+    runtime_names = _v4_runtime_names(model)
+
+    # Source-position renames still apply, including the multi-rule chain.
+    assert converter("model.layers.0.attn.norm.weight") == (
+        "model.layers.0.self_attn.kv_norm.weight"
+    )
+    assert converter("model.layers.0.attn_norm.weight") == "model.layers.0.input_layernorm.weight"
+    assert converter("model.layers.0.ffn.gate.bias") == (
+        "model.layers.0.mlp.gate.e_score_correction_bias"
+    )
+    assert converter("head.weight") == "lm_head.weight"
+
+    # Every non-expert source key lands on a runtime name. Expert weights are
+    # fused by a WeightConverter, so they are not 1:1 renames.
+    unmapped = sorted(
+        key for key in source_keys if ".experts." not in key and converter(key) not in runtime_names
+    )
+    assert unmapped == []
+
+    # Converting the runtime layout is the identity.
+    assert [name for name in runtime_names if converter(name) != name] == []

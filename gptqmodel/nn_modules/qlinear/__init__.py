@@ -420,6 +420,13 @@ class BaseQuantLinear(nn.Module):
     # (#5010). Empty means this kernel does not publish a payload of its own.
     CHECKPOINT_REQUIRED_BUFFERS: Tuple[str, ...] = ()
 
+    # Required suffixes whose checkpoint entry may be absent when the live
+    # module's buffer is legitimately empty. A per-channel QQQ layer keeps
+    # ``s_group = torch.empty(0)`` because the kernel derives it from
+    # ``s_channel``; checkpoints written before the save de-dup fix (#5126)
+    # omitted that key. Non-empty buffers stay required.
+    CHECKPOINT_OPTIONAL_EMPTY_BUFFERS: Tuple[str, ...] = ()
+
     SUPPORTS_AUTO_PADDING: bool = None
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
