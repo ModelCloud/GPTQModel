@@ -65,6 +65,13 @@ PARO_OUT_FEATURES_ALIGN = 8
 # Rotated activations benchmark faster with a shallower K split than generic AWQ.
 _PARO_AWQ_SPLIT_K = 4
 
+# Above this row count the native split-K AWQ GEMM loses on both time and peak
+# memory to dequantize + cuBLAS on the same packed weights. Measured on SM 8.9
+# (torch 2.15.0+cu132, FP16, group_size 128, synthetic g128 layers): the native
+# kernel is ahead up to ~640 rows on every projection, then its FP32 split-K
+# partial buffer (split_k=4) dominates. See docs/paro.md#native-prefill-dispatch.
+_PARO_AWQ_DENSE_MIN_ROWS = 640
+
 
 def awq_gemm_shape_supported(*, bits: int, in_features: int, out_features: int, groups: int) -> bool:
     """Whether the native AWQ GEMM accepts a packed layer of this shape.
@@ -703,6 +710,10 @@ class ParoLinear(AwqTorchLinear):
             if x_flat.dtype in (torch.float16, torch.bfloat16)
             else x_flat.dtype
         )
+        return self._dense_matmul_for_dtype(x_flat, compute_dtype)
+
+    def _dense_matmul_for_dtype(self, x_flat: torch.Tensor, compute_dtype: torch.dtype) -> torch.Tensor:
+        """Dequantize at ``compute_dtype`` and run the wide dense product."""
         weight = self._dequantize_weight_for_inference(x_flat, dtype=compute_dtype)
         return linear_wide_bias(
             x_flat,
@@ -711,6 +722,21 @@ class ParoLinear(AwqTorchLinear):
             weight.t(),
             self._bias_for_compute(device=x_flat.device),
         )
+
+    def _forward_dense_batch(self, x_2d: torch.Tensor) -> torch.Tensor:
+        """Large-row dispatch: dequantize the packed grid, then cuBLAS.
+
+        The activation dtype is the kernel's compute dtype, so the
+        reconstructed weight stays narrow and only the reduction and the bias
+        are wide, exactly like ``AwqGEMMLinear`` above its own row threshold.
+        The weight exists only for this call and is not retained.
+        """
+        weight = self._dequantize_weight_for_inference(x_2d, dtype=x_2d.dtype)
+        bias = self._bias_for_compute(device=x_2d.device)
+        out = torch.mm(x_2d, weight, out_dtype=torch.float32)
+        if bias is not None:
+            out = out + bias.float()
+        return out.to(dtype=x_2d.dtype)
 
     def _cuda_awq_kernel_supported(self, compute_dtype: torch.dtype) -> bool:
         """Whether the native AWQ GEMM can accept this layer's packed shape.
@@ -776,6 +802,16 @@ class ParoLinear(AwqTorchLinear):
             cache=use_cached_runtime_dtype,
         )
         kernel_input_2d = kernel_input.reshape(-1, kernel_input.shape[-1])
+        rows = kernel_input_2d.shape[0]
+        if rows > _PARO_AWQ_DENSE_MIN_ROWS:
+            # The split-K GEMM allocates one FP32 partial slab per split, so a
+            # long prefill pays split_k x rows x out_features of transient
+            # memory before the reduction. Dequantize + cuBLAS keeps only the
+            # reconstructed weight beside the output and is faster from this
+            # row count; this is `AwqGEMMLinear`'s own large-M dispatch. The
+            # 32-bit store class of #5096 in the native kernel is fixed
+            # independently in gptqmodel_ext/awq.
+            return self._forward_dense_batch(kernel_input_2d)
         if self.bias is not None and self.fp32_accum:
             # The split-K partials are already FP32.  Ask for an FP32 result
             # and add the stored bias there, so a finite sum that overflows the

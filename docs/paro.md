@@ -227,6 +227,87 @@ independent FP32 packed-grid dequantization in
 Repeated fallback forwards keep only the packed `int32` buffers; the test
 asserts that no `(in_features, out_features)` tensor is retained by the module.
 
+## Native prefill dispatch and wide offsets
+
+Two independent 32-bit assumptions ended an NVIDIA or ROCm prefill once a
+single forward produced more than 2^31 output elements (`rows x
+out_features`), or the activation itself passed `rows x in_features > 2^31`:
+
+* `ParoLinear` fed the native split-K AWQ GEMM for every row count. The
+  underlying store is 64-bit since the AWQ wide-offset fix, but the kernel
+  still allocates one FP32 partial slab per split, so a long prefill also paid
+  `split_k` x the output in transient memory and was slower than
+  dequantize + cuBLAS from ~640 rows.
+* `paro_gemm_kernel` computed `K * offsets_am` (A rows) and
+  `N * offs_cm` (C rows) from int32 vectors, so the same shapes wrapped the
+  address and faulted with `cudaErrorIllegalAddress` /
+  `hipErrorIllegalAddress`.
+
+```mermaid
+flowchart TD
+    A["ParoLinear.forward"] --> B["_forward_cuda_awq_kernel(rotated)"]
+    B --> C["_cuda_awq_kernel_supported(compute_dtype)"]
+    C --> D{"native shape and device contract?"}
+    D -- "No" --> Z["portable paths: AVX512 / ATen / dense"]
+    D -- "Yes" --> E{"rows > _PARO_AWQ_DENSE_MIN_ROWS (640)?"}
+    E -- "No" --> F["native split-K AWQ GEMM"]
+    E -- "Yes" --> G["_forward_dense_batch: dequantize + cuBLAS, FP32 reduce, one cast"]
+    F --> H["output"]
+    G --> H
+    Z --> H
+    classDef wide fill:#e8f4ff,stroke:#36c,color:#111
+    class G wide
+```
+
+```mermaid
+flowchart LR
+    A["ParoTritonLinear prefill"] --> B["paro_gemm_kernel"]
+    B --> C["offsets_am = pid_m.to(int64) * BLOCK_SIZE_M"]
+    B --> D["offs_cm = pid_m.to(int64) * BLOCK_SIZE_M"]
+    C --> E["a_ptrs = K * offsets_am + offsets_k"]
+    D --> F["c_ptrs = N * offs_cm + offs_cn"]
+    E --> G["64-bit A row address"]
+    F --> H["64-bit C row address"]
+```
+
+| Mechanism | Previous behavior | Current behavior |
+| --- | --- | --- |
+| `ParoLinear` CUDA dispatch | Native split-K GEMM for every row count (`paro.py`), one FP32 slab per split, 3.6x the output size transient | Above 640 rows, dequantize the packed grid and call cuBLAS with an FP32 reduction and one output cast |
+| `paro_gemm_kernel` A offsets | `K * offsets_am` with an int32 row vector | `offsets_am` is int64, so `rows x in_features > 2^31` no longer wraps |
+| `paro_gemm_kernel` C offsets | `N * offs_cm` with an int32 row vector | `offs_cm` is int64, so `rows x out_features > 2^31` no longer wraps |
+| Storage | Dequantized weight retained? | The reconstructed weight exists only for the dispatched call; the module keeps the packed INT4 buffers |
+
+Choosing a route by row count is a measured dispatch decision, not an
+environment switch. `_PARO_AWQ_DENSE_MIN_ROWS` is a module constant, so the
+same shape always selects the same path.
+
+### Validation
+
+Measured with torch 2.15.0+cu132 on an SM 8.9 device and
+torch 2.16.0.dev20261029+rocm10.1 on gfx1201, FP16, group_size 128, synthetic
+g128 layers (K=896/N=4864 and K=4864/N=896). Times are medians of five calls
+after three warmups with `torch.cuda.synchronize`; peak is the allocator delta
+over the call.
+
+| Rows | K/N | Native split-K ms / peak | Dequantize + cuBLAS ms / peak | Relative error |
+| --- | --- | --- | --- | --- |
+| 512 | 896/4864 | 0.093 / 52 MiB | 0.086 / 37 MiB | 2.7e-5 |
+| 1024 | 896/4864 | 0.217 / 104 MiB | 0.120 / 65 MiB | 1.5e-5 |
+| 8192 | 896/4864 | 2.342 / 836 MiB | 1.013 / 464 MiB | 2.6e-5 |
+| 32000 | 896/4864 | 8.931 / 3266 MiB | 3.794 / 1790 MiB | 2.6e-5 |
+| 1024 | 4864/896 | 0.097 / 19 MiB | 0.115 / 22 MiB | 2.4e-5 |
+| 4096 | 4864/896 | 0.387 / 77 MiB | 0.260 / 50 MiB | 2.2e-5 |
+| 32000 | 4864/896 | 3.458 / 602 MiB | 1.953 / 336 MiB | 2.2e-5 |
+
+The row threshold keeps the native kernel where it is faster (a narrow
+projection still wins at 1024 rows) and drops the wide partial buffer where the
+same projection reaches the threshold. Regressions live in
+`tests/kernels/test_paro.py`: the Triton cases build `rows x out_features` and
+`rows x in_features` just above 2^31 with only the tail rows nonzero, and the
+layer cases assert the dispatched route, the oracle agreement, and that a short
+prefill still records a native kernel call. All of them faulted before the fix
+and pass afterwards on both backends.
+
 ## Output width alignment
 
 An output width is packable only in multiples of eight. `pack_awq` writes eight

@@ -1447,3 +1447,262 @@ def test_paro_pack_and_forward_round_trips_at_the_packer_alignment(monkeypatch):
 
     assert actual.shape == (2, out_features)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def _wide_sentinel_input(rows: int, in_features: int, tail: int = 8) -> torch.Tensor:
+    """Activations whose only nonzero rows are the final ``tail`` rows.
+
+    Every other row is exactly zero, so a store that wrapped (or a load that
+    read the wrong row) is the only way the sampled tail can disagree with the
+    oracle. A small ``in_features`` keeps the activation narrow, so a shape
+    whose output crosses 2^31 elements still fits in one allocation.
+    """
+    torch.manual_seed(0)
+    x = torch.zeros(rows, in_features, dtype=torch.float16, device="cuda")
+    x[-tail:] = torch.randn(tail, in_features, dtype=torch.float16, device="cuda")
+    return x
+
+
+def _wide_relative_error(actual: torch.Tensor, oracle: torch.Tensor) -> float:
+    actual = actual.detach().float().cpu().double()
+    oracle = oracle.detach().float().cpu().double()
+    denominator = oracle.norm()
+    if denominator == 0:
+        return (actual - oracle).norm().item()
+    return ((actual - oracle).norm() / denominator).item()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or ROCm GPU required")
+@pytest.mark.cuda
+def test_paro_triton_prefill_stores_rows_above_int32_element_count():
+    """Issue #5096: the fused Triton GEMM must store rows past 2^31 elements.
+
+    ``c_ptrs`` computed ``N * offs_cm`` from an int32 ``offs_cm``, so once a
+    long-context prefill produced more than 2^31 output elements the store
+    wrapped to a negative element offset and faulted the device.
+    """
+    pytest.importorskip("triton")
+    from gptqmodel.quantization.paro.modules.triton.gemm import paro_gemm_triton_prefill
+
+    bits = 4
+    in_features = 256
+    out_features = 8192
+    group_size = 128
+    tail = 8
+    rows = 2**31 // out_features + (4096 + out_features - 1) // out_features
+    assert rows * out_features > 2**31
+
+    qweight, qzeros, scales, _ = _make_packed_buffers(bits, in_features, out_features, group_size)
+    x = _wide_sentinel_input(rows, in_features, tail)
+
+    with torch.inference_mode():
+        out = paro_gemm_triton_prefill(x, qweight.cuda(), scales.cuda(), qzeros.cuda())
+        torch.cuda.synchronize()
+
+    oracle = _fp32_awq_oracle(
+        x[-tail:].cpu(), qweight, qzeros, scales, None, bits=bits, group_size=group_size
+    )
+    assert out.shape == (rows, out_features)
+    assert torch.isfinite(out[-tail:]).all()
+    error = _wide_relative_error(out[-tail:], oracle)
+    assert error <= 2e-3, (
+        f"Paro Triton relative error {error:.3e} above 2^31 output elements; "
+        "the tail rows were not stored"
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or ROCm GPU required")
+@pytest.mark.cuda
+def test_paro_triton_prefill_reads_activations_above_int32_row_stride_product():
+    """Issue #5096: the fused Triton GEMM must index A rows in 64 bits.
+
+    ``a_ptrs`` computed ``K * offsets_am`` from an int32 row vector, so once
+    ``rows * in_features`` passed 2^31 the activation load wrapped to a
+    negative element offset. The output stays small here (N = 128).
+    """
+    pytest.importorskip("triton")
+    from gptqmodel.quantization.paro.modules.triton.gemm import paro_gemm_triton_prefill
+
+    bits = 4
+    in_features = 8192
+    out_features = 128
+    group_size = 128
+    tail = 8
+    rows = 2**31 // in_features + (4096 + in_features - 1) // in_features + 1
+    assert rows * in_features > 2**31
+
+    qweight, qzeros, scales, _ = _make_packed_buffers(bits, in_features, out_features, group_size)
+    x = _wide_sentinel_input(rows, in_features, tail)
+
+    with torch.inference_mode():
+        out = paro_gemm_triton_prefill(x, qweight.cuda(), scales.cuda(), qzeros.cuda())
+        torch.cuda.synchronize()
+
+    oracle = _fp32_awq_oracle(
+        x[-tail:].cpu(), qweight, qzeros, scales, None, bits=bits, group_size=group_size
+    )
+    assert out.shape == (rows, out_features)
+    assert torch.isfinite(out[-tail:]).all()
+    error = _wide_relative_error(out[-tail:], oracle)
+    assert error <= 2e-3, (
+        f"Paro Triton relative error {error:.3e} once rows * in_features passed 2^31; "
+        "the activation row offset wrapped"
+    )
+
+
+def _paro_module(in_features: int, out_features: int, group_size: int, dtype: torch.dtype) -> ParoLinear:
+    """A Paro layer holding real packed codes, zero points, scales and a bias."""
+    module = ParoLinear(
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        register_buffers=True,
+        krot=1,
+    ).eval()
+    qweight, qzeros, scales, bias = _make_packed_buffers(4, in_features, out_features, group_size)
+    module.qweight.copy_(qweight)
+    module.qzeros.copy_(qzeros)
+    module.scales.copy_(scales)
+    module.bias.copy_(bias)
+    module.post_init()
+    return module.to(device="cuda", dtype=dtype)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="native CUDA Paro kernel required (unavailable on ROCm)",
+)
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_paro_cuda_long_prefill_matches_the_dense_oracle(monkeypatch, dtype):
+    """Issue #5096: a long prefill must stay correct on the dispatched path.
+
+    Above the row threshold the layer dequantizes the packed grid and calls
+    cuBLAS instead of the native split-K GEMM, because the split-K partials
+    cost ``split_k`` x the output in transient memory and the kernel is slower
+    from that row count. Assert the large-row call no longer reaches the native
+    kernel and still matches the independent FP32 oracle.
+    """
+
+    in_features, out_features, group_size = 896, 4864, 128
+    module = _paro_module(in_features, out_features, group_size, dtype)
+    # A prefill row count above the documented large-M threshold (640).
+    rows = 1024
+    x = torch.randn(rows, in_features, device="cuda", dtype=dtype)
+    rotated = module._rotate_inputs(x)
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("the native split-K GEMM must not serve a long prefill")
+
+    monkeypatch.setattr(paro_module, "_awq_cuda_gemm_forward", _unexpected)
+    monkeypatch.setattr(paro_module, "_awq_cuda_gemm_forward_fp32_reduce", _unexpected)
+
+    with torch.inference_mode():
+        actual = module(x)
+
+    oracle = _fp32_awq_oracle(
+        rotated.cpu(),
+        module.qweight.cpu(),
+        module.qzeros.cpu(),
+        module.scales.cpu(),
+        module.bias.cpu(),
+        bits=4,
+        group_size=group_size,
+    )
+    assert actual.shape == (rows, out_features)
+    assert actual.dtype is dtype
+    assert torch.isfinite(actual).all()
+    # The FP32 oracle describes the exact grid; the visible output is rounded
+    # once to ``dtype``. Compare against the oracle rounded the same way, so
+    # the measured error is the kernel's own (bounded by a few output ULPs)
+    # rather than the mandatory rounding to BF16/FP16.
+    eps = torch.finfo(dtype).eps
+    rounded = oracle.to(dtype)
+    error = _wide_relative_error(actual[-8:].float(), rounded[-8:].float())
+    assert error <= 4 * eps, (
+        f"long-prefill relative error {error:.3e} against the {dtype} oracle exceeds 4 ULP"
+    )
+    visible_error = _wide_relative_error(actual[-8:], oracle[-8:])
+    assert visible_error <= 2 * eps, (
+        f"long-prefill visible relative error {visible_error:.3e} against the FP32 oracle"
+    )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="native CUDA Paro kernel required (unavailable on ROCm)",
+)
+@pytest.mark.cuda
+def test_paro_cuda_short_prefill_keeps_the_native_kernel(monkeypatch):
+    """The row threshold must not move a short prefill off the native kernel."""
+
+    in_features, out_features, group_size = 896, 4864, 128
+    module = _paro_module(in_features, out_features, group_size, torch.float16)
+    rows = 256
+    x = torch.randn(rows, in_features, device="cuda", dtype=torch.float16)
+
+    calls = []
+    native = paro_module._awq_cuda_gemm_forward
+    native_reduce = paro_module._awq_cuda_gemm_forward_fp32_reduce
+
+    def _recording(name, fn):
+        def _wrapper(*args, **kwargs):
+            calls.append((name, args[0].shape))
+            return fn(*args, **kwargs)
+        return _wrapper
+
+    monkeypatch.setattr(paro_module, "_awq_cuda_gemm_forward", _recording("gemm", native))
+    monkeypatch.setattr(
+        paro_module, "_awq_cuda_gemm_forward_fp32_reduce", _recording("fp32_reduce", native_reduce)
+    )
+    with torch.inference_mode():
+        module(x)
+
+    assert len(calls) == 1, calls
+    assert calls[0][1] == (rows, in_features)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="native CUDA Paro kernel required (unavailable on ROCm)",
+)
+@pytest.mark.cuda
+def test_paro_cuda_long_prefill_stores_rows_above_int32_element_count(monkeypatch):
+    """Issue #5096: the dispatched large-row path must address 2^31+ elements.
+
+    The layer used to call the native split-K GEMM for every row count. Its
+    64-bit store is fixed in ``gptqmodel_ext/awq``, and the layer now avoids
+    the wide partial buffer entirely; either way a prefill whose output crosses
+    2^31 elements has to return the sampled tail rows.
+    """
+
+    in_features, out_features, group_size = 256, 8192, 128
+    module = _paro_module(in_features, out_features, group_size, torch.float16)
+    tail = 8
+    rows = 2**31 // out_features + (4096 + out_features - 1) // out_features
+    assert rows * out_features > 2**31
+    x = _wide_sentinel_input(rows, in_features, tail)
+
+    with torch.inference_mode():
+        out = module(x)
+        torch.cuda.synchronize()
+
+    oracle = _fp32_awq_oracle(
+        x[-tail:].cpu(),
+        module.qweight.cpu(),
+        module.qzeros.cpu(),
+        module.scales.cpu(),
+        module.bias.cpu(),
+        bits=4,
+        group_size=group_size,
+    )
+    assert out.shape == (rows, out_features)
+    assert torch.isfinite(out[-tail:]).all()
+    error = _wide_relative_error(out[-tail:], oracle)
+    assert error <= 2e-3, (
+        f"Paro long-prefill relative error {error:.3e} above 2^31 output elements"
+    )
