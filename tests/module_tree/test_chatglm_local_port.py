@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import _capture, _quantized_features, _wrapper, assert_awq_folds_neutral
+from test_awq_scaling_groups import _foldable_groups
 from torch import nn
 
 from gptqmodel.models.auto import MODEL_MAP
@@ -16,7 +18,8 @@ from gptqmodel.models.definitions.chatglm import ChatGLMQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.chatglm.modeling_chatglm import ChatGLMForConditionalGeneration
-from tests.test_chatglm_local_port import _config
+from gptqmodel.quantization.awq.utils.module import get_op_name
+from tests.test_chatglm_local_port import _config, _model
 
 
 @pytest.mark.parametrize("checkpoint", ["THUDM/chatglm2-6b", "THUDM/chatglm3-6b", "THUDM/glm-4-9b-chat"])
@@ -95,10 +98,61 @@ def test_chatglm_real_state_dict_and_live_plan(rope_ratio, mqa, rmsnorm, bias):
         assert qkv.out_features == config.kv_channels * (
             config.num_attention_heads + 2 * config.num_key_value_heads
         )
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     assert set(model.state_dict()) == all_keys
     assert model.max_sequence_length == config.seq_length
     assert isinstance(model.all_tied_weights_keys, dict)
+
+
+@pytest.mark.parametrize("rope_ratio", [None, 500])
+@pytest.mark.parametrize("mqa", [False, True])
+@pytest.mark.parametrize("rmsnorm", [False, True])
+def test_chatglm_awq_scale_folds_preserve_layer_output(rope_ratio, mqa, rmsnorm):
+    # `rope_ratio` selects the sequence-first GLM2/3 or batch-first GLM4 core.
+    model = _model(rope_ratio=rope_ratio, multi_query_attention=mqa, rmsnorm=rmsnorm, add_bias_linear=True)
+    ids = torch.tensor([[4, 5, 6, 7, 8, 9]])
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    for layer in model.transformer.encoder.layers:
+        checked = assert_awq_folds_neutral(ChatGLMQModel, model, layer, forward)
+        # The packed QKV output and the packed SwiGLU input are wider than
+        # `dense` / `dense_4h_to_h`, so only the two pre-norms fold.
+        assert [(source, targets) for source, targets, _consumers in checked] == [
+            ("input_layernorm", ["self_attention.query_key_value"]),
+            ("post_attention_layernorm", ["mlp.dense_h_to_4h"]),
+        ]
+        _reference, features = _capture(layer, forward)
+        features = _quantized_features(layer, features, ChatGLMQModel.module_tree)
+        wrapper = _wrapper(ChatGLMQModel, model, ChatGLMQModel.module_tree)
+        inspected = {get_op_name(layer, node["prev_op"]): node.get("module2inspect")
+                     for node in wrapper.awq_get_modules_for_scaling(layer, features, {})}
+        # The attention block is not replayable on packed rows; QKV is scored.
+        assert inspected["input_layernorm"] is None
+        assert inspected["post_attention_layernorm"] is layer.mlp
+
+
+@pytest.mark.parametrize("rope_ratio", [None, 500])
+def test_chatglm_post_layernorm_residual_keeps_norms_unscaled(rope_ratio):
+    model = _model(rope_ratio=rope_ratio, apply_residual_connection_post_layernorm=True)
+    ids = torch.tensor([[4, 5, 6, 7, 8, 9]])
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    wrapper = _wrapper(ChatGLMQModel, model, ChatGLMQModel.module_tree)
+    for layer in model.transformer.encoder.layers:
+        _reference, features = _capture(layer, forward)
+        features = _quantized_features(layer, features, ChatGLMQModel.module_tree)
+        nodes = wrapper.awq_get_modules_for_scaling(layer, features, {})
+        # Both norm outputs are the residual stream in this mode; folding into
+        # either changed the block output by ~25%.
+        assert {get_op_name(layer, node["prev_op"]) for node in nodes} == {
+            "self_attention.query_key_value", "mlp.dense_h_to_4h",
+        }
+        # Neither packed linear source matches its consumer's width, so the
+        # processor quantizes this layer plainly.
+        assert _foldable_groups(layer, nodes) == []
 
 
 def test_chatglm_registry_alias_inventory_and_unchanged_plan():
