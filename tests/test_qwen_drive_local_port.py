@@ -287,13 +287,12 @@ def test_public_hostile_maps_never_import_official_or_checkpoint_python(tmp_path
 
 @pytest.mark.parametrize("layout", ["hybrid", "full"])
 @pytest.mark.parametrize("offload", [False, True])
-def test_public_image_plain_awq_all_linears_and_two_exact_reloads(tmp_path, monkeypatch, layout, offload):
+def test_public_image_awq_all_linears_and_two_exact_reloads(tmp_path, monkeypatch, layout, offload):
     source = tmp_path / "source"
     original, marker = write_checkpoint(source, layout)
     qcfg = AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=offload,
                      offload_to_disk_path=str(tmp_path / "offload") if offload else None)
     loaded = GPTQModel.load(str(source), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
-    assert loaded.awq_get_modules_for_scaling(None, None, None) == []
     inputs = media_inputs(dtype=torch.float16)
     # Construct at the load dtype so native RoPE keeps its FP32 frequency buffers.
     reference = native_reference(original, load_dtype=torch.float16)
@@ -338,9 +337,17 @@ def test_public_image_plain_awq_all_linears_and_two_exact_reloads(tmp_path, monk
     }
     assert {name for name, module in loaded.model.named_modules() if isinstance(module, AwqTorchLinear)} == expected
     state = {key: value.clone() for key, value in loaded.model.state_dict().items()}
+    # AWQ folds its scales into the decoder input/post-attention norms.
+    folded = (".input_layernorm.", ".post_attention_layernorm.")
     for key, value in original.state_dict().items():
+        if any(name in key for name in folded):
+            continue
         if not any(key.startswith(prefix + ".") for prefix in expected):
             torch.testing.assert_close(state[key], value.half(), rtol=0, atol=0)
+    assert any(
+        not torch.equal(state[key], value.half()) for key, value in original.state_dict().items()
+        if any(name in key for name in folded)
+    )
     with torch.inference_mode():
         logits = loaded(**inputs, use_cache=False).logits
     assert torch.isfinite(logits).all()

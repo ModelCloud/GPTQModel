@@ -69,10 +69,6 @@ class QwenDriveQModel(Qwen3_5QModel):
         },
     ]
 
-    def awq_get_modules_for_scaling(self, *args, **kwargs):
-        """Keep hybrid recurrent/gated attention on plain AWQ quantization."""
-        return []
-
     def prepare_dataset(self, calibration_dataset, batch_size=1, **kwargs):
         media_keys = {"pixel_values", "pixel_values_videos", "image_grid_thw", "video_grid_thw"}
         if isinstance(calibration_dataset, (str, bytes)):
