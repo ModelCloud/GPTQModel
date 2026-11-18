@@ -38,12 +38,12 @@ from transformers.masking_utils import create_causal_mask
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2RMSNorm
-from transformers.models.llama.modeling_llama import eager_attention_forward, rotate_half
 from transformers.utils import can_return_tuple
 from transformers.utils.generic import merge_with_config_defaults
 from transformers.utils.output_capturing import capture_outputs
 
+from ..native.deepseek_v2.modeling_deepseek_v2 import DeepseekV2RMSNorm
+from ..native.llama.modeling_llama import eager_attention_forward, rotate_half
 from .configuration_deepseek import DeepseekV2Config
 
 
