@@ -52,15 +52,11 @@ PENDING_MODEL_IMPORT_PORTS = frozenset({
 })
 
 PENDING_STALE_PATTERN_PORTS = frozenset({
-    "bailing_moe", "brumby", "decilm", "dream", "ernie4_5_vl_moe", "exaone", "instella", "internlm2",
-    "internvl_chat", "kimi_k3", "klear", "llada2", "mimo_v2", "minicpm", "minicpm_o", "mobilellm", "nanbeige",
-    "native/bloom", "native/codegen", "native/cohere2_moe", "native/decision_transformer", "native/deepseek_v4",
-    "native/diffusion_gemma", "native/dots3_note", "native/falcon", "native/falcon_h1", "native/falcon_mamba",
-    "native/gemma3", "native/gemma3n", "native/gemma4", "native/gemma4_unified", "native/gpt_neo",
-    "native/gpt_neox", "native/gptj", "native/hunyuan_vl", "native/llama4", "native/minimax_m3_vl", "native/mpt",
-    "native/nemotron_h", "native/nemotron_h_omni", "native/olmo3", "native/ovis2", "native/phi3",
-    "native/phi4_multimodal", "native/qwen2_5_vl", "native/qwen2_vl", "native/timm_wrapper", "native/voxtral",
-    "native/zamba", "native/zamba2", "nemotron_labs_diffusion", "phi4", "telechat2", "xing4_0", "xverse",
+    "ernie4_5_vl_moe", "kimi_k3", "mimo_v2", "minicpm_o", "native/bloom", "native/codegen",
+    "native/decision_transformer", "native/diffusion_gemma", "native/falcon", "native/falcon_h1",
+    "native/falcon_mamba", "native/gpt_neo", "native/gptj", "native/hunyuan_vl", "native/llama4",
+    "native/minimax_m3_vl", "native/mpt", "native/nemotron_h", "native/nemotron_h_omni", "native/ovis2",
+    "native/timm_wrapper", "native/voxtral", "native/zamba", "native/zamba2",
 })
 
 STALE_PATTERNS = re.compile(
@@ -116,8 +112,20 @@ def _model_import_ports():
     return {_port_name(path) for path in _port_files() if any(_model_family_imports(path))}
 
 
+# A released config.json may still spell a field the old way; configuration
+# modules may read it once at parse time and convert it. Nothing else may.
+PARSE_TIME_FIELDS = frozenset({"rope_scaling", "torch_dtype"})
+
+
+def _stale_hits(path):
+    hits = set(STALE_PATTERNS.findall(path.read_text(encoding="utf-8")))
+    if path.name.startswith("configuration_"):
+        hits -= PARSE_TIME_FIELDS
+    return hits
+
+
 def _stale_pattern_ports():
-    return {_port_name(path) for path in _port_files() if STALE_PATTERNS.search(path.read_text(encoding="utf-8"))}
+    return {_port_name(path) for path in _port_files() if _stale_hits(path)}
 
 
 def test_every_definition_uses_a_package_owned_loader():
@@ -144,9 +152,9 @@ def test_ports_contain_no_pre_5_23_compatibility_code():
     actual = _stale_pattern_ports()
     new = actual - PENDING_STALE_PATTERN_PORTS
     details = {
-        str(path.relative_to(PORTS)): sorted(set(STALE_PATTERNS.findall(path.read_text(encoding="utf-8"))))
+        str(path.relative_to(PORTS)): sorted(_stale_hits(path))
         for path in _port_files()
-        if _port_name(path) in new and STALE_PATTERNS.search(path.read_text(encoding="utf-8"))
+        if _port_name(path) in new and _stale_hits(path)
     }
     assert not new, f"stale pre-5.23 patterns: {details}"
     assert not PENDING_STALE_PATTERN_PORTS - actual, (
