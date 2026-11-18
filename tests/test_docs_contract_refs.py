@@ -109,7 +109,7 @@ CONTRACT_REFS = (
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/models/base.py",
      "generate", SYMBOL_CITATION),
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/utils/model.py",
-     "has_cpu_offload_hooks", 1776),
+     "has_cpu_offload_hooks", SYMBOL_CITATION),
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/utils/model.py",
      "simple_dispatch_model", SYMBOL_CITATION),
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/nn_modules/qlinear/torch.py",
