@@ -4627,7 +4627,18 @@ _TYPE_HINTS_CACHE: Dict[type, Dict[str, Any]] = {}
 #: the top level; the BnB per-module normalizer still translates them, so the
 #: key check must let them through (#4728).
 _DYNAMIC_LEGACY_KEYS = frozenset(
-    {"fmt", "nested", "bnb_quant_type", "bnb_block_size", "bnb_compress_statistics"}
+    {
+        "fmt",
+        "nested",
+        "bnb_quant_type",
+        "bnb_block_size",
+        "bnb_compress_statistics",
+        # `optimize/requant_embed_lm_head.py` used to publish this no-op knob in
+        # every embed/lm_head override, so checkpoints it wrote carry it. No
+        # quantization config has the field; accept it on load (and strip it on
+        # save) instead of refusing a checkpoint GPT-QModel itself wrote (#5206).
+        "scale_search",
+    }
 )
 
 
@@ -6474,10 +6485,16 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         dynamic = out["dynamic"]
         if dynamic:
             dynamic = copy.deepcopy(dynamic)
-            for _, overrides in dynamic.items():
+            for layer_name, overrides in dynamic.items():
                 if not isinstance(overrides, Mapping):
                     continue
+                # Refuse to write a checkpoint the loader would reject (#4668,
+                # #5206): a dynamic key that no config owns used to be saved
+                # silently and only failed on the next `GPTQModel.load()`.
+                _validate_dynamic_layer_keys(self, layer_name, overrides)
                 overrides.pop("adapter", None)
+                # No-op keys written by older tools must not propagate.
+                overrides.pop("scale_search", None)
                 for key, value in overrides.items():
                     if key == "bits":
                         overrides[key] = serialize_quant_bits(value)
