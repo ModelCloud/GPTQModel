@@ -412,7 +412,10 @@ def marlin_device_profile(
                 f"Marlin device profile: device index {raw_index} is out of range "
                 f"[0, {count})."
             )
-        target = torch.device(device)
+        # A bare ordinal names a CUDA device here. ``torch.device(int)`` instead
+        # resolves it against the current accelerator, which raises when torch
+        # sees no accelerator and picks another backend on a mixed host.
+        target = torch.device("cuda", raw_index) if isinstance(device, int) and not isinstance(device, bool) else torch.device(device)
         if target.type != "cuda":
             raise ValueError(
                 f"Marlin device profile requires a CUDA device, got {target!r}."
