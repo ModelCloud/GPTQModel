@@ -44,13 +44,27 @@ class RwgQModel(BaseQModel):
                 leaves = tree[-1]
                 for name in ("self_attention", "mlp"):
                     leaves[name] = tuple(leaf.replace(":in=x", "") for leaf in leaves[name])
+                if grouped and config.num_ln_in_parallel_attn in (None, 2):
+                    # Dual-norm layers: `ln_mlp` feeds only the MLP. Declaring it
+                    # after attention keeps AWQ from folding the attention input
+                    # scale into it (`ln_attn` is the q/k/v producer).
+                    tree[-1] = {
+                        name: leaves[name]
+                        for name in ("input_layernorm", "ln_attn", "self_attention", "ln_mlp",
+                                     "post_attention_layernorm", "mlp")
+                    }
         return tree
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Native parallel/sequential and dual-norm layouts have distinct replay
-        # boundaries. Until those folds are qualified, quantize every linear
-        # plainly through AWQ's existing empty-group path (also fallback=None).
-        return []
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        attention = getattr(module, "self_attention", None)
+        if not getattr(getattr(attention, "config", None), "alibi", False):
+            return nodes
+        # ALiBi (falcon-rw) bakes the bias into the attention mask, which the
+        # packed token-row replay of the q/k/v scale search cannot rebuild.
+        # Keep the MLP folds and quantize query_key_value without a fold.
+        qkv = getattr(attention, "query_key_value", None)
+        return [node for node in nodes if not any(layer is qkv for layer in node.get("layers") or [])]
 
 
 class FalconQModel(RwgQModel):

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from transformers import FalconConfig, FalconForCausalLM
 
 from gptqmodel.models.auto import MODEL_MAP_CASEFOLD
@@ -137,3 +138,54 @@ def test_every_native_checkpoint_owner_is_declared(definition, grouped, parallel
             assert set(spec.flags) & {"!", "?"}
     assert plan.find("self_attention.query_key_value.undeclared") is None
     assert plan.find("other.query_key_value") is None
+
+
+QKV, MLP_IN = "self_attention.query_key_value", "mlp.dense_h_to_4h"
+
+
+@pytest.mark.parametrize("definition", [RwgQModel, FalconQModel])
+@pytest.mark.parametrize("grouped,parallel,norms,expected", [
+    # Sequential (falcon-rw-1b): two pre-norms, GELU blocks dense_h_to_4h as a source.
+    (False, False, None, [("input_layernorm", [QKV], []), ("post_attention_layernorm", [MLP_IN], [])]),
+    # Parallel single norm (falcon-7b): one norm feeds both branches.
+    (False, True, None, [("input_layernorm", [QKV, MLP_IN], [])]),
+    (True, True, 1, [("input_layernorm", [QKV, MLP_IN], [])]),
+    # Dual norm (falcon-40b/180b): each branch has its own producer.
+    (True, True, 2, [("ln_attn", [QKV], []), ("ln_mlp", [MLP_IN], [])]),
+    (True, True, None, [("ln_attn", [QKV], []), ("ln_mlp", [MLP_IN], [])]),
+])
+@pytest.mark.parametrize("alibi", [False, True])
+def test_awq_scale_folds_preserve_every_decoder_layer_output(definition, grouped, parallel, norms, expected, alibi):
+    torch.manual_seed(13)
+    config = FalconConfig(vocab_size=64, hidden_size=32, num_hidden_layers=2, num_attention_heads=4,
+                          num_kv_heads=2 if grouped else 4, multi_query=parallel and not grouped,
+                          new_decoder_architecture=grouped, parallel_attn=parallel,
+                          num_ln_in_parallel_attn=norms, bias=True, alibi=alibi)
+    config._attn_implementation = "eager"
+    model = definition.loader.from_config(config).eval()
+    with torch.no_grad():
+        for name, value in model.named_parameters():
+            if name.startswith("transformer.h.") and ("ln_" in name or "layernorm" in name):
+                value.uniform_(0.5, 1.5)
+    _convert_model_with_defuser(definition, model, cleanup_original=False)
+    tree = definition._resolve_effective_module_tree(model, None)
+    ids = torch.tensor([[1, 4, 6, 9, 3, 8, 5, 7]])
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    # The fused query_key_value rows are never the dense input, so the only
+    # sources are norms. ALiBi attention replay is not qualified, so its
+    # query_key_value consumers are left unscaled.
+    if alibi:
+        expected = [group for group in expected if QKV not in group[1]]
+    if not expected:
+        definition_wrapper = definition.__new__(definition)
+        torch.nn.Module.__init__(definition_wrapper)
+        definition_wrapper.__dict__.update(model=model, effective_module_tree=tree, module_tree=tree)
+        for layer in model.transformer.h:
+            features = {name: torch.randn(4, 32) for name in (QKV, MLP_IN)}
+            assert definition_wrapper.awq_get_modules_for_scaling(layer, features, {}) == []
+        return
+    for layer in model.transformer.h:
+        assert assert_awq_folds_neutral(definition, model, layer, forward, tree=tree) == expected
