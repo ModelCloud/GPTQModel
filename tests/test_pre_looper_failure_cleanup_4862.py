@@ -24,6 +24,7 @@ from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
 from gptqmodel import BACKEND, CalibrationConfig
 from gptqmodel.adapter.adapter import Lora
+from gptqmodel.looper.eora_processor import EoraProcessor
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.quantization import QuantizeConfig
@@ -107,7 +108,7 @@ def _assert_no_new_smi_threads(baseline: set[int | None]) -> None:
 @pytest.mark.parametrize(
     ("dataset", "message"),
     [
-        pytest.param([], "must not be empty", id="empty"),
+        pytest.param([], "calibration dataset is empty", id="empty"),
         pytest.param(
             [{"input_ids": [1, 2], "attention_mask": [1, 1]}],
             "removed all samples",
@@ -119,7 +120,7 @@ def _assert_no_new_smi_threads(baseline: set[int | None]) -> None:
 def test_calibration_rejected_before_the_looper_leaves_no_smi_threads(
     tmp_path, dataset, message
 ):
-    """The calibration checks run in ``LoopProcessor.__init__``, before any loop."""
+    """Calibration is prepared once before any processor or looper is built."""
 
     baseline = {thread.ident for thread in _smi_threads()}
     qmodel = _build_qmodel(tmp_path)
@@ -150,11 +151,18 @@ def test_later_processor_failure_releases_the_processors_already_built(
 
     monkeypatch.setattr(LoopProcessor, "release_failed_run", recording_release)
 
-    with pytest.raises(ValueError, match="unsupported calibration example type"):
+    # Calibration (including the adapter samples) is now prepared once before
+    # any processor exists (#4869/#4935), so bad data can no longer fail the
+    # EoRA constructor. Fail it at its boundary instead, after GPTQ is built.
+    def failing_eora_init(self, *args, **kwargs):
+        raise ValueError("injected EoRA construction failure")
+
+    monkeypatch.setattr(EoraProcessor, "__init__", failing_eora_init)
+
+    with pytest.raises(ValueError, match="injected EoRA construction failure"):
         qmodel.quantize(
             CalibrationConfig(
                 dataset=CALIBRATION,
-                adapter_dataset=[123],
                 batch_size=1,
             ),
             backend=BACKEND.GPTQ_TORCH,
@@ -164,6 +172,8 @@ def test_later_processor_failure_releases_the_processors_already_built(
     # The prologue must release every processor it built, not only the ones a
     # looper would have seen.
     assert released, "the built processors were never released"
+    assert "GPTQProcessor" in released, released
+    assert "EoraProcessor" not in released
     _assert_no_new_smi_threads(baseline)
 
 

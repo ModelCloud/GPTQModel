@@ -46,7 +46,9 @@ def _measured(config, model_cls, tokens):
     model = model_cls(config).eval().to(torch.bfloat16)
     with torch.no_grad():
         output = model(torch.randint(3, config.vocab_size, (1, tokens)), use_cache=True)
-    layers = output.past_key_values.layers
+    # Transformers 5.23 may build a cache layer for every decoder layer and
+    # leave a KV-shared layer's tensors unallocated; count what was allocated.
+    layers = [layer for layer in output.past_key_values.layers if layer.keys is not None]
     measured = sum(
         tensor.numel() * tensor.element_size()
         for layer in layers

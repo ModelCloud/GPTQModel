@@ -247,13 +247,15 @@ def test_qwen3_5_moe_prepare_dataset_routes_pretokenized_rows_to_base_path(
         (row for row in rows), batch_size=2, calibration_dataset_sort="desc"
     )
 
+    # The padded row's trailing pad is stripped (#4889), so it sorts after the
+    # unpadded short row and collation re-pads it with the pad id.
     assert [batch["input_ids"].tolist() for batch in prepared] == [
         [long, long],
-        [short, short],
+        [short, short[:-1] + [0]],
     ]
     assert [batch["attention_mask"].tolist() for batch in prepared] == [
         [[1] * 14, [1] * 14],
-        [padded, [1] * 12],
+        [[1] * 12, padded],
     ]
 
 

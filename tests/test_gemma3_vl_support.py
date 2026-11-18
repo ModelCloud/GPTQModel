@@ -148,9 +148,12 @@ def test_gemma3_vl_prepare_dataset_accepts_pretokenized_text_without_processor(m
     prepared = model.prepare_dataset(rows, batch_size=1)
 
     assert len(prepared) == 2
-    assert [row["input_ids"].shape for row in prepared] == [(1, 12), (1, 13)]
-    assert prepared[0]["input_ids"].tolist() == [list(range(12))]
-    assert prepared[1]["input_ids"].tolist() == [list(range(13))]
+    # The base path strips the leading pad position of each row (#4889), so a
+    # pre-tokenized row reaches the looper at its real length.
+    assert [tuple(row["input_ids"].shape) for row in prepared] == [(1, 11), (1, 12)]
+    assert prepared[0]["input_ids"].tolist() == [list(range(1, 12))]
+    assert prepared[1]["input_ids"].tolist() == [list(range(1, 13))]
+    assert prepared[0]["attention_mask"].tolist() == [[1] * 11]
 
 
 def test_gemma3_checkpoint_keys_are_saved_in_huggingface_layout():
