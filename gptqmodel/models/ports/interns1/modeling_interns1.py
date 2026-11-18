@@ -37,6 +37,8 @@ from transformers.utils import (
     is_torchdynamo_compiling,
     torch_int,
 )
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
 
 from .configuration_interns1 import InternS1Config, InternS1VisionConfig
 from .text_interns1 import InternS1MoeModel
@@ -124,7 +126,6 @@ class InternS1VisionAttention(nn.Module):
             self,
             hidden_states: torch.Tensor,
             attention_mask: Optional[torch.Tensor] = None,
-            output_attentions: Optional[torch.Tensor] = None,
             **kwargs: Unpack[FlashAttentionKwargs],
     ):
         batch_size, seq_len, _ = hidden_states.size()
@@ -160,8 +161,7 @@ class InternS1VisionAttention(nn.Module):
         output = self.projection_layer(attn_output)
         output = self.projection_dropout(output)
 
-        outputs = (output, attn_weights) if output_attentions else (output, None)
-        return outputs
+        return output, attn_weights
 
 
 class InternS1VisionPreTrainedModel(PreTrainedModel):
@@ -394,14 +394,9 @@ class InternS1VisionLayer(GradientCheckpointingLayer):
             self.drop_path1 = nn.Identity()
             self.drop_path2 = nn.Identity()
 
-    def forward(
-            self,
-            hidden_states: torch.Tensor,
-            output_attentions: bool = False,
-    ) -> Union[tuple[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
-        attention_output, attention_weights = self.attention(
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        attention_output, _ = self.attention(
             self.layernorm_before(hidden_states),  # in InternS1Vision, layernorm is applied before self-attention
-            output_attentions=output_attentions,
         )
 
         attention_output = self.lambda_1 * attention_output
@@ -419,9 +414,13 @@ class InternS1VisionLayer(GradientCheckpointingLayer):
             layer_output = self.lambda_2 * layer_output
 
         # second residual connection
-        layer_output = self.drop_path2(layer_output) + hidden_states
+        return self.drop_path2(layer_output) + hidden_states
 
-        return layer_output, attention_weights
+
+InternS1VisionPreTrainedModel._can_record_outputs = {
+    "hidden_states": InternS1VisionLayer,
+    "attentions": InternS1VisionAttention,
+}
 
 
 class InternS1VisionEncoder(nn.Module):
@@ -431,35 +430,10 @@ class InternS1VisionEncoder(nn.Module):
         dpr = np.linspace(0.0, float(config.drop_path_rate), int(config.num_hidden_layers))
         self.layer = nn.ModuleList([InternS1VisionLayer(config, dpr[idx]) for idx in range(config.num_hidden_layers)])
 
-    @can_return_tuple
-    def forward(
-            self,
-            hidden_states: torch.Tensor,
-            output_attentions: bool = False,
-            output_hidden_states: bool = False,
-    ) -> Union[tuple, BaseModelOutput]:
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attentions = () if output_attentions else None
-
-        for i, layer_module in enumerate(self.layer):
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)
-
-            layer_outputs = layer_module(hidden_states, output_attentions)
-
-            hidden_states = layer_outputs[0]
-
-            if output_attentions:
-                all_self_attentions = all_self_attentions + (layer_outputs[1],)
-
-        if output_hidden_states:
-            all_hidden_states = all_hidden_states + (hidden_states,)
-
-        return BaseModelOutput(
-            last_hidden_state=hidden_states,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attentions,
-        )
+    def forward(self, hidden_states: torch.Tensor) -> BaseModelOutput:
+        for layer_module in self.layer:
+            hidden_states = layer_module(hidden_states)
+        return BaseModelOutput(last_hidden_state=hidden_states)
 
 
 class InternS1VisionModel(InternS1VisionPreTrainedModel):
@@ -480,38 +454,21 @@ class InternS1VisionModel(InternS1VisionPreTrainedModel):
     def get_input_embeddings(self):
         return self.embeddings.patch_embeddings
 
-    @can_return_tuple
+    @merge_with_config_defaults
+    @capture_outputs(tie_last_hidden_states=False)
     def forward(
             self,
             pixel_values: torch.Tensor,
             bool_masked_pos: Optional[torch.BoolTensor] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
+            **kwargs,
     ) -> Union[tuple, InternS1VisionModelOutputWithPooling]:
         r"""
         bool_masked_pos (`torch.BoolTensor` of shape `(batch_size, num_patches)`, *optional*):
             Boolean masked positions. Indicates which patches are masked (1) and which aren't (0).
         """
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-
         embedding_output, _ = self.embeddings(pixel_values, bool_masked_pos=bool_masked_pos)
-
-        encoder_outputs = self.encoder(
-            embedding_output,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-        )
-        sequence_output = encoder_outputs[0]
-        sequence_output = self.layernorm(sequence_output)
-
-        return InternS1VisionModelOutputWithPooling(
-            last_hidden_state=sequence_output,
-            hidden_states=encoder_outputs.hidden_states,
-            attentions=encoder_outputs.attentions,
-        )
+        sequence_output = self.layernorm(self.encoder(embedding_output).last_hidden_state)
+        return InternS1VisionModelOutputWithPooling(last_hidden_state=sequence_output)
 
 
 class InternS1PreTrainedModel(PreTrainedModel):
@@ -522,8 +479,6 @@ class InternS1PreTrainedModel(PreTrainedModel):
 
     _supports_flash_attn = True
     _supports_sdpa = True
-
-    _supports_static_cache = True
     _supports_flex_attn = True
     _supports_attention_backend = True
 
@@ -682,23 +637,8 @@ class InternS1Model(InternS1PreTrainedModel):
             vision_feature_layer: Optional[Union[int, list[int]]] = None,
             vision_feature_select_strategy: Optional[str] = None,
             use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            output_router_logits: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
-            cache_position: Optional[torch.LongTensor] = None,
             **kwargs: Unpack[FlashAttentionKwargs],
     ) -> InternS1ModelOutputWithPast:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        if self.is_moe_model:
-            output_router_logits = (
-                output_router_logits if output_router_logits is not None else self.config.text_config.output_router_logits
-            )
-            kwargs['output_router_logits'] = output_router_logits
-
         vision_feature_layer = (
             vision_feature_layer if vision_feature_layer is not None else self.config.vision_feature_layer
         )
@@ -746,9 +686,6 @@ class InternS1Model(InternS1PreTrainedModel):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            cache_position=cache_position,
             **kwargs,
         )
 
@@ -757,7 +694,7 @@ class InternS1Model(InternS1PreTrainedModel):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            router_logits=outputs.router_logits if self.is_moe_model else None,
+            router_logits=getattr(outputs, "router_logits", None),
             image_hidden_states=image_features if pixel_values is not None else None,
         )
 
@@ -1003,13 +940,8 @@ class InternS1ForConditionalGeneration(InternS1PreTrainedModel, GenerationMixin)
             vision_feature_select_strategy: Optional[str] = None,
             labels: Optional[torch.LongTensor] = None,
             use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
             output_router_logits: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
-            cache_position: Optional[torch.LongTensor] = None,
             logits_to_keep: Union[int, torch.Tensor] = 0,
-            image_sizes: Optional[torch.Tensor] = None,
             **kwargs,
     ) -> Union[tuple, InternS1CausalLMOutputWithPast]:
         r"""
@@ -1022,7 +954,7 @@ class InternS1ForConditionalGeneration(InternS1PreTrainedModel, GenerationMixin)
         >>> torch_device = "cuda"
         >>> processor = AutoProcessor.from_pretrained("InternLM/InternS1") # todo
         >>> model = AutoModelForImageTextToText.from_pretrained(
-        ...     "InternLM/InternS1", torch_dtype=torch.bfloat16, device_map=torch_device
+        ...     "InternLM/InternS1", dtype=torch.bfloat16, device_map=torch_device
         ... )
 
         >>> messages = [
@@ -1047,11 +979,6 @@ class InternS1ForConditionalGeneration(InternS1PreTrainedModel, GenerationMixin)
         >>> print(processor.decode(generate_ids[0, inputs["input_ids"].shape[1] :], skip_special_tokens=True))
         The images depict the Statue of Liberty and the Golden Gate Bridge.
         ```"""
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-
         if self.is_moe_model:
             output_router_logits = (
                 output_router_logits if output_router_logits is not None else self.config.text_config.output_router_logits
@@ -1077,10 +1004,6 @@ class InternS1ForConditionalGeneration(InternS1PreTrainedModel, GenerationMixin)
             vision_feature_layer=vision_feature_layer,
             vision_feature_select_strategy=vision_feature_select_strategy,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            cache_position=cache_position,
-            image_sizes=image_sizes,
             **kwargs,
         )
 
@@ -1112,39 +1035,9 @@ class InternS1ForConditionalGeneration(InternS1PreTrainedModel, GenerationMixin)
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            router_logits=outputs.router_logits if self.is_moe_model else None,
+            router_logits=outputs.router_logits,
             image_hidden_states=outputs.image_hidden_states,
         )
-
-    def prepare_inputs_for_generation(
-            self,
-            input_ids,
-            past_key_values=None,
-            inputs_embeds=None,
-            pixel_values=None,
-            attention_mask=None,
-            cache_position=None,
-            logits_to_keep=None,
-            **kwargs,
-    ):
-        # Overwritten -- in specific circumstances we don't want to forward image inputs to the model
-
-        model_inputs = super().prepare_inputs_for_generation(
-            input_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            cache_position=cache_position,
-            logits_to_keep=logits_to_keep,
-            **kwargs,
-        )
-
-        if kwargs.get("is_first_iteration", past_key_values is None or past_key_values.get_seq_length() == 0) or not kwargs.get("use_cache", True):
-            # If we're in cached decoding stage, pixel values should be None because input ids do not contain special image token anymore
-            # Otherwise we need pixel values to be passed to model
-            model_inputs["pixel_values"] = pixel_values
-
-        return model_inputs
 
 
 __all__ = [

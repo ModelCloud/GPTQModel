@@ -46,8 +46,8 @@ def reference_logits(model, ids, mask=None, positions=None):
     batch, length = ids.shape
     dim = cfg.hidden_size // cfg.num_attention_heads
     positions = torch.arange(length).unsqueeze(0) if positions is None else positions
-    scaling = cfg.rope_scaling or {}
-    kind = scaling.get("type", scaling.get("rope_type"))
+    scaling = cfg.rope_parameters or {}
+    kind = scaling.get("rope_type")
     base = cfg.rope_theta
     seq_len = positions.max() + 1
     if kind == "dynamic" and seq_len > cfg.max_position_embeddings:
@@ -252,7 +252,7 @@ def test_beam_generation_reorders_cache(backend):
 
 
 def test_attention_outputs_loss_tuple_and_invalid_cache_retry():
-    model = tiny_model()
+    model = tiny_model(attn_implementation="eager")
     ids = torch.tensor([[2, 4, 8, 6]])
     with pytest.raises(TypeError, match="Transformers Cache"):
         model(ids, past_key_values=((torch.zeros(1), torch.zeros(1)),))
@@ -262,7 +262,7 @@ def test_attention_outputs_loss_tuple_and_invalid_cache_retry():
     assert len(output.hidden_states) == 3
     assert torch.count_nonzero(output.attentions[0].triu(1)) == 0
     assert isinstance(model(ids, return_dict=False, use_cache=False), tuple)
-    torch.testing.assert_close(model(ids, num_logits_to_keep=1).logits, model(ids, logits_to_keep=1).logits)
+    torch.testing.assert_close(model(ids).logits[:, -1:], model(ids, logits_to_keep=1).logits)
 
 
 def test_dynamic_rotary_cache_threshold_and_warm_buffer_contract(tmp_path):
@@ -438,7 +438,7 @@ def test_public_dense_load_uses_packaged_model(tmp_path, monkeypatch, trust):
     assert isinstance(wrapper, InstellaQModel)
     assert type(wrapper.model) is InstellaForCausalLM
     assert wrapper.trust_remote_code is False
-    assert wrapper.model.config.rope_scaling["factor"] == 2.0
+    assert wrapper.model.config.rope_parameters["factor"] == 2.0
     assert wrapper.model(torch.tensor([[2, 4, 8]])).logits.isfinite().all()
 
 

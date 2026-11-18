@@ -70,7 +70,7 @@ def yarn_linear_ramp_mask(min, max, dim):
 
 
 class DeepseekV2RotaryEmbedding(nn.Module):
-    """DeepSeek's legacy ``rope_scaling`` (linear/dynamic/yarn) RoPE.
+    """DeepSeek-V2 RoPE (default/linear/dynamic/yarn) from standardized ``rope_parameters``.
 
     Frequencies are computed per call, so dynamic scaling never mutates shared state.
     """
@@ -85,7 +85,7 @@ class DeepseekV2RotaryEmbedding(nn.Module):
     @torch.no_grad()
     def forward(self, x, position_ids, seq_len):
         scaling = self.scaling
-        kind = scaling.get("rope_type", scaling.get("type", "default"))
+        kind = scaling.get("rope_type", "default")
         factor = scaling.get("factor", 1.0)
         base = self.base
         if kind == "dynamic" and seq_len > self.max_position_embeddings:

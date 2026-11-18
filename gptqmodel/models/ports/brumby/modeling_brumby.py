@@ -17,12 +17,16 @@ import torch
 from torch import nn
 from transformers.cache_utils import Cache, CacheLayerMixin
 from transformers.generation import GenerationMixin
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP as BrumbyMLP
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm as BrumbyRMSNorm
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding as BrumbyRotaryEmbedding
 from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb
+from transformers.utils import can_return_tuple
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
 
 from .configuration_brumby import BrumbyConfig
 
@@ -245,7 +249,7 @@ class BrumbyAttention(nn.Module):
         return self.o_proj(output.transpose(1, 2).reshape(*hidden_states.shape[:-1], -1).contiguous()), None
 
 
-class BrumbyDecoderLayer(nn.Module):
+class BrumbyDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.self_attn = BrumbyAttention(config, layer_idx)
@@ -269,6 +273,8 @@ class BrumbyPreTrainedModel(PreTrainedModel):
     _skip_keys_device_placement = ["past_key_values"]
     _supports_attention_backend = False
     _can_compile_fullgraph = False
+    supports_gradient_checkpointing = True
+    _can_record_outputs = {"hidden_states": BrumbyDecoderLayer}
 
 
 class BrumbyModel(BrumbyPreTrainedModel):
@@ -280,6 +286,8 @@ class BrumbyModel(BrumbyPreTrainedModel):
         self.rotary_emb = BrumbyRotaryEmbedding(config)
         self.post_init()
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(
         self,
         input_ids=None,
@@ -288,17 +296,10 @@ class BrumbyModel(BrumbyPreTrainedModel):
         past_key_values=None,
         inputs_embeds=None,
         use_cache=None,
-        output_hidden_states=None,
-        return_dict=None,
         **kwargs,
     ):
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Specify exactly one of input_ids or inputs_embeds")
-        use_cache = self.config.use_cache if use_cache is None else use_cache
-        output_hidden_states = (
-            self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
-        )
-        return_dict = self.config.return_dict if return_dict is None else return_dict
         if past_key_values is not None and not isinstance(past_key_values, PowerAttentionDynamicCache):
             raise TypeError("Brumby requires PowerAttentionDynamicCache, not a KV-only or legacy cache")
         if past_key_values is not None and not use_cache:
@@ -322,11 +323,8 @@ class BrumbyModel(BrumbyPreTrainedModel):
         if use_cache and cache is None:
             cache = PowerAttentionDynamicCache(self.config)
         snapshots = [vars(layer).copy() for layer in cache.layers] if cache is not None else None
-        all_hidden = () if output_hidden_states else None
         try:
             for decoder_layer in self.layers:
-                if output_hidden_states:
-                    all_hidden += (hidden_states,)
                 hidden_states = decoder_layer(
                     hidden_states, attention_mask=valid, position_embeddings=position_embeddings, past_key_values=cache
                 )
@@ -337,12 +335,7 @@ class BrumbyModel(BrumbyPreTrainedModel):
                     layer.__dict__.clear()
                     layer.__dict__.update(snapshot)
             raise
-        if output_hidden_states:
-            all_hidden += (hidden_states,)
-        output = BaseModelOutputWithPast(
-            last_hidden_state=hidden_states, past_key_values=cache, hidden_states=all_hidden
-        )
-        return output if return_dict else output.to_tuple()
+        return BaseModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=cache)
 
 
 class BrumbyForCausalLM(BrumbyPreTrainedModel, GenerationMixin):
@@ -372,6 +365,7 @@ class BrumbyForCausalLM(BrumbyPreTrainedModel, GenerationMixin):
         if generation_config.use_cache and cache is None:
             model_kwargs["past_key_values"] = PowerAttentionDynamicCache(self.config)
 
+    @can_return_tuple
     def forward(
         self,
         input_ids=None,
@@ -382,7 +376,6 @@ class BrumbyForCausalLM(BrumbyPreTrainedModel, GenerationMixin):
         labels=None,
         use_cache=None,
         logits_to_keep=0,
-        return_dict=None,
         **kwargs,
     ):
         snapshots = (
@@ -398,7 +391,6 @@ class BrumbyForCausalLM(BrumbyPreTrainedModel, GenerationMixin):
                 past_key_values=past_key_values,
                 inputs_embeds=inputs_embeds,
                 use_cache=use_cache,
-                return_dict=True,
                 **kwargs,
             )
             indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
@@ -417,7 +409,6 @@ class BrumbyForCausalLM(BrumbyPreTrainedModel, GenerationMixin):
                     layer.__dict__.clear()
                     layer.__dict__.update(snapshot)
             raise
-        output = CausalLMOutputWithPast(
+        return CausalLMOutputWithPast(
             loss=loss, logits=logits, past_key_values=outputs.past_key_values, hidden_states=outputs.hidden_states
         )
-        return output if (self.config.return_dict if return_dict is None else return_dict) else output.to_tuple()

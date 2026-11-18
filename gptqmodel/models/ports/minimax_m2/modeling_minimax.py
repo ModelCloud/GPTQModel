@@ -28,17 +28,21 @@ from .configuration_minimax import MiniMaxText01Config
 
 
 class MiniMaxText01Cache(MiniMaxCache):
-    """Track tokens independently of full-attention layer zero (which may not exist)."""
+    """MiniMax cache whose sequence length comes from the softmax-attention KV layers.
 
-    def __init__(self):
-        super().__init__()
-        self._num_seen_tokens = 0
+    Lightning-attention layers keep only a recurrent state, and layer zero is usually one of them, so the
+    length is read from the first initialized KV layer instead of layer zero. A cache without any
+    softmax-attention layer tracks no positions (none are consumed).
+    """
 
     def get_seq_length(self, layer_idx=0):
-        return self._num_seen_tokens
+        for layer in self.layers:
+            if layer.is_initialized:
+                return layer.get_seq_length()
+        return 0
 
     def get_mask_sizes(self, query_length, layer_idx):
-        return self._num_seen_tokens + query_length, 0
+        return self.get_seq_length() + query_length, 0
 
     def get_linear_cache(self, layer_idx):
         return self.linear_cache[layer_idx] if layer_idx < len(self.linear_cache) else None
@@ -64,7 +68,6 @@ class MiniMaxText01Cache(MiniMaxCache):
     def reset(self):
         super().reset()
         self.linear_cache = []
-        self._num_seen_tokens = 0
 
 
 class MiniMaxText01RotaryEmbedding(MiniMaxRotaryEmbedding):
@@ -220,7 +223,7 @@ class MiniMaxText01Model(MiniMaxModel):
             past_key_values = MiniMaxText01Cache()
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Pass exactly one of input_ids or inputs_embeds")
-        result = super().forward(
+        return super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -229,11 +232,6 @@ class MiniMaxText01Model(MiniMaxModel):
             use_cache=use_cache,
             **kwargs,
         )
-        if past_key_values is not None:
-            tokens = input_ids if input_ids is not None else inputs_embeds
-            assert tokens is not None
-            past_key_values._num_seen_tokens += tokens.shape[1]
-        return result
 
     @torch.no_grad()
     def _init_weights(self, module):

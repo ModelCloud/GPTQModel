@@ -87,11 +87,9 @@ class DeepseekV2Config(PreTrainedConfig):
             Whether to tie weight embeddings
         rope_theta (`float`, *optional*, defaults to 10000.0):
             The base period of the RoPE embeddings.
-        rope_scaling (`Dict`, *optional*):
-            Dictionary containing the scaling configuration for the RoPE embeddings. Currently supports two scaling
-            strategies: linear and dynamic. Their scaling factor must be a float greater than 1. The expected format is
-            `{"type": strategy name, "factor": scaling factor}`. When using this flag, don't update
-            `max_position_embeddings` to the expected new maximum.
+        rope_parameters (`Dict`, *optional*):
+            Standardized RoPE parameters (`rope_type` default/linear/dynamic/yarn plus its fields). A raw checkpoint
+            field of the older name is converted into it by `PreTrainedConfig` at parse time.
         attention_bias (`bool`, defaults to `False`, *optional*, defaults to `False`):
             Whether to use a bias in the query, key, value and output projection layers during self-attention.
         attention_dropout (`float`, *optional*, defaults to 0.0):
@@ -151,7 +149,6 @@ class DeepseekV2Config(PreTrainedConfig):
         pretraining_tp=1,
         tie_word_embeddings=False,
         rope_theta=10000.0,
-        rope_scaling=None,
         attention_bias=False,
         attention_dropout=0.0,
         use_mla=True,
@@ -194,8 +191,7 @@ class DeepseekV2Config(PreTrainedConfig):
         self.pretraining_tp = pretraining_tp
         self.use_cache = use_cache
         self.rope_theta = rope_theta
-        # Transformers 5 standardizes the legacy `rope_scaling` dict into `rope_parameters`.
-        self.rope_parameters = kwargs.pop("rope_parameters", None) or rope_scaling
+        self.rope_parameters = kwargs.pop("rope_parameters", None)
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.use_mla = use_mla
