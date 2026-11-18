@@ -199,7 +199,7 @@ per-expert Qwen1.5-MoE controls stay `False` throughout. The regressions are
 pinned by `tests/test_load_device_context_4863.py` and
 `tests/test_excluded_device_warmup.py`.
 
-See [PR #5105 fix](https://github.com/ModelCloud/GPTQModel/pull/) (draft) for the
+See [PR #5158](https://github.com/ModelCloud/GPTQModel/pull/5158) (draft) for the
 diff.
 
 ## Forward device selection
