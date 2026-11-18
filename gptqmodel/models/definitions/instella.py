@@ -34,8 +34,3 @@ class InstellaQModel(LlamaQModel):
             "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
         },
     ]
-
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Full-width Q/K RMSNorm and per-layer rotary/cache replay have not
-        # qualified scale search/folding. Keep every linear in plain AWQ.
-        return []

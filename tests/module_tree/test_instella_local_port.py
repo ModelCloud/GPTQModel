@@ -5,11 +5,13 @@ import hashlib
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.instella import InstellaQModel
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.instella import InstellaConfig, InstellaForCausalLM
+from tests.test_instella_local_port import tiny_model
 
 
 LINEARS = {
@@ -87,3 +89,25 @@ def test_instella_production_checkpoint_index_and_registry_contract():
         ["mlp.gate_proj", "mlp.up_proj"],
         ["mlp.down_proj"],
     ]
+
+
+# The full-width Q/K RMSNorms sit after q_proj/k_proj, so scaling their input
+# columns leaves the normalized queries/keys unchanged. Equal KV heads also
+# qualify v_proj -> o_proj, which the released GQA checkpoint cannot emit.
+@pytest.mark.parametrize("kv_heads", [2, 4])
+@pytest.mark.parametrize("bias", [False, True])
+def test_awq_scale_folds_preserve_layer_output(kv_heads, bias):
+    model = tiny_model(num_key_value_heads=kv_heads, attention_bias=bias)
+    ids = torch.tensor([[2, 4, 8, 6, 9, 11, 5, 7]])
+
+    def forward():
+        return model(ids, use_cache=False).logits
+
+    expected = [("pre_attention_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"])]
+    if kv_heads == 4:
+        expected.append(("self_attn.v_proj", ["self_attn.o_proj"]))
+    expected += [("pre_feedforward_layernorm", ["mlp.gate_proj", "mlp.up_proj"]),
+                 ("mlp.up_proj", ["mlp.down_proj"])]
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(InstellaQModel, model, layer, forward)
+        assert [(source, targets) for source, targets, _ in checked] == expected
