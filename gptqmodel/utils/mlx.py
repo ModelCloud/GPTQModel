@@ -505,7 +505,7 @@ def _packed_mlx_weights(model, config, lm_head_name, *, stock_compatible: bool =
     return mlx_model, mlx_config
 
 
-def convert_gptq_to_mlx_weights(
+def _convert_gptq_to_mlx_weights(
     model_id_or_path: str,
     model: Union[PreTrainedModel, BaseQModel],
     gptq_config: dict,
@@ -513,12 +513,21 @@ def convert_gptq_to_mlx_weights(
     *,
     stock_compatible: bool = False,
 ):
+    """Convert a GPT-QModel checkpoint into an MLX model. Internal only.
+
+    MLX support is reached through ``GPTQModel.load(..., backend=BACKEND.MLX)``;
+    the conversion is a step of that backend, not a public API. The former
+    public ``convert_gptq_to_mlx_weights()`` entry point was removed together
+    with ``GPTQModel.export()``, so there is no supported direct-call surface
+    and no compatibility shim.
+    """
+
     if not MLX_AVAILABLE:
         raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
 
     # Keep conversion on CPU while restoring MLX's GPU default for inference.
     with mx.stream(mx.cpu):
-        return _convert_gptq_to_mlx_weights(
+        return _build_mlx_model_from_checkpoint(
             model_id_or_path,
             model,
             gptq_config,
@@ -552,7 +561,7 @@ def _mlx_quant_predicate(dynamic, default_bits, default_group_size):
     return quant_predicate
 
 
-def _convert_gptq_to_mlx_weights(
+def _build_mlx_model_from_checkpoint(
     model_id_or_path, model, gptq_config, lm_head_name, *, stock_compatible: bool = False
 ):
 

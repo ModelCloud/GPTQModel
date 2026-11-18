@@ -225,7 +225,7 @@ def test_macaq_plain_mxfp4_exports_to_stock_mlx_lm(tmp_path):
     from mlx_lm.utils import load_model, save_config, save_model
     from transformers import LlamaConfig, LlamaForCausalLM
 
-    from gptqmodel.utils.mlx import convert_gptq_to_mlx_weights
+    from gptqmodel.utils.mlx import _convert_gptq_to_mlx_weights
 
     torch.manual_seed(5)
     config = LlamaConfig(
@@ -243,7 +243,7 @@ def test_macaq_plain_mxfp4_exports_to_stock_mlx_lm(tmp_path):
     gptq_config = {"bits": 4, "group_size": 32, "desc_act": False, "sym": True,
                    "format": "mxfp4", "method": "macaq", "dynamic": None}
 
-    mlx_model, mlx_config = convert_gptq_to_mlx_weights(
+    mlx_model, mlx_config = _convert_gptq_to_mlx_weights(
         str(source_dir), model, dict(gptq_config), "lm_head", stock_compatible=True,
     )
     assert "_gptqmodel_custom_mlx_runtime" not in mlx_config
@@ -270,7 +270,7 @@ def test_macaq_rotated_layer_is_not_stock_exportable(tmp_path):
 
     from transformers import LlamaConfig, LlamaForCausalLM
 
-    from gptqmodel.utils.mlx import convert_gptq_to_mlx_weights
+    from gptqmodel.utils.mlx import _convert_gptq_to_mlx_weights
 
     config = LlamaConfig(
         vocab_size=128, hidden_size=64, intermediate_size=128,
@@ -283,7 +283,7 @@ def test_macaq_rotated_layer_is_not_stock_exportable(tmp_path):
     )
     (tmp_path / "config.json").write_text(json.dumps(model.config.to_dict()))
     with pytest.raises(ValueError, match="requires transferable packed weights"):
-        convert_gptq_to_mlx_weights(
+        _convert_gptq_to_mlx_weights(
             str(tmp_path), model,
             {"bits": 4, "group_size": 32, "desc_act": False, "sym": True,
              "format": "mxfp4_macaq", "method": "macaq", "dynamic": None},
@@ -336,7 +336,7 @@ def test_macaq_mlx_converts_a_llama_layer_end_to_end(tmp_path):
 
     from transformers import LlamaConfig, LlamaForCausalLM
 
-    from gptqmodel.utils.mlx import convert_gptq_to_mlx_weights
+    from gptqmodel.utils.mlx import _convert_gptq_to_mlx_weights
 
     torch.manual_seed(3)
     config = LlamaConfig(
@@ -350,7 +350,7 @@ def test_macaq_mlx_converts_a_llama_layer_end_to_end(tmp_path):
         model.model.layers[0].self_attn.q_proj = source
     (tmp_path / "config.json").write_text(json.dumps(model.config.to_dict()))
 
-    mlx_model, mlx_config = convert_gptq_to_mlx_weights(
+    mlx_model, mlx_config = _convert_gptq_to_mlx_weights(
         str(tmp_path), model,
         {"bits": 4, "group_size": 32, "desc_act": False, "sym": True,
          "format": "mxfp4_macaq", "method": "macaq", "dynamic": None},
