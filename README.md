@@ -343,8 +343,9 @@ also records Ouro's owned recurrent decoder and Nemotron-Omni's native media
 owners. [OpenVLA model and action selection](docs/transformers5-model-ports.md#openvla-model-and-action-selection)
 documents Prismatic vision/action processing and native text decoders, with
 Meta Llama 2 license/use-policy notices retained for released tokenizer assets.
-Pangu's source-derived port is excluded while its redistribution license is
-unestablished.
+[PanGu-α](docs/transformers5-model-ports.md#pangu-alpha-top-query-loading-and-replay)
+uses a package-owned top-query decoder and the original Jieba/SentencePiece
+tokenizer pipeline. Install `gptqmodel[pangu-alpha]` to load its tokenizer.
 [Ovis visual-vocabulary selection](docs/transformers5-model-ports.md#ovis-visual-vocabulary-selection)
 preserves Ovis 1.0/1.5/1.6 vision and image-token layouts with native text
 decoders and plain AWQ; native Ovis2 keeps its separate definition.

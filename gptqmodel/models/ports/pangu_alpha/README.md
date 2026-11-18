@@ -87,9 +87,9 @@ forward; the full-forward reference also checks padding rows.
   mutation. Exact released state shapes on meta and tiny CPU/meta owners.
 - Exact pinned tokenizer IDs/decode, vocabulary failure and repair, and actual
   public dense loads with hostile metadata under both trust values and bypass
-  unset, `0`, or `1`. Install `jieba>=0.42.1` for PanGu-α tokenizer use and
-  tests. It and SentencePiece are imported only when the tokenizer is needed;
-  no downstream corrective normalization is applied.
+  unset, `0`, or `1`. Install `gptqmodel[pangu-alpha]` for tokenizer use.
+  The test extra also installs Jieba. The tokenizer imports Jieba and
+  SentencePiece when constructed.
 - Public plain AWQ with `fallback=None`, FP16/BF16, one or two blocks, and
   direct or checkpoint-backed LazyTurtle materialization. Every one of the six
   projections per block is packed. Excluded dense state and packed tensors,

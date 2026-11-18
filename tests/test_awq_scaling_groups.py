@@ -13,7 +13,6 @@ still reproduces its own consumer.
 
 import dataclasses
 import importlib
-from pathlib import Path
 
 import pytest
 import torch
@@ -117,29 +116,6 @@ _BASE_CONFIG = {
     "pad_token_id": 0,
     "eos_token_id": 1,
     "bos_token_id": 0,
-}
-
-# Unported checkpoint architecture; skip precisely when its fixture is absent.
-REMOTE_CODE_MODEL_PATHS = {
-    "gpt_pangu": "/monster/data/model/pangu_alpha_2_6B",
-}
-
-# Remote-code configs whose decoder fields are not named like `_BASE_CONFIG`'s.
-# PanGu spells the layer/head counts `num_layers` / `num_heads`.
-REMOTE_CODE_MODEL_OVERRIDES = {
-    "gpt_pangu": {
-        "vocab_size": 128,
-        "hidden_size": 64,
-        "intermediate_size": 256,
-        "num_layers": 2,
-        "num_heads": 4,
-        "max_position_embeddings": 64,
-        "layer_norm_epsilon": 1e-5,
-        "activation_function": "gelu",
-        "bos_token_id": 1,
-        "eos_token_id": 2,
-        "pad_token_id": 0,
-    },
 }
 
 # Composite (text + vision) configs keep the decoder under `text_config`; the
@@ -252,8 +228,10 @@ def _tiny_config(model_type):
             ),
             image_token_id=60, video_token_id=61, vision_start_token_id=62, vision_end_token_id=63,
         )
-    if model_type in REMOTE_CODE_MODEL_PATHS:
-        return _tiny_remote_config(model_type)
+    if model_type == "gpt_pangu":
+        from tests.test_pangu_alpha_local_port import tiny_config
+
+        return tiny_config()
     if model_type in COMPOSITE_TEXT_CONFIG_FAMILIES:
         return _tiny_composite_config(model_type)
     base = AutoConfig.for_model(model_type)
@@ -316,44 +294,6 @@ def _tiny_config(model_type):
                     break
             if not removed:
                 raise
-
-
-def _tiny_remote_config(model_type):
-    """Build a tiny config from a checkpoint whose architecture is remote code."""
-
-    model_path = Path(REMOTE_CODE_MODEL_PATHS[model_type])
-    if not model_path.is_dir():
-        pytest.skip(f"local {model_type} fixture is unavailable: {model_path}")
-
-    config = AutoConfig.from_pretrained(
-        model_path,
-        trust_remote_code=True,
-        local_files_only=True,
-    )
-    for key, value in _BASE_CONFIG.items():
-        if hasattr(config, key):
-            setattr(config, key, value)
-    for key, value in REMOTE_CODE_MODEL_OVERRIDES.get(model_type, {}).items():
-        setattr(config, key, value)
-    # K2's attention width is `num_attention_heads * head_dim`, which is wider
-    # than `hidden_size` (2048 vs 1536 on the 0.9B checkpoint). Mirror that so
-    # `o_proj` does not accidentally match the norm width and merge with it.
-    tiny_head_dim = 16 if model_type == "k2_horizon" else 8
-    for key in ("head_dim", "rotary_dim", "rope_head_dim"):
-        if hasattr(config, key):
-            setattr(config, key, tiny_head_dim)
-    # Per-layer lists must describe the tiny layer count, not the checkpoint's.
-    if hasattr(config, "num_key_value_heads_per_layer"):
-        config.num_key_value_heads_per_layer = [4] * config.num_hidden_layers
-    if hasattr(config, "mlp_only_layers"):
-        config.mlp_only_layers = list(range(config.num_hidden_layers))
-    config._attn_implementation = "eager"
-    # The invariant compares logits before/after a fold; a bf16 tiny model
-    # would report the dtype's own rounding (~8e-3) instead of fold error.
-    for dtype_attr in ("dtype", "torch_dtype"):
-        if hasattr(config, dtype_attr):
-            setattr(config, dtype_attr, torch.float32)
-    return config
 
 
 def _tiny_composite_config(model_type):
@@ -443,7 +383,7 @@ def _features(layer, plan):
 def _tiny_model(model_type):
     qmodel_cls = MODEL_MAP[model_type]
     torch.manual_seed(0)
-    if model_type in {"agnes", "exaone", "grinmoe", "hymba", "instella", "internlm2", "internvl_chat", "k2_horizon"}:
+    if model_type in {"agnes", "exaone", "gpt_pangu", "grinmoe", "hymba", "instella", "internlm2", "internvl_chat", "k2_horizon"}:
         hf_model = qmodel_cls.loader.from_config(_tiny_config(model_type)).eval()
     else:
         hf_model = AutoModelForCausalLM.from_config(
@@ -515,7 +455,7 @@ def _worst_relative_change(hf_model, ids, layer, groups):
 
 # Families whose decoder layer has no foldable AWQ group and is quantized plainly.
 PLAIN_QUANTIZATION_FAMILIES = {
-    "exaone", "falcon", "grinmoe", "hymba", "internlm2", "internvl_chat", "k2_horizon",
+    "exaone", "falcon", "gpt_pangu", "grinmoe", "hymba", "internlm2", "internvl_chat", "k2_horizon",
     "afmoe", "agnes", "apertus", "codegen", "deepseek_v2", "deepseek_v3", "deepseek_v4", "deepseek_vl_v2", "exaone4", "gpt2", "instella", "minimax", "minimax_m2", "nemotron_h"
 }
 

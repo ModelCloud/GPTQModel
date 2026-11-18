@@ -50,7 +50,11 @@ vision = [
 minicpm-o = [
     "vector-quantize-pytorch>=1.27.15",
 ]
+pangu-alpha = [
+    "jieba>=0.42.1",
+]
 test = [
+    "jieba>=0.42.1",
     "pytest>=9.1.1",
     "pytest-timeout>=2.4.0",
     "parameterized>=0.9.0",

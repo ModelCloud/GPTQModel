@@ -16,7 +16,9 @@ class GPTPanguTokenizer(PreTrainedTokenizer):
         try:
             import jieba
         except ImportError as exc:
-            raise ImportError("The PanGu-α tokenizer requires jieba; install it with `pip install jieba`.") from exc
+            raise ImportError(
+                "The PanGu-α tokenizer requires jieba. Install it with pip install 'gptqmodel[pangu-alpha]'."
+            ) from exc
 
         import sentencepiece as spm
 

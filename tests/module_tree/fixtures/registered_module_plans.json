@@ -1130,7 +1130,7 @@
       "layers": ["transformer.h"],
       "blocks": [
         ["ln_1:!"],
-        ["attn.q_proj", "attn.k_proj", "attn.v_proj"],
+        ["attn:!", "attn.q_proj", "attn.k_proj", "attn.v_proj"],
         ["attn.c_proj"],
         ["ln_2:!"],
         ["mlp.c_fc"],

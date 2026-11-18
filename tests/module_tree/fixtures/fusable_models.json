@@ -1943,7 +1943,7 @@
     },
     "gpt_pangu": {
       "definition": "PanguAlphaQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned PanGu-alpha top-query decoder; fusion executor has not been qualified."
     },
     "gptj": {
       "definition": "GptJQModel",

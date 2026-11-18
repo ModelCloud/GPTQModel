@@ -299,10 +299,39 @@ flowchart TD
 | Lazy expert storage | `7f84e0da7^:gptqmodel/utils/structure.py:2823-2826` offered only `gate_up_proj` | Try fused gated storage first, then separate gate/up tensors; missing shards raise and permit same-reader retry |
 
 The [checkpoint materialization reference](checkpoint-owned-materialization.md)
-records the shared placement, strict-FP32 and expert-storage contracts. These
-ports do not qualify trained checkpoints or GPU execution. Pangu remains on a
-licensing hold: the inspected custom upstream extension has no established
-redistribution license.
+records the shared placement, strict-FP32 and expert-storage contracts.
+
+### PanGu Alpha top-query loading and replay
+
+`PanguAlphaQModel.loader` selects package-owned config, model and tokenizer
+classes for `gpt_pangu`. The port follows the
+[Apache-2.0 Huawei reference](https://github.com/huawei-noah/Pretrained-Language-Model/tree/0598f02d7fc4eaa7b4cbc1e9d7ab18bc875c24f9/PanGu-%CE%B1)
+and the converted release's checkpoint layout. The release vocabulary matches
+the original SentencePiece model byte for byte. Install `gptqmodel[pangu-alpha]`
+for Jieba segmentation before SentencePiece. The public loader wraps this
+tokenizer through Tokenicer.
+
+```mermaid
+flowchart TD
+    A["load_model_config: gpt_pangu checkpoint metadata"] --> B["PanguAlphaQModel.loader chooses packaged classes"]
+    B --> C["Local tokenizer: Jieba, SentencePiece and Tokenicer"]
+    B --> D["Decoder: transformer.h"]
+    D --> M["2D keep mask crosses the block boundary; attention converts it to bias"]
+    D --> E["Final block: ln_f(hidden) and wqe(position_ids)"]
+    D --> F["prepare_layer_replay_kwargs reconstructs top-query input for calibration"]
+    E --> G["Causal-LM logits and cache"]
+    F --> H["Plain AWQ packs decoder projections"]
+    M --> H
+    B -->|Incompatible config or tokenizer assets| X["Raise before running a forward"]
+    style X fill:#ffcdd2,stroke:#b71c1c
+```
+
+| Mechanism | Before | Current behavior |
+| --- | --- | --- |
+| Runtime | `e44f276d1:gptqmodel/models/definitions/pangu_alpha.py` had no local loader and used checkpoint-selected classes | Definition-owned decoder and tokenizer handle the released `gpt_pangu` layout |
+| Calibration | The definition reconstructed the special top-query input for the checkpoint class | The owned decoder and replay hook share the top-query rule, including position-aware batches |
+| Mask capture | An all-zero additive attention bias discarded every calibration row | The block receives a 2D keep mask and converts it to additive bias inside attention |
+| AWQ | The definition filtered the final query projection from one scale group | Plain AWQ packs the supported decoder projections with top-query replay |
 
 ### OpenVLA model and action selection
 
