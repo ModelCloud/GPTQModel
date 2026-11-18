@@ -517,15 +517,27 @@ def test_invalid_cache_rejection_leaves_live_cache_usable():
 
 
 @pytest.mark.parametrize("moe", [False, True])
-@pytest.mark.parametrize("fallback", [None, "plain"])
+# "0.5%" is the default RTN fallback threshold. The earlier "plain" value was
+# never parsed while the override emitted no scale groups, and is not a valid
+# threshold.
+@pytest.mark.parametrize("fallback", [None, "0.5%"])
 @pytest.mark.parametrize("all_experts", [False, True])
-def test_public_plain_awq_pack_infer_two_safetensors_cycles(tmp_path, moe, fallback, all_experts):
+def test_public_awq_scale_search_pack_infer_two_safetensors_cycles(tmp_path, monkeypatch, moe, fallback, all_experts):
+    from gptqmodel.looper import awq_processor
+
     source, marker = _checkpoint(tmp_path / "source", num_hidden_layers=1,
                                   num_experts=3 if moe else 0, num_experts_per_tok=2 if moe else 0)
     qcfg = AWQConfig(device="cpu", group_size=16, fallback=fallback, offload_to_disk=False,
                      moe=MoEConfig(routing=ExpertsRoutingOverride()) if all_experts and moe else None)
     model = GPTQModel.load(str(tmp_path / "source"), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
-    assert model.awq_get_modules_for_scaling(model.model.model.layers[0], {}, {}) == []
+    applied = []
+    original_apply_scale = awq_processor.apply_scale
+
+    def record_apply_scale(module, scales_list, *args, **kwargs):
+        applied.extend((source, tuple(targets)) for source, targets, _scales, _loss in scales_list)
+        return original_apply_scale(module, scales_list, *args, **kwargs)
+
+    monkeypatch.setattr(awq_processor, "apply_scale", record_apply_scale)
     ids = torch.tensor([[4, 5, 6, 7, 4, 7, 6, 5]])
     calibration = [{"input_ids": ids, "attention_mask": torch.ones_like(ids)} for _ in range(2)]
     dense = {name: value.to(torch.float16).clone() for name, value in source.state_dict().items()}
@@ -535,14 +547,26 @@ def test_public_plain_awq_pack_infer_two_safetensors_cycles(tmp_path, moe, fallb
     )
     expected_linears = 4 + (9 if moe else 3)
     assert sum(isinstance(m, AwqTorchLinear) for m in model.model.modules()) == expected_linears
+    # Scale search ran for every branch (GQA kv=2 leaves v_proj -> o_proj out).
+    attention = [("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"))]
+    if moe:
+        mlp = [("post_attention_layernorm", tuple(f"mlp.experts.{i}.{n}" for i in range(3) for n in ("w1", "w3")))]
+        mlp += [(f"mlp.experts.{i}.w3", (f"mlp.experts.{i}.w2",)) for i in range(3)]
+    else:
+        mlp = [("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj")), ("mlp.up_proj", ("mlp.down_proj",))]
+    assert applied == attention + mlp
     state = {name: value.clone() for name, value in model.model.state_dict().items()}
     assert sum(name.endswith(".qweight") for name in state) == expected_linears
     if moe:
         assert model.model.model.layers[0].mlp.num_experts_per_tok == 2
-        torch.testing.assert_close(state["model.layers.0.mlp.gate.weight"], dense["model.layers.0.mlp.gate.weight"], atol=0, rtol=0)
-    for name, value in state.items():
-        if "norm.weight" in name or name in ("model.embed_tokens.weight", "lm_head.weight"):
-            torch.testing.assert_close(value, dense[name], atol=0, rtol=0)
+        # The unquantized router stays dense and absorbs the inverse of the
+        # post-attention norm fold, so the routed logits are unchanged.
+        norm = "model.layers.0.post_attention_layernorm.weight"
+        router = "model.layers.0.mlp.gate.weight"
+        torch.testing.assert_close((state[router] * state[norm]).float(), (dense[router] * dense[norm]).float(),
+                                   atol=2e-3, rtol=2e-3)
+    for name in ("model.norm.weight", "model.embed_tokens.weight", "lm_head.weight"):
+        torch.testing.assert_close(state[name], dense[name], atol=0, rtol=0)
     with torch.no_grad():
         expected = model.model(ids).logits
         assert torch.isfinite(expected).all()
