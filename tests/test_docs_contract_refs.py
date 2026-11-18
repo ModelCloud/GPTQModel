@@ -66,7 +66,9 @@ CONTRACT_REFS = (
      "_rotary_layer_type_kwargs", SYMBOL_CITATION),
     ("docs/layer-type-replay-masks.md", "gptqmodel/models/definitions/olmo3.py",
      "Olmo3QModel", 53),
-    ("docs/multi_gpu_quantization.md", "gptqmodel/utils/torch.py", "torch_sync", 611),
+    # `utils/torch.py` keeps growing (the #5020 compile-release helpers added
+    # ~40 lines above this symbol), so cite it by name.
+    ("docs/multi_gpu_quantization.md", "gptqmodel/utils/torch.py", "torch_sync", SYMBOL_CITATION),
     # `writer.py` keeps growing (the #5029 passthrough ownership scope added
     # ~70 lines above the class), so cite the symbol instead of a line.
     ("docs/native-checkpoint-export.md", "gptqmodel/models/writer.py",
