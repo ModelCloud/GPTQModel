@@ -16,14 +16,16 @@ from transformers import (
     Exaone4_5_Config,
     Exaone4_5_ForConditionalGeneration,
     Exaone4_5_Processor,
-    Exaone4Config,
-    Exaone4ForCausalLM,
     PreTrainedTokenizerFast,
     Qwen2VLImageProcessor,
     Qwen2VLVideoProcessor,
 )
+from transformers.models.exaone4.configuration_exaone4 import Exaone4Config as NativeExaone4Config
+from transformers.models.exaone4.modeling_exaone4 import Exaone4ForCausalLM as NativeExaone4ForCausalLM
 
 from gptqmodel.models.auto import MODEL_MAP, check_and_get_model_definition
+from gptqmodel.models.ports.native.exaone4.configuration_exaone4 import Exaone4Config
+from gptqmodel.models.ports.native.exaone4.modeling_exaone4 import Exaone4ForCausalLM
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 from gptqmodel.utils.security import BYPASS_ENV
 
@@ -127,9 +129,30 @@ def test_text_alias_uses_native_config_and_model_without_checkpoint_code(tmp_pat
 
 def test_native_multimodal_config_already_normalizes_legacy_text_identity():
     config = tiny_vision_config()
-    assert type(config.text_config) is Exaone4Config
+    # EXAONE 4.5 is still a Transformers-native definition; its nested text config is Transformers' own.
+    assert type(config.text_config) is NativeExaone4Config
     assert config.text_config.model_type == "exaone4"
     assert config.to_dict()["text_config"]["model_type"] == "exaone4"
+
+
+@pytest.mark.parametrize("layer_types", [["sliding_attention", "full_attention"], ["full_attention", "full_attention"]])
+@pytest.mark.parametrize("implementation", ["eager", "sdpa"])
+@torch.inference_mode()
+def test_vendored_port_matches_transformers_oracle(layer_types, implementation):
+    torch.manual_seed(7)
+    config = tiny_text_config(layer_types=layer_types)
+    model = MODEL_MAP["exaone4"].loader.from_config(deepcopy(config), attn_implementation=implementation).eval()
+    oracle = NativeExaone4ForCausalLM._from_config(
+        NativeExaone4Config(**config.to_dict()), attn_implementation=implementation
+    ).eval()
+    assert set(model.state_dict()) == set(oracle.state_dict())
+    oracle.load_state_dict(model.state_dict())
+    ids = torch.tensor([[1, 7, 11, 13, 19, 23, 29]])
+    assert torch.equal(model(ids, use_cache=False).logits, oracle(ids, use_cache=False).logits)
+    assert torch.equal(
+        model.generate(ids[:, :3], max_new_tokens=4, do_sample=False, eos_token_id=None),
+        oracle.generate(ids[:, :3], max_new_tokens=4, do_sample=False, eos_token_id=None),
+    )
 
 
 @pytest.mark.parametrize("model_type", ["exaone4", "exaone4_5_text", "exaone4_5"])

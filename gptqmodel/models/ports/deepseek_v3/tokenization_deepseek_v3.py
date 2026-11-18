@@ -3,13 +3,46 @@
 """Select the standalone Kimi-K2 tokenizer without changing native DeepSeek."""
 
 import json
+from importlib import import_module
 from pathlib import Path
 
-from transformers import AutoTokenizer, PreTrainedConfig, TokenizersBackend
-from transformers.models.auto.tokenization_auto import get_tokenizer_config, tokenizer_class_from_name
+from transformers import PreTrainedConfig, TokenizersBackend
 from transformers.utils.hub import cached_file
 
+from ..native.auto import _registry
 from .configuration_deepseek_v3 import DeepseekV3Config
+
+
+# Declared names that mean "the framework's serialized tokenizers backend".
+_FRAMEWORK_BACKENDS = {None, "PreTrainedTokenizerFast", "TokenizersBackend"}
+
+
+_DOWNLOAD_KEYS = {"cache_dir", "force_download", "local_files_only", "token", "revision", "subfolder", "_commit_hash"}
+
+
+def _download_kwargs(kwargs):
+    return {key: value for key, value in kwargs.items() if key in _DOWNLOAD_KEYS}
+
+
+def _tokenizer_metadata(model_id_or_path, kwargs):
+    path = cached_file(
+        model_id_or_path, "tokenizer_config.json", _raise_exceptions_for_missing_entries=False,
+        **_download_kwargs(kwargs),
+    )
+    return {} if path is None else json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _vendored_tokenizer_class(declared_class):
+    """Resolve a declared tokenizer class against GPT-QModel's vendored registry only."""
+
+    names = {declared_class, declared_class.removesuffix("Fast")}
+    for module, name in _registry.TOKENIZER.values():
+        if name in names:
+            return getattr(import_module(module), name)
+    raise ValueError(
+        f"Native DeepSeek tokenizer class {declared_class!r} is not available natively; "
+        "the owned Kimi tokenizer requires model_type/source_model_type='kimi_k2'."
+    )
 
 
 class DeepseekV3Tokenizer:
@@ -24,20 +57,15 @@ class DeepseekV3Tokenizer:
 
             return TikTokenTokenizer.from_pretrained(model_id_or_path, **kwargs)
         config = DeepseekV3Config.from_dict(payload)
-        metadata = get_tokenizer_config(model_id_or_path, **kwargs)
+        metadata = _tokenizer_metadata(model_id_or_path, kwargs)
         declared_class = metadata.get("tokenizer_class") or getattr(config, "tokenizer_class", None)
-        native_class = tokenizer_class_from_name(declared_class) if declared_class else None
-        if declared_class and (native_class is None or not native_class.__module__.startswith("transformers.")):
-            raise ValueError(
-                f"Native DeepSeek tokenizer class {declared_class!r} is not available natively; "
-                "the owned Kimi tokenizer requires model_type/source_model_type='kimi_k2'."
-            )
+        tokenizer_class = TokenizersBackend
+        if declared_class not in _FRAMEWORK_BACKENDS:
+            tokenizer_class = _vendored_tokenizer_class(declared_class)
         if declared_class in {None, "LlamaTokenizer", "LlamaTokenizerFast", "PreTrainedTokenizerFast", "TokenizersBackend"}:
-            download_kwargs = {key: value for key, value in kwargs.items() if key in {
-                "cache_dir", "force_download", "local_files_only", "token", "revision", "subfolder", "_commit_hash",
-            }}
             serialized = kwargs.get("tokenizer_file") or cached_file(
-                model_id_or_path, "tokenizer.json", _raise_exceptions_for_missing_entries=False, **download_kwargs,
+                model_id_or_path, "tokenizer.json", _raise_exceptions_for_missing_entries=False,
+                **_download_kwargs(kwargs),
             )
             if serialized is not None:
                 specification = json.loads(Path(serialized).read_text(encoding="utf-8"))
@@ -53,6 +81,4 @@ class DeepseekV3Tokenizer:
                 "Unqualified native DeepSeek tokenizer metadata: checkpoint AutoTokenizer code is disabled; "
                 "only the native serialized ByteLevel BPE layout is qualified with tokenizer auto_map."
             )
-        return AutoTokenizer.from_pretrained(
-            model_id_or_path, config=config, trust_remote_code=False, **kwargs,
-        )
+        return tokenizer_class.from_pretrained(model_id_or_path, **kwargs)
