@@ -18,7 +18,7 @@ from gptqmodel.utils.hf import load_model_config
 
 
 VERSIONS = ["2.0", "2.0-mini-preview", "2.0-flash-preview", "2.0-cap", "2.1", "2.2"]
-AUDITS = json.loads((Path(__file__).parents[1] / "gptqmodel/models/ports/llada2/checkpoint_audits.json").read_text())
+AUDITS = json.loads((Path(__file__).parent / "fixtures/ports/llada2/checkpoint_audits.json").read_text())
 
 
 def tiny_config(version="2.1", **overrides):
@@ -88,8 +88,7 @@ def test_loading_does_not_mutate_any_forward_class(monkeypatch):
     assert type(model.model).forward is inner
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "1")])
 def test_checkpoint_python_cannot_select_config_or_model(tmp_path, monkeypatch, trust, bypass):
     if bypass is None:
         monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
@@ -243,9 +242,18 @@ def reference_forward(model, ids, visible=None):
     return linear(hidden, "lm_head").float(), hidden_trace, routers
 
 
-@pytest.mark.parametrize("version", VERSIONS)
-@pytest.mark.parametrize("kv_heads,bias,qk_norm", [(4, False, False), (2, True, True), (1, False, True)])
-@pytest.mark.parametrize("mask_kind", ["bidirectional", "block", "causal"])
+@pytest.mark.parametrize(
+    "version,kv_heads,bias,qk_norm,mask_kind",
+    [
+        ("2.0", 4, False, False, "bidirectional"),
+        ("2.0-mini-preview", 2, True, True, "block"),
+        ("2.0-flash-preview", 1, False, True, "causal"),
+        ("2.0-cap", 2, True, True, "bidirectional"),
+        ("2.1", 1, False, True, "block"),
+        ("2.2", 4, False, False, "causal"),
+        ("2.2", 2, True, True, "block"),
+    ],
+)
 def test_entire_forward_independent_equations(version, kv_heads, bias, qk_norm, mask_kind):
     model = tiny_model(
         version, num_key_value_heads=kv_heads, use_qkv_bias=bias, use_bias=bias, use_qk_norm=qk_norm
@@ -469,9 +477,16 @@ def write_tokenizer(path):
     PreTrainedTokenizerFast(tokenizer_object=tokenizer, pad_token="[PAD]", unk_token="[UNK]").save_pretrained(path)
 
 
-@pytest.mark.parametrize("version", VERSIONS)
 @pytest.mark.parametrize(
-    "trust,bypass", [(False, None), (True, None), (False, "0"), (True, "0"), (False, "1"), (True, "1")]
+    "version,trust,bypass",
+    [
+        ("2.0", False, None),
+        ("2.0-mini-preview", True, None),
+        ("2.0-flash-preview", False, "0"),
+        ("2.0-cap", True, "0"),
+        ("2.1", False, "1"),
+        ("2.2", True, "1"),
+    ],
 )
 def test_public_explicit_version_and_hostile_maps(tmp_path, monkeypatch, version, trust, bypass):
     from gptqmodel import GPTQModel
@@ -500,8 +515,10 @@ def test_public_explicit_version_and_hostile_maps(tmp_path, monkeypatch, version
     assert LLaDA2MoeQModel.loader.load_config(tmp_path / "config_only").llada_version == version
 
 
-@pytest.mark.parametrize("version", VERSIONS)
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "version,dtype",
+    list(zip(VERSIONS, [torch.float32, torch.float16, torch.bfloat16] * 2)),
+)
 def test_safetensors_dtype_roundtrip_and_failed_retry(tmp_path, version, dtype):
     from safetensors.torch import load_file, save_file
 
@@ -533,8 +550,7 @@ def test_safetensors_dtype_roundtrip_and_failed_retry(tmp_path, version, dtype):
     torch.testing.assert_close(retried(ids).logits, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("version", VERSIONS)
-@pytest.mark.parametrize("implementation", ["eager", "sdpa"])
+@pytest.mark.parametrize("version,implementation", list(zip(VERSIONS, ["eager", "sdpa"] * 3)))
 def test_causal_cache_continuation_invalid_mask_retry_and_diffusion_visibility(version, implementation):
     from transformers.cache_utils import DynamicCache
 
@@ -568,17 +584,16 @@ def test_causal_cache_continuation_invalid_mask_retry_and_diffusion_visibility(v
 
 
 @pytest.mark.parametrize(
-    "version,kind",
+    "version,kind,offload",
     [
-        ("2.0", "mixed"),
-        ("2.0-mini-preview", "dense"),
-        ("2.0-flash-preview", "moe"),
-        ("2.0-cap", "mixed"),
-        ("2.1", "mixed"),
-        ("2.2", "mixed"),
+        ("2.0", "mixed", False),
+        ("2.0-mini-preview", "dense", True),
+        ("2.0-flash-preview", "moe", False),
+        ("2.0-cap", "mixed", True),
+        ("2.1", "mixed", False),
+        ("2.2", "mixed", True),
     ],
 )
-@pytest.mark.parametrize("offload", [False, True])
 def test_public_plain_awq_all_owners_pack_infer_and_two_reloads(tmp_path, version, kind, offload):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear

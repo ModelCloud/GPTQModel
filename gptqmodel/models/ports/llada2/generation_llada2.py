@@ -16,7 +16,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# Adapted for Transformers 5 by ModelCloud.ai, 2026. See README.md and NOTICE.
+# Adapted for Transformers 5 by ModelCloud.ai, 2026. See NOTICE.
 """Pinned InclusionAI diffusion/edit decoders. Version selection belongs to config."""
 
 from typing import Optional
