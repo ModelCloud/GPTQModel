@@ -1,4 +1,5 @@
 # Vendored from huggingface/transformers v5.23.0 (Apache-2.0) by GPT-QModel.
+# GPT-QModel: modernized to Transformers 5.23 conventions (no legacy return paths).
 # Do not edit by hand except to keep it on the 5.23 ABI; see docs/transformers5-model-ports.md.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
 #           This file was automatically generated from src/transformers/models/voxtral/modular_voxtral.py.
@@ -226,7 +227,6 @@ class VoxtralPreTrainedModel(PreTrainedModel):
     _supports_flash_attn = True
     _supports_sdpa = True
     _supports_flex_attn = True
-    _supports_cache_class = True
     _supports_attention_backend = True
     _can_compile_fullgraph = True
 
