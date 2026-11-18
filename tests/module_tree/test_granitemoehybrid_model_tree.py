@@ -46,7 +46,7 @@ NON_SOURCES = ("mamba", "mamba.in_proj", "mamba.conv1d")
 
 
 def _tiny_config():
-    from transformers.models.granitemoehybrid import GraniteMoeHybridConfig
+    from gptqmodel.models.ports.native.granitemoehybrid.configuration_granitemoehybrid import GraniteMoeHybridConfig
 
     # `mamba_d_head * mamba_n_heads` must equal `hidden_size * mamba_expand`.
     return GraniteMoeHybridConfig(
@@ -255,13 +255,13 @@ EAGER_MAMBA_WRAPPERS = (
 def _eager_torch_mamba_kernels():
     """Pin the Mamba-2 reference implementations for one CPU forward.
 
-    ``transformers`` resolves ``mamba_ssm``/``causal_conv1d`` at import time and
+    GPT-QModel's vendored modeling resolves ``mamba_ssm``/``causal_conv1d`` at import time and
     those kernels are CUDA-only. ``functools.wraps`` keeps the undecorated Torch
     reference on ``__wrapped__``, so the invariant can still execute the real
     model forward without claiming the installed kernels were exercised.
     """
 
-    from transformers.models.granitemoehybrid import modeling_granitemoehybrid as modeling
+    from gptqmodel.models.ports.native.granitemoehybrid import modeling_granitemoehybrid as modeling
 
     saved = {}
     try:
@@ -308,8 +308,8 @@ def test_awq_folds_preserve_the_full_model_output():
     transformers' own Torch reference before running the CPU forward.
     """
 
-    from transformers.models.granitemoehybrid import GraniteMoeHybridConfig, GraniteMoeHybridForCausalLM
-
+    from gptqmodel.models.ports.native.granitemoehybrid.configuration_granitemoehybrid import GraniteMoeHybridConfig
+    from gptqmodel.models.ports.native.granitemoehybrid.modeling_granitemoehybrid import GraniteMoeHybridForCausalLM
     from gptqmodel.quantization.awq.quantize.scale import apply_scale, is_foldable_source
 
     config = GraniteMoeHybridConfig(
