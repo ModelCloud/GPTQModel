@@ -96,6 +96,46 @@ coverage. The pre-pack dequantization and the packed grid then agree.
 The symmetric branch is unchanged: its zero point is the fixed midpoint
 `(maxq + 1) / 2`.
 
+## SmoothMSE endpoint candidates
+
+`mse_optimal_quant` searches the shrink factor `p` but must treat the unshrunk
+range (`p = 1`) as a candidate, not as an unchecked initialization. The ternary
+probes are computed from interior thirds of `[maxshrink, 1]`, so none of them
+equals `1`; a search seeded with `p = 1` and `best_err = inf` let the first
+interior probe replace the incumbent before `p = 1` was ever scored. The
+refinement then only searched near that probe.
+
+The endpoint scores and the final reconstruction are float32 while the tensor
+is stored at checkpoint precision, so a float64 oracle can still report a
+relative difference around `1e-5`. That is scoring rounding, not a worse
+selection: the incumbent is the same expression the search scores.
+
+```mermaid
+flowchart TD
+    S["mse_optimal_quant(block)"] --> B["_eval_mse at p = maxshrink and p = 1"]
+    B --> I["incumbent = lower-error endpoint"]
+    I --> T["Ternary iterations over interior midpoints"]
+    T --> R["Refine around the incumbent"]
+    R --> C{"Refined error < incumbent error?"}
+    C -- Yes --> N["Adopt refinement"]
+    C -- No --> K["Keep incumbent"]
+    N --> O["Final quantization at best_p"]
+    K --> O
+    style O fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+```
+
+| Mechanism | Previous behavior | New behavior |
+| --- | --- | --- |
+| `p = 1` scoring | Never evaluated; `best_err` started at `inf` | Scored together with `p = maxshrink` before the search |
+| First interior probe | Always replaced the unscored incumbent | Only replaces an endpoint with a strictly lower measured error |
+| Refinement | Argmin over the refinement set only | Compared with the incumbent error |
+| Result vs the unshrunk grid | Could be worse (for example a constant row returned `0.9979189634` instead of the exact grid) | Rejected when its measured error is not lower than the `p = 1` score |
+
+`tests/test_smooth_mse_endpoint_baseline.py` pins this with an independent
+float64 endpoint oracle for normal, negative-constant, all-zero and mixed-sign
+rows, in symmetric and asymmetric modes, through the direct search and the
+`rtn.py`, `gptq.py` and `qqq.py` fallback consumers.
+
 ```mermaid
 flowchart TD
     F["GPTQ._fallback_quantize"] --> M{"SmoothMSE?"}
