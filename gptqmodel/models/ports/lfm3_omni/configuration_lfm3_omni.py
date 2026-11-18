@@ -15,9 +15,9 @@
 # Pinned source and modifications: NOTICE.
 from huggingface_hub.dataclasses import strict
 from transformers.configuration_utils import PreTrainedConfig
-from transformers.models.lfm2.configuration_lfm2 import Lfm2Config
 from transformers.utils import auto_docstring
 
+from ..native.lfm2.configuration_lfm2 import Lfm2Config
 from .configuration_lfm3 import Lfm3Config
 from .configuration_lfm3_vl import Lfm3VlVisionConfig
 

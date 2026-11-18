@@ -6,16 +6,14 @@ import warnings
 
 import torch
 from torch import nn
-from transformers import (
-    GenerationMixin,
-    LlamaForCausalLM,
-    Phi3ForCausalLM,
-    Qwen2ForCausalLM,
-    Qwen3ForCausalLM,
-    Qwen3MoeForCausalLM,
-)
+from transformers import GenerationMixin
 from transformers.modeling_utils import PreTrainedModel
 
+from ..native.llama.modeling_llama import LlamaForCausalLM
+from ..native.phi3.modeling_phi3 import Phi3ForCausalLM
+from ..native.qwen2.modeling_qwen2 import Qwen2ForCausalLM
+from ..native.qwen3.modeling_qwen3 import Qwen3ForCausalLM
+from ..native.qwen3_moe.modeling_qwen3_moe import Qwen3MoeForCausalLM
 from .configuration_internvl_chat import InternVLChatConfig
 from .conversation import get_conv_template
 from .modeling_intern_vit import InternVisionModel

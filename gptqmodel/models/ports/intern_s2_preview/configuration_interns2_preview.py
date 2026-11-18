@@ -14,7 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from transformers.configuration_utils import PreTrainedConfig
-from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig, Qwen3_5MoeVisionConfig
+
+from ..native.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig, Qwen3_5MoeVisionConfig
 
 
 # The released text_config declares model_type="qwen3_5_moe_text"; its fields,

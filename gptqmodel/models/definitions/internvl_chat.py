@@ -94,6 +94,23 @@ class InternVLChatQModel(BaseQModel):
         return tree
 
     @classmethod
+    def after_defuser_conversion(cls, model):
+        """Split the vendored Phi-3 MLP exactly as Defuser splits Transformers' class.
+
+        Defuser registers ``transformers.models.phi3.modeling_phi3.Phi3MLP`` by
+        class path; the decoder here is the vendored copy, so apply Defuser's
+        own runtime split (same weights, same forward) to that class.
+        """
+
+        from defuser.modeling.runtime_defusion import patch_split_gate_up_mlp
+
+        from ..ports.native.phi3.modeling_phi3 import Phi3MLP
+
+        for module in model.modules():
+            if type(module) is Phi3MLP:
+                patch_split_gate_up_mlp(module, variant="standard")
+
+    @classmethod
     def get_num_experts(cls, model_config):
         return getattr(model_config.llm_config, "num_experts", None)
 

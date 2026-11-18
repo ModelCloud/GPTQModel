@@ -4,7 +4,13 @@
 
 import copy
 
-from transformers import CLIPVisionConfig, Gemma2Config, LlamaConfig, PretrainedConfig, Qwen2Config, SiglipVisionConfig
+from transformers import PretrainedConfig
+
+from ..native.clip.configuration_clip import CLIPVisionConfig
+from ..native.gemma2.configuration_gemma2 import Gemma2Config
+from ..native.llama.configuration_llama import LlamaConfig
+from ..native.qwen2.configuration_qwen2 import Qwen2Config
+from ..native.siglip.configuration_siglip import SiglipVisionConfig
 
 
 IGNORE_ID = -100

@@ -11,7 +11,8 @@ config construction so an invalid checkpoint fails before any allocation.
 import math
 
 from huggingface_hub.dataclasses import strict
-from transformers import Qwen3_5Config
+
+from ..native.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
 
 
 _MHC_FIELDS = frozenset({"start", "end", "streams", "iterations", "fixed_identity", "pre_scale"})

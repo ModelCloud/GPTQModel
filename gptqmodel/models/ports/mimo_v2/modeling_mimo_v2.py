@@ -31,13 +31,13 @@ from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
-from transformers.models.qwen2.modeling_qwen2 import Qwen2Model
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, can_return_tuple, logging
 from transformers.utils.generic import merge_with_config_defaults
 from transformers.utils.output_capturing import capture_outputs
 
+from ..native.qwen2.configuration_qwen2 import Qwen2Config
+from ..native.qwen2.modeling_qwen2 import Qwen2Model
 from .configuration_mimo_v2 import MiMoV2Config
 
 

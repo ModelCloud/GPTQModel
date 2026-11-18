@@ -7,16 +7,14 @@ import math
 import torch
 from torch import nn
 from torch.nn import functional as F
-from transformers import (
-    CLIPVisionModel,
-    Gemma2ForCausalLM,
-    LlamaForCausalLM,
-    PreTrainedModel,
-    Qwen2ForCausalLM,
-    SiglipVisionModel,
-)
+from transformers import PreTrainedModel
 from transformers.generation import GenerationConfig, GenerationMixin
 
+from ..native.clip.modeling_clip import CLIPVisionModel
+from ..native.gemma2.modeling_gemma2 import Gemma2ForCausalLM
+from ..native.llama.modeling_llama import LlamaForCausalLM
+from ..native.qwen2.modeling_qwen2 import Qwen2ForCausalLM
+from ..native.siglip.modeling_siglip import SiglipVisionModel
 from .configuration_ovis import IGNORE_ID, IMAGE_ATOM_ID, IMAGE_INDICATOR_IDS, IMAGE_TOKEN_ID, OvisConfig
 from .processing_ovis import (
     ConversationFormatter,

@@ -5,9 +5,13 @@
 import math
 from copy import deepcopy
 
-from transformers import LlamaConfig, Phi3Config, Qwen2Config, Qwen3Config, Qwen3MoeConfig
 from transformers.configuration_utils import PretrainedConfig
 
+from ..native.llama.configuration_llama import LlamaConfig
+from ..native.phi3.configuration_phi3 import Phi3Config
+from ..native.qwen2.configuration_qwen2 import Qwen2Config
+from ..native.qwen3.configuration_qwen3 import Qwen3Config
+from ..native.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from .configuration_intern_vit import InternVisionConfig
 
 

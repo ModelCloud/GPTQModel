@@ -71,6 +71,10 @@ class InternVLTokenizerFactory:
         elif architecture in {"LlamaForCausalLM", "Phi3ForCausalLM"}:
             if _asset(path, "tokenizer.json", hub_kwargs) is None:
                 _asset(path, "tokenizer.model", hub_kwargs, required=True)
+            # Tokenicer's SentencePiece normalization recognizes only Transformers'
+            # own LlamaTokenizer (`type(tok) is transformers.LlamaTokenizer`); the
+            # vendored class would silently change token IDs until Tokenicer
+            # accepts it.
             from transformers import LlamaTokenizer
 
             tokenizer_class = LlamaTokenizer
@@ -78,7 +82,7 @@ class InternVLTokenizerFactory:
             if _asset(path, "tokenizer.json", hub_kwargs) is None:
                 _asset(path, "vocab.json", hub_kwargs, required=True)
                 _asset(path, "merges.txt", hub_kwargs, required=True)
-            from transformers import Qwen2Tokenizer
+            from ..native.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 
             tokenizer_class = Qwen2Tokenizer
         return tokenizer_class.from_pretrained(path, trust_remote_code=False, **kwargs)

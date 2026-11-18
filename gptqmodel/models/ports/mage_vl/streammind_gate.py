@@ -6,8 +6,9 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import Qwen3Config
-from transformers.models.qwen3 import Qwen3ForCausalLM
+
+from ..native.qwen3.configuration_qwen3 import Qwen3Config
+from ..native.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 
 
 class PreNet(nn.Module):
