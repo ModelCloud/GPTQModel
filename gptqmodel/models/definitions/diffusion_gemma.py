@@ -8,7 +8,7 @@ from typing import Any, Dict
 
 import torch
 from torch import nn
-from transformers import AutoModelForMultimodalLM, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 from transformers.pytorch_utils import id_tensor_storage
 
 from ...nn_modules.qlinear import BaseQuantLinear
@@ -17,6 +17,7 @@ from ...utils.model import MODALITY, get_module_by_name_prefix, move_to, nested_
 from ...utils.torch import torch_empty_cache
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
@@ -160,7 +161,12 @@ class DiffusionGemmaQModel(BaseQModel):
     fusable = FusableConfig("diffusion_gemma").merge(LlamaFusableConfig(), profiles=("gate_up",))
 
 
-    loader = AutoModelForMultimodalLM
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForMultimodalLM",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
     require_load_processor = True
     support_batch_quantize = False
     layer_modules_strict = False
@@ -339,7 +345,14 @@ class DiffusionGemmaQModel(BaseQModel):
         return additional_inputs
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)
+        processor = getattr(self, "processor", None)
+        if processor is not None:
+            return processor
+        return self.loader.load_processor(
+            self.model_local_path,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+        )
 
     @classmethod
     def prepare_inputs_for_conversations(

@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -16,7 +16,10 @@ class Llama4QModel(BaseQModel):
     fusable = FusableConfig("llama4").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     support_batch_quantize = False
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+    )
 
     # The conditional-generation wrapper keeps the causal head on its inner
     # `Llama4ForCausalLM`, not at the top level.
@@ -91,7 +94,10 @@ class Llama4TextQModel(Llama4QModel):
 
     shared_input_verified_model_types = frozenset({"llama4_text"})
 
-    loader = AutoModelForCausalLM
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
 
     # `Llama4ForCausalLM` owns the head at the top level; the multimodal
     # wrapper above keeps it on `language_model`.

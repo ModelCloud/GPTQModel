@@ -5,9 +5,14 @@
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 class Ernie4_5_MoeQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
     fusable = FusableConfig("ernie4_5_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     support_batch_quantize = False

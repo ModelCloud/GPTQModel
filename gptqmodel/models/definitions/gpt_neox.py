@@ -4,9 +4,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 class GPTNeoXQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
     pre_lm_head_norm_module = "gpt_neox.final_layer_norm"
     # Transformers 5.22 renamed the runtime module to ``lm_head``; the
     # checkpoint still stores ``embed_out.weight`` and is bridged by the

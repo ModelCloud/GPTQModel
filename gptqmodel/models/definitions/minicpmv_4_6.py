@@ -5,7 +5,7 @@
 
 from typing import Dict
 
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to, nested_move_to
@@ -13,6 +13,7 @@ from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig
+from ..local import LocalModelLoader
 from ._vlm_calibration import (
     finalize_conversation_batches,
     pop_conversation_calibration_options,
@@ -24,7 +25,12 @@ from .qwen3_5 import Qwen3_5QModel
 class MiniCPMV4_6QModel(BaseQModel):
     fusable = FusableConfig("minicpmv4_6").merge(Qwen3_5QModel.fusable)
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
 
     pre_lm_head_norm_module = "model.language_model.norm"
     rotary_embedding = "model.language_model.rotary_emb"
@@ -161,7 +167,14 @@ class MiniCPMV4_6QModel(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)
+        processor = getattr(self, "processor", None)
+        if processor is not None:
+            return processor
+        return self.loader.load_processor(
+            self.model_local_path,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+        )
 
     @classmethod
     def prepare_inputs_for_conversations(
