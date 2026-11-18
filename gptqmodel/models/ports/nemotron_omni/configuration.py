@@ -4,8 +4,12 @@
 
 from copy import deepcopy
 
-from transformers import NemotronH_Omni_Reasoning_V3_Config as NativeOmniConfig
-from transformers import NemotronHConfig, ParakeetEncoderConfig, RadioConfig
+from ..native.nemotron_h.configuration_nemotron_h import NemotronHConfig
+from ..native.nemotron_h_omni.configuration_nemotron_h_omni import (
+    NemotronH_Omni_Reasoning_V3_Config as NativeOmniConfig,
+)
+from ..native.parakeet.configuration_parakeet import ParakeetEncoderConfig
+from ..native.radio.configuration_radio import RadioConfig
 
 
 def _native_config(value, cls, allowed_types):

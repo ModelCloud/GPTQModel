@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from microsoft/Mage-VL@d88b153285f1633a61b2f693c59c8576693af185.
 from huggingface_hub.dataclasses import strict
-from transformers import CONFIG_MAPPING, AutoConfig
 from transformers.configuration_utils import PreTrainedConfig, classproperty
+
+from ..native.auto import CONFIG_MAPPING, AutoConfig
 
 
 @strict

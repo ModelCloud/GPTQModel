@@ -15,6 +15,9 @@ from transformers import NemotronHForCausalLM, PreTrainedTokenizerFast
 from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.nemotron_omni import NemotronOmniQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.ports.native.nemotron_h.modeling_nemotron_h import (
+    NemotronHForCausalLM as VendoredNemotronHForCausalLM,
+)
 from gptqmodel.models.ports.nemotron_omni.configuration import NemotronOmniConfig
 from gptqmodel.models.ports.nemotron_omni.modeling import NemotronH_Omni_Reasoning_V3
 from gptqmodel.models.ports.nemotron_omni.processing import NemotronOmniProcessor
@@ -117,7 +120,8 @@ def image_inputs():
 @pytest.mark.parametrize("bias", [False, True])
 def test_native_parameter_owners_and_text_parity(kv, bias):
     model = tiny_model(kv=kv, bias=bias)
-    assert type(model.language_model) is NemotronHForCausalLM
+    assert type(model.language_model) is VendoredNemotronHForCausalLM
+    # Transformers' own class is the numerical oracle for the vendored decoder.
     reference = NemotronHForCausalLM(model.config.text_config).eval()
     reference.load_state_dict(model.language_model.state_dict(), strict=True)
     ids = torch.tensor([[1, 4, 7, 9, 3]])

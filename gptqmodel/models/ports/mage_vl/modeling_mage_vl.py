@@ -9,13 +9,11 @@ from typing import Any, Optional, Union
 import torch
 import torch.nn as nn
 from torch.nn import LayerNorm
-from transformers import AutoModel
 from transformers.cache_utils import Cache
 from transformers.generation.utils import GenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
-from transformers.models.siglip.modeling_siglip import SiglipMLP
 from transformers.utils.auto_docstring import auto_docstring
 from transformers.utils.generic import (
     ModelOutput,
@@ -25,6 +23,8 @@ from transformers.utils.generic import (
 )
 from transformers.utils.output_capturing import capture_outputs
 
+from ..native.auto import AutoModel
+from ..native.siglip.modeling_siglip import SiglipMLP
 from .configuration_mage_vl import MageVLConfig, MageVLVisionConfig
 
 
@@ -904,7 +904,7 @@ class MageVLModel(MageVLPreTrainedModel):
     def __init__(self, config: MageVLConfig):
         super().__init__(config)
         self.visual = MageVLVisionPretrainedModel._from_config(config.vision_config)
-        self.language_model = AutoModel.from_config(config.text_config, trust_remote_code=False)
+        self.language_model = AutoModel.from_config(config.text_config)
         self.streammind_gate = None
         self._streammind_model_path: str | None = None
 
