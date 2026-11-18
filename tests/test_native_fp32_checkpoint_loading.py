@@ -236,8 +236,13 @@ def test_public_awq_reload_preserves_nonzero_native_router_bias_after_failure(tm
     verified = GPTQModel.load(str(destination), device="cpu", backend=BACKEND.AWQ_TORCH,
                              dtype=dtype, attn_implementation="eager")
     torch.testing.assert_close(verified.model.state_dict()[bias_name], bias, rtol=0, atol=0)
-    torch.testing.assert_close(verified.model.state_dict()["model.layers.1.mlp.gate.weight"],
-                               reference.state_dict()["model.layers.1.mlp.gate.weight"], rtol=0, atol=0)
+    # ERNIE AWQ folds post_attention_layernorm scales into the routed experts
+    # and compensates the native-fp32 router, so the saved router equals the
+    # quantized model's fp32 router, not the unquantized reference.
+    router_name = "model.layers.1.mlp.gate.weight"
+    assert expected[router_name].dtype == torch.float32
+    assert not torch.equal(expected[router_name], reference.state_dict()[router_name])
+    torch.testing.assert_close(verified.model.state_dict()[router_name], expected[router_name], rtol=0, atol=0)
     broken = dict(stored)
     del broken[bias_name]
     save_file(broken, payload, metadata={"format": "pt"})
