@@ -56,11 +56,26 @@ class HymbaQModel(BaseQModel):
     ]
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # in_proj packs parallel Q/K/V/SSM/gate branches; out_proj consumes an
-        # average of two normalized branches. Generic sequential folds cannot
-        # score that objective or safely compensate shared KV consumers.
-        # Keep all declared projections eligible for plain quantization.
-        return []
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        # A gateless expert (`mlp_hidden_act="relu2"`) computes
+        # down(relu(up(x)) ** 2): up_proj feeds a non-linear activation, so it
+        # cannot absorb down_proj's input scale. SiLU experts multiply up_proj's
+        # output linearly and keep that fold, like every other group here.
+        gateless_up = {
+            id(expert.up_proj)
+            for expert in module.modules()
+            if hasattr(expert, "up_proj") and hasattr(expert, "down_proj") and not hasattr(expert, "gate_proj")
+        }
+        nodes = [node for node in nodes if id(node.get("prev_op")) not in gateless_up]
+        mixer = getattr(module, "mamba", None)
+        for node in nodes:
+            if mixer is not None and node.get("module2inspect") is mixer:
+                # Score in_proj on its own output. Replaying the whole mixer needs
+                # this batch's producer K/V on KV-reusing layers and the layer's
+                # own SWA policy, which the generic AWQ replay kwargs (captured
+                # at layer 0) do not carry. The fold itself is exact either way.
+                node.pop("module2inspect")
+        return nodes
 
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
         result = super().prepare_layer_replay_kwargs(layer, layer_input, additional_inputs, target_device)
