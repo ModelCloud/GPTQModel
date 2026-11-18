@@ -12,13 +12,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
 from transformers import (
     AutoConfig,
-    AutoProcessor,
-    Exaone4_5_Config,
-    Exaone4_5_ForConditionalGeneration,
-    Exaone4_5_Processor,
     PreTrainedTokenizerFast,
-    Qwen2VLImageProcessor,
-    Qwen2VLVideoProcessor,
 )
 from transformers.models.exaone4.configuration_exaone4 import Exaone4Config as NativeExaone4Config
 from transformers.models.exaone4.modeling_exaone4 import Exaone4ForCausalLM as NativeExaone4ForCausalLM
@@ -26,6 +20,11 @@ from transformers.models.exaone4.modeling_exaone4 import Exaone4ForCausalLM as N
 from gptqmodel.models.auto import MODEL_MAP, check_and_get_model_definition
 from gptqmodel.models.ports.native.exaone4.configuration_exaone4 import Exaone4Config
 from gptqmodel.models.ports.native.exaone4.modeling_exaone4 import Exaone4ForCausalLM
+from gptqmodel.models.ports.native.exaone4_5.configuration_exaone4_5 import Exaone4_5_Config
+from gptqmodel.models.ports.native.exaone4_5.modeling_exaone4_5 import Exaone4_5_ForConditionalGeneration
+from gptqmodel.models.ports.native.exaone4_5.processing_exaone4_5 import Exaone4_5_Processor
+from gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
+from gptqmodel.models.ports.native.qwen2_vl.video_processing_qwen2_vl import Qwen2VLVideoProcessor
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 from gptqmodel.utils.security import BYPASS_ENV
 
@@ -129,8 +128,7 @@ def test_text_alias_uses_native_config_and_model_without_checkpoint_code(tmp_pat
 
 def test_native_multimodal_config_already_normalizes_legacy_text_identity():
     config = tiny_vision_config()
-    # EXAONE 4.5 is still a Transformers-native definition; its nested text config is Transformers' own.
-    assert type(config.text_config) is NativeExaone4Config
+    assert type(config.text_config) is Exaone4Config
     assert config.text_config.model_type == "exaone4"
     assert config.to_dict()["text_config"]["model_type"] == "exaone4"
 
@@ -223,7 +221,7 @@ def test_native_media_processor_save_reload_and_failure_retry(tmp_path, modality
     processor = tiny_processor()
     processor.save_pretrained(tmp_path)
     tiny_vision_config().save_pretrained(tmp_path)
-    loaded = AutoProcessor.from_pretrained(tmp_path, trust_remote_code=False)
+    loaded = MODEL_MAP["exaone4_5"].loader.load_processor(tmp_path, trust_remote_code=False)
     assert type(loaded) is Exaone4_5_Processor
     model = tiny_model("exaone4_5")
     if modality == "image":

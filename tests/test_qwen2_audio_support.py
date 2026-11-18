@@ -128,9 +128,11 @@ def test_qwen2_audio_model_type_selects_definition(monkeypatch):
 
 
 def test_qwen2_audio_definition_metadata():
-    from transformers import AutoModelForPreTraining
+    from gptqmodel.models.local import LocalModelLoader
 
-    assert Qwen2AudioGPTQ.loader is AutoModelForPreTraining
+    assert isinstance(Qwen2AudioGPTQ.loader, LocalModelLoader)
+    assert Qwen2AudioGPTQ.loader.model_class == "gptqmodel.models.ports.native.auto.NativeForPreTraining"
+    assert Qwen2AudioGPTQ.loader.processor_class == "gptqmodel.models.ports.native.auto.NativeProcessor"
     assert Qwen2AudioGPTQ.require_load_processor is True
     assert Qwen2AudioGPTQ.pre_lm_head_norm_module == "model.language_model.norm"
     assert Qwen2AudioGPTQ.rotary_embedding == "model.language_model.rotary_emb"
