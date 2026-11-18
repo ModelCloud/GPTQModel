@@ -1884,6 +1884,18 @@ class AWQProcessor(LoopProcessor):
         return AWQProcessor._token_row_budget_for_counts(row_counts)
 
     @staticmethod
+    def _stratified_token_row(quota: int, length: int) -> torch.Tensor:
+        """Rows at the centre of ``quota`` equal-width bins over one batch.
+
+        A batch that contributes a single row must not pin position 0: the
+        hidden state there is the BOS/attention-sink activation, identical for
+        every document, so a run whose batches each keep one row searches every
+        module's scales on hundreds of copies of one vector (#5265).
+        """
+        index = torch.arange(int(quota), dtype=torch.int64)
+        return ((2 * index + 1) * int(length)) // (2 * int(quota))
+
+    @staticmethod
     def _compute_token_row_quotas(
         lengths: List[int],
         max_tokens: int,
@@ -1896,6 +1908,9 @@ class AWQProcessor(LoopProcessor):
         Empty batches are excluded from the quota allocation, matching
         ``_pack_token_rows``: they contribute no rows, so counting them would
         steal budget (or select a zero-row batch) and break equivalence.
+
+        A batch that contributes a single row keeps the centre of the batch,
+        not row 0, which is the BOS/attention-sink position (#5265).
         """
         quotas = [0] * len(lengths)
         local_indices: Dict[int, torch.Tensor] = {}
@@ -1921,7 +1936,9 @@ class AWQProcessor(LoopProcessor):
             for active_index in batch_ids:
                 batch_index = active[active_index]
                 quotas[batch_index] = 1
-                local_indices[batch_index] = torch.zeros(1, dtype=torch.int64)
+                local_indices[batch_index] = AWQProcessor._stratified_token_row(
+                    1, active_lengths[active_index]
+                )
             return quotas, local_indices
 
         local_quotas = [1] * batch_count
@@ -1957,7 +1974,10 @@ class AWQProcessor(LoopProcessor):
             if quota == length:
                 local_indices[batch_index] = torch.arange(length, dtype=torch.int64)
             elif quota == 1:
-                local_indices[batch_index] = torch.zeros(1, dtype=torch.int64)
+                # The bin centre, never row 0 (#5265).
+                local_indices[batch_index] = AWQProcessor._stratified_token_row(
+                    1, length
+                )
             else:
                 local_indices[batch_index] = (
                     torch.arange(quota, dtype=torch.int64)
