@@ -35,7 +35,7 @@
 
 **7.11.2**
 
-- **Inference:** `optimize()` now compiles the forward pass used by generation, and deleting compiled models releases VRAM. [Supported CPU kernels](docs/kernel-compile-matrix.md) compile with Inductor without graph breaks. EXL3 uses native kernels for BF16, and [Paro](docs/paro.md) selects Triton on ROCm.
+- **Inference:** `optimize()` now compiles the forward pass used by generation, and deleting compiled models releases VRAM. [Supported CPU kernels](docs/kernel-compile-matrix.md) compile with Inductor without graph breaks. [Torch compile fallback](docs/torch-compile-fallback.md) covers the first-use compile lock and dynamo failure classification. EXL3 uses native kernels for BF16, and [Paro](docs/paro.md) selects Triton on ROCm.
 - **Models:** Added quantization for [SenseNova-Loop 9B](docs/supported-models.md) and [Decision Transformer](docs/decision-transformer-calibration.md), which calibrates on trajectories without a tokenizer. Fixed checkpoint round trips for Qwen2.5-Omni, Qwen3-Omni, and InternVL.
 - **Quantization:** GPTQ and EXL3 use less GPU memory. NF12 and MACaQ can resume from checkpoints, and models stay runnable after [failed or cancelled runs](docs/cancelled-run-contract.md).
 - **Calibration:** Fixed token positions and masks in padded and multimodal batches. Chat datasets retain tool and document context, and AWQ still scales MoE experts that received tokens when others received none.
