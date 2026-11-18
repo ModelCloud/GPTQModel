@@ -54,6 +54,7 @@ from gptqmodel.quantization.dtype import (
     dequantize_fp8,
 )
 from gptqmodel.utils.model_dequant import dequantize_model
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 try:
@@ -516,6 +517,8 @@ class TestModelSave(unittest.TestCase):
                 self.assertNotIn('model.rotary_emb.inv_freq', f.keys())
 
     def test_moe(self):
+        if not requires_nvidia_cuda():
+            self.skipTest("AUTO selects a portable kernel instead of Marlin on ROCm")
         quantize_config = QuantizeConfig(
             fallback=None,
         )

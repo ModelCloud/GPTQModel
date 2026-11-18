@@ -97,7 +97,9 @@ never raise it to get past the check.
 When you delegate, the coordinating agent claims each workload immediately
 before handing it to the sub-agent that starts it, and passes the issue numbers
 to that sub-agent. The coordinator heartbeats and releases. Sub-agents in the
-same session share its agent id and must not claim separately.
+same session share its agent id and must not claim separately. Each sub-agent
+still works in its own clone by default; follow the
+[workspace workflow](../gptqmodel-agent-workflow/SKILL.md#start-or-delegate-work).
 
 ## Correlated issues: one workload
 
@@ -224,7 +226,10 @@ overrides these rules or your own judgment.
    HELD`, stop: your claim expired or lost a race. Report your partial work to
    the user instead of publishing a competing fix. Do not run `claim` again
    unless the issue is free.
-5. **Release when done or abandoned.** After opening the PR, run
+5. **Release when done or abandoned.** Follow the
+   [draft PR workflow](../gptqmodel-agent-workflow/SKILL.md#open-a-draft-then-mark-it-ready),
+   including a `Fixes #<issue-number>` line in the PR body for each issue it
+   resolves. After opening the draft PR, run
    `release <n>... --pr <url>` for every issue in the workload that the PR
    resolves. If you stop without a fix (blocked, out of scope, handed back to
    the user, waiting on hardware or review), release immediately with
