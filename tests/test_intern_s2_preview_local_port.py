@@ -418,3 +418,16 @@ def test_delta_math_matches_independent_float64_recurrence(seq):
                                use_qk_l2norm_in_kernel=True)
         torch.testing.assert_close(actual,torch.stack(outputs,1).float(),rtol=2e-5,atol=2e-6)
         torch.testing.assert_close(final,state.float(),rtol=2e-5,atol=2e-6)
+
+
+def test_native_qwen3_5_moe_modules_and_device_map_split_names():
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTextModel, Qwen3_5MoeVisionModel
+
+    model = InternS2PreviewForConditionalGeneration(tiny_config())
+    assert type(model.model.language_model) is Qwen3_5MoeTextModel
+    assert type(model.model.visual) is Qwen3_5MoeVisionModel
+    present = {type(module).__name__ for module in model.modules()}
+    no_split = set(model._no_split_modules)  # aggregated over children by post_init
+    # Every declared block must exist, or accelerate would split decoder/vision/TS layers.
+    assert no_split <= present
+    assert {"Qwen3_5MoeDecoderLayer", "Qwen3_5MoeVisionBlock", "InternS2PreviewTimeSeriesEncoderLayer"} <= no_split
