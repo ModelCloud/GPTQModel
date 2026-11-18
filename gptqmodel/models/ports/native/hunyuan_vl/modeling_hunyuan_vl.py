@@ -1,4 +1,5 @@
 # Vendored from huggingface/transformers v5.23.0 (Apache-2.0) by GPT-QModel.
+# GPT-QModel: modernized to Transformers 5.23 conventions (no legacy return paths).
 # Do not edit by hand except to keep it on the 5.23 ABI; see docs/transformers5-model-ports.md.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
 #           This file was automatically generated from src/transformers/models/hunyuan_vl/modular_hunyuan_vl.py.
@@ -1161,7 +1162,7 @@ class HunYuanVLForConditionalGeneration(HunYuanVLPreTrainedModel, GenerationMixi
         >>> model_id = "tencent/HunyuanOCR"
         >>> processor = AutoProcessor.from_pretrained(model_id, backend="pil")
         >>> model = HunYuanVLForConditionalGeneration.from_pretrained(
-        ...     model_id, attn_implementation="eager", torch_dtype=torch.bfloat16, device_map="auto"
+        ...     model_id, attn_implementation="eager", dtype=torch.bfloat16, device_map="auto"
         ... )
 
         >>> messages = [

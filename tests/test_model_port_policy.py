@@ -54,7 +54,7 @@ PENDING_MODEL_IMPORT_PORTS = frozenset({
 PENDING_STALE_PATTERN_PORTS = frozenset({
     "ernie4_5_vl_moe", "kimi_k3", "minicpm_o", "native/bloom", "native/codegen", "native/decision_transformer",
     "native/diffusion_gemma", "native/falcon", "native/falcon_h1", "native/falcon_mamba", "native/gpt_neo",
-    "native/gptj", "native/hunyuan_vl", "native/llama4", "native/minimax_m3_vl", "native/mpt", "native/nemotron_h",
+    "native/gptj", "native/llama4", "native/minimax_m3_vl", "native/mpt", "native/nemotron_h",
     "native/nemotron_h_omni", "native/timm_wrapper", "native/zamba", "native/zamba2",
 })
 
