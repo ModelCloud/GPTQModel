@@ -44,7 +44,9 @@ def test_disabled_trust_defers_config_errors_and_allows_repair(tmp_path, model_t
 
 def test_native_model_with_custom_tokenizer_reports_missing_bypass(tmp_path, monkeypatch):
     monkeypatch.delenv(BYPASS_ENV, raising=False)
-    (tmp_path / "config.json").write_text('{"model_type":"mpt"}')
+    # mpt is now owned by a LocalModelLoader (checkpoint Python never runs); use a
+    # Transformers-native type GPT-QModel does not define.
+    (tmp_path / "config.json").write_text('{"model_type":"biogpt"}')
     tokenizer_config = tmp_path / "tokenizer_config.json"
     tokenizer_config.write_text(json.dumps({
         "tokenizer_class": "UnregisteredTokenizer",
