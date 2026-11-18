@@ -1716,6 +1716,7 @@ class SmoothMSE(SmoothMethod):
     +----------------+-------------------------------------------+
     | steps (N)      | number of shrink candidates               |
     | maxshrink (S)  | smallest range multiplier                 |
+    | objective      | importance-weighted weight error          |
     | effect         | more steps = better fit, slower           |
     +----------------+-------------------------------------------+
     """
