@@ -101,13 +101,13 @@ def test_alias_ignores_hostile_code(tmp_path, monkeypatch, model_type, trust, by
 @pytest.mark.parametrize("model_type", NATIVE_TYPES)
 @pytest.mark.parametrize("implementation", ["eager", "sdpa"])
 def test_exact_native_alias_forward_cache_generation_reload(tmp_path, model_type, implementation):
-    from transformers import AutoModelForCausalLM
+    from gptqmodel.models.ports.native.auto import MODEL_FOR_CAUSAL_LM_MAPPING
 
     hostile_config(tmp_path, model_type, head_dim=8, attn_implementation=implementation)
     config = load_model_config(tmp_path, trust_remote_code=True)
     config._attn_implementation = implementation
     model = LlamaQModel.loader.from_config(config).eval()
-    assert type(model) is AutoModelForCausalLM._model_mapping[type(config)]
+    assert type(model) is MODEL_FOR_CAUSAL_LM_MAPPING[config.model_type]
     ids = torch.tensor([[3, 7, 5, 9], [0, 4, 8, 6]])
     mask = torch.tensor([[1, 1, 1, 1], [0, 1, 1, 1]])
     with torch.inference_mode():

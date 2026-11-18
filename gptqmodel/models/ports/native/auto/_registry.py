@@ -926,6 +926,26 @@ CONFIG = {
         "gptqmodel.models.ports.native.timm_wrapper.configuration_timm_wrapper",
         "TimmWrapperConfig"
     ],
+    "unlimited_ocr": [
+        "gptqmodel.models.ports.native.unlimited_ocr.configuration_unlimited_ocr",
+        "UnlimitedOcrConfig"
+    ],
+    "unlimited_ocr_sam_vision_model": [
+        "gptqmodel.models.ports.native.unlimited_ocr.configuration_unlimited_ocr",
+        "UnlimitedOcrSamVisionConfig"
+    ],
+    "unlimited_ocr_text": [
+        "gptqmodel.models.ports.native.unlimited_ocr.configuration_unlimited_ocr",
+        "UnlimitedOcrTextConfig"
+    ],
+    "unlimited_ocr_vision": [
+        "gptqmodel.models.ports.native.unlimited_ocr.configuration_unlimited_ocr",
+        "UnlimitedOcrVisionConfig"
+    ],
+    "unlimited_ocr_vision_encoder": [
+        "gptqmodel.models.ports.native.unlimited_ocr.configuration_unlimited_ocr",
+        "UnlimitedOcrVisionEncoderConfig"
+    ],
     "voxtral": [
         "gptqmodel.models.ports.native.voxtral.configuration_voxtral",
         "VoxtralConfig"
@@ -1704,6 +1724,10 @@ MODEL = {
         "gptqmodel.models.ports.native.timm_wrapper.modeling_timm_wrapper",
         "TimmWrapperModel"
     ],
+    "unlimited_ocr": [
+        "gptqmodel.models.ports.native.unlimited_ocr.modeling_unlimited_ocr",
+        "UnlimitedOcrModel"
+    ],
     "voxtral": [
         "gptqmodel.models.ports.native.voxtral.modeling_voxtral",
         "VoxtralModel"
@@ -2339,6 +2363,10 @@ IMAGE_TEXT_TO_TEXT = {
     "smolvlm": [
         "gptqmodel.models.ports.native.smolvlm.modeling_smolvlm",
         "SmolVLMForConditionalGeneration"
+    ],
+    "unlimited_ocr": [
+        "gptqmodel.models.ports.native.unlimited_ocr.modeling_unlimited_ocr",
+        "UnlimitedOcrForConditionalGeneration"
     ]
 }
 MULTIMODAL_LM = {
@@ -2533,6 +2561,10 @@ MULTIMODAL_LM = {
     "smolvlm": [
         "gptqmodel.models.ports.native.smolvlm.modeling_smolvlm",
         "SmolVLMForConditionalGeneration"
+    ],
+    "unlimited_ocr": [
+        "gptqmodel.models.ports.native.unlimited_ocr.modeling_unlimited_ocr",
+        "UnlimitedOcrForConditionalGeneration"
     ],
     "voxtral": [
         "gptqmodel.models.ports.native.voxtral.modeling_voxtral",
@@ -2835,6 +2867,10 @@ PROCESSOR = {
     "smolvlm": [
         "gptqmodel.models.ports.native.smolvlm.processing_smolvlm",
         "SmolVLMProcessor"
+    ],
+    "unlimited_ocr": [
+        "gptqmodel.models.ports.native.unlimited_ocr.processing_unlimited_ocr",
+        "UnlimitedOcrProcessor"
     ],
     "voxtral": [
         "gptqmodel.models.ports.native.voxtral.processing_voxtral",
@@ -3379,6 +3415,10 @@ IMAGE_PROCESSOR = {
     "timm_wrapper": [
         "gptqmodel.models.ports.native.timm_wrapper.image_processing_timm_wrapper",
         "TimmWrapperImageProcessor"
+    ],
+    "unlimited_ocr": [
+        "gptqmodel.models.ports.native.unlimited_ocr.image_processing_unlimited_ocr",
+        "UnlimitedOcrImageProcessor"
     ]
 }
 VIDEO_PROCESSOR = {

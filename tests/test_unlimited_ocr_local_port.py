@@ -8,12 +8,10 @@ import re
 
 import pytest
 import torch
-from transformers import (
-    UnlimitedOcrConfig,
-    UnlimitedOcrForConditionalGeneration,
-)
 
 from gptqmodel.models.definitions.unlimited_ocr import UnlimitedOCRQModel
+from gptqmodel.models.ports.native.unlimited_ocr.configuration_unlimited_ocr import UnlimitedOcrConfig
+from gptqmodel.models.ports.native.unlimited_ocr.modeling_unlimited_ocr import UnlimitedOcrForConditionalGeneration
 from gptqmodel.utils.hf import load_model_config
 from tests.port_assets import PORTS, read_port_asset
 
@@ -97,7 +95,7 @@ def source_fixture(path, *, legacy=False, layout="mixed", kv_heads=4, bias=False
         (path / "generation_config.json").write_bytes(asset("generation_config.json"))
     for name in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"]:
         (path / name).write_bytes(asset(name))
-    from transformers import UnlimitedOcrImageProcessor
+    from gptqmodel.models.ports.native.unlimited_ocr.image_processing_unlimited_ocr import UnlimitedOcrImageProcessor
 
     UnlimitedOcrImageProcessor(
         size={"height": 32, "width": 32}, tile_size=32, min_patches=2, max_patches=4,
@@ -253,7 +251,7 @@ def test_actual_public_hostile_load_image_cache_and_two_saves(tmp_path, monkeypa
         str(tmp_path / "source"), device="cpu", backend=BACKEND.TORCH,
         dtype=torch.float32, trust_remote_code=trust, attn_implementation="eager",
     )
-    from transformers import UnlimitedOcrProcessor
+    from gptqmodel.models.ports.native.unlimited_ocr.processing_unlimited_ocr import UnlimitedOcrProcessor
     assert type(loaded.model) is UnlimitedOcrForConditionalGeneration
     assert type(loaded.processor) is UnlimitedOcrProcessor
     from defuser.modeling.update_module import update_module

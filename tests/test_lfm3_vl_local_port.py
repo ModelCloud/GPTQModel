@@ -11,20 +11,15 @@ import torch
 from PIL import Image
 from safetensors.torch import save_file
 from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import (
-    AutoModelForImageTextToText,
-    Lfm3Config,
-    Lfm3VlConfig,
-    Lfm3VlForConditionalGeneration,
-    Lfm3VlProcessor,
-    Lfm3VlVisionConfig,
-    PreTrainedTokenizerFast,
-    Qwen2VLImageProcessor,
-    Qwen3VLVideoProcessor,
-)
+from transformers import PreTrainedTokenizerFast
 
 from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.lfm3_vl import LFM3VLQModel
+from gptqmodel.models.ports.lfm3_vl.native import Lfm3VlConfig, Lfm3VlForConditionalGeneration, Lfm3VlProcessor
+from gptqmodel.models.ports.native.lfm3.configuration_lfm3 import Lfm3Config
+from gptqmodel.models.ports.native.lfm3_vl.configuration_lfm3_vl import Lfm3VlVisionConfig
+from gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
+from gptqmodel.models.ports.native.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoProcessor
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.backend import BACKEND
@@ -57,7 +52,7 @@ def tiny_config(kv_heads=2, bias=False, gate=True, sandwich=True):
 
 def native_model(**kwargs):
     torch.manual_seed(571)
-    return AutoModelForImageTextToText.from_config(tiny_config(**kwargs), attn_implementation="eager").eval()
+    return Lfm3VlForConditionalGeneration._from_config(tiny_config(**kwargs), attn_implementation="eager").eval()
 
 
 def tiny_processor():

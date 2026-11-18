@@ -1,18 +1,17 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Native Transformers aliases, with explicit native media component selection.
+"""Vendored Transformers 5.23 LFM3-VL, with explicit media component selection.
 
-No modeling implementation is copied. The pinned checkpoint's historical
-``Lfm3Vl{Image,Video}Processor`` names map to the native Qwen media processors.
+The model, config and processor are the vendored 5.23 classes. The pinned
+checkpoint's historical ``Lfm3Vl{Image,Video}Processor`` names map to the
+vendored Qwen media processors.
 """
 
-from transformers import (
-    Lfm3VlConfig,
-    Lfm3VlForConditionalGeneration,
-    Lfm3VlProcessor,
-    Qwen2VLImageProcessor,
-    Qwen3VLVideoProcessor,
-)
+from ..native.lfm3_vl.configuration_lfm3_vl import Lfm3VlConfig
+from ..native.lfm3_vl.modeling_lfm3_vl import Lfm3VlForConditionalGeneration
+from ..native.lfm3_vl.processing_lfm3_vl import Lfm3VlProcessor
+from ..native.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
+from ..native.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoProcessor
 
 
 class Lfm3VlNativeProcessor(Lfm3VlProcessor):
