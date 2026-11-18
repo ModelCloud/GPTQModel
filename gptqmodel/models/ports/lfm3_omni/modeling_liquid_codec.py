@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # GPT-QModel adaptation: package-owned loading and Transformers 5 execution.
-# Pinned source, modifications and qualification limits: README.md and NOTICE.
+# Pinned source and modifications: NOTICE.
 
 import math
 from dataclasses import dataclass

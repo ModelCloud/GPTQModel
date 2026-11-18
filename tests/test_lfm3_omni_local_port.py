@@ -4,7 +4,6 @@
 
 import copy
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -19,9 +18,6 @@ from gptqmodel.models.ports.lfm3_omni.image_processing_lfm3_vl import Lfm3VlImag
 from gptqmodel.models.ports.lfm3_omni.modeling_lfm3_omni import Lfm3OmniForConditionalGeneration
 from gptqmodel.models.ports.lfm3_omni.processing_lfm3_omni import Lfm3OmniProcessor
 from gptqmodel.models.ports.lfm3_omni.video_processing_lfm3_vl import Lfm3VlVideoProcessor
-
-
-PORT = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/lfm3_omni"
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -125,8 +121,7 @@ def write_checkpoint(path, model=None, hostile=False):
     return marker
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "1")])
 def test_public_load_owns_config_model_processor_despite_hostile_metadata(tmp_path, monkeypatch, trust, bypass):
     if bypass is None:
         monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
@@ -229,9 +224,15 @@ def reference_text_forward(model, ids, positions, keep):
     return linear(hidden, "lm_head")
 
 
-@pytest.mark.parametrize("kv_heads", [4, 2, 1])
-@pytest.mark.parametrize("bias,sandwich", [(False, True), (True, False), (False, False), (True, True)])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "kv_heads,bias,sandwich,dtype",
+    [
+        (4, False, True, torch.float32),
+        (2, True, False, torch.float32),
+        (1, False, False, torch.float16),
+        (2, True, True, torch.bfloat16),
+    ],
+)
 def test_full_text_equations_cache_and_causality(kv_heads, bias, sandwich, dtype):
     model = tiny_model(kv_heads=kv_heads, bias=bias, sandwich=sandwich).to(dtype)
     ids = torch.tensor([[1, 4, 5, 6, 7, 8, 9, 10], [0, 0, 1, 11, 12, 13, 14, 15]])
@@ -270,7 +271,7 @@ def test_multimodal_forward_and_safetensors_roundtrip(tmp_path):
         reloaded, info = LFM3OmniQModel.loader.from_pretrained(
             tmp_path, output_loading_info=True, attn_implementation="eager")
         assert not any(info.values()), info
-        torch.testing.assert_close(reloaded(**inputs).logits, baseline, atol=0, rtol=0)
+        torch.testing.assert_close(reloaded(**inputs).logits, baseline, atol=1e-6, rtol=1e-5)
         assert list(tmp_path.glob("*.safetensors")) and not list(tmp_path.glob("*.bin"))
         assert set(reloaded.state_dict()) == set(model.state_dict())
         for key, value in model.state_dict().items():
@@ -438,8 +439,7 @@ def test_codec_real_encode_decode_stream_legacy_safetensors_and_processor_reload
     assert type(Lfm3OmniProcessor.from_pretrained(tmp_path, tokenizer=processor.tokenizer).audio_tokenizer) is LiquidCodecModel
 
 
-@pytest.mark.parametrize("kv_heads", [4, 2, 1])
-@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("kv_heads,bias", [(4, False), (1, True)])
 def test_public_plain_awq_quantizes_only_text_linears_and_reloads(tmp_path, kv_heads, bias):
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig

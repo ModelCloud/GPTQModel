@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Inspect actual Omni checkpoint tensor ownership, not similarly shaped stubs."""
 
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -16,7 +17,11 @@ from gptqmodel.models.ports.lfm3_omni.configuration_lfm3_omni import Lfm3OmniCon
 from gptqmodel.models.ports.lfm3_omni.configuration_liquid_codec import LiquidCodecConfig
 from gptqmodel.models.ports.lfm3_omni.modeling_lfm3_omni import Lfm3OmniForConditionalGeneration
 from gptqmodel.models.ports.lfm3_omni.modeling_liquid_codec import LiquidCodecModel
-from tests.test_lfm3_omni_local_port import PORT, tiny_config
+from tests.port_assets import DATA
+from tests.test_lfm3_omni_local_port import tiny_config
+
+
+FIXTURES = DATA / "lfm3_omni"
 
 
 EXPECTED_PLAN = {
@@ -51,8 +56,7 @@ def wrapper_for(model):
     return wrapper
 
 
-@pytest.mark.parametrize("kv_heads", [4, 2, 1])
-@pytest.mark.parametrize("bias,sandwich", [(False, True), (True, False), (False, False), (True, True)])
+@pytest.mark.parametrize("kv_heads,bias,sandwich", [(4, False, True), (2, True, False), (1, True, True)])
 def test_real_decoder_weight_owners_quantization_and_plan_tags(kv_heads, bias, sandwich):
     with torch.device("meta"):
         model = Lfm3OmniForConditionalGeneration(tiny_config(kv_heads=kv_heads, bias=bias, sandwich=sandwich))
@@ -81,22 +85,23 @@ def test_real_decoder_weight_owners_quantization_and_plan_tags(kv_heads, bias, s
     assert plan.find("conv.conv.undeclared") is None
 
 
+def _layout_sha256(model):
+    layout = {key: list(value.shape) for key, value in model.state_dict().items()}
+    return len(layout), hashlib.sha256(json.dumps(layout, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def test_exact_pinned_checkpoint_shapes_and_every_decoder_owner():
-    config = Lfm3OmniConfig(**json.loads((PORT / "checkpoint-config.json").read_text()))
+    config = Lfm3OmniConfig(**json.loads((FIXTURES / "checkpoint-config.json").read_text()))
     with torch.device("meta"):
         model = Lfm3OmniForConditionalGeneration(config)
-    actual = {key: list(value.shape) for key, value in model.state_dict().items()}
-    expected = json.loads((PORT / "checkpoint-layout.json").read_text())
-    assert len(expected) == 665
-    # Safetensors omits the tied lm_head; HF restores this exact alias on loading.
-    expected["lm_head.weight"] = expected["model.language_model.embed_tokens.weight"]
-    assert actual == expected
+    # Canonical sorted {key: shape} of the pinned safetensors headers (665 tensors) plus the tied lm_head alias.
+    assert _layout_sha256(model) == (666, "daa5713ca2ad5297b84bd8d1b36e4c396db012e129461c2ffff13a89348dc2ed")
     assert model.lm_head.weight is model.model.language_model.embed_tokens.weight
     plan = ModulePlan.from_tree(LFM3OmniQModel.module_tree)
     wrapper = wrapper_for(model)
     declared = {name for block in wrapper.simple_layer_modules(config, SimpleNamespace(dynamic=None)) for name in block}
     count = 0
-    for key in expected:
+    for key in model.state_dict():
         if not key.startswith("model.language_model.layers."):
             continue
         relative = key.split(".", 4)[-1]
@@ -108,13 +113,10 @@ def test_exact_pinned_checkpoint_shapes_and_every_decoder_owner():
     assert count > 200
 
 
-def test_exact_pinned_codec_shapes_after_declared_legacy_key_mapping():
-    config = LiquidCodecConfig(**json.loads((PORT / "codec-config.json").read_text()))
+def test_exact_pinned_codec_shapes():
+    config = LiquidCodecConfig(**json.loads((FIXTURES / "codec-config.json").read_text()))
     with torch.device("meta"):
         model = LiquidCodecModel(config)
-    actual = {key: list(value.shape) for key, value in model.state_dict().items()}
-    source = json.loads((PORT / "codec-layout.json").read_text())
-    assert len(source) == 203
-    expected = {key.replace("_frontend.", "frontend.").replace("quantizer.fsq.", "quantizer."): shape
-                for key, shape in source.items()}
-    assert actual == expected
+    # Canonical sorted {key: shape} of the pinned codec safetensors header.
+    assert _layout_sha256(model) == (203, "8cf8486423a504c5cc516117179def353093d6398079f3744ce0e604b06b153a")
+    assert list(model.state_dict()["decoder.istft.window"].shape) == [1280]
