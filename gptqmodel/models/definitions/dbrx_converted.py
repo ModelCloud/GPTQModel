@@ -19,17 +19,6 @@ class DbrxConvertedQModel(BaseQModel):
 
     pre_lm_head_norm_module = "transformer.norm_f"
 
-    @classmethod
-    def awq_input_feature_aggregation(cls, module_name):
-        # Plain quantization has no scale group consuming the shared pre-router input.
-        if module_name == "ffn":
-            return {"mode": "token_rows"}
-        return super().awq_input_feature_aggregation(module_name)
-
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Clipped QKV and routed expert fan-out are not qualified for scale folding.
-        return []
-
     module_tree= [
         "transformer",
         "blocks",
@@ -46,9 +35,23 @@ class DbrxConvertedQModel(BaseQModel):
                 },
                 "experts": {
                     "mlp": {
-                        "#": ("w1:0", "v1:0", "w2:1"),
+                        # `w2(act(w1(x)) * v1(x))`: `v1` is the linear (up)
+                        # branch. Without the role, `w1` was inferred as the
+                        # only gate/up member and folded across the activation.
+                        "#": ("w1:0:gate", "v1:0:up", "w2:1:down"),
                     },
                 },
             },
         }
     ]
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        attention = getattr(getattr(module, "norm_attn_norm", None), "attn", None)
+        if getattr(attention, "clip_qkv", None) is None:
+            return nodes
+        # `clip_qkv` clamps the q/k/v outputs, so dividing `v_proj`'s rows by a
+        # scale is not undone by `out_proj`. The norm -> q/k/v fold keeps the
+        # projection outputs, and therefore the clamp, exact.
+        v_proj = getattr(attention, "v_proj", None)
+        return [node for node in nodes if node.get("prev_op") is not v_proj]

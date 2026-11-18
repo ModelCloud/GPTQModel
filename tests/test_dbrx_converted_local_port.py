@@ -446,7 +446,7 @@ def test_low_precision_forward_and_safetensors_reload(tmp_path, dtype):
         torch.testing.assert_close(loaded(ids).logits, result.logits, rtol=0, atol=0)
 
 
-def test_plain_awq_public_quantization_and_packed_reload(tmp_path):
+def test_awq_public_quantization_and_packed_reload(tmp_path):
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel
     from transformers import PreTrainedTokenizerFast
@@ -471,6 +471,13 @@ def test_plain_awq_public_quantization_and_packed_reload(tmp_path):
     )
     packed = {name: module for name, module in wrapped.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert len(packed) == 26
+    native = model.state_dict()
+    for index in range(2):
+        prefix = f"transformer.blocks.{index}."
+        # Searched scales fold into both norm gains; the router reading norm_2
+        # is compensated with the same scale.
+        for name in ("norm_attn_norm.norm_1.weight", "norm_attn_norm.norm_2.weight", "ffn.router.layer.weight"):
+            assert not torch.equal(wrapped.model.state_dict()[prefix + name], native[prefix + name].half()), name
     assert all(module.qweight.dtype == torch.int32 for module in packed.values())
     for layer in wrapped.model.transformer.blocks:
         assert isinstance(layer.ffn.router.layer, torch.nn.Linear)

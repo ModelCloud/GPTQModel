@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Checkpoint-owned converted DBRX plans and conservative AWQ consumer safety."""
+"""Checkpoint-owned converted DBRX plans and AWQ scale-fold safety."""
 
 
 import hashlib
@@ -8,10 +8,7 @@ import hashlib
 import pytest
 import torch
 
-from gptqmodel.looper.awq_processor import AWQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.module_looper import ModuleLooper
-from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.dbrx_converted import DbrxConvertedQModel
@@ -93,49 +90,39 @@ def test_real_plan_covers_every_state_dict_owner_and_looper_family(experts, top_
     assert not plan.is_expert("ffn.router.layer")
 
 
-def test_awq_policy_executes_real_plain_quantization_without_touching_router_or_norms(monkeypatch):
-    config = DbrxConfig(
-        d_model=32, n_heads=4, n_layers=1, vocab_size=41,
-        attn_config={"kv_n_heads": 2, "clip_qkv": 0.15},
-        ffn_config={"ffn_hidden_size": 48, "moe_num_experts": 3, "moe_top_k": 2},
-    )
-    model = DbrxForCausalLM(config).eval()
-    qcfg = AWQConfig(bits=4, group_size=16, device="cpu", offload_to_disk=False)
-    wrapped = DbrxConvertedQModel(model, quantized=False, quantize_config=qcfg)
-    block = model.transformer.blocks[0]
-    assert wrapped.awq_get_modules_for_scaling(block, {}, {}) == []
-    assert not wrapped.awq_input_feature_aggregation("ffn").get("capture_root", False)
-    processor = AWQProcessor(
-        tokenizer=None, qcfg=qcfg, calibration=CalibrationConfig(), gptq_model=wrapped, model=model,
-        calculate_w_wq_diff=False,
-    )
-    monkeypatch.setattr(processor, "draw_progress", lambda *a, **k: None)
-    monkeypatch.setattr(processor, "log_new_row", lambda *a, **k: None)
-    processor.apply_clip = False
-    quantized = {name for group in wrapped.simple_layer_modules(config, qcfg) for name in group}
-    state = processor._get_layer_state(0)
-    state.layer_module = block
-    named = {name: NamedModule(block.get_submodule(name), name, "transformer.blocks.0." + name, 0) for name in quantized}
-    state.modules = dict(named)
-    processor._feature_task_names = set()
-    processor._awq_feature_kwargs = {}
-    monkeypatch.setattr(processor, "_layer_input_features", lambda state: {})
-    # Search/fold must never be entered; quantization below is not mocked.
-    monkeypatch.setattr(processor, "_search_best_scale", lambda *a, **k: pytest.fail("unqualified AWQ search"))
-    original = {name: tensor.clone() for name, tensor in block.state_dict().items()}
-    expected = {}
-    for name in quantized:
-        weight = original[name + ".weight"]
-        expected[name] = processor.pseudo_quantize_tensor(weight.clone(), bits=4, group_size=16)[0]
-    processor._quantize_layer(0, state)
-    assert state.quantized and not state.modules
-    assert set(expected) == quantized and len(expected) == 13
-    for name, module in named.items():
-        torch.testing.assert_close(module.weight, expected[name], rtol=0, atol=0)
-        assert not torch.equal(module.weight, original[name + ".weight"])
-        assert "q_scales" in module.state and "q_zeros" in module.state
-    for key in original:
-        if key.rsplit(".", 1)[0] not in quantized:
-            torch.testing.assert_close(block.state_dict()[key], original[key], rtol=0, atol=0)
-    with torch.inference_mode():
-        assert torch.isfinite(model(torch.tensor([[1, 3, 7, 11]])).logits).all()
+@pytest.mark.parametrize("kv_heads,clip_qkv", [(2, 0.15), (4, 0.15), (4, None)])
+def test_awq_scale_folds_preserve_attention_and_routed_expert_output(kv_heads, clip_qkv):
+    from awq_neutrality import assert_awq_folds_neutral
+
+    from gptqmodel.models.loader import _convert_model_with_defuser
+    from tests.test_dbrx_converted_local_port import make_model
+
+    # top_k == experts routes every token through every expert, so every
+    # expert's v1 -> w2 group is captured and checked.
+    model = make_model(attn_config={"kv_n_heads": kv_heads, "clip_qkv": clip_qkv, "rope_theta": 500000},
+                       ffn_config={"ffn_hidden_size": 48, "moe_num_experts": 3, "moe_top_k": 3})
+    _convert_model_with_defuser(DbrxConvertedQModel, model, cleanup_original=False)
+    tree = DbrxConvertedQModel._resolve_effective_module_tree(model, None)
+    # The norm_2 -> experts group reads the shared pre-router input.
+    assert DbrxConvertedQModel.awq_input_feature_aggregation("ffn")["capture_root"] is True
+    ids = torch.tensor([[1, 3, 7, 11, 19, 23]])
+
+    def forward():
+        return model(ids, use_cache=False).logits
+
+    experts = [f"ffn.experts.mlp.{i}" for i in range(3)]
+    expected = [
+        ("norm_attn_norm.norm_1", [f"norm_attn_norm.attn.{name}_proj" for name in "qkv"], []),
+        ("norm_attn_norm.attn.v_proj", ["norm_attn_norm.attn.out_proj"], []),
+        ("norm_attn_norm.norm_2", [f"{e}.{w}" for e in experts for w in ("w1", "v1")], ["ffn.router.layer"]),
+    ] + [(f"{e}.v1", [f"{e}.w2"], []) for e in experts]
+    if clip_qkv is not None or kv_heads != 4:
+        # `clip_qkv` clamps v_proj's output, so its row scale cannot be undone
+        # by out_proj (the fold changed the output by up to 20%); GQA also
+        # narrows v below out_proj's input.
+        expected.pop(1)
+    for block in model.transformer.blocks:
+        checked = assert_awq_folds_neutral(DbrxConvertedQModel, model, block, forward, tree=tree)
+        # The router reads norm_2 and is compensated; the activated `w1`
+        # branch is never a fold source for `w2`.
+        assert checked == expected
