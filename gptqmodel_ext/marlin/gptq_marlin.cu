@@ -102,7 +102,8 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     vllm::ScalarTypeId const& b_q_type_id, int64_t size_m, int64_t size_n,
     int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
     bool is_zp_float, std::optional<torch::Tensor> c_tmp_or_none,
-    std::optional<torch::Tensor> a_tmp_or_none) {
+    std::optional<torch::Tensor> a_tmp_or_none, int64_t thread_k_override,
+    int64_t thread_n_override, int64_t num_threads_override) {
   TORCH_CHECK_NOT_IMPLEMENTED(false,
                               "marlin_gemm(..) requires CUDA_ARCH >= 8.0");
   return torch::empty({1, 1});
@@ -799,6 +800,52 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
   return exec_cfg;
 }
 
+// Small-grid narrow-tile override (vllm-project/vllm#24722).
+//
+// #5216 switched to {thread_k=128, thread_n=64, threads=128} whenever the
+// auto-selected tile left fewer than four output tiles per SM. That rule only
+// counted output tiles: it ignored K and the 256-thread tile it replaced. On
+// 128-SM Ada parts N=4096 sits exactly on the boundary, so every large-K
+// down projection took the narrow tile even though the wide tile already had
+// enough split-K work per SM; those calls lost 1.1-1.35x. Parts with more SMs
+// keep #5216's choice: on the 170-SM RTX 5090 the narrow tile measured faster
+// for every 16-row shape in #5216's table, including the large-K ones.
+constexpr int MARLIN_NARROW_SMALL_GRID_MAX_SMS = 128;
+constexpr int MARLIN_SMALL_GRID_MAX_SHORT_K = 4096;
+constexpr int MARLIN_SMALL_GRID_THREAD_K = 128;
+constexpr int MARLIN_SMALL_GRID_THREAD_N = 64;
+constexpr int MARLIN_SMALL_GRID_THREADS = 128;
+
+bool marlin_prefers_narrow_small_grid(int prob_m_split, int prob_n, int prob_k,
+                                      const thread_config_t& wide,
+                                      int thread_m_blocks, int sms) {
+  const int m_tiles = div_ceil(prob_m_split, thread_m_blocks * 16);
+  const int wide_tiles = m_tiles * (prob_n / wide.thread_n);
+  if (wide_tiles * 4 > sms) {
+    return false;
+  }
+  if (sms > MARLIN_NARROW_SMALL_GRID_MAX_SMS) {
+    return true;
+  }
+  const int narrow_tiles = m_tiles * (prob_n / MARLIN_SMALL_GRID_THREAD_N);
+  const int narrow_k_tiles = div_ceil(prob_k, MARLIN_SMALL_GRID_THREAD_K);
+  const int narrow_blocks_per_tile =
+      narrow_tiles > 0 ? min(narrow_k_tiles, sms / narrow_tiles) : 0;
+  // Without a K split the narrow tile is one 128-thread block per output
+  // tile against the wide tile's 256 threads; keep the wide tile.
+  if (narrow_blocks_per_tile < 2) {
+    return false;
+  }
+  if (thread_m_blocks > 1) {
+    return true;
+  }
+  // A 16-row wide tile keeps its per-FLOP advantage at long K. The narrow
+  // tile is only used for short K or when it still splits K at least four
+  // ways (the k/v projection shapes #5216 targeted).
+  return prob_k <= MARLIN_SMALL_GRID_MAX_SHORT_K ||
+         narrow_blocks_per_tile >= 4;
+}
+
 template <typename scalar_t>
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                void* s, void* s2, void* zp, void* g_idx, void* perm,
@@ -806,8 +853,8 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                void* workspace, vllm::ScalarType const& q_type, bool has_bias,
                bool has_act_order, bool is_k_full, bool has_zp, int num_groups,
                int group_size, int dev, cudaStream_t stream, int thread_k_init,
-               int thread_n_init, int sms, bool use_atomic_add,
-               bool use_fp32_reduce, bool is_zp_float) {
+               int thread_n_init, int num_threads_init, int sms,
+               bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) {
   if (has_zp) {
     TORCH_CHECK(
         q_type == vllm::kU4 || q_type == vllm::kU8,
@@ -945,7 +992,10 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
       exec_cfg = exec_config_t{1, thread_config_t{128, 128, 256}};
       thread_tfg = exec_cfg.tb_cfg;
     } else if (thread_k != -1 && thread_n != -1) {
-      thread_tfg = thread_config_t{thread_k, thread_n, default_threads};
+      thread_tfg =
+          thread_config_t{thread_k, thread_n,
+                          num_threads_init != -1 ? num_threads_init
+                                                 : default_threads};
       exec_cfg = exec_config_t{1, thread_tfg};
       TORCH_CHECK(prob_n % thread_n == 0, "prob_n = ", prob_n,
                   " is not divisible by thread_n = ", thread_n);
@@ -961,14 +1011,16 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
       // Small grids: when the chosen tile leaves fewer than four output tiles
       // per SM, most SMs would split K for the same few tiles and then queue
       // on their reduction locks. Narrow 128x64 tiles double the output
-      // parallelism instead (vllm-project/vllm#24722). The full-SM sm_80
+      // parallelism instead (vllm-project/vllm#24722), but only while their
+      // K split and warp count stay worthwhile (#5281). The full-SM sm_80
       // tables and Ada's narrow FP32 AWQ schedule are tuned separately and
       // keep their own choice.
       if (thread_tfg.thread_k != -1 && !full_sm80 && !narrow_fp32_awq &&
-          div_ceil(prob_m_split, thread_m_blocks * 16) *
-                  (prob_n / thread_tfg.thread_n) * 4 <=
-              sms) {
-        const thread_config_t small_grid_cfg{128, 64, 128};
+          marlin_prefers_narrow_small_grid(prob_m_split, prob_n, prob_k,
+                                           thread_tfg, thread_m_blocks, sms)) {
+        const thread_config_t small_grid_cfg{
+            MARLIN_SMALL_GRID_THREAD_K, MARLIN_SMALL_GRID_THREAD_N,
+            MARLIN_SMALL_GRID_THREADS};
         if (is_valid_config(small_grid_cfg, thread_m_blocks, prob_m_split,
                             prob_n, prob_k, num_bits, group_size,
                             has_act_order, is_k_full, has_zp, is_zp_float,
@@ -1085,7 +1137,8 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     vllm::ScalarTypeId const& b_q_type_id, int64_t size_m, int64_t size_n,
     int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
     bool is_zp_float, std::optional<torch::Tensor> c_tmp_or_none,
-    std::optional<torch::Tensor> a_tmp_or_none) {
+    std::optional<torch::Tensor> a_tmp_or_none, int64_t thread_k_override,
+    int64_t thread_n_override, int64_t num_threads_override) {
   const int kernel_size_m = marlin::checked_kernel_dim(size_m, "size_m");
   const int kernel_size_n = marlin::checked_kernel_dim(size_n, "size_n");
   const int kernel_size_k = marlin::checked_kernel_dim(size_k, "size_k");
@@ -1154,12 +1207,27 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   TORCH_CHECK(b_scales.device().is_cuda(), "b_scales is not on GPU");
   TORCH_CHECK(b_scales.is_contiguous(), "b_scales is not contiguous");
 
-  // thread_k: `k` size of a thread_tile in `weights` (can usually be left as
-  // auto -1)
-  int thread_k = -1;
-  // thread_n: `n` size of a thread_tile in `weights` (can usually be left as
-  // auto -1)
-  int thread_n = -1;
+  // Explicit thread tile. The default (-1, -1) keeps the shape planner.
+  // ``thread_k``/``thread_n`` are the `k`/`n` sizes of one thread tile in
+  // `weights`; ``num_threads`` defaults to 256 for an explicit pair.
+  TORCH_CHECK((thread_k_override == -1) == (thread_n_override == -1),
+              "thread_k and thread_n must be set together (got ",
+              thread_k_override, ", ", thread_n_override, ")");
+  TORCH_CHECK(thread_k_override >= -1 &&
+                  thread_k_override <= std::numeric_limits<int>::max(),
+              "thread_k is out of range: ", thread_k_override);
+  TORCH_CHECK(thread_n_override >= -1 &&
+                  thread_n_override <= std::numeric_limits<int>::max(),
+              "thread_n is out of range: ", thread_n_override);
+  TORCH_CHECK(num_threads_override >= -1 &&
+                  num_threads_override <= std::numeric_limits<int>::max(),
+              "num_threads is out of range: ", num_threads_override);
+  TORCH_CHECK(num_threads_override == -1 ||
+                  (thread_k_override != -1 && thread_n_override != -1),
+              "num_threads requires an explicit thread_k and thread_n");
+  int thread_k = static_cast<int>(thread_k_override);
+  int thread_n = static_cast<int>(thread_n_override);
+  int num_threads = static_cast<int>(num_threads_override);
   // sms: number of SMs to use for the kernel
   int sms = marlin::get_marlin_device_info(a.get_device()).sms;
 
@@ -1486,7 +1554,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
         kernel_size_n, kernel_size_k, kernel_lda, workspace.data_ptr(),
         b_q_type, has_bias, has_act_order,
         is_k_full, has_zp, num_groups, group_size, dev,
-        stream, thread_k, thread_n, sms,
+        stream, thread_k, thread_n, num_threads, sms,
         use_atomic_add, use_fp32_reduce, is_zp_float);
     return c;
   }
@@ -1523,7 +1591,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
         kernel_size_m, kernel_size_n, kernel_size_k, kernel_lda,
         workspace.data_ptr(), b_q_type,
         has_bias, has_act_order, is_k_full, has_zp, num_groups, group_size, dev,
-        stream, thread_k, thread_n, sms,
+        stream, thread_k, thread_n, num_threads, sms,
         use_atomic_add, use_fp32_reduce, is_zp_float);
     return c;
   }

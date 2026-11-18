@@ -1092,7 +1092,16 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      use_fp32_reduce: bool = False,
                      is_zp_float: bool = False,
                      c_tmp: Optional[torch.Tensor] = None,
-                     a_tmp: Optional[torch.Tensor] = None) -> torch.Tensor:
+                     a_tmp: Optional[torch.Tensor] = None,
+                     thread_k: int = -1,
+                     thread_n: int = -1,
+                     num_threads: int = -1) -> torch.Tensor:
+    """Launch the Marlin GEMM.
+
+    ``thread_k``/``thread_n``/``num_threads`` select an explicit thread tile
+    instead of the shape planner; the defaults keep auto selection. They exist
+    so tests and tuning can compare two tiles on the same operands.
+    """
     # The context owns the lock workspace as well as the optional
     # reduction/activation buffers for the duration of this call.
     context = active_marlin_scratch_context()
@@ -1157,11 +1166,15 @@ def gptq_marlin_gemm(a: torch.Tensor,
             use_fp32_reduce,
             is_zp_float,
         )
+        tile_override = thread_k != -1 or thread_n != -1 or num_threads != -1
+        if use_owned_scratch and tile_override:
+            return op(*arguments, c_tmp, a_tmp, thread_k, thread_n, num_threads)
         if use_owned_scratch:
-            # Keep the historical 18-argument ABI for the default path.  The
-            # appended arguments are only sent to extensions built with the
-            # caller-owned scratch ABI.
+            # Keep the historical 20-argument caller-owned scratch ABI.
             return op(*arguments, c_tmp, a_tmp)
+        if tile_override:
+            # An explicit tile is appended after the optional scratch pair.
+            return op(*arguments, None, None, thread_k, thread_n, num_threads)
         return op(*arguments)
     finally:
         if context_borrowed:
