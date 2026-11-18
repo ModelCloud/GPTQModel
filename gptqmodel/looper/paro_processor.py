@@ -76,6 +76,7 @@ from ..quantization.paro.optimization import (
     _quantizer_sym_for_impl,
     _resolve_best_state_snapshot_dtype,
     _result_from_model,
+    _sample_activation_rows,
     build_paro_optimizer,
     build_random_rotation_buffers,
     build_random_rotation_buffers_reference,
@@ -360,6 +361,28 @@ class ParoProcessor(LoopProcessor):
         else:
             feature = feature.detach()
 
+        qcfg = getattr(self, "qcfg", None)
+        train_rows = getattr(qcfg, "opt_train_samples", 512) if qcfg is not None else 512
+        val_rows = getattr(qcfg, "opt_validation_samples", 128) if qcfg is not None else 128
+        target_rows = max(1, int(train_rows) + int(val_rows))
+
+        cache = getattr(self, "inputs_cache", None)
+        layer_inputs = getattr(cache, "layer_inputs", None)
+        batch_count = len(layer_inputs) if layer_inputs else 0
+        if batch_count <= 0:
+            calibration = getattr(self, "calibration", None)
+            rows = getattr(calibration, "rows", None)
+            if rows:
+                batch_count = len(rows)
+
+        if batch_count > 0:
+            per_batch_quota = max(1, 2 * (target_rows + batch_count - 1) // batch_count)
+        else:
+            per_batch_quota = target_rows
+
+        if feature.numel() > 0 and feature.reshape(-1, feature.shape[-1]).shape[0] > per_batch_quota:
+            feature = _sample_activation_rows(feature, max_rows=per_batch_quota).unsqueeze(0)
+
         with self.lock:
             entry = self.tasks.get(module_name)
             if entry is None:
@@ -383,6 +406,11 @@ class ParoProcessor(LoopProcessor):
 
     def _layer_input_features(self, state: _ParoLayerState) -> Dict[str, torch.Tensor]:
         """Materialize concatenated calibration features for all modules in a layer."""
+        qcfg = getattr(self, "qcfg", None)
+        train_rows = getattr(qcfg, "opt_train_samples", 512) if qcfg is not None else 512
+        val_rows = getattr(qcfg, "opt_validation_samples", 128) if qcfg is not None else 128
+        target_rows = max(1, int(train_rows) + int(val_rows))
+
         features: Dict[str, torch.Tensor] = {}
         for name in list(state.modules):
             entry = self.tasks.get(name) or {}
@@ -395,10 +423,14 @@ class ParoProcessor(LoopProcessor):
                 continue
             try:
                 features[name] = torch.cat(tensors, dim=0)
-                entry["inputs"] = [features[name]]
-                entry.pop("input_batch_indices", None)
             except RuntimeError:
                 features[name] = tensors[0]
+
+            if features[name].numel() > 0 and features[name].reshape(-1, features[name].shape[-1]).shape[0] > target_rows:
+                features[name] = _sample_activation_rows(features[name], max_rows=target_rows).unsqueeze(0)
+
+            entry["inputs"] = [features[name]]
+            entry.pop("input_batch_indices", None)
         return features
 
     def _module_quant_params(self, module_name: str, *, resolved_cfg=None) -> tuple[int, int, bool]:
