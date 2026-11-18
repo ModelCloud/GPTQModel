@@ -35,12 +35,9 @@
 
 **7.11.4**
 
-- **Marlin:** [Faster large-batch prefill](docs/marlin-hybrid-schedule.md), corrected GPTQ/AWQ outputs under concurrent GPU workloads, and fixed MXFP8/MXFP4 execution.
-- **Inference:** Enabled compiled generation for the portable QQQ and VPTQ Torch kernels and fixed crashes when loading another model during compiled inference. Improved EXL3 BF16 execution and Paro dispatch for long prefills.
 - **Quantization:** AWQ uses bounded activation sampling for MoE experts, respects model context limits during calibration, and handles experts spread across GPUs. SenseNova-Loop now calibrates on every pass through its repeated layers.
-- **Compat:** Fixed Transformers `device_map="auto"` when GPTQ, RTN, or AWQ layers spill to CPU or disk. Checkpoint loading preserves required FP32 tensors, and re-saving preserves quantized embeddings and output heads.
-
-*Compatibility note:* [FP8 is load-only](docs/fp8-load-only.md) through Torch; new FP8 quantization/export and the MLX FP8 backend were removed. Marlin now requires [NVIDIA Ampere or newer](docs/support-matrix.md).
+- **Inference:** Marlin [speeds up large-batch prefill](docs/marlin-hybrid-schedule.md) and fixes GPTQ/AWQ output errors under GPU contention and MXFP8/MXFP4 execution. Portable QQQ and VPTQ Torch kernels now support compiled generation. Fixed crashes when loading another model during compiled inference and improved EXL3 BF16 execution and Paro dispatch for long prefills.
+- **Compat:** Fixed Transformers `device_map="auto"` when GPTQ, RTN, or AWQ layers spill to CPU or disk. Checkpoint loads preserve required FP32 tensors, and re-saves preserve quantized embeddings and output heads. Marlin now requires [NVIDIA Ampere or newer](docs/support-matrix.md).
 
 **7.11.2**
 
