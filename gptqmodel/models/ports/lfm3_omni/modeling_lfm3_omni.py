@@ -43,7 +43,6 @@ from transformers.masking_utils import (
 )
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
-from transformers.models.lfm2.modeling_lfm2 import Lfm2Model
 from transformers.processing_utils import Unpack
 from transformers.utils import (
     ModelOutput,
@@ -55,6 +54,7 @@ from transformers.utils import (
 )
 from transformers.utils.import_utils import is_tracing
 
+from ..native.lfm2.modeling_lfm2 import Lfm2Model
 from .configuration_lfm3_omni import Lfm3OmniConfig, Lfm3OmniEncoderConfig
 from .modeling_lfm3 import Lfm3Model
 from .modeling_lfm3_vl import Lfm3VlVisionModel
