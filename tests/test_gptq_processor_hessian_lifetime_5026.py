@@ -51,6 +51,9 @@ def test_process_does_not_hold_the_task_hessian():
         H=torch.zeros(8, 8),
         module=module.module,
         quantize=quantize,
+        # `process()` releases the accumulator on the failure path too (#5040);
+        # this probe only measures the reference count, so a no-op is enough.
+        release_hessian_state=lambda: None,
     )
 
     processor = gptq_processor.GPTQProcessor.__new__(gptq_processor.GPTQProcessor)
