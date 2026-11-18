@@ -1,6 +1,6 @@
 # Copyright (c) The InternLM team and The HuggingFace Inc. team. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Adapted for Transformers 5 by ModelCloud.ai. See README.md for pinned provenance.
+# Adapted for Transformers 5 by ModelCloud.ai.
 """InternLM2 and InternLM2.5 checkpoint configuration."""
 
 import copy

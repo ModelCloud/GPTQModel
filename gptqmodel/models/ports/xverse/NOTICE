@@ -3,8 +3,9 @@ XVERSE Transformers 5 port
 Derived from the Apache-2.0 XVERSE configuration/modeling implementations
 published by Shenzhen Yuanxiang Technology Co., Ltd. (XVERSE), 2023-2025.
 Upstream modeling files also credit EleutherAI and the Hugging Face Inc. team,
-2022-2023. See LICENSE for the Apache-2.0 license and source_manifest.json for
-the exact pinned upstream repositories, revisions and source-file SHA-256s.
+2022-2023. See the repository root LICENSE for the Apache-2.0 license; the
+pinned upstream repositories and revisions are listed in the test fixture
+tests/fixtures/ports/xverse/checkpoint_inventories.json.
 
 Transformers 5 adaptation and independent regression tests:
 Copyright 2026 ModelCloud.ai.

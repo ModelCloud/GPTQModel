@@ -6,17 +6,15 @@ https://huggingface.co/XHToken/Spark-X2.5-4B/tree/0bcb35678590218655dff3765b9e61
 
 Upstream configuration copyright:
 Copyright 2026 The XHToken team and the HuggingFace Inc. team. All rights reserved.
-The upstream repository LICENSE is Apache License, Version 2.0; its complete,
-byte-preserved text is distributed alongside this notice.
+The upstream repository LICENSE is Apache License, Version 2.0; its text is
+identical to the repository root LICENSE.
 
 Modified by ModelCloud.ai for package-local Transformers 5 config/model
 ownership, current masks/cache/tied-weight APIs, native eager/SDPA execution,
 quantized projection dtype independence, validation and offline qualification.
 Checkpoint modeling/config Python is never imported at runtime.
 
-Compressed fixtures retain pinned config, generation policy, tokenizer/chat
-data and JSON header/index exports, not trained tensor payloads.
-The source_sha256.json manifest distinguishes upstream source assets from
-the derived checkpoint_shapes.json inventory. Header export hashes cover the
-stored JSON exports, not complete safetensors shards. tokenizer_cases.json
-contains IDs/decode from the pinned tokenizer.json's Rust tokenizer backend.
+Test fixtures (tests/fixtures/ports/spark2_5) retain the pinned config,
+generation policy and tokenizer/chat data, not trained tensor payloads.
+tokenizer_cases.json contains IDs/decode from the pinned tokenizer.json's
+Rust tokenizer backend.

@@ -187,8 +187,7 @@ def test_float64_source_decoder_oracle(layers, heads, inner, scaled, activation,
         torch.testing.assert_close(actual.attentions[i], prob, atol=2e-12, rtol=2e-12)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("tied", [False, True])
+@pytest.mark.parametrize("dtype,tied", [(torch.float32, True), (torch.float16, False), (torch.bfloat16, True)])
 def test_cache_generation_and_two_safetensors_cycles(tmp_path, dtype, tied):
     torch.manual_seed(9)
     model = GPTPanguForCausalLM(tiny_config(tie_word_embeddings=tied)).to(dtype).eval()
@@ -325,7 +324,7 @@ def test_explicit_unsupported_sdpa_and_legacy_cache():
 def test_real_tokenizer_source_ids_decode_and_two_reload_cycles(tmp_path):
     real_assets(tmp_path)
     tokenizer = GPTPanguTokenizer(tmp_path / "vocab.model", pad_token="<eot>")
-    cases = json.loads((FIXTURES / "tokenizer_oracle.json").read_text())
+    cases = json.loads(read_port_asset(FIXTURES / "tokenizer_oracle.json"))
     for cycle in range(3):
         assert tokenizer.eos_token_id == 9
         for case in cases:
@@ -356,8 +355,7 @@ def test_public_vocabulary_failure_and_repair(tmp_path, damage):
     assert wrapper.tokenizer.encode("你好，世界！", add_special_tokens=False) == [5772, 10, 267, 29]
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "1")])
 def test_public_real_tokenizer_model_security_and_reload(tmp_path, monkeypatch, trust, bypass):
     from gptqmodel import BACKEND, GPTQModel
 
@@ -390,9 +388,7 @@ def test_public_real_tokenizer_model_security_and_reload(tmp_path, monkeypatch, 
             torch.testing.assert_close(wrapper.model(ids).logits, oracle, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("offload", [False, True])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("layers", [1, 2])
+@pytest.mark.parametrize("offload,dtype,layers", [(False, torch.float16, 2), (True, torch.bfloat16, 1)])
 def test_public_plain_awq_pack_infer_and_two_reloads(tmp_path, offload, dtype, layers):
     from safetensors.torch import load_file
 

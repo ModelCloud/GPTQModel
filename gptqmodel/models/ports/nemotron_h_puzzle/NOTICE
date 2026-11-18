@@ -12,7 +12,7 @@ checkpoint's modeling_nemotron_h.py:
   Copyright 2024 The HuggingFace Inc. team. All rights reserved.
   Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
   Licensed under Apache License, Version 2.0.
-  See LICENSE-APACHE-2.0 for the complete license text.
+  See the repository root LICENSE for the complete license text.
 
 Native Transformers 5.23.0 NemotronHMamba2Mixer, NemotronHRMSNorm and weight
 initialization are imported from the installed Apache-2.0 Transformers package.
@@ -20,5 +20,4 @@ They are not downloaded from, registered by or imported through the checkpoint.
 
 This adaptation replaces temporary process-global block monkey-patching with
 package-owned per-layer construction and Transformers 5 cache/mask APIs.
-Source checksums and the exact modification boundary are recorded in README.md
-and source_manifest.json. Original checkpoint Python is never executed.
+Original checkpoint Python is never executed.

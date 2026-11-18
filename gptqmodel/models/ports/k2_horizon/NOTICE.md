@@ -1,8 +1,8 @@
 # K2-Horizon source notice
 
 This directory contains a GPT-QModel adaptation of IFM's K2-Horizon sources
-published under Apache-2.0. The pinned repositories/revisions and source files
-are listed in [README.md](README.md) and [checkpoint_layouts.json](checkpoint_layouts.json).
+published under Apache-2.0. The pinned repositories and revisions are listed in
+the test fixture tests/fixtures/ports/k2_horizon/checkpoint_layouts.json.
 
 Original source attribution is preserved verbatim in each Python source file:
 
@@ -12,4 +12,4 @@ Original source attribution is preserved verbatim in each Python source file:
 
 Transformers 5 compatibility, package ownership, tests and documentation were
 adapted for GPT-QModel by ModelCloud.ai, 2026. No upstream NOTICE file was present
-among the inspected checkpoint source files. See [LICENSE](LICENSE).
+among the inspected checkpoint source files. See the repository root LICENSE.

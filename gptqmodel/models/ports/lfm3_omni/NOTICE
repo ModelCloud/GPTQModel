@@ -14,4 +14,3 @@ Modified for GPT-QModel by ModelCloud.ai: definition-owned local class selection
 closed component-config selection, native Transformers LFM2 audio encoder,
 portable PyTorch convolution execution, local media/codec loading, load-scoped
 codec key conversion and qualification against Transformers 5.23.0.
-See README.md for modifications, provenance, numerical evidence and limitations.

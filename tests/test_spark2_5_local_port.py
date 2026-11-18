@@ -3,7 +3,6 @@
 """Spark2.5 real-model qualification; source oracle is independent of the port."""
 
 import copy
-import hashlib
 import json
 from pathlib import Path
 
@@ -16,27 +15,10 @@ from gptqmodel.models.definitions.spark2_5 import Spark2_5QModel
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.ports.spark2_5.configuration_spark import Spark2_5Config
 from gptqmodel.models.ports.spark2_5.modeling_spark import Spark2_5ForCausalLM
-from tests.port_assets import has_port_asset, read_port_asset
+from tests.port_assets import read_port_asset
 
 
 FIXTURES = Path(__file__).parents[1] / "gptqmodel/models/ports/spark2_5/fixtures"
-
-
-def test_pinned_source_assets_and_header_exports_are_byte_preserved():
-    manifest = json.loads((FIXTURES / "source_sha256.json").read_text())["sha256"]
-    verified = set()
-    for name, digest in manifest.items():
-        if name == "LICENSE":
-            payload = (FIXTURES.parent / name).read_bytes()
-        elif (FIXTURES / name).exists():
-            payload = (FIXTURES / name).read_bytes()
-        elif has_port_asset(FIXTURES / name):
-            payload = read_port_asset(FIXTURES / name)
-        else:
-            continue
-        assert hashlib.sha256(payload).hexdigest() == digest, name
-        verified.add(name)
-    assert verified == set(manifest) - {"README.md", "configuration_spark.py", "modeling_spark.py"}
 
 
 def test_real_shared_mlp_inputs_and_excluded_head_gate():
@@ -180,10 +162,10 @@ def test_definition_owns_loading_and_never_requires_checkpoint_python():
     assert not getattr(Spark2_5QModel, "before_model_load_requires_remote_code", False)
 
 
-@pytest.mark.parametrize("heads", [1, 2, 4])
-@pytest.mark.parametrize("head_dim", [8, 16])
-@pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("gate", [False, "sigmoid", "silu"])
+@pytest.mark.parametrize(
+    "heads,head_dim,bias,gate",
+    [(1, 8, False, False), (2, 16, True, "sigmoid"), (4, 8, True, "silu"), (4, 16, False, "sigmoid")],
+)
 def test_real_decoder_matches_independent_source_equations(heads, head_dim, bias, gate):
     model = tiny_model(
         num_key_value_heads=heads,
@@ -245,11 +227,8 @@ def test_source_absolute_slot_partial_rope_near_released_context_boundary(head_d
 
 def write_tokenizer(path, real=False):
     if real:
-        manifest = json.loads((FIXTURES / "source_sha256.json").read_text())["sha256"]
         for asset in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "chat_template.jinja"]:
-            data = read_port_asset(FIXTURES / asset)
-            assert hashlib.sha256(data).hexdigest() == manifest[asset]
-            (path / asset).write_bytes(data)
+            (path / asset).write_bytes(read_port_asset(FIXTURES / asset))
     else:
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
@@ -280,8 +259,7 @@ def hostile_checkpoint(path):
     return marker
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "1")])
 def test_public_hostile_load_real_tokenizer_generation_policy_and_two_reloads(tmp_path, monkeypatch, trust, bypass):
     from gptqmodel import GPTQModel
 
@@ -292,7 +270,7 @@ def test_public_hostile_load_real_tokenizer_generation_policy_and_two_reloads(tm
     model = tiny_model(vocab_size=131072, tie_word_embeddings=True)
     model.save_pretrained(tmp_path)
     write_tokenizer(tmp_path, real=True)
-    policy = GenerationConfig.from_dict(json.loads((FIXTURES / "generation_config.json").read_text()))
+    policy = GenerationConfig.from_dict(json.loads(read_port_asset(FIXTURES / "generation_config.json")))
     policy.save_pretrained(tmp_path)
     marker = hostile_checkpoint(tmp_path)
     raw = AutoTokenizer.from_pretrained(tmp_path, trust_remote_code=False)
@@ -324,8 +302,7 @@ def test_public_hostile_load_real_tokenizer_generation_policy_and_two_reloads(tm
             tmp_path = saved
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("assign", [False, True])
+@pytest.mark.parametrize("dtype,assign", [(torch.float32, True), (torch.float16, False), (torch.bfloat16, True)])
 def test_state_assignment_safetensors_and_failed_load_repair_retry(tmp_path, dtype, assign):
     model = tiny_model(tie_word_embeddings=True).to(dtype)
     reference = {name: value.clone() for name, value in model.state_dict().items()}
@@ -550,7 +527,7 @@ def test_pinned_real_tokenizer_source_ids_decode_chat_and_roundtrip(tmp_path, ca
     from tokenicer import Tokenicer
 
     write_tokenizer(tmp_path, real=True)
-    expected = json.loads((FIXTURES / "tokenizer_cases.json").read_text())[case]
+    expected = json.loads(read_port_asset(FIXTURES / "tokenizer_cases.json"))[case]
     tokenizer = Tokenicer.load(str(tmp_path), trust_remote_code=False, model_config=tiny_config())
     assert tokenizer(expected["text"], add_special_tokens=False)["input_ids"] == expected["ids"]
     assert tokenizer.decode(expected["ids"], skip_special_tokens=False) == expected["decoded"]

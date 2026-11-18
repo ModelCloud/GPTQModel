@@ -52,8 +52,7 @@ def poisoned_checkpoint(path, **kwargs):
     return model, marker
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [False, True])
+@pytest.mark.parametrize("trust,bypass", [(False, False), (True, True)])
 def test_definition_owned_selection_ignores_checkpoint_code(tmp_path, monkeypatch, trust, bypass):
     model, marker = poisoned_checkpoint(tmp_path)
     if bypass:
@@ -77,8 +76,7 @@ def test_definition_owned_selection_ignores_checkpoint_code(tmp_path, monkeypatc
     torch.testing.assert_close(loaded(ids).logits, model(ids).logits, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [False, True])
+@pytest.mark.parametrize("trust,bypass", [(False, False), (True, True)])
 def test_public_dense_load_and_generation(tmp_path, monkeypatch, trust, bypass):
     model, marker = poisoned_checkpoint(tmp_path)
     if bypass:

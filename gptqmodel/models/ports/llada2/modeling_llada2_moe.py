@@ -16,7 +16,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# Adapted for Transformers 5 by ModelCloud.ai, 2026. See README.md and NOTICE.
+# Adapted for Transformers 5 by ModelCloud.ai, 2026. See NOTICE.
 """Package-owned LLaDA2 diffusion MoE; no checkpoint Python dispatch."""
 
 import copy
@@ -500,11 +500,8 @@ class LLaDA2MoePreTrainedModel(PreTrainedModel):
     supports_gradient_checkpointing = True
     _no_split_modules = ["LLaDA2MoeDecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
-    _supports_flash_attn_2 = False
     _supports_sdpa = True
-    _supports_flex_attn = False
     _keep_in_fp32_modules_strict = ["expert_bias"]
-    _supports_cache_class = True
 
     @torch.no_grad()
     def _init_weights(self, module):
@@ -525,8 +522,6 @@ class LLaDA2MoeModel(LLaDA2MoePreTrainedModel):
         self.layers = nn.ModuleList(
             [LLaDA2MoeDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
-        self._use_sdpa = config._attn_implementation == "sdpa"
-        self._use_flex_attention = config._attn_implementation == "flex_attention"
         self.norm = LLaDA2MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = LLaDA2MoeRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
@@ -560,7 +555,7 @@ class LLaDA2MoeModel(LLaDA2MoePreTrainedModel):
             output_router_logits if output_router_logits is not None else self.config.output_router_logits
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         elif input_ids is not None:
@@ -707,7 +702,7 @@ class LLaDA2MoeModelLM(LLaDA2MoePreTrainedModel, LLaDA22Generation, GenerationMi
         output_router_logits = (
             output_router_logits if output_router_logits is not None else self.config.output_router_logits
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,

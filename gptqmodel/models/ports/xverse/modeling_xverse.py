@@ -1,7 +1,7 @@
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 # Copyright 2023-2025 XVERSE and 2026 ModelCloud.ai.
 # SPDX-License-Identifier: Apache-2.0
-"""Source-matched XVERSE decoder; see README.md for pinned sources and limits."""
+"""Source-matched XVERSE dense, 256K and MoE decoder."""
 
 import math
 
@@ -224,7 +224,6 @@ class XversePreTrainedModel(PreTrainedModel):
     base_model_prefix = "model"
     _no_split_modules = ["XverseDecoderLayer"]
     _supports_sdpa = True
-    _supports_attention_backend = True
     _keep_in_fp32_modules_strict = ["router", "inv_freq"]
 
     def _init_weights(self, module):

@@ -3,7 +3,7 @@
 """Native class aliases, imported only when the definition's loader is used."""
 
 from transformers import PreTrainedConfig, Qwen2Tokenizer, Qwen3Config, Qwen3ForCausalLM, TokenizersBackend
-from transformers.utils.hub import cached_file
+from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
 
 class NativeQwen3Config:
@@ -27,21 +27,23 @@ class NativeQwen3Config:
 
 
 class Qwen3Tokenizer:
-    """Keep the serialized pipeline or use native Qwen BPE for legacy assets."""
+    """Select the tokenizer class the way TF5 ``AutoTokenizer`` does for ``qwen3``.
+
+    Qwen3 releases declare ``Qwen2Tokenizer`` (also TF5's registered class for
+    ``qwen3``), which rebuilds the BPE pipeline from vocab/merges. Releases that
+    declare a generic fast tokenizer (e.g. Marin's ``PreTrainedTokenizerFast``)
+    keep the serialized ``tokenizer.json`` via ``TokenizersBackend``.
+    """
 
     @classmethod
     def from_pretrained(cls, model_id_or_path, **kwargs):
         from ....utils.hf import get_config_selection_kwargs
 
-        tokenizer_file = kwargs.get("tokenizer_file")
-        if tokenizer_file is None:
-            tokenizer_file = cached_file(
-                model_id_or_path,
-                "tokenizer.json",
-                _raise_exceptions_for_missing_entries=False,
-                **get_config_selection_kwargs(kwargs),
-            )
-        tokenizer_class = TokenizersBackend if tokenizer_file is not None else Qwen2Tokenizer
+        declared = get_tokenizer_config(model_id_or_path, **get_config_selection_kwargs(kwargs)).get("tokenizer_class")
+        if declared is None or declared.removesuffix("Fast") == "Qwen2Tokenizer":
+            tokenizer_class = Qwen2Tokenizer
+        else:
+            tokenizer_class = TokenizersBackend
         return tokenizer_class.from_pretrained(model_id_or_path, **kwargs)
 
 

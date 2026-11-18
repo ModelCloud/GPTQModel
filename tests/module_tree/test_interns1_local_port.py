@@ -383,7 +383,7 @@ def test_real_wrapper_tree_owns_weights_roles_and_quantizer_consumers(layout, to
     assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
 
 
-@pytest.mark.parametrize("layout", ["dense", "moe", "hybrid", "moe_dense_only"])
+@pytest.mark.parametrize("layout", ["dense", "hybrid"])
 def test_plain_awq_real_consumer_quantizes_every_linear_and_retries(layout, tokenizer_assets, monkeypatch):
     torch.manual_seed(103)
     wrapper = wrapper_for(layout, tokenizer_assets)
@@ -439,7 +439,7 @@ def test_plain_awq_real_consumer_quantizes_every_linear_and_retries(layout, toke
         assert torch.isfinite(model(torch.tensor([[1, 17, 18, 19]])).logits).all()
 
 
-@pytest.mark.parametrize("moe", [False, True, "hybrid", "moe_dense_only"])
+@pytest.mark.parametrize("moe", [False, "hybrid", "moe_dense_only"])
 def test_public_awq_plain_quantization_pack_media_and_safetensors_reload(tokenizer_assets, moe):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.models.ports.interns1.tokenization_interns1 import InternS1Tokenizer

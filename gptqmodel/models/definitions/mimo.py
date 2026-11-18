@@ -8,7 +8,6 @@ from . import LlamaQModel
 
 
 # MiMo is based on Qwen2
-# Pinned source/provenance: ../ports/mimo/README.md
 class MimoQModel(LlamaQModel):
     fusable = None  # No qualified executor for this definition.
 

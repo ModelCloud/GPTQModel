@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real LLaDA2 packed-QKV/dense/shared/routed checkpoint weight ownership."""
 
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -19,21 +17,29 @@ from tests.test_llada2_local_port import VERSIONS, tiny_config
 def test_exact_central_plan_proposal_and_no_fusion_admission():
     from gptqmodel.models.fusable import require_fusable_config
 
-    proposal = json.loads(
-        (Path(__file__).parents[2] / "gptqmodel/models/ports/llada2/module_plan_cases.json").read_text()
-    )
-    expected = proposal["registered_module_plans"]["cases"]["LLaDA2MoeQModel/gptq"]
-    assert LLaDA2MoeQModel.extract_layers_node() == expected["layers"]
-    assert (
-        LLaDA2MoeQModel.build_layer_modules(LLaDA2MoeQModel.module_tree, include_capture_only=True)
-        == expected["blocks"]
-    )
+    assert LLaDA2MoeQModel.extract_layers_node() == ["model.layers"]
+    assert LLaDA2MoeQModel.build_layer_modules(LLaDA2MoeQModel.module_tree, include_capture_only=True) == [
+        ["input_layernorm:!"],
+        ["attention.query_key_value", "attention.query_layernorm:!", "attention.key_layernorm:!"],
+        ["attention.dense"],
+        ["post_attention_layernorm:!"],
+        ["mlp:?"],
+        ["mlp.gate:!", "mlp.gate.expert_bias:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+    ]
     with pytest.raises(ValueError):
         require_fusable_config(LLaDA2MoeQModel, "llada2_moe")
 
 
-@pytest.mark.parametrize("version", VERSIONS)
-@pytest.mark.parametrize("kv,bias,shared,dense", [(4, False, None, 0), (2, True, 1, 1), (1, False, 2, 2)])
+@pytest.mark.parametrize(
+    "version,kv,bias,shared,dense",
+    [(version, *layout) for version, layout in zip(VERSIONS, [(4, False, None, 0), (2, True, 1, 1), (1, False, 2, 2)] * 2)],
+)
 def test_real_checkpoint_owned_modules_and_aliases(version, kv, bias, shared, dense):
     config = tiny_config(
         version,

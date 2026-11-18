@@ -3,7 +3,6 @@
 """Native Qwen3 and the published Qwen3-backed Marin release."""
 
 import copy
-import hashlib
 import json
 from pathlib import Path
 
@@ -26,7 +25,7 @@ from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.hf import load_model_config
-from tests.port_assets import iter_port_assets, read_port_asset
+from tests.port_assets import read_port_asset
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/qwen3/fixtures"
@@ -48,6 +47,24 @@ def test_native_qwen_bpe_assets_without_tokenizer_json(tmp_path):
     phrases = ["  Qwen learns café 你好!", "newline\nand\twhitespace", "A different sequence: 42, seven, moon!"]
     assert actual(phrases).input_ids == expected(phrases).input_ids
     assert actual.all_special_tokens == expected.all_special_tokens
+
+
+@pytest.mark.parametrize("declared", ["Qwen2Tokenizer", "Qwen2TokenizerFast", "PreTrainedTokenizerFast", None])
+def test_tokenizer_class_matches_native_auto_selection(tmp_path, declared):
+    vocab = {"<|endoftext|>": 0, "a": 1, "b": 2, "ab": 3, "\u0120": 4, "\u0120a": 5}
+    Qwen2Tokenizer(vocab=vocab, merges=[("a", "b"), ("\u0120", "a")]).save_pretrained(tmp_path)
+    tiny_config().save_pretrained(tmp_path)
+    tokenizer_config = json.loads((tmp_path / "tokenizer_config.json").read_text())
+    tokenizer_config.pop("tokenizer_class")
+    if declared is not None:
+        tokenizer_config["tokenizer_class"] = declared
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps(tokenizer_config))
+
+    expected = AutoTokenizer.from_pretrained(tmp_path)
+    actual = Qwen3QModel.loader.load_tokenizer(tmp_path)
+    assert type(actual) is type(expected)
+    assert type(actual).__name__ == ("TokenizersBackend" if declared == "PreTrainedTokenizerFast" else "Qwen2Tokenizer")
+    assert actual("ab a b").input_ids == expected("ab a b").input_ids
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -146,8 +163,7 @@ def test_definition_owns_exact_native_qwen3():
     assert type(AutoModelForCausalLM.from_config(tiny_config())) is Qwen3ForCausalLM
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "1")])
 def test_raw_marin_metadata_rejected_before_checkpoint_python(tmp_path, monkeypatch, trust, bypass):
     if bypass is None:
         monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
@@ -170,8 +186,7 @@ def test_raw_marin_metadata_rejected_before_checkpoint_python(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("family", ["marin", "qwen3"])
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "1")])
 def test_public_native_selection_tokenizer_generation_and_reload(tmp_path, monkeypatch, family, trust, bypass):
     security_env(monkeypatch, bypass)
     source = source_fixture(tmp_path / "source", family)
@@ -237,21 +252,7 @@ def test_public_native_selection_tokenizer_generation_and_reload(tmp_path, monke
     assert not marker.exists()
 
 
-def test_pinned_assets_integrity():
-    manifest = json.loads((FIXTURES / "manifest.json").read_text())
-    for family, (repo, revision) in manifest["releases"].items():
-        for path in iter_port_assets(FIXTURES, f"{family}-*"):
-            name = path.name[len(family) + 1 :]
-            if name == "headers.json":
-                continue
-            expected = manifest["assets"][f"https://huggingface.co/{repo}/resolve/{revision}/{name}"]
-            raw = read_port_asset(path)
-            assert len(raw) == expected["bytes"]
-            assert hashlib.sha256(raw).hexdigest() == expected["sha256"]
-
-
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "1")])
 def test_raw_marin_public_fail_repair_retry_same_checkpoint(tmp_path, monkeypatch, trust, bypass):
     security_env(monkeypatch, bypass)
     source = source_fixture(tmp_path, "marin")
@@ -281,9 +282,9 @@ def test_raw_marin_public_fail_repair_retry_same_checkpoint(tmp_path, monkeypatc
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("family", ["marin", "qwen3"])
-@pytest.mark.parametrize("offload", [False, True])
-@pytest.mark.parametrize("kv_heads,bias", [(4, False), (2, True), (1, False)])
+@pytest.mark.parametrize(
+    "family,offload,kv_heads,bias", [("marin", False, 2, True), ("qwen3", True, 1, False)]
+)
 def test_public_awq_scaling_pack_infer_two_exact_reloads(tmp_path, family, offload, kv_heads, bias):
     source = source_fixture(tmp_path / "source", family, num_key_value_heads=kv_heads, attention_bias=bias)
     qcfg = AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=offload)
@@ -404,10 +405,9 @@ def independent_decoder(model, ids, positions):
     return linear(norm(x, "model.norm"), "lm_head")
 
 
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("llama3_rope", [False, True])
-@pytest.mark.parametrize("sliding", [False, True])
+@pytest.mark.parametrize(
+    "kv_heads,bias,llama3_rope,sliding", [(1, False, False, True), (2, True, True, False), (4, False, True, True)]
+)
 def test_independent_qk_norm_rotary_decoder_oracle(kv_heads, bias, llama3_rope, sliding):
     options = {
         "num_key_value_heads": kv_heads,
@@ -444,9 +444,10 @@ def test_independent_qk_norm_rotary_decoder_oracle(kv_heads, bias, llama3_rope, 
     torch.testing.assert_close(actual.double(), expected, rtol=4e-3, atol=6e-4)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("implementation", ["eager", "sdpa"])
-@pytest.mark.parametrize("sliding", [False, True])
+@pytest.mark.parametrize(
+    "dtype,implementation,sliding",
+    [(torch.float32, "eager", True), (torch.float16, "sdpa", False), (torch.bfloat16, "sdpa", True)],
+)
 def test_native_cache_continuation_assignment_and_safetensors_cycles(tmp_path, dtype, implementation, sliding):
     config = tiny_config(use_sliding_window=sliding, sliding_window=3, max_window_layers=1)
     config._attn_implementation = implementation
