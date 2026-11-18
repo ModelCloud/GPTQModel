@@ -21,35 +21,41 @@ merged patch tokens into the language model through placeholder tokens.
 """
 
 import itertools
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import initialization as init
-from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicLayer, LinearAttentionLayer
 from transformers.generation import GenerationMixin
-from transformers.masking_utils import create_causal_mask
-from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.masking_utils import create_causal_mask, create_recurrent_attention_mask
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, BaseModelOutputWithPooling, CausalLMOutputWithPast
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.modeling_utils import PreTrainedModel
+from transformers.models.qwen3_5.modeling_qwen3_5 import (
+    Qwen3_5Attention,
+    Qwen3_5MLP,
+    Qwen3_5RMSNorm,
+    Qwen3_5RMSNormGated,
+    Qwen3_5TextRotaryEmbedding,
+    Qwen3_5VisionAttention,
+    Qwen3_5VisionBlock,
+    Qwen3_5VisionPatchEmbed,
+    Qwen3_5VisionPatchMerger,
+    l2norm,
+)
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, torch_compilable_check
 from transformers.utils.generic import (
     accepts_precomputed_kwargs,
-    is_flash_attention_requested,
-    maybe_autocast,
     merge_with_config_defaults,
 )
 from transformers.utils.output_capturing import capture_outputs
 from transformers.vision_utils import (
-    get_vision_bilinear_indices_and_weights,
-    get_vision_cu_seqlens,
+    get_vision_attention_seqlens,
+    get_vision_interpolation_indices_and_weights,
     get_vision_position_ids,
 )
 
@@ -121,204 +127,28 @@ class AgnesDynamicCache(Cache):
 
 
 # ---------------------------------------------------------------------------
-# Normalisation
+# Building blocks shared with native Qwen3.5 (identical math and parameter names)
 # ---------------------------------------------------------------------------
 
-
-class _RMSNormFn(torch.autograd.Function):
-    """RMS normalisation with a one-centred scale, y = x / rms(x) * (1 + w).
-
-    The forward matches the reference op-for-op (fp32 statistics, cast back to
-    the input dtype at the end); the backward is written out analytically
-    instead of being traced through the forward graph.
-    """
-
-    @staticmethod
-    def forward(ctx, x, weight, eps):
-        xf = x.float()
-        inv = torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps)
-        unit = xf * inv
-        out = unit * (1.0 + weight.float())
-        ctx.save_for_backward(unit, inv, weight)
-        ctx.in_dtype = x.dtype
-        return out.type_as(x)
-
-    @staticmethod
-    def backward(ctx, grad_out):
-        unit, inv, weight = ctx.saved_tensors
-        g = grad_out.float()
-        g_unit = g * (1.0 + weight.float())
-        grad_x = inv * (g_unit - unit * (g_unit * unit).mean(-1, keepdim=True))
-        grad_w = (g * unit).reshape(-1, unit.shape[-1]).sum(0)
-        return grad_x.to(ctx.in_dtype), grad_w.to(weight.dtype), None
+AgnesRMSNorm = Qwen3_5RMSNorm
+AgnesGatedNorm = Qwen3_5RMSNormGated
+AgnesRotaryEmbedding = Qwen3_5TextRotaryEmbedding
+AgnesGlobalAttention = Qwen3_5Attention
 
 
-class AgnesRMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.zeros(dim))
-
-    def forward(self, x):
-        return _RMSNormFn.apply(x, self.weight, self.eps)
-
-    def extra_repr(self):
-        return f"{tuple(self.weight.shape)}, eps={self.eps}"
-
-
-class _GatedRMSNormFn(torch.autograd.Function):
-    """RMS normalisation followed by a learned scale and a SiLU gate.
-
-    Forward order (matters for bit-exactness): fp32 statistics, cast to the
-    input dtype, multiply by the weight in that dtype, then multiply by the
-    fp32 gate activation and cast back.
-    """
-
-    @staticmethod
-    def forward(ctx, x, weight, gate, eps):
-        in_dtype = x.dtype
-        xf = x.to(torch.float32)
-        inv = torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps)
-        unit = xf * inv
-        scaled = weight * unit.to(in_dtype)
-        gate_f = gate.to(torch.float32)
-        act = F.silu(gate_f)
-        out = scaled * act
-        ctx.save_for_backward(unit, inv, weight, gate_f, scaled)
-        ctx.in_dtype = in_dtype
-        return out.to(in_dtype)
-
-    @staticmethod
-    def backward(ctx, grad_out):
-        unit, inv, weight, gate_f, scaled = ctx.saved_tensors
-        g = grad_out.float()
-        sig = torch.sigmoid(gate_f)
-        act = gate_f * sig
-        g_scaled = g * act
-        grad_w = (g_scaled * unit).reshape(-1, unit.shape[-1]).sum(0)
-        g_unit = g_scaled * weight.float()
-        grad_x = inv * (g_unit - unit * (g_unit * unit).mean(-1, keepdim=True))
-        grad_gate = g * scaled.float() * (sig * (1.0 + gate_f * (1.0 - sig)))
-        return grad_x.to(ctx.in_dtype), grad_w.to(weight.dtype), grad_gate.to(ctx.in_dtype), None
-
-
-class AgnesGatedNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6, **kwargs):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states, gate=None):
-        return _GatedRMSNormFn.apply(hidden_states, self.weight, gate, self.variance_epsilon)
-
-
-# ---------------------------------------------------------------------------
-# Feed-forward
-# ---------------------------------------------------------------------------
-
-
-class AgnesMLP(nn.Module):
+class AgnesMLP(Qwen3_5MLP):
     """SwiGLU block.  With `parallel_size > 0` a second, narrower SwiGLU runs
     on the same input and its output is added to the main one."""
 
     def __init__(self, config, intermediate_size: int, parallel_size: int = 0):
-        super().__init__()
-        self.config = config
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, intermediate_size, bias=False)
-        self.down_proj = nn.Linear(intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
+        super().__init__(config, intermediate_size)
         self.parallel_ffn = AgnesMLP(config, parallel_size) if parallel_size > 0 else None
 
     def forward(self, x):
-        y = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        y = super().forward(x)
         if self.parallel_ffn is not None:
             y = y + self.parallel_ffn(x)
         return y
-
-
-# ---------------------------------------------------------------------------
-# Rotary position encodings
-# ---------------------------------------------------------------------------
-
-
-def _swap_halves(x):
-    """(a, b) -> (-b, a) along the last axis."""
-    half = x.shape[-1] // 2
-    return torch.cat((-x[..., half:], x[..., :half]), dim=-1)
-
-
-def _apply_rope(q, k, cos, sin, unsqueeze_dim=1):
-    """Rotate the leading `cos.shape[-1]` channels of q and k; the rest pass through."""
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    n_rot = cos.shape[-1]
-    q_rot, q_rest = q[..., :n_rot], q[..., n_rot:]
-    k_rot, k_rest = k[..., :n_rot], k[..., n_rot:]
-    q_rot = (q_rot * cos) + (_swap_halves(q_rot) * sin)
-    k_rot = (k_rot * cos) + (_swap_halves(k_rot) * sin)
-    return torch.cat([q_rot, q_rest], dim=-1), torch.cat([k_rot, k_rest], dim=-1)
-
-
-class AgnesRotaryEmbedding(nn.Module):
-    """Three-axis (text / height / width) rotary tables with interleaved sections."""
-
-    inv_freq: torch.Tensor
-
-    def __init__(self, config: AgnesTextConfig, device=None):
-        super().__init__()
-        self.config = config
-        self.max_seq_len_cached = config.max_position_embeddings
-        self.original_max_seq_len = config.max_position_embeddings
-        self.rope_type = config.rope_parameters["rope_type"]
-        builder: Callable = self.compute_default_rope_parameters
-        if self.rope_type != "default":
-            builder = ROPE_INIT_FUNCTIONS[self.rope_type]
-        inv_freq, self.attention_scaling = builder(config, device)
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.register_buffer("original_inv_freq", inv_freq.clone(), persistent=False)
-        self.mrope_section = config.rope_parameters.get("mrope_section", [11, 11, 10])
-
-    @staticmethod
-    def compute_default_rope_parameters(
-        config: AgnesTextConfig | None = None,
-        device: Optional["torch.device"] = None,
-        seq_len: int | None = None,
-    ) -> tuple["torch.Tensor", float]:
-        theta = config.rope_parameters["rope_theta"]
-        fraction = config.rope_parameters.get("partial_rotary_factor", 1.0)
-        head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
-        n_rot = int(head_dim * fraction)
-        exponents = torch.arange(0, n_rot, 2, dtype=torch.int64).to(device=device, dtype=torch.float) / n_rot
-        inv_freq = 1.0 / (theta**exponents)
-        return inv_freq, 1.0
-
-    @torch.no_grad()
-    @dynamic_rope_update
-    def forward(self, x, position_ids):
-        if position_ids.ndim == 2:
-            position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
-        freq_col = self.inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1).to(x.device)
-        pos_row = position_ids[:, :, None, :].float()
-        dev = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
-        with maybe_autocast(device_type=dev, enabled=False):
-            angles = (freq_col.float() @ pos_row.float()).transpose(2, 3)
-            angles = self._interleave_axes(angles, self.mrope_section)
-            table = torch.cat((angles, angles), dim=-1)
-            cos = table.cos() * self.attention_scaling
-            sin = table.sin() * self.attention_scaling
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
-
-    @staticmethod
-    def _interleave_axes(angles, section):
-        """Fold the H and W axes into the T table at every 2nd / 3rd frequency slot."""
-        merged = angles[0]
-        for axis, offset in ((1, 1), (2, 2)):
-            take = slice(offset, section[axis] * 3, 3)
-            merged[..., take] = angles[axis, ..., take]
-        return merged
 
 
 class AgnesVisionRotary(nn.Module):
@@ -335,108 +165,11 @@ class AgnesVisionRotary(nn.Module):
         return (position_ids.unsqueeze(-1) * self.inv_freq).flatten(1)
 
 
-def _apply_vision_rope(q, k, cos, sin):
-    q_dtype, k_dtype = q.dtype, k.dtype
-    q, k = q.float(), k.float()
-    cos, sin = cos.unsqueeze(-2).float(), sin.unsqueeze(-2).float()
-    q = (q * cos) + (_swap_halves(q) * sin)
-    k = (k * cos) + (_swap_halves(k) * sin)
-    return q.to(q_dtype), k.to(k_dtype)
-
-
-# ---------------------------------------------------------------------------
-# Global (softmax) attention
-# ---------------------------------------------------------------------------
-
-
-def _broadcast_kv(x: torch.Tensor, groups: int) -> torch.Tensor:
-    """Repeat each kv head `groups` times along the head axis."""
-    b, h, t, d = x.shape
-    if groups == 1:
-        return x
-    return x[:, :, None, :, :].expand(b, h, groups, t, d).reshape(b, h * groups, t, d)
-
-
-def _dense_attention(
-    module: nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: torch.Tensor | None,
-    scaling: float,
-    dropout: float = 0.0,
-    **kwargs: Unpack[TransformersKwargs],
-):
-    k = _broadcast_kv(key, module.num_key_value_groups)
-    v = _broadcast_kv(value, module.num_key_value_groups)
-    scores = torch.matmul(query, k.transpose(2, 3)) * scaling
-    if attention_mask is not None:
-        scores = scores + attention_mask
-    probs = nn.functional.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
-    probs = nn.functional.dropout(probs, p=dropout, training=module.training)
-    out = torch.matmul(probs, v).transpose(1, 2).contiguous()
-    return out, probs
-
-
-class AgnesGlobalAttention(nn.Module):
-    """Grouped-query softmax attention with per-head q/k normalisation and a
-    sigmoid output gate produced alongside the queries."""
-
-    def __init__(self, config: AgnesTextConfig, layer_idx: int):
-        super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
-        self.scaling = self.head_dim**-0.5
-        self.attention_dropout = config.attention_dropout
-        self.is_causal = True
-        q_width = config.num_attention_heads * self.head_dim
-        kv_width = config.num_key_value_heads * self.head_dim
-        self.q_proj = nn.Linear(config.hidden_size, q_width * 2, bias=config.attention_bias)
-        self.k_proj = nn.Linear(config.hidden_size, kv_width, bias=config.attention_bias)
-        self.v_proj = nn.Linear(config.hidden_size, kv_width, bias=config.attention_bias)
-        self.o_proj = nn.Linear(q_width, config.hidden_size, bias=config.attention_bias)
-        self.q_norm = AgnesRMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = AgnesRMSNorm(self.head_dim, eps=config.rms_norm_eps)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: torch.Tensor | None,
-        past_key_values: Cache | None = None,
-        **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        lead = hidden_states.shape[:-1]
-        per_head = (*lead, -1, self.head_dim)
-
-        q, gate = torch.chunk(self.q_proj(hidden_states).view(*lead, -1, self.head_dim * 2), 2, dim=-1)
-        gate = gate.reshape(*lead, -1)
-        q = self.q_norm(q.view(per_head)).transpose(1, 2)
-        k = self.k_norm(self.k_proj(hidden_states).view(per_head)).transpose(1, 2)
-        v = self.v_proj(hidden_states).view(per_head).transpose(1, 2)
-
-        cos, sin = position_embeddings
-        q, k = _apply_rope(q, k, cos, sin)
-        if past_key_values is not None:
-            k, v = past_key_values.update(k, v, self.layer_idx)
-
-        attend: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(self.config._attn_implementation, _dense_attention)
-        out, probs = attend(
-            self, q, k, v, attention_mask,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            **kwargs,
-        )
-        out = out.reshape(*lead, -1).contiguous()
-        out = out * torch.sigmoid(gate)
-        return self.o_proj(out), probs
-
-
 # ---------------------------------------------------------------------------
 # Delta-rule (recurrent) attention
 # ---------------------------------------------------------------------------
+# Native Qwen3.5 conv/delta-rule helpers silently dispatch to optional `fla` /
+# `causal_conv1d` kernels when installed; keep the pure-torch reference here.
 
 
 def _zero_padded_positions(hidden_states, attention_mask):
@@ -458,10 +191,6 @@ def _causal_conv_step(hidden_states, conv_state, weight, bias=None, activation=N
     return y.to(hidden_states.dtype)
 
 
-def _unit_normalize(x: torch.FloatTensor, dim: int = -1, eps: float = 1e-6):
-    return x * torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
-
-
 def _delta_rule_chunked(
     query, key, value, g, beta, chunk_size=64, initial_state=None, output_final_state=False,
     use_qk_l2norm_in_kernel=False, **kwargs,
@@ -469,8 +198,8 @@ def _delta_rule_chunked(
     """Chunk-parallel gated delta rule (prefill path)."""
     out_dtype = query.dtype
     if use_qk_l2norm_in_kernel:
-        query = _unit_normalize(query, dim=-1, eps=1e-6)
-        key = _unit_normalize(key, dim=-1, eps=1e-6)
+        query = l2norm(query, dim=-1, eps=1e-6)
+        key = l2norm(key, dim=-1, eps=1e-6)
     query, key, value, beta, g = [t.transpose(1, 2).contiguous().to(torch.float32) for t in (query, key, value, beta, g)]
 
     bsz, heads, seq, dk = key.shape
@@ -532,8 +261,8 @@ def _delta_rule_stepwise(query, key, value, g, beta, initial_state, output_final
     """Token-by-token gated delta rule (decode path)."""
     out_dtype = query.dtype
     if use_qk_l2norm_in_kernel:
-        query = _unit_normalize(query, dim=-1, eps=1e-6)
-        key = _unit_normalize(key, dim=-1, eps=1e-6)
+        query = l2norm(query, dim=-1, eps=1e-6)
+        key = l2norm(key, dim=-1, eps=1e-6)
     query, key, value, beta, g = [t.transpose(1, 2).contiguous().to(torch.float32) for t in (query, key, value, beta, g)]
 
     bsz, heads, seq, dk = key.shape
@@ -577,7 +306,6 @@ class AgnesDeltaAttention(nn.Module):
         self.conv_kernel_size = config.linear_conv_kernel_dim
         self.layer_idx = layer_idx
         self.activation = config.hidden_act
-        self.act = ACT2FN[config.hidden_act]
         self.layer_norm_epsilon = config.rms_norm_eps
 
         self.conv_dim = self.key_dim * 2 + self.value_dim
@@ -586,17 +314,10 @@ class AgnesDeltaAttention(nn.Module):
             kernel_size=self.conv_kernel_size, groups=self.conv_dim, padding=self.conv_kernel_size - 1,
         )
         self.dt_bias = nn.Parameter(torch.ones(self.num_v_heads))
-        self.A_log = nn.Parameter(torch.log(torch.empty(self.num_v_heads).uniform_(0, 16)))
+        self.A_log = nn.Parameter(torch.log(torch.empty(self.num_v_heads).uniform_(0.01, 16)))
 
-        # Preserve upstream's portable math without importing optional CUDA
-        # packages during CPU/meta construction. Fused kernels are unqualified.
         self.norm = AgnesGatedNorm(self.head_v_dim, eps=self.layer_norm_epsilon)
         self.out_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
-
-        self.causal_conv1d_fn = None
-        self.causal_conv1d_update = _causal_conv_step
-        self.chunk_gated_delta_rule = _delta_rule_chunked
-        self.recurrent_gated_delta_rule = _delta_rule_stepwise
 
         self.in_proj_qkv = nn.Linear(self.hidden_size, self.key_dim * 2 + self.value_dim, bias=False)
         self.in_proj_z = nn.Linear(self.hidden_size, self.value_dim, bias=False)
@@ -624,7 +345,7 @@ class AgnesDeltaAttention(nn.Module):
         a = self.in_proj_a(hidden_states)
 
         if resume and seq == 1:
-            qkv = self.causal_conv1d_update(qkv, conv_state, self.conv1d.weight.squeeze(1), self.conv1d.bias, self.activation)
+            qkv = _causal_conv_step(qkv, conv_state, self.conv1d.weight.squeeze(1), self.conv1d.bias, self.activation)
         else:
             if cache_params is not None:
                 context = cache_params.update_conv_state(
@@ -634,13 +355,7 @@ class AgnesDeltaAttention(nn.Module):
                 # current-token outputs. Only a resumed chunk needs that context.
                 if resume:
                     qkv = context
-            if self.causal_conv1d_fn is not None:
-                qkv = self.causal_conv1d_fn(
-                    x=qkv, weight=self.conv1d.weight.squeeze(1), bias=self.conv1d.bias,
-                    activation=self.activation, seq_idx=kwargs.get("seq_idx"),
-                )
-            else:
-                qkv = F.silu(self.conv1d(qkv)[:, :, : qkv.shape[-1]])
+            qkv = F.silu(self.conv1d(qkv)[:, :, : qkv.shape[-1]])
             if resume:
                 qkv = qkv[:, :, -seq:]
 
@@ -659,12 +374,12 @@ class AgnesDeltaAttention(nn.Module):
             key = key.repeat_interleave(groups, dim=2)
 
         if resume and seq == 1:
-            mixed, rec_state = self.recurrent_gated_delta_rule(
+            mixed, rec_state = _delta_rule_stepwise(
                 query, key, value, g=g, beta=beta, initial_state=rec_state,
                 output_final_state=cache_params is not None, use_qk_l2norm_in_kernel=True,
             )
         else:
-            mixed, rec_state = self.chunk_gated_delta_rule(
+            mixed, rec_state = _delta_rule_chunked(
                 query, key, value, g=g, beta=beta,
                 initial_state=rec_state if resume else None,
                 output_final_state=cache_params is not None, use_qk_l2norm_in_kernel=True,
@@ -753,7 +468,7 @@ class AgnesPreTrainedModel(PreTrainedModel):
         super()._init_weights(module)
         if isinstance(module, AgnesDeltaAttention):
             init.ones_(module.dt_bias)
-            init.copy_(module.A_log, torch.empty_like(module.A_log).uniform_(0, 16).log_())
+            init.copy_(module.A_log, torch.empty_like(module.A_log).uniform_(0.01, 16).log_())
         elif isinstance(module, AgnesRMSNorm):
             # the norm scales by (1 + weight), so zero is the identity
             init.zeros_(module.weight)
@@ -766,126 +481,12 @@ class AgnesPreTrainedModel(PreTrainedModel):
 # Vision tower
 # ---------------------------------------------------------------------------
 
-
-class AgnesVisionPatchEmbed(nn.Module):
-    def __init__(self, config) -> None:
-        super().__init__()
-        self.patch_size = config.patch_size
-        self.temporal_patch_size = config.temporal_patch_size
-        self.in_channels = config.in_channels
-        self.embed_dim = config.hidden_size
-        kernel = [self.temporal_patch_size, self.patch_size, self.patch_size]
-        self.proj = nn.Conv3d(self.in_channels, self.embed_dim, kernel_size=kernel, stride=kernel, bias=True)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        dt = self.proj.weight.dtype
-        patches = hidden_states.view(-1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size)
-        return self.proj(patches.to(dtype=dt)).view(-1, self.embed_dim)
+AgnesVisionPatchEmbed = Qwen3_5VisionPatchEmbed
+AgnesVisionMerger = Qwen3_5VisionPatchMerger
 
 
-class AgnesVisionMLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
-        self.linear_fc1 = nn.Linear(self.hidden_size, self.intermediate_size, bias=True)
-        self.linear_fc2 = nn.Linear(self.intermediate_size, self.hidden_size, bias=True)
-        self.act_fn = ACT2FN[config.hidden_act]
-
-    def forward(self, hidden_state):
-        return self.linear_fc2(self.act_fn(self.linear_fc1(hidden_state)))
-
-
-class AgnesVisionAttention(nn.Module):
-    def __init__(self, config: AgnesVisionConfig) -> None:
-        super().__init__()
-        self.dim = config.hidden_size
-        self.num_heads = config.num_heads
-        self.head_dim = self.dim // self.num_heads
-        self.num_key_value_groups = 1
-        self.qkv = nn.Linear(self.dim, self.dim * 3, bias=True)
-        self.proj = nn.Linear(self.dim, self.dim)
-        self.scaling = self.head_dim**-0.5
-        self.config = config
-        self.attention_dropout = 0.0
-        self.is_causal = False
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        n_tok = hidden_states.shape[0]
-        q, k, v = self.qkv(hidden_states).reshape(n_tok, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
-        cos, sin = position_embeddings
-        q, k = _apply_vision_rope(q, k, cos, sin)
-        q = q.transpose(0, 1).unsqueeze(0)
-        k = k.transpose(0, 1).unsqueeze(0)
-        v = v.transpose(0, 1).unsqueeze(0)
-
-        attend: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(self.config._attn_implementation, _dense_attention)
-        drop = 0.0 if not self.training else self.attention_dropout
-        if is_flash_attention_requested(self.config):
-            longest = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-            out, _ = attend(
-                self, q, k, v, attention_mask=None, scaling=self.scaling, dropout=drop,
-                cu_seq_lens_q=cu_seqlens, cu_seq_lens_k=cu_seqlens, max_length_q=longest, max_length_k=longest,
-                is_causal=False, **kwargs,
-            )
-        else:
-            spans = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-            pieces = [torch.split(t, spans, dim=2) for t in (q, k, v)]
-            out = torch.cat(
-                [
-                    attend(self, qi, ki, vi, attention_mask=None, scaling=self.scaling, dropout=drop, is_causal=False, **kwargs)[0]
-                    for qi, ki, vi in zip(*pieces)
-                ],
-                dim=1,
-            )
-        return self.proj(out.reshape(n_tok, -1).contiguous())
-
-
-class AgnesVisionBlock(GradientCheckpointingLayer):
-    def __init__(self, config, attn_implementation: str = "sdpa") -> None:
-        super().__init__()
-        self.norm1 = nn.LayerNorm(config.hidden_size, eps=1e-6)
-        self.norm2 = nn.LayerNorm(config.hidden_size, eps=1e-6)
-        self.attn = AgnesVisionAttention(config=config)
-        self.mlp = AgnesVisionMLP(config=config)
-
-    @auto_docstring
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        r"""
-        cu_seqlens (`torch.Tensor`):
-            Cumulative sequence lengths used for packed variable-length attention.
-        """
-        hidden_states = hidden_states + self.attn(
-            self.norm1(hidden_states), cu_seqlens=cu_seqlens, position_embeddings=position_embeddings, **kwargs
-        )
-        return hidden_states + self.mlp(self.norm2(hidden_states))
-
-
-class AgnesVisionMerger(nn.Module):
-    def __init__(self, config: AgnesVisionConfig, use_postshuffle_norm=False) -> None:
-        super().__init__()
-        self.hidden_size = config.hidden_size * (config.spatial_merge_size**2)
-        self.use_postshuffle_norm = use_postshuffle_norm
-        self.norm = nn.LayerNorm(self.hidden_size if use_postshuffle_norm else config.hidden_size, eps=1e-6)
-        self.linear_fc1 = nn.Linear(self.hidden_size, self.hidden_size)
-        self.act_fn = nn.GELU()
-        self.linear_fc2 = nn.Linear(self.hidden_size, config.out_hidden_size)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.norm(x.view(-1, self.hidden_size) if self.use_postshuffle_norm else x).view(-1, self.hidden_size)
-        return self.linear_fc2(self.act_fn(self.linear_fc1(x)))
+class AgnesVisionBlock(Qwen3_5VisionBlock):
+    pass
 
 
 class AgnesVisionModel(AgnesPreTrainedModel):
@@ -894,7 +495,7 @@ class AgnesVisionModel(AgnesPreTrainedModel):
     input_modalities = ("image", "video")
     _can_record_outputs = {
         "hidden_states": AgnesVisionBlock,
-        "attentions": AgnesVisionAttention,
+        "attentions": Qwen3_5VisionAttention,
     }
     _no_split_modules = ["AgnesVisionBlock"]
 
@@ -922,14 +523,15 @@ class AgnesVisionModel(AgnesPreTrainedModel):
             grid_thw (`torch.Tensor` of shape `(num_images_or_videos, 3)`):
                 Temporal / height / width extent of every image or video.
         """
-        idx, w = get_vision_bilinear_indices_and_weights(
-            grid_thw, num_grid_per_side=self.num_grid_per_side, spatial_merge_size=self.config.spatial_merge_size, kwargs=kwargs
+        idx, w = get_vision_interpolation_indices_and_weights(
+            grid_thw, num_grid_per_side=self.num_grid_per_side, mode="bilinear", align_corners=True,
+            spatial_merge_size=self.config.spatial_merge_size, kwargs=kwargs,
         )
         pos_ids = get_vision_position_ids(grid_thw, self.spatial_merge_size, kwargs=kwargs)
-        cu_seqlens = get_vision_cu_seqlens(grid_thw, kwargs=kwargs)
+        cu_seqlens, max_seqlen = get_vision_attention_seqlens(grid_thw, self.config, kwargs=kwargs)
 
         tokens = self.patch_embed(hidden_states)
-        tokens = tokens + (self.pos_embed(idx) * w[:, :, None]).sum(0).to(tokens.dtype)
+        tokens = tokens + (self.pos_embed(idx) * w[:, :, None]).sum(1).to(tokens.dtype)
         angles = self.rotary_pos_emb(pos_ids)
 
         n_tok, _ = tokens.size()
@@ -939,7 +541,7 @@ class AgnesVisionModel(AgnesPreTrainedModel):
         rope = (table.cos(), table.sin())
 
         for block in self.blocks:
-            tokens = block(tokens, cu_seqlens=cu_seqlens, position_embeddings=rope, **kwargs)
+            tokens = block(tokens, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, position_embeddings=rope, **kwargs)
 
         return BaseModelOutputWithPooling(last_hidden_state=tokens, pooler_output=self.merger(tokens))
 
@@ -1058,7 +660,7 @@ class AgnesTextModel(AgnesPreTrainedModel):
             config=self.config, inputs_embeds=inputs_embeds, attention_mask=attention_mask,
             past_key_values=past_key_values, position_ids=text_positions,
         ) if LAYER_GLOBAL in self.config.layer_types else None
-        delta_mask = self._recurrent_mask(attention_mask, past_key_values)
+        delta_mask = create_recurrent_attention_mask(self.config, inputs_embeds, attention_mask, past_key_values)
 
         h = inputs_embeds
         rope = self.rotary_emb(h, position_ids)
@@ -1081,16 +683,6 @@ class AgnesTextModel(AgnesPreTrainedModel):
             if not _defer_cache_commit:
                 past_key_values._in_forward = False
         return AgnesModelOutput(last_hidden_state=h, past_key_values=past_key_values)
-
-    @staticmethod
-    def _recurrent_mask(attention_mask, past_key_values):
-        """Padding mask for the recurrent layers (left padding).  Not needed
-        once a cache holds prior state, or when nothing is masked."""
-        if past_key_values is not None and past_key_values.get_seq_length() > 0:
-            return None
-        if attention_mask is not None and torch.all(attention_mask == 1):
-            return None
-        return attention_mask
 
 
 @auto_docstring
