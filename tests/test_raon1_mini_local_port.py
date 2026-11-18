@@ -232,7 +232,11 @@ def test_actual_hybrid_decoder_matches_independent_float64_equations(layout, set
     with torch.no_grad():
         expected = _source_oracle(model, tokens)
         actual = model(tokens, use_cache=False).logits
-    torch.testing.assert_close(actual.double(), expected, atol=3e-6, rtol=3e-5)
+    # The pinned source keeps norms, mHC mixing, convolutions and recurrent
+    # state in float32 even for float64 weights (model.double() still differs
+    # from this oracle by ~1e-6), so fp32 logits of magnitude ~3 carry a few
+    # ulps of rounding; use torch.testing's float32 atol.
+    torch.testing.assert_close(actual.double(), expected, atol=1e-5, rtol=3e-5)
 
 
 @pytest.mark.parametrize("layout", ["hybrid", "reverse", "rda", "mla"])
