@@ -495,15 +495,21 @@ class _CompiledModelForward:
         reused the compiled cache adds no frames and needs no collection.
         """
 
-        traced = dynamo_traced_frames()
-        if traced == self._traced_frames:
-            return
         if dynamo_is_compiling():
             # An outer ``torch.compile`` (transformers' static-cache generate)
             # is tracing this call. ``gc.collect`` is untraceable, so running it
             # here is a graph break per model call (#5224), and collecting while
             # dynamo still holds the trace's trackers is the wrong time. Leave
             # the count unchanged so the next eager call releases the garbage.
+            return
+        # Read the counter only after the trace check: dynamo traces this
+        # method when an outer compile calls through the proxy, and a traced
+        # read of ``counters["frames"]`` installs a guard on dynamo's global
+        # frame counter. Every later compile bumps that counter, so the guard
+        # failed on the next call and every static-cache ``generate()``
+        # re-traced forever (#5266).
+        traced = dynamo_traced_frames()
+        if traced == self._traced_frames:
             return
         self._traced_frames = traced
         release_compile_trace_garbage()
