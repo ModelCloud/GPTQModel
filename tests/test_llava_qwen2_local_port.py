@@ -532,3 +532,14 @@ def test_public_awq_image_calibration_pack_infer_and_safetensors_reload(tmp_path
     assert set(reloaded.model.state_dict()) == set(wrapper.model.state_dict())
     for name, value in reloaded.model.state_dict().items():
         torch.testing.assert_close(value, wrapper.model.state_dict()[name], atol=0, rtol=0)
+
+
+def test_decoder_and_clip_tower_use_vendored_classes():
+    from gptqmodel.models.ports.native.clip.modeling_clip import CLIPVisionModel
+    from gptqmodel.models.ports.native.qwen2.configuration_qwen2 import Qwen2Config
+    from gptqmodel.models.ports.native.qwen2.modeling_qwen2 import Qwen2ForCausalLM
+
+    model = _model("clip")
+    assert issubclass(LlavaConfig, Qwen2Config)
+    assert isinstance(model, Qwen2ForCausalLM)
+    assert type(model.get_vision_tower().vision_tower) is CLIPVisionModel
