@@ -470,6 +470,66 @@ def test_paro_biased_fp16_compiles_before_the_first_eager_call():
     _compile_first(lambda: _pack_awq(ParoLinear, bias=True))
 
 
+def _pack_paro_rotated(*, dtype: torch.dtype = torch.bfloat16):
+    """A Paro layer whose rotation is learned, not the identity (#5115).
+
+    The ``CASES`` Paro entry starts from identity rotation buffers, so it never
+    reaches the rotation runtime-dtype cache that broke the graph for every
+    projection of a real Paro checkpoint.
+    """
+
+    from gptqmodel.utils.paro import build_identity_rotation_buffers
+
+    module = _pack_awq(ParoLinear, bias=True)
+    pairs, theta, channel_scales = build_identity_rotation_buffers(
+        in_features=IN_FEATURES,
+        group_size=GROUP_SIZE,
+        krot=module.krot,
+        dtype=torch.float16,
+    )
+    torch.manual_seed(0)
+    theta.normal_()
+    channel_scales.uniform_(0.75, 1.25)
+    module.pairs.copy_(pairs)
+    module.theta.copy_(theta)
+    module.channel_scales.copy_(channel_scales)
+    module = module.to(dtype)
+    module.clear_weight_cache()
+    assert module._rotation_identity is False
+    return module
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+def test_paro_rotated_cpu_layer_reaches_declared_level(dtype):
+    """A learned rotation keeps the CPU forward graph-safe (#5115).
+
+    Before the fix, ``_ensure_rotation_runtime_dtype`` keyed its cache with
+    ``tensor_cache_key`` (``is_inference()``) inside the traced region, and the
+    vectorized rotation read a padding mask with ``bool(...)``, so every
+    projection of a real Paro checkpoint broke the graph while the class
+    declared ``INDUCTOR``.
+    """
+
+    module = _pack_paro_rotated(dtype=dtype)
+    x = torch.randn(ROWS, IN_FEATURES, dtype=dtype)
+    result = probe(module, (x,), check_cuda_graph=False)
+    declared = compile_level(ParoLinear, device_type="cpu")
+
+    assert declared is COMPILE_LEVEL.INDUCTOR
+    assert result.eager, result.eager_error
+    assert result.levels.get("dynamo"), (
+        f"ParoLinear (rotated, {dtype}): the CPU forward is not graph-safe: "
+        f"{result.errors.get('dynamo')}"
+    )
+    assert result.reached(declared), (
+        f"ParoLinear (rotated, {dtype}): declares CPU {declared.name} but the "
+        f"probe reported {result.summary()} errors={result.errors}"
+    )
+    assert result.output_close.get("inductor", True), (
+        f"ParoLinear (rotated, {dtype}): inductor output does not match eager"
+    )
+
+
 def test_nf12_cpu_compiles_after_post_init_without_an_eager_call():
     """``post_init`` resolves the exponent base, so a cold trace has no host read."""
 

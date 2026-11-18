@@ -591,11 +591,45 @@ class ParoLinear(AwqTorchLinear):
             self._runtime_bias = bias
         return scales, bias
 
+    def _rotation_runtime_tensors(
+        self,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Convert the rotation operands for this device/dtype, without caching."""
+
+        theta = self.theta.to(device=device, dtype=dtype).contiguous()
+        channel_scales = self.channel_scales.to(device=device, dtype=dtype).contiguous()
+        return theta, channel_scales
+
     def _ensure_rotation_runtime_dtype(
         self,
         device: torch.device,
         dtype: torch.dtype,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if torch.compiler.is_compiling():
+            # `tensor_cache_key` reads `is_inference()`/`_version`/`data_ptr()`,
+            # all hard dynamo graph breaks, and publishing the cache is a state
+            # write a traced graph must not perform. The eager warmup built the
+            # tensors for this device/dtype; a cold trace converts them without
+            # publishing, which stays traceable. Without this, every layer of a
+            # real (non-identity) Paro checkpoint broke the graph twice on CPU
+            # while the class declared `INDUCTOR` (#5115).
+            theta = self._runtime_theta
+            channel_scales = self._runtime_channel_scales
+            if (
+                theta is None
+                or channel_scales is None
+                or theta.device != device
+                or theta.dtype != dtype
+                or channel_scales.device != device
+                or channel_scales.dtype != dtype
+                or not theta.is_contiguous()
+                or not channel_scales.is_contiguous()
+            ):
+                return self._rotation_runtime_tensors(device, dtype)
+            return theta, channel_scales
+
         runtime_key = (
             tensor_cache_key(self.theta),
             tensor_cache_key(self.channel_scales),
@@ -609,8 +643,9 @@ class ParoLinear(AwqTorchLinear):
             or not self._runtime_theta.is_contiguous()
             or not self._runtime_channel_scales.is_contiguous()
         ):
-            self._runtime_theta = self.theta.to(device=device, dtype=dtype).contiguous()
-            self._runtime_channel_scales = self.channel_scales.to(device=device, dtype=dtype).contiguous()
+            self._runtime_theta, self._runtime_channel_scales = (
+                self._rotation_runtime_tensors(device, dtype)
+            )
             self._rotation_runtime_device = device
             self._rotation_runtime_dtype = dtype
             self._rotation_runtime_key = runtime_key
@@ -818,6 +853,14 @@ class ParoLinear(AwqTorchLinear):
 
         gemm = TorchCpuAvx512AwqLinear.gemm_int4_qzero_group_scaled_cpu_kernel
         if gemm is None:
+            if torch.compiler.is_compiling():
+                # Resolving the handle loads the JIT extension through
+                # importlib, which dynamo cannot trace (a `setattr` on the
+                # extension module is a hard graph break). The eager warmup
+                # already answered for this host: a missing handle means the
+                # AVX512 path is unavailable, so fall through to the ATen/dense
+                # paths instead of resolving it inside the graph (#5115).
+                return None
             ok, _ = TorchCpuAvx512AwqLinear.cached_validate_once()
             gemm = TorchCpuAvx512AwqLinear.gemm_int4_qzero_group_scaled_cpu_kernel
             if not ok or gemm is None:
