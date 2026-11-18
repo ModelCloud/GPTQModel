@@ -7,7 +7,8 @@ Class selection is package-owned; Tokenicer owns corrective normalization.
 
 import regex as re
 from tokenizers.processors import TemplateProcessing
-from transformers import GPT2Tokenizer
+
+from ..native.gpt2.tokenization_gpt2 import GPT2Tokenizer
 
 
 class MossTokenizer(GPT2Tokenizer):
