@@ -61,8 +61,10 @@ def tiny_config(layout="hybrid", kv_heads=2, bias=False):
     )
 
 
-def native_reference(model):
-    reference = Qwen3_5ForConditionalGeneration(copy.deepcopy(model.config.vlm_config)).to(model.dtype).eval()
+def native_reference(model, *, dtype=None):
+    reference = Qwen3_5ForConditionalGeneration._from_config(
+        copy.deepcopy(model.config.vlm_config), dtype=dtype or model.dtype,
+    ).eval()
     reference.load_state_dict({key.removeprefix("vlm."): value for key, value in model.state_dict().items()}, strict=True)
     return reference
 
@@ -280,7 +282,8 @@ def test_public_image_plain_awq_all_linears_and_two_exact_reloads(tmp_path, monk
     loaded = GPTQModel.load(str(source), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
     assert loaded.awq_get_modules_for_scaling(None, None, None) == []
     inputs = media_inputs(dtype=torch.float16)
-    reference = native_reference(original).half()
+    # Construct at the load dtype so native RoPE keeps its FP32 frequency buffers.
+    reference = native_reference(original, dtype=torch.float16)
     first_inputs = []
 
     def observe_first(module, args, kwargs):
