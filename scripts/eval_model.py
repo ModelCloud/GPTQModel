@@ -27,10 +27,6 @@ if sys.platform == "darwin":
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
-os.environ.setdefault(
-    "PYTORCH_ALLOC_CONF",
-    "expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7",
-)
 
 DEFAULT_RESULTS_PATH = Path("evalution_results.json")
 DEFAULT_TASKS = ("arc_challenge",)

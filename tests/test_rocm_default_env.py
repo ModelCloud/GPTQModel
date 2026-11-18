@@ -17,6 +17,7 @@ Both rules defer to an explicit caller value.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -350,3 +351,138 @@ def test_harness_import_keeps_the_rocm_safe_default():
 
     assert payload["alloc"] == _alloc_conf.ROCM_DEFAULT_ALLOC_CONF
     assert "expandable_segments:True" not in (payload["alloc"] or "")
+
+
+# ---------------------------------------------------------------------------
+# The quantization command-line tools must not pin the allocator (#5199)
+# ---------------------------------------------------------------------------
+
+
+_REQUANT_TOOL_IMPORT_PROBE = """
+    import json, os
+    import optimize.requant_embed_lm_head  # noqa: F401  (runs set_env() at import)
+    import gptqmodel  # noqa: F401
+    from gptqmodel import _alloc_conf
+    print(json.dumps({
+        "alloc": os.environ.get("PYTORCH_ALLOC_CONF"),
+        "cuda_alloc": os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+        "expected": _alloc_conf.default_alloc_conf(),
+    }))
+"""
+
+
+def test_requant_tool_leaves_the_allocator_default_to_gptqmodel():
+    """``optimize/requant_embed_lm_head.py`` must get GPT-QModel's per-platform default.
+
+    ``optimize._common.set_env()`` runs before ``gptqmodel`` is imported, and
+    GPT-QModel defers to a caller-set ``PYTORCH_ALLOC_CONF``. Setting
+    ``expandable_segments:True`` there replaced the ROCm default
+    (``expandable_segments:False``) with the configuration that corrupts
+    ordinary Torch results after ``empty_cache()`` on gfx1201 (#5199).
+    """
+
+    payload = _last_json(_run_child(_REQUANT_TOOL_IMPORT_PROBE, timeout=900).stdout)
+
+    assert payload["alloc"] == payload["expected"]
+    assert payload["cuda_alloc"] == payload["expected"]
+
+
+def test_requant_tool_keeps_a_caller_alloc_conf():
+    """An explicit caller value still wins over both the tool and GPT-QModel."""
+
+    caller_value = "max_split_size_mb:512"
+    payload = _last_json(
+        _run_child(
+            _REQUANT_TOOL_IMPORT_PROBE,
+            env=_child_env(PYTORCH_ALLOC_CONF=caller_value),
+            timeout=900,
+        ).stdout
+    )
+
+    assert payload["alloc"] == caller_value
+
+
+_ALLOC_CONF_OWNER = REPO_ROOT / "gptqmodel" / "_alloc_conf.py"
+_SKIPPED_SOURCE_DIRS = {"build", "dist", "venv", "__pycache__", "node_modules"}
+
+
+def _is_os_environ(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "environ"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "os"
+    )
+
+
+def _str_constant(node) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _environ_writes(tree: ast.AST):
+    """Yield ``(node, key, value)`` for literal ``os.environ`` / ``os.putenv`` writes."""
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Subscript) and _is_os_environ(target.value):
+                    yield node, _str_constant(target.slice), _str_constant(node.value)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and len(node.args) >= 2:
+            func = node.func
+            is_setdefault = func.attr == "setdefault" and _is_os_environ(func.value)
+            is_putenv = func.attr == "putenv" and isinstance(func.value, ast.Name) and func.value.id == "os"
+            if is_setdefault or is_putenv:
+                yield node, _str_constant(node.args[0]), _str_constant(node.args[1])
+
+
+def _guarded_for_rocm(node: ast.AST, parents: dict, source: str) -> bool:
+    """Whether *node* sits under an ``if`` whose test checks for a HIP/ROCm build."""
+
+    current = parents.get(node)
+    while current is not None:
+        if isinstance(current, ast.If):
+            test = (ast.get_source_segment(source, current.test) or "").lower()
+            if "hip" in test or "rocm" in test:
+                return True
+        current = parents.get(current)
+    return False
+
+
+def test_no_source_forces_expandable_segments_outside_alloc_conf():
+    """Only ``gptqmodel/_alloc_conf.py`` may choose ``expandable_segments:True``.
+
+    A script, tool, or test that writes it into ``PYTORCH_*ALLOC_CONF`` before
+    ``import gptqmodel`` overrides the ROCm-safe default for that process.
+    #5165 removed the ``docs/eora/`` copies and #5199 the ``optimize/`` one; this
+    keeps a new copy from coming back. A write inside an ``if`` that checks for
+    a HIP/ROCm build is allowed. CI workflow files are not Python and are not
+    scanned here.
+    """
+
+    alloc_names = set(ALL_ALLOC_ENV_VARS)
+    offenders = []
+    for path in sorted(REPO_ROOT.rglob("*.py")):
+        rel_parts = path.relative_to(REPO_ROOT).parts
+        if any(part.startswith(".") or part in _SKIPPED_SOURCE_DIRS for part in rel_parts[:-1]):
+            continue
+        if path == _ALLOC_CONF_OWNER:
+            continue
+        source = path.read_text(encoding="utf-8", errors="replace")
+        if "expandable_segments:True" not in source:
+            continue
+        tree = ast.parse(source, filename=str(path))
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        for node, key, value in _environ_writes(tree):
+            if key not in alloc_names or value is None or "expandable_segments:True" not in value:
+                continue
+            if _guarded_for_rocm(node, parents, source):
+                continue
+            offenders.append(f"{'/'.join(rel_parts)}:{node.lineno}: {key}={value!r}")
+
+    assert not offenders, (
+        "these sources force expandable_segments:True and override the ROCm-safe "
+        "allocator default; leave PYTORCH_ALLOC_CONF to `import gptqmodel`:\n"
+        + "\n".join(offenders)
+    )
