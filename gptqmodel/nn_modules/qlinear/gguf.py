@@ -332,7 +332,10 @@ def _gguf_quantize_q8_0(blocks: np.ndarray) -> np.ndarray:
     d = np.abs(blocks).max(axis=-1, keepdims=True) / 127.0
     with np.errstate(divide="ignore"):
         inv_d = np.where(d == 0, 0, 1.0 / d)
-    qs = np.round(blocks * inv_d).astype(np.int8).view(np.uint8)
+    # ggml's Q8_0 reference rounds ties away from zero, not to nearest-even.
+    # The optional `gguf` package packs Q8_0 with that rule, so the fallback
+    # must emit the same bytes when that dependency is missing.
+    qs = _gguf_roundf(blocks * inv_d).astype(np.int8).view(np.uint8)
     d = d.astype(np.float16).view(np.uint8)
     return np.concatenate([d, qs], axis=-1)
 
