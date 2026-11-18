@@ -3044,6 +3044,14 @@ def get_state_dict_for_save(
             tensor = source
             if getattr(tensor, "is_meta", False) or tensor.device.type == "meta":
                 key = ("meta", id(tensor))
+            elif tensor.numel() == 0:
+                # Every zero-element tensor reports storage pointer 0, so
+                # storage identity cannot distinguish one empty buffer from
+                # another. They carry no data to share; keep each named entry
+                # so a required empty buffer (e.g. a per-channel QQQ
+                # `s_group`) is written instead of being removed as a
+                # duplicate (#5126).
+                key = ("empty", name)
             else:
                 try:
                     # Distinct checkpoint weights may be views into one fused
@@ -3192,6 +3200,11 @@ def validate_checkpoint_qweights(
     illegal-address fault or all-NaN logits (#5010). A truncated checkpoint
     must raise, not corrupt the context.
 
+    A suffix listed in ``CHECKPOINT_OPTIONAL_EMPTY_BUFFERS`` is not required
+    when the live module's buffer is empty: there is no data to restore, and
+    per-channel QQQ derives its empty ``s_group`` from ``s_channel`` (#5126).
+    A non-empty buffer of the same name stays required.
+
     ``format`` is kept for the call-site signature; the per-kernel declaration
     is the source of truth.
     """
@@ -3206,10 +3219,15 @@ def validate_checkpoint_qweights(
         required = getattr(module, "CHECKPOINT_REQUIRED_BUFFERS", ())
         if not required:
             continue
+        optional_empty = getattr(module, "CHECKPOINT_OPTIONAL_EMPTY_BUFFERS", ())
         aliases = [name]
         if callable(key_converter):
             aliases.append(key_converter(name))
         for suffix in required:
+            if suffix in optional_empty:
+                buffer = getattr(module, suffix, None)
+                if isinstance(buffer, torch.Tensor) and buffer.numel() == 0:
+                    continue
             for alias in aliases:
                 module_keys[(id(module), suffix)].add(
                     f"{alias}.{suffix}" if alias else suffix
