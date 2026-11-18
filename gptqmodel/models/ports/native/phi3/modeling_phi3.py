@@ -40,6 +40,7 @@ from transformers.modeling_layers import (
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple
 from transformers.utils.generic import merge_with_config_defaults
@@ -319,7 +320,7 @@ class Phi3DecoderLayer(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class Phi3PreTrainedModel(PreTrainedModel):
+class Phi3PreTrainedModel(NativePreTrainedModel):
     config: Phi3Config
     base_model_prefix = "model"
     supports_gradient_checkpointing = True

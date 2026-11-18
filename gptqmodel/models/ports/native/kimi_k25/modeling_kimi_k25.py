@@ -33,6 +33,7 @@ from transformers.generation import GenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, BaseModelOutputWithPooling, ModelOutput
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, torch_compilable_check
 from transformers.utils.generic import get_max_seqlen, is_flash_attention_requested
@@ -419,7 +420,7 @@ class Kimi_K25VisionEncoderLayer(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class Kimi_K25PreTrainedModel(PreTrainedModel):
+class Kimi_K25PreTrainedModel(NativePreTrainedModel):
     config: Kimi_K25Config
     base_model_prefix = "model"
     input_modalities = ("image", "video", "text")

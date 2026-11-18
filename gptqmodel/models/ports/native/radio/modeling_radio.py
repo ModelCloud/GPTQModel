@@ -32,6 +32,7 @@ from transformers.activations import ACT2FN
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutput, ModelOutput
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple
 from transformers.utils.generic import get_max_seqlen, is_flash_attention_requested, merge_with_config_defaults
@@ -379,7 +380,7 @@ class RadioLayer(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class RadioPreTrainedModel(PreTrainedModel):
+class RadioPreTrainedModel(NativePreTrainedModel):
     config: RadioConfig
     base_model_prefix = "model"
     main_input_name = "pixel_values"

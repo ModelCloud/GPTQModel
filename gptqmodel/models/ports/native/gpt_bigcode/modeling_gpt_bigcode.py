@@ -34,6 +34,7 @@ from transformers.modeling_outputs import (
     TokenClassifierOutput,
 )
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import (
     TransformersKwargs,
@@ -331,7 +332,7 @@ class GPTBigCodeBlock(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class GPTBigCodePreTrainedModel(PreTrainedModel):
+class GPTBigCodePreTrainedModel(NativePreTrainedModel):
     config: GPTBigCodeConfig
     base_model_prefix = "transformer"
     supports_gradient_checkpointing = True

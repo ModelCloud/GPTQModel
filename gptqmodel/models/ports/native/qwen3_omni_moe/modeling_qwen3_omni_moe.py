@@ -48,6 +48,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import auto_docstring, can_return_tuple, logging, torch_compilable_check
 from transformers.utils.generic import (
@@ -112,7 +113,7 @@ class SinusoidsPositionEmbedding(nn.Module):
 
 
 @auto_docstring
-class Qwen3OmniMoePreTrainedModel(PreTrainedModel):
+class Qwen3OmniMoePreTrainedModel(NativePreTrainedModel):
     config: Qwen3OmniMoeConfig
     base_model_prefix = "model"
     input_modalities = ("image", "video", "audio", "text")
@@ -1566,7 +1567,7 @@ class Qwen3OmniMoeThinkerTextDecoderLayer(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class Qwen3OmniMoeThinkerTextPreTrainedModel(PreTrainedModel):
+class Qwen3OmniMoeThinkerTextPreTrainedModel(NativePreTrainedModel):
     config: Qwen3OmniMoeTextConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
