@@ -4,18 +4,10 @@ tokenization_kimi.py, tool_declaration_ts.py and LICENSE
 derive from moonshotai/Kimi-K2.5 at revision
 4d01dfe0332d63057c186e0b262165819efb6611, Copyright (c) 2026 Moonshot AI.
 They retain the accompanying Modified MIT License, including its commercial
-display requirement. See LICENSE and README.md for source hashes and changes.
+display requirement. See LICENSE.
 
-The byte alphabet in tokenization_utils.py adapts bytes_to_unicode from
-Hugging Face Transformers src/transformers/models/gpt2/tokenization_gpt2.py,
-v4.57.3, commit 47b0e478f324b54f177ea7998a0791870fdd0324.
-Copyright 2018 The Open AI Team Authors and The HuggingFace Inc. team.
-Licensed under Apache License 2.0; the complete upstream license is preserved
-in LICENSE-APACHE-2.0. Local names, range spelling and formatting differ;
-the 256-byte mapping is unchanged. The original lru_cache decorator and
-docstring are omitted.
-Source: https://github.com/huggingface/transformers/blob/47b0e478f324b54f177ea7998a0791870fdd0324/src/transformers/models/gpt2/tokenization_gpt2.py
-Source SHA256: ddb2e0c5a6a9fba6297a1cd923e0d1e6cd0553c3ccd2b8898ec99a8aa287ff74
+tokenization_kimi.py uses bytes_to_unicode from Hugging Face Transformers
+(transformers.convert_slow_tokenizer, Apache License 2.0); no copy is kept.
 
 native.py adapts Hugging Face Transformers 5.23.0 Kimi-K2.5 native classes,
 Copyright 2026 The HuggingFace Team, licensed under Apache License 2.0.
