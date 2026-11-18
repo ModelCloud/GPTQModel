@@ -1,6 +1,6 @@
 # Copyright (c) Alibaba Cloud.
 # Modified by ModelCloud.ai for Transformers 5; see NOTICE and LICENSE.
-"""Original Qwen checkpoint configuration, pinned upstream in provenance.json."""
+"""Original Qwen checkpoint configuration (Qwen/Qwen-7B@ef3c5c9c)."""
 
 from transformers import PreTrainedConfig
 

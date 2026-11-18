@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Legacy MiniCPM-V wrapper on Transformers 5 native language decoders.
 
-See PROVENANCE.json for pinned implementations and README.md for support limits.
+Upstream sources are listed in NOTICE.
 No checkpoint Python or AutoModel/AutoProcessor discovery occurs in this module.
 """
 
@@ -26,7 +26,7 @@ class MiniCPMV(PreTrainedModel, GenerationMixin):
     main_input_name = "input_ids"
     _supports_sdpa = True
     _supports_attention_backend = True
-    _no_split_modules = ["VisionLayer", "LlamaDecoderLayer", "Qwen2DecoderLayer", "Qwen3DecoderLayer"]
+    _no_split_modules = ["Idefics2EncoderLayer", "LlamaDecoderLayer", "Qwen2DecoderLayer", "Qwen3DecoderLayer"]
     _tied_weights_keys = {"llm.lm_head.weight": "llm.model.embed_tokens.weight"}
 
     def __init__(self, config):

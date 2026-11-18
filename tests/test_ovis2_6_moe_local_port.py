@@ -20,6 +20,7 @@ from gptqmodel.models.ports.ovis2_6_moe.configuration_ovis2_6 import Ovis2_6_Moe
 from tests.port_assets import read_port_asset
 
 
+FIXTURES = Path(__file__).parent / "fixtures/ports/ovis2_6_moe/fixtures"
 CASES = [(Ovis2_6_MoeQModel, Ovis2_6_Moe_Config), (Ovis2_6_NextQModel, Ovis2_6_Next_Config)]
 
 
@@ -106,8 +107,7 @@ def checkpoint(path, definition, config_class, *, generation_config=None):
 
 
 def released_generation_policy():
-    fixture = Path(__file__).parents[1] / "gptqmodel/models/ports/ovis2_6_moe/fixtures/generation_config.json"
-    policy = GenerationConfig.from_dict(json.loads(fixture.read_text()))
+    policy = GenerationConfig.from_dict(json.loads((FIXTURES / "generation_config.json").read_text()))
     policy.update(
         bos_token_id=1,
         pad_token_id=0,
@@ -120,15 +120,8 @@ def released_generation_policy():
 
 
 def test_released_generation_policy_is_pinned_for_both_variants():
-    import hashlib
-
-    port = Path(__file__).parents[1] / "gptqmodel/models/ports/ovis2_6_moe"
-    provenance = json.loads((port / "provenance.json").read_text())
-    payload = (port / "fixtures/generation_config.json").read_bytes()
-    digest = hashlib.sha256(payload).hexdigest()
-    assert digest == provenance["fixture_sha256"]["generation_config.json"]
-    assert all(provenance[size]["files"]["generation_config.json"] == digest for size in ("30B", "80B"))
-    released = json.loads(payload)
+    # Both released repositories ship this identical generation_config.json.
+    released = json.loads((FIXTURES / "generation_config.json").read_text())
     assert released["eos_token_id"] == [151645, 151643]
     assert released["do_sample"] is True
     assert [released[name] for name in ("top_k", "top_p", "temperature", "repetition_penalty")] == [20, .95, .6, 1.05]
@@ -667,6 +660,26 @@ def test_independent_float64_navit_soft_vocabulary_and_image_merge(implementatio
     torch.testing.assert_close(model.merge_multimodal(ids, patches, grids), merged, atol=0, rtol=0)
 
 
+def test_vision_uses_tf5_attention_interface_and_config_return_dict(monkeypatch):
+    from transformers import PretrainedConfig
+    from transformers.modeling_layers import GradientCheckpointingLayer
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+    model = build(*CASES[0], implementation="sdpa")
+    vit = model.visual_tokenizer.vit
+    assert all(isinstance(layer, GradientCheckpointingLayer) for layer in vit.vision_model.encoder.layers)
+    # `use_return_dict` is deprecated in TF5; the wrapper must read `return_dict`.
+    monkeypatch.setattr(PretrainedConfig, "use_return_dict", property(lambda self: pytest.fail("use_return_dict")))
+    calls = []
+    sdpa = ALL_ATTENTION_FUNCTIONS["sdpa"]
+    monkeypatch.setitem(ALL_ATTENTION_FUNCTIONS, "sdpa", lambda *a, **k: calls.append(a[1].shape) or sdpa(*a, **k))
+    grids = torch.tensor([[1, 4, 4], [1, 2, 4]])
+    output = vit(torch.randn(24, 12), grids)
+    assert output.last_hidden_state.shape == (24, 16)
+    # One call per packed window/image (window_size=8 -> 2x2 merged patches per window).
+    assert calls and all(shape[0] == 1 and shape[1] == 2 for shape in calls)
+
+
 @pytest.mark.parametrize("definition,config_class", CASES)
 @pytest.mark.parametrize("kind", ["image", "video"])
 def test_processor_pixels_patch_order_prompt_save_reload_and_retry(definition, config_class, kind, tmp_path):
@@ -724,11 +737,12 @@ def test_real_released_tokenizer_assets_ids_chat_and_reload(size, case, trust, b
     from gptqmodel.utils.hf import load_hf_tokenizer
 
     definition, config_class = case
-    fixtures = Path(__file__).parents[1] / "gptqmodel/models/ports/ovis2_6_moe/fixtures"
-    (tmp_path / "tokenizer.json").write_bytes(read_port_asset(fixtures / "qwen_tokenizer.json"))
-    for file in ["tokenizer_config.json", "preprocessor_config.json", "added_tokens.json", "special_tokens_map.json"]:
-        (tmp_path / file).write_bytes((fixtures / f"{size}_{file}").read_bytes())
-    config = config_class(**json.loads((fixtures / f"{size}_config.json").read_text()))
+    port = Path(__file__).parents[1] / "gptqmodel/models/ports/ovis2_6_moe/fixtures"
+    (tmp_path / "tokenizer.json").write_bytes(read_port_asset(port / "qwen_tokenizer.json"))
+    (tmp_path / "tokenizer_config.json").write_bytes((FIXTURES / f"{size}_tokenizer_config.json").read_bytes())
+    for file in ["preprocessor_config.json", "added_tokens.json", "special_tokens_map.json"]:
+        (tmp_path / file).write_bytes((FIXTURES / file).read_bytes())
+    config = config_class(**json.loads((FIXTURES / f"{size}_config.json").read_text()))
     config.save_pretrained(tmp_path)
     original = AutoTokenizer.from_pretrained(tmp_path, trust_remote_code=False)
     if bypass is None:

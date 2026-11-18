@@ -28,21 +28,21 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from torch import nn
+from transformers import initialization as init
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache
 from transformers.generation import GenerationMixin
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.models.kimi_linear.modeling_kimi_linear import KimiLinearRMSNorm as KimiRMSNorm
+from transformers.models.kimi_linear.modeling_kimi_linear import eager_attention_forward
 from transformers.processing_utils import Unpack
-from transformers.utils import TransformersKwargs, can_return_tuple, logging
+from transformers.utils import TransformersKwargs, can_return_tuple
 
 from .checkpoint import ActiveKDAHeads, KimiCheckpointMixin
 from .configuration_kimi_k3 import KimiLinearConfig
 from .eager_kda import FusedRMSNormGated, ShortConvolution, kda_forward
-
-
-logger = logging.get_logger(__name__)
 
 
 # Register Moonshot-specific activation functions
@@ -182,17 +182,9 @@ class KimiDynamicCache:
         """Returns the sequence length of the cached states. A layer index can be optionally passed."""
         return self.seen_tokens
 
-    def get_mask_sizes(self, cache_position: torch.Tensor, layer_idx: int) -> tuple[int, int]:
-        """
-        Return a tuple (kv_length, kv_offset) corresponding to the length and offset that will be returned for
-        the given layer at `layer_idx`.
-        The masks are then prepared according to the given lengths (kv_length, kv_offset) and patterns for each layer.
-        """
-        kv_offset = 0
-        query_length = cache_position.shape[0]
-        past_seen_tokens = self.get_seq_length(layer_idx)
-        kv_length = query_length + past_seen_tokens
-        return kv_length, kv_offset
+    def get_mask_sizes(self, query_length: int, layer_idx: int = 0) -> tuple[int, int]:
+        """TF5 ``Cache.get_mask_sizes`` contract: ``(kv_length, kv_offset)`` for ``query_length`` new tokens."""
+        return self.get_seq_length(layer_idx) + query_length, 0
 
     @property
     def has_previous_state(self):
@@ -200,19 +192,6 @@ class KimiDynamicCache:
         if self.last_linear_layer == -1:
             return False
         return self.conv_states[self.last_linear_layer] is not None
-
-
-class KimiRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        dtype = hidden_states.dtype
-        x = hidden_states.float()
-        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon)
-        return self.weight * x.to(dtype)
 
 
 class KimiBlockSparseMLP(nn.Module):
@@ -270,37 +249,6 @@ class KimiMLP(nn.Module):
         else:
             down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
-
-
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """Expand the key/value heads from `num_key_value_heads` to `num_attention_heads`."""
-    if n_rep == 1:
-        return hidden_states
-    return torch.repeat_interleave(hidden_states, dim=1, repeats=n_rep)
-
-
-def eager_attention_forward(
-    module: nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: torch.Tensor | None,
-    scaling: float,
-    dropout: float = 0.0,
-    **kwargs: Unpack[TransformersKwargs],
-):
-    key = repeat_kv(key, module.num_key_value_groups)
-    value = repeat_kv(value, module.num_key_value_groups)
-
-    scores = torch.einsum("bhqd,bhkd->bhqk", query, key) * scaling
-    if attention_mask is not None:
-        scores = scores + attention_mask[:, :, :, : key.shape[-2]]
-
-    probs = F.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
-    probs = F.dropout(probs, p=dropout, training=module.training)
-    out = torch.einsum("bhqk,bhkd->bhqd", probs, value).transpose(1, 2).contiguous()
-
-    return out, probs
 
 
 class KimiMLAAttention(nn.Module):
@@ -413,9 +361,9 @@ class KimiMLAAttention(nn.Module):
         if self.config._attn_implementation == "flash_attention_2" and self.q_head_dim != self.v_head_dim:
             value_states = F.pad(value_states, [0, self.q_head_dim - self.v_head_dim])
 
-        attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
 
         attn_output, _ = attention_interface(
             self,
@@ -628,9 +576,7 @@ class KimiMoEGate(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        import torch.nn.init as init
-
-        init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
 
     def forward(self, hidden_states):
         bsz, seq_len, h = hidden_states.shape
@@ -994,16 +940,16 @@ class KimiPreTrainedModel(KimiCheckpointMixin, PreTrainedModel):
     _is_stateful = True
     _keep_in_fp32_modules_strict = ["A_log", "dt_bias"]
 
+    @torch.no_grad()
     def _init_weights(self, module):
-        std = self.config.initializer_range
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
+        # TF5 `transformers.initialization` helpers skip tensors already loaded from the checkpoint.
+        super()._init_weights(module)  # Linear/Conv1d/Embedding and *RMSNorm* weights
+        if isinstance(module, KimiMoEGate):
+            init.kaiming_uniform_(module.weight, a=math.sqrt(5))
+            init.zeros_(module.e_score_correction_bias)
+        elif isinstance(module, KimiDeltaAttention):
+            init.copy_(module.A_log, init.uniform_(module.A_log, a=1.0, b=16.0).log())
+            init.zeros_(module.dt_bias)
 
 
 def _apply_attn_res(prefix_sum, block_residual, proj, norm):
@@ -1172,37 +1118,19 @@ class KimiLinearForCausalLM(KimiPreTrainedModel, GenerationMixin):
         self.post_init()
 
     @can_return_tuple
-    # @auto_docstring
     def forward(
         self,
-        input_ids: torch.LongTensor = None,
+        input_ids: torch.LongTensor | None = None,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
-        past_key_values: list[torch.FloatTensor] | None = None,
+        past_key_values: KimiDynamicCache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         labels: torch.LongTensor | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        generation_mode: bool | None = None,
-        return_dict: bool | None = None,
         cache_position: torch.LongTensor | None = None,
+        logits_to_keep: int | torch.Tensor = 0,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> tuple | CausalLMOutputWithPast:
-        r"""
-        Args:
-            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
-                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
-                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
-        """
-
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
+    ) -> CausalLMOutputWithPast:
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -1210,28 +1138,19 @@ class KimiLinearForCausalLM(KimiPreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
             cache_position=cache_position,
+            **kwargs,
         )
 
-        logits = outputs[0]
-        if generation_mode:
-            logits = logits[:, -1:]
-        logits = self.lm_head(logits)
+        hidden_states = outputs.last_hidden_state
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
 
         loss = None
         if labels is not None:
             loss = self.loss_function(logits, labels, self.vocab_size, **kwargs)
 
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
+        return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=outputs.past_key_values)
 
 
 def _causal_mask(config, input_embeds, attention_mask, cache_position, past_key_values, position_ids):

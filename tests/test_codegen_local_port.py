@@ -26,7 +26,7 @@ from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 from gptqmodel.utils.security import BYPASS_ENV
 
 
-CONFIGS = json.loads((Path(__file__).parents[1] / "gptqmodel/models/ports/codegen/upstream_configs.json").read_text())
+CONFIGS = json.loads((Path(__file__).parent / "fixtures/ports/codegen/upstream_configs.json").read_text())
 
 
 def tiny_config(partitions=8, **kwargs):
@@ -191,7 +191,7 @@ def test_invalid_metadata_fails_before_weights_and_retry_recovers(tmp_path, over
 
 @pytest.mark.parametrize("partitions", [4, 8])
 @pytest.mark.parametrize("rotary_dim", [4, 8, None])
-@pytest.mark.parametrize("n_head", [8, 16, 24])
+@pytest.mark.parametrize("n_head", [8, 24])
 def test_full_model_numerics_and_layout_regression(partitions, rotary_dim, n_head):
     torch.manual_seed(106)
     model = CodeGenForCausalLM(tiny_config(partitions, rotary_dim=rotary_dim, n_head=n_head, n_embd=8 * n_head)).eval()

@@ -223,7 +223,7 @@ def test_plain_awq_quantizes_every_native_projection_and_preserves_routers(tmp_p
                           for index in range(3) for projection in ("gate_proj", "up_proj", "down_proj"))
     assert len(packed) == 23 and set(packed) == expected_names
     assert all(module.qweight.dtype == torch.int32 for module in packed.values())
-    assert "falling back to plain quantization" in caplog.text
+    assert "no AWQ scaling groups were generated" in caplog.text
     assert not marker.exists()
     for name, expected in router.items():
         torch.testing.assert_close(model.model.state_dict()[name].float(), expected, rtol=0, atol=0)

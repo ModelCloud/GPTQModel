@@ -2,7 +2,8 @@ GPT-QModel package-owned DeciLM / Nemotron-NAS implementation
 
 Adapted from the Deci/DeciLM-7B-instruct and
 nvidia/Llama-3_1-Nemotron-Ultra-253B-v1 modeling/configuration code.
-Pinned sources and attribution are recorded in README.md.
+Pinned sources: Deci/DeciLM-7B-instruct@4adc7aa9efe61b47b0a98b2cc94527d9c45c3b4f
+and nvidia/Llama-3_1-Nemotron-Ultra-253B-v1@5b47def5b8957142d82faeb44bfad9349d02840d.
 
 Deci AI contributors (DeciLM modeling and checkpoint configuration)
 Copyright 2024 NVIDIA Corporation
@@ -15,6 +16,6 @@ which is in turn based on EleutherAI's GPT-NeoX library and the GPT-NeoX and
 OPT implementations in this library.
 Sliding window code based on Gemma2 by Google."
 
-Modeling code is licensed under Apache License 2.0; see LICENSE.
+Modeling code is licensed under Apache License 2.0; see the repository root LICENSE.
 The checkpoint weights and model cards have their own terms; this port
 does not include trained weights or grant rights to those weights.

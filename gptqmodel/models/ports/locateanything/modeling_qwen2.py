@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # Adapted by ModelCloud for Transformers 5. The pinned source repository's
-# accompanying NVIDIA LICENSE also applies; see NOTICE and README.md.
+# accompanying NVIDIA LICENSE also applies; see NOTICE.
 """LocateAnything's block-diffusion decoder on Transformers 5 Qwen2 layers.
 
 Native layers preserve the Q/K/V bias, RoPE, GQA, RMSNorm and SwiGLU equations.
@@ -59,6 +59,15 @@ def inject_images(model, input_ids, visual_features, image_token_index, inputs_e
 
 
 class Qwen2Model(NativeQwen2Model):
+    def _sliding_window(self):
+        # Native Qwen2 windows only `sliding_attention` layers (see `layer_types`).
+        types = set(getattr(self.config, "layer_types", None) or ())
+        if "sliding_attention" not in types:
+            return None
+        if types != {"sliding_attention"}:
+            raise NotImplementedError("LocateAnything does not support mixed sliding/full attention layers")
+        return self.config.sliding_window
+
     def block_mask(self, input_ids, inputs_embeds, position_ids, attention_mask, past_length, use_cache):
         batch, length = inputs_embeds.shape[:2]
         key_length = past_length + length
@@ -73,7 +82,7 @@ class Qwen2Model(NativeQwen2Model):
         rows = torch.arange(length, device=inputs_embeds.device)[:, None] + past_length
         cols = torch.arange(key_length, device=inputs_embeds.device)[None, :]
         allowed = cols <= rows
-        window = getattr(self.config, "sliding_window", None)
+        window = self._sliding_window()
         if window is not None:
             allowed = allowed & (cols > rows - window)
         mask = torch.zeros((batch, 1, length, key_length), dtype=inputs_embeds.dtype, device=inputs_embeds.device)

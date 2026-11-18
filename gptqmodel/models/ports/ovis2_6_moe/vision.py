@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2024 AIDC-AI
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""NaViT/soft visual vocabulary adapted from pinned AIDC-AI Ovis2.6; see README."""
+"""NaViT/soft visual vocabulary adapted from AIDC-AI Ovis2.6 (see NOTICE)."""
 
 import math
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional
 
 import numpy as np
 import PIL.Image
@@ -13,9 +13,11 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from transformers import SiglipImageProcessor
 from transformers import initialization as init
-from transformers.activations import ACT2FN
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithNoAttention
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import apply_rotary_pos_emb_vision
+from transformers.models.siglip2.modeling_siglip2 import Siglip2MLP, eager_attention_forward
 
 from .configuration_ovis2_6 import Siglip2NavitConfig
 
@@ -179,30 +181,8 @@ class Siglip2VisionEmbeddings(nn.Module):
         return patch_embeds
 
 
-# copied from qwen2.5-vl
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb_vision(
-    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    orig_q_dtype = q.dtype
-    orig_k_dtype = k.dtype
-    q, k = q.float(), k.float()
-    cos, sin = cos.unsqueeze(-2).float(), sin.unsqueeze(-2).float()
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    q_embed = q_embed.to(orig_q_dtype)
-    k_embed = k_embed.to(orig_k_dtype)
-    return q_embed, k_embed
-
-
 class Siglip2Attention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """SigLIP attention over packed NaViT sequences (one call per ``cu_seqlens`` window)."""
 
     def __init__(self, config):
         super().__init__()
@@ -210,79 +190,46 @@ class Siglip2Attention(nn.Module):
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
-        if self.head_dim * self.num_heads != self.embed_dim:
-            raise ValueError(
-                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
-                f" {self.num_heads})."
-            )
         self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
         self.is_causal = False
-
         self.k_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.v_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.q_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim)
-
         self.use_rope = config.use_rope
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Input shape: Batch x Time x Channel"""
-
-        seq_length, embed_dim = hidden_states.shape
-
-        queries = self.q_proj(hidden_states)
-        keys = self.k_proj(hidden_states)
-        values = self.v_proj(hidden_states)
-
-        queries = queries.view(seq_length, self.num_heads, self.head_dim)
-        keys = keys.view(seq_length, self.num_heads, self.head_dim)
-        values = values.view(seq_length, self.num_heads, self.head_dim)
-
+    def forward(self, hidden_states, cu_seqlens, position_embeddings=None, **kwargs):
+        seq_length = hidden_states.shape[0]
+        shape = (seq_length, self.num_heads, self.head_dim)
+        queries = self.q_proj(hidden_states).view(shape)
+        keys = self.k_proj(hidden_states).view(shape)
+        values = self.v_proj(hidden_states).view(shape)
         if self.use_rope:
             cos, sin = position_embeddings
-            queries, keys = apply_rotary_pos_emb_vision(queries.unsqueeze(0), keys.unsqueeze(0), cos, sin)
-            queries = queries.squeeze(0)
-            keys = keys.squeeze(0)
-
-        outputs = []
-        cu = cu_seqlens.tolist()
-        for start, end in zip(cu[:-1], cu[1:]):
-            q, k, val = [x[start:end].transpose(0, 1).unsqueeze(0) for x in (queries, keys, values)]
-            if self.config._attn_implementation == "eager":
-                scores = (q @ k.transpose(-1, -2)) * self.scale
-                probs = scores.softmax(dim=-1, dtype=torch.float32).to(q.dtype)
-                out = probs @ val
-            else:
-                out = F.scaled_dot_product_attention(q, k, val, dropout_p=0.0)
-            outputs.append(out.squeeze(0).transpose(0, 1).reshape(-1, self.embed_dim))
-        attn_output = torch.cat(outputs)
-
-        attn_output = self.out_proj(attn_output)
-        return attn_output
-
-
-class Siglip2MLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.activation_fn = ACT2FN[config.hidden_act]
-        self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size)
-        self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.fc1(hidden_states)
-        hidden_states = self.activation_fn(hidden_states)
-        hidden_states = self.fc2(hidden_states)
-        return hidden_states
+            queries, keys = apply_rotary_pos_emb_vision(queries, keys, cos, sin)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
+        lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        outputs = [
+            attention_interface(
+                self,
+                q.transpose(0, 1)[None],
+                k.transpose(0, 1)[None],
+                v.transpose(0, 1)[None],
+                None,
+                is_causal=False,
+                scaling=self.scale,
+                dropout=0.0 if not self.training else self.dropout,
+                **kwargs,
+            )[0].reshape(-1, self.embed_dim)
+            for q, k, v in zip(*(x.split(lengths) for x in (queries, keys, values)))
+        ]
+        return self.out_proj(torch.cat(outputs))
 
 
-class Siglip2EncoderLayer(nn.Module):
+class Siglip2EncoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: Siglip2NavitConfig):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -291,42 +238,14 @@ class Siglip2EncoderLayer(nn.Module):
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = Siglip2MLP(config)
 
-    def forward(
-        self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor, position_embeddings: torch.Tensor
-    ) -> tuple[torch.FloatTensor]:
-        """
-        Args:
-            hidden_states (`torch.FloatTensor`):
-                Input to the layer of shape `(batch, seq_len, embed_dim)`.
-            attention_mask (`torch.FloatTensor`):
-                Attention mask of shape `(batch, 1, q_len, k_v_seq_len)` where padding elements are indicated by very large negative values.
-            output_attentions (`bool`, *optional*, defaults to `False`):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-        """
+    def forward(self, hidden_states, cu_seqlens, position_embeddings, **kwargs):
         residual = hidden_states
-
-        hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states, cu_seqlens=cu_seqlens, position_embeddings=position_embeddings
-        )
+        hidden_states = self.self_attn(self.layer_norm1(hidden_states), cu_seqlens, position_embeddings, **kwargs)
         hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.layer_norm2(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-
-        return hidden_states
+        return hidden_states + self.mlp(self.layer_norm2(hidden_states))
 
 
 class Siglip2Encoder(nn.Module):
-    """
-    Transformer encoder consisting of `config.num_hidden_layers` self attention layers. Each layer is a
-    [`Siglip2EncoderLayer`].
-    Args:
-        config: Siglip2NavitConfig
-    """
 
     def __init__(self, config: Siglip2NavitConfig):
         super().__init__()
@@ -420,33 +339,7 @@ class Siglip2Encoder(nn.Module):
 
         return window_index, cu_window_seqlens
 
-    # Ignore copy
-    def forward(
-        self,
-        inputs_embeds,
-        grid_thws: torch.Tensor,
-        output_hidden_states: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, ...]]]:
-        r"""
-        Args:
-            inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
-                Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation.
-                This is useful if you want more control over how to convert `input_ids` indices into associated vectors
-                than the model's internal embedding lookup matrix.
-            attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
-                - 1 for tokens that are **not masked**,
-                - 0 for tokens that are **masked**.
-                [What are attention masks?](../glossary#attention-mask)
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-            output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
-                for more detail.
-            return_dict (`bool`, *optional*):
-                Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
-        """
+    def forward(self, inputs_embeds, grid_thws, output_hidden_states=False):
 
         rotary_pos_emb = self.rot_pos_emb(grid_thws)
         window_index, cu_window_seqlens = self.get_window_index(grid_thws)
@@ -486,16 +379,10 @@ class Siglip2Encoder(nn.Module):
                 cu_seqlens_tmp = cu_seqlens
             else:
                 cu_seqlens_tmp = cu_window_seqlens
-            if self.gradient_checkpointing and self.training:
-                hidden_states = self._gradient_checkpointing_func(
-                    block.__call__, hidden_states, cu_seqlens_tmp, position_embeddings
-                )
-            else:
-                hidden_states = block(hidden_states, cu_seqlens_tmp, position_embeddings)
+            hidden_states = block(hidden_states, cu_seqlens_tmp, position_embeddings)
             if output_hidden_states:
                 hidden_states_ = hidden_states.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
                 encoder_states += (hidden_states_[reverse_indices, :].reshape(seq_len, -1),)
-        # tokens = self.post_trunk_norm(tokens)
         hidden_states = hidden_states.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
         hidden_states = hidden_states[reverse_indices, :].reshape(seq_len, -1)
 
@@ -511,27 +398,8 @@ class Siglip2VisionTransformer(nn.Module):
         self.embeddings = Siglip2VisionEmbeddings(config)
         self.encoder = Siglip2Encoder(config)
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
-        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
 
-    def forward(
-        self,
-        pixel_values: torch.FloatTensor,
-        grid_thws: torch.LongTensor,
-        output_hidden_states: Optional[bool] = True,
-        return_dict: Optional[bool] = True,
-    ) -> Union[
-        Tuple[torch.Tensor],
-        Tuple[torch.Tensor, Tuple[torch.Tensor, ...]],
-        BaseModelOutputWithNoAttention,
-    ]:
-        r"""
-        spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
-            Tensor containing the spatial dimensions (height, width) of the input images.
-        """
-        # output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        # output_hidden_states = (
-        #     output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        # )
+    def forward(self, pixel_values, grid_thws, output_hidden_states=True, return_dict=True):
 
         hidden_states = self.embeddings(pixel_values, grid_thws)
 
@@ -580,22 +448,11 @@ class Siglip2NavitModel(Siglip2PreTrainedModel):
     def get_input_embeddings(self) -> nn.Module:
         return self.vision_model.embeddings.patch_embedding
 
-    def forward(
-        self,
-        pixel_values: torch.FloatTensor,
-        grid_thws: torch.LongTensor,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[
-        Tuple[torch.Tensor],
-        Tuple[torch.Tensor, Tuple[torch.Tensor, ...]],
-        BaseModelOutputWithNoAttention,
-    ]:
-
+    def forward(self, pixel_values, grid_thws, output_hidden_states=None, return_dict=None):
         if output_hidden_states is None:
             output_hidden_states = self.config.output_hidden_states
         if return_dict is None:
-            return_dict = self.config.use_return_dict
+            return_dict = self.config.return_dict
 
         return self.vision_model(
             pixel_values=pixel_values,

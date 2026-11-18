@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real MOSS shells: every persistent checkpoint owner and conservative AWQ."""
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from gptqmodel.models.ports.moss.modeling_moss import MossForCausalLM
 from tests.test_moss_local_port import _config
 
 
+RELEASED_KEYS_SHA256 = "97ce41222e2a95a3a038d33506d72b5adad28ee6fadef83e22333ccfd3e000a2"
 EXPECTED_PLAN = {"layers": ["transformer.h"], "blocks": [
     ["ln_1:!"], ["attn:!"], ["attn.qkv_proj"], ["attn.out_proj"], ["mlp.fc_in"], ["mlp.fc_out"],
 ]}
@@ -59,20 +61,20 @@ def test_moss_actual_owners_and_plan(device, heads, width, rotary, inner):
     assert wrapper.fusable is None
 
 
-@pytest.mark.parametrize("variant", ["base", "sft", "sft-plugin"])
-def test_moss_complete_released_index_ownership(variant):
-    fixture = json.loads((Path(__file__).parents[2] / "gptqmodel/models/ports/moss/source_inventory.json").read_text())
-    config = MossConfig(**fixture["variants"][variant]["config"])
+def test_moss_complete_released_index_ownership():
+    # fnlp/moss-moon-003-base@ea9e1340 config; sft/sft-plugin differ only in eos_token_id.
+    config = MossConfig(**json.loads((Path(__file__).parents[1] / "fixtures/ports/moss/released_config.json").read_text()))
     with torch.device("meta"):
         model = MossForCausalLM(config)
     # Includes all 34 persistent causal_mask buffers, not just Parameters.
-    assert set(model.state_dict()) == set(fixture["checkpoint_keys"])
-    assert len(model.state_dict()) == 311
+    keys = sorted(model.state_dict())
+    assert len(keys) == 311
+    assert hashlib.sha256("\n".join(keys).encode()).hexdigest() == RELEASED_KEYS_SHA256
     assert model.transformer.h[0].attn.qkv_proj.weight.shape == (18432, 6144)
     assert model.transformer.h[0].mlp.fc_in.weight.shape == (24576, 6144)
     assert model.lm_head.weight.shape == (107008, 6144)
     plan = ModulePlan.from_tree(MossQModel.module_tree)
-    for key in fixture["checkpoint_keys"]:
+    for key in keys:
         if key.startswith("transformer.h."):
             owner = key.split(".", 3)[-1].rsplit(".", 1)[0]
             assert plan.find(owner) is not None, key

@@ -6,6 +6,7 @@ import base64
 import copy
 import hashlib
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,7 @@ from gptqmodel.utils.security import BYPASS_ENV
 
 
 PIN = "f831ab66814297da540d832a5235f8e904f29d06"
+FIXTURES = Path(__file__).parent / "fixtures/ports/kimi_k3"
 LINEAR_PIN = "e1df551a447157d4658b573f9a695d57658590e9"
 
 
@@ -197,14 +199,12 @@ def test_published_padded_a_log_first_load_and_two_safetensors_roundtrips(tmp_pa
     expected = {name: value.clone() for name, value in state.items()}
     keys = [name for name in state if name.endswith(".self_attn.A_log")]
     assert len(keys) == 2
-    from gptqmodel.models.ports import kimi_k3
-
-    reference = json.loads((Path(kimi_k3.__file__).parent / "a_log_reference.json").read_text())
+    reference = json.loads((FIXTURES / "a_log_reference.json").read_text())
     raw = base64.b64decode(reference["base64"])
     assert hashlib.sha256(raw).hexdigest() == reference["sha256"]
     assert reference["revision"] == PIN and reference["shape"] == [128] and reference["active_heads"] == 96
     assert (
-        json.loads((Path(kimi_k3.__file__).parent / "checkpoint_config.json").read_text())["text_config"][
+        json.loads((FIXTURES / "checkpoint_config.json").read_text())["text_config"][
             "linear_attn_config"
         ]["num_heads"]
         == 96
@@ -842,9 +842,7 @@ def test_pinned_real_tokenizer_asset_ids_and_public_default_deny(tmp_path):
     ]
     from shutil import copyfile
 
-    from gptqmodel.models.ports import kimi_k3
-
-    payload = json.loads((Path(kimi_k3.__file__).parent / "checkpoint_config.json").read_text())
+    payload = json.loads((FIXTURES / "checkpoint_config.json").read_text())
     config = KimiK3Config.from_dict(payload)
     marker = hostile_checkpoint(tmp_path, config)
     copyfile(asset, tmp_path / "tiktoken.model")
@@ -1076,3 +1074,62 @@ def test_public_config_ignores_checkpoint_code(tmp_path, model_type, definition)
     config = load_model_config(tmp_path, trust_remote_code=False)
     assert isinstance(definition.loader, LocalModelLoader), "K3 must select package-owned code"
     assert config is not None and type(config).__module__.startswith("gptqmodel.models.ports.kimi_k3")
+
+
+def test_missing_checkpoint_tensors_use_tf5_init_and_loaded_tensors_are_kept(tmp_path):
+    from safetensors.torch import load_file, save_file
+
+    model = KimiK3ForConditionalGeneration(tiny_k3()).eval()
+    model.save_pretrained(tmp_path)
+    state = load_file(tmp_path / "model.safetensors")
+    prefix = "language_model.model.layers."
+    missing = {
+        prefix + "0.self_attn.A_log": None,
+        prefix + "0.self_attn.dt_bias": torch.zeros,
+        prefix + "0.input_layernorm.weight": torch.ones,
+        prefix + "0.self_attn.o_norm.weight": torch.ones,
+        prefix + "1.block_sparse_moe.gate.weight": None,
+        prefix + "1.block_sparse_moe.gate.e_score_correction_bias": torch.zeros,
+    }
+    for name in missing:
+        state.pop(name)
+    save_file(state, tmp_path / "model.safetensors", metadata={"format": "pt"})
+    restored = KimiK3QModel.loader.from_pretrained(tmp_path, local_files_only=True).state_dict()
+    for name, value in state.items():
+        torch.testing.assert_close(restored[name], value, rtol=0, atol=0)
+    for name, fill in missing.items():
+        assert torch.isfinite(restored[name]).all(), name
+        if fill is not None:
+            torch.testing.assert_close(restored[name], fill(restored[name].shape), rtol=0, atol=0)
+    a_log = restored[prefix + "0.self_attn.A_log"]
+    assert bool(((a_log >= 0) & (a_log <= math.log(16))).all())
+    # Non-persistent vision buffers are rebuilt by _init_weights after meta-device loading.
+    reloaded = KimiK3QModel.loader.from_pretrained(tmp_path, local_files_only=True)
+    torch.testing.assert_close(
+        reloaded.vision_tower.patch_embed.pos_emb.time_weight,
+        model.vision_tower.patch_embed.pos_emb.time_weight,
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_tf5_output_contract_logits_to_keep_and_mask_sizes(monkeypatch):
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        text, k3 = tiny_config(), tiny_k3()
+    monkeypatch.setattr(type(text), "use_return_dict", property(lambda self: pytest.fail("deprecated")), raising=False)
+    monkeypatch.setattr(type(k3), "use_return_dict", property(lambda self: pytest.fail("deprecated")), raising=False)
+    ids = torch.tensor([[1, 4, 6, 8]])
+    for model in (KimiLinearForCausalLM(text).eval(), KimiK3ForConditionalGeneration(k3).eval()):
+        with torch.no_grad():
+            full = model(ids, use_cache=True)
+            as_tuple = model(ids, use_cache=False, return_dict=False)
+        assert isinstance(as_tuple, tuple)
+        torch.testing.assert_close(as_tuple[0], full.logits, rtol=0, atol=0)
+        assert full.past_key_values.get_mask_sizes(3, 0) == (ids.shape[1] + 3, 0)
+    with torch.no_grad():
+        last = model.language_model(ids, use_cache=False, logits_to_keep=1).logits
+    assert last.shape[1] == 1
+    torch.testing.assert_close(last, full.logits[:, -1:], rtol=1e-6, atol=1e-6)

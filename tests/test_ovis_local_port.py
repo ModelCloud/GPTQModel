@@ -4,7 +4,6 @@
 
 import copy
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -21,7 +20,6 @@ from gptqmodel.models.ports.ovis.processing_ovis import ConversationFormatter, O
 
 LAYOUTS = ["clip-llama", "clip-qwen2", "siglip-llama", "s2-gemma2", "adaptive-llama", "s2-clip-llama",
            "adaptive-clip-llama", "partition-llama", "partition-gemma2"]
-PORT = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/ovis"
 
 
 @pytest.fixture(autouse=True, scope="module")

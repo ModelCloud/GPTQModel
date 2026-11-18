@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """MOSS Moon-003: four-way Q/V/K packing, FP32 rotary keys, parallel residual.
 
-Adapted from OpenMOSS/MOSS; pinned sources and changes are in README.md.
+Adapted from OpenMOSS/MOSS; pinned sources are in NOTICE.
 No checkpoint Python, global HF registration, optional kernels or dtype mutation.
 """
 
@@ -12,6 +12,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from transformers import PreTrainedModel
+from transformers import initialization as init
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache, DynamicLayer
 from transformers.generation import GenerationMixin
@@ -131,16 +132,10 @@ class MossPreTrainedModel(PreTrainedModel):
     _supports_sdpa = False
 
     def _init_weights(self, module):
-        if isinstance(module, (nn.Linear, nn.Embedding)):
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
-            if getattr(module, "bias", None) is not None:
-                nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.LayerNorm):
-            nn.init.ones_(module.weight)
-            nn.init.zeros_(module.bias)
+        super()._init_weights(module)  # TF5 default: normal(initializer_range) Linear/Embedding, unit LayerNorm
         if isinstance(module, MossAttention):
             # HF's no-init/meta loader may need to initialize a missing buffer.
-            module.causal_mask.copy_(torch.ones_like(module.causal_mask).tril())
+            init.copy_(module.causal_mask, torch.ones_like(module.causal_mask).tril())
 
 
 class MossModel(MossPreTrainedModel):

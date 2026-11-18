@@ -12,8 +12,8 @@ package-local tokenizer ownership, cache-owned NTK metadata and beam operations,
 strict geometry/cache/asset validation, safetensors reload qualification and
 explicit plain AWQ policy. No upstream trained weights are included.
 
-The public source repository's Apache 2.0 code license is retained in
-LICENSE-APACHE. Separate model-release terms are retained in LICENSE (Tongyi
+The public source repository's code license is Apache 2.0 (see the repository
+root LICENSE). Separate model-release terms are retained in LICENSE (Tongyi
 Qianwen) and LICENSE-1.8B-RESEARCH. The public source license does not override
 those release terms. NOTICE-UPSTREAM retains upstream third-party notices.
-See provenance.json for exact revisions, SHA-256 digests and fixture origins.
+Test fixtures derived from the pinned releases live under tests/fixtures/ports/qwen.

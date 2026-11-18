@@ -1,0 +1,32 @@
+{
+  "Qwen-1_8B": {
+    "revision": "fa6e214ccbbc6a55235c26ef406355b6bfdf5eed",
+    "config.json": {"architectures":["QWenLMHeadModel"],"attn_dropout_prob":0.0,"bf16":false,"emb_dropout_prob":0.0,"fp16":false,"fp32":false,"hidden_size":2048,"intermediate_size":11008,"initializer_range":0.02,"kv_channels":128,"layer_norm_epsilon":1e-06,"max_position_embeddings":8192,"model_type":"qwen","no_bias":true,"num_attention_heads":16,"num_hidden_layers":24,"onnx_safe":null,"rotary_emb_base":10000,"rotary_pct":1.0,"scale_attn_weights":true,"seq_length":8192,"tie_word_embeddings":false,"tokenizer_class":"QWenTokenizer","transformers_version":"4.32.0","use_cache":true,"use_dynamic_ntk":true,"use_flash_attn":"auto","use_logn_attn":true,"vocab_size":151936},
+    "tokenizer_config.json": {"model_max_length":8192,"tokenizer_class":"QWenTokenizer","auto_map":{"AutoTokenizer":["tokenization_qwen.QWenTokenizer",null]}},
+    "generation_config.json": {"chat_format":"raw","eos_token_id":151643,"pad_token_id":151643,"stop_words_ids":[[151643]],"max_new_tokens":512,"do_sample":true,"top_k":0,"top_p":0.8,"transformers_version":"4.31.0"}
+  },
+  "Qwen-7B": {
+    "revision": "ef3c5c9c57b252f3149c1408daf4d649ec8b6c85",
+    "config.json": {"architectures":["QWenLMHeadModel"],"attn_dropout_prob":0.0,"bf16":false,"emb_dropout_prob":0.0,"fp16":false,"fp32":false,"hidden_size":4096,"intermediate_size":22016,"initializer_range":0.02,"kv_channels":128,"layer_norm_epsilon":1e-06,"max_position_embeddings":32768,"model_type":"qwen","no_bias":true,"num_attention_heads":32,"num_hidden_layers":32,"onnx_safe":null,"rotary_emb_base":10000,"rotary_pct":1.0,"scale_attn_weights":true,"seq_length":8192,"tie_word_embeddings":false,"tokenizer_class":"QWenTokenizer","transformers_version":"4.32.0","use_cache":true,"use_dynamic_ntk":true,"use_flash_attn":"auto","use_logn_attn":true,"vocab_size":151936},
+    "tokenizer_config.json": {"model_max_length":32768,"tokenizer_class":"QWenTokenizer","auto_map":{"AutoTokenizer":["tokenization_qwen.QWenTokenizer",null]}},
+    "generation_config.json": {"chat_format":"raw","eos_token_id":151643,"pad_token_id":151643,"stop_words_ids":[[151643]],"max_new_tokens":512,"do_sample":true,"top_k":0,"top_p":0.8,"transformers_version":"4.31.0"}
+  },
+  "Qwen-14B": {
+    "revision": "c4051215126d906ac22bb67fe5edb39a921cd831",
+    "config.json": {"architectures":["QWenLMHeadModel"],"attn_dropout_prob":0.0,"bf16":false,"emb_dropout_prob":0.0,"fp16":false,"fp32":false,"hidden_size":5120,"intermediate_size":27392,"initializer_range":0.02,"kv_channels":128,"layer_norm_epsilon":1e-06,"max_position_embeddings":8192,"model_type":"qwen","no_bias":true,"num_attention_heads":40,"num_hidden_layers":40,"onnx_safe":null,"rotary_emb_base":10000,"rotary_pct":1.0,"scale_attn_weights":true,"seq_length":2048,"tie_word_embeddings":false,"tokenizer_class":"QWenTokenizer","transformers_version":"4.32.0","use_cache":true,"use_dynamic_ntk":true,"use_flash_attn":"auto","use_logn_attn":true,"vocab_size":152064},
+    "tokenizer_config.json": {"model_max_length":8192,"tokenizer_class":"QWenTokenizer","auto_map":{"AutoTokenizer":["tokenization_qwen.QWenTokenizer",null]}},
+    "generation_config.json": {"chat_format":"raw","eos_token_id":151643,"pad_token_id":151643,"stop_words_ids":[[151643]],"max_new_tokens":512,"do_sample":true,"top_k":0,"top_p":0.8,"transformers_version":"4.31.0"}
+  },
+  "Qwen-72B": {
+    "revision": "b8e18ac61df64d35308695769ff46b976b6a00f4",
+    "config.json": {"architectures":["QWenLMHeadModel"],"attn_dropout_prob":0.0,"bf16":false,"emb_dropout_prob":0.0,"fp16":false,"fp32":false,"hidden_size":8192,"intermediate_size":49152,"initializer_range":0.02,"kv_channels":128,"layer_norm_epsilon":1e-06,"max_position_embeddings":32768,"model_type":"qwen","no_bias":true,"num_attention_heads":64,"num_hidden_layers":80,"onnx_safe":null,"rope_theta":1000000,"rotary_emb_base":1000000,"rotary_pct":1.0,"scale_attn_weights":true,"seq_length":32768,"tie_word_embeddings":false,"tokenizer_class":"QWenTokenizer","transformers_version":"4.32.0","use_cache":true,"use_dynamic_ntk":false,"use_flash_attn":"auto","use_logn_attn":false,"vocab_size":152064},
+    "tokenizer_config.json": {"model_max_length":32768,"tokenizer_class":"QWenTokenizer","auto_map":{"AutoTokenizer":["tokenization_qwen.QWenTokenizer",null]}},
+    "generation_config.json": {"chat_format":"raw","eos_token_id":151643,"pad_token_id":151643,"stop_words_ids":[[151643]],"max_new_tokens":512,"do_sample":true,"top_k":0,"top_p":0.8,"transformers_version":"4.31.0"}
+  },
+  "Qwen-7B-Chat": {
+    "revision": "93a65d34827a3cc269b727e67004743b723e2f83",
+    "config.json": {"architectures":["QWenLMHeadModel"],"attn_dropout_prob":0.0,"bf16":false,"emb_dropout_prob":0.0,"fp16":false,"fp32":false,"hidden_size":4096,"intermediate_size":22016,"initializer_range":0.02,"kv_channels":128,"layer_norm_epsilon":1e-06,"max_position_embeddings":32768,"model_type":"qwen","no_bias":true,"num_attention_heads":32,"num_hidden_layers":32,"onnx_safe":null,"rotary_emb_base":10000,"rotary_pct":1.0,"scale_attn_weights":true,"seq_length":8192,"tie_word_embeddings":false,"tokenizer_class":"QWenTokenizer","transformers_version":"4.32.0","use_cache":true,"use_dynamic_ntk":true,"use_flash_attn":"auto","use_logn_attn":true,"vocab_size":151936},
+    "tokenizer_config.json": {"model_max_length":32768,"tokenizer_class":"QWenTokenizer","auto_map":{"AutoTokenizer":["tokenization_qwen.QWenTokenizer",null]}},
+    "generation_config.json": {"chat_format":"chatml","eos_token_id":151643,"pad_token_id":151643,"max_window_size":24000,"max_new_tokens":512,"do_sample":true,"top_k":0,"top_p":0.8,"repetition_penalty":1.1,"transformers_version":"4.31.0"}
+  }
+}
