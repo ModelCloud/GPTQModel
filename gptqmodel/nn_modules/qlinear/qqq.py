@@ -14,6 +14,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import CPU, DEVICE, PLATFORM
 from ...nn_modules.qlinear import GroupedQuantLinear
 from ...quantization import FORMAT, METHOD
+from ...quantization.qqq_activation import QQQ_ACTIVATION_DTYPES, qqq_activation_quantize
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.qqq import qqq_gemm, qqq_runtime_available, qqq_runtime_error
@@ -627,21 +628,21 @@ class QQQLinear(GroupedQuantLinear):
     # activation int8 quantization
     def dynamic_quant(self, x: torch.Tensor):
         if (x.device.type == "cuda" and x.is_contiguous() and 0 < x.shape[-1] <= 32768
-                and x.dtype in (torch.float16, torch.bfloat16, torch.float32)
+                and x.dtype in QQQ_ACTIVATION_DTYPES
                 and not torch.compiler.is_compiling()):
             quantizer = _qqq_gpu_quantizer()
             if quantizer is not None:
                 return quantizer(x)
-        x = x.float()
-        quant_scale = x.abs().amax(dim=-1, keepdim=True).div(127.0)
-        quant_scale = torch.where(quant_scale == 0, torch.ones_like(quant_scale), quant_scale)
-        x = (x / quant_scale).round().clamp(-128, 127).to(torch.int8)
         # The element-wise fallback preserves the input's memory format, so a
         # column-strided activation (``x.t()`` of a ``[K, M]`` buffer) comes back
         # column-major. ``qqq_gemm`` reads the operand row-major with no stride
         # argument, so hand it a packed INT8 buffer (#4740). The copy is int8,
         # i.e. a quarter of the fp16 operand it replaces.
-        return x.contiguous(), quant_scale
+        #
+        # GSQ calibration calls the same helper, so the Hessian and cross moment
+        # describe the codes and FP32 scale this path produces rather than a
+        # separate FP16-narrowed grid.
+        return qqq_activation_quantize(x)
 
     def _split_k_locks(self, device) -> torch.Tensor:
         """A fresh zeroed split-K lock array for one forward call.
