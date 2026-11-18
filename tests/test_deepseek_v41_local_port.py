@@ -320,6 +320,19 @@ def test_dspark_matches_reference_forward_spec(built):
 
 
 @torch.no_grad()
+def test_joint_dspark_anchors_equal_independent_histories(built):
+    attention = built[1].layers[0].self_attn
+    generator = torch.Generator().manual_seed(10)
+    main_x = torch.randn(1, 9, TINY_TEXT["hidden_size"], generator=generator)
+    drafts = torch.randn(3, TINY_TEXT["dspark_block_size"], TINY_TEXT["hidden_size"], generator=generator)
+    anchors = torch.tensor([1, 4, 8])
+    joint, _ = attention(drafts, {}, main_x=main_x, anchor_positions=anchors)
+    for row, anchor in enumerate(anchors.tolist()):
+        single, _ = attention(drafts[row : row + 1], {}, main_x=main_x[:, : anchor + 1])
+        _close(joint[row : row + 1], single, atol=1e-6, rtol=1e-6)
+
+
+@torch.no_grad()
 def test_image_routing_bias_and_engram_mask_match_reference(built):
     model, _, reference, _ = built
     layer, ref_layer = model.model.layers[4], reference.layers[4]
