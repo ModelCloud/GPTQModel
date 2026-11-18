@@ -34,18 +34,6 @@ from transformers.masking_utils import create_causal_mask, create_recurrent_atte
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, BaseModelOutputWithPooling, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel, slice_logits_to_keep
-from transformers.models.qwen3_5.modeling_qwen3_5 import (
-    Qwen3_5Attention,
-    Qwen3_5MLP,
-    Qwen3_5RMSNorm,
-    Qwen3_5RMSNormGated,
-    Qwen3_5TextRotaryEmbedding,
-    Qwen3_5VisionAttention,
-    Qwen3_5VisionBlock,
-    Qwen3_5VisionPatchEmbed,
-    Qwen3_5VisionPatchMerger,
-    l2norm,
-)
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, torch_compilable_check
 from transformers.utils.generic import (
@@ -59,6 +47,18 @@ from transformers.vision_utils import (
     get_vision_position_ids,
 )
 
+from ..native.qwen3_5.modeling_qwen3_5 import (
+    Qwen3_5Attention,
+    Qwen3_5MLP,
+    Qwen3_5RMSNorm,
+    Qwen3_5RMSNormGated,
+    Qwen3_5TextRotaryEmbedding,
+    Qwen3_5VisionAttention,
+    Qwen3_5VisionBlock,
+    Qwen3_5VisionPatchEmbed,
+    Qwen3_5VisionPatchMerger,
+    l2norm,
+)
 from .configuration_agnes import LAYER_DELTA, LAYER_GLOBAL, AgnesConfig, AgnesTextConfig, AgnesVisionConfig
 
 

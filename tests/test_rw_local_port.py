@@ -9,10 +9,11 @@ import math
 import pytest
 import torch
 from torch.nn import functional as F
-from transformers import FalconConfig, FalconForCausalLM
 
 from gptqmodel.models.auto import MODEL_MAP_CASEFOLD
 from gptqmodel.models.definitions.rw import FalconQModel
+from gptqmodel.models.ports.native.falcon.configuration_falcon import FalconConfig
+from gptqmodel.models.ports.native.falcon.modeling_falcon import FalconForCausalLM
 from gptqmodel.models.ports.rw import RWConfig
 from gptqmodel.utils.hf import load_model_config
 

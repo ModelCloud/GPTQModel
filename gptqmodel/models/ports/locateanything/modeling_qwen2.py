@@ -29,12 +29,12 @@ Qwen2 alone does not implement this architecture.
 import torch
 from transformers.cache_utils import DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM as NativeQwen2ForCausalLM
-from transformers.models.qwen2.modeling_qwen2 import Qwen2Model as NativeQwen2Model
-from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM as NativeQwen3ForCausalLM
 from transformers.utils.generic import merge_with_config_defaults
 from transformers.utils.output_capturing import capture_outputs
 
+from ..native.qwen2.modeling_qwen2 import Qwen2ForCausalLM as NativeQwen2ForCausalLM
+from ..native.qwen2.modeling_qwen2 import Qwen2Model as NativeQwen2Model
+from ..native.qwen3.modeling_qwen3 import Qwen3ForCausalLM as NativeQwen3ForCausalLM
 from .mask_sdpa_utils import (
     create_block_diff_mask_by_pe_4d,
     find_prefix_seq_length_by_pe,

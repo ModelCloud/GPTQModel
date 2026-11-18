@@ -14,8 +14,9 @@
 # limitations under the License.
 
 
-from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
+
+from ..native.auto import CONFIG_MAPPING, AutoConfig
 
 
 class InternS1VisionConfig(PretrainedConfig):
@@ -195,8 +196,6 @@ class InternS1Config(PretrainedConfig):
         vision_feature_select_strategy="default",
         **kwargs,
     ):
-        from transformers import CONFIG_MAPPING
-
         self.image_token_id = image_token_id
         self.image_seq_length = image_seq_length
         self.downsample_ratio = downsample_ratio

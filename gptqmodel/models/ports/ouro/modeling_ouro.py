@@ -14,17 +14,17 @@ from transformers.masking_utils import create_causal_mask, create_sliding_window
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
-from transformers.models.qwen2.modeling_qwen2 import (
+from transformers.utils import can_return_tuple
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
+
+from ..native.qwen2.modeling_qwen2 import (
     Qwen2MLP,
     Qwen2RMSNorm,
     Qwen2RotaryEmbedding,
     apply_rotary_pos_emb,
     eager_attention_forward,
 )
-from transformers.utils import can_return_tuple
-from transformers.utils.generic import merge_with_config_defaults
-from transformers.utils.output_capturing import capture_outputs
-
 from .configuration_ouro import OuroConfig
 
 

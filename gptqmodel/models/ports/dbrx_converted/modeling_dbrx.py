@@ -22,15 +22,15 @@ from transformers.masking_utils import create_causal_mask
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast, MoeModelOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-from transformers.models.dbrx.modeling_dbrx import (
-    apply_rotary_pos_emb,
-    eager_attention_forward,
-    load_balancing_loss_func,
-)
 from transformers.utils import can_return_tuple
 from transformers.utils.generic import merge_with_config_defaults
 from transformers.utils.output_capturing import OutputRecorder, capture_outputs
 
+from ..native.dbrx.modeling_dbrx import (
+    apply_rotary_pos_emb,
+    eager_attention_forward,
+    load_balancing_loss_func,
+)
 from .configuration_dbrx import DbrxConfig
 
 

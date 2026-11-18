@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-from transformers.models.minimax.configuration_minimax import MiniMaxConfig
+from ..native.minimax.configuration_minimax import MiniMaxConfig
 
 
 class MiniMaxText01Config(MiniMaxConfig):

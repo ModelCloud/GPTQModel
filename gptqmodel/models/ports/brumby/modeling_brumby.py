@@ -20,14 +20,14 @@ from transformers.generation import GenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
-from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP as BrumbyMLP
-from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm as BrumbyRMSNorm
-from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding as BrumbyRotaryEmbedding
-from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb
 from transformers.utils import can_return_tuple
 from transformers.utils.generic import merge_with_config_defaults
 from transformers.utils.output_capturing import capture_outputs
 
+from ..native.qwen3.modeling_qwen3 import Qwen3MLP as BrumbyMLP
+from ..native.qwen3.modeling_qwen3 import Qwen3RMSNorm as BrumbyRMSNorm
+from ..native.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding as BrumbyRotaryEmbedding
+from ..native.qwen3.modeling_qwen3 import apply_rotary_pos_emb
 from .configuration_brumby import BrumbyConfig
 
 

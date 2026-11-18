@@ -16,9 +16,9 @@ from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import PreTrainedModel
-from transformers.models.ministral3.modeling_ministral3 import Ministral3MLP, Ministral3RMSNorm
 from transformers.utils.output_capturing import capture_outputs
 
+from ..native.ministral3.modeling_ministral3 import Ministral3MLP, Ministral3RMSNorm
 from .configuration_nemotron_labs_diffusion import NemotronLabsDiffusionConfig
 
 

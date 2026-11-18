@@ -390,3 +390,13 @@ def test_owned_tokenizer_missing_science_asset_fails_then_same_path_retries(toke
     path.write_bytes(content)
     tokenizer = load_hf_tokenizer(str(tokenizer_assets), model_config=config)
     assert tokenizer.decode(tokenizer("<IUPAC>carbon acid</IUPAC>")["input_ids"]) == "<IUPAC>carbon acid</IUPAC>"
+
+
+@pytest.mark.parametrize("moe", [False, True])
+def test_text_stack_uses_vendored_qwen3_classes(moe):
+    config = tiny_config(moe=moe)
+    model = InternS1ForConditionalGeneration(config)
+    for owner in (type(config.text_config), type(model.model.language_model)):
+        assert owner.__module__.startswith("gptqmodel.models.ports."), owner
+        assert not owner.__module__.startswith("transformers.")
+    assert InternS1Config.sub_configs["text_config"].__module__ == "gptqmodel.models.ports.native.auto"

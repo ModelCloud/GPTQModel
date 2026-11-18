@@ -11,7 +11,8 @@ from torch import nn
 from transformers import initialization as init
 from transformers.activations import ACT2FN
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-from transformers.models.minimax.modeling_minimax import (
+
+from ..native.minimax.modeling_minimax import (
     MiniMaxAttention,
     MiniMaxCache,
     MiniMaxDecoderLayer,
@@ -23,7 +24,6 @@ from transformers.models.minimax.modeling_minimax import (
     MiniMaxRotaryEmbedding,
     eager_attention_forward,
 )
-
 from .configuration_minimax import MiniMaxText01Config
 
 

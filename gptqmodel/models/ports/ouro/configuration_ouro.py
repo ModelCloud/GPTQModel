@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Ouro config adapted from the Apache-2.0 ByteDance release."""
 
-from transformers import Qwen2Config
+from ..native.qwen2.configuration_qwen2 import Qwen2Config
 
 
 class OuroConfig(Qwen2Config):
