@@ -170,8 +170,10 @@ def test_vptq_cuda_rejects_rocm_with_actionable_error(monkeypatch):
 
 def test_paro_triton_supports_rocm_explicitly():
     assert DEVICE.ROCM in ParoTritonLinear.SUPPORTS_DEVICES
-    # Priority 0 keeps this kernel out of AUTO selection on every device.
-    assert ParoTritonLinear.SUPPORTS_FORMATS[fp8_module.FORMAT.PARO] == 0
+    # A positive declared priority makes the kernel AUTO-eligible. On ROCm it
+    # outranks the dense ``ParoLinear`` fallback; on CUDA ``ParoLinear`` keeps
+    # the higher rank (#4914).
+    assert ParoTritonLinear.SUPPORTS_FORMATS[fp8_module.FORMAT.PARO] > 0
 
 
 def test_qqq_marlin_kernel_declares_cuda_only():

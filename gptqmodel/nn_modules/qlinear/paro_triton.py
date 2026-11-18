@@ -25,6 +25,7 @@ from ...quantization.paro.modules.triton.gemm import (
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
 from ...utils.kernel import resolve_kernel_config
+from ...utils.rocm import IS_ROCM
 from ._compile_support import COMPILE_LEVEL
 from ._numerics import _wants_fp32_reduce, matmul_fp32_reduce
 from .paro import ParoLinear
@@ -50,7 +51,13 @@ class ParoTritonLinear(ParoLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.PARO_TRITON]
     SUPPORTS_METHODS = ParoLinear.SUPPORTS_METHODS
-    SUPPORTS_FORMATS = {FORMAT.PARO: 0}
+    # A positive priority makes this kernel AUTO-eligible. On CUDA the native
+    # ``PARO_CUDA`` AWQ GEMM in ``ParoLinear`` keeps the higher declared rank
+    # (55), so the measured CUDA order is unchanged. On ROCm that extension
+    # cannot run and ``ParoLinear`` falls back to a per-forward dense
+    # dequantize, so ``auto_select_priority`` promotes this kernel above it
+    # (#4914).
+    SUPPORTS_FORMATS = {FORMAT.PARO: 10}
     SUPPORTS_BITS = ParoLinear.SUPPORTS_BITS
     SUPPORTS_GROUP_SIZE = ParoLinear.SUPPORTS_GROUP_SIZE
     SUPPORTS_DESC_ACT = ParoLinear.SUPPORTS_DESC_ACT
@@ -69,10 +76,10 @@ class ParoTritonLinear(ParoLinear):
     # ``triton.language.extra.hip.libdevice`` on HIP, so ROCm is a supported
     # device family here too.
     #
-    # ``SUPPORTS_FORMATS`` keeps FORMAT.PARO at priority 0, so this kernel
-    # is never chosen automatically; listing DEVICE.ROCM only allows an explicit
-    # ``BACKEND.PARO_TRITON`` request and leaves AUTO on the portable
-    # ``ParoLinear`` torch path.
+    # AUTO ordering is device-aware: on ROCm this is the native path and
+    # outranks ``ParoLinear``'s dense fallback; on CUDA ``ParoLinear`` keeps
+    # its higher rank and an explicit ``BACKEND.PARO_TRITON`` request still
+    # reaches this kernel.
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = ParoLinear.SUPPORTS_PACK_DTYPES
@@ -84,6 +91,21 @@ class ParoTritonLinear(ParoLinear):
     PARO_TRITON_AUTOTUNE_ITERS = 4
     PARO_TRITON_AUTOTUNE_MARGIN = 0.05
     PARO_TRITON_DECODE_MAX_ROWS = 8
+
+    @classmethod
+    def auto_select_priority(cls, fmt, dtype=None):
+        """AUTO rank: the native ROCm path, a lower-ranked fallback on CUDA.
+
+        On ROCm ``ParoLinear`` cannot reach its CUDA-only AWQ GEMM and
+        dequantizes the whole weight on every forward, so this kernel must win
+        AUTO selection (#4914). On CUDA ``ParoLinear`` keeps its measured
+        rank and this kernel only stays behind it as a fallback.
+        """
+
+        priority = cls.SUPPORTS_FORMATS.get(fmt, 0)
+        if IS_ROCM:
+            return priority
+        return 0
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:

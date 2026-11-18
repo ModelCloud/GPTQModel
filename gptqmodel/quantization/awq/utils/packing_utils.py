@@ -5,6 +5,7 @@
 # AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
 
 import math
+import threading
 
 import torch
 import transformers
@@ -217,6 +218,34 @@ def unpack_reorder_pack(qweight, qzeros, bits):
     return qweight, qzeros
 
 
+# Extraction offsets for a four-bit decode, in AWQ reverse lane order. Building
+# them from a host list (`torch.tensor([...], device=...)`) copies host memory
+# to the device, which a CUDA-graph capture rejects and which added one H2D
+# copy to every portable AWQ forward (#4914). Derive the constant with
+# device-side arithmetic instead and keep one buffer per device.
+_AWQ_SHIFTS_CACHE = {}
+_AWQ_SHIFTS_LOCK = threading.Lock()
+
+
+def _awq_shifts(device: torch.device, bits: int) -> torch.Tensor:
+    """Return the cached four-bit extraction offsets for ``device``."""
+
+    key = (device.type, device.index, bits)
+    cached = _AWQ_SHIFTS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    with _AWQ_SHIFTS_LOCK:
+        cached = _AWQ_SHIFTS_CACHE.get(key)
+        if cached is None:
+            # `AWQ_REVERSE_ORDER[j] == j // 2 + 4 * (j % 2)` for the eight lanes,
+            # so this reproduces `[lane * bits for lane in AWQ_REVERSE_ORDER]`
+            # without reading a host constant on the device.
+            lanes = torch.arange(8, device=device, dtype=torch.int64)
+            cached = bits * (lanes // 2) + (4 * bits) * (lanes % 2)
+            _AWQ_SHIFTS_CACHE[key] = cached
+        return cached
+
+
 # Upper bound on one tile of INT32 codes inside `dequantize_gemm`. The tile is
 # what keeps the transient footprint of a wide layer proportional to the
 # reconstructed weight instead of a multiple of it; 8 MiB keeps the extra
@@ -255,9 +284,7 @@ def dequantize_gemm(qweight, qzeros, scales, bits, group_size):
     # full-size column gather that `reverse_awq_order` performs.
     shifts = None
     if bits == 4:
-        shifts = torch.tensor(
-            [lane * bits for lane in AWQ_REVERSE_ORDER], dtype=torch.int64, device=device
-        )
+        shifts = _awq_shifts(device, bits)
 
     # Zero points hold one row per group, so they stay small when unpacked once.
     izeros = _unpack_columnwise(qzeros, bits, out_features, dtype=torch.int32, shifts=shifts)

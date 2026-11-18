@@ -479,6 +479,22 @@ class ParoLinear(AwqTorchLinear):
         """Paro relies on AWQ validation and needs no extra one-time checks here."""
         return True, None
 
+    @classmethod
+    def auto_select_priority(cls, fmt, dtype=None):
+        """AUTO rank; demote the per-forward dense fallback on ROCm.
+
+        ``_cuda_awq_kernel_supported`` is false on every HIP build because the
+        AWQ GEMM extension is CUDA-only, so on ROCm this kernel always takes
+        ``_forward_dense`` and re-dequantizes the whole packed weight on each
+        call. ``ParoTritonLinear`` is the native ROCm path and must win AUTO
+        selection there; the declared rank is unchanged on CUDA (#4914).
+        """
+
+        priority = super().auto_select_priority(fmt, dtype)
+        if IS_ROCM:
+            return min(priority, 0)
+        return priority
+
     def extra_repr(self) -> str:
         """Expose Paro-specific fields in `repr(module)` for debugging."""
         return (
