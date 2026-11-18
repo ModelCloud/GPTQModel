@@ -8,7 +8,7 @@ from typing import Dict, Optional
 
 import torch
 from PIL import Image
-from transformers import AutoModelForTextToWaveform, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.audio import process_audio_info
 from ...utils.calibration import batched_conversations
@@ -17,6 +17,7 @@ from ...utils.model import MODALITY, thinker_multimodal_model, thinker_text_mode
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ._omni_thinker_layout import OmniThinkerCheckpointLayoutMixin
 from ._thinker_embeddings import ThinkerEmbeddingsMixin
 from ._vlm_calibration import (
@@ -40,7 +41,12 @@ class BaseQwen2_5_OmniGPTQ(OmniThinkerCheckpointLayoutMixin, ThinkerEmbeddingsMi
 
     HF_WRAPPER_CLASS_NAME = "Qwen2_5OmniForConditionalGeneration"
 
-    loader = AutoModelForTextToWaveform
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForTextToWaveform",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
 
     lm_head = "thinker.lm_head"
     # transformers 5.22 nests the thinker decoder under `language_model`.
@@ -188,7 +194,14 @@ class BaseQwen2_5_OmniGPTQ(OmniThinkerCheckpointLayoutMixin, ThinkerEmbeddingsMi
         return self.model.thinker(*args, **kwargs)
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path)
+        processor = self.__dict__.get("processor")
+        if processor is not None:
+            return processor
+        return self.loader.load_processor(
+            self.model_local_path,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+        )
 
     def prepare_dataset(self, calibration_dataset, calibration_dataset_concat_size=None, batch_size: int = 1, **kwargs):
         label = type(self).__name__

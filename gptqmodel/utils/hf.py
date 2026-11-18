@@ -16,7 +16,7 @@ from typing import Any, Optional
 
 import torch
 from accelerate import init_empty_weights
-from transformers import (
+from transformers import (  # Auto*: unsupported-model config/support probes only
     AutoConfig,
     AutoModelForCausalLM,
     GenerationConfig,

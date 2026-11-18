@@ -171,7 +171,7 @@ def load_mtp(source, device="cuda:0", *, include_experts=False) -> GlmMTP:
     CPU transfers, defuses the source expert leaves when requested, retains
     F32 correction biases and applies the indexer FP32 execution policy.
     """
-    from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
+    from gptqmodel.models.ports.native.glm_moe_dsa.modeling_glm_moe_dsa import (
         GlmMoeDsaDecoderLayer,
         GlmMoeDsaRMSNorm,
     )

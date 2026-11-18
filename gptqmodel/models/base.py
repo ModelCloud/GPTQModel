@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Set, Tupl
 import torch
 import torch.nn as nn
 from tokenicer import Tokenicer
-from transformers import (
+from transformers import (  # Auto*: unsupported-model fallback only (see BaseQModel.loader)
     AutoModelForCausalLM,
     AutoProcessor,
     PreTrainedModel,
@@ -1093,7 +1093,8 @@ class BaseQModel(nn.Module):
     # Entries not matching a key continue to use ``dynamic_expert_index``.
     dynamic_expert_indices: Optional[Dict[str, str]] = None
 
-    # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
+    # Policy exception: only a model with no MODEL_MAP definition reaches this
+    # default; it runs Transformers' own (or checkpoint) code, never a port.
     loader = AutoModelForCausalLM
 
     # monkey patch api for trust_remote_code=True models that have broken transformer compat

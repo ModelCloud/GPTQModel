@@ -3541,7 +3541,7 @@ def test_shipped_modeling_file_uses_the_source_architecture(tmp_path):
 
     with open(os.path.join(out, bq.MODELING_FILE)) as handle:
         source = handle.read()
-    assert "from transformers.models.opt.modeling_opt import OPTForCausalLM" in source
+    assert "from transformers import OPTForCausalLM" in source
     assert "LlamaForCausalLM" not in source
 
     from transformers import AutoModelForCausalLM

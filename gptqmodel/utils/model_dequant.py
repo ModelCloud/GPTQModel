@@ -314,6 +314,8 @@ def _get_compressed_tensors_dependencies() -> dict:
         ) from exc
 
     try:
+        # Policy exception: Auto* build only unsupported (no MODEL_MAP definition)
+        # checkpoints for dequantization; supported ones use their LocalModelLoader.
         from transformers import (
             AutoConfig,
             AutoModel,

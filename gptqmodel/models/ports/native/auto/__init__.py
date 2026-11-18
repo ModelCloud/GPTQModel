@@ -157,6 +157,19 @@ def _checkpoint_json(model_id_or_path, filename, **kwargs):
     return payload if isinstance(payload, dict) else {}
 
 
+def causal_lm_class_name(model_type):
+    """Name of the vendored (= Transformers 5.23) causal-LM class for ``model_type``, or None."""
+
+    entry = _registry.CAUSAL_LM.get(model_type)
+    return entry[1] if entry is not None else None
+
+
+def get_tokenizer_config(model_id_or_path, **kwargs):
+    """Return the checkpoint's ``tokenizer_config.json`` (``{}`` when absent) as plain JSON."""
+
+    return _checkpoint_json(model_id_or_path, "tokenizer_config.json", **kwargs)
+
+
 def _checkpoint_model_type(model_id_or_path, **kwargs):
     selection = {key: kwargs[key] for key in ("revision", "subfolder", "token", "cache_dir", "local_files_only") if key in kwargs}
     payload, _ = PreTrainedConfig.get_config_dict(model_id_or_path, **selection)
@@ -318,4 +331,6 @@ __all__ = [
     "AutoModel",
     "AutoModelForCausalLM",
     "SubConfigSpec",
+    "causal_lm_class_name",
+    "get_tokenizer_config",
 ]
