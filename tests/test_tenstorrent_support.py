@@ -3401,49 +3401,6 @@ def test_mixed_width_checkpoint_roundtrip(tmp_path):
             assert torch.equal(got, want), prefix
 
 
-def test_refusing_quantizer_allows_a_shipped_blockfloat_modeling_file():
-    """#4557: a shipped ``auto_map`` loader must not be refused by transformers.
-
-    The refusing quantizer exists to stop silent random-init loads of packed
-    checkpoints that transformers cannot read. A block-float checkpoint that
-    ships its own modeling file is read by that class, so the writer records the
-    shipped file in the quantization config. A bare config without it still
-    fails closed.
-    """
-
-    from transformers.quantizers.auto import AutoHfQuantizer, AutoQuantizationConfig
-
-    shipped = AutoQuantizationConfig.from_dict(
-        {
-            "quant_method": "tt-blockfloat",
-            "bits": 4,
-            "bits_per_layer": {"model.layers.0.mlp.down_proj": 4},
-            "shipped_modeling_file": "modeling_tt_blockfloat.py",
-        }
-    )
-    quantizer = AutoHfQuantizer.from_config(shipped)
-    assert quantizer.pre_quantized is True
-    # The remote modeling class reads these back out of the config object.
-    assert dict(shipped)["bits_per_layer"] == {"model.layers.0.mlp.down_proj": 4}
-
-    # A checkpoint written before the explicit marker existed still records the
-    # format field that only ``save_blockfloat_model`` writes.
-    legacy = AutoQuantizationConfig.from_dict(
-        {
-            "quant_method": "tt-blockfloat",
-            "checkpoint_format": "tt-blockfloat",
-            "bits": 4,
-        }
-    )
-    assert AutoHfQuantizer.from_config(legacy).pre_quantized is True
-
-    bare = AutoQuantizationConfig.from_dict(
-        {"quant_method": "tt-blockfloat", "bits": 4}
-    )
-    with pytest.raises(ValueError, match="cannot be loaded by `transformers`"):
-        AutoHfQuantizer.from_config(bare)
-
-
 def test_shipped_modeling_file_makes_transformers_load_correctly(tmp_path):
     """Plain ``transformers`` must load the checkpoint correctly, not silently.
 

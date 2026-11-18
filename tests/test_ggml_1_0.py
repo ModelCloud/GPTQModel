@@ -137,7 +137,10 @@ def test_gguf_extra_requires_the_ggml_1_0_llama_cpp_release():
 
     gguf_extra = extras["gguf"]
     assert "llama-cpp-python>=0.3.37" in gguf_extra
-    assert not any(dependency.startswith("gguf>=") for dependency in gguf_extra)
+    # Loading a `.gguf` file goes through Transformers' own GGUF integration,
+    # which needs the real `gguf` package: GPT-QModel never substitutes its
+    # reader for it.
+    assert any(dependency.startswith("gguf>=") for dependency in gguf_extra)
     # The GGUF reader/dequantizers import NumPy, which is no longer a base
     # requirement on this branch.
     assert any(dependency.startswith("numpy") for dependency in gguf_extra)
