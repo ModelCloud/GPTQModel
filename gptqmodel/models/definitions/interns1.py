@@ -31,6 +31,9 @@ class InternS1QModel(BaseQModel):
     # Mixed dense/routed layers resolve only their declared MLP branch.
     layer_modules_strict = False
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
+    # The routed `mlp:moe:?` root exists only in the effective tree; AWQ must
+    # resolve it there to capture the shared router/expert input.
+    _MODULE_TREE_RUNTIME_METHODS = BaseQModel._MODULE_TREE_RUNTIME_METHODS | {"awq_input_feature_aggregation"}
 
     pre_lm_head_norm_module = "model.language_model.norm"
     rotary_embedding = "model.language_model.rotary_emb"
@@ -86,10 +89,6 @@ class InternS1QModel(BaseQModel):
             blocks["mlp:moe:?"] = moe
             blocks.pop("mlp", None)
         return tree
-
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # No vision/text or routed-expert folding relationships are qualified.
-        return []
 
     def pre_quantize_generate_hook_start(self):
         language_model = self.model.model.language_model
