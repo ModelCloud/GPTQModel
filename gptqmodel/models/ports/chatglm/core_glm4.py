@@ -148,9 +148,7 @@ class SelfAttention(core.SelfAttention):
         super().__init__(config, layer_number, device=device)
         self.core_attention = CORE_ATTENTION_CLASSES[config._attn_implementation](config, self.layer_number)
 
-    def forward(
-            self, hidden_states, attention_mask, rotary_pos_emb, kv_cache=None, use_cache=True
-    ):
+    def forward(self, hidden_states, attention_mask, rotary_pos_emb, past_key_values=None, **kwargs):
         # hidden_states: [b, sq, h]
 
         # =================================================
@@ -199,15 +197,8 @@ class SelfAttention(core.SelfAttention):
             query_layer = apply_rotary_pos_emb(query_layer, rotary_pos_emb)
             key_layer = apply_rotary_pos_emb(key_layer, rotary_pos_emb)
 
-        # adjust key and value for inference
-        if kv_cache is not None:
-            cache_k, cache_v = kv_cache
-            key_layer = torch.cat((cache_k, key_layer), dim=2)
-            value_layer = torch.cat((cache_v, value_layer), dim=2)
-        if use_cache:
-            kv_cache = (key_layer, value_layer)
-        else:
-            kv_cache = None
+        if past_key_values is not None:
+            key_layer, value_layer = past_key_values.update(key_layer, value_layer, self.layer_idx)
 
         if self.multi_query_attention:
             key_layer = key_layer.unsqueeze(2)
@@ -237,7 +228,7 @@ class SelfAttention(core.SelfAttention):
 
         output = self.dense(context_layer)
 
-        return output, kv_cache
+        return output
 
 
 class GLMBlock(core.GLMBlock):
