@@ -383,6 +383,67 @@ variable-length calibration samples, `batch_size=1`, `OMP_NUM_THREADS=4`:
 out-of-order case and the two-device case; the two-device tests skip when fewer
 than two CUDA devices are visible.
 
+## Routed-expert Hessian ownership (EXL3)
+
+EXL3 keeps one shared Hessian accumulator per routed expert projection: `w1`
+and `w3` share one state and `w2` has its own. The accumulator is keyed by
+device, and `auto_forward_data_parallel=True` feeds the same accumulator from
+more than one GPU, so the owner has to be a concrete ordinal. An index-less
+`torch.device("cuda")` resolves to the calling worker's current device while
+the accumulator key stays `"cuda"`, so the second worker's
+`existing.add_(xtx)` adds a `cuda:1` partial to a `cuda:0` tensor and layer 0
+crashes with `Expected all tensors to be on the same device`.
+
+`routed_expert_owner_devices` resolves the owner list in the order below and
+`resolve_hessian_owner_device` assigns each expert round-robin. The looper
+binds its already-filtered MoE pool to the processor
+(`bind_moe_quant_devices`) so capture stays on devices
+`compute_device_filter` allowed.
+
+```mermaid
+flowchart TD
+    A["EXL3Processor.preprocess<br/>routed expert identity"] --> B{"moe_vram_strategy_devices<br/>configured?"}
+    B -- "yes" --> C["as_torch_device per entry"]
+    B -- "no" --> D{"looper MoE pool bound?"}
+    D -- "yes" --> E["ModuleLooper._moe_quant_devices<br/>after compute_device_filter"]
+    D -- "no" --> F["qcfg.device -> as_torch_device"]
+    C --> G["_expand_family_owner_devices<br/>cuda -> cuda:0 .. cuda:N-1"]
+    E --> G
+    F --> G
+    G --> H["resolve_hessian_owner_device<br/>expert_index % len devices"]
+    H --> I["GPTQ.set_hessian_accumulator_device"]
+    I --> J["process_batch moves the batch to the owner<br/>and keys the partial under that device"]
+    I -. "index-less accelerator" .-> X["ValueError: concrete ordinal required"]
+    style X fill:#f8d7da,stroke:#c82333
+```
+
+### Before / after
+
+Line references are from `main` at the time of the fix.
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Owner list | `[as_torch_device(qcfg.device)]` keeps the family index-less (`exllamav3_processor.py:147-162`) | Configured pool, else the looper pool, else the family expanded to its visible ordinals |
+| Data-parallel worker 2 | `process_batch` moves the batch to `"cuda"` (that worker's GPU) but keys it under `"cuda"` (`gptq.py:1356-1361`) | The batch moves to the expert's concrete owner and is keyed there |
+| Accumulation | `existing.add_(xtx)` mixes `cuda:0` with `cuda:1` (`gptq.py:889`) | `add_` runs on one device |
+| Index-less accelerator | Accepted; the failure surfaces in layer 0 | `set_hessian_accumulator_device` raises `ValueError` naming the module |
+| Serial forward (`auto_forward_data_parallel=False`) | Every expert owned by the forward thread's current device | Experts spread over the pool; the reduced sum is unchanged |
+| Single GPU | `cuda:0` | Unchanged |
+
+### Measured
+
+Tiny two-layer Qwen3-MoE (hidden 128, 4 experts, 4 rows x 32 tokens, routing
+override), two GPUs, default `auto_forward_data_parallel=True`:
+
+| Run | Before | After |
+| --- | --- | --- |
+| EXL3 quantize | `RuntimeError: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cuda:1` at `gptq.py:889` | Completes; owners are `cuda:0` and `cuda:1` |
+| Routed coverage | Layer 0 aborts | 24 of 24 expert projections captured 128 tokens each |
+| Layer-0 Hessian vs serial capture | Not reached | Normalized error <= 4.3e-8 |
+| Serial and single-GPU controls | Completed | Completed |
+
+Introduced in PR #5144.
+
 ## GPU peer access (P2P)
 
 PyTorch already enables peer access lazily inside its own copy path
