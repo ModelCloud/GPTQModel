@@ -19,15 +19,15 @@ ROCm (and keep ``ParoLinear`` first on CUDA), and a dense ``ParoLinear``
 forward must survive a CUDA-graph capture with output matching eager.
 """
 
+import importlib.util
+
 import pytest
 import torch
 
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import paro as paro_module
-from gptqmodel.nn_modules.qlinear import paro_triton as paro_triton_module
 from gptqmodel.nn_modules.qlinear._compile_support import graph_capture_safe
 from gptqmodel.nn_modules.qlinear.paro import ParoLinear
-from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import (
@@ -35,6 +35,15 @@ from gptqmodel.utils.importer import (
     select_quant_linear,
 )
 from gptqmodel.utils.paro import build_identity_rotation_buffers
+
+
+# ``paro_triton`` imports the Triton kernels at module scope. The AWQ shift and
+# dense CUDA-graph tests below do not touch it.
+HAS_TRITON = importlib.util.find_spec("triton") is not None
+if HAS_TRITON:
+    from gptqmodel.nn_modules.qlinear import paro_triton as paro_triton_module
+    from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
+requires_triton = pytest.mark.skipif(not HAS_TRITON, reason="ParoTritonLinear requires triton")
 
 
 def _patch_rocm(monkeypatch, rocm: bool):
@@ -45,6 +54,7 @@ def _patch_rocm(monkeypatch, rocm: bool):
     monkeypatch.setattr(paro_triton_module, "IS_ROCM", rocm, raising=False)
 
 
+@requires_triton
 def test_paro_triton_is_auto_eligible():
     # Priority 0 opts a kernel out of AUTO selection; a positive rank keeps the
     # Triton kernel reachable from the auto map.
@@ -53,6 +63,7 @@ def test_paro_triton_is_auto_eligible():
     assert BACKEND.PARO_TRITON in auto_map
 
 
+@requires_triton
 def test_rocm_auto_priority_prefers_triton(monkeypatch):
     _patch_rocm(monkeypatch, True)
 
@@ -65,6 +76,7 @@ def test_rocm_auto_priority_prefers_triton(monkeypatch):
     )
 
 
+@requires_triton
 def test_cuda_auto_priority_keeps_paro_linear(monkeypatch):
     _patch_rocm(monkeypatch, False)
 
@@ -92,6 +104,7 @@ def _select(device):
     )
 
 
+@requires_triton
 def test_rocm_auto_selects_triton_kernel(monkeypatch):
     _patch_rocm(monkeypatch, True)
     # Validation is environment-dependent (Triton import, GPU presence); this
@@ -106,6 +119,7 @@ def test_rocm_auto_selects_triton_kernel(monkeypatch):
     assert _select(DEVICE.ROCM) is ParoTritonLinear
 
 
+@requires_triton
 def test_cuda_auto_selects_paro_linear(monkeypatch):
     _patch_rocm(monkeypatch, False)
     monkeypatch.setattr(
