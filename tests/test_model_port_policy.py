@@ -54,10 +54,10 @@ PENDING_MODEL_IMPORT_PORTS = frozenset({
 PENDING_STALE_PATTERN_PORTS = frozenset({
     "bailing_moe", "brumby", "dbrx_converted", "decilm", "deepseek_vl_v2", "dream", "ernie4_5_vl_moe", "exaone",
     "grinmoe", "hymba", "instella", "intern_s2_preview", "internlm2", "interns1", "internvl_chat", "k2_horizon",
-    "kimi_k3", "klear", "lfm3_omni", "llada2", "llama", "locateanything", "mage_vl", "mimo", "mimo_v2", "minicpm",
-    "minicpm_o", "minimax_m2", "mobilellm", "nanbeige", "nemotron_h_puzzle", "nemotron_labs_diffusion",
-    "nemotron_omni", "ouro", "ovis2_5", "ovis2_6_moe", "phi4", "raon1_mini", "ricursive", "solar_open2", "spark2_5",
-    "telechat2", "xing4_0", "xverse",
+    "kimi_k3", "klear", "lfm3_omni", "llada2", "llama", "locateanything", "mimo", "mimo_v2", "minicpm", "minicpm_o",
+    "minimax_m2", "mobilellm", "nanbeige", "nemotron_h_puzzle", "nemotron_labs_diffusion", "nemotron_omni", "ouro",
+    "ovis2_5", "ovis2_6_moe", "phi4", "raon1_mini", "ricursive", "solar_open2", "spark2_5", "telechat2", "xing4_0",
+    "xverse",
 })
 
 STALE_PATTERNS = re.compile(
