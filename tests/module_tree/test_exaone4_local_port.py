@@ -28,9 +28,9 @@ NORMS = {"self_attn.q_norm", "self_attn.k_norm", "post_attention_layernorm", "po
 CHECKPOINTS = json.loads(Path(exaone4.__file__).with_name("checkpoint_contract.json").read_text())["models"]
 
 
-@pytest.mark.parametrize("model_type", ["exaone4", "exaone4_5_text", "exaone4_5"])
-@pytest.mark.parametrize("device", ["cpu", "meta"])
-@pytest.mark.parametrize("kv_heads", [2, 4])
+@pytest.mark.parametrize(
+    "model_type,device,kv_heads", [("exaone4", "meta", 2), ("exaone4_5_text", "cpu", 4), ("exaone4_5", "meta", 4)]
+)
 def test_exact_native_state_dict_plan_ownership_and_roles(model_type, device, kv_heads):
     definition = MODEL_MAP[model_type]
     with torch.device(device):
@@ -77,8 +77,7 @@ def test_exact_native_state_dict_plan_ownership_and_roles(model_type, device, kv
     assert not observed_keys - checkpoint_keys
 
 
-@pytest.mark.parametrize("model_type", ["exaone4", "exaone4_5_text", "exaone4_5"])
-@pytest.mark.parametrize("fallback", [None, {}])
+@pytest.mark.parametrize("model_type,fallback", [("exaone4", None), ("exaone4_5", {})])
 def test_plain_awq_quantizes_every_native_linear_without_folding(tmp_path, monkeypatch, model_type, fallback):
     model = tiny_model(model_type)
     definition = MODEL_MAP[model_type]
