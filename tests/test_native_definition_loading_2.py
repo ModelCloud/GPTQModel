@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Group-2 definitions load vendored Transformers 5.23 classes through their public loader.
 
-For every model type, a tiny checkpoint built from the *vendored* config class is
-saved, loaded through ``MODEL_MAP[model_type].loader`` and checked to contain only
-vendored modules. The native Transformers class (the oracle; tests may import
-``transformers.models``) is loaded from the same checkpoint and must produce
-identical outputs.
+For every model type, a tiny config built with the *vendored* config class seeds a
+checkpoint saved by the native Transformers class (the oracle; tests may import
+``transformers.models``). The checkpoint is loaded through
+``MODEL_MAP[model_type].loader``, must contain only vendored modules, and must
+match the oracle's own ``from_pretrained`` of the same checkpoint exactly.
 """
 
 import importlib
@@ -210,19 +210,24 @@ def test_definition_loader_builds_vendored_classes_matching_transformers(model_t
     assert type(config).__module__.startswith(NATIVE)
     assert config.model_type == model_type
 
+    # The checkpoint is written by the native Transformers class, so loading it
+    # through the definition exercises Transformers' checkpoint conversion mappings.
+    modeling = f"modeling_{family}"
+    oracle_class = _oracle(family, modeling, class_name)
+    native_config = oracle_class.config_class.from_dict(config.to_dict())
+    assert type(native_config).__module__.startswith("transformers.models.")
     torch.manual_seed(0)
-    model = loader.from_config(config, dtype=torch.float32)
+    native = oracle_class._from_config(native_config, dtype=torch.float32)
     checkpoint = tmp_path / "checkpoint"
-    model.save_pretrained(checkpoint)
+    native.save_pretrained(checkpoint)
     if model_type == "qwen2_5_omni":
         torch.save({}, checkpoint / "spk_dict.pt")
-    del model
+    del native
 
     loaded_config = loader.load_config(str(checkpoint))
     assert type(loaded_config) is type(config)
     loaded = loader.from_pretrained(str(checkpoint), config=loaded_config, dtype=torch.float32).eval()
 
-    modeling = f"modeling_{family}"
     assert type(loaded) is _vendored(family, modeling, class_name)
     foreign = sorted({type(m).__module__ for m in loaded.modules() if not type(m).__module__.startswith(NATIVE)})
     leaked = [name for name in foreign if name.startswith("transformers.models")]
@@ -232,7 +237,7 @@ def test_definition_loader_builds_vendored_classes_matching_transformers(model_t
     configs = [loaded.config, *(getattr(m, "config", None) for m in loaded.modules())]
     assert all(type(c).__module__.startswith(NATIVE) for c in configs if c is not None)
 
-    oracle = _oracle(family, modeling, class_name).from_pretrained(str(checkpoint), dtype=torch.float32).eval()
+    oracle = oracle_class.from_pretrained(str(checkpoint), dtype=torch.float32).eval()
     assert type(oracle).__module__.startswith("transformers.models.")
     loaded_state, oracle_state = loaded.state_dict(), oracle.state_dict()
     assert list(loaded_state) == list(oracle_state)

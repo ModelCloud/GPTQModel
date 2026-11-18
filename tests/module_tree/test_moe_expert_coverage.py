@@ -29,7 +29,17 @@ from packaging.version import InvalidVersion, Version
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from gptqmodel.models.auto import MODEL_MAP, select_model_definition
+from gptqmodel.models.local import LocalModelLoader
+from gptqmodel.models.ports.native.auto import AutoConfig as NativeAutoConfig
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
+
+
+def _auto_config(model_type, **kwargs):
+    """Build the default config with the class the definition's loader expects."""
+    loader = getattr(MODEL_MAP.get(model_type), "loader", None)
+    if isinstance(loader, LocalModelLoader) and loader.config_class.startswith("gptqmodel.models.ports.native."):
+        return NativeAutoConfig.for_model(model_type, **kwargs)
+    return transformers.AutoConfig.for_model(model_type, **kwargs)
 
 
 # `afmoe` and `bailing_hybrid` only defuse their routed experts from 0.0.29, so
@@ -161,7 +171,7 @@ def _build_defused_model(model_type):
     split into per-expert linears; the sweep skips those models because the
     loader itself refuses to quantize below its own Defuser minimum.
     """
-    config = transformers.AutoConfig.for_model(model_type)
+    config = _auto_config(model_type)
     override = CONFIG_OVERRIDES.get(model_type)
     if override is not None:
         override(config)
