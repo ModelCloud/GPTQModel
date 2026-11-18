@@ -11,6 +11,7 @@ from torch import nn
 from torch.nn import CrossEntropyLoss
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import BaseModelOutput
+from transformers.utils import can_return_tuple
 from transformers.utils.generic import ModelOutput
 
 from .configuration_nemotron_labs_diffusion import NemotronLabsDiffusionConfig
@@ -85,6 +86,7 @@ class NemotronLabsDiffusionModel(Ministral3PreTrainedModel, DiffusionGenerationM
         return noisy_batch, masked_indices, p_mask
 
 
+    @can_return_tuple
     def forward(
         self,
         input_ids: torch.LongTensor,
@@ -108,7 +110,6 @@ class NemotronLabsDiffusionModel(Ministral3PreTrainedModel, DiffusionGenerationM
     ) -> NemotronLabsDiffusionOutputWithPast | BaseModelOutput:
 
         batch_size, seq_len = input_ids.shape
-        kwargs.pop("return_dict", None)
 
         if self.config.dlm_paradigm == 'block_diff':
             if labels is not None and block_size is None:
@@ -147,6 +148,7 @@ class NemotronLabsDiffusionModel(Ministral3PreTrainedModel, DiffusionGenerationM
             attention_mask=attention_mask,
             position_ids=position_ids,
             is_training=(labels is not None),
+            return_dict=True,
             **kwargs,
         )
 

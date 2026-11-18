@@ -12,10 +12,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers.cache_utils import DynamicCache
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.ministral3.modeling_ministral3 import Ministral3MLP, Ministral3RMSNorm
+from transformers.utils.output_capturing import capture_outputs
 
 from .configuration_nemotron_labs_diffusion import NemotronLabsDiffusionConfig
 
@@ -59,6 +61,11 @@ class Ministral3RotaryEmbedding(nn.Module):
                     (angles.sin() * self.attention_scaling).to(x.dtype))
 
 
+def get_llama_4_attn_scale(positions_ids, beta, max_position_embeddings):
+    scaling = 1 + beta * torch.log(1 + torch.floor(positions_ids / max_position_embeddings))
+    return scaling[:, None, :, None]
+
+
 def apply_rotary(x, cos, sin):
     first, last = x.chunk(2, dim=-1)
     return x * cos[:, None] + torch.cat([-last, first], dim=-1) * sin[:, None]
@@ -98,8 +105,7 @@ class Ministral3Attention(nn.Module):
         self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=False)
 
     def forward(self, hidden_states, position_embeddings, attention_mask=None, past_key_values=None,
-                use_cache=False, cache_position=None, diffusion_lm=True, block_training=False,
-                output_attentions=False, **kwargs):
+                use_cache=False, scale_position_ids=None, diffusion_lm=True, block_training=False, **kwargs):
         batch, length, _ = hidden_states.shape
         q, k, v = [proj(hidden_states).view(batch, length, -1, self.head_dim).transpose(1, 2)
                    for proj in (self.q_proj, self.k_proj, self.v_proj)]
@@ -108,10 +114,9 @@ class Ministral3Attention(nn.Module):
             cos, sin = cos.repeat(1, 2, 1), sin.repeat(1, 2, 1)
         q, k = apply_rotary(q, cos, sin), apply_rotary(k, cos, sin)
         rope = self.config.rope_parameters
-        scale = 1 + rope["llama_4_scaling_beta"] * torch.log(
-            1 + torch.floor(cache_position / rope["original_max_position_embeddings"])
-        )
-        q = q * scale[:, None].to(q.dtype)
+        q = q * get_llama_4_attn_scale(
+            scale_position_ids, rope["llama_4_scaling_beta"], rope["original_max_position_embeddings"]
+        ).to(q.dtype)
         prefix = 0
         if past_key_values is not None:
             prefix = past_key_values.get_seq_length(self.layer_idx)
@@ -144,7 +149,7 @@ class Ministral3Attention(nn.Module):
             mask = mask + additive
         dropout = self.config.attention_dropout if self.training else 0.0
         weights = None
-        if self.config._attn_implementation == "eager" or output_attentions:
+        if self.config._attn_implementation == "eager" or kwargs.get("output_attentions", False):
             scores = (q @ k.transpose(-1, -2)) * self.scaling + mask
             weights = scores.softmax(-1, dtype=torch.float32).to(q.dtype).nan_to_num()
             out = F.dropout(weights, p=dropout, training=self.training) @ v
@@ -155,7 +160,7 @@ class Ministral3Attention(nn.Module):
         return self.o_proj(out), weights
 
 
-class Ministral3DecoderLayer(nn.Module):
+class Ministral3DecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.self_attn = Ministral3Attention(config, layer_idx)
@@ -164,15 +169,17 @@ class Ministral3DecoderLayer(nn.Module):
         self.post_attention_layernorm = Ministral3RMSNorm(config.hidden_size, config.rms_norm_eps)
 
     def forward(self, hidden_states, **kwargs):
-        attn, weights = self.self_attn(self.input_layernorm(hidden_states), **kwargs)
+        attn, _ = self.self_attn(self.input_layernorm(hidden_states), **kwargs)
         hidden_states = hidden_states + attn
-        return hidden_states + self.mlp(self.post_attention_layernorm(hidden_states)), weights
+        return hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
 
 
 class Ministral3PreTrainedModel(PreTrainedModel):
     config_class = NemotronLabsDiffusionConfig
     base_model_prefix = "encoder"
+    supports_gradient_checkpointing = True
     _no_split_modules = ["Ministral3DecoderLayer"]
+    _can_record_outputs = {"hidden_states": Ministral3DecoderLayer, "attentions": Ministral3Attention}
     _supports_sdpa = True
     _supports_flash_attn = False
     _supports_flex_attn = False
@@ -200,12 +207,15 @@ class Ministral3Model(Ministral3PreTrainedModel):
         self.layers = nn.ModuleList([Ministral3DecoderLayer(config, i) for i in range(config.num_hidden_layers)])
         self.norm = Ministral3RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.rotary_emb = Ministral3RotaryEmbedding(config)
+        self.gradient_checkpointing = False
         self.post_init()
 
+    # `use_cache` here means "append this call's K/V to the cache"; denoising calls read the prefix only,
+    # so it deliberately does not default from config.use_cache.
+    @capture_outputs
     def forward(self, input_ids=None, inputs_embeds=None, attention_mask=None, position_ids=None,
-                past_key_values=None, use_cache=False, cache_position=None, diffusion_lm=None,
-                use_causal_mask=False, is_training=False, output_hidden_states=False,
-                output_attentions=False, **kwargs):
+                past_key_values=None, use_cache=False, diffusion_lm=None,
+                use_causal_mask=False, is_training=False, **kwargs):
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Specify exactly one of input_ids or inputs_embeds")
         if past_key_values is not None and type(past_key_values) is not DynamicCache:
@@ -219,30 +229,27 @@ class Ministral3Model(Ministral3PreTrainedModel):
         if block_training and (prefix or use_cache or inputs_embeds.shape[1] % 2):
             raise ValueError("Block-diff training requires equal noisy/clean halves without a cache")
         length = inputs_embeds.shape[1]
-        if cache_position is None:
-            cache_position = torch.arange(prefix, prefix + length, device=inputs_embeds.device)
         if position_ids is None:
-            position_ids = cache_position[:length // 2 if block_training else length].unsqueeze(0)
+            position_ids = torch.arange(prefix, prefix + length, device=inputs_embeds.device).unsqueeze(0)
+            if block_training:
+                position_ids = position_ids[:, :length // 2]
+        # The source scales queries by their absolute token index; block-diff training concatenates the noisy
+        # and clean halves, so its query indices run over the full doubled length.
+        if block_training:
+            scale_position_ids = torch.arange(length, device=inputs_embeds.device).unsqueeze(0)
+        else:
+            scale_position_ids = position_ids
         position_embeddings = self.rotary_emb(inputs_embeds, position_ids)
         if diffusion_lm is None:
             diffusion_lm = self.config.dlm_paradigm != "autoregressive"
         if use_causal_mask:
             diffusion_lm = False
         hidden = inputs_embeds
-        states, attentions = (), ()
         for layer in self.layers:
-            if output_hidden_states:
-                states += (hidden,)
-            hidden, attn = layer(hidden, position_embeddings=position_embeddings, attention_mask=attention_mask,
-                                 past_key_values=past_key_values, use_cache=use_cache,
-                                 cache_position=cache_position, diffusion_lm=diffusion_lm,
-                                 block_training=block_training, output_attentions=output_attentions)
-            if output_attentions:
-                attentions += (attn,)
+            hidden = layer(hidden, position_embeddings=position_embeddings, attention_mask=attention_mask,
+                           past_key_values=past_key_values, use_cache=use_cache,
+                           scale_position_ids=scale_position_ids, diffusion_lm=diffusion_lm,
+                           block_training=block_training, **kwargs)
         hidden = self.norm(hidden)
-        if output_hidden_states:
-            states += (hidden,)
         return BaseModelOutputWithPast(last_hidden_state=hidden,
-                                       past_key_values=past_key_values if use_cache else None,
-                                       hidden_states=states if output_hidden_states else None,
-                                       attentions=attentions if output_attentions else None)
+                                       past_key_values=past_key_values if use_cache else None)

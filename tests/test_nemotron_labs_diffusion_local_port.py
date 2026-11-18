@@ -142,7 +142,7 @@ def test_yarn_llama4_scale_and_padding_match_independent_equations():
     mask = torch.tensor([[0, 1, 1, 1], [1, 1, 1, 1]])
     expected = oracle(model, ids, padding=mask)
     torch.testing.assert_close(model(ids, attention_mask=mask).logits.double(), expected, rtol=2e-5, atol=2e-6)
-    compact = model(ids[:1, 1:], position_ids=torch.tensor([[1, 2, 3]]), cache_position=torch.tensor([1, 2, 3])).logits
+    compact = model(ids[:1, 1:], position_ids=torch.tensor([[1, 2, 3]])).logits
     torch.testing.assert_close(model(ids[:1], attention_mask=mask[:1]).logits[:, 1:], compact, rtol=2e-5, atol=2e-6)
 
 
@@ -509,3 +509,23 @@ def test_public_awq_pack_infer_two_safetensors_cycles(tmp_path, paradigm, offloa
         actual_diffusion, actual_nfe = loaded.generate(inputs=ids, **generation_options)
         assert torch.equal(actual_diffusion, expected_diffusion) and actual_nfe == expected_nfe
     assert not marker.exists()
+
+
+def test_cached_causal_decode_with_llama4_scale_matches_full_forward():
+    rope = {"rope_type": "default", "rope_theta": 10000.0, "original_max_position_embeddings": 2,
+            "llama_4_scaling_beta": 0.3}
+    model = tiny_model(rope_parameters=rope)
+    ids = torch.tensor([[1, 7, 8, 9, 10, 4]])
+    with torch.inference_mode():
+        full = model(ids, use_causal_mask=True).logits
+        cache = DynamicCache()
+        prefix = model.encoder(input_ids=ids[:, :3], past_key_values=cache, use_cache=True, diffusion_lm=False)
+        steps = [model.diffusion_head(prefix.last_hidden_state)]
+        for index in range(3, ids.shape[1]):
+            out = model.encoder(input_ids=ids[:, index:index + 1], past_key_values=cache, use_cache=True,
+                                diffusion_lm=False)
+            steps.append(model.diffusion_head(out.last_hidden_state))
+        assert cache.get_seq_length() == ids.shape[1]
+    cached = torch.cat(steps, 1)
+    torch.testing.assert_close(cached, full, rtol=2e-5, atol=2e-6)
+    assert torch.equal(cached.argmax(-1), full.argmax(-1))
