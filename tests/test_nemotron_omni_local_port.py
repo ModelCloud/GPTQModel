@@ -3,6 +3,7 @@
 """Released Nemotron Omni metadata cannot select checkpoint Python."""
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -354,7 +355,7 @@ def test_source_format_load_conversion_and_corrupt_tensor_repair_retry(tmp_path)
 
 @pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("offload", [False, True])
-def test_public_plain_awq_image_calibration_all_owners_and_two_reloads(tmp_path, legacy, offload):
+def test_public_awq_image_calibration_all_owners_and_two_reloads(tmp_path, legacy, offload):
     source = tmp_path / "source"
     expected, marker = legacy_checkpoint(source)[:2] if legacy else checkpoint(source)
     cfg = AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=offload,
@@ -381,8 +382,19 @@ def test_public_plain_awq_image_calibration_all_owners_and_two_reloads(tmp_path,
     packed = {name for name, module in model.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert packed == modules
     assert all(not hasattr(model.model.get_submodule(name), "weight") for name in packed)
+    # AWQ folds each searched scale into the layer input norms and compensates
+    # the MoE router's input columns; every other unquantized tensor is intact.
+    folded = {key for key in dense if re.fullmatch(r"language_model\.model\.layers\.\d+\.(norm|mixer\.gate)\.weight", key)}
+    assert len(folded) == 5
+    changed = set()
     for key, value in dense.items():
+        if key in folded:
+            if not torch.equal(model.model.state_dict()[key], value):
+                changed.add(key)
+            continue
         torch.testing.assert_close(model.model.state_dict()[key], value, rtol=0, atol=0)
+    # Mamba, attention, dense-MLP and MoE layers each kept their norm group.
+    assert changed == folded
     with torch.inference_mode():
         logits = model.model(**image_inputs(), use_cache=False).logits
         assert torch.isfinite(logits).all()
