@@ -24,6 +24,7 @@ import torch
 import torch.nn as nn
 from tokenicer import Tokenicer
 from transformers import (
+    AutoConfig,
     AutoModelForCausalLM,
     AutoProcessor,
     PreTrainedModel,
@@ -2928,26 +2929,35 @@ class BaseQModel(nn.Module):
         if embed_quant_config is None and norm is None:
             raise ValueError("`requantize()` requires `embed_quant_config`, `embed_quant_mode` or `norm`.")
 
-        if norm is not None:
-            from ..quantization.norm_tuning import validate_tuning_model
-
-            # Fail before embedding packing, dataset preparation or teacher loading.
-            # Loaded GPTQ-v1 checkpoints are fine: their runtime zeros are already v2.
-            if embed_quant_config is not None and resolve_quant_format(
+        # Fail before embedding packing, dataset preparation or teacher loading.
+        # Loaded GPTQ-v1 checkpoints are fine: their runtime zeros are already v2.
+        if (
+            norm is not None
+            and embed_quant_config is not None
+            and resolve_quant_format(
                 self.quantize_config.format, self.quantize_config.method
-            ) == FORMAT.GPTQ:
-                raise ValueError(
-                    "Norm tuning cannot be combined with GPTQ-v1 embedding requantization. "
-                    "Requantize embeddings separately, save the model, then reload with "
-                    "`backend=BACKEND.TORCH` and call `requantize(norm=...)`."
-                )
-            validate_tuning_model(self.model)
+            ) == FORMAT.GPTQ
+        ):
+            raise ValueError(
+                "Norm tuning cannot be combined with GPTQ-v1 embedding requantization. "
+                "Requantize embeddings separately, save the model, then reload with "
+                "`backend=BACKEND.TORCH` and call `requantize(norm=...)`."
+            )
 
         if self.load_quantized_model and self.turtle_model is None:
             # Resolve persistence before embedding packing or norm updates can
             # mutate the loaded model. Revalidate on each requantize() call.
             self._module_replacement_source = _QuantizedCheckpointSource(
                 str(self.model_local_path), checkpoint_file_name=getattr(self, "checkpoint_file_name", None)
+            )
+
+        norm_names = None
+        if norm is not None:
+            # The whole norm pre-flight: every rejection has to land before the
+            # embeddings are replaced, or the in-session model keeps a quantized
+            # embedding that no later requantize() accepts (#5118).
+            norm_names = self._validate_requantize_norm(
+                calibration=calibration, norm=norm, tokenizer=tokenizer
             )
 
         result = {}
@@ -2965,18 +2975,28 @@ class BaseQModel(nn.Module):
                 calibration=calibration,
                 norm=norm,
                 tokenizer=tokenizer,
+                names=norm_names,
             )
         return result
 
-    def _requantize_norm(
+    def _validate_requantize_norm(
         self,
         *,
         calibration: CalibrationConfig,
         norm: NormConfig,
         tokenizer: Optional[PreTrainedTokenizerBase],
-    ) -> Dict[str, Any]:
-        """Tune tagged norm parameters against an unquantized teacher; packed tensors stay untouched."""
-        from ..quantization.norm_tuning import tune_norm_params, validate_tuning_model
+    ) -> List[str]:
+        """Reject every invalid norm request before the model is mutated (#5118).
+
+        ``requantize(embed_quant_mode=..., norm=...)`` packs the embeddings
+        first. A rejected norm half (calibration flags, no matching norm
+        modules, a bad tokenizer, a mistyped teacher id) used to arrive after
+        that, leaving the input embedding replaced by a quantized module that
+        no later ``requantize()`` accepts. Resolve the teacher here too: a
+        path/id typo must fail before the embedding is touched.
+        """
+
+        from ..quantization.norm_tuning import validate_tuning_model
 
         validate_tuning_model(self.model)
         if calibration.dataset is None:
@@ -2996,11 +3016,38 @@ class BaseQModel(nn.Module):
                 "module_tree; norm tuning is unavailable."
             )
 
+        if tokenizer is not None and not isinstance(tokenizer, PreTrainedTokenizerBase):
+            raise ValueError(
+                f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`."
+            )
+
+        teacher = norm.teacher
+        if not isinstance(teacher, nn.Module):
+            # Resolve the config only: the weights are loaded by
+            # `_requantize_norm` after the embeddings, but a bad path/id has to
+            # fail here.
+            AutoConfig.from_pretrained(
+                teacher, trust_remote_code=getattr(self, "trust_remote_code", False)
+            )
+        return names
+
+    def _requantize_norm(
+        self,
+        *,
+        calibration: CalibrationConfig,
+        norm: NormConfig,
+        tokenizer: Optional[PreTrainedTokenizerBase],
+        names: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Tune tagged norm parameters against an unquantized teacher; packed tensors stay untouched."""
+        from ..quantization.norm_tuning import tune_norm_params
+
+        if names is None:
+            names = self._validate_requantize_norm(
+                calibration=calibration, norm=norm, tokenizer=tokenizer
+            )
+
         if tokenizer is not None:
-            if not isinstance(tokenizer, PreTrainedTokenizerBase):
-                raise ValueError(
-                    f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`."
-                )
             self.tokenizer = Tokenicer.load(
                 tokenizer,
                 trust_remote_code=self.trust_remote_code,
