@@ -338,7 +338,7 @@ def test_public_missing_post_ln_corrupt_payload_repair_retry(definition, config_
 
 @pytest.mark.parametrize("definition,config_class", CASES)
 @pytest.mark.parametrize("offload", [False, True])
-def test_public_image_calibrated_plain_awq_pack_infer_two_reloads(definition, config_class, offload, tmp_path):
+def test_public_image_calibrated_scaled_awq_pack_infer_two_reloads(definition, config_class, offload, tmp_path):
     import numpy as np
     from PIL import Image
 
@@ -388,9 +388,18 @@ def test_public_image_calibrated_plain_awq_pack_infer_two_reloads(definition, co
     assert not any(
         "in_proj_ba" in name or name.endswith("mlp.gate") or "shared_expert_gate" in name for name in modules
     )
+    # AWQ folds its scales into the decoder norms and compensates their dense
+    # consumers (router, shared-expert gate, in_proj_ba); nothing outside the
+    # decoder layers moves.
     for key, value in loaded.model.state_dict().items():
-        if key in dense:
+        if key in dense and not key.startswith("llm.model.layers."):
             torch.testing.assert_close(value, dense[key], atol=0, rtol=0, msg=key)
+    folded = [
+        key for key, value in loaded.model.state_dict().items()
+        if key.startswith("llm.model.layers.") and key.endswith("layernorm.weight")
+        and not torch.equal(value, dense[key])
+    ]
+    assert folded
     with torch.inference_mode():
         expected = loaded.model(**calibration[0], use_cache=False).logits
         assert expected.isfinite().all()
@@ -424,6 +433,46 @@ def test_public_image_calibrated_plain_awq_pack_infer_two_reloads(definition, co
             assert list(target.glob("*.safetensors"))
             assert not list(target.glob("*.bin"))
         assert_public_generation_policy(loaded, media_inputs())
+
+
+@pytest.mark.parametrize("definition,config_class", CASES)
+@pytest.mark.parametrize("kv", [4, 2])
+def test_awq_scale_folds_are_neutral_on_every_decoder_layer_type(definition, config_class, kv):
+    from awq_neutrality import assert_awq_folds_neutral
+
+    model = build(definition, config_class, kv=kv)
+    ids = torch.tensor([[1, 4, 5, 6, 3, 4, 5, 6]])
+
+    def forward():
+        return model.llm(input_ids=ids, use_cache=False).logits
+
+    experts = [f"mlp.experts.{index}" for index in range(3)]
+    routed = [f"{expert}.{proj}" for expert in experts for proj in ("gate_proj", "up_proj")]
+    for index, layer in enumerate(model.llm.model.layers):
+        checked = assert_awq_folds_neutral(definition, model, layer, forward)
+        groups = {source: (targets, consumers) for source, targets, consumers in checked}
+        linear = config_class is Ovis2_6_Next_Config and index % 2 == 0
+        if linear:
+            # Gated DeltaNet: the dense `in_proj_ba` reads the same normed input.
+            assert groups["input_layernorm"] == (["linear_attn.in_proj_qkvz"], ["linear_attn.in_proj_ba"])
+            # `out_proj` reads a gated RMSNorm output, which cannot absorb a scale.
+            assert not any(source.startswith("linear_attn.") for source in groups)
+        else:
+            assert groups["input_layernorm"][0] == ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]
+            # o_proj reads the value width only without grouped KV heads.
+            assert ("self_attn.v_proj" in groups) == (kv == 4)
+            if kv == 4:
+                assert groups["self_attn.v_proj"][0] == ["self_attn.o_proj"]
+        targets, consumers = groups["post_attention_layernorm"]
+        if config_class is Ovis2_6_Next_Config:
+            assert targets == ["mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", *routed]
+            assert consumers == ["mlp.gate", "mlp.shared_expert_gate"]
+            assert groups["mlp.shared_expert.up_proj"][0] == ["mlp.shared_expert.down_proj"]
+        else:
+            assert targets == routed
+            assert consumers == ["mlp.gate"]
+        for expert in experts:
+            assert groups[f"{expert}.up_proj"][0] == [f"{expert}.down_proj"]
 
 
 @pytest.mark.parametrize("definition,config_class", CASES)

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from gptqmodel.models.definitions.ovis2_5 import Ovis2_5QModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from tests.port_assets import read_port_json
@@ -41,7 +42,8 @@ def test_real_decoder_every_checkpoint_owner_has_explicit_plan(definition, confi
                 assert not plan.find(name + ".undeclared")
     assert definition.get_num_experts(model.config) == 3
     assert definition.extract_layers_node() == ["llm.model.layers"]
-    assert definition.awq_get_modules_for_scaling(None) == []
+    # The decoders use the generic AWQ planner, not Ovis2.5's plain policy.
+    assert definition.awq_get_modules_for_scaling is not Ovis2_5QModel.awq_get_modules_for_scaling
     assert definition.fusable is None
 
 
