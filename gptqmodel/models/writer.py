@@ -83,7 +83,9 @@ from ..utils.model import (
     find_modules,
     get_model_files_size,
     get_module_by_name,
+    get_module_name,
     get_state_dict_for_save,
+    is_embeddings_module_quantized,
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
     resolve_resave_format_conversion,
@@ -2786,7 +2788,36 @@ def ModelWriter(cls):
             ignore_modules = [self.lm_head] + self.get_base_modules(model)
             external_inclusions = qcfg.external_module_inclusions()
 
+            # A checkpoint may quantize the input embedding and/or the output
+            # head through `dynamic` (requantize / quantize embed endpoints).
+            # The loader keeps those modules and `make_quant` swaps in a
+            # `TorchQuantEmbeddings`, but this shell only kept `lm_head` when
+            # `qcfg.lm_head` was set, so the re-saved checkpoint had no
+            # `embed_tokens.weight` / `lm_head.weight` for the dense endpoint
+            # and the reload raised (#5207). Detect them exactly like the
+            # loader does so both paths cannot drift.
+            try:
+                input_embeddings = model.get_input_embeddings()
+            except NotImplementedError:
+                input_embeddings = None
+            try:
+                output_embeddings = model.get_output_embeddings()
+            except NotImplementedError:
+                output_embeddings = None
+            input_embed_name = get_module_name(model, input_embeddings) if input_embeddings is not None else None
+            output_embed_name = get_module_name(model, output_embeddings) if output_embeddings is not None else None
+            input_embed_quantized, output_embed_quantized = is_embeddings_module_quantized(
+                model_dir=model_id_or_path,
+                input_embed_name=input_embed_name,
+                output_embed_name=output_embed_name,
+            )
+
             for name in list(modules.keys()):
+                if input_embed_quantized and name == input_embed_name:
+                    continue
+                if output_embed_quantized and name == output_embed_name:
+                    continue
+
                 # allow loading of quantized lm_head
                 if qcfg.lm_head and name == self.lm_head:
                     continue
