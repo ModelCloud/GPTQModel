@@ -26,6 +26,16 @@
 #include <hip/hip_fp16.h>
 
 using __nv_bfloat16 = __hip_bfloat16;
+
+// HIP has no scalar ``__float2bfloat16_rn``: the only scalar spelling is
+// ``__float2bfloat16``, which converts through clang's ``__bf16`` and therefore
+// rounds to nearest-even, the same rounding as CUDA's ``__float2bfloat16_rn``.
+// Map the CUDA name onto it so the kernel bodies below stay identical on both
+// platforms, exactly as rotation.cuh maps ``__floats2bfloat162_rn``.
+static __device__ __forceinline__ __nv_bfloat16 __float2bfloat16_rn(float value)
+{
+    return __float2bfloat16(value);
+}
 #else
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
