@@ -350,11 +350,8 @@ class DeepSeekV4MTPAuxiliaryShell(nn.Module):
 
         import defuser
 
-        from ...utils.torch import defuser_conversion_scope
-
-        with defuser_conversion_scope(self):
-            if not defuser.convert_model(self, cleanup_original=False):
-                raise RuntimeError("Defuser did not expand DeepSeek V4 MTP expert tensors")
+        if not defuser.convert_model(self, cleanup_original=False):
+            raise RuntimeError("Defuser did not expand DeepSeek V4 MTP expert tensors")
         patched = patch_deepseek_v4_router_precision(self)
         if patched != MTP_BLOCK_COUNT:
             raise RuntimeError(
