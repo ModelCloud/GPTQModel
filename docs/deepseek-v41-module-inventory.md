@@ -1,16 +1,15 @@
 # DeepSeek V4.1 Flash: checkpoint module inventory
 
 This is a verified **checkpoint inventory and integration guide**, not a claim
-that GPT-QModel can already load or quantize DeepSeek V4.1 Flash. The
-`deepseek_v41` type is absent from the registry at the module-plan implementation
-revision `7d03a349`; the installed Transformers 5.22.1 also lacks that config.
-The upstream Transformers model directory checked on 2026-11-07 lists
-`deepseek_v4`, but not `deepseek_v41`.
-
-The checkpoint now includes reference inference Python code. Its config does
-not provide an `auto_map` that makes that code a Transformers AutoModel
-implementation. A dedicated integration is still required. The existing
-`DeepSeekV4QModel` is for V4, and must not be relabeled as V4.1.
+that GPT-QModel can already load or quantize DeepSeek V4.1 Flash through the
+automatic `MODEL_MAP` dispatcher. Transformers 5.23 ships no `deepseek_v41`
+family. GPT-QModel carries a package-owned Transformers 5.23-ABI port of the
+text decoder, Engram hashing and dSpark stages in
+`gptqmodel/models/ports/deepseek_v41`, ported from the checkpoint's reference
+`inference/` code (MIT) and checked against it numerically in
+`tests/test_deepseek_v41_local_port.py`. It backs the explicit V4.1 calibration
+API and is not registered in `MODEL_MAP`; the vision tower is not ported. The
+existing `DeepSeekV4QModel` is for V4, and must not be relabeled as V4.1.
 
 Start with the [module-plan guide](module-plan-guide.md) for APIs, tags, and
 new-model tests. This page explains the actual V4.1 weight paths, including

@@ -8,11 +8,12 @@ run the registered Defuser conversion, and then exercise the same tree consumers
 used by quantization: ``simple_layer_modules``, ``ModulePlan``, the MoE lifecycle
 hooks, and the module looper helpers.
 
-The DeepSeek-V4.1-Flash checkpoint declares ``model_type=deepseek_v41``.  No
-``deepseek_v41`` config/model class is vendored yet, so a true model test is
-impossible until it is ported.  ``deepseek_v4`` is kept as
-the supported V4-Flash control, and the V4.1 test activates automatically once
-the upstream config exists.
+The DeepSeek-V4.1-Flash checkpoint declares ``model_type=deepseek_v41``.  Its
+package-owned port (``gptqmodel/models/ports/deepseek_v41``) backs an explicit
+calibration API and is deliberately not registered in ``MODEL_MAP`` or the
+native ``CONFIG_MAPPING``; ``tests/test_deepseek_v41_local_port.py`` covers it.
+``deepseek_v4`` is kept as the supported V4-Flash control, and the V4.1 tree
+test activates automatically once the family is registered.
 """
 
 from __future__ import annotations
@@ -636,17 +637,17 @@ def test_deepseek_v41_flash_model_tree_when_upstream_support_lands():
     """Build V4.1 only once its config/model are vendored.
 
     The checkpoint ``deepseek-ai/DeepSeek-V4.1-Flash`` declares
-    ``model_type=deepseek_v41``.  Only ``deepseek_v4`` is vendored, so there is
-    no package-owned config or model class to build.  Keeping this test
-    conditional means it becomes real V4.1 coverage as soon as the vendored
-    port and the GPTQModel definition are added, instead of silently testing
-    V4-Flash under a V4.1 label.
+    ``model_type=deepseek_v41``.  Its port is an unregistered calibration API,
+    so there is no registered config or definition to build here.  Keeping this
+    test conditional means it becomes real V4.1 tree coverage as soon as the
+    family is registered, instead of silently testing V4-Flash under a V4.1
+    label.
     """
 
     if "deepseek_v41" not in CONFIG_MAPPING:
         pytest.skip(
-            "GPT-QModel vendors no deepseek_v41 config/model implementation; "
-            "DeepSeek-V4.1-Flash cannot be built as a true model yet"
+            "the deepseek_v41 port is an unregistered calibration API "
+            "(see tests/test_deepseek_v41_local_port.py)"
         )
     if "deepseek_v41" not in MODEL_MAP:
         pytest.fail(

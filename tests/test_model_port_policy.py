@@ -176,15 +176,9 @@ PACKAGE_MODEL_IMPORT_EXCEPTIONS = {
     },
 }
 
-# Files still importing a model family that Transformers 5.23 does not ship, so
-# it cannot be vendored: DeepSeek V4.1 (``transformers.models.deepseek_v41``)
-# is an unregistered calibration API that needs a package-owned port. May only
-# shrink.
-PENDING_PACKAGE_MODEL_IMPORTS = frozenset({
-    "models/definitions/deepseek_v41.py",
-    "utils/v41_native.py",
-    "utils/v41_source.py",
-})
+# Files still importing a model family that Transformers 5.23 does not ship. May
+# only shrink.
+PENDING_PACKAGE_MODEL_IMPORTS = frozenset()
 
 
 def _package_model_imports():
