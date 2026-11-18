@@ -6,9 +6,10 @@ from types import SimpleNamespace
 
 import torch
 from torch import nn
-from transformers import AutoModelForCausalLM, MllamaForCausalLM, MllamaTextConfig
 
 from gptqmodel.models.definitions.mllama import MLlamaQModel, MLlamaTextQModel
+from gptqmodel.models.ports.native.mllama.configuration_mllama import MllamaTextConfig
+from gptqmodel.models.ports.native.mllama.modeling_mllama import MllamaForCausalLM
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
 from gptqmodel.utils.structure import LazyTurtle
 
@@ -302,9 +303,9 @@ def _tiny_mllama_text_config():
 
 
 def test_mllama_text_config_resolves_to_causal_lm():
-    # Transformers 5.22 ships MllamaForCausalLM for MllamaTextConfig but does
-    # not map the config in AutoModelForCausalLM.
-    model = AutoModelForCausalLM.from_config(_tiny_mllama_text_config())
+    # Transformers' causal-LM table has no mllama_text_model entry; the
+    # definition binds the vendored MllamaForCausalLM directly.
+    model = MLlamaTextQModel.loader.from_config(_tiny_mllama_text_config())
     assert isinstance(model, MllamaForCausalLM)
 
 

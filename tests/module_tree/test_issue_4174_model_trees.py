@@ -28,17 +28,26 @@ from gptqmodel.models.definitions.kimi_linear import KimiLinearNativeQModel
 from gptqmodel.models.definitions.llama4 import Llama4QModel, Llama4TextQModel
 from gptqmodel.models.definitions.phi3 import Phi3QModel
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.ports.native import auto as native_auto
 from gptqmodel.utils.model import get_layers_with_prefixes
 
 
 QC = SimpleNamespace(dynamic=None)
 
 
+def _default_config(definition, model_type):
+    # Package-owned loaders only accept the vendored config classes.
+    if isinstance(definition.loader, LocalModelLoader) and model_type in native_auto.CONFIG_MAPPING:
+        return native_auto.AutoConfig.for_model(model_type)
+    return transformers.AutoConfig.for_model(model_type)
+
+
 def _build_meta(model_type, config=None):
     definition = MODEL_MAP[model_type]
     if config is None:
-        config = transformers.AutoConfig.for_model(model_type)
+        config = _default_config(definition, model_type)
     with torch.device("meta"):
         model = definition.loader.from_config(config)
     _convert_model_with_defuser(definition, model, cleanup_original=False)

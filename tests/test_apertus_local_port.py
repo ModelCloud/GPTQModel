@@ -11,7 +11,7 @@ from huggingface_hub.errors import StrictDataclassClassValidationError
 from safetensors import safe_open
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
-from transformers import ApertusConfig, ApertusForCausalLM, PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizerFast
 
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.local import LocalModelLoader
@@ -20,6 +20,8 @@ from gptqmodel.models.ports.apertus.modeling_apertus1p5 import (
     Apertus1p5ForConditionalGeneration,
     Apertus1p5TextForCausalLM,
 )
+from gptqmodel.models.ports.native.apertus.configuration_apertus import ApertusConfig
+from gptqmodel.models.ports.native.apertus.modeling_apertus import ApertusForCausalLM
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 from gptqmodel.utils.security import BYPASS_ENV
 

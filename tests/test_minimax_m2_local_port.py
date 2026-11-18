@@ -16,6 +16,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFa
 from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.ports.native import auto as native_auto
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 from gptqmodel.utils.security import BYPASS_ENV
@@ -38,6 +39,11 @@ def bounded_torch_threads():
     torch.set_num_threads(1)
     yield
     torch.set_num_threads(before)
+
+
+def _config_factory(model_type):
+    # minimax_m2 loads through the vendored Transformers 5.23 classes.
+    return native_auto.AutoConfig if model_type == "minimax_m2" else AutoConfig
 
 
 def tiny_config(model_type, kv=2, layout="mixed", rotary_dim=4, shared=False, postnorm=True):
@@ -76,7 +82,7 @@ def tiny_config(model_type, kv=2, layout="mixed", rotary_dim=4, shared=False, po
             postnorm=postnorm,
             shared_intermediate_size=32 if shared else 0,
         )
-    config = AutoConfig.for_model(model_type, **values)
+    config = _config_factory(model_type).for_model(model_type, **values)
     config._attn_implementation = "eager"
     return config
 
@@ -320,7 +326,7 @@ def test_entire_pinned_checkpoint_inventory_matches_real_meta_model(model_type):
     if model_type == "minimax":
         config = MODEL_MAP[model_type].loader.load_config(FIXTURES / f"{model_type}_released_config.json")
     else:
-        config = AutoConfig.for_model(model_type, **{k: v for k, v in raw.items() if k != "model_type"})
+        config = _config_factory(model_type).for_model(model_type, **{k: v for k, v in raw.items() if k != "model_type"})
     with torch.device("meta"):
         model = MODEL_MAP[model_type].loader.from_config(config)
     keys = read_port_json(ASSETS / f"{model_type}_checkpoint_keys.json")
