@@ -17,9 +17,14 @@ from torch.nn import functional as F
 from transformers import PreTrainedModel
 from transformers import initialization as init
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache
+from transformers.cache_utils import Cache, LinearAttentionAndFullAttentionLayer, LinearAttentionLayer
 from transformers.generation import GenerationMixin
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast, MoeModelOutputWithPast
+from transformers.modeling_utils import slice_logits_to_keep
+from transformers.utils import can_return_tuple
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import OutputRecorder, capture_outputs
 
 from .configuration_hymba import HymbaConfig
 
@@ -79,37 +84,28 @@ def _rotate(x, cos, sin):
 
 
 class HybridMambaAttentionDynamicCache(Cache):
-    """Request-owned hybrid state. A partially updated request must be reset.
+    """Request-owned hybrid state on 5.23 cache layers. A partially updated request must be reset.
 
-    KV tensors exist only for producer layers; consumers use the producer's
-    tensor directly within each forward. Logical length includes memory tokens
-    and is independent of KV length, user-token count and cache storage policy.
+    KV producers own a `LinearAttentionAndFullAttentionLayer` (SSM conv/recurrent
+    state plus KV); consumers own a `LinearAttentionLayer` and use the producer's
+    tensors directly within each forward. The logical length (KV length on the
+    producers) includes memory tokens; `user_token_mask` marks user positions.
     """
 
     is_compileable = False
 
-    def __init__(self, config, batch_size, dtype=torch.float32, device=None, layer_type=None):
-        super().__init__(layers=[])
+    def __init__(self, config, batch_size):
+        super().__init__(layers=[LinearAttentionAndFullAttentionLayer() if source == i else LinearAttentionLayer()
+                                 for i, source in enumerate(config.kv_sources)])
         self._lock = threading.RLock()
         self._depth = 0
         self._invalid = False
         self._owner = None
         self.signature = self._signature(config)
-        self.dtype = dtype
         self._batch_size = batch_size
-        self.layer_type = list(config.layer_type)
-        inner = int(config.hidden_size * config.mamba_expand)
-        self.conv_states = [torch.zeros(batch_size, inner, config.mamba_d_conv, device=device, dtype=dtype)
-                            for _ in range(config.num_hidden_layers)]
-        self.ssm_states = [torch.zeros(batch_size, inner, config.mamba_d_state, device=device, dtype=dtype)
-                           for _ in range(config.num_hidden_layers)]
-        self.key_cache = [None] * config.num_hidden_layers
-        self.value_cache = [None] * config.num_hidden_layers
-        self._length = 0
-        self.user_seq_length = 0
         self.padding_mask = None
         self.memory_mask = None
-        self.has_previous_state = False
+        self.user_token_mask = None
 
     @staticmethod
     def _signature(config):
@@ -137,28 +133,9 @@ class HybridMambaAttentionDynamicCache(Cache):
         finally:
             self._lock.release()
 
-    def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
-        if self.key_cache[layer_idx] is not None:
-            key_states = torch.cat((self.key_cache[layer_idx], key_states), dim=-2)
-            value_states = torch.cat((self.value_cache[layer_idx], value_states), dim=-2)
-        self.key_cache[layer_idx], self.value_cache[layer_idx] = key_states, value_states
-        return key_states, value_states
-
-    def get_seq_length(self, layer_idx=0):
-        return self._length
-
-    def get_usable_length(self, new_seq_length, layer_idx=0):
-        return self._length
-
-    def get_max_cache_shape(self, layer_idx=0):
-        return -1
-
-    def get_mask_sizes(self, query_length, layer_idx=0):
-        return self._length + query_length, 0
-
     @property
-    def max_batch_size(self):
-        return self._batch_size
+    def user_seq_length(self):
+        return 0 if self.user_token_mask is None else int(self.user_token_mask.sum())
 
     @property
     def batch_size(self):
@@ -166,10 +143,7 @@ class HybridMambaAttentionDynamicCache(Cache):
 
     def reorder_cache(self, beam_idx):
         with self.transaction():
-            for states in (self.key_cache, self.value_cache, self.conv_states, self.ssm_states):
-                for i, state in enumerate(states):
-                    if state is not None:
-                        states[i] = state.index_select(0, beam_idx.to(state.device))
+            super().reorder_cache(beam_idx)
             if self.padding_mask is not None:
                 self.padding_mask = self.padding_mask.index_select(0, beam_idx.to(self.padding_mask.device))
                 self.memory_mask = self.memory_mask.index_select(0, beam_idx.to(self.memory_mask.device))
@@ -178,28 +152,20 @@ class HybridMambaAttentionDynamicCache(Cache):
     batch_select_indices = reorder_cache
 
     def batch_repeat_interleave(self, repeats):
-        device = self.conv_states[0].device
+        device = self.padding_mask.device if self.padding_mask is not None else None
         self.reorder_cache(torch.arange(self.batch_size, device=device).repeat_interleave(repeats))
 
     def reset(self):
         with self._lock:
             if self._depth:
                 raise RuntimeError("Cannot reset an active Hymba cache")
-            for states in (self.conv_states, self.ssm_states):
-                for state in states:
-                    state.zero_()
-            self.key_cache = [None] * len(self.key_cache)
-            self.value_cache = [None] * len(self.value_cache)
-            self._length = self.user_seq_length = 0
-            self.padding_mask = self.memory_mask = None
-            self.has_previous_state = self._invalid = False
+            super().reset()
+            self.padding_mask = self.memory_mask = self.user_token_mask = None
+            self._invalid = False
             self._owner = None
 
     def crop(self, max_length):
         raise NotImplementedError("Hymba recurrent state cannot be cropped; replay into a fresh cache")
-
-    def to_legacy_cache(self):
-        raise NotImplementedError("Hymba recurrent state has no legacy KV-only cache representation")
 
 
 class HymbaAttention(nn.Module):
@@ -222,7 +188,7 @@ class HymbaAttention(nn.Module):
             self.rotary_emb = LlamaRotaryEmbedding(config, self.kq_head_dim, config.rope_theta)
 
     def forward(self, query_states, key_states=None, value_states=None, *, position_ids,
-                attention_mask, kv_last_layer=None, past_key_value=None, use_cache=False,
+                attention_mask, kv_last_layer=None, past_key_values=None, use_cache=False,
                 use_swa=False, memory_mask=None, **kwargs):
         batch, length, _ = query_states.shape
         query = query_states.view(batch, length, self.num_heads, self.kq_head_dim).transpose(1, 2)
@@ -244,7 +210,7 @@ class HymbaAttention(nn.Module):
             if self.config.rope:
                 key = _rotate(key, cos, sin)
             if use_cache:
-                key, value = past_key_value.update(key, value, self.layer_idx)
+                key, value = past_key_values.update(key, value, self.layer_idx)
         key, value = key.to(query.device), value.to(query.device)
         shared = (key, value)
         repeats = self.num_heads // self.num_key_value_heads
@@ -325,8 +291,10 @@ class HymbaBlock(nn.Module):
             self.B_layernorm = HymbaRMSNorm(self.ssm_state_size, config.rms_norm_eps)
             self.C_layernorm = HymbaRMSNorm(self.ssm_state_size, config.rms_norm_eps)
 
-    def forward(self, hidden_states, past_key_value=None, attention_mask=None, position_ids=None,
+    def forward(self, hidden_states, past_key_values=None, attention_mask=None, position_ids=None,
                 kv_last_layer=None, use_cache=False, use_swa=False, memory_mask=None, **kwargs):
+        cache_layer = past_key_values.layers[self.layer_idx] if use_cache else None
+        continuing = use_cache and cache_layer.has_previous_state[0]
         projected = self.in_proj(hidden_states)
         current_mask = attention_mask[:, -projected.shape[1]:, None].to(projected)
         projected = projected * current_mask
@@ -339,18 +307,17 @@ class HymbaBlock(nn.Module):
                 (self.attn_hidden_size, self.k_hidden_size, self.v_hidden_size, self.intermediate_size), dim=-1
             )
         raw = x.transpose(1, 2)
-        if use_cache:
-            # k-1 historical inputs plus every current input; works for short
-            # prefill, one-token decode and multi-token continuation alike.
-            history = past_key_value.conv_states[self.layer_idx].to(raw.device)
+        if continuing:
+            # k-1 historical inputs plus every current input; works for one-token
+            # decode and multi-token continuation alike.
+            history = cache_layer.conv_states[0].to(raw.device)
             extended = torch.cat((history[..., 1:], raw), dim=-1)
-            conv_state = torch.cat((history, raw), dim=-1)[..., -self.conv_kernel_size:]
         else:
             extended = F.pad(raw, (self.conv_kernel_size - 1, 0))
         x = ACT2FN[self.config.hidden_act](self.conv1d(extended)).transpose(1, 2) * current_mask
         attention, shared = self.self_attn(
             query, key, value, position_ids=position_ids, attention_mask=attention_mask,
-            kv_last_layer=kv_last_layer, past_key_value=past_key_value, use_cache=use_cache,
+            kv_last_layer=kv_last_layer, past_key_values=past_key_values, use_cache=use_cache,
             use_swa=use_swa, memory_mask=memory_mask,
         )
         dt, B, C = self.x_proj[0](x).split((self.time_step_rank, self.ssm_state_size, self.ssm_state_size), dim=-1)
@@ -361,13 +328,14 @@ class HymbaBlock(nn.Module):
         delta = self.dt_proj[0](dt)
         ssm, state = selective_scan_reference(
             x, delta, -self.A_log[0].float().exp(), B, C, self.D[0], gate,
-            past_key_value.ssm_states[self.layer_idx].to(x.device) if use_cache else None,
+            cache_layer.recurrent_states[0].to(x.device) if continuing else None,
         )
         if use_cache:
-            past_key_value.conv_states[self.layer_idx] = conv_state.detach()
-            past_key_value.ssm_states[self.layer_idx] = state.to(x.dtype).detach()
+            # The layer keeps the last k raw inputs (zero left-padded on prefill).
+            cache_layer.update_conv_state(raw.detach(), conv_kernel_size=self.conv_kernel_size)
+            cache_layer.update_recurrent_state(state.to(x.dtype).detach())
         mixed = (self.pre_avg_layernorm1(attention) + self.pre_avg_layernorm2(ssm)) / 2
-        return self.out_proj(mixed), shared, past_key_value
+        return self.out_proj(mixed), shared
 
 
 class HymbaMLP(nn.Module):
@@ -410,7 +378,7 @@ class HymbaSparseMoeBlock(nn.Module):
         return output.view(shape), logits
 
 
-class HymbaDecoderLayer(nn.Module):
+class HymbaDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx, reuse_kv=False):
         super().__init__()
         self.config, self.layer_idx, self.reuse_kv = config, layer_idx, reuse_kv
@@ -421,11 +389,10 @@ class HymbaDecoderLayer(nn.Module):
             self.pre_moe_layernorm = HymbaRMSNorm(config.hidden_size, config.rms_norm_eps)
             self.moe = HymbaSparseMoeBlock(config)
 
-    def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_value=None,
-                use_cache=False, output_attentions=False, output_router_logits=False,
-                kv_last_layer=None, use_swa=False, memory_mask=None, **kwargs):
-        output, shared, cache = self.mamba(
-            self.input_layernorm(hidden_states), past_key_value=past_key_value,
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_values=None,
+                use_cache=False, kv_last_layer=None, use_swa=False, memory_mask=None, **kwargs):
+        output, shared = self.mamba(
+            self.input_layernorm(hidden_states), past_key_values=past_key_values,
             attention_mask=attention_mask, position_ids=position_ids, use_cache=use_cache,
             kv_last_layer=kv_last_layer, use_swa=use_swa, memory_mask=memory_mask,
         )
@@ -434,22 +401,22 @@ class HymbaDecoderLayer(nn.Module):
         if self.intermediate_size > 0:
             output, router = self.moe(self.pre_moe_layernorm(hidden_states))
             hidden_states = hidden_states + output
-        result = (hidden_states,)
-        if output_attentions:
-            raise NotImplementedError("Hymba SDPA does not return attention probabilities")
-        if use_cache:
-            result += (cache,)
-        if output_router_logits:
-            result += (router,)
-        return result + (shared,)
+        # The producer's current KV is the last element; calibration replay reads it too.
+        return hidden_states, router, shared
 
 
 class HymbaPreTrainedModel(PreTrainedModel):
     config_class = HymbaConfig
     base_model_prefix = "model"
+    supports_gradient_checkpointing = True
     _no_split_modules = ["HymbaDecoderLayer"]
+    _skip_keys_device_placement = ["past_key_values"]
     _supports_sdpa = True
     _is_stateful = True
+    _can_record_outputs = {
+        "hidden_states": HymbaDecoderLayer,
+        "router_logits": OutputRecorder(HymbaSparseMoeBlock, index=1),
+    }
 
     @torch.no_grad()
     def _init_weights(self, module):
@@ -496,35 +463,30 @@ class HymbaModel(HymbaPreTrainedModel):
             physical += 1
         return (torch.cat(pieces, dim=1), torch.cat(masks, dim=1),
                 torch.tensor(memories, device=embeds.device)[None].expand(embeds.shape[0], -1),
-                torch.tensor(indices, device=embeds.device)[None].expand(embeds.shape[0], -1))
+                torch.tensor(indices, device=embeds.device)[None].expand(embeds.shape[0], -1),
+                torch.zeros(physical, dtype=torch.bool, device=embeds.device).index_fill_(
+                    0, torch.tensor(indices, device=embeds.device), True))
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-                inputs_embeds=None, use_cache=None, output_attentions=None, output_hidden_states=None,
-                output_router_logits=None, return_dict=None, **kwargs):
+                inputs_embeds=None, use_cache=None, **kwargs):
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Specify exactly one of input_ids and inputs_embeds")
-        use_cache = self.config.use_cache if use_cache is None else use_cache
-        output_attentions = self.config.output_attentions if output_attentions is None else output_attentions
-        output_hidden_states = self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
-        output_router_logits = self.config.output_router_logits if output_router_logits is None else output_router_logits
-        if output_attentions:
-            raise NotImplementedError("Hymba SDPA does not return attention probabilities")
         if past_key_values is not None and not use_cache:
             raise ValueError("Hymba past_key_values requires use_cache=True")
         embeds = self.embed_tokens(input_ids) if inputs_embeds is None else inputs_embeds
         if not embeds.shape[1]:
             raise ValueError("Hymba requires at least one input token")
         if use_cache and past_key_values is None:
-            past_key_values = HybridMambaAttentionDynamicCache(self.config, embeds.shape[0], embeds.dtype, embeds.device)
+            past_key_values = HybridMambaAttentionDynamicCache(self.config, embeds.shape[0])
         if past_key_values is not None and not isinstance(past_key_values, HybridMambaAttentionDynamicCache):
             raise TypeError("Hymba requires HybridMambaAttentionDynamicCache, not a KV-only cache")
         context = past_key_values.transaction() if use_cache else nullcontext()
         with context:
-            return self._forward(embeds, attention_mask, position_ids, past_key_values, use_cache,
-                                 output_hidden_states, output_router_logits, return_dict)
+            return self._forward(embeds, attention_mask, position_ids, past_key_values, use_cache, **kwargs)
 
-    def _forward(self, embeds, attention_mask, position_ids, cache, use_cache,
-                 output_hidden_states, output_router_logits, return_dict):
+    def _forward(self, embeds, attention_mask, position_ids, cache, use_cache, **kwargs):
         batch, user_length, _ = embeds.shape
         user_offset = cache.user_seq_length if use_cache else 0
         past_length = cache.get_seq_length() if use_cache else 0
@@ -542,7 +504,8 @@ class HymbaModel(HymbaPreTrainedModel):
             if attention_mask.shape[1] not in (user_length, user_offset + user_length):
                 raise ValueError("Hymba attention_mask must cover current or all user tokens")
             current_mask = attention_mask[:, -user_length:].to(embeds.device).bool()
-        expanded, current_mask, memory_mask, gather = self._expand_memory(embeds, current_mask, user_offset)
+        expanded, current_mask, memory_mask, gather, user_tokens = self._expand_memory(
+            embeds, current_mask, user_offset)
         length = expanded.shape[1]
         if position_ids is None:
             positions = torch.arange(past_length, past_length + length, device=embeds.device)[None].expand(batch, -1)
@@ -566,34 +529,22 @@ class HymbaModel(HymbaPreTrainedModel):
         else:
             mask = current_mask
         hidden = expanded
-        all_hidden = () if output_hidden_states else None
-        all_router = () if output_router_logits else None
         shared_kv = {}
         for i, layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden += (hidden,)
             source = self.config.kv_sources[i]
-            result = layer(hidden, attention_mask=mask, position_ids=positions, past_key_value=cache,
-                           use_cache=use_cache, output_router_logits=output_router_logits,
-                           kv_last_layer=shared_kv.get(source), memory_mask=memory_mask,
-                           use_swa=self.config.sliding_window is not None and i not in self.config.global_attn_idx)
-            hidden = result[0]
-            shared_kv[i] = result[-1]
-            if output_router_logits and result[-2] is not None:
-                all_router += (result[-2],)
+            hidden, _, shared_kv[i] = layer(
+                hidden, attention_mask=mask, position_ids=positions, past_key_values=cache,
+                use_cache=use_cache, kv_last_layer=shared_kv.get(source), memory_mask=memory_mask,
+                use_swa=self.config.sliding_window is not None and i not in self.config.global_attn_idx, **kwargs,
+            )
         hidden = self.final_layernorm(hidden)
-        if output_hidden_states:
-            all_hidden += (hidden,)
         hidden = hidden.gather(1, gather.to(hidden.device)[..., None].expand(-1, -1, hidden.shape[-1]))
         if use_cache:
-            cache._length += length
-            cache.user_seq_length += user_length
             cache.padding_mask = mask.detach()
             cache.memory_mask = memory_mask.detach()
-            cache.has_previous_state = True
-        result = MoeModelOutputWithPast(last_hidden_state=hidden, past_key_values=cache if use_cache else None,
-                                       hidden_states=all_hidden, router_logits=all_router)
-        return result if return_dict is not False else result.to_tuple()
+            cache.user_token_mask = (user_tokens if cache.user_token_mask is None
+                                     else torch.cat((cache.user_token_mask.to(user_tokens.device), user_tokens)))
+        return MoeModelOutputWithPast(last_hidden_state=hidden, past_key_values=cache if use_cache else None)
 
 
 class HymbaForCausalLM(HymbaPreTrainedModel, GenerationMixin):
@@ -621,29 +572,23 @@ class HymbaForCausalLM(HymbaPreTrainedModel, GenerationMixin):
     def _supports_default_dynamic_cache(cls):
         return False
 
+    @can_return_tuple
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-                inputs_embeds=None, labels=None, use_cache=None, output_attentions=None,
-                output_hidden_states=None, output_router_logits=None, return_dict=None,
-                calc_logits_for_entire_prompt=True, logits_to_keep=0, **kwargs):
+                inputs_embeds=None, labels=None, use_cache=None, calc_logits_for_entire_prompt=True,
+                logits_to_keep=0, **kwargs):
         use_cache = self.config.use_cache if use_cache is None else use_cache
         if use_cache and past_key_values is None:
             source = inputs_embeds if inputs_embeds is not None else input_ids
             if source is not None:
-                past_key_values = HybridMambaAttentionDynamicCache(self.config, source.shape[0], self.dtype, source.device)
+                past_key_values = HybridMambaAttentionDynamicCache(self.config, source.shape[0])
         context = past_key_values.transaction() if isinstance(past_key_values, HybridMambaAttentionDynamicCache) else nullcontext()
         with context:
             outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
                                  past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache,
-                                 output_attentions=output_attentions, output_hidden_states=output_hidden_states,
-                                 output_router_logits=output_router_logits, return_dict=True)
+                                 **kwargs)
             hidden = outputs.last_hidden_state
             if labels is None:
-                if not calc_logits_for_entire_prompt:
-                    hidden = hidden[:, -1:]
-                elif isinstance(logits_to_keep, int):
-                    hidden = hidden[:, -logits_to_keep:] if logits_to_keep else hidden
-                else:
-                    hidden = hidden[:, logits_to_keep]
+                hidden = slice_logits_to_keep(hidden, logits_to_keep if calc_logits_for_entire_prompt else 1)
             logits = self.lm_head(hidden).float()
             loss = None
             if labels is not None:
@@ -662,10 +607,9 @@ class HymbaForCausalLM(HymbaPreTrainedModel, GenerationMixin):
                     aux_loss = (expert_mask.mean(0) * probs.mean(0)[None]).sum() * self.config.num_experts
                 if loss is not None:
                     loss = loss + self.config.router_aux_loss_coef * aux_loss
-            result = MoeCausalLMOutputWithPast(loss=loss, aux_loss=aux_loss, logits=logits,
-                                              past_key_values=outputs.past_key_values,
-                                              hidden_states=outputs.hidden_states, router_logits=outputs.router_logits)
-            return result if return_dict is not False else result.to_tuple()
+            return MoeCausalLMOutputWithPast(loss=loss, aux_loss=aux_loss, logits=logits,
+                                             past_key_values=outputs.past_key_values,
+                                             hidden_states=outputs.hidden_states, router_logits=outputs.router_logits)
 
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, attention_mask=None,
                                       inputs_embeds=None, **kwargs):
