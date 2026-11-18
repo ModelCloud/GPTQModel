@@ -753,6 +753,16 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
         resolved = full.get(module_name)
         if resolved is None:
             resolved, _ = get_module_by_name_prefix(layer_module, module_name)
+            if resolved is not None and not isinstance(resolved, tuple(SUPPORTS_MODULE_TYPES)):
+                # A declared name that ``find_modules`` skipped can still
+                # resolve to a placeholder. Nemotron-H declares
+                # ``mixer.fc1_latent_proj`` for the latent-MoE layout, and
+                # transformers builds an ``nn.Identity`` there whenever
+                # ``moe_latent_size`` is unset (#5270). Wrapping it in a
+                # ``NamedModule`` raises ``StopIteration`` on
+                # ``next(module.parameters())`` and aborts the whole run, so
+                # treat it as the coverage miss the calibrated looper records.
+                resolved = None
             if resolved is None:
                 self.layer_module_coverage.record_miss(module_name, layer_index)
                 if self.gptq_model.layer_modules_strict:
