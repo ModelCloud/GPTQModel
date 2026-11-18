@@ -38,6 +38,8 @@ class AgnesQModel(BaseQModel):
     rotary_embedding = "model.language_model.rotary_emb"
 
     out_of_model_tensors = {"prefixes": ["mtp"]}
+    # GQA: `v_proj` and `o_proj` widths differ, so the v->o fold is skipped.
+    awq_scale_optimize_shape_dependent_modules = ["global_attn.o_proj"]
 
     module_tree = [
         "model",
@@ -78,15 +80,6 @@ class AgnesQModel(BaseQModel):
             },
         },
     ]
-
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        """Use plain AWQ quantization; hybrid/parallel norm folds are unqualified.
-
-        The one-centred RMS norms, delta state/gates and parallel FFN must be
-        scored together before any scale optimization can be admitted. Returning
-        no groups leaves all declared linear projections eligible for quantization.
-        """
-        return []
 
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
         """Refresh only global-attention masks during cached layer replay.

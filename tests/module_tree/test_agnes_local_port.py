@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Pinned checkpoint ownership and real quantization for Agnes layouts."""
+"""Pinned checkpoint ownership, AWQ fold neutrality and real quantization for Agnes layouts."""
 
 import hashlib
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor
@@ -106,15 +107,93 @@ def _get_submodule(layer, path):
         return None
 
 
+def _scaled_tiny_model(parallel, kv_heads=1):
+    config = tiny_config(parallel)
+    config.text_config.num_key_value_heads = kv_heads
+    config.text_config._attn_implementation = "eager"
+    torch.manual_seed(23)
+    model = AgnesForConditionalGeneration(config).eval()
+    # Agnes norms scale by `1 + weight` and initialise to zero; perturb every
+    # 1-D gain so a fold into the wrong place cannot hide behind identities.
+    with torch.no_grad():
+        for name, parameter in model.model.language_model.named_parameters():
+            if parameter.ndim == 1 and name.endswith("norm.weight"):
+                parameter.normal_(0.0, 0.3)
+    return model
+
+
+EXPECTED_GROUPS = {
+    "agnes_delta_attention": [
+        ("input_layernorm", ["delta_attn.in_proj_qkv", "delta_attn.in_proj_z"],
+         ["delta_attn.in_proj_b", "delta_attn.in_proj_a"]),
+    ],
+    "agnes_global_attention": [
+        ("input_layernorm", ["global_attn.q_proj", "global_attn.k_proj", "global_attn.v_proj"], []),
+    ],
+}
+
+
+@pytest.mark.parametrize("parallel", [0, 12])
+@pytest.mark.parametrize("kv_heads", [1, 2])
+def test_awq_folds_preserve_delta_and_global_layer_output(parallel, kv_heads):
+    model = _scaled_tiny_model(parallel, kv_heads)
+    tree = AgnesQModel._resolve_effective_module_tree(model, None)
+    ids = torch.randint(2, 60, (1, 9))
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    mlp = [("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"]
+            + (["mlp.parallel_ffn.gate_proj", "mlp.parallel_ffn.up_proj"] if parallel else []), [])]
+    mlp.append(("mlp.up_proj", ["mlp.down_proj"], []))
+    if parallel:
+        mlp.append(("mlp.parallel_ffn.up_proj", ["mlp.parallel_ffn.down_proj"], []))
+    for layer in model.model.language_model.layers:
+        checked = assert_awq_folds_neutral(AgnesQModel, model, layer, forward, tree=tree)
+        expected = list(EXPECTED_GROUPS[layer.layer_type])
+        if layer.layer_type == "agnes_global_attention" and kv_heads == 2:
+            # Without GQA `v_proj` feeds `o_proj` through softmax(QK)V and the
+            # per-channel sigmoid output gate, both linear in V's channels.
+            expected.append(("global_attn.v_proj", ["global_attn.o_proj"], []))
+        expected += mlp
+        assert [(s, t, list(c)) for s, t, c in checked] == expected
+
+
 @pytest.mark.parametrize("parallel", [0, 12])
 @torch.no_grad()
-def test_plain_awq_quantizes_every_declared_linear_without_norm_folding(parallel, monkeypatch):
-    torch.manual_seed(23)
-    model = AgnesForConditionalGeneration(tiny_config(parallel)).eval()
+def test_awq_scaled_quantization_covers_every_declared_linear(parallel, monkeypatch):
+    model = _scaled_tiny_model(parallel)
     wrapper = AgnesQModel.__new__(AgnesQModel)
     nn.Module.__init__(wrapper)
     wrapper.__dict__["model"] = model
     declared = {name for block in AgnesQModel.simple_layer_modules(model.config, None) for name in block}
+    layers = model.model.language_model.layers
+    ids = torch.randint(2, 60, (2, 9))
+
+    captured, handles = {}, []
+
+    def record_layer(index):
+        def hook(module, args, kwargs):
+            captured[index] = {k: v for k, v in kwargs.items() if k != "past_key_values"}
+        return hook
+
+    def record(index, name):
+        def hook(module, args):
+            captured.setdefault((index, "features"), {})[name] = args[0].detach().clone()
+        return hook
+
+    for index, layer in enumerate(layers):
+        handles.append(layer.register_forward_pre_hook(record_layer(index), with_kwargs=True))
+        for name in declared:
+            target = _get_submodule(layer, name)
+            if isinstance(target, nn.Linear):
+                handles.append(target.register_forward_pre_hook(record(index, name)))
+    try:
+        reference = model(input_ids=ids, use_cache=False).logits
+    finally:
+        for handle in handles:
+            handle.remove()
+
     qcfg = AWQConfig(device="cpu", group_size=4, fallback=None)
     processor = AWQProcessor(
         tokenizer=None, qcfg=qcfg, calibration=CalibrationConfig(), gptq_model=wrapper,
@@ -125,23 +204,33 @@ def test_plain_awq_quantizes_every_declared_linear_without_norm_folding(parallel
     processor.apply_clip = False
     processor._feature_task_names = set()
     processor._awq_feature_kwargs = {}
-    for index, layer in enumerate(model.model.language_model.layers):
+    for index, layer in enumerate(layers):
         state = processor._get_layer_state(index)
         state.layer_module = layer
+        # The processor keys a layer's modules by their layer-relative name.
         state.modules = {
-            f"model.language_model.layers.{index}.{name}": NamedModule(
+            name: NamedModule(
                 layer.get_submodule(name), name, f"model.language_model.layers.{index}.{name}", index,
             ) for name in sorted(declared) if isinstance(_get_submodule(layer, name), nn.Linear)
         }
         original = {name: value.clone() for name, value in layer.state_dict().items()}
         named_linears = list(state.modules.values())
         assert len(named_linears) == ((6 if index == 0 else 7) + (3 if parallel else 0))
-        monkeypatch.setattr(processor, "_layer_input_features", lambda state: {})
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
+        features = captured[(index, "features")]
+        assert set(features) == {named.name for named in named_linears}
+        processor._module_forward_kwargs = dict(captured[index])
+        monkeypatch.setattr(processor, "_layer_input_features", lambda state, features=features: features)
+        assert wrapper.awq_get_modules_for_scaling(layer, features, {})
         processor._quantize_layer(index, state)
         assert state.quantized
         for named in named_linears:
             assert "q_scales" in named.state and "q_zeros" in named.state
             assert not torch.equal(named.module.weight, original[named.name + ".weight"])
         changed = {name for name, value in layer.state_dict().items() if not torch.equal(value, original[name])}
-        assert changed == {named.name + ".weight" for named in named_linears}
+        # Scale search folded into both RMS norms (plus the delta gate inputs).
+        assert {"input_layernorm.weight", "post_attention_layernorm.weight"} <= changed
+        allowed = {named.name + ".weight" for named in named_linears} | {
+            "input_layernorm.weight", "post_attention_layernorm.weight"}
+        assert changed <= allowed | {"delta_attn.in_proj_b.weight", "delta_attn.in_proj_a.weight"}
+    output = model(input_ids=ids, use_cache=False).logits
+    assert torch.isfinite(output).all()
