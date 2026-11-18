@@ -159,19 +159,34 @@ _EXL3_MUL1_INV = _half_scalar_from_bits(0x1EEE)
 _EXL3_MUL1_BIAS = _half_scalar_from_bits(0xC931)
 
 
+# These factories feed process-global ``lru_cache`` entries. A plain
+# ``torch.inference_mode()`` caller (``generate()``, an eval loop, server
+# warmup) would otherwise create an *inference* tensor and the cache would hand
+# that kind to every later caller. Matmul then raises "Inference tensors cannot
+# be saved for backward" for any grad-mode forward of any model in the process.
+# Build every constant with inference mode disabled (and no autograd tracking):
+# the values never need grad, and an ordinary tensor is valid in every mode.
+# A clone inside inference mode is still an inference tensor, so it cannot fix
+# this; the construction context itself has to be grad-safe.
 @lru_cache(maxsize=None)
+@torch.inference_mode(False)
+@torch.no_grad()
 def _tensor_core_perm(device_type: str, device_index: int | None) -> torch.Tensor:
     device = torch.device(device_type, device_index)
     return torch.tensor(_tensor_core_perm_values(), dtype=torch.long, device=device)
 
 
 @lru_cache(maxsize=None)
+@torch.inference_mode(False)
+@torch.no_grad()
 def _tensor_core_perm_i(device_type: str, device_index: int | None) -> torch.Tensor:
     device = torch.device(device_type, device_index)
     return torch.tensor(_inverse_perm_values(_tensor_core_perm_values()), dtype=torch.long, device=device)
 
 
 @lru_cache(maxsize=None)
+@torch.inference_mode(False)
+@torch.no_grad()
 def _hadamard_128(device_type: str, device_index: int | None) -> torch.Tensor:
     device = torch.device(device_type, device_index)
     had = torch.tensor([[1.0]], dtype=torch.float32, device=device)
@@ -188,6 +203,8 @@ def _hadamard_128(device_type: str, device_index: int | None) -> torch.Tensor:
 
 
 @lru_cache(maxsize=None)
+@torch.inference_mode(False)
+@torch.no_grad()
 def _codebook_lut(
     codebook: str,
     device_type: str,
@@ -257,6 +274,8 @@ def _hadamard_for(x: torch.Tensor) -> torch.Tensor:
 
 
 @lru_cache(maxsize=None)
+@torch.inference_mode(False)
+@torch.no_grad()
 def _hadamard_128_as(device_type: str, device_index: int | None, dtype: torch.dtype) -> torch.Tensor:
     return _hadamard_128(device_type, device_index).to(dtype=dtype)
 
