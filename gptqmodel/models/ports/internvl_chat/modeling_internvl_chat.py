@@ -98,7 +98,6 @@ class InternVLChatModel(PreTrainedModel, GenerationMixin):
 
     def forward(self, pixel_values=None, input_ids=None, attention_mask=None, position_ids=None,
                 image_flags=None, past_key_values=None, labels=None, use_cache=None,
-                output_attentions=None, output_hidden_states=None, return_dict=None,
                 inputs_embeds=None, **kwargs):
         if inputs_embeds is not None and (input_ids is not None or pixel_values is not None):
             raise ValueError("Supply inputs_embeds or input_ids/images, not both")
@@ -108,8 +107,7 @@ class InternVLChatModel(PreTrainedModel, GenerationMixin):
             inputs_embeds = self._image_embeddings(input_ids, pixel_values, image_flags)
         return self.language_model(inputs_embeds=inputs_embeds, attention_mask=attention_mask,
                                    position_ids=position_ids, past_key_values=past_key_values, labels=labels,
-                                   use_cache=use_cache, output_attentions=output_attentions,
-                                   output_hidden_states=output_hidden_states, return_dict=return_dict, **kwargs)
+                                   use_cache=use_cache, **kwargs)
 
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
