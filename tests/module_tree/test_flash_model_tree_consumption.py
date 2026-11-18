@@ -3,14 +3,14 @@
 
 """End-to-end module-tree contract tests for current Flash model families.
 
-These tests build the actual Transformers model shells on the ``meta`` device,
+These tests build the package-owned (vendored) model shells on the ``meta`` device,
 run the registered Defuser conversion, and then exercise the same tree consumers
 used by quantization: ``simple_layer_modules``, ``ModulePlan``, the MoE lifecycle
 hooks, and the module looper helpers.
 
-The DeepSeek-V4.1-Flash checkpoint declares ``model_type=deepseek_v41``.  The
-current Transformers release has no ``deepseek_v41`` config/model class, so a
-true model test is impossible until upstream lands.  ``deepseek_v4`` is kept as
+The DeepSeek-V4.1-Flash checkpoint declares ``model_type=deepseek_v41``.  No
+``deepseek_v41`` config/model class is vendored yet, so a true model test is
+impossible until it is ported.  ``deepseek_v4`` is kept as
 the supported V4-Flash control, and the V4.1 test activates automatically once
 the upstream config exists.
 """
@@ -24,8 +24,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-import transformers
-from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.models._const import EXPERT_INDEX_PLACEHOLDER
@@ -38,8 +36,9 @@ from gptqmodel.models.definitions.qwen3_5 import Qwen3_5QModel
 from gptqmodel.models.definitions.ricursive import RicursiveQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
-from tests.test_ricursive_support import _build_tiny_fixture, _reference_dir
+from tests.test_ricursive_support import _build_tiny_fixture, _load_tiny_model
 
 
 QC = SimpleNamespace(dynamic=None)
@@ -371,7 +370,7 @@ def _normalize_owner(owner: str) -> str:
 
 
 def _build_meta_case(case: FlashCase) -> SimpleNamespace:
-    config = transformers.AutoConfig.for_model(case.model_type)
+    config = CONFIG_MAPPING[case.model_type]()
     override = CONFIG_OVERRIDES.get(case.model_type)
     if override is not None:
         override(config)
@@ -572,17 +571,11 @@ def test_flash_looper_consumers_use_the_module_plan(flash_case):
         assert looper._extract_moe_group_key("mlp.down_proj") is None
 
 
-def test_ricursive_ripple_real_custom_model_matches_declared_tree(tmp_path):
-    ref_dir = _reference_dir()
-    if ref_dir is None:
-        pytest.skip("Ripple custom code unavailable (set GPTQMODEL_RIPPLE_REF to run offline)")
-
+def test_ricursive_ripple_package_model_matches_declared_tree(tmp_path):
     model_dir = tmp_path / "ripple"
-    _build_tiny_fixture(ref_dir, model_dir)
+    _build_tiny_fixture(model_dir)
 
-    from transformers import AutoModelForCausalLM
-
-    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True).eval()
+    model = _load_tiny_model(str(model_dir)).eval()
     layers, layer_names = get_layers_with_prefixes(model, RicursiveQModel.extract_layers_node())
     assert len(layers) == 5
     assert layer_names[0] == "model.layers.0"
@@ -640,29 +633,28 @@ def test_ricursive_ripple_real_custom_model_matches_declared_tree(tmp_path):
 
 
 def test_deepseek_v41_flash_model_tree_when_upstream_support_lands():
-    """Build V4.1 against its real checkpoint only once Transformers supports it.
+    """Build V4.1 only once its config/model are vendored.
 
     The checkpoint ``deepseek-ai/DeepSeek-V4.1-Flash`` declares
-    ``model_type=deepseek_v41``.  Transformers 5.22.2 (the version used by this
-    suite) and its main branch contain only ``deepseek_v4``, so there is no
-    native config or model class to build.  Keeping this test conditional means
-    it becomes real V4.1 coverage as soon as the upstream class and the
-    GPTQModel definition are added, instead of silently testing V4-Flash under a
-    V4.1 label.
+    ``model_type=deepseek_v41``.  Only ``deepseek_v4`` is vendored, so there is
+    no package-owned config or model class to build.  Keeping this test
+    conditional means it becomes real V4.1 coverage as soon as the vendored
+    port and the GPTQModel definition are added, instead of silently testing
+    V4-Flash under a V4.1 label.
     """
 
     if "deepseek_v41" not in CONFIG_MAPPING:
         pytest.skip(
-            "Transformers has no deepseek_v41 config/model implementation; "
+            "GPT-QModel vendors no deepseek_v41 config/model implementation; "
             "DeepSeek-V4.1-Flash cannot be built as a true model yet"
         )
     if "deepseek_v41" not in MODEL_MAP:
         pytest.fail(
-            "Transformers now exposes deepseek_v41 but GPTQModel has no "
+            "A deepseek_v41 config is vendored but GPTQModel has no "
             "DeepSeek-V4.1 definition; add the definition and tree tests"
         )
 
-    config = transformers.AutoConfig.for_model("deepseek_v41")
+    config = CONFIG_MAPPING["deepseek_v41"]()
     definition = MODEL_MAP["deepseek_v41"]
     with torch.device("meta"):
         model = definition.loader.from_config(config)
