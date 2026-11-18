@@ -137,6 +137,11 @@ Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kerne
   decode dtype from the stored scale range, so a wide or tiny checkpoint scale
   no longer becomes `inf`/`0` before the product; see
   [AWQ Torch forward decode range](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-torch-decode-range.md).
+- **Keep the AWQ extraction table out of a capture.** A four-bit dequant that
+  first runs inside `torch.cuda.graph(...)` records its offset table instead of
+  computing it, so the table is published only from eager calls; an abandoned
+  capture can no longer leave later eager dequant decoding with zeros. See
+  [capture-safe extraction offsets](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-dequantize-tiling.md#capture-safe-extraction-offsets).
 - **Keep the AWQ bias out of the scale dtype.** A non-quantized bias is added
   after the reduction, so packing keeps its source precision instead of casting
   it to FP16; see

@@ -94,7 +94,7 @@ python -m tests.kernels.gen_compile_matrix
 | `AwqMarlinLinear` | `marlin_awq` | `EAGER` | `EAGER` | yes | no | - |
 | `AwqMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | yes | - |
 | `AwqSwordfishLinear` | `swordfish` | `EAGER` | `EAGER` | no | no | - |
-| `AwqTorchLinear` | `torch_awq` | `CUDAGRAPH` | `INDUCTOR` | no | yes | - |
+| `AwqTorchLinear` | `torch_awq` | `CUDAGRAPH` | `INDUCTOR` | yes | yes | - |
 | `BitblasLinear` | `bitblas` | `EAGER` | `EAGER` | no | no | - |
 | `BitsAndBytesLinear` | `bitsandbytes` | `CUDAGRAPH` | `INDUCTOR` | yes | yes | - |
 | `BitsAndBytesMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |

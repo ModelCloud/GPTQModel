@@ -223,8 +223,30 @@ def unpack_reorder_pack(qweight, qzeros, bits):
 # to the device, which a CUDA-graph capture rejects and which added one H2D
 # copy to every portable AWQ forward (#4914). Derive the constant with
 # device-side arithmetic instead and keep one buffer per device.
+#
+# A capture records device work instead of running it, so a table first built
+# inside `torch.cuda.graph(...)` holds uninitialized memory (zeros) until the
+# graph is replayed. Publishing that table would make every later eager dequant
+# decode with those zeros after an abandoned capture (#5094). `_awq_shifts()`
+# therefore only publishes from an eager call and returns an uncached tensor
+# for the graph to record when the first call happens during capture.
 _AWQ_SHIFTS_CACHE = {}
 _AWQ_SHIFTS_LOCK = threading.Lock()
+
+
+def _is_current_stream_capturing(device: torch.device) -> bool:
+    """Whether a CUDA/ROCm graph capture is recording on this stream."""
+
+    # ROCm also reports its device as ``cuda`` and exposes the same API.
+    if device.type != "cuda":
+        return False
+    is_capturing = getattr(torch.cuda, "is_current_stream_capturing", None)
+    if is_capturing is None:
+        return False
+    try:
+        return bool(is_capturing())
+    except Exception:  # noqa: BLE001 - backend without capture support
+        return False
 
 
 def _awq_shifts(device: torch.device, bits: int) -> torch.Tensor:
@@ -240,6 +262,7 @@ def _awq_shifts(device: torch.device, bits: int) -> torch.Tensor:
         # write); the eager warmup caches the same tensor for later calls.
         lanes = torch.arange(8, device=device, dtype=torch.int64)
         return bits * (lanes // 2) + (4 * bits) * (lanes % 2)
+    capturing = _is_current_stream_capturing(device)
     with _AWQ_SHIFTS_LOCK:
         cached = _AWQ_SHIFTS_CACHE.get(key)
         if cached is None:
@@ -248,7 +271,8 @@ def _awq_shifts(device: torch.device, bits: int) -> torch.Tensor:
             # without reading a host constant on the device.
             lanes = torch.arange(8, device=device, dtype=torch.int64)
             cached = bits * (lanes // 2) + (4 * bits) * (lanes % 2)
-            _AWQ_SHIFTS_CACHE[key] = cached
+            if not capturing:
+                _AWQ_SHIFTS_CACHE[key] = cached
         return cached
 
 

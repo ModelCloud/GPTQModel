@@ -44,14 +44,17 @@ class AwqTorchLinear(AWQuantLinear):
     # that compiling it is not a pessimization, unlike the custom-op kernels.
     SUPPORTS_COMPILE = True
     # Measured on NVIDIA GB10 (sm_121), torch 2.11.0+cu130: dynamo, aot_eager,
-    # inductor and reduce-overhead all pass. Eager CUDA-graph capture fails:
-    # dequantize_gemm builds its shift table with `torch.tensor([...], cuda)`.
+    # inductor and reduce-overhead all pass. Eager CUDA-graph capture used to
+    # fail because dequantize_gemm built its shift table with a host-to-device
+    # copy; #5094 keeps that table out of the global cache during capture, and
+    # the eager forward now captures and replays on RTX 4090 (sm_89), torch
+    # 2.15.0+cu132 (tests/test_awq_shift_capture_5094.py).
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
     # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0, and
     # dynamo/aot_eager/inductor all reach it. CUDA-graph capture is CUDA-only,
     # so the CPU forward's ceiling is INDUCTOR.
     SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [8]
