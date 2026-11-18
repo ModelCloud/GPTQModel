@@ -144,12 +144,6 @@ class MimoV2QModel(BaseQModel):
         self._drop_checkpoint_omitted_audio_tensors(model, self.model_local_path)
         return model
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Packed QKV with unequal QK/V widths, SWA sinks and routed experts
-        # have not been qualified for folding/search. Quantize all linears
-        # through AWQ's existing explicit no-group path, including fallback=None.
-        return []
-
     def pre_quantize_generate_hook_start(self):
         model = self.model.model
         rotary_emb_cls = type(model.rotary_emb)

@@ -494,7 +494,7 @@ def test_corrupt_safetensors_public_failure_repair_retry(tmp_path):
 
 @pytest.mark.parametrize("layout", ["split", "fused_qkv"])
 @pytest.mark.parametrize("moe", [[0, 0], [0, 1], [1, 1]])
-def test_public_plain_awq_packs_every_decoder_linear_and_two_roundtrips(tmp_path, layout, moe):
+def test_public_awq_packs_every_decoder_linear_and_two_roundtrips(tmp_path, layout, moe):
     from gptqmodel import BACKEND
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
@@ -510,12 +510,16 @@ def test_public_plain_awq_packs_every_decoder_linear_and_two_roundtrips(tmp_path
         write_tokenizer(tmp_path)
     wrapper = GPTQModel.load(str(tmp_path), dtype=torch.float16, backend=BACKEND.TORCH,
                             quantize_config=AWQConfig(device="cpu", group_size=16, fallback=None))
+    # AWQ folds its scales into the decoder input/post-attention norms and
+    # compensates the router weight; everything else outside the linears is dense.
+    folded = (".input_layernorm.", ".post_attention_layernorm.", ".mlp.gate.weight")
     before = {name: value.clone() for name, value in source.state_dict().items()
-              if not name.startswith("model.layers.") or any(key in name for key in ("norm", "mlp.gate.", "sink_bias"))}
+              if (not name.startswith("model.layers.") or any(key in name for key in ("norm", "mlp.gate.", "sink_bias")))
+              and not any(key in name for key in folded)}
+    norms = {name: value.clone() for name, value in source.state_dict().items()
+             if name.startswith("model.layers.") and any(key in name for key in folded[:2])}
     expected_names = {name for name, module in source.named_modules()
                       if name.startswith("model.layers.") and isinstance(module, torch.nn.Linear)}
-    for layer in wrapper.model.model.layers:
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[1, 4, 5, 6, 7, 8, 9, 10]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
     if media:
@@ -534,6 +538,7 @@ def test_public_plain_awq_packs_every_decoder_linear_and_two_roundtrips(tmp_path
     assert packed == expected_names
     for name, value in before.items():
         torch.testing.assert_close(wrapper.model.state_dict()[name], value, atol=0, rtol=0)
+    assert any(not torch.equal(wrapper.model.state_dict()[name], value) for name, value in norms.items())
     with torch.inference_mode():
         expected = wrapper.model(**calibration[0], use_cache=False).logits
     assert torch.isfinite(expected).all()
