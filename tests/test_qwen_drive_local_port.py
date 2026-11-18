@@ -101,7 +101,8 @@ def test_entire_released_header_matches_meta_and_only_tied_head_is_omitted():
         model = QwenDriveForConditionalGeneration(config)
     actual = {key: list(value.shape) for key, value in model.state_dict().items()}
     assert len(header) == 723
-    assert actual.pop("vlm.lm_head.weight") == header["vlm.model.language_model.embed_tokens.weight"]["shape"]
+    lm_head_shape = actual.pop("vlm.lm_head.weight")
+    assert lm_head_shape == header["vlm.model.language_model.embed_tokens.weight"]["shape"]
     assert actual == {key: value["shape"] for key, value in header.items()}
     assert model.get_output_embeddings().weight is model.get_input_embeddings().weight
     assert not hasattr(model, "planning_expert")

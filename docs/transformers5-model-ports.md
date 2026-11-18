@@ -97,11 +97,10 @@ in [Tokenicer 0.0.20](https://pypi.org/project/tokenicer/0.0.20/).
 Tokenicer prepares the selected tokenizer JSON before the backend parses it.
 GPT-QModel adds no tokenizer normalization shim.
 
-On Transformers 5.23.0 with published Tokenicer 0.0.20, the repeat audit
-covered the same 145 files in 19 batches. It passed **7,961 tests** with
-zero failures, skips or collection errors after rerunning the batch with
-the corrected SenseNova-Loop loader assertion. The Kimi tokenizer assets
-were available for this run.
+On Transformers 5.23.0 with published Tokenicer 0.0.20, the complete audit
+at `10ba615ba` covered the same 145 files in 19 batches. It passed
+**7,963 tests** with zero failures, skips or collection errors. The Kimi
+tokenizer assets were available for this run.
 
 An independent audit of the integrated `0a9a08ea3` port tree plus the optional
 vision patch (`f0245b360`) ran all 145 local-port/module-plan files in 19 bounded

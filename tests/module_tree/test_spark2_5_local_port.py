@@ -43,7 +43,8 @@ def test_all_released_checkpoint_keys_and_shapes_match_exact_meta_model():
     assert set(weight_map) == set(published)
     actual = {name: list(tensor.shape) for name, tensor in model.state_dict().items()}
     # The published safetensors omit the tied output head, as native save does.
-    assert actual.pop("lm_head.weight") == expected["model.embedding.weight"]
+    lm_head_shape = actual.pop("lm_head.weight")
+    assert lm_head_shape == expected["model.embedding.weight"]
     assert actual == expected
     assert len(expected) == 290
     assert model.lm_head.weight is model.model.embedding.weight
