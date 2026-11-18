@@ -36,7 +36,7 @@ class BailingConfig(PretrainedConfig):
         hidden_act="silu", use_qkv_bias=False, use_bias=False, rms_norm_eps=1e-6,
         tie_word_embeddings=False, embedding_dropout=0.0, attention_dropout=0.0,
         output_dropout=0.0, initializer_range=0.02, max_position_embeddings=32768,
-        rope_theta=600000.0, use_cache=True, rope_scaling=None, pad_token_id=156892,
+        rope_theta=600000.0, use_cache=True, pad_token_id=156892,
         eos_token_id=156892, num_experts=256, num_shared_experts=1,
         num_experts_per_tok=8, n_group=8, topk_group=4, moe_intermediate_size=512,
         first_k_dense_replace=1, head_dim=None, output_router_logits=False,
@@ -51,9 +51,8 @@ class BailingConfig(PretrainedConfig):
         values.pop("self")
         values.pop("kwargs")
         values.pop("__class__", None)
-        # Transformers 5 owns RoPE metadata as standardized `rope_parameters`;
-        # `rope_scaling` is only a deprecated alias of it.
-        values.pop("rope_scaling")
+        # Released checkpoints may carry a `rope_scaling` field; it stays in kwargs so
+        # `PreTrainedConfig` converts it into the standardized `rope_parameters` at parse time.
         self.rope_parameters = kwargs.pop("rope_parameters", None)
         for key, value in values.items():
             setattr(self, key, value)
@@ -66,7 +65,7 @@ class BailingConfig(PretrainedConfig):
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         super().__init__(
             pad_token_id=pad_token_id, eos_token_id=eos_token_id,
-            tie_word_embeddings=tie_word_embeddings, rope_scaling=rope_scaling, **kwargs,
+            tie_word_embeddings=tie_word_embeddings, **kwargs,
         )
         self.rope_theta = self.rope_parameters["rope_theta"]
         if model_type not in ("bailing_moe", "bailing_hybrid"):

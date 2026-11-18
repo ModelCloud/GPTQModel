@@ -176,7 +176,7 @@ def test_calibration_replay_matches_every_native_layer_including_mtp(layout):
 
     expected = []
     handle = model.model.layers[0].register_forward_pre_hook(capture, with_kwargs=True)
-    handles = [layer.register_forward_hook(lambda module, args, output: expected.append(output[0].clone())) for layer in model.model.layers]
+    handles = [layer.register_forward_hook(lambda module, args, output: expected.append(output.clone())) for layer in model.model.layers]
     try:
         with torch.no_grad():
             model(**source, use_cache=False)
@@ -190,5 +190,5 @@ def test_calibration_replay_matches_every_native_layer_including_mtp(layout):
         for layer, reference in zip(model.model.layers, expected, strict=True):
             inputs = [hidden]
             kwargs = wrapper.prepare_layer_replay_kwargs(layer, inputs, dict(captured["kwargs"]), device)
-            hidden = layer(*inputs, **kwargs)[0]
+            hidden = layer(*inputs, **kwargs)
             torch.testing.assert_close(hidden, reference, rtol=0, atol=0)
