@@ -35,7 +35,7 @@ flowchart TD
     B --> C["post-forward tail:<br/>receive_layer_forward_context,<br/>receive_layer_inputs, forward_end cb"]
     C -->|"StopMainLoop / exception"| R1
     C --> D["_release_capture_hooks() (success path)"]
-    B -->|"other unwind"| E["ModuleLooper.loop failure branch"]
+    B -->|"other unwind"| E["RunExitRecovery.abort (both loopers)"]
     C -->|"other unwind"| E
     D --> F["ensure_version_counters(model) (success path)"]
     E --> G["_fence_run_work, _restore_inflight_layer"]
@@ -72,6 +72,11 @@ Pre-fix locations are from revision `bfbb7a2b4`; the symbols are unchanged.
   `offload_to_disk=True` exists for.
 
 ## Tests
+
+`tests/test_run_exit_recovery_contract_5060.py` — the shared conformance
+fixture for both loopers: a next-layer fault and a final-restore fault with
+disk offload on and off, the calibrated post-forward stop, a secondary repair
+failure that must not replace the primary error, and a successful-run control.
 
 `tests/test_failed_run_model_state_5009.py`:
 
