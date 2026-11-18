@@ -31,8 +31,7 @@ class XverseConfig(PretrainedConfig):
         bos_token_id=1,
         eos_token_id=2,
         tie_word_embeddings=False,
-        rope_theta=None,
-        rope_scaling=None,
+        rope_parameters=None,
         attention_bias=False,
         attention_dropout=0.0,
         pretraining_tp=1,
@@ -80,10 +79,23 @@ class XverseConfig(PretrainedConfig):
         self.xverse_rope_persistent = (
             not bool(num_experts) if xverse_rope_persistent is None else xverse_rope_persistent
         )
-        self.rope_theta = (
-            rope_theta if rope_theta is not None else (500000.0 if xverse_rope_type == "dynamic_256k" else 10000.0)
+        # Released config.json files spell RoPE as top-level ``rope_theta``/``rope_scaling``; canonicalize them
+        # into ``rope_parameters`` here. Nothing downstream reads the released spelling.
+        rope_theta = kwargs.pop("rope_theta", None)
+        rope_scaling = kwargs.pop("rope_scaling", None)
+        if rope_parameters is None:
+            rope_parameters = {"rope_type": "default"}
+            if rope_scaling is not None:
+                rope_parameters = {
+                    "rope_type": rope_scaling.get("rope_type", rope_scaling.get("type")),
+                    "factor": rope_scaling.get("factor", 0),
+                }
+        rope_parameters = dict(rope_parameters)
+        rope_parameters.setdefault(
+            "rope_theta",
+            rope_theta if rope_theta is not None else (500000.0 if xverse_rope_type == "dynamic_256k" else 10000.0),
         )
-        self.xverse_rope_scaling = kwargs.pop("xverse_rope_scaling", rope_scaling)
+        self.rope_parameters = rope_parameters
         if (
             num_attention_heads < 1
             or self.num_key_value_heads < 1
@@ -109,12 +121,11 @@ class XverseConfig(PretrainedConfig):
             )
         ):
             raise ValueError("Invalid pretraining_tp partition")
-        rope_scaling = self.xverse_rope_scaling
-        if rope_scaling is not None:
+        if rope_parameters.get("rope_type", "default") != "default":
             if (
                 not num_experts
-                or rope_scaling.get("type") not in {"linear", "dynamic"}
-                or rope_scaling.get("factor", 0) <= 1
+                or rope_parameters["rope_type"] not in {"linear", "dynamic"}
+                or rope_parameters.get("factor", 0) <= 1
             ):
                 raise ValueError("XVERSE MoE rope_scaling requires linear/dynamic type and factor > 1")
         super().__init__(
