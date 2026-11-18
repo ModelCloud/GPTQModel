@@ -239,7 +239,10 @@ def test_public_cache_failure_retry_is_transactional(monkeypatch, return_dict, s
     assert [layer.get_seq_length() for layer in cache.layers] == [5, 5, 5]
     assert prefix.get_seq_length() == 5
     full = hf_model(ids, use_cache=True)
-    rtol, atol = {torch.float32: (2e-5, 2e-6), torch.float16: (2e-3, 2e-3), torch.bfloat16: (2e-2, 2e-2)}[dtype]
+    # Cached decode and the full forward run different GEMM shapes, so fp32
+    # differs by reduction order (native Transformers 5.23 DeepseekV2 shows the
+    # same drift); fp32 atol is torch.testing's float32 default.
+    rtol, atol = {torch.float32: (2e-5, 1e-5), torch.float16: (2e-3, 2e-3), torch.bfloat16: (2e-2, 2e-2)}[dtype]
     torch.testing.assert_close(logits, full.logits[:, 2:], rtol=rtol, atol=atol)
     for layer, expected in zip(cache.layers, full.past_key_values.layers):
         torch.testing.assert_close(layer.keys, expected.keys, rtol=rtol, atol=atol)
