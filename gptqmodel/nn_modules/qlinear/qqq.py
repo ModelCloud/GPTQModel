@@ -1066,6 +1066,17 @@ class QQQTorchLinear(QQQLinear):
                 self._buffers[name] = None
             return True
 
+    # ``inference_mode(False)`` first: the cached operands outlive this call, and
+    # a tensor created under ``inference_mode`` cannot be saved for backward.
+    # ``forward()`` runs the first forward of every ``generate()``/eval loop
+    # inside ``inference_mode``, so without this the lazily-built cache held
+    # inference tensors and the next grad-mode forward raised at
+    # ``accum * s_channel`` (#5197). The plain ``no_grad`` below is required
+    # too: on this torch, ``inference_mode(False)`` restores the enclosing grad
+    # mode, and a cache built while rebuilding the checkpoint must never record
+    # an autograd graph.
+    @torch.inference_mode(False)
+    @torch.no_grad()
     def _packed_weight_for_cpu(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build the CPU kernel cache, then replace the checkpoint layout.
 
