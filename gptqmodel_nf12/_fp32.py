@@ -362,14 +362,34 @@ def linear_bf16_fp32(x: torch.Tensor, weight: NF12Weight,
     return out
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["m"])
 def _linear_fp32_prefill_gate_tc(
     x_ptr, weight_ptr, bias_ptr, out_ptr,
-    m: tl.constexpr, n: tl.constexpr, k: tl.constexpr,
+    m, n: tl.constexpr, k: tl.constexpr,
     has_bias: tl.constexpr,
     block_m: tl.constexpr, block_n: tl.constexpr, block_k: tl.constexpr,
 ):
-    """Use Ampere Tensor Cores with FP32 inputs and exact BF16 weight values."""
+    """Use Ampere Tensor Cores with FP32 inputs and exact BF16 weight values.
+
+    Shapes: ``x`` is a contiguous FP32 ``[m, k]`` activation, ``weight`` the
+    call-local contiguous BF16 ``[n, k]`` decode of the NF12 gate, ``bias`` an
+    optional FP32 ``[n]`` vector and ``out`` a contiguous FP32 ``[m, n]``
+    result. The grid is ``(cdiv(m, block_m), cdiv(n, block_n))``; each program
+    owns one ``block_m x block_n`` output tile and walks the full ``k`` axis
+    in ``block_k`` steps with one TF32x3 ``tl.dot`` per step.
+
+    ``m`` is the prefill row count and is deliberately a runtime argument that
+    Triton does not specialize (no ``==1`` or ``%16`` variants). It only
+    masks activation loads and output stores; it never enters an address,
+    the K loop trip count, the tile shape or the accumulation order. As a
+    ``tl.constexpr`` it compiled one variant per distinct prefill width
+    (about 1,800 cached variants in production), each new width paying a
+    compile or a disk load on the serving path. ``n`` and ``k`` stay
+    constexpr: they fix the K-loop bounds, pipelining and vectorization, and
+    take one value per gate geometry. A given row therefore runs the same
+    per-element instruction sequence for every ``m``, so results are
+    bit-identical to the former per-width specializations.
+    """
     input_rows = tl.program_id(0) * block_m + tl.arange(0, block_m)
     output_rows = tl.program_id(1) * block_n + tl.arange(0, block_n)
     depth = tl.arange(0, block_k)
