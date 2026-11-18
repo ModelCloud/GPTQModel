@@ -133,7 +133,6 @@ from gptqmodel.quantization.config import (  # noqa: E402
     BitsAndBytesConfig,
     Fallback,
     FOEMConfig,
-    FP8Config,
     GGUFConfig,
     GPTAQConfig,
     HessianConfig,
@@ -1569,21 +1568,6 @@ class ModelTest(unittest.TestCase):
             if format_family == FORMAT.GGUF or self.WEIGHT_ONLY.method.value == "gguf":
                 return GGUFConfig(
                     bits=self.BITS,
-                    adapter=self.EORA,
-                    pack_impl="cpu",
-                    dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
-                    dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,
-                    moe_vram_strategy=self.MOE_VRAM_STRATEGY,
-                    moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
-                    dynamic=self.DYNAMIC,
-                    moe=self.MOE_CONFIG,
-                    smoother=self.WEIGHT_ONLY.smooth,
-                )
-
-            if format_family == FORMAT.FP8 or self.WEIGHT_ONLY.method.value == "fp8":
-                return FP8Config(
-                    bits=self.BITS,
-                    format=self.FORMAT,
                     adapter=self.EORA,
                     pack_impl="cpu",
                     dense_vram_strategy=self.DENSE_VRAM_STRATEGY,

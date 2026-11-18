@@ -7,7 +7,6 @@ import pytest
 import torch
 
 from gptqmodel.quantization import GSQConfig
-from gptqmodel.quantization.gsq_fp8 import refine_fp8_weight
 from gptqmodel.quantization.gsq_qqq import refine_qqq_codes
 from gptqmodel.quantization.gsq_scalar import refine_affine_scalar
 
@@ -63,73 +62,7 @@ def test_qqq_candidate_chunks_preserve_codes_and_hard_score():
     torch.testing.assert_close(torch.tensor(after), expected, rtol=1e-6, atol=1e-6)
 
 
-def test_fp8_block_candidate_chunks_can_split_a_scale_block():
-    rows, width = 6, 4
-    weight = torch.zeros((rows, width)).to(torch.float8_e4m3fn)
-    scale_inv = torch.full((3, 2), 2.0)
-    target = torch.tensor([[0.35, -0.15, 0.50, -0.20]]).repeat(rows, 1)
-    config = GSQConfig(enabled=True, steps=4, candidates=4,
-                       max_candidate_bytes=3 * width * 4 * 4)
-
-    with torch.inference_mode():
-        result = refine_fp8_weight(weight, scale_inv, target=target, config=config,
-                                   hessian=torch.eye(width), method='block', block_size=(2, 2))
-
-    expanded_scales = scale_inv.repeat_interleave(2, 0).repeat_interleave(2, 1)
-    decoded = result['weight'].float() / expanded_scales
-    expected = (decoded - target).square().sum() / target.square().sum()
-    assert result['weight'].shape == weight.shape
-    assert len(result['history']) == config.steps + 1
-    assert result['after'] <= result['before']
-    torch.testing.assert_close(torch.tensor(result['after']), expected, rtol=1e-6, atol=1e-6)
-
-
-def test_fp8_hessian_accepts_gemm_reduction_asymmetry():
-    """#4579: a real ``X.T @ X`` has fp32 reduction-order skew, not bitwise symmetry.
-
-    rocBLAS/hipBLASLt reduce the two triangles of a GEMM in different orders and
-    leave ~2e-7 relative to max|G| of skew on gfx1201. The old absolute
-    ``atol=1e-7`` rejected that valid Gram.
-    """
-
-    torch.manual_seed(0)
-    width, tokens = 16, 512
-    inputs = torch.randn(tokens, width) * 3
-    gram = inputs.T @ inputs
-    # The old check combined rtol with a huge diagonal, so it only failed when
-    # the asymmetric entry sat on a near-zero off-diagonal. Pick the smallest
-    # off-diagonal pair and add the measured reduction-order skew there.
-    magnitudes = gram.abs().clone()
-    magnitudes.fill_diagonal_(float('inf'))
-    row, column = divmod(int(magnitudes.argmin()), width)
-    hessian = gram.clone()
-    hessian[row, column] += 2e-7 * gram.abs().max()
-    weight = torch.zeros((4, width)).to(torch.float8_e4m3fn)
-    config = GSQConfig(enabled=True, steps=1, candidates=4)
-
-    target = torch.randn(4, width)
-    result = refine_fp8_weight(weight, torch.ones(4), target=target,
-                               config=config, hessian=hessian)
-
-    assert result['weight'].shape == weight.shape
-    assert len(result['history']) == config.steps + 1
-
-
-def test_fp8_hessian_still_rejects_a_grossly_asymmetric_matrix():
-    """The scale-aware guard must still catch a genuinely asymmetric Hessian."""
-
-    width = 8
-    hessian = torch.eye(width)
-    hessian[0, 1] = 0.5
-    weight = torch.zeros((2, width)).to(torch.float8_e4m3fn)
-    config = GSQConfig(enabled=True, steps=1, candidates=4)
-
-    with pytest.raises(ValueError, match='must be symmetric'):
-        refine_fp8_weight(weight, torch.ones(2), target=torch.zeros(2, width),
-                          config=config, hessian=hessian)
-
-
-@pytest.mark.parametrize('method', ['affine', 'qqq', 'fp8'])
+@pytest.mark.parametrize('method', ['affine', 'qqq'])
 def test_candidate_budget_still_rejects_one_row(method):
     config = GSQConfig(enabled=True, steps=1, candidates=4, max_candidate_bytes=63)
     target = torch.zeros((2, 4))
@@ -138,10 +71,7 @@ def test_candidate_budget_still_rejects_one_row(method):
             refine_affine_scalar(target, torch.ones((2, 1)), torch.zeros((2, 1)),
                                  torch.zeros(4, dtype=torch.int32), target=target, bits=4,
                                  config=config)
-        elif method == 'qqq':
+        else:
             refine_qqq_codes(torch.zeros((2, 4), dtype=torch.int32), torch.ones((2, 1)),
                              target=target, group_size=-1, hessian=torch.eye(4),
                              cross_moment=torch.zeros((4, 4)), config=config)
-        else:
-            refine_fp8_weight(target.to(torch.float8_e4m3fn), torch.ones(2),
-                              target=target, config=config)

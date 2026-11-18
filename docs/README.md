@@ -40,6 +40,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Embedding quantization config validation](embedding-quantization-config.md)
 - [Embedding-endpoint quantization: fresh quantize vs requantize](embed-endpoint-quantize.md)
 - [CPU block packing](cpu-block-packing.md)
+- [FP8 is load-only: production checkpoints only](fp8-load-only.md)
 - [FP4 effective-weight range in the decode path](fp4-effective-weight-range.md)
 - [FP8 dequantization scaling and AWQ GEMM dispatch](fp8-dequant-scaling.md)
 - [Packed payloads and save-time source materialization](fp8-save-offload.md)

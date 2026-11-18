@@ -213,7 +213,7 @@ def test_chunked_hessian_accumulation_enters_the_override_per_chunk(monkeypatch)
 
 @pytest.mark.parametrize(
     "step",
-    ["GPTQ", "QQQ", "VPTQ", "MACAQ", "EXL3", "FP8_GSQ", "PARO"],
+    ["GPTQ", "QQQ", "VPTQ", "MACAQ", "EXL3", "PARO"],
 )
 def test_hessian_methods_need_the_deterministic_pin(step):
     """Every Hessian builder and Paro must accumulate on rocBLAS (#4123, #4460)."""

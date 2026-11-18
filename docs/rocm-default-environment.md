@@ -78,7 +78,6 @@ The pin is scoped to the processors in `_DETERMINISTIC_BLAS_PROCESSOR_STEPS`
 | VPTQ | `X^T X` | `quantization/vptq.py:283` |
 | MACaQ | `X^T X` | `quantization/macaq.py:668` |
 | EXL3 | reuses GPTQ's capture | `looper/exllamav3_processor.py:192` |
-| FP8 GSQ | fp32 input Gram | `quantization/gsq_calibration.py:56` |
 | EoRA | fp32 input Gram + `eigh` | `eora/eora.py:44` |
 | Paro | none; rotation optimization GEMMs | `looper/paro_processor.py` |
 
@@ -123,7 +122,7 @@ same-target runs share the refcount and different-target runs serialize.
 ```mermaid
 flowchart TD
     A["GPTQModel.quantize"] --> B{"_needs_deterministic_hessian"}
-    B -- "yes: GPTQ, QQQ, VPTQ, MACaQ, EXL3, FP8 GSQ, Paro, EoRA" --> C["want rocBLAS"]
+    B -- "yes: GPTQ, QQQ, VPTQ, MACaQ, EXL3, Paro, EoRA" --> C["want rocBLAS"]
     B -- "no: AWQ, RTN" --> D["want hipBLASLt"]
     C --> E{"another run holds the other backend?"}
     D --> E
@@ -144,7 +143,7 @@ flowchart TD
 | Override scope | unconditional around the whole calibrated run (`gptqmodel/models/base.py:2128`) | only when `_needs_deterministic_hessian(run_plan)` (`gptqmodel/models/base.py:158`) |
 | AWQ / RTN | forced rocBLAS for the whole run | pinned hipBLASLt for the whole run |
 | Paro | forced rocBLAS for the whole run | pinned rocBLAS (no Hessian, but hipBLASLt kernel choice made seeded runs differ) |
-| QQQ / VPTQ / MACaQ / EXL3 / FP8 GSQ | forced rocBLAS | pinned rocBLAS (they build a Hessian) |
+| QQQ / VPTQ / MACaQ / EXL3 | forced rocBLAS | pinned rocBLAS (they build a Hessian) |
 | EoRA | forced rocBLAS | pinned rocBLAS (fp32 input Gram + `eigh`; #4614) |
 | GPTQ calibration forward and replay | forced rocBLAS | pinned rocBLAS (their activations feed the Hessian) |
 | Hessian `X^T X` and inversion | rocBLAS | rocBLAS, plus a nested per-call context |

@@ -17,6 +17,7 @@ import torch
 import torch.nn as nn
 
 import gptqmodel.nn_modules.qlinear.fp8 as fp8_module
+from tests.fp8_test_utils import pack_fp8_module
 
 
 def _kernel(*, in_features=64, out_features=64, method="row", block=None, seed=0):
@@ -36,7 +37,7 @@ def _kernel(*, in_features=64, out_features=64, method="row", block=None, seed=0
         weight_block_size=block,
         register_buffers=False,
     )
-    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    pack_fp8_module(kernel, linear)
     return kernel.eval()
 
 

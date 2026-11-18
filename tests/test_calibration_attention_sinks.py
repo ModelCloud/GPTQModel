@@ -30,7 +30,6 @@ import torch.nn as nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.exllamav3_processor import EXL3Processor
-from gptqmodel.looper.fp8_gsq_processor import FP8GSQProcessor
 from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.loop_processor import LoopProcessor, active_padding_mask
 from gptqmodel.looper.macaq_processor import MacaqProcessor
@@ -456,20 +455,6 @@ def test_unmasked_rows_lose_only_the_bos_sinks():
     # Natively routed `[routed_rows, H]` inputs have no sequence position.
     routed = flat[:6]
     assert processor.calibration_rows(routed) is routed
-
-
-def test_gsq_capture_receives_the_calibration_mask():
-    seen = []
-
-    class _Task:
-        def add_batch(self, source, *, source_weight=1.0, mask=None):
-            seen.append(mask)
-
-    processor = _flagged_processor(FP8GSQProcessor, tasks={"proj": _Task()}, calibration_dataset=[{}])
-    x = _inputs()
-    keep, _ = _bind_masks(processor, x)
-    processor.pre_process_fwd_hook("proj")(None, (x,), None)
-    assert torch.equal(seen[0], keep)
 
 
 def test_awq_features_and_token_row_structure_drop_the_sink():

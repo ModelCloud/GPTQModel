@@ -27,7 +27,6 @@ import torch
 from packaging import version
 
 from .._quant_methods import (
-    FP8_EXPORT_QUANT_METHOD,
     GGUF_EXPORT_QUANT_METHOD,
     LEGACY_PARO_QUANT_METHOD,
 )
@@ -1363,7 +1362,10 @@ _FP8_FMT_ALIASES = {
     "float8_e8m0fnu": "float8_e8m0fnu",
 }
 _FP8_WEIGHT_SCALE_METHODS = {"tensor", "row", "block"}
-_FP8_SCALE_SEMANTICS = {"inverse"}
+# Production checkpoints multiply by `weight_scale_inv` (transformers
+# `FineGrainedFP8`, DeepSeek/Qwen, ModelOpt). `inverse` is accepted only so
+# legacy GPT-QModel checkpoints keep loading; it is not an output.
+_FP8_SCALE_SEMANTICS = {"multiplier", "inverse"}
 _BITSANDBYTES_4BIT_FORMATS = {"fp4", "nf4"}
 _BITSANDBYTES_8BIT_FORMATS = {"int8"}
 _BITSANDBYTES_FORMATS = _BITSANDBYTES_4BIT_FORMATS | _BITSANDBYTES_8BIT_FORMATS
@@ -1419,7 +1421,7 @@ def _normalize_fp8_weight_scale_method(
 ) -> str:
     """Resolve the FP8 weight scaling strategy from config inputs."""
 
-    normalized = "block" if weight_block_size is not None and value is None else (value or "row")
+    normalized = "block" if weight_block_size is not None and value is None else (value or "tensor")
     normalized = str(normalized).strip().lower()
     if normalized not in _FP8_WEIGHT_SCALE_METHODS:
         supported = ", ".join(sorted(_FP8_WEIGHT_SCALE_METHODS))
@@ -1438,7 +1440,7 @@ def _normalize_fp8_weight_scale_method(
 def _normalize_fp8_scale_semantics(value: Optional[str]) -> str:
     """Normalize FP8 scale semantics to the supported enum-like string."""
 
-    normalized = "inverse" if value is None else str(value).strip().lower()
+    normalized = "multiplier" if value is None else str(value).strip().lower()
     if normalized not in _FP8_SCALE_SEMANTICS:
         supported = ", ".join(sorted(_FP8_SCALE_SEMANTICS))
         raise ValueError(
@@ -2740,7 +2742,8 @@ PARO_OPT_SCALE_CLAMP_MAX_DEFAULT = 1e2
 QQQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.QQQ,
 )
-FP8_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+# FP8 storage layouts this build can read. Not an export target: FP8 is load-only.
+FP8_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.FP8,
 )
 BITSANDBYTES_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
@@ -4193,8 +4196,6 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
             return METHOD.EXL3
         if value == GGUF_EXPORT_QUANT_METHOD:
             return METHOD.GGUF
-        if value == FP8_EXPORT_QUANT_METHOD:
-            return METHOD.FP8
         if value == FORMAT.PARO:
             return METHOD.PARO
         try:
@@ -4957,58 +4958,6 @@ def _resolve_export_quant_method(format_value: FORMAT, fallback_method: Optional
     return method
 
 
-def _fp8_dynamic_override_is_hf_readable(overrides: Mapping) -> bool:
-    """Whether one ``dynamic`` FP8 override keeps the HF-readable layout."""
-
-    scale_method = overrides.get("weight_scale_method")
-    if scale_method is not None and str(scale_method).strip().lower() != "block":
-        return False
-    if "weight_block_size" in overrides and overrides["weight_block_size"] is None:
-        return False
-    semantics = overrides.get("weight_scale_semantics")
-    if semantics is not None and str(semantics).strip().lower() != "multiplier":
-        return False
-    fmt = overrides.get(FORMAT_FIELD_CODE)
-    if fmt is not None and str(fmt).strip().lower() != "float8_e4m3fn":
-        return False
-    return True
-
-
-def _fp8_layout_is_hf_readable(quantize_config: Any) -> bool:
-    """Whether ``transformers``' ``FineGrainedFP8`` can read this FP8 layout.
-
-    ``FineGrainedFP8`` consumes a 2-D ``[out/block_rows, in/block_cols]``
-    ``weight_scale_inv`` grid **and treats it as a multiplier**
-    (``weight = fp8 * weight_scale_inv``). It also allocates
-    ``float8_e4m3fn`` weights, so an ``e5m2`` payload is not readable either.
-
-    GPT-QModel always quantizes with ``weight_scale_semantics="inverse"``
-    (``weight = fp8 / weight_scale_inv``), and
-    ``_normalize_fp8_scale_semantics`` rejects every other value. No
-    GPT-QModel FP8 save is therefore readable by ``FineGrainedFP8``: this
-    predicate only accepts a third-party-style block/multiplier/e4m3 payload,
-    and every GPT-QModel export publishes ``FP8_EXPORT_QUANT_METHOD`` instead
-    of ``fp8``.
-    """
-
-    if getattr(quantize_config, "weight_scale_method", None) != "block":
-        return False
-    if getattr(quantize_config, "weight_block_size", None) is None:
-        return False
-    if getattr(quantize_config, "weight_scale_semantics", None) != "multiplier":
-        return False
-    if getattr(quantize_config, "format", None) != "float8_e4m3fn":
-        return False
-    dynamic = getattr(quantize_config, "dynamic", None)
-    if isinstance(dynamic, Mapping):
-        for overrides in dynamic.values():
-            if not isinstance(overrides, Mapping):
-                continue
-            if not _fp8_dynamic_override_is_hf_readable(overrides):
-                return False
-    return True
-
-
 def _serialize_export_quant_method(
     method: METHOD,
     quantize_config: Any = None,
@@ -5020,18 +4969,10 @@ def _serialize_export_quant_method(
     ``GgufHfQuantizer``, which expects a ``.gguf`` file and otherwise loads the
     checkpoint as randomly initialized weights.
 
-    ``METHOD.FP8`` is split the same way. transformers registers ``fp8`` for
-    ``FineGrainedFP8``, which only reads a block ``weight_scale_inv`` grid
-    interpreted as a multiplier. GPT-QModel writes inverse scales for every
-    layout, so all GPT-QModel FP8 saves publish ``FP8_EXPORT_QUANT_METHOD``
-    and are refused by the import-time guard; ``fp8`` is reserved for
-    third-party block/multiplier checkpoints.
     """
 
     if method == METHOD.GGUF:
         return GGUF_EXPORT_QUANT_METHOD
-    if method == METHOD.FP8 and not _fp8_layout_is_hf_readable(quantize_config):
-        return FP8_EXPORT_QUANT_METHOD
     return method.value if isinstance(method, METHOD) else str(method)
 
 
@@ -5770,6 +5711,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return tuple(METHOD)
+
+    def is_load_only(self) -> bool:
+        """Whether this config may only load checkpoints, never quantize or export."""
+        return False
 
     def supported_export_formats(self) -> Tuple[FORMAT, ...]:
         valid_formats = QUANT_METHOD_FORMAT_MAPPING.get(self.method, None)
@@ -7697,17 +7642,29 @@ class MacaqConfig(PreProcessorConfig):
 
 @dataclass
 class FP8Config(PreProcessorConfig):
-    gsq: Optional[GSQConfig] = field(default=None)
-    gsq_calibration: bool = field(default=False)
+    """Load-only descriptor for a production FP8 checkpoint.
+
+    GPT-QModel no longer quantizes or exports FP8. This config exists only to
+    describe an existing checkpoint so the loader can decode and run it. New
+    FP8 checkpoints are not produced here: use a production FP8 checkpoint
+    (transformers ``FineGrainedFP8`` / DeepSeek / Qwen block scales, or NVIDIA
+    ModelOpt per-tensor scales) and quantize to GPTQ/AWQ/RTN if a GPT-QModel
+    layout is required.
+
+    The row/tensor inverse-scale layouts that earlier GPT-QModel releases
+    invented are still readable for backward compatibility, but they are not a
+    supported output.
+    """
+
     bits: int = field(default=8, metadata={"choices": [8]})
     method: METHOD = field(default=METHOD.FP8)
     format: Optional[str] = field(default="float8_e4m3fn")
     group_size: int = field(default=-1)
     desc_act: Optional[bool] = field(default=False)
     sym: bool = field(default=True)
-    weight_scale_method: str = field(default="row")
+    weight_scale_method: str = field(default="tensor")
     weight_block_size: Optional[Union[List[int], Tuple[int, int]]] = field(default=None)
-    weight_scale_semantics: str = field(default="inverse")
+    weight_scale_semantics: str = field(default="multiplier")
 
     def _resolve_checkpoint_format(self) -> FORMAT:
         self.format = _normalize_fp8_fmt(self.format)
@@ -7716,8 +7673,11 @@ class FP8Config(PreProcessorConfig):
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.FP8,)
 
+    def is_load_only(self) -> bool:
+        return True
+
     def supported_export_formats(self) -> Tuple[FORMAT, ...]:
-        return FP8_EXPORT_FORMATS
+        return FP8_FORMATS
 
     def default_desc_act(self) -> bool:
         return False
@@ -7736,14 +7696,6 @@ class FP8Config(PreProcessorConfig):
         self.desc_act = False
         self.sym = True
 
-        self.gsq = normalize_gsq_config(self.gsq)
-        if self.gsq is not None and self.gsq.enabled and self.gsq.learn_scales:
-            raise ValueError("FP8Config: GSQ currently requires fixed inverse scales")
-        if not isinstance(self.gsq_calibration, bool):
-            raise TypeError("FP8Config: gsq_calibration must be boolean")
-        if self.gsq_calibration and (self.gsq is None or not self.gsq.enabled):
-            raise ValueError("FP8Config: gsq_calibration requires enabled GSQ")
-
         self.format = _normalize_fp8_fmt(self.format)
         block_size = _normalize_fp8_weight_block_size(self.weight_block_size)
         self.weight_scale_method = _normalize_fp8_weight_scale_method(
@@ -7752,7 +7704,6 @@ class FP8Config(PreProcessorConfig):
         )
         self.weight_block_size = list(block_size) if block_size is not None else None
         self.weight_scale_semantics = _normalize_fp8_scale_semantics(self.weight_scale_semantics)
-        self._validate_gsq()
 
         if self.dynamic is not None:
             self.dynamic = {
@@ -7829,23 +7780,14 @@ class FP8Config(PreProcessorConfig):
             "weight_scale_semantics": self.weight_scale_semantics,
         }
 
-    def _validate_gsq(self) -> None:
-        if self.gsq is not None and self.gsq.enabled and self.format == "float8_e8m0fnu":
-            raise ValueError("FP8Config: GSQ requires finite E4M3/E5M2 weight storage")
-        if self.gsq_calibration and self.weight_scale_method == "tensor":
-            raise ValueError("FP8Config: calibrated GSQ requires row or block weight scales")
-
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out[FORMAT_FIELD_CODE] = self.format
-        if self.gsq is not None:
-            out["gsq"] = asdict(self.gsq)
-        out["gsq_calibration"] = self.gsq_calibration
         out["weight_scale_method"] = self.weight_scale_method
         out["weight_block_size"] = self.weight_block_size
         out["weight_scale_semantics"] = self.weight_scale_semantics
 
     def uses_weight_only_lifecycle(self) -> bool:
-        return not self.gsq_calibration
+        return True
 
 
 @dataclass
@@ -8734,7 +8676,11 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
     ):
         return GGUFConfig
     if weight_only_method == WeightOnlyMethod.FP8:
-        return FP8Config
+        raise ValueError(
+            "QuantizeConfig: weight-only FP8 export was removed. GPT-QModel no longer "
+            "produces FP8 checkpoints; load a production FP8 checkpoint, or quantize "
+            "with `rtn`, `gguf`, or `bitsandbytes`."
+        )
     if weight_only_method == WeightOnlyMethod.BITSANDBYTES:
         return BitsAndBytesConfig
     if weight_only_method == WeightOnlyMethod.RTN:
