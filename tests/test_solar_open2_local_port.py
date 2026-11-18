@@ -13,6 +13,8 @@ from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
 
 from gptqmodel.models.definitions.solar_open2 import SolarOpen2QModel
+from transformers.cache_utils import Cache
+
 from gptqmodel.models.ports.solar_open2 import SolarOpen2Config, SolarOpen2DynamicCache, SolarOpen2ForCausalLM
 from gptqmodel.utils.hf import build_shell_model, load_model_config
 
@@ -264,9 +266,11 @@ def test_cache_continuation_generation_and_causality(dtype, layout, implementati
         expected = model(ids, use_cache=False).logits
         part = model(ids[:, :1], use_cache=True)
         assert isinstance(part.past_key_values, SolarOpen2DynamicCache)
+        assert isinstance(part.past_key_values, Cache)
         part = model(ids[:, 1:5], past_key_values=part.past_key_values)
         part = model(ids[:, 5:], past_key_values=part.past_key_values)
         assert part.past_key_values.get_seq_length() == ids.shape[1]
+        assert all(part.past_key_values.has_previous_state(i) for i, kind in enumerate(layout) if kind != "full_attention")
         tolerance = 1e-6 if dtype == torch.float32 else 2e-3
         torch.testing.assert_close(part.logits, expected[:, -1:], atol=tolerance, rtol=tolerance)
         changed = ids.clone()
@@ -285,6 +289,9 @@ def test_cache_continuation_generation_and_causality(dtype, layout, implementati
         assert torch.equal(beams_cached, beams_uncached)
         part.past_key_values.reset()
         assert part.past_key_values.get_seq_length() == 0
+        assert not any(
+            part.past_key_values.has_previous_state(i) for i, kind in enumerate(layout) if kind != "full_attention"
+        )
         restarted = model(ids, past_key_values=part.past_key_values).logits
         torch.testing.assert_close(restarted, expected, atol=tolerance, rtol=tolerance)
 
@@ -482,13 +489,11 @@ def test_independent_kda_final_state_and_interleaved_cache_ownership(full_proj):
         continued = model(ids[:, 2:], past_key_values=first).logits
         torch.testing.assert_close(continued, model(ids, use_cache=False).logits[:, 2:], atol=1e-6, rtol=1e-5)
         assert torch.equal(other.layers[0].recurrent_states[0], before)
-        with pytest.raises(NotImplementedError, match="rolled back"):
+        with pytest.raises(RuntimeError, match="past states"):
             first.crop(1)
-        from transformers.cache_utils import DynamicCache
-
-        with pytest.raises(ValueError, match="package-owned"):
-            model(ids, past_key_values=DynamicCache(config=model.config))
-        assert model(ids).past_key_values.get_seq_length() == ids.shape[1]
+        fresh = model(ids).past_key_values
+        assert all(fresh.has_previous_state(i) for i in range(2))
+        assert fresh.get_seq_length() == ids.shape[1]
 
 
 @pytest.mark.parametrize("implementation", ["eager", "sdpa"])
