@@ -161,53 +161,34 @@ def test_intern_s2_preview_plain_policy_preserves_layer_state(intern_s2_module):
 
 
 @pytest.mark.parametrize("model_type", ["minicpmv", "minicpmo"])
-def test_minicpm_attention_and_mlp_stages_preserve_layer_output(model_type):
-    import transformers
+def test_minicpm_plain_awq_keeps_attention_and_mlp_stages(model_type):
+    from tests.test_minicpm_o_local_port import tiny_config as minicpmo_config
+    from tests.test_minicpmv_local_port import tiny_config as minicpmv_config
 
-    config = transformers.Qwen3Config(
-        vocab_size=64,
-        hidden_size=32,
-        intermediate_size=48,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        head_dim=8,
-        max_position_embeddings=64,
-        tie_word_embeddings=False,
-    )
+    config = minicpmv_config() if model_type == "minicpmv" else minicpmo_config()
     config._attn_implementation = "eager"
     torch.manual_seed(7)
-    llm = transformers.Qwen3ForCausalLM(config).eval()
-    model = nn.Module()
-    model.config = config
-    model.llm = llm
+    definition = MODEL_MAP[model_type]
+    model = definition.loader.from_config(config).eval()
+    wrapper = _wrapper(definition, model, definition.module_tree)
 
     ids = torch.randint(2, 60, (1, 8))
 
     def forward():
-        return llm(input_ids=ids).logits
+        return model.llm(input_ids=ids, use_cache=False).logits
 
-    checked = []
-    if model_type == "minicpmv":
-        # Legacy MiniCPM-V is deliberately plain-only. Its owned real-model
-        # acceptance suite packs every decoder projection across six versions.
-        definition = MODEL_MAP[model_type].__new__(MODEL_MAP[model_type])
-        for layer in llm.model.layers:
-            assert definition.awq_get_modules_for_scaling(layer, {}, {}) == []
-    else:
-        for layer in llm.model.layers:
-            checked.extend(_assert_neutral(MODEL_MAP[model_type], model, layer, forward))
-
-        flat = {(source, tuple(targets)) for source, targets, _consumers in checked}
-        assert ("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")) in flat
-        assert ("self_attn.v_proj", ("self_attn.o_proj",)) in flat
-        assert ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj")) in flat
-        assert ("mlp.up_proj", ("mlp.down_proj",)) in flat
+    for layer in model.llm.model.layers:
+        _, features = _capture(layer, forward)
+        features = _quantized_features(layer, features, definition.module_tree)
+        assert "self_attn.q_proj" in features
+        assert wrapper.awq_get_modules_for_scaling(layer, features, {}) == []
 
     blocks = [
         [entry.split(":", 1)[0] for entry in block]
-        for block in MODEL_MAP[model_type].simple_layer_modules(config, SimpleNamespace(dynamic=None))
+        for block in definition.simple_layer_modules(config, SimpleNamespace(dynamic=None))
     ]
+    assert ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"] in blocks
+    assert ["self_attn.o_proj"] in blocks
     assert ["mlp.gate_proj", "mlp.up_proj"] in blocks
     assert ["mlp.down_proj"] in blocks
 
