@@ -787,7 +787,6 @@ class Lfm3OmniForConditionalGeneration(Lfm3OmniPreTrainedModel, GenerationMixin)
         "use_cache": True,
         "cache_implementation": None,
         "cache_config": None,
-        "return_legacy_cache": None,
         "prefill_chunk_size": None,
         "typical_p": 1.0,
         "epsilon_cutoff": 0.0,
