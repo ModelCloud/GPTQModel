@@ -396,6 +396,9 @@ def test_awq_token_rows_streaming_reservoir_keeps_every_quarter_proportional():
         processor._record_input_feature(module_name, torch.randn(1, length, hidden))
 
     entry = processor.tasks[module_name]
+    # Provenance is kept as integer tensors during capture and materialized for
+    # replay, so build the tuple list the same way `_layer_input_features` does.
+    processor._materialize_reservoir_provenance(entry)
     provenance = entry["provenance"]
     counts = entry["batch_row_counts"]
 
