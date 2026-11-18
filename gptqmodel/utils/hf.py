@@ -1198,6 +1198,39 @@ def _normalize_legacy_tied_weights_keys(model: PreTrainedModel) -> None:
             submodule._tied_weights_keys = {}
 
 
+def _is_rope_init_bridge(init_fn: Any) -> bool:
+    """Return whether ``init_fn`` delegates back to ``ROPE_INIT_FUNCTIONS``.
+
+    GPT-QModel installs such bridges on legacy ``trust_remote_code`` rotary
+    classes (e.g. Ouro) so transformers 5.x can find an initializer for them.
+    The bridge resolves the global ``"default"`` entry when it is called, so
+    the precedence wrapper must not hide that entry from it (#5259).
+    """
+
+    if getattr(init_fn, "_gptqmodel_rope_bridge", False):
+        return True
+
+    code = getattr(init_fn, "__code__", None)
+    if code is None:
+        return False
+
+    referenced = set(code.co_names) | set(code.co_freevars)
+    if "ROPE_INIT_FUNCTIONS" not in referenced:
+        return False
+    return "default" in {const for const in code.co_consts if isinstance(const, str)}
+
+
+def _rope_init_lookup_globals(init_fn: Any) -> Optional[dict[str, Any]]:
+    """Return the namespace ``init_fn`` resolves its module globals from."""
+
+    try:
+        unwrapped = inspect.unwrap(init_fn)
+    except Exception:
+        unwrapped = init_fn
+    namespace = getattr(unwrapped, "__globals__", None)
+    return namespace if isinstance(namespace, dict) else None
+
+
 def _install_rope_init_precedence_compat(rope_utils: Any) -> None:
     """Keep a model's own default RoPE initializer ahead of the remote shim.
 
@@ -1211,6 +1244,13 @@ def _install_rope_init_precedence_compat(rope_utils: Any) -> None:
     RoPE layout and its logits (#5226). Wrap ``_init_weights`` so a
     module-owned initializer wins for that module, while modules that rely on
     the shim still get it.
+
+    The table itself is never mutated: hiding ``"default"`` from the lookup
+    would break GPT-QModel's own bridges (Ouro's bridge delegates straight to
+    ``ROPE_INIT_FUNCTIONS["default"]``, #5259) and any other thread that
+    constructs a legacy remote rotary module during initialization. Instead
+    the wrapper shadows the table in ``_init_weights``' own namespace for the
+    duration of the call, leaving the process-global table intact.
     """
 
     try:
@@ -1224,16 +1264,41 @@ def _install_rope_init_precedence_compat(rope_utils: Any) -> None:
         return
 
     def _init_weights_with_rope_precedence(self, module):
-        if hasattr(module, "original_inv_freq") and "RotaryEmbedding" in module.__class__.__name__:
+        if (
+            getattr(module, "rope_type", None) == "default"
+            and hasattr(module, "original_inv_freq")
+            and "RotaryEmbedding" in module.__class__.__name__
+        ):
             own = getattr(module, "compute_default_rope_parameters", None)
             table = getattr(rope_utils, "ROPE_INIT_FUNCTIONS", None)
             if own is not None and isinstance(table, dict) and "default" in table:
-                with _MONKEY_PATCH_LOCK:
-                    installed = table.pop("default")
-                    try:
-                        return original(self, module)
-                    finally:
-                        table["default"] = installed
+                if getattr(own, "_gptqmodel_rope_bridge", False):
+                    # The marked bridge returns exactly the shim's result, so
+                    # letting the shim win is equivalent and leaves the table
+                    # untouched (#5259).
+                    return original(self, module)
+                namespace = _rope_init_lookup_globals(original)
+                shadow = None
+                if namespace is not None and namespace.get("ROPE_INIT_FUNCTIONS") is table:
+                    shadow = {key: value for key, value in table.items() if key != "default"}
+                if shadow is not None:
+                    with _MONKEY_PATCH_LOCK:
+                        namespace["ROPE_INIT_FUNCTIONS"] = shadow
+                        try:
+                            return original(self, module)
+                        finally:
+                            namespace["ROPE_INIT_FUNCTIONS"] = table
+                # Fallback for transformers builds that do not expose the
+                # lookup table as a module global: drop the entry for the
+                # duration. A detected bridge keeps resolving the shim instead
+                # of raising the KeyError this wrapper exists to avoid.
+                if not _is_rope_init_bridge(own):
+                    with _MONKEY_PATCH_LOCK:
+                        installed = table.pop("default")
+                        try:
+                            return original(self, module)
+                        finally:
+                            table["default"] = installed
         return original(self, module)
 
     _init_weights_with_rope_precedence._gptqmodel_rope_precedence = True
