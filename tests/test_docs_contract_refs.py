@@ -61,13 +61,13 @@ CONTRACT_REFS = (
      "_decoder_fp8_scale_semantics", SYMBOL_CITATION),
     ("docs/fusion-planner.md", "gptqmodel/models/fusion.py", "_share_operands", 444),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
-     "_normalize_gguf_config", 925),
+     "_normalize_gguf_config", 962),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
-     "_gguf_bits_spec_from_format_value", 855),
+     "_gguf_bits_spec_from_format_value", 892),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
-     "_gguf_bits_from_components", 896),
+     "_gguf_bits_from_components", 933),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/protocol.py",
-     "_resolve_gguf_public_format", 1334),
+     "_resolve_gguf_public_format", 1381),
     # `awq_processor.py` keeps growing (the #4880 replay packing added ~70
     # lines above this symbol), so cite it by name.
     ("docs/layer-type-replay-masks.md", "gptqmodel/looper/awq_processor.py",
@@ -86,13 +86,13 @@ CONTRACT_REFS = (
     ("docs/openai-server-exposure.md", "gptqmodel/utils/openai_server.py",
      "BodySizeLimitMiddleware", None),
     ("docs/quantize-run-summary.md", "gptqmodel/models/base.py",
-     "_quantize_summary_counts", 347),
+     "_quantize_summary_counts", 355),
     ("docs/quantize-run-summary.md", "gptqmodel/models/base.py",
      "_log_quantize_summary", None),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
-     "compute_hessian_xtx", 1207),
+     "compute_hessian_xtx", 1220),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
-     "hessian_inverse", 2108),
+     "hessian_inverse", 2121),
     # `calibration.py` grew a 70-line payload normalizer above
     # `prepare_calibration_dataset` (#4934); these three citations are symbol
     # anchored so an unrelated edit cannot drift them again.
@@ -105,7 +105,7 @@ CONTRACT_REFS = (
     # `base.py` keeps growing, so the shipped branch is cited by symbol; the
     # removed branch keeps a line citation because it no longer exists to name.
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/models/base.py",
-     "generate", 3751),
+     "generate", 3902),
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/models/base.py",
      "generate", SYMBOL_CITATION),
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/utils/model.py",
@@ -207,6 +207,29 @@ def test_eora_generation_saves_where_the_readme_loads():
         assert load == load.strip(), f"Lora.path has surrounding whitespace: {load!r}"
         assert load in save_paths, (
             f"README loads the adapter from {load!r} but saves it to {save_paths!r}"
+        )
+
+
+def test_eora_scripts_leave_the_allocator_default_to_gptqmodel():
+    """The documented EoRA entry points must not force a CUDA-only allocator.
+
+    ``expandable_segments:True`` plus ``torch.cuda.empty_cache()`` corrupts
+    ordinary Torch results on ROCm 10.1 / gfx1201, so ROCm defaults to
+    ``expandable_segments:False``. The scripts import ``gptqmodel`` before
+    Torch, and ``gptqmodel._alloc_conf.apply_default_alloc_conf()`` installs
+    the right per-platform default; an unconditional override here silently
+    replaced it for every user following ``docs/eora/README.md`` (#5121).
+    """
+
+    for rel in (
+        "docs/eora/eora_generation.py",
+        "docs/eora/post_quant_eora_generation.py",
+        "docs/eora/evaluation.py",
+        "docs/eora/eora_load_and_inference.py",
+    ):
+        source = _read(rel)
+        assert 'os.environ["PYTORCH_ALLOC_CONF"]' not in source, (
+            f"{rel} overrides the allocator default that gptqmodel installs"
         )
 
 

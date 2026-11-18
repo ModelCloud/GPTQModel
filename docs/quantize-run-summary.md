@@ -69,7 +69,7 @@ flowchart LR
 | Staged-GSQ completion | returned before the summary (`gptqmodel/models/base.py:1669-1672` at `94f9630`), so the line never appeared | summary logged after `fuse()` (`gptqmodel/models/base.py:1794-1802`) |
 | Ordinary completion | summary logged before rotation setup and fusion (`gptqmodel/models/base.py:1973-1979`, `:1981`, `:1990`) | summary logged after both (`gptqmodel/models/base.py:2103-2119`) |
 | Failing finalization | success line already emitted, elapsed excluded finalization | exception, no summary line |
-| Staged-GSQ counts | would count the single top-level key (`gptqmodel/utils/logger.py:253-255`) | `_quantize_summary_counts()` maps blocks to layers (`gptqmodel/models/base.py:347`) |
+| Staged-GSQ counts | would count the single top-level key (`gptqmodel/utils/logger.py:253-255`) | `_quantize_summary_counts()` maps blocks to layers (`gptqmodel/models/base.py:355`) |
 
 ## Contract
 

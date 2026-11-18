@@ -67,10 +67,9 @@ rocBLAS has no fast fp16/bf16 kernels, so that also routed AWQ's and RTN's
 fp16/bf16 GEMMs through rocBLAS: 8-14x slower than hipBLASLt, with no
 determinism gain for methods that never build a Hessian.
 
-The pin is scoped to methods that accumulate a Hessian or input Gram from the
-calibration activations (`_needs_deterministic_hessian` in
-`gptqmodel/models/base.py:158`, keyed off `_HESSIAN_PROCESSOR_STEPS` at
-`gptqmodel/models/base.py:148`):
+The pin is scoped to the processors in `_DETERMINISTIC_BLAS_PROCESSOR_STEPS`
+(`gptqmodel/models/base.py::_DETERMINISTIC_BLAS_PROCESSOR_STEPS`), checked by
+`_needs_deterministic_hessian` (`gptqmodel/models/base.py::_needs_deterministic_hessian`):
 
 | Method | Accumulates | Where |
 |---|---|---|
@@ -81,11 +80,14 @@ calibration activations (`_needs_deterministic_hessian` in
 | EXL3 | reuses GPTQ's capture | `looper/exllamav3_processor.py:192` |
 | FP8 GSQ | fp32 input Gram | `quantization/gsq_calibration.py:56` |
 | EoRA | fp32 input Gram + `eigh` | `eora/eora.py:44` |
+| Paro | none; rotation optimization GEMMs | `looper/paro_processor.py` |
 
-AWQ, Paro and weight-only (RTN) accumulate none of these and keep
-hipBLASLt. EoRA is included even though it is a secondary processor: an
-AWQ + EoRA plan would otherwise keep the adapter Gram on hipBLASLt, and the
-saved adapter differed in 39/42 LoRA tensors between identical runs (#4614).
+AWQ and weight-only (RTN) accumulate none of these and keep hipBLASLt. Paro is
+pinned rocBLAS despite building no Hessian: hipBLASLt selected a different GEMM
+kernel per process, so identically seeded runs saved different checkpoints
+(#4460). EoRA is included even though it is a secondary processor: an AWQ +
+EoRA plan would otherwise keep the adapter Gram on hipBLASLt, and the saved
+adapter differed in 39/42 LoRA tensors between identical runs (#4614).
 
 #4105 scoped the pin to `ProcessorStep.GPTQ in run_plan.processors`, which was
 too narrow: QQQ also builds a Hessian, so it accumulated on hipBLASLt and lost
@@ -99,8 +101,8 @@ only for the fp32 `X^T X` GEMM: those forward GEMMs produce the activations that
 are accumulated into the Hessian. Pinning only `compute_hessian_xtx` regressed
 Qwen2.5-0.5B-Instruct to **332/795** differing tensors across processes (the
 #4075 no-pin baseline), because the captured inputs themselves differed. The
-per-call contexts in `compute_hessian_xtx` (`gptqmodel/quantization/gptq.py:1207,1244,1260`)
-and `hessian_inverse` (`gptqmodel/quantization/gptq.py:2108`) remain as
+per-call contexts in `compute_hessian_xtx` (`gptqmodel/quantization/gptq.py:1220,1257,1273`)
+and `hessian_inverse` (`gptqmodel/quantization/gptq.py:2121`) remain as
 defense-in-depth for direct Hessian calls; the outer method-scoped context is
 what keeps the forward reproducible.
 

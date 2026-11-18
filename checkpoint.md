@@ -201,9 +201,12 @@ override is accepted.
 
 The current checkpoint adapter supports:
 
-- model `model_type` values `llama` and `qwen3_moe`;
-- GPTQ, RTN, AWQ, QQQ, Paro, EXL3, FP8, GGUF, and bitsandbytes
+- model `model_type` values `llama`, `qwen2`, and `qwen3_moe`;
+- GPTQ, RTN, AWQ, QQQ, Paro, EXL3, FP8, GGUF, bitsandbytes, MACaQ, and NF12
   quantization paths;
+- dynamic per-module quantization, including runtime exclusions; the ordered
+  rules are part of the checkpoint identity, so changing them rejects resume
+  before any state is restored;
 - EoRA continuation with GPTQ, AWQ, QQQ, and Paro;
 - the same normally supported export formats and packing kernels as ordinary
   quantization.
@@ -215,7 +218,6 @@ The following are currently unsupported with checkpointing:
 
 - other model families;
 - `true_sequential=False`;
-- dynamic per-module quantization/exclusions;
 - rotation;
 - `lm_head` or embedding quantization;
 - GPTAQ or FOEM;

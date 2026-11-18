@@ -192,7 +192,7 @@ def _prepare_tensor_kwargs_dataset(
 
     if calibration_dataset_concat_size:
         raise ValueError(
-            "Quantize: `calibration_dataset_concat_size` is token-based and cannot be used "
+            "Quantize: `CalibrationConfig.concat_size` is token-based and cannot be used "
             "with a model that declares `calibration_inputs = 'tensor_kwargs'`."
         )
 
@@ -1199,9 +1199,9 @@ def prepare_calibration_dataset(
     concat_mode = bool(calibration_dataset_concat_size)
     if concat_mode and max_positions is not None and calibration_dataset_concat_size > max_positions:
         raise ValueError(
-            f"Quantize: calibration_dataset_concat_size={calibration_dataset_concat_size} exceeds "
+            f"Quantize: CalibrationConfig.concat_size={calibration_dataset_concat_size} exceeds "
             f"{max_positions_source}={max_positions}, so a packed window could never fit the model's "
-            "position budget. Lower `concat_size`."
+            "position budget. Lower `CalibrationConfig.concat_size`."
         )
 
     dropped_padded_row_count = 0
@@ -1391,7 +1391,7 @@ def prepare_calibration_dataset(
         )
 
     if calibration_dataset_concat_size:
-        _require_tokenizer("`calibration_dataset_concat_size` is specified")
+        _require_tokenizer("`CalibrationConfig.concat_size` is specified")
         concatenated_data = []
         input_ids_buff = []
         attention_mask_buff = []
@@ -1516,7 +1516,7 @@ def prepare_calibration_dataset(
             raise ValueError(
                 "Quantize: concatenation produced no calibration window with more than "
                 f"{calibration_data_min_length} non-padding tokens. "
-                "`calibration_dataset_concat_size` must be larger than `min_length`."
+                "`CalibrationConfig.concat_size` must be larger than `min_length`."
             )
 
         new_calibration_dataset = concatenated_data

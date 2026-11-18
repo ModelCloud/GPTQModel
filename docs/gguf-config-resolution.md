@@ -16,21 +16,21 @@ the protocol compiler. Introduced by
 
 ## Resolution flow
 
-`_normalize_gguf_config()` (`gptqmodel/quantization/config.py:925`) is the only
+`_normalize_gguf_config()` (`gptqmodel/quantization/config.py:962`) is the only
 place that combines the two inputs. Before projecting a full alias it asks
-`_gguf_bits_spec_from_format_value()` (`config.py:855`) for the alias's own
-`GGUFBits` and compares widths (`config.py:988`).
+`_gguf_bits_spec_from_format_value()` (`config.py:892`) for the alias's own
+`GGUFBits` and compares widths (`config.py:1025`).
 
 ```mermaid
 flowchart TD
-    A["GGUFConfig(bits, format)<br/>dynamic override or protocol variant"] --> B["_normalize_gguf_config()<br/>config.py:925"]
-    B --> C["_gguf_bits_spec_from_format_value(format)<br/>config.py:855"]
+    A["GGUFConfig(bits, format)<br/>dynamic override or protocol variant"] --> B["_normalize_gguf_config()<br/>config.py:962"]
+    B --> C["_gguf_bits_spec_from_format_value(format)<br/>config.py:892"]
     C --> D{"format is a full alias?<br/>q8_0 / q6_k / q5_k_m"}
     D -->|no: q_0, q_k_m or None| E["project to width-less token<br/>_normalize_gguf_public_format()"]
     D -->|yes| F{"alias bits == bits width?"}
-    F -->|no| R1["raise Unsupported GGUF combination<br/>bits=4, format=q8_0<br/>config.py:988"]
+    F -->|no| R1["raise Unsupported GGUF combination<br/>bits=4, format=q8_0<br/>config.py:1025"]
     F -->|yes| E
-    E --> G["_gguf_bits_from_components(bits, token)<br/>config.py:896"]
+    E --> G["_gguf_bits_from_components(bits, token)<br/>config.py:933"]
     G --> H{"subtype exists at that width?"}
     H -->|no| R2["raise Unsupported GGUF combination"]
     H -->|yes| I{"bits also names a subtype?"}
@@ -53,18 +53,18 @@ existence check (the subtype does not exist at that width, for example
 
 The protocol compiler resolves `export.variant` before it constructs a
 `GGUFConfig`. `_resolve_gguf_public_format()`
-(`gptqmodel/quantization/protocol.py:1334`) normalizes the variant through the
-same alias path, compares the width (`protocol.py:1356`), and, when `bits` is
-also a full subtype, compares the resolved subtype (`protocol.py:1368`).
+(`gptqmodel/quantization/protocol.py:1381`) normalizes the variant through the
+same alias path, compares the width (`protocol.py:1403`), and, when `bits` is
+also a full subtype, compares the resolved subtype (`protocol.py:1415`).
 
 ```mermaid
 flowchart TD
-    P["weight.quantize.bits + weight.export.variant"] --> Q["_resolve_gguf_public_format()<br/>protocol.py:1334"]
+    P["weight.quantize.bits + weight.export.variant"] --> Q["_resolve_gguf_public_format()<br/>protocol.py:1381"]
     Q --> R["_normalize_gguf_config(bits, None)<br/>bits width"]
     Q --> S["_normalize_gguf_public_format(variant)"]
     S --> T{"variant is a full alias?"}
     T -->|yes| U{"variant width == bits width?"}
-    U -->|no| X["raise incompatible bits/export variant combination<br/>protocol.py:1356"]
+    U -->|no| X["raise incompatible bits/export variant combination<br/>protocol.py:1403"]
     U -->|yes| V["variant GGUFBits"]
     T -->|no| W["width-less public token<br/>q_0 / q_k_m"]
     V --> Y{"bits is a full alias?"}
@@ -89,10 +89,10 @@ comparison could run.
 
 | Stage | Before (`e2f9676c6`) | After |
 | --- | --- | --- |
-| Format normalization | `_normalize_gguf_public_format()` (`config.py:830`, projection branch `config.py:845`) turned `q8_0` into `q_0`; the width was discarded | `_gguf_bits_spec_from_format_value()` (`config.py:855`) returns the full `GGUFBits`; the width is compared at `config.py:988` before projection |
-| Subtype rebuild | `_gguf_bits_from_components(bits, "q_0")` (`config.py:864`) rebuilt `Q4_0` from `bits=4` | The conflicting pair raises at `config.py:988`; a consistent pair still rebuilds exactly as before |
+| Format normalization | `_normalize_gguf_public_format()` (`config.py:867`, projection branch `config.py:882`) turned `q8_0` into `q_0`; the width was discarded | `_gguf_bits_spec_from_format_value()` (`config.py:892`) returns the full `GGUFBits`; the width is compared at `config.py:1025` before projection |
+| Subtype rebuild | `_gguf_bits_from_components(bits, "q_0")` (`config.py:933`) rebuilt `Q4_0` from `bits=4` | The conflicting pair raises at `config.py:1025`; a consistent pair still rebuilds exactly as before |
 | Per-module `dynamic` | `clone_weight_only_config_for_module()` (`config.py:8319`) re-ran the same projection on the merged override | The merged override goes through `_normalize_gguf_config()` in `_normalize_dynamic_layer_config()` (`config.py:8297`) and the clone (`config.py:8388`), so it inherits the same check |
-| Protocol | `_resolve_gguf_public_format()` (`protocol.py:1330-1344`) returned `export.variant` unchanged for an integer `bits`, and compared a raw variant with the projected token for a string `bits` | `protocol.py:1334` normalizes the variant and compares width (`protocol.py:1356`) and subtype (`protocol.py:1368`) before returning the public token |
+| Protocol | `_resolve_gguf_public_format()` (`protocol.py:1381-1420`) returned `export.variant` unchanged for an integer `bits`, and compared a raw variant with the projected token for a string `bits` | `protocol.py:1381` normalizes the variant and compares width (`protocol.py:1403`) and subtype (`protocol.py:1415`) before returning the public token |
 
 Observable before/after for the reported pairs:
 
@@ -131,6 +131,6 @@ rejected on `QuantizeConfig.from_quant_config()`.
 
 Add a new ggml subtype to `_GGUF_BITS_ALIAS_INFO`
 (`config.py:455`). If the subtype exists at several widths, its alias width is
-the value compared at `config.py:988`; no extra branch is needed. Width-in-name
+the value compared at `config.py:1025`; no extra branch is needed. Width-in-name
 formats such as `mxfp4`/`nvfp4` keep `variant == ""` and are handled by the
 same alias path.
