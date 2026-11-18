@@ -60,14 +60,17 @@ CONTRACT_REFS = (
     ("docs/fp8-scale-semantics.md", "gptqmodel/models/base.py",
      "_decoder_fp8_scale_semantics", SYMBOL_CITATION),
     ("docs/fusion-planner.md", "gptqmodel/models/fusion.py", "_share_operands", 444),
+    # `config.py` and `protocol.py` keep growing (the #5122 payload validators
+    # added ~35 lines above these symbols), so the GGUF resolution page cites
+    # the shipped symbols instead of line numbers.
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
-     "_normalize_gguf_config", 925),
+     "_normalize_gguf_config", SYMBOL_CITATION),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
-     "_gguf_bits_spec_from_format_value", 855),
+     "_gguf_bits_spec_from_format_value", SYMBOL_CITATION),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
-     "_gguf_bits_from_components", 896),
+     "_gguf_bits_from_components", SYMBOL_CITATION),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/protocol.py",
-     "_resolve_gguf_public_format", 1334),
+     "_resolve_gguf_public_format", SYMBOL_CITATION),
     # `awq_processor.py` keeps growing (the #4880 replay packing added ~70
     # lines above this symbol), so cite it by name.
     ("docs/layer-type-replay-masks.md", "gptqmodel/looper/awq_processor.py",
@@ -90,9 +93,9 @@ CONTRACT_REFS = (
     ("docs/quantize-run-summary.md", "gptqmodel/models/base.py",
      "_log_quantize_summary", None),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
-     "compute_hessian_xtx", 1207),
+     "compute_hessian_xtx", SYMBOL_CITATION),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
-     "hessian_inverse", 2108),
+     "hessian_inverse", SYMBOL_CITATION),
     # `calibration.py` grew a 70-line payload normalizer above
     # `prepare_calibration_dataset` (#4934); these three citations are symbol
     # anchored so an unrelated edit cannot drift them again.
@@ -102,10 +105,10 @@ CONTRACT_REFS = (
      "prepare_calibration_dataset", SYMBOL_CITATION),
     ("docs/decision-transformer-calibration.md", "gptqmodel/utils/calibration.py",
      "_is_tensor_kwargs_row", SYMBOL_CITATION),
-    # `base.py` keeps growing, so the shipped branch is cited by symbol; the
-    # removed branch keeps a line citation because it no longer exists to name.
+    # `base.py` keeps growing (#5116 moved `generate` by 104 lines), so both
+    # the removed and the shipped branch are cited by symbol.
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/models/base.py",
-     "generate", 3751),
+     "generate", SYMBOL_CITATION),
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/models/base.py",
      "generate", SYMBOL_CITATION),
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/utils/model.py",

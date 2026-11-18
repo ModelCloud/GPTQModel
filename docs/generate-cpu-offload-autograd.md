@@ -15,11 +15,11 @@ models. Every other model keeps `inference_mode` (#5099).
 
 | Step | Before (`e2f9676c6`) | After |
 | --- | --- | --- |
-| Context selection | `no_grad` only for XLA, otherwise `inference_mode` (`gptqmodel/models/base.py:3751-3756`) | `no_grad` for XLA or `has_cpu_offload_hooks(self.model)` (`gptqmodel/models/base.py::generate`) |
+| Context selection | `no_grad` only for XLA, otherwise `inference_mode` (`gptqmodel/models/base.py::generate`) | `no_grad` for XLA or `has_cpu_offload_hooks(self.model)` (`gptqmodel/models/base.py::generate`) |
 | Hook detection | none | `has_cpu_offload_hooks` scans `_hf_hook`, unwraps `SequentialHook`, and matches `CpuOffload` plus `AlignDevicesHook(offload=True)` (`gptqmodel/utils/model.py::has_cpu_offload_hooks`) |
 | Layer materialization | `CpuOffload.pre_forward` calls `module.to(execution_device)` under `inference_mode`; `simple_dispatch_model` installs that hook (`gptqmodel/utils/model.py::simple_dispatch_model`) | the same move runs under `no_grad` |
 | Buffer lifecycle | `Module._apply` replaces buffers outright; the second move of an inference buffer stores a tensor without a version counter | the move allocates a normal tensor, so the buffer keeps its counter |
-| Compiled `generate()` | dynamo's guard on `g_idx._version` raises `RuntimeError: Inference tensors do not track version counter` (`gptqmodel/nn_modules/qlinear/torch.py:1031`) | the trace succeeds and generation produces tokens |
+| Compiled `generate()` | dynamo's guard on `g_idx._version` raises `RuntimeError: Inference tensors do not track version counter` (`gptqmodel/nn_modules/qlinear/torch.py::TorchLinear`) | the trace succeeds and generation produces tokens |
 
 Parameters are rebound with `param.data = ...` in `Module._apply`, which keeps
 their version counter even under inference mode; packed GPT-QModel tensors
