@@ -18,7 +18,7 @@ from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.minicpm import MiniCPMGPTQ
 from gptqmodel.models.ports.minicpm import MiniCPMConfig, MiniCPMForCausalLM
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.quantization.config import AWQConfig, ExpertsRoutingOverride, MoEConfig
+from gptqmodel.quantization.config import AWQConfig, ExpertsRoutingOverride, MoEConfig, QuantizeConfig
 from gptqmodel.utils.hf import load_hf_tokenizer, load_model_config
 
 
@@ -187,6 +187,47 @@ def test_public_loader_ignores_all_checkpoint_code(tmp_path, monkeypatch, trust,
     for key, tensor in loaded.model.state_dict().items():
         torch.testing.assert_close(tensor, source.state_dict()[key], atol=0, rtol=0)
     assert loaded.trust_remote_code is False
+    assert not marker.exists()
+
+
+def test_batched_gptq_save_and_reload_ignores_checkpoint_python(tmp_path):
+    source = tmp_path / "source"
+    _, marker = _checkpoint(source, num_hidden_layers=1)
+    model = GPTQModel.load(
+        str(source),
+        quantize_config=QuantizeConfig(bits=4, group_size=16, device="cpu", offload_to_disk=False),
+        trust_remote_code=True,
+        backend=BACKEND.TORCH,
+        dtype=torch.float16,
+    )
+    ids = torch.tensor([[2, 4, 7, 5, 6, 4, 5, 7]])
+    calibration = [
+        {"input_ids": item, "attention_mask": torch.ones_like(item)}
+        for item in (ids, ids.flip(-1)[:, :6])
+    ]
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=2, min_length=1), backend=BACKEND.TORCH)
+    packed = {name: tensor.clone() for name, tensor in model.model.state_dict().items() if name.endswith(".qweight")}
+    assert len(packed) == 7
+    with torch.inference_mode():
+        expected = model.model(ids, use_cache=False).logits
+    assert torch.isfinite(expected).all()
+
+    destination = tmp_path / "quantized"
+    model.save(str(destination))
+    assert list(destination.glob("*.safetensors"))
+    assert not list(destination.rglob("*.py"))
+    assert not json.loads((destination / "config.json").read_text()).get("auto_map")
+
+    reloaded = GPTQModel.load(
+        str(destination), device="cpu", backend=BACKEND.TORCH, dtype=torch.float16, trust_remote_code=True
+    )
+    assert type(reloaded.model) is MiniCPMForCausalLM
+    assert reloaded.trust_remote_code is False
+    state = reloaded.model.state_dict()
+    for name, tensor in packed.items():
+        torch.testing.assert_close(state[name], tensor, atol=0, rtol=0)
+    with torch.inference_mode():
+        torch.testing.assert_close(reloaded.model(ids, use_cache=False).logits, expected, atol=0, rtol=0)
     assert not marker.exists()
 
 
