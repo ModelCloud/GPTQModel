@@ -295,7 +295,7 @@ def hf_gptqmodel_prepare_model_for_load(
 
     from ..models.auto import MODEL_MAP_CASEFOLD
     from ..models.base import BaseQModel
-    from .importer import hf_normalize_device_device_map
+    from .importer import auto_cpu_offload, hf_normalize_device_device_map
     from .model import (
         _module_has_meta_tensors,
         _prepare_variable_quant_buffers,
@@ -366,6 +366,11 @@ def hf_gptqmodel_prepare_model_for_load(
         lm_head_name=model_definition.lm_head,
         device=target_device,
         dtype=dtype,
+        # A map with CPU entries runs `post_init` on the CPU-resident layers, so
+        # AUTO must not select a kernel that needs CUDA there (#5022). Only
+        # AUTO consults this: an explicit backend can repack from an in-memory
+        # offload weights map.
+        cpu_offload=auto_cpu_offload(backend, device_map),
     )
     if packed_suffix == ".nf12_packed":
         # The escape row count depends on the encoded weights, so resize the

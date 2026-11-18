@@ -1196,6 +1196,46 @@ def auto_select_device(
     return device
 
 
+def device_map_uses_cpu(device_map) -> bool:
+    """Whether a placement map contains a CPU-resident entry.
+
+    The HF bridge (`hf_select_quant_linear` / `hf_select_quant_linear_v2`) is
+    called by Transformers and Optimum *before* the weights are dispatched, so
+    it has to derive the CPU-offload contract from the map it is given. Without
+    it AUTO picked `MarlinLinear` / `AwqMarlinLinear` for a map that offloads
+    some layers to CPU, and those kernels need CUDA during `post_init` (#5022).
+
+    An integer is a device ordinal, not a CPU placement; `"disk"` and other
+    accelerate offload spellings are not CPU-resident either.
+    """
+
+    if not isinstance(device_map, dict):
+        return False
+    for value in device_map.values():
+        if value is None or isinstance(value, int):
+            continue
+        try:
+            if torch.device(value).type == "cpu":
+                return True
+        except (RuntimeError, ValueError):
+            continue
+    return False
+
+
+def auto_cpu_offload(backend, device_map) -> bool:
+    """Whether AUTO must skip a kernel whose ``post_init`` needs CUDA.
+
+    Only AUTO selection consults the ``SUPPORTS_CPU_OFFLOAD`` declaration: an
+    explicit backend is the caller's choice, and
+    ``_post_init_cpu_offloaded_marlin`` repacks a CPU-offloaded layer from an
+    in-memory offload weights map (#5022).
+    """
+
+    if backend not in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
+        return False
+    return device_map_uses_cpu(device_map)
+
+
 # public/stable api exposed to transformer/optimum
 def hf_select_quant_linear(
         bits: int,
@@ -1230,6 +1270,7 @@ def hf_select_quant_linear(
         dynamic=None,
         pack_dtype=torch.int32,
         adapter=None,
+        cpu_offload=auto_cpu_offload(backend, device_map),
     )
 
 # public/stable api exposed to transformer/optimum
@@ -1328,6 +1369,7 @@ def hf_select_quant_linear_v2(
         pack_dtype=pack_dtype,
         dtype=normalized_dtype,
         adapter=None,
+        cpu_offload=auto_cpu_offload(backend, device_map),
     )
 
 
