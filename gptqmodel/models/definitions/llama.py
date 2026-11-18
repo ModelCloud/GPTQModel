@@ -35,7 +35,7 @@ class LlamaQModel(BaseQModel):
             for prefix, heads in (("q", config.num_attention_heads), ("k", config.num_key_value_heads)):
                 extras.extend(f"{prefix}_layernorm.norms.{index}:!" for index in range(heads))
         if extras:
-            tree[-1]["self_attn"] = (*tree[-1]["self_attn"], *extras)
+            tree[-1]["self_attn"] = tuple(dict.fromkeys((*tree[-1]["self_attn"], *extras)))
         return tree
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):

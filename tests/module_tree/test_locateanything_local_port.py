@@ -45,6 +45,9 @@ def test_real_plan_covers_every_decoder_weight_and_concrete_consumer(architectur
         model = LocateAnythingQModel.loader.from_config(tiny_config(architecture=architecture, kv_heads=kv_heads))
     _convert_model_with_defuser(LocateAnythingQModel, model, cleanup_original=False)
     config = QuantizeConfig(method=method, group_size=16)
+    tree = LocateAnythingQModel._resolve_effective_module_tree(model, config)
+    model.gptqmodel_effective_module_tree = tree
+    assert LocateAnythingQModel._resolve_effective_module_tree(model, config) == tree
     wrapper = LocateAnythingQModel(model=model, quantized=False, quantize_config=config)
     plan = wrapper.module_plan()
     layers, prefixes = get_layers_with_prefixes(model, wrapper.extract_layers_node())

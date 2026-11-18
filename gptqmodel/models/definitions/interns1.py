@@ -68,21 +68,23 @@ class InternS1QModel(BaseQModel):
         tree = super()._resolve_effective_module_tree(model, quantize_config, detector)
         config = getattr(model, "config", None)
         text = getattr(config, "text_config", None)
-        if getattr(text, "model_type", None) == "qwen3_moe":
+        blocks = tree[-1]
+        if getattr(text, "model_type", None) == "qwen3_moe" and "mlp:moe:?" not in blocks:
             sparse_layers = [
                 index for index in range(text.num_hidden_layers)
                 if index not in text.mlp_only_layers and (index + 1) % text.decoder_sparse_step == 0
             ]
             if not sparse_layers:
                 return tree
-            tree[-1]["mlp:moe:?"] = {
+            moe = {
                 "gate": ("gate:!",),
                 "experts": {"#": ("gate_proj:0", "up_proj:0", "down_proj:1")},
             }
             if len(sparse_layers) < text.num_hidden_layers:
                 for projection, order in (("gate_proj", 0), ("up_proj", 0), ("down_proj", 1)):
-                    tree[-1]["mlp:moe:?"][projection] = (f"{projection}:{order}",)
-            del tree[-1]["mlp"]
+                    moe[projection] = (f"{projection}:{order}",)
+            blocks["mlp:moe:?"] = moe
+            blocks.pop("mlp", None)
         return tree
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):

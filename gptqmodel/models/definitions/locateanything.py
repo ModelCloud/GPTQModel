@@ -78,7 +78,7 @@ class LocateAnythingQModel(BaseQModel):
         tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
         config = getattr(model, "config", None)
         if getattr(getattr(config, "text_config", None), "model_type", None) == "qwen3":
-            tree[-1]["self_attn"] = ("q_norm:!", "k_norm:!", *tree[-1]["self_attn"])
+            tree[-1]["self_attn"] = tuple(dict.fromkeys(("q_norm:!", "k_norm:!", *tree[-1]["self_attn"])))
         return tree
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):

@@ -122,6 +122,9 @@ def test_real_alias_state_owners_and_plan_roles(family, heads, bias, device):
             )
         assert MODEL_MAP[family] is LlamaQModel
         _convert_model_with_defuser(LlamaQModel, model, cleanup_original=False)
+        tree = LlamaQModel._resolve_effective_module_tree(model, None)
+        model.gptqmodel_effective_module_tree = tree
+        assert LlamaQModel._resolve_effective_module_tree(model, None) == tree
         wrapper = LlamaQModel(model=model, quantized=False, quantize_config=None)
         plan = wrapper.module_plan()
         layer = model.model.layers[0]

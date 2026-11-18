@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import copy
-
 from ..base import BaseQModel
 from ..local import LocalModelLoader
 from ..moe_lifecycle import W1W3W2MoELifecycleHooks
@@ -35,10 +33,10 @@ class MiniCPMGPTQ(BaseQModel):
     @classmethod
     def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
         tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
-        if getattr(getattr(model, "config", None), "num_experts", 0):
-            tree = copy.deepcopy(tree)
-            del tree[-1]["mlp"]
-            tree[-1]["mlp:moe"] = {
+        blocks = tree[-1]
+        if getattr(getattr(model, "config", None), "num_experts", 0) and "mlp:moe" not in blocks:
+            blocks.pop("mlp", None)
+            blocks["mlp:moe"] = {
                 "gate": ("gate:!",),
                 "experts": {"#": ("w1:0:gate", "w3:0:up", "w2:1:down")},
             }

@@ -52,6 +52,8 @@ def test_actual_native_weight_owners_and_layout_isolation(text_only, kv_heads, d
         model = Qwen2_5_VLQModel.loader.from_config(config, attn_implementation="eager")
     defuser.convert_model(model, cleanup_original=False)
     tree = Qwen2_5_VLQModel._resolve_effective_module_tree(model, None)
+    model.gptqmodel_effective_module_tree = tree
+    assert Qwen2_5_VLQModel._resolve_effective_module_tree(model, None) == tree
     wrapper = Qwen2_5_VLQModel.__new__(Qwen2_5_VLQModel)
     nn.Module.__init__(wrapper)
     wrapper.model = model

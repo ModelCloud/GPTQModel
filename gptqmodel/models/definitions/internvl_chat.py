@@ -85,8 +85,8 @@ class InternVLChatQModel(BaseQModel):
             }
         elif architecture == "Phi3ForCausalLM":
             blocks["self_attn"] = ("qkv_proj:0", "o_proj:1")
-        elif architecture == "Qwen3MoeForCausalLM":
-            blocks.pop("mlp")
+        elif architecture == "Qwen3MoeForCausalLM" and "mlp:moe:?" not in blocks:
+            blocks.pop("mlp", None)
             blocks["mlp:moe:?"] = {
                 "gate": ("gate:!",),
                 "experts": {"#": ("gate_proj:0", "up_proj:0", "down_proj:1")},

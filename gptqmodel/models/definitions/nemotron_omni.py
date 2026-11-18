@@ -215,6 +215,6 @@ class NemotronOmniQModel(NemotronHQModel):
     @classmethod
     def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
         tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
-        tree[-1]["mixer"] = (*tree[-1]["mixer"], "A_log:!", "D:!", "dt_bias:!")
+        tree[-1]["mixer"] = tuple(dict.fromkeys((*tree[-1]["mixer"], "A_log:!", "D:!", "dt_bias:!")))
         tree[-1]["mixer.norm"] = ("norm:!",)
         return tree

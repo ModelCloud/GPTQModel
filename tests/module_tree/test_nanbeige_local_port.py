@@ -101,6 +101,9 @@ def test_real_layouts_have_complete_owned_weight_plan(device, kv_heads, bias, va
     with torch.device(device):
         model = NanbeigeForCausalLM(tiny_config(**options))
     _convert_model_with_defuser(NanbeigeQModel, model, cleanup_original=False)
+    tree = NanbeigeQModel._resolve_effective_module_tree(model, None)
+    model.gptqmodel_effective_module_tree = tree
+    assert NanbeigeQModel._resolve_effective_module_tree(model, None) == tree
     wrapper = NanbeigeQModel(model=model, quantized=False, quantize_config=None)
     plan = wrapper.module_plan()
     assert MODEL_MAP["nanbeige"] is NanbeigeQModel
