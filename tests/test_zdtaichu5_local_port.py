@@ -12,10 +12,10 @@ import torch.nn.functional as F
 from PIL import Image
 from tokenizers import Tokenizer
 from transformers import TokenizersBackend
-from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 
 from gptqmodel.models.definitions.zdtaichu5 import ZDTaichu5QModel
 from gptqmodel.models.local import LocalModelLoader
+from gptqmodel.models.ports.native.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 from gptqmodel.models.ports.zdtaichu5.configuration import ZDTaichu5_0_Config
 from gptqmodel.models.ports.zdtaichu5.image_processing import ZDTaichu5_0_ImageProcessor
 from gptqmodel.models.ports.zdtaichu5.modeling import ZDTaichu5_0_ForConditionalGeneration

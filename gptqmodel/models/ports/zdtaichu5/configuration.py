@@ -5,8 +5,9 @@
 
 from copy import deepcopy
 
-from transformers import PreTrainedConfig, Qwen3_5TextConfig
+from transformers import PreTrainedConfig
 
+from ..native.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 from .cradio_config import RADIOConfig
 
 

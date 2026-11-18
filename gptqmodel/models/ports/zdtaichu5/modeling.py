@@ -12,9 +12,9 @@ from torch import nn
 from transformers import PreTrainedModel
 from transformers.cache_utils import DynamicCache
 from transformers.generation import GenerationMixin
-from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 from transformers.utils import logging
 
+from ..native.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 from .configuration import ZDTaichu5_0_Config
 
 
