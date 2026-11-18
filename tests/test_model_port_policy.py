@@ -29,12 +29,11 @@ PENDING_NATIVE_DEFINITIONS = frozenset({
 })
 
 PENDING_MODEL_IMPORT_PORTS = frozenset({
-    "chatglm", "ernie4_5_vl_moe", "internvl_chat", "kimi_k3", "lfm3_vl", "llama", "mimo", "minicpm_o",
-    "nemotron_h_puzzle", "ovis2_6_moe", "unlimited_ocr",
+    "internvl_chat", "lfm3_vl", "llama", "unlimited_ocr",
 })
 
 PENDING_STALE_PATTERN_PORTS = frozenset({
-    "ernie4_5_vl_moe", "kimi_k3", "native/falcon_h1", "native/nemotron_h", "native/zamba2",
+    "native/falcon_h1", "native/nemotron_h", "native/zamba2",
 })
 
 STALE_PATTERNS = re.compile(
