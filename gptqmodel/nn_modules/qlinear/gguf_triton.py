@@ -40,6 +40,101 @@ except Exception:  # pragma: no cover - optional dependency
 
 _CUDA_DEVICE_CAPABILITY_CACHE: dict[int, tuple[int, int]] = {}
 
+# Q1_0 G128 fixed launch configs are plain data consumed by the launch
+# selectors below, which are importable (and unit-tested) without Triton.
+_Q1_0_G128_SM80_DECODE_NARROW_CONFIG = {
+    "BLOCK_SIZE_M": 4,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 4,
+    "num_stages": 2,
+}
+_Q1_0_G128_SM80_DECODE_WIDE_CONFIG = {
+    "BLOCK_SIZE_M": 2,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 4,
+    "num_stages": 4,
+}
+_Q1_0_G128_SM89_DECODE_NARROW_CONFIG = {
+    "BLOCK_SIZE_M": 8,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 8,
+    "num_stages": 2,
+}
+_Q1_0_G128_SM89_DECODE_2048_TO_2048_CONFIG = {
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 4,
+    "num_stages": 2,
+}
+_Q1_0_G128_SM89_DECODE_2048_TO_6144_CONFIG = {
+    "BLOCK_SIZE_M": 8,
+    "BLOCK_SIZE_N": 64,
+    "num_warps": 8,
+    "num_stages": 2,
+}
+_Q1_0_G128_SM89_DECODE_WIDE_CONFIG = {
+    "BLOCK_SIZE_M": 2,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 8,
+    "num_stages": 4,
+}
+_Q1_0_G128_SM80_PREFILL_NARROW_CONFIG = {
+    "BLOCK_SIZE_M": 32,
+    "BLOCK_SIZE_N": 16,
+    "num_warps": 4,
+    "num_stages": 4,
+}
+_Q1_0_G128_SM80_PREFILL_WIDE_CONFIG = {
+    "BLOCK_SIZE_M": 64,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 4,
+    "num_stages": 4,
+}
+_Q1_0_G128_SM89_PREFILL_NARROW_CONFIG = {
+    "BLOCK_SIZE_M": 64,
+    "BLOCK_SIZE_N": 16,
+    "num_warps": 8,
+    "num_stages": 4,
+}
+_Q1_0_G128_SM89_PREFILL_WIDE_CONFIG = {
+    "BLOCK_SIZE_M": 32,
+    "BLOCK_SIZE_N": 64,
+    "num_warps": 4,
+    "num_stages": 4,
+}
+_Q1_0_G128_SM80_U32_DECODE_CONFIG = {
+    "BLOCK_SIZE_M": 32,
+    "BLOCK_SIZE_N": 16,
+    "num_warps": 4,
+    "num_stages": 4,
+}
+_Q1_0_G128_SM80_U32_PREFILL_CONFIG = {
+    "BLOCK_SIZE_M": 64,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 4,
+    "num_stages": 4,
+}
+# These exact-shape decode configs target the dominant post-down-proj A100 decode hotspots.
+_Q1_0_G128_SM80_U32_DECODE_2048_TO_1024_CONFIG = {
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 16,
+    "num_warps": 2,
+    "num_stages": 2,
+}
+_Q1_0_G128_SM80_U32_DECODE_2048_TO_2048_CONFIG = {
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 4,
+    "num_stages": 2,
+}
+_Q1_0_G128_SM80_U32_DECODE_2048_TO_6144_CONFIG = {
+    "BLOCK_SIZE_M": 8,
+    "BLOCK_SIZE_N": 32,
+    "num_warps": 4,
+    "num_stages": 4,
+}
+
+
 
 def triton_available() -> bool:
     return _TRITON_AVAILABLE
@@ -205,97 +300,6 @@ if _TRITON_AVAILABLE:
         ),
     ]
     _GGUF_TRITON_LARGE_NUM_BLOCKS = 16
-    _Q1_0_G128_SM80_DECODE_NARROW_CONFIG = {
-        "BLOCK_SIZE_M": 4,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 4,
-        "num_stages": 2,
-    }
-    _Q1_0_G128_SM80_DECODE_WIDE_CONFIG = {
-        "BLOCK_SIZE_M": 2,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 4,
-        "num_stages": 4,
-    }
-    _Q1_0_G128_SM89_DECODE_NARROW_CONFIG = {
-        "BLOCK_SIZE_M": 8,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 8,
-        "num_stages": 2,
-    }
-    _Q1_0_G128_SM89_DECODE_2048_TO_2048_CONFIG = {
-        "BLOCK_SIZE_M": 16,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 4,
-        "num_stages": 2,
-    }
-    _Q1_0_G128_SM89_DECODE_2048_TO_6144_CONFIG = {
-        "BLOCK_SIZE_M": 8,
-        "BLOCK_SIZE_N": 64,
-        "num_warps": 8,
-        "num_stages": 2,
-    }
-    _Q1_0_G128_SM89_DECODE_WIDE_CONFIG = {
-        "BLOCK_SIZE_M": 2,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 8,
-        "num_stages": 4,
-    }
-    _Q1_0_G128_SM80_PREFILL_NARROW_CONFIG = {
-        "BLOCK_SIZE_M": 32,
-        "BLOCK_SIZE_N": 16,
-        "num_warps": 4,
-        "num_stages": 4,
-    }
-    _Q1_0_G128_SM80_PREFILL_WIDE_CONFIG = {
-        "BLOCK_SIZE_M": 64,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 4,
-        "num_stages": 4,
-    }
-    _Q1_0_G128_SM89_PREFILL_NARROW_CONFIG = {
-        "BLOCK_SIZE_M": 64,
-        "BLOCK_SIZE_N": 16,
-        "num_warps": 8,
-        "num_stages": 4,
-    }
-    _Q1_0_G128_SM89_PREFILL_WIDE_CONFIG = {
-        "BLOCK_SIZE_M": 32,
-        "BLOCK_SIZE_N": 64,
-        "num_warps": 4,
-        "num_stages": 4,
-    }
-    _Q1_0_G128_SM80_U32_DECODE_CONFIG = {
-        "BLOCK_SIZE_M": 32,
-        "BLOCK_SIZE_N": 16,
-        "num_warps": 4,
-        "num_stages": 4,
-    }
-    _Q1_0_G128_SM80_U32_PREFILL_CONFIG = {
-        "BLOCK_SIZE_M": 64,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 4,
-        "num_stages": 4,
-    }
-    # These exact-shape decode configs target the dominant post-down-proj A100 decode hotspots.
-    _Q1_0_G128_SM80_U32_DECODE_2048_TO_1024_CONFIG = {
-        "BLOCK_SIZE_M": 16,
-        "BLOCK_SIZE_N": 16,
-        "num_warps": 2,
-        "num_stages": 2,
-    }
-    _Q1_0_G128_SM80_U32_DECODE_2048_TO_2048_CONFIG = {
-        "BLOCK_SIZE_M": 16,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 4,
-        "num_stages": 2,
-    }
-    _Q1_0_G128_SM80_U32_DECODE_2048_TO_6144_CONFIG = {
-        "BLOCK_SIZE_M": 8,
-        "BLOCK_SIZE_N": 32,
-        "num_warps": 4,
-        "num_stages": 4,
-    }
 
     # ------------------------------------------------------------------
     # SM89 (RTX 4090) fixed launch configs for the Q4_K/Q5_K/Q6_K fused
