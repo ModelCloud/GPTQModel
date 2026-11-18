@@ -81,5 +81,6 @@ def test_ouro_declared_loader_constructs_owned_config_without_remote_class_looku
     assert type(config) is OuroConfig
     assert config.total_ut_steps == 4
     assert "before_model_load" not in OuroQModel.__dict__
-    assert OuroQModel.awq_get_modules_for_scaling(None, None, None, None) == []
+    # AWQ uses the generic planner; its folds are qualified in the port suite.
+    assert "awq_get_modules_for_scaling" not in OuroQModel.__dict__
     assert OuroQModel.fusable is None

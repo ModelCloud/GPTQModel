@@ -6,6 +6,7 @@ import json
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 from torch.nn import functional as F
 
@@ -423,12 +424,37 @@ def test_config_output_defaults_and_explicit_overrides():
         assert output.hidden_states is None and output.attentions is None
 
 
-def test_no_fold_policy_and_loop_capture_all_depths():
+@pytest.mark.parametrize("kv_heads", [2, 4])
+def test_awq_folds_preserve_recurrent_output_across_all_loops(kv_heads):
+    model = tiny_model(num_key_value_heads=kv_heads)
+    ids = torch.tensor([[4, 5, 6, 7, 6, 5]])
+
+    def forward():
+        # Every shared layer runs `total_ut_steps` times, including the early
+        # exit gate between steps; a fold must be exact at every depth.
+        return model(ids, use_cache=False).logits
+
+    expected = [
+        ("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]),
+        ("self_attn.v_proj", ["self_attn.o_proj"]),
+        ("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"]),
+        ("mlp.up_proj", ["mlp.down_proj"]),
+    ]
+    if kv_heads != 4:
+        # GQA: the value width differs from `o_proj`'s input.
+        expected.remove(("self_attn.v_proj", ["self_attn.o_proj"]))
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(OuroQModel, model, layer, forward)
+        # The sandwich post-norms `input_layernorm_2` / `post_attention_layernorm_2`
+        # normalize a branch output before the residual add and never fold.
+        assert [(source, targets) for source, targets, _consumers in checked] == expected
+
+
+def test_loop_capture_all_depths():
     model = tiny_model()
     wrapper = OuroQModel.__new__(OuroQModel)
     nn.Module.__init__(wrapper)
     wrapper.model = model
-    assert wrapper.awq_get_modules_for_scaling(model.model.layers[0], {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[4, 5, 6, 7]])}]
     bucket = wrapper._capture_looped_layer_invocations(model.model.layers, [], calibration, torch.device("cpu"))
     for layer in model.model.layers:
@@ -446,7 +472,7 @@ def test_no_fold_policy_and_loop_capture_all_depths():
 
 @pytest.mark.parametrize("kv_heads", [1, 2, 4])
 @pytest.mark.parametrize("offload", [False, True])
-def test_public_plain_awq_all_reused_linears_two_exact_reloads(tmp_path, kv_heads, offload):
+def test_public_awq_all_reused_linears_two_exact_reloads(tmp_path, kv_heads, offload):
     from safetensors.torch import load_file
 
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -498,7 +524,12 @@ def test_public_plain_awq_all_reused_linears_two_exact_reloads(tmp_path, kv_head
         for name in expected_names:
             assert {name + "." + key for key in ("qweight", "qzeros", "scales")} <= state.keys()
         for name, value in source.state_dict().items():
-            if not any(name.startswith(prefix + ".") for prefix in expected_names):
+            if any(name.startswith(prefix + ".") for prefix in expected_names):
+                continue
+            if name.endswith(("input_layernorm.weight", "post_attention_layernorm.weight")):
+                # AWQ folds its searched activation scales into both pre-norms.
+                assert not torch.equal(state[name], value.half()), name
+            else:
                 torch.testing.assert_close(state[name], value.half(), rtol=0, atol=0)
         if previous_state is not None:
             assert state.keys() == previous_state.keys()

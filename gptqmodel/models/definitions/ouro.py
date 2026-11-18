@@ -47,9 +47,5 @@ class OuroQModel(LoopedLayerCaptureMixin, BaseQModel):
         },
     ]
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Sandwich post-norms and recurrent reuse have not been fold/search qualified.
-        return []
-
 
 __all__ = ["OuroQModel"]
