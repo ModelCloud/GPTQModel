@@ -2917,6 +2917,13 @@ class AWQProcessor(LoopProcessor):
         # replay mask and position ids are identical too. Build the (bounded,
         # but quadratic) block-diagonal mask once per unique capture list.
         token_row_kwargs_cache: Dict[Tuple[int, ...], Dict[str, Any]] = {}
+        # Both caches key on ``id()`` of the capture tensors. A materialized
+        # reservoir hands each module a fresh view that is dropped once the
+        # module's entry is replaced, so CPython can recycle that id for the
+        # next module's view and return a different module's (even a
+        # different-width) tensor. Keep every keyed list alive until the loop
+        # ends so an id stays unique for the cache's lifetime.
+        cache_key_owners: List[List[torch.Tensor]] = []
         # Iterate over a snapshot since quantization may mutate state.modules concurrently
         for name in feature_names:
             entry = self.tasks.get(name) or {}
@@ -2949,6 +2956,7 @@ class AWQProcessor(LoopProcessor):
                 tensors = [tensors[index] for index in order]
                 self._reorder_token_row_capture(entry, order)
 
+            cache_key_owners.append(tensors)
             policy = self._feature_aggregation_policy(name)
             aggregation_mode = (policy or {}).get("mode")
             if aggregation_mode == "token_rows":
