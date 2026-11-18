@@ -4,9 +4,7 @@ GPT-QModel GPTQ/AWQ checkpoints can be loaded through Transformers and fine-tune
 
 Use a current PEFT release together with `optimum>=2.3.0`. Older PEFT/Optimum combinations may warn that the GPT-QModel quantized layer type is unsupported. The FSDP recipe was validated with PEFT `0.21.3.dev0` (main checkout), Optimum 2.3.0, Transformers 5.20.2, and PyTorch 2.14.
 
-Loading a native GPTQ checkpoint through `AutoModelForCausalLM.from_pretrained` does not require importing `gptqmodel` first. The Optimum load bridge installs itself from Transformers' GPTQ quantizer, so per-module `dynamic` bit widths and group sizes from the checkpoint are honoured in the plain-Transformers flow below.
-
-AWQ is different: Transformers' `AwqQuantizer` imports `gptqmodel` from *inside* `replace_with_awq_linear`, after it has already decided how to build the layers. The AWQ bridge therefore repairs a dense checkpoint's modules after the weights are resident, but a checkpoint that stores per-expert (`experts.<n>.*.qweight`) tensors cannot be repaired after the fact: the experts were already dropped. Keep `import gptqmodel` before `from_pretrained` for AWQ, as in the example below, whenever the checkpoint may be an AWQ MoE checkpoint. GPTQ does not need the import.
+The plain-Transformers flow below is upstream's GPTQ/AWQ path: Transformers and Optimum call GPT-QModel's public `hf_*` kernel-selection entry points, and GPT-QModel does not patch that path. It reads only standard GPTQ/AWQ checkpoints built from the global quantization config. A checkpoint with per-module `dynamic` overrides, per-expert MoE tensors (`experts.<n>.*.qweight`) or another GPT-QModel-only feature is not supported there (the save-time warning says so); load it with `GPTQModel.load`. See [Hugging Face interop](hf-interop.md#1-loader-contract).
 
 For training, select the trainable kernel for the checkpoint's quantization method: `gptq_torch` for GPTQ and `torch_awq` for AWQ. `torch_awq` is the Transformers-facing alias for GPT-QModel's `AWQ_TORCH` kernel. The default inference kernels do not propagate gradients through the quantized layers, so a backward pass will fail.
 
@@ -17,7 +15,6 @@ pip install "gptqmodel[hf]" peft
 ## Train a LoRA adapter
 
 ```py
-import gptqmodel  # installs the native AWQ load bridge before the AWQ quantizer runs
 from peft import LoraConfig, get_peft_model
 from transformers import AutoConfig, AutoModelForCausalLM
 
