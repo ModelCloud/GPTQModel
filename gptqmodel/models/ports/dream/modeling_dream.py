@@ -29,22 +29,22 @@ from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, MaskedLMOutput
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
-from transformers.models.qwen2.modeling_qwen2 import (
-    Qwen2MLP as DreamMLP,
-)
-from transformers.models.qwen2.modeling_qwen2 import (
-    Qwen2RMSNorm as DreamRMSNorm,
-)
-from transformers.models.qwen2.modeling_qwen2 import (
-    Qwen2RotaryEmbedding,
-    apply_rotary_pos_emb,
-    repeat_kv,
-)
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, can_return_tuple, logging
 from transformers.utils.generic import merge_with_config_defaults
 from transformers.utils.output_capturing import capture_outputs
 
+from ..native.qwen2.modeling_qwen2 import (
+    Qwen2MLP as DreamMLP,
+)
+from ..native.qwen2.modeling_qwen2 import (
+    Qwen2RMSNorm as DreamRMSNorm,
+)
+from ..native.qwen2.modeling_qwen2 import (
+    Qwen2RotaryEmbedding,
+    apply_rotary_pos_emb,
+    repeat_kv,
+)
 from .configuration_dream import DreamConfig
 from .generation_utils import DreamGenerationConfig, DreamGenerationMixin
 
