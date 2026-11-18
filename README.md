@@ -121,7 +121,7 @@ Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kerne
   [smoothing](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#weight-smoothing), and [norm tuning](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#post-quantization-norm-tuning) for supported recipes. [LoRA](https://github.com/ModelCloud/GPTQModel/blob/main/docs/peft.md) training and adapter
   loading support further task adaptation; exported EoRA `rank_pattern` keys follow the [adapter rank-pattern contract](docs/adapter-rank-pattern-matching.md) so PEFT builds the trained rank per module. [Rotation model support](https://github.com/ModelCloud/GPTQModel/blob/main/docs/rotation-model-support.md) lists the exact definitions that opt in. AWQ GSQ uses the
   [packed-code scoring contract](docs/gsq-awq-code-recovery.md) to evaluate exported candidates.
-  The fused relaxation kernel keeps the [eager precision contract](docs/gsq-fused-relaxation-precision.md)
+  QQQ inference and GSQ calibration share one [activation INT8 grid contract](docs/qqq-activation-grid.md). The fused relaxation kernel keeps the [eager precision contract](docs/gsq-fused-relaxation-precision.md)
   for BF16 and FP32 logits, and per-linear refinement searches the exported
   codes and refits scales under the [scalar refinement
   contract](docs/gsq-scalar-refinement.md).

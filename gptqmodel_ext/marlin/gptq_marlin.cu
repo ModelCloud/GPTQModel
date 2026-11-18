@@ -66,15 +66,7 @@
 template <typename T, T v>
 struct is_valid_value { static constexpr bool value = true; };
 
-#if defined(__has_include)
-#  if __has_include(<ATen/native/quantized/Float8_e8m0fnu.h>)
-#    define HAS_FLOAT8_E8M0FNU 1
-#  else
-#    define HAS_FLOAT8_E8M0FNU 0
-#  endif
-#else
-#  define HAS_FLOAT8_E8M0FNU 0
-#endif
+#include <c10/util/Float8_e8m0fnu.h>
 
 #include "kernel.h"
 #include "marlin_scratch.cuh"
@@ -90,7 +82,7 @@ __global__ void MarlinDefault(MARLIN_KERNEL_PARAMS){};
 
 using MarlinFuncPtr = void (*)(MARLIN_KERNEL_PARAMS);
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
 __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
                                     int const* __restrict__ perm_int_ptr,
@@ -112,7 +104,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     bool is_zp_float, std::optional<torch::Tensor> c_tmp_or_none,
     std::optional<torch::Tensor> a_tmp_or_none) {
   TORCH_CHECK_NOT_IMPLEMENTED(false,
-                              "marlin_gemm(..) requires CUDA_ARCH >= 7.5");
+                              "marlin_gemm(..) requires CUDA_ARCH >= 8.0");
   return torch::empty({1, 1});
 }
 
@@ -415,13 +407,6 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
     return false;
   }
 
-  // Our stage-2 dense 4-bit kernels need enough B-stage capacity to cover the
-  // output tile. Larger M tiles with thread_k == 64 are not emitted.
-  if (stages == 2 && num_bits == 4 &&
-      thread_m_blocks * 2 > th_config.thread_k / 16) {
-    return false;
-  }
-
   // Check that pipeline fits into cache
   int cache_size = get_kernel_cache_size(
       th_config, thread_m_blocks, prob_m, prob_n, prob_k, num_bits, group_size,
@@ -439,26 +424,17 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
              stages == STAGES && group_blocks == GROUP_BLOCKS &&               \
              num_threads == NUM_THREADS &&                                     \
              is_zp_float == IS_ZP_FLOAT) {                                     \
-      constexpr bool kIsStage2FourBitTile =                                    \
-          STAGES == 2 &&                                                       \
-          (W_TYPE == vllm::kU4 || W_TYPE == vllm::kU4B8 ||                     \
-           W_TYPE == vllm::kFE2M1f);                                           \
-      constexpr bool kIsSupportedStage2Tile =                                  \
-          !kIsStage2FourBitTile ||                                             \
-          THREAD_M_BLOCKS * 2 <= THREAD_K_BLOCKS;                              \
-      if constexpr (kIsSupportedStage2Tile) {                                  \
-        constexpr auto S_TYPE =                                                \
-            W_TYPE == vllm::kFE2M1f                                            \
-                ? (GROUP_BLOCKS == 1 ? vllm::kFE4M3fn : vllm::kFE8M0fnu)       \
-                : ((W_TYPE == vllm::kFE4M3fn && GROUP_BLOCKS == 2)             \
-                       ? vllm::kFE8M0fnu                                       \
-                       : (std::is_same<scalar_t, half>::value                  \
-                              ? vllm::kFloat16                                 \
-                              : vllm::kBFloat16));                             \
-        kernel = Marlin<scalar_t, W_TYPE.id(), S_TYPE.id(), NUM_THREADS,       \
-                        THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,     \
-                        M_BLOCK_SIZE_8, STAGES, GROUP_BLOCKS, IS_ZP_FLOAT>;    \
-      }                                                                        \
+      constexpr auto S_TYPE =                                                  \
+          W_TYPE == vllm::kFE2M1f                                              \
+              ? (GROUP_BLOCKS == 1 ? vllm::kFE4M3fn : vllm::kFE8M0fnu)         \
+              : ((W_TYPE == vllm::kFE4M3fn && GROUP_BLOCKS == 2)               \
+                     ? vllm::kFE8M0fnu                                         \
+                     : (std::is_same<scalar_t, half>::value                    \
+                            ? vllm::kFloat16                                   \
+                            : vllm::kBFloat16));                               \
+      kernel = Marlin<scalar_t, W_TYPE.id(), S_TYPE.id(), NUM_THREADS,         \
+                      THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,       \
+                      M_BLOCK_SIZE_8, STAGES, GROUP_BLOCKS, IS_ZP_FLOAT>;      \
     }
 
   // COMMON: cases for (group_blocks in [-1, 2, 4, 8] and is_zp_float == false)
@@ -680,24 +656,6 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
                                 bool is_zp_float, int stages) {
   int num_bits = q_type.size_bits();
   auto kernel = MarlinDefault;
-  if constexpr (std::is_same<scalar_t, half>::value) {
-    if (stages == 2) {
-      if (false) {
-      }
-      COMMON_GET_IF(vllm::kU4, 2)
-      COMMON_GET_IF(vllm::kU8, 2)
-      COMMON_GET_IF(vllm::kU4B8, 2)
-      COMMON_GET_IF(vllm::kU8B128, 2)
-
-      NVFP4_GET_IF(vllm::kFE2M1f, 2)
-
-      BIGGROUP_GET_IF(vllm::kFE4M3fn, 2)
-
-      ACT_GET_IF(vllm::kU4B8, 2)
-      ACT_GET_IF(vllm::kU8B128, 2)
-    }
-  }
-
   if (stages == pipe_stages) {
     if (false) {
     }
@@ -715,11 +673,6 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
   }
 
   if constexpr (std::is_same<scalar_t, half>::value) {
-    if (stages == 2) {
-      if (false) {
-      }
-      FZP_GET_IF(vllm::kU4, 2)
-    }
     if (stages == pipe_stages) {
       if (false) {
       }
@@ -894,17 +847,10 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
   int major_capability = device_info.major_capability;
   int minor_capability = device_info.minor_capability;
-  TORCH_CHECK(major_capability > 7 ||
-                  (major_capability == 7 && minor_capability >= 5),
-              "marlin kernel only supports Turing or newer GPUs.");
+  TORCH_CHECK(major_capability >= 8,
+              "marlin kernel only supports Ampere or newer GPUs.");
 
   int stages = pipe_stages;
-  if (major_capability == 7 && minor_capability == 5) {
-    stages = 2;
-    if constexpr (!std::is_same<scalar_t, half>::value) {
-      TORCH_CHECK(false, "Turing only supports float16 dense Marlin kernels.");
-    }
-  }
 
   int max_par = 16;
   if (prob_n <= 4096) max_par = 16 * 8;
@@ -975,6 +921,30 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
           num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float,
           stages, max_shared_mem, major_capability, minor_capability, sms);
       thread_tfg = exec_cfg.tb_cfg;
+      // Small grids: when the chosen tile leaves fewer than four output tiles
+      // per SM, most SMs would split K for the same few tiles and then queue
+      // on their reduction locks. Narrow 128x64 tiles double the output
+      // parallelism instead (vllm-project/vllm#24722). The full-SM sm_80
+      // tables and Ada's narrow FP32 AWQ schedule are tuned separately and
+      // keep their own choice.
+      if (thread_tfg.thread_k != -1 && !full_sm80 && !narrow_fp32_awq &&
+          div_ceil(prob_m_split, thread_m_blocks * 16) *
+                  (prob_n / thread_tfg.thread_n) * 4 <=
+              sms) {
+        const thread_config_t small_grid_cfg{128, 64, 128};
+        if (is_valid_config(small_grid_cfg, thread_m_blocks, prob_m_split,
+                            prob_n, prob_k, num_bits, group_size,
+                            has_act_order, is_k_full, has_zp, is_zp_float,
+                            stages, max_shared_mem) &&
+            get_marlin_kernel<scalar_t>(
+                q_type, thread_m_blocks, small_grid_cfg.thread_n / 16,
+                small_grid_cfg.thread_k / 16, m_block_size_8, has_act_order,
+                has_zp, group_blocks, small_grid_cfg.num_threads, is_zp_float,
+                stages) != MarlinDefault) {
+          thread_tfg = small_grid_cfg;
+          exec_cfg = exec_config_t{1, thread_tfg};
+        }
+      }
       if (thread_tfg.thread_k == -1 && force_exact_split) {
         disable_full_sm80_exact_split = true;
         max_thread_m_blocks = 4;
@@ -1449,23 +1419,16 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
       if (group_size == 16)
         scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
       else if (group_size == 32) {
-        #if HAS_FLOAT8_E8M0FNU
-          scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
-        #else
-          TORCH_CHECK(false,
-            "float8_e8m0fnu is not available in this build of PyTorch.");
-        #endif
+        TORCH_CHECK(false, "float4_e2m1f with float8_e8m0fnu scales requires "
+                           "bfloat16 compute (MXFP4).");
       } else
         TORCH_CHECK(false,
                     "float4_e2m1f only supports group_size == 16 (NVFP4) ",
                     "and group_size == 32 (MXFP4)");
-#if HAS_FLOAT8_E8M0FNU
     } else if (b_q_type == vllm::kFE4M3fn &&
                b_scales.scalar_type() == at::ScalarType::Float8_e8m0fnu) {
       TORCH_CHECK(false, "float8_e4m3fn with float8_e8m0fnu scales requires "
                          "bfloat16 compute (MXFP8).");
-#endif
-
     } else {
       scales_ptr = b_scales.data_ptr<at::Half>();
     }
@@ -1491,25 +1454,18 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     if (b_q_type == vllm::kFE2M1f) {
       if (group_size == 16)
         scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
-      else if (group_size == 32) {
-        #if HAS_FLOAT8_E8M0FNU
-          scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
-        #else
-          TORCH_CHECK(false,
-            "float8_e8m0fnu is not available in this build of PyTorch.");
-        #endif
-     } else
+      else if (group_size == 32)
+        scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
+      else
         TORCH_CHECK(false,
                     "float4_e2m1f only supports group_size == 16 (NVFP4) ",
                     "and group_size == 32 (MXFP4)");
-#if HAS_FLOAT8_E8M0FNU
     } else if (b_q_type == vllm::kFE4M3fn &&
                b_scales.scalar_type() == at::ScalarType::Float8_e8m0fnu) {
       TORCH_CHECK(group_size == 32,
                   "float8_e4m3fn only supports group_size == 32 (MXFP8) when "
                   "using float8_e8m0fnu scales.");
       scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
-#endif
     } else {
       scales_ptr = b_scales.data_ptr<at::BFloat16>();
     }

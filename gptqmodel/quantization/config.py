@@ -4946,27 +4946,54 @@ def _resolve_export_quant_method(format_value: FORMAT, fallback_method: Optional
     return method
 
 
+def _fp8_dynamic_override_is_hf_readable(overrides: Mapping) -> bool:
+    """Whether one ``dynamic`` FP8 override keeps the HF-readable layout."""
+
+    scale_method = overrides.get("weight_scale_method")
+    if scale_method is not None and str(scale_method).strip().lower() != "block":
+        return False
+    if "weight_block_size" in overrides and overrides["weight_block_size"] is None:
+        return False
+    semantics = overrides.get("weight_scale_semantics")
+    if semantics is not None and str(semantics).strip().lower() != "multiplier":
+        return False
+    fmt = overrides.get(FORMAT_FIELD_CODE)
+    if fmt is not None and str(fmt).strip().lower() != "float8_e4m3fn":
+        return False
+    return True
+
+
 def _fp8_layout_is_hf_readable(quantize_config: Any) -> bool:
     """Whether ``transformers``' ``FineGrainedFP8`` can read this FP8 layout.
 
     ``FineGrainedFP8`` consumes a 2-D ``[out/block_rows, in/block_cols]``
-    ``weight_scale_inv`` grid. GPT-QModel's default ``row`` layout is a 1-D
-    per-output-row vector and ``tensor`` is a scalar; both are GPT-QModel-only.
-    A per-module ``dynamic`` override can mix layouts, so the whole checkpoint
-    is only HF-readable when every declared scale method is ``block``.
+    ``weight_scale_inv`` grid **and treats it as a multiplier**
+    (``weight = fp8 * weight_scale_inv``). It also allocates
+    ``float8_e4m3fn`` weights, so an ``e5m2`` payload is not readable either.
+
+    GPT-QModel always quantizes with ``weight_scale_semantics="inverse"``
+    (``weight = fp8 / weight_scale_inv``), and
+    ``_normalize_fp8_scale_semantics`` rejects every other value. No
+    GPT-QModel FP8 save is therefore readable by ``FineGrainedFP8``: this
+    predicate only accepts a third-party-style block/multiplier/e4m3 payload,
+    and every GPT-QModel export publishes ``FP8_EXPORT_QUANT_METHOD`` instead
+    of ``fp8``.
     """
 
     if getattr(quantize_config, "weight_scale_method", None) != "block":
         return False
     if getattr(quantize_config, "weight_block_size", None) is None:
         return False
+    if getattr(quantize_config, "weight_scale_semantics", None) != "multiplier":
+        return False
+    if getattr(quantize_config, "format", None) != "float8_e4m3fn":
+        return False
     dynamic = getattr(quantize_config, "dynamic", None)
     if isinstance(dynamic, Mapping):
         for overrides in dynamic.values():
             if not isinstance(overrides, Mapping):
                 continue
-            scale_method = overrides.get("weight_scale_method")
-            if scale_method is not None and str(scale_method).strip().lower() != "block":
+            if not _fp8_dynamic_override_is_hf_readable(overrides):
                 return False
     return True
 
@@ -4983,9 +5010,11 @@ def _serialize_export_quant_method(
     checkpoint as randomly initialized weights.
 
     ``METHOD.FP8`` is split the same way. transformers registers ``fp8`` for
-    ``FineGrainedFP8``, so only a block-scaled layout it can decode keeps the
-    standard name. GPT-QModel's default row/tensor scales are published under
-    ``FP8_EXPORT_QUANT_METHOD`` and refused by the import-time guard.
+    ``FineGrainedFP8``, which only reads a block ``weight_scale_inv`` grid
+    interpreted as a multiplier. GPT-QModel writes inverse scales for every
+    layout, so all GPT-QModel FP8 saves publish ``FP8_EXPORT_QUANT_METHOD``
+    and are refused by the import-time guard; ``fp8`` is reserved for
+    third-party block/multiplier checkpoints.
     """
 
     if method == METHOD.GGUF:

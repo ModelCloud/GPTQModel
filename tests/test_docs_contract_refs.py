@@ -86,7 +86,7 @@ CONTRACT_REFS = (
     ("docs/openai-server-exposure.md", "gptqmodel/utils/openai_server.py",
      "BodySizeLimitMiddleware", None),
     ("docs/quantize-run-summary.md", "gptqmodel/models/base.py",
-     "_quantize_summary_counts", 359),
+     "_quantize_summary_counts", SYMBOL_CITATION),
     ("docs/quantize-run-summary.md", "gptqmodel/models/base.py",
      "_log_quantize_summary", None),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
@@ -102,10 +102,10 @@ CONTRACT_REFS = (
      "prepare_calibration_dataset", SYMBOL_CITATION),
     ("docs/decision-transformer-calibration.md", "gptqmodel/utils/calibration.py",
      "_is_tensor_kwargs_row", SYMBOL_CITATION),
-    # `base.py` keeps growing, so the shipped branch is cited by symbol; the
-    # removed branch keeps a line citation because it no longer exists to name.
-    ("docs/generate-cpu-offload-autograd.md", "gptqmodel/models/base.py",
-     "generate", 3939),
+    # `base.py` keeps growing (nearly every fix PR moves something above it), so
+    # every citation into it is symbol-anchored: a symbol cannot drift when
+    # unrelated code moves. `test_models_base_citations_use_the_symbol_form`
+    # enforces that for the whole registry.
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/models/base.py",
      "generate", SYMBOL_CITATION),
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/utils/model.py",
@@ -260,4 +260,23 @@ def test_contract_reference_resolves(doc, source, symbol, cited):
     nearest = min(hits, key=lambda line: abs(line - cited))
     assert abs(nearest - cited) <= LINE_WINDOW, (
         f"{doc} cites `{symbol}` at {source}:{cited}, but it is defined at {hits}"
+    )
+
+
+def test_models_base_citations_use_the_symbol_form():
+    """Every guarded ``models/base.py`` citation must name its symbol.
+
+    ``base.py`` grows with nearly every fix PR, so a ``base.py:N`` citation
+    drifts within a couple of merges and turns ``main`` red (#5201). The symbol
+    form resolves against the definition instead of an offset.
+    """
+
+    line_citations = [
+        (doc, symbol, cited)
+        for doc, source, symbol, cited in CONTRACT_REFS
+        if source == "gptqmodel/models/base.py" and isinstance(cited, int)
+    ]
+    assert not line_citations, (
+        "cite `gptqmodel/models/base.py` by symbol, not line number: "
+        f"{line_citations}"
     )

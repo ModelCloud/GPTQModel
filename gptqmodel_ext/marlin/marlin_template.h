@@ -36,7 +36,7 @@
 
 namespace MARLIN_NAMESPACE_NAME {
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
 template <typename scalar_t,  // compute dtype, half or nv_float16
           const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
@@ -280,20 +280,6 @@ __global__ void Marlin(
 
   static constexpr auto w_type = vllm::ScalarType::from_id(w_type_id);
   static constexpr auto s_type = vllm::ScalarType::from_id(s_type_id);
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
-  constexpr auto num_bits = vllm::ScalarType::from_id(w_type_id).size_bits();
-  constexpr bool use_fp16_accum =
-      std::is_same<scalar_t, half>::value &&
-      (!(w_type_id == vllm::kFE2M1f.id() && s_type_id == vllm::kFE4M3fn.id()) &&
-       !(group_blocks == -1 && num_bits == 4));
-#else
-  constexpr bool use_fp16_accum = false;
-#endif
-  if constexpr (std::is_same<scalar_t, nv_bfloat16>::value) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
-    return;
-#endif
-  }
   if constexpr (w_type == vllm::kFE2M1f) {
     static_assert(s_type == vllm::kFE4M3fn && group_blocks == 1 ||
                   s_type == vllm::kFE8M0fnu && group_blocks == 2);
@@ -306,6 +292,11 @@ __global__ void Marlin(
     static_assert(s_type == vllm::kFloat16);
   }
 
+  // 8-bit scales (E4M3 for NVFP4, E8M0 for MXFP4 and MXFP8) use a paired
+  // layout: one 16-bit slot holds the scales of two adjacent groups. Key the
+  // scale strides and reads on the scale width, not the weight type, so FP8
+  // weights with E8M0 scales (MXFP8) read the same layout as FP4.
+  constexpr bool is_8bit_scale = s_type.size_bits() == 8;
   constexpr bool has_zp = w_type == vllm::kU4 || w_type == vllm::kU8;
   constexpr bool is_int_type = w_type == vllm::kU4 || w_type == vllm::kU8 ||
                                w_type == vllm::kU4B8 || w_type == vllm::kU8B128;
@@ -518,7 +509,7 @@ __global__ void Marlin(
   constexpr int s_sh_stride = 16 * thread_n_blocks / 8;
   constexpr int s_tb_groups =
       !has_act_order && group_blocks != -1 && group_blocks < thread_k_blocks
-          ? thread_k_blocks / group_blocks / (w_type == vllm::kFE2M1f ? 2 : 1)
+          ? thread_k_blocks / group_blocks / (is_8bit_scale ? 2 : 1)
           : 1;
   constexpr int s_sh_stage = s_tb_groups * s_sh_stride;
   int s_gl_rd_delta = s_gl_stride;
@@ -578,7 +569,7 @@ __global__ void Marlin(
       s_gl_rd = s_sh_stride * slice_col + threadIdx.x;
     } else {
       s_gl_rd = s_gl_stride * ((thread_k_blocks * slice_row) / group_blocks) /
-                    (w_type == vllm::kFE2M1f ? 2 : 1) +
+                    (is_8bit_scale ? 2 : 1) +
                 s_sh_stride * slice_col + threadIdx.x;
     }
   }
@@ -602,7 +593,7 @@ __global__ void Marlin(
   // we scale a `half2` tile in column-major layout in the former and in
   // row-major in the latter case.
   int s_sh_rd;
-  if constexpr (group_blocks != -1 && w_type == vllm::kFE2M1f) {
+  if constexpr (group_blocks != -1 && is_8bit_scale) {
     auto warp_id = threadIdx.x / 32;
     int n_warps = thread_n_blocks / 4;
     int warp_row = warp_id / n_warps;
@@ -970,11 +961,11 @@ __global__ void Marlin(
 
           int k_blocks = cur_k / 16;
           int cur_group_id =
-              k_blocks / (group_blocks * (w_type == vllm::kFE2M1f ? 2 : 1));
+              k_blocks / (group_blocks * (is_8bit_scale ? 2 : 1));
 
           int4* sh_s_stage = sh_s + s_sh_stage * pipe;
 
-          if constexpr (w_type_id != vllm::kFE2M1f.id()) {
+          if constexpr (!is_8bit_scale) {
             reinterpret_cast<int4*>(&frag_s[k % 2])[0] =
                 sh_s_stage[s_sh_rd + cur_group_id * s_sh_stride];
           } else if constexpr (group_blocks == 1 || thread_k_blocks > 4) {
@@ -1263,12 +1254,12 @@ __global__ void Marlin(
   #pragma unroll
       for (int i = 0; i < thread_m_blocks; i++) {
         if constexpr (m_block_size_8) {
-          mma_trans<scalar_t, use_fp16_accum>(
+          mma_trans<scalar_t>(
               frag_a[k2][i], frag_b0, frag_b1, frag_c[i][j][0]);
         } else {
-          mma<scalar_t, use_fp16_accum>(
+          mma<scalar_t>(
               frag_a[k2][i], frag_b0, frag_c[i][j][0]);
-          mma<scalar_t, use_fp16_accum>(
+          mma<scalar_t>(
               frag_a[k2][i], frag_b1, frag_c[i][j][1]);
         }
       }
@@ -1707,21 +1698,6 @@ __global__ void Marlin(
     // While this pattern may not be the most readable, other ways of writing
     // the loop seemed to noticeably worse performance after compilation.
     if (slice_iters == 0) {
-      if constexpr (use_fp16_accum) {
-#pragma unroll
-        for (int i = 0; i < thread_m_blocks * 4 * 2; i++) {
-          float* frag_c_part_float = reinterpret_cast<float*>(frag_c) + i * 4;
-          scalar_t* frag_c_part_half =
-              reinterpret_cast<scalar_t*>(frag_c_part_float);
-
-#pragma unroll
-          for (int j = 3; j >= 0; j--) {
-            frag_c_part_float[j] = ScalarType<scalar_t>::num2float(
-                frag_c_part_half[j]);
-          }
-        }
-      }
-
       cp_async_wait<0>();
       bool last = slice_idx == slice_count - 1;
       // For per-column scales, we only fetch them here in the final step before
