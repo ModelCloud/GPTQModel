@@ -282,6 +282,25 @@ def recurse_setattr(module, name, value):
         name, rest = name.split(".", 1)
         recurse_setattr(getattr(module, name), rest, value)
 
+def install_quant_module(
+    module_root: nn.Module,
+    name: str,
+    quant_module: nn.Module,
+) -> nn.Module:
+    """Publish a fully built and packed quant module with one assignment.
+
+    Finalization used to swap the float projection for an empty kernel
+    (``register_buffers=False``) and only then call ``pack_module()``, so a
+    Ctrl-C or exception inside packing left a module in the tree that owned no
+    ``qweight``/``qzeros``/``scales``/``g_idx``. Every later forward then
+    raised ``AttributeError`` (issue #5089). Callers build and pack the module
+    off-tree and call this function last, so the tree only ever sees a complete
+    module or the untouched float one.
+    """
+
+    recurse_setattr(module_root, name, quant_module)
+    return quant_module
+
 
 def _module_has_meta_tensors(module: nn.Module) -> bool:
     for param in module.parameters(recurse=True):
@@ -702,6 +721,7 @@ def create_quant_module(
     bias_dtype: Optional[torch.dtype] = None,
     resolved_module_config: Optional[ResolvedModuleConfig] = None,
     transfer_from: Optional[nn.Module] = None,
+    install: bool = True,
 
 ):
     # An adapter only covers the modules named by its PEFT target list and
@@ -871,7 +891,10 @@ def create_quant_module(
         # kernels pick their layout from `self.training` on the first forward
         # and latch it, so carry the replaced module's mode over (#4907).
         new_layer.train(transfer_from.training)
-    recurse_setattr(module, name, new_layer.to(ori_layer_device))
+    new_layer = new_layer.to(ori_layer_device)
+    if install:
+        install_quant_module(module, name, new_layer)
+    return new_layer
 
 def create_quant_layer(
         linear_candidates: List[Type[BaseQuantLinear]],

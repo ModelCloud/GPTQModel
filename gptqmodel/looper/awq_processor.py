@@ -64,6 +64,7 @@ from ..utils.model import (
     create_quant_module,
     find_modules,
     get_module_by_name_prefix,
+    install_quant_module,
     move_to,
     pack_module,
     resolve_position_limit,
@@ -5412,7 +5413,7 @@ class AWQProcessor(LoopProcessor):
                 module_name=module_label,
         ):
             with parent_module_lock(parent_key):
-                create_quant_module(
+                qmodule = create_quant_module(
                     name=module.full_name,
                     linear_cls=quant_linear_cls,
                     bits=self._module_bits(module.full_name, resolved_cfg=resolved_cfg),
@@ -5429,6 +5430,7 @@ class AWQProcessor(LoopProcessor):
                     register_buffers=False,
                     dtype=module.weight.dtype,
                     resolved_module_config=resolved_cfg,
+                    install=False,
                 )
         if timer is not None and create_start is not None:
             timer.record(
@@ -5436,8 +5438,12 @@ class AWQProcessor(LoopProcessor):
                 time.perf_counter() - create_start,
                 source=module_label,
             )
+        if qmodule is None:
+            raise RuntimeError(
+                f"AWQProcessor: module `{module.full_name}` resolved to an excluded "
+                "quant config but still reached packing."
+            )
         # pack module
-        qmodule = self.gptq_model.model.get_submodule(module.full_name)
         qModules = (
             {module.full_name: qmodule}
             if isinstance(qmodule, quant_linear_cls)
@@ -5468,6 +5474,12 @@ class AWQProcessor(LoopProcessor):
                 time.perf_counter() - pack_start,
                 source=f"{module_label} [{packer_label or 'module.pack_original'}]",
             )
+
+        # Publish the packed kernel with one assignment; installing it before
+        # packing left an unusable projection behind when packing was
+        # interrupted (issue #5089).
+        with parent_module_lock(parent_key):
+            install_quant_module(self.gptq_model.model, module.full_name, qmodule)
 
     def finalize(self, model: BaseQModel, **kwargs):
         """Marks the model as AWQ-quantized and runs shared finalization logic."""

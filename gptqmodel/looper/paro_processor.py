@@ -57,7 +57,11 @@ from ..models.writer import (
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
 )
-from ..nn_modules.hooked_linear import HookedLinear
+from ..nn_modules.hooked_linear import (
+    HookedLinear,
+    restore_linear_from_hooked,
+    unwrap_hooked_linears,
+)
 from ..nn_modules.qlinear.paro import ParoLinear
 from ..quantization.config import FORMAT, METHOD, CalibrationConfig, QuantizeConfig, resolve_quant_format
 from ..quantization.paro.optimization import (
@@ -82,6 +86,7 @@ from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import (
     create_quant_module,
     get_module_by_name_prefix,
+    install_quant_module,
     move_to,
     nested_move_to,
     pack_module,
@@ -776,24 +781,11 @@ class ParoProcessor(LoopProcessor):
     @staticmethod
     def _restore_linear_from_hooked(module: HookedLinear) -> torch.nn.Linear:
         """Drop HookedLinear's inference-only forward while preserving the shared parameter storage."""
-        restored = torch.nn.Linear.__new__(torch.nn.Linear)
-        torch.nn.Module.__init__(restored)
-        restored.in_features = module.in_features
-        restored.out_features = module.out_features
-        restored.weight = module.weight
-        restored.bias = module.bias
-        return restored
+        return restore_linear_from_hooked(module)
 
     def _strip_hooked_linear_wrappers(self, module: torch.nn.Module) -> int:
         """Layer-scope training must not run through HookedLinear, which always forwards in inference mode."""
-        replaced = 0
-        for child_name, child in list(module.named_children()):
-            if isinstance(child, HookedLinear):
-                setattr(module, child_name, self._restore_linear_from_hooked(child))
-                replaced += 1
-                continue
-            replaced += self._strip_hooked_linear_wrappers(child)
-        return replaced
+        return unwrap_hooked_linears(module)
 
     @staticmethod
     def _sync_named_modules_to_live_layer(
@@ -2774,7 +2766,7 @@ class ParoProcessor(LoopProcessor):
             module_name=module_label,
         ):
             with parent_module_lock(module.full_name):
-                create_quant_module(
+                qmodule = create_quant_module(
                     name=module.full_name,
                     linear_cls=quant_linear_cls,
                     bits=self.qcfg.runtime_bits,
@@ -2791,9 +2783,14 @@ class ParoProcessor(LoopProcessor):
                     register_buffers=False,
                     init_kwargs=self.qcfg.quant_linear_init_kwargs(),
                     resolved_module_config=resolved_cfg,
+                    install=False,
                 )
 
-        qmodule = model.model.get_submodule(module.full_name)
+        if qmodule is None:
+            raise RuntimeError(
+                f"ParoProcessor: module `{module.full_name}` resolved to an excluded "
+                "quant config but still reached packing."
+            )
         qmodules = (
             {module.full_name: qmodule}
             if isinstance(qmodule, quant_linear_cls)
@@ -2821,7 +2818,6 @@ class ParoProcessor(LoopProcessor):
                 quantize_config=self.qcfg,
             )
 
-        qmodule = qmodules[module.full_name]
         if not isinstance(qmodule, ParoLinear):
             raise TypeError(
                 f"Expected `{module.full_name}` to be packed as ParoLinear, got `{type(qmodule).__name__}`."
@@ -2833,6 +2829,11 @@ class ParoProcessor(LoopProcessor):
             channel_scales.to(device=qmodule.channel_scales.device, dtype=qmodule.channel_scales.dtype)
         )
         qmodule.post_init()
+        # Publish the fully packed and post-initialized module with one
+        # assignment; installing it before packing left an unusable projection
+        # behind when packing was interrupted (issue #5089).
+        with parent_module_lock(module.full_name):
+            install_quant_module(model.model, module.full_name, qmodule)
 
     def finalize(self, model: BaseQModel, **kwargs):
         """Mark the model as Paro-quantized before shared finalization work."""
