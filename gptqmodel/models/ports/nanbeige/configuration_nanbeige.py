@@ -55,7 +55,6 @@ class NanbeigeConfig(PretrainedConfig):
         pretraining_tp=1,
         tie_word_embeddings=False,
         rope_theta=10000.0,
-        rope_scaling=None,
         attention_bias=False,
         attention_dropout=0.0,
         mlp_bias=False,
@@ -123,14 +122,15 @@ class NanbeigeConfig(PretrainedConfig):
         self.rope_theta = rope_theta
         rope = kwargs.pop("rope_parameters", None)
         if rope is None:
-            rope = dict(rope_scaling or {})
+            # Released checkpoints carry the raw `rope_scaling` field; convert it once, at parse time.
+            rope = dict(kwargs.pop("rope_scaling", None) or {})
         else:
             rope = dict(rope)
         rope["rope_type"] = rope.pop("type", rope.get("rope_type", "default"))
         rope.setdefault("rope_theta", rope_theta)
         self.rope_theta = rope["rope_theta"]
         self.rope_parameters = rope
-        self._rope_scaling_validation()
+        self._rope_parameters_validation()
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.mlp_bias = mlp_bias
@@ -175,17 +175,15 @@ class NanbeigeConfig(PretrainedConfig):
             **kwargs,
         )
 
-    def _rope_scaling_validation(self):
-        rope_scaling_type = self.rope_parameters["rope_type"]
-        if rope_scaling_type == "default":
+    def _rope_parameters_validation(self):
+        rope_type = self.rope_parameters["rope_type"]
+        if rope_type == "default":
             return
-        rope_scaling_factor = self.rope_parameters.get("factor", None)
-        if rope_scaling_type not in ["linear", "dynamic"]:
-            raise ValueError(
-                f"`rope_scaling`'s type field must be one of ['linear', 'dynamic'], got {rope_scaling_type}"
-            )
-        if rope_scaling_factor is None or not isinstance(rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
-            raise ValueError(f"`rope_scaling`'s factor field must be a float > 1, got {rope_scaling_factor}")
+        factor = self.rope_parameters.get("factor", None)
+        if rope_type not in ["linear", "dynamic"]:
+            raise ValueError(f"`rope_parameters`' rope_type must be one of ['linear', 'dynamic'], got {rope_type}")
+        if factor is None or not isinstance(factor, float) or factor <= 1.0:
+            raise ValueError(f"`rope_parameters`' factor field must be a float > 1, got {factor}")
 
     def _hyper_connection_validation(self):
         ngram_fields = (self.emb_neighbor_num, self.emb_split_num, self.ngram_vocab_size_ratio)

@@ -482,8 +482,6 @@ def test_cache_and_input_failures_are_transactional_and_retryable():
     cache = out.past_key_values
     before = [(layer.keys.clone(), layer.values.clone()) for layer in cache.layers]
     ngram = cache.ngram_context.clone()
-    with pytest.raises(ValueError, match="cache_position"):
-        m(IDS[:, 3:4], past_key_values=cache, cache_position=torch.tensor([99]), use_cache=True)
     with pytest.raises(ValueError, match="mask"):
         m(IDS[:, 3:4], past_key_values=cache, attention_mask=torch.ones(2, 99), use_cache=True)
     with pytest.raises(ValueError, match="hidden-state.*history"):

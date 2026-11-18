@@ -11,7 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -21,9 +21,12 @@ from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.masking_utils import create_causal_mask
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from transformers.utils import logging
+from transformers.utils import can_return_tuple, logging
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import OutputRecorder, capture_outputs
 
 from .configuration_nanbeige import NanbeigeConfig
 
@@ -181,10 +184,9 @@ def _apply_depth_attention_then_update_cache(
     query_states: torch.Tensor,
     key_states: torch.Tensor,
     value_states: torch.Tensor,
-    past_key_value: Optional[Cache],
+    past_key_values: Optional[Cache],
     loop_idx: int,
     loop_cache_layer_idx: Optional[int],
-    cache_kwargs: Dict[str, Any],
     skip_cache_update: bool = False,
     softmax_scale: Optional[float] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -197,11 +199,11 @@ def _apply_depth_attention_then_update_cache(
         value_states,
         softmax_scale=softmax_scale,
     )
-    if past_key_value is not None and (not skip_cache_update):
+    if past_key_values is not None and (not skip_cache_update):
         cache_layer_idx = _get_loop_cache_layer_idx(
             layer_idx, loop_idx, _get_num_physical_layers(config), loop_cache_layer_idx
         )
-        key_states, value_states = past_key_value.update(key_states, value_states, cache_layer_idx, cache_kwargs)
+        key_states, value_states = past_key_values.update(key_states, value_states, cache_layer_idx)
     return (key_states, value_states)
 
 
@@ -849,16 +851,14 @@ class NanbeigeAttention(nn.Module):
         self._init_rope()
 
     def _init_rope(self):
-        rope_scaling = self.config.rope_parameters
-        scaling_type = None
-        if isinstance(rope_scaling, dict):
-            scaling_type = rope_scaling.get("type", rope_scaling.get("rope_type"))
-        if rope_scaling is None or scaling_type in (None, "default"):
+        rope_parameters = self.config.rope_parameters
+        scaling_type = rope_parameters.get("rope_type") if isinstance(rope_parameters, dict) else None
+        if rope_parameters is None or scaling_type in (None, "default"):
             self.rotary_emb = NanbeigeRotaryEmbedding(
                 self.head_dim, max_position_embeddings=self.max_position_embeddings, base=self.rope_theta
             )
         else:
-            scaling_factor = rope_scaling["factor"]
+            scaling_factor = rope_parameters["factor"]
             if scaling_type == "linear":
                 self.rotary_emb = NanbeigeLinearScalingRotaryEmbedding(
                     self.head_dim,
@@ -881,12 +881,10 @@ class NanbeigeAttention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        record_attention: bool = True,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         loop_idx = kwargs.pop("loop_idx", 0)
         loop_cache_layer_idx = kwargs.pop("loop_cache_layer_idx", None)
         loop_share_kv_cache = kwargs.pop("loop_share_kv_cache", None)
@@ -904,15 +902,12 @@ class NanbeigeAttention(nn.Module):
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
         use_loop_shared_kv = loop_share_kv_cache is not None and loop_share_kv_repeat_idx is not None
         skip_cache_update = use_loop_shared_kv and loop_share_kv_repeat_idx > 0
-        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
         if depth_attention_kv_cache is None:
-            if past_key_value is not None and (not skip_cache_update):
+            if past_key_values is not None and (not skip_cache_update):
                 cache_layer_idx = _get_loop_cache_layer_idx(
                     self.layer_idx, loop_idx, _get_num_physical_layers(self.config), loop_cache_layer_idx
                 )
-                key_states, value_states = past_key_value.update(
-                    key_states, value_states, cache_layer_idx, cache_kwargs
-                )
+                key_states, value_states = past_key_values.update(key_states, value_states, cache_layer_idx)
             key_states, value_states = _apply_loop_shared_kv(
                 loop_share_kv_cache, self.layer_idx, loop_share_kv_repeat_idx, key_states, value_states
             )
@@ -927,18 +922,18 @@ class NanbeigeAttention(nn.Module):
                 query_states,
                 key_states,
                 value_states,
-                past_key_value,
+                past_key_values,
                 loop_idx,
                 loop_cache_layer_idx,
-                cache_kwargs,
                 skip_cache_update=skip_cache_update,
                 softmax_scale=self.head_dim ** (-0.5),
             )
         causal_mask = attention_mask
         if attention_mask is not None:
             causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
-        implementation = "eager" if output_attentions else self.config._attn_implementation
-        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(implementation, eager_attention_forward)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
         attn_output, attn_weights = attention_interface(
             self,
             query_states,
@@ -948,14 +943,25 @@ class NanbeigeAttention(nn.Module):
             dropout=self.attention_dropout if self.training else 0.0,
             scaling=self.scaling,
         )
-        if not output_attentions:
+        if not record_attention:
+            # Only the final loop's attention maps are reported (see `NanbeigeModel.forward`).
             attn_weights = None
         attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.head_dim)
-        attn_output = self.o_proj(attn_output)
-        return (attn_output, attn_weights, past_key_value)
+        return self.o_proj(attn_output), attn_weights
 
 
-class NanbeigeDecoderLayer(nn.Module):
+class NanbeigeHiddenStateTap(nn.Module):
+    """Parameter-free identity whose outputs are the model's recorded hidden states.
+
+    Looped/hyper-connection execution reports the final loop's (stream-contracted) layer inputs plus the
+    final hidden state, which do not coincide with decoder-layer outputs.
+    """
+
+    def forward(self, hidden_states):
+        return hidden_states
+
+
+class NanbeigeDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: NanbeigeConfig, layer_idx: int):
         super().__init__()
         self.config = config
@@ -1071,30 +1077,24 @@ class NanbeigeDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: Optional[bool] = False,
-        use_cache: Optional[bool] = False,
-        cache_position: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
         loop_idx: int = 0,
         loop_cache_layer_idx: Optional[int] = None,
         mhc_loop_idx: Optional[int] = None,
         loop_share_kv_cache: Optional[Dict[int, Tuple[torch.Tensor, torch.Tensor]]] = None,
         depth_attention_kv_cache: Optional[List[DepthAttentionCacheEntry]] = None,
         **kwargs,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> torch.FloatTensor:
         residual = hidden_states
         if self.enable_hyper_connection:
             self_attn_hc = self._get_self_attn_hc(mhc_loop_idx)
             hidden_states, h_res, h_post = self_attn_hc(hidden_states)
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-            cache_position=cache_position,
+            past_key_values=past_key_values,
             loop_idx=loop_idx,
             loop_cache_layer_idx=loop_cache_layer_idx,
             loop_share_kv_cache=loop_share_kv_cache,
@@ -1116,12 +1116,7 @@ class NanbeigeDecoderLayer(nn.Module):
             hidden_states = mlp_hc.fuse_residual(h_res, residual, h_post, hidden_states)
         else:
             hidden_states = residual + hidden_states
-        outputs = (hidden_states,)
-        if output_attentions:
-            outputs += (self_attn_weights,)
-        if use_cache:
-            outputs += (present_key_value,)
-        return outputs
+        return hidden_states
 
 
 class NanbeigePreTrainedModel(PreTrainedModel):
@@ -1132,10 +1127,11 @@ class NanbeigePreTrainedModel(PreTrainedModel):
     _skip_keys_device_placement = ["past_key_values"]
     _supports_flash_attn = False
     _supports_sdpa = True
-    _supports_cache_class = True
-    _supports_quantized_cache = False
-    _supports_static_cache = False
     _supports_attention_backend = False
+    _can_record_outputs = {
+        "hidden_states": OutputRecorder(NanbeigeHiddenStateTap, capture_initial_hidden_state=False),
+        "attentions": OutputRecorder(NanbeigeAttention, index=1),
+    }
 
     @classmethod
     def _supports_default_dynamic_cache(cls) -> bool:
@@ -1199,6 +1195,7 @@ class NanbeigeModel(NanbeigePreTrainedModel):
             }
         )
         self.norm = NanbeigeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.hidden_state_tap = NanbeigeHiddenStateTap()
         self.gradient_checkpointing = False
         self.post_init()
 
@@ -1260,46 +1257,31 @@ class NanbeigeModel(NanbeigePreTrainedModel):
             max_seq_length = max(max_seq_length, past_key_values.get_seq_length(layer_idx))
         return max_seq_length
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
+        **kwargs,
+    ) -> BaseModelOutputWithPast:
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
                 "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
             )
-        if self.gradient_checkpointing and self.training and use_cache:
-            logger.warning_once(
-                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
-            )
-            use_cache = False
         num_loops = self._get_num_loops()
         double_loop_split = getattr(self.config, "enable_double_loop_split", False)
         if past_key_values is not None and not isinstance(past_key_values, DynamicCache):
-            raise ValueError("Nanbeige requires a Transformers DynamicCache, not legacy/static/quantized caches.")
+            raise ValueError("Nanbeige requires a Transformers DynamicCache, not static/quantized caches.")
         if past_key_values is not None and not use_cache:
             raise ValueError("use_cache must be enabled when past_key_values is supplied.")
         input_tensor = input_ids if inputs_embeds is None else inputs_embeds
         batch_size, sequence_length = input_tensor.shape[:2]
         past_length = self._get_cache_seq_length(past_key_values)
-        expected_position = torch.arange(past_length, past_length + sequence_length, device=input_tensor.device)
-        if cache_position is not None and not torch.equal(cache_position, expected_position):
-            raise ValueError("cache_position must describe the contiguous append to the dynamic cache.")
         if attention_mask is not None:
             if attention_mask.ndim == 2 and attention_mask.shape != (batch_size, past_length + sequence_length):
                 raise ValueError("attention_mask must cover the full cached and new token sequence.")
@@ -1344,20 +1326,18 @@ class NanbeigeModel(NanbeigePreTrainedModel):
             raise RuntimeError("N-gram layer fusion requires input_ids and ngram embeddings.")
         if use_cache and isinstance(past_key_values, NgramCache) and (input_ids is not None):
             past_key_values.update_ngram_context(input_ids)
-        if cache_position is None:
-            past_seen_tokens = self._get_cache_seq_length(past_key_values)
-            cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-            )
         if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
-        causal_mask = self._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+            position_ids = torch.arange(
+                past_length, past_length + inputs_embeds.shape[1], device=inputs_embeds.device
+            ).unsqueeze(0)
+        causal_mask = create_causal_mask(
+            config=self.config,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            position_ids=position_ids,
         )
         hidden_states = inputs_embeds
-        last_loop_all_hidden_states = None
-        last_loop_all_self_attns = None
-        last_loop_next_decoder_cache = None
         layer_order = self._get_layer_execution_order()
         layer_lookup = list(self.layers)
         loop_share_kv_cache = {} if getattr(self.config, "loop_share_kv", False) else None
@@ -1367,20 +1347,19 @@ class NanbeigeModel(NanbeigePreTrainedModel):
         if depth_attention_kv_cache is not None and self.gradient_checkpointing and self.training:
             raise ValueError("enable_depth_attention does not support gradient checkpointing during training.")
         for loop_idx in range(num_loops):
-            current_loop_all_hidden_states = () if output_hidden_states else None
-            current_loop_all_self_attns = () if output_attentions else None
-            current_loop_next_decoder_cache = None
+            # Recorded hidden states / attention maps describe the final loop only.
+            final_loop = loop_idx == num_loops - 1
             if self.config.enable_hyper_connection and len(self.layers) > 0:
                 hidden_states = self._convert_hyper_connection_streams(hidden_states, 0)
             for execution_idx, (layer_idx, mhc_loop_idx) in enumerate(layer_order):
                 decoder_layer = layer_lookup[layer_idx]
                 if self.config.enable_hyper_connection:
                     hidden_states = self._convert_hyper_connection_streams(hidden_states, layer_idx)
-                if output_hidden_states:
+                if final_loop:
                     if self.config.enable_hyper_connection:
-                        current_loop_all_hidden_states += (self._contract_hyper_connection_streams(hidden_states),)
+                        self.hidden_state_tap(self._contract_hyper_connection_streams(hidden_states))
                     else:
-                        current_loop_all_hidden_states += (hidden_states,)
+                        self.hidden_state_tap(hidden_states)
                 fusion_key = str(layer_idx)
                 fusion = self.ngram_layer_fusion[fusion_key] if fusion_key in self.ngram_layer_fusion else None
                 if fusion is not None:
@@ -1392,88 +1371,31 @@ class NanbeigeModel(NanbeigePreTrainedModel):
                         hidden_states = self._convert_hyper_connection_streams(contracted, layer_idx)
                     else:
                         hidden_states = fusion(hidden_states, ngram_layer_embeddings)
-                if self.gradient_checkpointing and self.training:
-                    cache_layer_idx = (
-                        (layer_idx if loop_share_kv_cache is not None else execution_idx)
-                        if double_loop_split
-                        else None
-                    )
-                    layer_outputs = self._gradient_checkpointing_func(
-                        decoder_layer.__call__,
-                        hidden_states,
-                        causal_mask,
-                        position_ids,
-                        past_key_values,
-                        output_attentions,
-                        use_cache,
-                        cache_position,
-                        loop_idx,
-                        cache_layer_idx,
-                        mhc_loop_idx,
-                        loop_share_kv_cache,
-                        depth_attention_kv_cache,
-                    )
-                else:
-                    cache_layer_idx = (
-                        (layer_idx if loop_share_kv_cache is not None else execution_idx)
-                        if double_loop_split
-                        else None
-                    )
-                    layer_outputs = decoder_layer(
-                        hidden_states,
-                        attention_mask=causal_mask,
-                        position_ids=position_ids,
-                        past_key_value=past_key_values,
-                        output_attentions=output_attentions,
-                        use_cache=use_cache,
-                        cache_position=cache_position,
-                        loop_idx=loop_idx,
-                        loop_cache_layer_idx=cache_layer_idx,
-                        mhc_loop_idx=mhc_loop_idx,
-                        loop_share_kv_cache=loop_share_kv_cache,
-                        depth_attention_kv_cache=depth_attention_kv_cache,
-                    )
-                hidden_states = layer_outputs[0]
-                if use_cache:
-                    current_loop_next_decoder_cache = layer_outputs[2 if output_attentions else 1]
-                if output_attentions:
-                    current_loop_all_self_attns += (layer_outputs[1],)
+                cache_layer_idx = (
+                    (layer_idx if loop_share_kv_cache is not None else execution_idx) if double_loop_split else None
+                )
+                hidden_states = decoder_layer(
+                    hidden_states,
+                    attention_mask=causal_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    loop_idx=loop_idx,
+                    loop_cache_layer_idx=cache_layer_idx,
+                    mhc_loop_idx=mhc_loop_idx,
+                    loop_share_kv_cache=loop_share_kv_cache,
+                    depth_attention_kv_cache=depth_attention_kv_cache,
+                    record_attention=final_loop,
+                )
             if self.config.enable_hyper_connection:
                 hidden_states = self._contract_hyper_connection_streams(hidden_states)
             if not getattr(self.config, "skip_loop_final_norm", False):
                 hidden_states = self.norm(hidden_states)
-            if output_hidden_states:
-                current_loop_all_hidden_states += (hidden_states,)
-            last_loop_all_hidden_states = current_loop_all_hidden_states
-            last_loop_all_self_attns = current_loop_all_self_attns
-            last_loop_next_decoder_cache = current_loop_next_decoder_cache
         if getattr(self.config, "skip_loop_final_norm", False):
             hidden_states = self.norm(hidden_states)
-            if output_hidden_states and last_loop_all_hidden_states is not None:
-                last_loop_all_hidden_states = last_loop_all_hidden_states[:-1] + (hidden_states,)
-        next_cache = last_loop_next_decoder_cache if use_cache else None
-        if not return_dict:
-            return tuple(
-                (
-                    v
-                    for v in [hidden_states, next_cache, last_loop_all_hidden_states, last_loop_all_self_attns]
-                    if v is not None
-                )
-            )
+        self.hidden_state_tap(hidden_states)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=next_cache,
-            hidden_states=last_loop_all_hidden_states,
-            attentions=last_loop_all_self_attns,
-        )
-
-    def _update_causal_mask(self, attention_mask, input_tensor, cache_position, past_key_values, output_attentions):
-        return create_causal_mask(
-            config=self.config,
-            inputs_embeds=input_tensor,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            allow_is_causal_skip=not output_attentions,
+            past_key_values=past_key_values if use_cache else None,
         )
 
 
@@ -1508,27 +1430,19 @@ class NanbeigeForCausalLM(NanbeigePreTrainedModel, GenerationMixin):
     def get_decoder(self):
         return self.model
 
+    @can_return_tuple
     def forward(
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         **kwargs,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
+    ) -> CausalLMOutputWithPast:
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -1536,21 +1450,13 @@ class NanbeigeForCausalLM(NanbeigePreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            cache_position=cache_position,
+            **kwargs,
         )
-        hidden_states = outputs[0]
         indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, indices, :])
-        logits = logits.float()
+        logits = self.lm_head(outputs.last_hidden_state[:, indices, :]).float()
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
@@ -1571,34 +1477,3 @@ class NanbeigeForCausalLM(NanbeigePreTrainedModel, GenerationMixin):
                     NgramCache(self.config) if self.model.ngram_embeddings is not None else DynamicCache()
                 )
         return super().generate(*args, **kwargs)
-
-    def prepare_inputs_for_generation(
-        self,
-        input_ids,
-        next_sequence_length=None,
-        past_key_values=None,
-        attention_mask=None,
-        inputs_embeds=None,
-        is_first_iteration=False,
-        **kwargs,
-    ):
-        if next_sequence_length is None and past_key_values is not None:
-            past_length = self.model._get_cache_seq_length(past_key_values)
-            next_sequence_length = (
-                input_ids.shape[-1] - past_length if input_ids.shape[-1] > past_length else input_ids.shape[-1]
-            )
-        prepared = GenerationMixin.prepare_inputs_for_generation(
-            self,
-            input_ids,
-            next_sequence_length=next_sequence_length,
-            past_key_values=past_key_values,
-            attention_mask=attention_mask,
-            inputs_embeds=inputs_embeds,
-            is_first_iteration=is_first_iteration,
-            **kwargs,
-        )
-        tensor = prepared.get("input_ids")
-        sequence_length = tensor.shape[-1] if tensor is not None else prepared["inputs_embeds"].shape[-2]
-        if prepared.get("cache_position") is not None:
-            prepared["cache_position"] = prepared["cache_position"][-sequence_length:]
-        return prepared
