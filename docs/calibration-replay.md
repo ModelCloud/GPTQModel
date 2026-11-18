@@ -181,6 +181,8 @@ not part of the quantized module tree, so the quantizer never materializes them
 for replay. Before the fix for issue #5135 the hook assumed both were resident
 on the layer's device.
 
+Introduced by the fix in [PR #5169](https://github.com/ModelCloud/GPTQModel/pull/5169).
+
 ### Before the fix
 
 ```mermaid
