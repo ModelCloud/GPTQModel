@@ -641,11 +641,39 @@ def _gguf_quantize_q8_k(blocks: np.ndarray) -> np.ndarray:
     # block_q8_K = { fp32 d, int8 qs[256], int16 bsums[16] }; bsums[i] is the
     # int8 code sum of group i (16 elements), used by upstream dot kernels.
     signed_max = np.take_along_axis(blocks, np.abs(blocks).argmax(axis=1, keepdims=True), axis=1)
-    iscale = np.divide(
-        np.float32(-127.0), signed_max, out=np.zeros_like(signed_max), where=signed_max != 0
-    )
-    d = np.divide(np.float32(1.0), iscale, out=np.zeros_like(iscale), where=iscale != 0)
-    q = np.clip(np.rint(blocks * iscale), -127, 127).astype(np.int8)
+    nonzero = signed_max != 0
+    # ggml derives the stored scale as the reciprocal of -127/peak. For a very
+    # small but nonzero peak that reciprocal overflows to Inf in fp32, and
+    # 1/Inf is zero even though -peak/127 is a representable subnormal fp32.
+    # Keep the reciprocal path wherever it is finite so ordinary blocks stay
+    # bit-exact with ggml, and use the direct quotient only for those blocks.
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        iscale = np.divide(
+            np.float32(-127.0), signed_max, out=np.zeros_like(signed_max), where=nonzero
+        )
+        reciprocal_overflow = np.isinf(iscale)
+        d = np.divide(
+            np.float32(1.0),
+            iscale,
+            out=np.zeros_like(iscale),
+            where=nonzero & ~reciprocal_overflow,
+        )
+    if np.any(reciprocal_overflow):
+        direct_d = np.divide(
+            -signed_max, np.float32(127.0), out=np.zeros_like(signed_max), where=nonzero
+        )
+        d = np.where(reciprocal_overflow, direct_d, d)
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        scaled = blocks * iscale
+    if np.any(reciprocal_overflow):
+        # Codes for an overflowing block must come from the stored scale; using
+        # the Inf reciprocal would saturate every nonzero element to +/-127.
+        # The wide division also keeps a subnormal stored scale usable on hosts
+        # that flush subnormal operands.
+        safe_d = np.where(d == 0, np.float32(1.0), d)
+        direct = blocks.astype(np.float64) / safe_d.astype(np.float64)
+        scaled = np.where(reciprocal_overflow, direct, scaled)
+    q = np.clip(np.rint(scaled), -127, 127).astype(np.int8)
     bsums = q.reshape(-1, 16, 16).sum(axis=2).astype(np.int16)
     rows = blocks.shape[0]
     out = np.empty((rows, _GGUF_TYPE_INFO["Q8_K"]["type_size"]), dtype=np.uint8)
