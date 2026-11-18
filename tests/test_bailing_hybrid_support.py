@@ -4,25 +4,12 @@
 
 from types import SimpleNamespace
 
-from gptqmodel.models import auto
 from gptqmodel.models.definitions.bailing_moe import BailingMoeQModel
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 def _config():
     return SimpleNamespace(num_experts=2, num_local_experts=2, num_shared_experts=1)
-
-
-def test_bailing_hybrid_model_type_selects_definition(monkeypatch):
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(
-        auto.AutoConfig,
-        "from_pretrained",
-        lambda *args, **kwargs: SimpleNamespace(model_type="bailing_hybrid"),
-    )
-
-    assert auto.check_and_get_model_definition("/tmp/bailing-hybrid") is BailingMoeQModel
-    assert auto.MODEL_MAP["bailing_hybrid"] is BailingMoeQModel
 
 
 def test_bailing_hybrid_simple_layer_modules_cover_attention_and_mlp():

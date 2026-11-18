@@ -52,8 +52,7 @@ class RotaryEmbedding(nn.Module):
         self.dim = config.qk_rope_head_dim if mla else int(config.head_dim * config.partial_rotary_factor)
         if self.dim % 2:
             raise ValueError("Rotary dimension must be even")
-        scaling = config.rope_scaling or {}
-        self.rope_type = scaling.get("rope_type", scaling.get("type", "default"))
+        self.rope_type = config.rope_parameters["rope_type"]
         if self.rope_type not in ("default", "linear", "dynamic", "yarn"):
             raise ValueError(f"Unqualified Ling RoPE type: {self.rope_type}")
         inv_freq, self.attention_scaling = self._parameters_for_length(config.max_position_embeddings)
@@ -61,9 +60,9 @@ class RotaryEmbedding(nn.Module):
 
     def _parameters_for_length(self, length):
         config = self.config
-        scaling = config.rope_scaling or {}
+        scaling = config.rope_parameters
         factor = scaling.get("factor", 1.0)
-        base, dim = config.rope_theta, self.dim
+        base, dim = scaling["rope_theta"], self.dim
         attention_scaling = 1.0
         if self.rope_type == "dynamic" and length > config.max_position_embeddings:
             base *= (factor * length / config.max_position_embeddings - (factor - 1)) ** (dim / (dim - 2))
@@ -73,10 +72,11 @@ class RotaryEmbedding(nn.Module):
         elif self.rope_type == "yarn":
             from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
-            # Modern YaRN reads rope_parameters, not the legacy rope_scaling dict.
+            # `dim` already includes the partial rotary factor (or is the MLA
+            # rope dim), so the generic helper must not apply it again.
             rope_config = BailingConfig.from_dict(config.to_dict())
             rope_config.head_dim = dim
-            rope_config.rope_parameters = {"rope_theta": base, **scaling}
+            rope_config.rope_parameters = {**scaling, "rope_theta": base, "partial_rotary_factor": 1.0}
             inv_freq, attention_scaling = ROPE_INIT_FUNCTIONS["yarn"](rope_config)
         return inv_freq, attention_scaling
 
@@ -236,7 +236,7 @@ class MLAttention(nn.Module):
         )
         self.dense = nn.Linear(config.num_attention_heads * config.v_head_dim, config.hidden_size, bias=config.use_qkv_bias)
         self.scaling = config.qk_head_dim ** -0.5
-        scaling = config.rope_scaling or {}
+        scaling = config.rope_parameters
         if scaling.get("mscale_all_dim", 0) and scaling["factor"] > 1:
             self.scaling *= (0.1 * scaling["mscale_all_dim"] * math.log(scaling["factor"]) + 1.0) ** 2
 

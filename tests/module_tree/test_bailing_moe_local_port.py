@@ -33,10 +33,9 @@ def test_mtp_envelope_and_mla_variants_have_explicit_ordered_subsets():
 
 
 @pytest.mark.parametrize("layout", ["dense", "mla", "mla_dense_q", "hybrid", "legacy_gqa", "mla_alias"])
-@pytest.mark.parametrize("model_type", ["bailing_moe", "bailing_hybrid"])
-def test_real_checkpoint_owners_and_moe_consumers(layout, model_type):
-    definition = MODEL_MAP[model_type]
-    assert definition is BailingMoeQModel
+def test_real_checkpoint_owners_and_moe_consumers(layout):
+    assert MODEL_MAP["bailing_moe"] is MODEL_MAP["bailing_hybrid"] is BailingMoeQModel
+    definition = BailingMoeQModel
     config = tiny_config(layout, num_nextn_predict_layers=1)
     with torch.device("meta"):
         model = definition.loader.from_config(config)
