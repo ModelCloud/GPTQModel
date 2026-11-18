@@ -60,7 +60,10 @@ class ErnieVLConfig(Ernie4_5_VLMoeConfig):
             values["vision_config"] = vision
             values.setdefault("image_token_id", values.get("im_patch_id", 100295))
             fields = set(Ernie4_5_VLMoeConfig.__dataclass_fields__)
-            fields.update(("architectures", "dtype", "torch_dtype", "_name_or_path"))
+            fields.update(("architectures", "dtype", "_name_or_path"))
+            # Released checkpoints spell the dtype field ``torch_dtype``; canonicalize at parse time.
+            if "torch_dtype" in values:
+                values.setdefault("dtype", values.pop("torch_dtype"))
             values = {key: value for key, value in values.items() if key in fields}
         values["model_type"] = Ernie4_5_VLMoeConfig.model_type
         return Ernie4_5_VLMoeConfig.from_dict(values, **kwargs)
