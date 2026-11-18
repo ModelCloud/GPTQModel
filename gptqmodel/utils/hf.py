@@ -3482,11 +3482,17 @@ def build_shell_model(
     try:
         with init_empty_weights(include_buffers=True):
             try:
-                shell = loader.from_config(
-                    config,
-                    trust_remote_code=trust_remote_code,
-                    **init_kwargs
-                )
+                # ``from_config`` wraps construction in transformers'
+                # ``local_torch_dtype``, a process-global default-dtype window.
+                # Compiled forwards must not trace through it (#5209, #5268).
+                from ..models.loader import model_global_state_lock
+
+                with model_global_state_lock():
+                    shell = loader.from_config(
+                        config,
+                        trust_remote_code=trust_remote_code,
+                        **init_kwargs
+                    )
             except FileNotFoundError as exc:
                 # Some trust_remote_code caches can become stale (missing
                 # generated files like transformers_v*__configuration_*.py).
@@ -3519,11 +3525,12 @@ def build_shell_model(
                         from transformers.dynamic_module_utils import get_class_from_dynamic_module
                         get_class_from_dynamic_module(class_ref, str(getattr(config, "_name_or_path", "")), force_download=True)
 
-                    shell = loader.from_config(
-                        config,
-                        trust_remote_code=trust_remote_code,
-                        **init_kwargs,
-                    )
+                    with model_global_state_lock():
+                        shell = loader.from_config(
+                            config,
+                            trust_remote_code=trust_remote_code,
+                            **init_kwargs,
+                        )
                 else:
                     raise
     finally:
