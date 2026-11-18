@@ -4,7 +4,6 @@
 
 import hashlib
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -18,22 +17,18 @@ from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.intern_s2_preview import InternS2PreviewQModel as Definition
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
-from gptqmodel.models.ports.intern_s2_preview import configuration_interns2_preview
 from gptqmodel.models.ports.intern_s2_preview.configuration_interns2_preview import InternS2PreviewConfig
 from gptqmodel.models.ports.intern_s2_preview.modeling_interns2_preview import InternS2PreviewForConditionalGeneration
 from gptqmodel.quantization.config import AWQConfig
 from tests.test_intern_s2_preview_local_port import tiny_config
 
 
-PORT = Path(configuration_interns2_preview.__file__).parent
+FIXTURES = Path(__file__).parents[1] / "fixtures/ports/intern_s2_preview"
+RELEASED_NON_MTP_KEYS_SHA256 = "9a3ddb41f442b04e68c0aaa764975bf8e4dab758c1a6890a749f816c5a50e1f3"
 LAYOUTS = [
     ["linear_attention", "full_attention"], ["full_attention", "linear_attention"],
     ["linear_attention"] * 2, ["full_attention"] * 2,
 ]
-
-
-def normalize_key(key):
-    return re.sub(r"\.(layers|blocks)\.\d+\.", r".\1.#.", key)
 
 
 def wrapper_for(model):
@@ -52,15 +47,13 @@ def get_submodule(layer, name):
 
 
 def test_exact_released_checkpoint_meta_ownership_and_aliases():
-    manifest = json.loads((PORT / "checkpoint_ownership.json").read_text())
-    config = InternS2PreviewConfig(**json.loads((PORT / "upstream_config.json").read_text()))
+    # internlm/Intern-S2-Preview@4f57cab5: 2098 safetensors tensors, 785 under mtp.*
+    config = InternS2PreviewConfig(**json.loads((FIXTURES / "upstream_config.json").read_text()))
     with torch.device("meta"):
         model = InternS2PreviewForConditionalGeneration(config)
     keys = set(model.state_dict())
-    assert hashlib.sha256("\n".join(sorted(keys)).encode()).hexdigest() == manifest["non_mtp_keys_sha256"]
-    assert len(keys) == manifest["tensor_count"] - manifest["mtp_count"] == 1313
-    assert {normalize_key(k) for k in keys} == {
-        k for k in manifest["normalized_checkpoint_keys"] if not k.startswith("mtp.")}
+    assert len(keys) == 2098 - 785
+    assert hashlib.sha256("\n".join(sorted(keys)).encode()).hexdigest() == RELEASED_NON_MTP_KEYS_SHA256
     assert len(model.model.language_model.layers) == 40
     assert len(model.model.visual.blocks) == 27
     assert Definition.out_of_model_tensors == {"prefixes": ["mtp"]}

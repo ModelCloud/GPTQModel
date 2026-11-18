@@ -10,7 +10,7 @@ import torch
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
-from transformers import PreTrainedTokenizerFast, Qwen2VLImageProcessor, Qwen3VLVideoProcessor
+from transformers import DynamicCache, PreTrainedTokenizerFast, Qwen2VLImageProcessor, Qwen3VLVideoProcessor
 
 from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.intern_s2_preview import InternS2PreviewQModel
@@ -49,9 +49,10 @@ def tiny_config(layer_types=None, **text_overrides):
     return config
 
 
+# Native Qwen3.5 DynamicCache measures cached length on attention layers, so
+# every cached layout keeps at least one full-attention layer (as releases do).
 @pytest.mark.parametrize("layer_types", [
-    ["linear_attention", "full_attention"], ["full_attention", "linear_attention"],
-    ["linear_attention"] * 2, ["full_attention"] * 2,
+    ["linear_attention", "full_attention"], ["full_attention", "linear_attention"], ["full_attention"] * 2,
 ])
 @pytest.mark.parametrize("continuation", [1, 4])
 @torch.no_grad()
@@ -64,6 +65,8 @@ def test_real_hybrid_forward_and_cache(layer_types, continuation):
     end = 3 + continuation
     output = model(ids[:, 3:end], past_key_values=prefill.past_key_values, use_cache=True)
     torch.testing.assert_close(output.logits, expected[:, 3:end], rtol=2e-5, atol=2e-6)
+    # Hybrid state lives in the native Transformers 5 cache, not a package-owned object.
+    assert type(output.past_key_values) is DynamicCache
     assert output.past_key_values.get_seq_length() == end
 
 
