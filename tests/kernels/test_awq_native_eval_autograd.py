@@ -7,6 +7,7 @@ import torch
 
 from gptqmodel.adapter.adapter import Lora
 from gptqmodel.nn_modules.qlinear import gemm_awq
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 def _module(monkeypatch, *, bias=True):
@@ -37,7 +38,7 @@ def _module(monkeypatch, *, bias=True):
     return module
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not requires_nvidia_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("grad_target", ["input", "bias"])
 def test_awq_native_eval_preserves_requested_gradients(monkeypatch, grad_target):
     module = _module(monkeypatch)
@@ -60,7 +61,7 @@ def test_awq_native_eval_preserves_requested_gradients(monkeypatch, grad_target)
     assert module(x.detach()).is_inference()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not requires_nvidia_cuda(), reason="CUDA required")
 def test_awq_native_empty_rows_return_zero_bias_gradient(monkeypatch):
     module = _module(monkeypatch)
     module.bias.requires_grad_(True)
@@ -71,7 +72,7 @@ def test_awq_native_empty_rows_return_zero_bias_gradient(monkeypatch):
     torch.testing.assert_close(module.bias.grad, torch.zeros_like(module.bias), rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not requires_nvidia_cuda(), reason="CUDA required")
 def test_awq_native_eval_adapter_can_update_output(monkeypatch):
     module = _module(monkeypatch, bias=False)
     a = torch.full((128, 1), 0.01, device="cuda", dtype=torch.float16, requires_grad=True)

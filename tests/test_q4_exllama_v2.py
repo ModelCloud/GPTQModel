@@ -24,12 +24,15 @@ from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
+from tests.accelerator_gates import requires_nvidia_cuda  # noqa: E402
 
 
 GENERATE_EVAL_SIZE = 100
 
 class TestsQ4ExllamaV2(unittest.TestCase):
     def test_exllamav2(self):
+        if not requires_nvidia_cuda():
+            self.skipTest("ExLlamaV2 GPTQ is CUDA-only")
         group_size = 128
 
         m = 1
@@ -159,6 +162,8 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
 
     def test_generation_desc_act_true(self):
+        if not requires_nvidia_cuda():
+            self.skipTest("ExLlamaV2 GPTQ is CUDA-only")
         prompt = "The capital of France is"
         torch.device("cuda:0")
 
@@ -186,6 +191,8 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         assert "paris" in predicted_text.lower() or "city" in predicted_text.lower()
 
     def test_exllama_v2_buffer_size(self):
+        if not requires_nvidia_cuda():
+            self.skipTest("ExLlamaV2 GPTQ is CUDA-only")
         # prompt = "I'm in Paris and" * 450
         prompt = "I'm in Paris and" * 500
         device = torch.device("cuda:0")

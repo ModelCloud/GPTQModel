@@ -29,6 +29,7 @@ from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear  # noqa: E402
 from gptqmodel.quantization import Fallback, QuantizeConfig  # noqa: E402
 from gptqmodel.quantization.config import CalibrationConfig  # noqa: E402
 from gptqmodel.utils import safetensor  # noqa: E402
+from tests.accelerator_gates import requires_nvidia_cuda  # noqa: E402
 
 
 class TestDynamic(ModelTest):
@@ -121,6 +122,8 @@ class TestDynamic(ModelTest):
         ]
     )
     def test_dynamic_bits(self, backend, backendQLinear):
+        if backend in (BACKEND.TRITON, BACKEND.MARLIN) and not requires_nvidia_cuda():
+            self.skipTest(f"{backend.name} is CUDA-only")
         model = GPTQModel.load(
             self.tmp_quant_path.name,
             backend=backend,

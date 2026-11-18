@@ -26,6 +26,14 @@ from gptqmodel.utils.importer import (
 )
 
 
+# Selector validation deliberately ignores the CUDA capability tuple on ROCm
+# (``utils/importer.py``), so a fake capability pair cannot be refused there.
+requires_nvidia_capability = pytest.mark.skipif(
+    torch.version.hip is not None,
+    reason="ROCm ignores the CUDA capability tuple used by these fakes",
+)
+
+
 def _mixed_capabilities(monkeypatch):
     monkeypatch.setattr("torch.cuda.is_available", lambda: True)
     monkeypatch.setattr(
@@ -64,6 +72,7 @@ def test_single_gpu_budget_never_validates_the_other_card(
     assert _resolved_kernel_devices(max_memory) == expected
 
 
+@requires_nvidia_capability
 def test_a_budget_that_names_both_cards_still_rejects_mixed_capabilities(monkeypatch):
     _mixed_capabilities(monkeypatch)
 

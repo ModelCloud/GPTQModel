@@ -5,9 +5,10 @@ import torch
 
 from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
 from gptqmodel.utils import glm5_core as core
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
-pytestmark=[pytest.mark.cuda,pytest.mark.skipif(not torch.cuda.is_available(),reason="admitted CUDA GPU required")]
+pytestmark=[pytest.mark.cuda,pytest.mark.skipif(not requires_nvidia_cuda(),reason="admitted CUDA GPU required")]
 
 
 @pytest.mark.parametrize("bits",[4,6])

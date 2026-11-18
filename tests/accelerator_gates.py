@@ -27,6 +27,17 @@ def cuda_only_skip_reason(kernel: str) -> str | None:
     return None
 
 
+def requires_nvidia_cuda() -> bool:
+    """Return whether this process can run an NVIDIA-only CUDA kernel.
+
+    ``torch.cuda.is_available()`` is true on ROCm because HIP reuses the CUDA
+    device namespace, so tests that drive a CUDA-only kernel must also require
+    a non-HIP build. Use this for a marker or a body-level skip; it is a
+    runtime predicate, not a capability probe.
+    """
+    return torch.cuda.is_available() and torch.version.hip is None
+
+
 def _capability(index: int) -> tuple[int, int] | None:
     try:
         return tuple(torch.cuda.get_device_capability(index))

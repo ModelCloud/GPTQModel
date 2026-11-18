@@ -8,9 +8,17 @@ from awq_test_utils import run_quantized_awq_generation_test
 
 from gptqmodel import BACKEND
 from gptqmodel.quantization import FORMAT
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
-pytestmark = [pytest.mark.model, pytest.mark.slow]
+pytestmark = [
+    pytest.mark.model,
+    pytest.mark.slow,
+    pytest.mark.skipif(
+        not requires_nvidia_cuda(),
+        reason="the native AWQ GEMM/GEMV pack kernels are CUDA-only",
+    ),
+]
 
 
 def test_awq_gemm_quantized_model_loads_and_generates():
