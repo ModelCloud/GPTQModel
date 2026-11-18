@@ -65,12 +65,56 @@ PARO_OUT_FEATURES_ALIGN = 8
 # Rotated activations benchmark faster with a shallower K split than generic AWQ.
 _PARO_AWQ_SPLIT_K = 4
 
-# Above this row count the native split-K AWQ GEMM loses on both time and peak
-# memory to dequantize + cuBLAS on the same packed weights. Measured on SM 8.9
-# (torch 2.15.0+cu132, FP16, group_size 128, synthetic g128 layers): the native
-# kernel is ahead up to ~640 rows on every projection, then its FP32 split-K
-# partial buffer (split_k=4) dominates. See docs/paro.md#native-prefill-dispatch.
-_PARO_AWQ_DENSE_MIN_ROWS = 640
+# The split-K AWQ GEMM and dequantize + cuBLAS cross over at a row count that
+# depends on the projection shape. The dense route pays a fixed dequantize
+# cost proportional to ``in_features * out_features``, while the native route
+# pays one FP32 split-K partial slab per row. A global 640-row threshold (the
+# #5164 fix for #5096) therefore sent the 641-2000 row band to cuBLAS even
+# where the native kernel is still faster (issue #5210).
+#
+# Measured on SM 12.0 (RTX 5090, torch 2.15.0+cu132, FP16/BF16, group_size
+# 128, synthetic g128 layers). The crossover is ~2400 rows for 4096x4096,
+# ~2050 for 4096x14336, ~2750 for 14336x4096, ~1290 for 896x4864 and ~3900
+# for 4864x896. The aspect/width fit below reproduces those crossovers to
+# within ~5% for the 7-8B projection shapes and is deliberately conservative
+# for the small wide projection: it never selects cuBLAS before the measured
+# crossover, so the 641-2000 row band keeps the native kernel. The 4096-row
+# ceiling preserves #5096's wide-prefill escape for every shape. See
+# docs/paro.md#native-prefill-dispatch.
+_PARO_AWQ_DENSE_MIN_ROWS = 2048
+_PARO_AWQ_DENSE_ROWS_AT_4096 = 2400
+_PARO_AWQ_DENSE_MAX_ROWS = 4096
+_PARO_AWQ_DENSE_ASPECT_EXP = 0.15
+_PARO_AWQ_DENSE_WIDTH_EXP = 0.2
+
+
+def paro_awq_dense_min_rows(in_features: int, out_features: int) -> int:
+    """Rows from which dequantize + cuBLAS beats the native split-K AWQ GEMM.
+
+    The measured crossover grows with the input width and shrinks with the
+    output width: a wide ``down_proj``-like layer amortizes the dequantize
+    cost sooner, while a narrow output makes the cuBLAS GEMM relatively less
+    efficient. The fit is anchored at 2400 rows for 4096x4096 and clamped to
+    ``[2048, 4096]`` so the historical 641-row band never takes the dense
+    route. It is a host-side integer decision, not a device probe, so the same
+    shape always selects the same path.
+    """
+
+    if in_features <= 0 or out_features <= 0:
+        return _PARO_AWQ_DENSE_MIN_ROWS
+    aspect = in_features / out_features
+    # A narrow output makes the dense GEMM less efficient, so it needs more
+    # rows to pay off. A wide output does not move the crossover below the
+    # 4096x4096 anchor: both routes scale with ``in_features * out_features``.
+    width = max(1.0, 4096.0 / out_features)
+    rows = (
+        _PARO_AWQ_DENSE_ROWS_AT_4096
+        * aspect**_PARO_AWQ_DENSE_ASPECT_EXP
+        * width**_PARO_AWQ_DENSE_WIDTH_EXP
+    )
+    return int(
+        min(_PARO_AWQ_DENSE_MAX_ROWS, max(_PARO_AWQ_DENSE_MIN_ROWS, round(rows)))
+    )
 
 
 def awq_gemm_shape_supported(*, bits: int, in_features: int, out_features: int, groups: int) -> bool:
@@ -263,6 +307,11 @@ class ParoLinear(AwqTorchLinear):
         self.scales_and_zeros = None
         self._register_rotation_buffers()
         self._rotation_identity = True
+        # The dense/split-K crossover is a property of the projection shape,
+        # so resolve it once instead of paying a float pow on every forward.
+        self._awq_dense_min_rows = paro_awq_dense_min_rows(
+            self.in_features, self.out_features
+        )
 
     def _register_rotation_buffers(self) -> None:
         """Allocate the per-layer buffers that encode runtime rotations."""
@@ -850,14 +899,14 @@ class ParoLinear(AwqTorchLinear):
         )
         kernel_input_2d = kernel_input.reshape(-1, kernel_input.shape[-1])
         rows = kernel_input_2d.shape[0]
-        if rows > _PARO_AWQ_DENSE_MIN_ROWS:
+        if rows >= self._awq_dense_min_rows:
             # The split-K GEMM allocates one FP32 partial slab per split, so a
             # long prefill pays split_k x rows x out_features of transient
             # memory before the reduction. Dequantize + cuBLAS keeps only the
-            # reconstructed weight beside the output and is faster from this
-            # row count; this is `AwqGEMMLinear`'s own large-M dispatch. The
-            # 32-bit store class of #5096 in the native kernel is fixed
-            # independently in gptqmodel_ext/awq.
+            # reconstructed weight beside the output and is faster from the
+            # shape-aware crossover. The 32-bit store class of #5096 in the
+            # native kernel is fixed independently in gptqmodel_ext/awq; the
+            # 4096-row ceiling keeps that escape for every shape.
             return self._forward_dense_batch(kernel_input_2d)
         if self.bias is not None and self.fp32_accum:
             # The split-K partials are already FP32.  Ask for an FP32 result

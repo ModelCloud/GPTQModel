@@ -236,12 +236,18 @@ out_features`), or the activation itself passed `rows x in_features > 2^31`:
 * `ParoLinear` fed the native split-K AWQ GEMM for every row count. The
   underlying store is 64-bit since the AWQ wide-offset fix, but the kernel
   still allocates one FP32 partial slab per split, so a long prefill also paid
-  `split_k` x the output in transient memory and was slower than
-  dequantize + cuBLAS from ~640 rows.
+  `split_k` x the output in transient memory.
 * `paro_gemm_kernel` computed `K * offsets_am` (A rows) and
   `N * offs_cm` (C rows) from int32 vectors, so the same shapes wrapped the
   address and faulted with `cudaErrorIllegalAddress` /
   `hipErrorIllegalAddress`.
+
+#5164 fixed the first by dequantizing and calling cuBLAS above a global
+640-row threshold. That threshold was tuned only on Qwen2.5-0.5B shapes
+(K/N = 896/4864 and 4864/896). Issue #5210 measured 7-8B projections and
+found the native kernel still faster up to roughly 1500-2500 rows, so the
+641-2000 row band regressed by 1.1-2.1x per layer. The dispatch is now
+shape-aware.
 
 ```mermaid
 flowchart TD
@@ -249,7 +255,7 @@ flowchart TD
     B --> C["_cuda_awq_kernel_supported(compute_dtype)"]
     C --> D{"native shape and device contract?"}
     D -- "No" --> Z["portable paths: AVX512 / ATen / dense"]
-    D -- "Yes" --> E{"rows > _PARO_AWQ_DENSE_MIN_ROWS (640)?"}
+    D -- "Yes" --> E{"rows >= paro_awq_dense_min_rows(in_features, out_features)?"}
     E -- "No" --> F["native split-K AWQ GEMM"]
     E -- "Yes" --> G["_forward_dense_batch: dequantize + cuBLAS, FP32 reduce, one cast"]
     F --> H["output"]
@@ -272,22 +278,57 @@ flowchart LR
 
 | Mechanism | Previous behavior | Current behavior |
 | --- | --- | --- |
-| `ParoLinear` CUDA dispatch | Native split-K GEMM for every row count (`paro.py`), one FP32 slab per split, 3.6x the output size transient | Above 640 rows, dequantize the packed grid and call cuBLAS with an FP32 reduction and one output cast |
+| `ParoLinear` CUDA dispatch | Native split-K GEMM for every row count (`paro.py`), one FP32 slab per split, 3.6x the output size transient | Above a shape-aware crossover (2048-4096 rows), dequantize the packed grid and call cuBLAS with an FP32 reduction and one output cast |
 | `paro_gemm_kernel` A offsets | `K * offsets_am` with an int32 row vector | `offsets_am` is int64, so `rows x in_features > 2^31` no longer wraps |
 | `paro_gemm_kernel` C offsets | `N * offs_cm` with an int32 row vector | `offs_cm` is int64, so `rows x out_features > 2^31` no longer wraps |
 | Storage | Dequantized weight retained? | The reconstructed weight exists only for the dispatched call; the module keeps the packed INT4 buffers |
 
-Choosing a route by row count is a measured dispatch decision, not an
-environment switch. `_PARO_AWQ_DENSE_MIN_ROWS` is a module constant, so the
-same shape always selects the same path.
+### Shape-aware crossover
+
+The dense route pays a dequantize cost proportional to
+`in_features * out_features`, plus a GEMM whose per-row cost is lower than
+the native split-K kernel's. The native route pays `split_k` FP32 partial
+slabs. Solving the two cost curves gives a row count that depends on the
+projection shape, not a global constant:
+
+```
+rows = 2400 * (in_features / out_features) ** 0.15
+             * (max(1, 4096 / out_features)) ** 0.2
+       clamped to [2048, 4096]
+```
+
+The 2048-row floor is the band #5210 measured as a regression; the 4096-row
+ceiling keeps #5096's wide-prefill escape for every shape, including the
+narrow 4864/896 projection that crosses over later. `paro_awq_dense_min_rows`
+is a host-side integer decision, so the same shape always selects the same
+path.
+
+Measured crossovers on SM 12.0 (RTX 5090, torch 2.15.0+cu132, FP16/BF16,
+group_size 128, synthetic g128 layers) and the resulting threshold:
+
+| K/N | Measured crossover (rows) | `paro_awq_dense_min_rows` |
+| --- | --- | --- |
+| 4096/4096 | ~2400 | 2400 |
+| 4096/14336 | ~2050 | 2048 |
+| 14336/4096 | ~2750-2900 | 2896 |
+| 896/4864 | ~1290 | 2048 (floor) |
+| 4864/896 | ~3900 | 4096 (ceiling) |
+
+The issue's SM 8.9 table puts the 7-8B crossovers about 20-30% lower
+(~1500-2300 rows). The SM 12.0 fit is conservative there: it delays the
+dense win slightly but never selects cuBLAS before the crossover. The
+896/4864 floor also delays the dense win on that small projection; the
+absolute cost is under 0.2 ms per layer and it keeps the 641-2000 band
+native, which is the contract #5210 asks for.
 
 ### Validation
 
-Measured with torch 2.15.0+cu132 on an SM 8.9 device and
-torch 2.16.0.dev20261029+rocm10.1 on gfx1201, FP16, group_size 128, synthetic
-g128 layers (K=896/N=4864 and K=4864/N=896). Times are medians of five calls
-after three warmups with `torch.cuda.synchronize`; peak is the allocator delta
-over the call.
+The #5164 table that set the old 640-row threshold, measured with torch
+2.15.0+cu132 on an SM 8.9 device and torch 2.16.0.dev20261029+rocm10.1 on
+gfx1201, FP16, group_size 128, synthetic g128 layers (K=896/N=4864 and
+K=4864/N=896). It does not describe 7-8B projections. Times are medians of
+five calls after three warmups with `torch.cuda.synchronize`; peak is the
+allocator delta over the call.
 
 | Rows | K/N | Native split-K ms / peak | Dequantize + cuBLAS ms / peak | Relative error |
 | --- | --- | --- | --- | --- |
@@ -299,14 +340,55 @@ over the call.
 | 4096 | 4864/896 | 0.387 / 77 MiB | 0.260 / 50 MiB | 2.2e-5 |
 | 32000 | 4864/896 | 3.458 / 602 MiB | 1.953 / 336 MiB | 2.2e-5 |
 
-The row threshold keeps the native kernel where it is faster (a narrow
-projection still wins at 1024 rows) and drops the wide partial buffer where the
-same projection reaches the threshold. Regressions live in
-`tests/kernels/test_paro.py`: the Triton cases build `rows x out_features` and
-`rows x in_features` just above 2^31 with only the tail rows nonzero, and the
-layer cases assert the dispatched route, the oracle agreement, and that a short
-prefill still records a native kernel call. All of them faulted before the fix
-and pass afterwards on both backends.
+The #5210 per-layer table below is the same synthetic-layer harness on SM
+12.0 (RTX 5090, torch 2.15.0+cu132). Modes are interleaved round-robin,
+min of six blocks of ten calls, one process. `current` is the #5164
+`>640` behaviour; `new` is `paro_awq_dense_min_rows`. Ratios are against
+the pre-#5164 always-native route; peak is the allocator delta.
+
+| dtype | K/N | M | native ms | current ms (x) | new ms (x) | native peak / new peak |
+| --- | --- | --- | --- | --- | --- | --- |
+| FP16 | 4096/4096 | 641 | 0.164 | 0.326 (2.00x) | 0.165 (1.01x) | 50 / 50 MiB |
+| FP16 | 4096/4096 | 768 | 0.193 | 0.332 (1.72x) | 0.194 (1.01x) | 60 / 60 MiB |
+| FP16 | 4096/4096 | 1024 | 0.260 | 0.393 (1.51x) | 0.261 (1.00x) | 80 / 80 MiB |
+| FP16 | 4096/4096 | 2048 | 0.566 | 0.574 (1.01x) | 0.567 (1.00x) | 160 / 160 MiB |
+| FP16 | 4096/4096 | 4096 | 1.239 | 0.936 (0.76x) | 0.935 (0.76x) | 320 / 160 MiB |
+| FP16 | 4096/14336 | 641 | 0.630 | 1.117 (1.77x) | 0.630 (1.00x) | 175 / 175 MiB |
+| FP16 | 4096/14336 | 768 | 0.757 | 1.133 (1.50x) | 0.757 (1.00x) | 210 / 210 MiB |
+| FP16 | 4096/14336 | 1024 | 1.047 | 1.303 (1.24x) | 1.048 (1.00x) | 280 / 280 MiB |
+| FP16 | 4096/14336 | 2048 | 2.230 | 2.001 (0.90x) | 1.999 (0.90x) | 560 / 336 MiB |
+| FP16 | 4096/14336 | 4096 | 4.481 | 3.316 (0.74x) | 3.321 (0.74x) | 1120 / 560 MiB |
+| FP16 | 14336/4096 | 641 | 0.521 | 1.101 (2.12x) | 0.522 (1.00x) | 50 / 50 MiB |
+| FP16 | 14336/4096 | 768 | 0.633 | 1.120 (1.77x) | 0.634 (1.00x) | 60 / 60 MiB |
+| FP16 | 14336/4096 | 1024 | 0.828 | 1.277 (1.54x) | 0.829 (1.00x) | 80 / 80 MiB |
+| FP16 | 14336/4096 | 2048 | 1.676 | 1.963 (1.17x) | 1.695 (1.01x) | 160 / 160 MiB |
+| FP16 | 14336/4096 | 4096 | 3.380 | 3.242 (0.96x) | 3.019 (0.89x) | 320 / 240 MiB |
+
+BF16 follows FP16 within 2% on every shape and M. The `down_proj` peak
+regression from #5164 is gone in the band: 14336/4096 at 641 rows is 50 MiB
+on both the old and new dispatch, against 154 MiB for `current`.
+
+A 16-layer, hidden-2048, intermediate-8192, GQA 32/8 x 64 stack of real
+`ParoLinear` layers (identity rotation, so rotation cost is constant across
+modes) gives the equivalent end-to-end check. One prefill through the stack,
+FP16, modes interleaved, min of five blocks of five forwards:
+
+| Seq | native ms | current ms (x) | new ms (x) |
+| --- | --- | --- | --- |
+| 512 | 9.59 | 9.63 (1.00x) | 9.69 (1.01x) |
+| 768 | 14.40 | 23.53 (1.63x) | 14.41 (1.00x) |
+| 1024 | 19.40 | 25.23 (1.30x) | 19.33 (1.00x) |
+| 1536 | 30.41 | 31.70 (1.04x) | 30.26 (1.00x) |
+| 2048 | 42.14 | 40.12 (0.95x) | 37.54 (0.89x) |
+| 4096 | 95.28 | 73.80 (0.77x) | 73.77 (0.77x) |
+
+Regressions live in `tests/kernels/test_paro.py`: the Triton cases build
+`rows x out_features` and `rows x in_features` just above 2^31 with only the
+tail rows nonzero, the layer cases assert the dispatched route and oracle
+agreement, and the #5210 cases pin the shape-aware crossover and both sides
+of the 4096x4096 contract (641 and 2048 rows native, 2400 rows dense). The
+wide-prefill case now uses 4096 rows so it still exercises the dense route
+for its 896x4864 layer.
 
 ## Output width alignment
 
