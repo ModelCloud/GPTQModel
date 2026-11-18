@@ -356,7 +356,7 @@ def test_public_dense_hostile_checkpoint_policy_two_reloads(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize("offload,full_proj,dense_first", [(False, False, False), (True, True, False), (False, False, True)])
-def test_public_plain_awq_all_projections_two_exact_reloads(tmp_path, offload, full_proj, dense_first):
+def test_public_awq_all_projections_two_exact_reloads(tmp_path, offload, full_proj, dense_first):
     from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
@@ -380,7 +380,6 @@ def test_public_plain_awq_all_projections_two_exact_reloads(tmp_path, offload, f
         offload_to_disk_path=str(tmp_path / "offload"),
     )
     wrapper = GPTQModel.load(str(path), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
-    assert wrapper.awq_get_modules_for_scaling(None, None, None) == []
     samples = [
         {
             "input_ids": torch.tensor([[1, 7, 9, 5, 12, 17, 21, 32, 15, 24, 36, 42, 51, 61, 11, 8]]),
@@ -397,9 +396,18 @@ def test_public_plain_awq_all_projections_two_exact_reloads(tmp_path, offload, f
                 expected.add(f"model.layers.{index}.{name}")
     assert packed == expected
     assert len(packed) == (27 if dense_first else 40 if full_proj else 39)
+    searched = {(int(row["layer"]), str(row["module"])) for row in wrapper.quant_log if row["loss"] != "not applicable"}
+    assert {(0, "self_attn.q_proj"), (1, "self_attn.q_proj"), (1, "mlp.shared_experts.gate_proj")} <= searched
+    # AWQ folds into both decoder norms and compensates the dense consumers
+    # that read the same normed input (router and KDA decay/beta/gate inputs).
+    folded = ("input_layernorm.weight", "post_attention_layernorm.weight", "mlp.gate.weight",
+              "self_attn.b_proj.weight", "self_attn.f_proj.weight", "self_attn.f_a_proj.weight",
+              "self_attn.g_a_proj.weight")
     before = {k: v.detach().clone() for k, v in wrapper.model.state_dict().items()}
     for key, value in before.items():
-        if key in original:
+        if key in original and key.endswith(folded):
+            assert not torch.equal(value, original[key].to(value.dtype)), key
+        elif key in original:
             if key.endswith("e_score_correction_bias"):
                 assert value.dtype == torch.float32
                 torch.testing.assert_close(value, original[key], rtol=0, atol=0)

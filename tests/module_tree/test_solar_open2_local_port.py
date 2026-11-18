@@ -5,12 +5,13 @@ from pathlib import Path
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.solar_open2 import SolarOpen2QModel
 from gptqmodel.models.ports.solar_open2 import SolarOpen2Config, SolarOpen2ForCausalLM
 from tests.port_assets import read_port_json
-from tests.test_solar_open2_local_port import tiny_values
+from tests.test_solar_open2_local_port import tiny_model, tiny_values
 
 
 PORT = Path(__file__).resolve().parents[2] / "gptqmodel/models/ports/solar_open2"
@@ -64,6 +65,61 @@ def test_all_live_checkpoint_weight_owners_have_exact_module_plan_tags(device, k
                 assert not spec.quantize
             assert plan.find(owner + ".foreign") is None
         assert layer.layer_type == ("full_attention" if name == 0 else "linear_attention")
-    assert wrapper.awq_get_modules_for_scaling(None, None, None) == []
     assert SolarOpen2QModel.fusable is None
     assert MODEL_MAP["solar_open2"] is SolarOpen2QModel
+
+
+@pytest.mark.parametrize(
+    "kv_heads,full_proj,dense_first,extras",
+    [
+        (2, False, False, {}),
+        (4, True, True, {}),
+        (4, False, False, {"use_qk_norm": True, "attention_bias": True, "use_gqa_gate_bias": True}),
+        (1, True, False, {"use_gqa_gate": False}),
+    ],
+)
+def test_awq_folds_are_neutral_on_full_linear_dense_and_moe_layers(kv_heads, full_proj, dense_first, extras):
+    model = tiny_model(
+        num_key_value_heads=kv_heads,
+        kda_use_full_proj=full_proj,
+        first_k_dense_replace=int(dense_first),
+        linear_attn_config={"head_dim": 8, "num_heads": 4, "num_kv_heads": kv_heads, "short_conv_kernel_size": 2},
+        **extras,
+    )
+    ids = torch.tensor([[1, 7, 9, 5, 12, 17, 21, 32, 15, 24, 36, 42, 51, 61, 11, 8]])
+
+    def forward():
+        return model(ids, use_cache=False).logits
+
+    config = model.config
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(SolarOpen2QModel, model, layer, forward)
+        groups = {(source, tuple(targets)): consumers for source, targets, consumers in checked}
+        # The attention output (sigmoid-gated or KDA gated-norm) never reads the
+        # input norm, so o_proj may not join its group on either layer type.
+        assert all("self_attn.o_proj" not in targets for _source, targets in groups)
+        attention = ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]
+        if layer.layer_type == "full_attention":
+            if config.use_gqa_gate:
+                attention.append("self_attn.g_proj")
+            assert groups[("input_layernorm", tuple(attention))] == []
+        else:
+            # Dense KDA decay/beta/gate projections read the same normed input
+            # and absorb the inverse scale; the conv/recurrence path never folds.
+            if full_proj:
+                attention.append("self_attn.g_proj")
+                consumers = ["self_attn.b_proj", "self_attn.f_proj"]
+            else:
+                consumers = ["self_attn.b_proj", "self_attn.f_a_proj", "self_attn.g_a_proj"]
+            assert groups[("input_layernorm", tuple(attention))] == consumers
+        assert all(not source.startswith("self_attn.") for source, _targets in groups)
+        if hasattr(layer.mlp, "experts"):
+            gate_up = [f"mlp.shared_experts.{p}" for p in ("gate_proj", "up_proj")]
+            norm_groups = [key for key in groups if key[0] == "post_attention_layernorm"]
+            assert len(norm_groups) == 1 and list(norm_groups[0][1][:2]) == gate_up
+            assert groups[norm_groups[0]] == ["mlp.gate"]
+            assert ("mlp.shared_experts.up_proj", ("mlp.shared_experts.down_proj",)) in groups
+            assert any(source.startswith("mlp.experts.") for source, _targets in groups)
+        else:
+            assert groups[("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj"))] == []
+            assert ("mlp.up_proj", ("mlp.down_proj",)) in groups

@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import torch
+from torch import nn
 from transformers.masking_utils import create_causal_mask, create_recurrent_attention_mask
 
 from ...utils.attn_mask import normalize_seq_mask
@@ -25,9 +26,6 @@ class SolarOpen2QModel(BaseQModel):
         model_class="gptqmodel.models.ports.solar_open2.modeling_solar_open2.SolarOpen2ForCausalLM",
     )
     fusable = None
-
-    def awq_get_modules_for_scaling(self, *args, **kwargs):
-        return []
 
     layer_modules_strict = False
     dynamic_expert_index = "n_routed_experts"
@@ -88,6 +86,61 @@ class SolarOpen2QModel(BaseQModel):
             },
         },
     ]
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        """Generic groups with two tree-position corrections.
+
+        Both attention variants end their Q/K/V block with KDA-only ``:!``
+        leaves, so on a full-attention layer the tree position falls back to
+        ``input_layernorm`` as ``o_proj``'s source whenever the attention width
+        equals the hidden size. ``o_proj`` reads the (gated) attention output,
+        never the normed residual, so only that consumer is removed.
+
+        The dense-prefix MLP shares its gate/up block with the absent shared
+        expert, which hides ``mlp.up_proj`` as ``mlp.down_proj``'s source. The
+        SwiGLU product is linear in ``up_proj``'s output, so that group is
+        restored explicitly.
+        """
+
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        attention = getattr(module, "self_attn", None)
+        o_proj, v_proj = getattr(attention, "o_proj", None), getattr(attention, "v_proj", None)
+        kept = []
+        for node in nodes:
+            layers = node.get("layers") or []
+            if o_proj is not None and node.get("prev_op") is not v_proj and any(layer is o_proj for layer in layers):
+                layers = [layer for layer in layers if layer is not o_proj]
+                if not layers:
+                    continue
+                node = dict(node, layers=layers)
+                search = node.get("_awq_search_layers")
+                if search is not None:
+                    node["_awq_search_layers"] = [layer for layer in search if layer is not o_proj]
+            kept.append(node)
+
+        mlp = getattr(module, "mlp", None)
+        up_proj, down_proj = getattr(mlp, "up_proj", None), getattr(mlp, "down_proj", None)
+        feature = input_feat.get("mlp.down_proj") if isinstance(input_feat, dict) else None
+        if (
+            isinstance(up_proj, nn.Linear)
+            and isinstance(down_proj, nn.Linear)
+            and up_proj.out_features == down_proj.in_features
+            and torch.is_tensor(feature)
+            and feature.numel() > 0
+            and not any(any(layer is down_proj for layer in node.get("layers") or []) for node in kept)
+        ):
+            kwargs = dict(module_kwargs or {})
+            feature_kwargs = kwargs.pop("_awq_feature_kwargs", None)
+            if isinstance(feature_kwargs, dict) and isinstance(feature_kwargs.get("mlp.down_proj"), dict):
+                kwargs.update(feature_kwargs["mlp.down_proj"])
+            kept.append({
+                "prev_op": up_proj,
+                "layers": [down_proj],
+                "inp": feature,
+                "kwargs": kwargs,
+                "_input_feature_name": "mlp.down_proj",
+            })
+        return kept
 
     def run_input_capture(self, example, use_cache: bool, data_device):
         """Expose the original 2D mask while the first-layer hook is active."""
