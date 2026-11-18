@@ -6,33 +6,24 @@
 from types import SimpleNamespace
 
 import torch
-from transformers import (
-    AutoModelForCausalLM,
-    AutoModelForPreTraining,
-    MllamaForCausalLM,
-    MllamaTextConfig,
-)
 
 from ...utils.model import get_module, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
-
-
-# Transformers 5.22 ships `MllamaForCausalLM` for the text-only model but does
-# not register `MllamaTextConfig` with `AutoModelForCausalLM`, so
-# `AutoModelForCausalLM.from_config(MllamaTextConfig)` raises "Unrecognized
-# configuration class" and `mllama_text_model` checkpoints cannot load.
-AutoModelForCausalLM.register(MllamaTextConfig, MllamaForCausalLM, exist_ok=True)
+from ..local import LocalModelLoader
 
 
 # TODO FIXME: we currently do not support quantizing cross attention layer (pixel_values)
 class MLlamaQModel(BaseQModel):
-    # AutoModelForPreTraining return a correct MLlamaForConditionalGeneration for mllama.
+    # NativeForPreTraining resolves the vendored MllamaForConditionalGeneration for mllama.
     fusable = FusableConfig("mllama").merge(LlamaFusableConfig())
 
-    loader = AutoModelForPreTraining
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForPreTraining",
+    )
     _cross_attention_decoder_layer = "MllamaCrossAttentionDecoderLayer"
 
     pre_lm_head_norm_module = "model.language_model.norm"
@@ -266,7 +257,12 @@ class MLlamaQModel(BaseQModel):
 class MLlamaTextQModel(MLlamaQModel):
     fusable = FusableConfig("mllama_text_model").merge(MLlamaQModel.fusable)
 
-    loader = AutoModelForCausalLM
+    # Transformers' causal-LM table has no `mllama_text_model` entry; bind the
+    # vendored text-only head directly.
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.mllama.configuration_mllama.MllamaTextConfig",
+        model_class="gptqmodel.models.ports.native.mllama.modeling_mllama.MllamaForCausalLM",
+    )
 
     pre_lm_head_norm_module = "model.norm"
     rotary_embedding = "model.rotary_emb"

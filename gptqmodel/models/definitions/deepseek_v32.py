@@ -4,11 +4,17 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class DeepSeekV32QModel(BaseQModel):
     """DeepSeek-V3.2 MLA/DSA model with dense and routed/shared-MoE layers."""
+
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
 
     require_trust_remote_code = False
 
