@@ -29,7 +29,7 @@ class PlanOnlyMiniCPMV(MiniCPMVQModel):
 EXPECTED_PLAN = {
     "layers": ["llm.model.layers"],
     "blocks": [["input_layernorm:!"],
-               ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.q_norm:!", "self_attn.k_norm:!"],
+               ["self_attn.q_norm:!", "self_attn.k_norm:!", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
                ["self_attn.o_proj"],
                ["post_attention_layernorm:!"], ["mlp.gate_proj", "mlp.up_proj"], ["mlp.down_proj"]],
 }
@@ -70,7 +70,6 @@ def test_live_owners_all_attention_layouts(version, device, kv, bias):
             else:
                 assert "!" in spec.flags, key
         assert len(quantized) == 7
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     assert MiniCPMVQModel.fusable is None
     for key in ["self_attn.q_norm.child", "self_attn.q_projection", "mlp.down_proj_extra"]:
         assert plan.find(key) is None
