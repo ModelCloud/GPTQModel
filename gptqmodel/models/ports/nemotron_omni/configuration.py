@@ -53,7 +53,7 @@ class NemotronOmniConfig(NativeOmniConfig):
             if main is not None and alias is not None:
                 values = [_native_config(v, cls, allowed).to_dict() for v in (main, alias)]
                 for value in values:
-                    for key in ("dtype", "torch_dtype", "_name_or_path", "transformers_version"):
+                    for key in ("dtype", "_name_or_path", "transformers_version"):
                         value.pop(key, None)
                 if values[0] != values[1]:
                     raise ValueError("Conflicting native and legacy Nemotron Omni subconfig aliases")
