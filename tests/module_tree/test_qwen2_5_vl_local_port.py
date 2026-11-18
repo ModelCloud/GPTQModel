@@ -98,9 +98,8 @@ def test_text_fusion_is_explicitly_unqualified_and_composite_policy_unchanged():
 
 
 def test_pinned_released_checkpoint_all_shapes_and_text_extraction_schema():
-    from transformers import Qwen2_5_VLConfig
-
     import gptqmodel.models.ports.qwen2_5_vl as port
+    from gptqmodel.models.ports.native.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig
 
     fixtures = Path(port.__file__).parent / "fixtures"
     config = Qwen2_5_VLConfig.from_dict(json.loads(read_port_asset(fixtures / "qwen3b_config.json")))
@@ -129,10 +128,9 @@ def test_pinned_released_checkpoint_all_shapes_and_text_extraction_schema():
 
 
 def test_independently_published_standalone_native_headless_schema():
-    from transformers import Qwen2_5_VLTextConfig
-    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLTextModel
-
     import gptqmodel.models.ports.qwen2_5_vl as port
+    from gptqmodel.models.ports.native.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLTextConfig
+    from gptqmodel.models.ports.native.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLTextModel
 
     fixtures = Path(port.__file__).parent / "fixtures"
     config = Qwen2_5_VLTextConfig.from_dict(json.loads(read_port_asset(fixtures / "published_headless_config.json")))

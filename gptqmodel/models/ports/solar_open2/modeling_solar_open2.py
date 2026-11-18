@@ -23,23 +23,23 @@ from transformers.masking_utils import create_causal_mask, create_recurrent_atte
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, MoeModelOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
-from transformers.models.glm4_moe.modeling_glm4_moe import apply_rotary_pos_emb  # partial-rotary aware
-from transformers.models.kimi_linear.modeling_kimi_linear import (
+from transformers.processing_utils import Unpack
+from transformers.utils import TransformersKwargs, can_return_tuple
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
+
+from ..native.glm4_moe.modeling_glm4_moe import apply_rotary_pos_emb  # partial-rotary aware
+from ..native.kimi_linear.modeling_kimi_linear import (
     KimiLinearRMSNormGated,
     apply_mask_to_padding_states,
 )
-from transformers.models.solar_open.modeling_solar_open import (
+from ..native.solar_open.modeling_solar_open import (
     SolarOpenMLP,
     SolarOpenRMSNorm,
     SolarOpenRotaryEmbedding,
     SolarOpenTopkRouter,
     eager_attention_forward,
 )
-from transformers.processing_utils import Unpack
-from transformers.utils import TransformersKwargs, can_return_tuple
-from transformers.utils.generic import merge_with_config_defaults
-from transformers.utils.output_capturing import capture_outputs
-
 from .configuration_solar_open2 import SolarOpen2Config
 
 

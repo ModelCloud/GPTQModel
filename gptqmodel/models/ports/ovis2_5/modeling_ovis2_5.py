@@ -6,9 +6,10 @@
 from typing import Optional, Union
 
 import torch
-from transformers import GenerationMixin, PreTrainedModel, Qwen3ForCausalLM
+from transformers import GenerationMixin, PreTrainedModel
 from transformers.generation.utils import GenerateOutput
 
+from ..native.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 from .configuration_ovis2_5 import Ovis2_5_Config
 from .vision_ovis2_5 import (
     INDICATOR_IDS,

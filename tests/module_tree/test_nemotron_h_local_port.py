@@ -9,12 +9,12 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import NemotronHConfig, NemotronHForCausalLM
 
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.nemotron_h import NemotronHQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.ports.nemotron_h import NemotronHConfig, NemotronHForCausalLM
 from tests.port_assets import read_port_asset, read_port_json
 from tests.test_nemotron_h_local_port import config, wrapper
 

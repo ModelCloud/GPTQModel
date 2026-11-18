@@ -105,7 +105,9 @@ class PrismaticForConditionalGeneration(PreTrainedModel, GenerationMixin):
 
     def __init__(self, config):
         super().__init__(config)
-        from transformers import LlamaForCausalLM, MistralForCausalLM, PhiForCausalLM
+        from ..native.llama.modeling_llama import LlamaForCausalLM
+        from ..native.mistral.modeling_mistral import MistralForCausalLM
+        from ..native.phi.modeling_phi import PhiForCausalLM
 
         self.vision_backbone = PrismaticVisionBackbone(config)
         self.projector = PrismaticProjector(config.use_fused_vision_backbone,

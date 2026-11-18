@@ -11,9 +11,12 @@ from copy import deepcopy
 
 import torch
 from torch import nn
-from transformers import LlamaForCausalLM, PreTrainedModel, Qwen2ForCausalLM, Qwen3ForCausalLM
+from transformers import PreTrainedModel
 from transformers.generation import GenerationMixin
 
+from ..native.llama.modeling_llama import LlamaForCausalLM
+from ..native.qwen2.modeling_qwen2 import Qwen2ForCausalLM
+from ..native.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 from .configuration_minicpm import MiniCPMVConfig
 from .legacy_decoder import MiniCPMForCausalLM
 from .resampler import Resampler

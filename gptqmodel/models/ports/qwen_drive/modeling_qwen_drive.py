@@ -7,8 +7,9 @@ The upstream wrapper instantiates exactly Qwen3.5 under ``vlm`` and delegates
 VQA to it. No planner weights are in the released root safetensors.
 """
 
-from transformers import GenerationMixin, PreTrainedModel, Qwen3_5ForConditionalGeneration
+from transformers import GenerationMixin, PreTrainedModel
 
+from ..native.qwen3_5.modeling_qwen3_5 import Qwen3_5ForConditionalGeneration
 from .configuration_qwen_drive import QwenDriveConfig
 
 

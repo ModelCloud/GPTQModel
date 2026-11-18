@@ -7,22 +7,22 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import AutoModel
 from transformers.modeling_outputs import BaseModelOutputWithPooling
-from transformers.models.kimi_k25.configuration_kimi_k25 import Kimi_K25Config
-from transformers.models.kimi_k25.modeling_kimi_k25 import (
-    Kimi_K25ForConditionalGeneration as NativeKimiForConditionalGeneration,
-)
-from transformers.models.kimi_k25.modeling_kimi_k25 import Kimi_K25Model as NativeKimiModel
-from transformers.models.kimi_k25.modeling_kimi_k25 import (
-    Kimi_K25MultimodalProjection,
-    Kimi_K25PreTrainedModel,
-)
-from transformers.models.kimi_k25.modeling_kimi_k25 import Kimi_K25VisionModel as NativeKimiVisionModel
 from transformers.utils.generic import can_return_tuple
 from transformers.utils.output_capturing import capture_outputs
 from transformers.vision_utils import get_vision_attention_seqlens, get_vision_position_ids
 
+from ..native.auto import AutoModel
+from ..native.kimi_k25.configuration_kimi_k25 import Kimi_K25Config
+from ..native.kimi_k25.modeling_kimi_k25 import (
+    Kimi_K25ForConditionalGeneration as NativeKimiForConditionalGeneration,
+)
+from ..native.kimi_k25.modeling_kimi_k25 import Kimi_K25Model as NativeKimiModel
+from ..native.kimi_k25.modeling_kimi_k25 import (
+    Kimi_K25MultimodalProjection,
+    Kimi_K25PreTrainedModel,
+)
+from ..native.kimi_k25.modeling_kimi_k25 import Kimi_K25VisionModel as NativeKimiVisionModel
 from .processing_kimi_k25 import Kimi_K25Processor
 
 
@@ -50,14 +50,9 @@ class Kimi_K25Model(NativeKimiModel):
     def __init__(self, config):
         Kimi_K25PreTrainedModel.__init__(self, config)
         self.vision_tower = Kimi_K25VisionModel._from_config(config.vision_config)
-        self.language_model = AutoModel.from_config(config.text_config, trust_remote_code=False)
+        self.language_model = AutoModel.from_config(config.text_config)
         self.mm_projector = Kimi_K25MultimodalProjection(config)
         self.post_init()
-
-    @classmethod
-    def is_custom_code(cls):
-        # Native checkpoint transforms still own every parameter and layout.
-        return False
 
     @can_return_tuple
     def get_image_features(self, pixel_values, image_grid_thw=None, **kwargs):
@@ -79,10 +74,6 @@ class Kimi_K25ForConditionalGeneration(NativeKimiForConditionalGeneration):
         text_config = self.model.language_model.config
         self.lm_head = nn.Linear(text_config.hidden_size, text_config.vocab_size, bias=False)
         self.post_init()
-
-    @classmethod
-    def is_custom_code(cls):
-        return False
 
     def save_pretrained(self, *args, save_original_format=False, **kwargs):
         # Native reverse QKV conversion also matches dense text q_proj in 5.23.

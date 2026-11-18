@@ -3,7 +3,9 @@
 # GPT-QModel adaptation; pinned source and changes: NOTICE.
 """Ovis2.5's Qwen3 decoder and custom SigLIP2 NaViT configuration."""
 
-from transformers import PreTrainedConfig, Qwen3Config
+from transformers import PreTrainedConfig
+
+from ..native.qwen3.configuration_qwen3 import Qwen3Config
 
 
 class Siglip2NavitConfig(PreTrainedConfig):

@@ -5,7 +5,11 @@
 
 from typing import Dict, List, Optional
 
-from transformers import LlamaConfig, MistralConfig, PhiConfig, PreTrainedConfig
+from transformers import PreTrainedConfig
+
+from ..native.llama.configuration_llama import LlamaConfig
+from ..native.mistral.configuration_mistral import MistralConfig
+from ..native.phi.configuration_phi import PhiConfig
 
 
 # === Utilities for Mapping Prismatic names to HF names ===

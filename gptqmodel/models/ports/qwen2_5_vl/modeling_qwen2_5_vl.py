@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Select exact native composite or standalone headless text models."""
 
-from transformers import PreTrainedConfig, Qwen2_5_VLConfig, Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLTextConfig
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLTextModel
+from transformers import PreTrainedConfig
+
+from ..native.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig, Qwen2_5_VLTextConfig
+from ..native.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLTextModel
 
 
 class Qwen2_5_VLConfigLoader:

@@ -5,7 +5,12 @@
 
 from copy import deepcopy
 
-from transformers import LlamaConfig, PretrainedConfig, Qwen2Config, Qwen3Config, SiglipVisionConfig
+from transformers import PretrainedConfig
+
+from ..native.llama.configuration_llama import LlamaConfig
+from ..native.qwen2.configuration_qwen2 import Qwen2Config
+from ..native.qwen3.configuration_qwen3 import Qwen3Config
+from ..native.siglip.configuration_siglip import SiglipVisionConfig
 
 
 class MiniCPMVSliceConfig(PretrainedConfig):
