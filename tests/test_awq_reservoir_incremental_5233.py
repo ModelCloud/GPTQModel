@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import torch
 
-from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState
+from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState, _TokenRowPlan
 from gptqmodel.quantization.config import CalibrationConfig
 
 
@@ -157,3 +157,78 @@ def test_reservoir_keeps_rows_captured_before_it_took_over():
     assert int((rows == 7.0).sum()) == 3 * hidden
     assert int((rows == 9.0).sum()) == 5 * hidden
     assert {source for source, _row in entry["provenance"]} == {0, 1}
+
+
+def test_plan_capture_after_reservoir_keeps_its_rows():
+    """A plan capture after the reservoir exists must merge, not vanish (#5264).
+
+    Batches are processed longest first, so the short batch that matches the
+    precomputed plan often arrives after the routed expert's reservoir already
+    exists. The plan path used to append to ``inputs``/``provenance``, which the
+    next reservoir merge overwrote, so the whole batch was silently dropped.
+    """
+
+    processor = _processor(max_tokens=64, hidden=2)
+    lengths = [5, 3, 4, 6]
+    plan = _TokenRowPlan(
+        lengths=lengths,
+        budget=18,
+        max_tokens=64,
+        quotas=list(lengths),
+        local_indices={batch: torch.arange(length) for batch, length in enumerate(lengths)},
+    )
+    processor._token_row_plan_for_module = lambda *args, **kwargs: plan
+    module_name = "mlp.experts.3.gate_proj"
+
+    # Batch 0 keeps 2 of 5 rows through the reservoir, batch 1 matches the plan
+    # exactly (3 of 3), then two more reservoir captures follow.
+    for batch, length in [(0, 2), (1, 3), (2, 1), (3, 2)]:
+        processor._set_current_batch_index(batch)
+        processor._record_input_feature(
+            module_name, torch.full((1, length, 2), float(batch))
+        )
+
+    features = processor._layer_input_features(
+        _AWQLayerState(modules={module_name: torch.nn.Linear(2, 2)})
+    )
+    rows = features[module_name][0, :, 0].tolist()
+    assert rows == [0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 3.0, 3.0]
+
+
+def test_plan_capture_after_reservoir_keeps_its_local_row_indices():
+    """A partial plan quota merged after the reservoir keeps its own rows (#5264).
+
+    The reservoir stores each surviving row's index inside its calibration
+    batch; a plan capture that keeps only ``local_indices`` must pass those
+    indices instead of renumbering the sampled rows from zero.
+    """
+
+    processor = _processor(max_tokens=64, hidden=2)
+    lengths = [5, 3, 4, 6]
+    plan = _TokenRowPlan(
+        lengths=lengths,
+        budget=7,
+        max_tokens=64,
+        quotas=[2, 2, 1, 2],
+        local_indices={
+            0: torch.tensor([0, 3]),
+            1: torch.tensor([0, 2]),
+            2: torch.tensor([1]),
+            3: torch.tensor([0, 5]),
+        },
+    )
+    processor._token_row_plan_for_module = lambda *args, **kwargs: plan
+    module_name = "mlp.experts.5.down_proj"
+
+    # Batch 0 falls out of the plan (2 of 5 rows) and creates the reservoir;
+    # batch 1 matches the plan with a partial quota of 2 of its 3 rows.
+    for batch, length in [(0, 2), (1, 3)]:
+        processor._set_current_batch_index(batch)
+        processor._record_input_feature(
+            module_name, torch.full((1, length, 2), float(batch))
+        )
+
+    entry = processor.tasks[module_name]
+    processor._materialize_reservoir_provenance(entry)
+    assert entry["provenance"] == [(0, 0), (0, 1), (1, 0), (1, 2)]
+    assert entry["inputs"][0][0, :, 0].tolist() == [0.0, 0.0, 1.0, 1.0]
