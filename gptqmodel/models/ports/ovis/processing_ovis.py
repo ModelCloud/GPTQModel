@@ -5,9 +5,11 @@
 import copy
 
 import torch
-from transformers import CLIPImageProcessor, ProcessorMixin, SiglipImageProcessor
+from transformers import ProcessorMixin
 from transformers.feature_extraction_utils import BatchFeature
 
+from ..native.clip.image_processing_clip import CLIPImageProcessor
+from ..native.siglip.image_processing_siglip import SiglipImageProcessor
 from .configuration_ovis import IGNORE_ID, IMAGE_ATOM_ID, IMAGE_INDICATOR_IDS, IMAGE_TOKEN_ID, OvisConfig
 
 
