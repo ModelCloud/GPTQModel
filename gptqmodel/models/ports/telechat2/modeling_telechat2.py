@@ -12,7 +12,12 @@ from torch import nn
 from torch.nn import functional as F
 from transformers import GenerationMixin, PreTrainedModel
 from transformers.cache_utils import DynamicCache
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_utils import slice_logits_to_keep
+from transformers.utils import can_return_tuple
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
 
 from .configuration_telechat2 import Telechat2Config
 
@@ -69,7 +74,7 @@ class TelechatAttention(nn.Module):
         self.dense = nn.Linear(config.hidden_size, config.hidden_size, bias=True)
         self.rotary_emb = RotaryEmbedding(self.head_dim, config)
 
-    def forward(self, hidden_states, residual, attention_mask, past_key_values=None, output_attentions=False):
+    def forward(self, hidden_states, residual, attention_mask, past_key_values=None, **kwargs):
         batch, length, _ = hidden_states.shape
         query = self.query(hidden_states).view(batch, length, self.num_heads, self.head_dim).transpose(1, 2)
         kv = self.key_value(hidden_states).view(batch, length, self.num_key_value_heads, 2 * self.head_dim)
@@ -83,7 +88,7 @@ class TelechatAttention(nn.Module):
         key, value = key.repeat_interleave(groups, dim=1), value.repeat_interleave(groups, dim=1)
         dropout = self.config.attention_dropout if self.training else 0.0
         probabilities = None
-        if self.config._attn_implementation == "sdpa" and not output_attentions:
+        if self.config._attn_implementation == "sdpa" and not kwargs.get("output_attentions", False):
             context = F.scaled_dot_product_attention(query, key, value, attn_mask=~attention_mask, dropout_p=dropout)
         else:
             scores = (query @ key.transpose(-1, -2)) / math.sqrt(self.head_dim)
@@ -111,7 +116,7 @@ class TelechatMLP(nn.Module):
         return F.dropout(result, p=self.config.hidden_dropout, training=self.training) + residual
 
 
-class TelechatBlock(nn.Module):
+class TelechatBlock(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.input_layernorm = MixedFusedRMSNorm(config.hidden_size, config.layer_norm_epsilon)
@@ -120,23 +125,23 @@ class TelechatBlock(nn.Module):
         self.mlp = TelechatMLP(config)
         self.apply_residual_connection_post_layernorm = config.apply_residual_connection_post_layernorm
 
-    def forward(self, hidden_states, attention_mask, past_key_values=None, output_attentions=False, **kwargs):
+    def forward(self, hidden_states, attention_mask, past_key_values=None, **kwargs):
         normalized = self.input_layernorm(hidden_states)
         residual = normalized if self.apply_residual_connection_post_layernorm else hidden_states
-        hidden_states, weights = self.self_attention(
-            normalized, residual, attention_mask, past_key_values, output_attentions,
-        )
+        hidden_states, _ = self.self_attention(normalized, residual, attention_mask, past_key_values, **kwargs)
         normalized = self.post_attention_layernorm(hidden_states)
         residual = normalized if self.apply_residual_connection_post_layernorm else hidden_states
-        return self.mlp(normalized, residual), weights
+        return self.mlp(normalized, residual)
 
 
 class TelechatPreTrainedModel(PreTrainedModel):
     config_class = Telechat2Config
     base_model_prefix = "transformer"
+    supports_gradient_checkpointing = True
     _no_split_modules = ["TelechatBlock"]
     _skip_keys_device_placement = ["past_key_values"]
     _supports_sdpa = True
+    _can_record_outputs = {"hidden_states": TelechatBlock, "attentions": TelechatAttention}
 
     def _init_weights(self, module):
         if isinstance(module, (nn.Linear, nn.Embedding)):
@@ -155,6 +160,7 @@ class TelechatModel(TelechatPreTrainedModel):
             self.word_embeddings_layernorm = MixedFusedRMSNorm(config.hidden_size, config.layer_norm_epsilon)
         self.h = nn.ModuleList([TelechatBlock(config, index) for index in range(config.n_layer)])
         self.ln_f = MixedFusedRMSNorm(config.hidden_size, config.layer_norm_epsilon)
+        self.gradient_checkpointing = False
         self.post_init()
 
     def get_input_embeddings(self):
@@ -163,14 +169,12 @@ class TelechatModel(TelechatPreTrainedModel):
     def set_input_embeddings(self, value):
         self.word_embeddings = value
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(self, input_ids=None, attention_mask=None, past_key_values=None, inputs_embeds=None,
-                use_cache=None, output_attentions=None, output_hidden_states=None, return_dict=None, **kwargs):
+                use_cache=None, **kwargs):
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Specify exactly one of input_ids and inputs_embeds")
-        use_cache = self.config.use_cache if use_cache is None else use_cache
-        output_attentions = self.config.output_attentions if output_attentions is None else output_attentions
-        output_hidden_states = self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
-        return_dict = self.config.return_dict if return_dict is None else return_dict
         if past_key_values is not None and not isinstance(past_key_values, DynamicCache):
             raise TypeError("TeleChat supports DynamicCache, not foreign or legacy tuple caches")
         if past_key_values is not None and not use_cache:
@@ -191,20 +195,10 @@ class TelechatModel(TelechatPreTrainedModel):
             if attention_mask.shape != (batch, key_length):
                 raise ValueError("attention_mask must cover the full cached and current sequence")
             mask = mask | ~attention_mask.to(device=hidden_states.device, dtype=torch.bool)[:, None, None, :]
-        states, attentions = (), ()
         for block in self.h:
-            if output_hidden_states:
-                states += (hidden_states,)
-            hidden_states, weights = block(hidden_states, mask, past_key_values, output_attentions)
-            if output_attentions:
-                attentions += (weights,)
+            hidden_states = block(hidden_states, attention_mask=mask, past_key_values=past_key_values, **kwargs)
         hidden_states = self.ln_f(hidden_states)
-        if output_hidden_states:
-            states += (hidden_states,)
-        output = BaseModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=past_key_values,
-                                        hidden_states=states if output_hidden_states else None,
-                                        attentions=attentions if output_attentions else None)
-        return output if return_dict else output.to_tuple()
+        return BaseModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=past_key_values)
 
 
 class Telechat2ForCausalLM(TelechatPreTrainedModel, GenerationMixin):
@@ -237,18 +231,15 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel, GenerationMixin):
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
 
+    @can_return_tuple
     def forward(self, input_ids=None, attention_mask=None, past_key_values=None, inputs_embeds=None,
-                labels=None, use_cache=None, output_attentions=None, output_hidden_states=None,
-                return_dict=None, logits_to_keep=0, **kwargs):
+                labels=None, use_cache=None, logits_to_keep=0, **kwargs):
         output = self.transformer(input_ids=input_ids, attention_mask=attention_mask, past_key_values=past_key_values,
-                                  inputs_embeds=inputs_embeds, use_cache=use_cache, output_attentions=output_attentions,
-                                  output_hidden_states=output_hidden_states, return_dict=True)
-        indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(output.last_hidden_state[:, indices, :])
+                                  inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs)
+        logits = self.lm_head(slice_logits_to_keep(output.last_hidden_state, logits_to_keep))
         loss = None
         if labels is not None:
             loss = F.cross_entropy(logits[:, :-1].reshape(-1, self.config.vocab_size).float(),
                                    labels[:, 1:].reshape(-1).to(logits.device))
-        result = CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=output.past_key_values,
-                                       hidden_states=output.hidden_states, attentions=output.attentions)
-        return result if (self.config.return_dict if return_dict is None else return_dict) else result.to_tuple()
+        return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=output.past_key_values,
+                                      hidden_states=output.hidden_states, attentions=output.attentions)
