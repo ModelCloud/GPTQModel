@@ -12,11 +12,10 @@ Primary snapshots:
   cf0b69a6118cd3b2c90bb37f3f4366e2fba802ab
   Copyright 2025 The OpenBMB Team. All rights reserved.
 
-The OpenBMB Apache-2.0 license is retained as LICENSE. Original file
+The OpenBMB Apache-2.0 license is the repository LICENSE. Original file
 headers, source attributions and borrowed-code comments are preserved.
-Adaptations for Transformers 5 and GPT-QModel are documented in README.md.
-Source hashes and independently read checkpoint-header hashes are recorded
-in source_manifest.json. No trained tensor payload is included.
+Adaptations for Transformers 5 and GPT-QModel are noted in the file headers.
+No trained tensor payload is included.
 
 Inherited ChatTTS boundary:
   https://github.com/2noise/ChatTTS
@@ -39,7 +38,13 @@ Inherited ChatTTS boundary:
   The initial 2024-05-28 license was CC-BY-NC-ND-4.0; the 2024-06-01
   revision changed it to CC-BY-NC-4.0, and the 2024-07-15 revision changed
   it to AGPL-3.0. No permissive historical root grant was found.
-  See third_party_provenance.json for exact commits, hashes and boundaries.
+  Closest historical matches (ChatTTS path @ revision):
+    ConvNeXtBlock, GFSQ, DVAEDecoder: ChatTTS/model/dvae.py @ cff3b4e5
+    DVAE: ChatTTS/model/dvae.py @ e69ffacf
+    CustomRepetitionPenaltyLogitsProcessorRepeat, gen_logits:
+      ChatTTS/model/processors.py @ 52d75d54
+  tts_26.py ConditionalChatTTS.generate and decode_to_mel_specs are
+  attributed to ChatTTS/model/gpt.py and ChatTTS/core.py.
 
 Vocos:
   https://github.com/gemelo-ai/vocos

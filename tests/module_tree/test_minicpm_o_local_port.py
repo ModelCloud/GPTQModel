@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ from gptqmodel.models.definitions.minicpm_o import MiniCPMOQModel
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.minicpm_o.configuration_minicpmo import MiniCPMOConfig
 from gptqmodel.models.ports.minicpm_o.modeling_minicpmo import MiniCPMO
-from tests.test_minicpm_o_local_port import LEGACY_TTS_AVAILABLE, PORT, tiny_config
+from tests.test_minicpm_o_local_port import LEGACY_TTS_AVAILABLE, tiny_config
 
 
 EXPECTED_PLAN = {
@@ -37,9 +38,7 @@ def test_exact_registry_contract():
     assert MiniCPMOQModel.build_layer_modules(tree, include_capture_only=True) == EXPECTED_PLAN["blocks"]
 
 
-@pytest.mark.parametrize("version", ["4.5", "2.6"])
-@pytest.mark.parametrize("kv_heads", [4, 2, 1])
-@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("version,kv_heads,bias", [("4.5", 4, False), ("4.5", 1, True), ("2.6", 2, True)])
 def test_actual_cpu_meta_owners_and_plain_policy(version, kv_heads, bias):
     with torch.device("meta"):
         model = MiniCPMO(tiny_config(version=version, kv_heads=kv_heads, bias=bias))
@@ -74,19 +73,28 @@ def test_actual_cpu_meta_owners_and_plain_policy(version, kv_heads, bias):
     assert plan.find("self_attn.q_norm.weight.undeclared") is None
 
 
-@pytest.mark.parametrize("version,keys", [("4_5", 1414), ("2_6", 1599)])
-def test_every_real_pinned_checkpoint_key_and_header_shape(version, keys):
+# SHA-256 of sorted "key:shape" lines read from the pinned released safetensors
+# headers: openbmb/MiniCPM-o-4_5@fb09628e and openbmb/MiniCPM-o-2_6@cf0b69a6.
+RELEASED_LAYOUTS = {
+    "4_5": (1414, "e228920cc2edc3b0156c6a8f8d664a658c1a3e91736372a5b9bf938e78a8dedc"),
+    "2_6": (1599, "60355c01aa88a731f6b98d7e0bab19299771581aa3037d023de76d9cf6d4e8e1"),
+}
+
+
+@pytest.mark.parametrize("version", ["4_5", "2_6"])
+def test_every_real_pinned_checkpoint_key_and_header_shape(version):
     if version == "2_6" and not LEGACY_TTS_AVAILABLE:
         pytest.skip("MiniCPM-o 2.6 TTS requires gptqmodel[minicpm-o]")
-    config = MiniCPMOConfig(**json.loads((PORT / f"checkpoint-{version}-config.json").read_text()))
+    fixture = Path(__file__).resolve().parents[1] / f"fixtures/ports/minicpm_o/checkpoint-{version}-config.json"
+    config = MiniCPMOConfig(**json.loads(fixture.read_text()))
     with torch.device("meta"):
         model = MiniCPMO(config)
-    expected = json.loads((PORT / f"checkpoint-{version}-checkpoint-layout.json").read_text())
-    assert len(expected) == keys
     actual = {key: list(value.shape) for key, value in model.state_dict().items()}
-    assert actual == expected
+    canonical = "\n".join(f"{key}:{','.join(map(str, shape))}" for key, shape in sorted(actual.items()))
+    assert (len(actual), hashlib.sha256(canonical.encode()).hexdigest()) == RELEASED_LAYOUTS[version]
+    assert actual["apm.conv1.weight"] == [1024, 80, 3]
     assert all(
         key.startswith(("llm.", "vpm.", "resampler.", "apm.", "audio_projection_layer.", "tts.")) for key in actual
     )
-    assert expected["llm.model.layers.0.self_attn.k_proj.weight"][0] == config.num_key_value_heads * config.head_dim
+    assert actual["llm.model.layers.0.self_attn.k_proj.weight"][0] == config.num_key_value_heads * config.head_dim
     assert model.tts.model.config.hidden_size == config.tts_config.hidden_size

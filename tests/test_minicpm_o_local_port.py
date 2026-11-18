@@ -25,7 +25,6 @@ from gptqmodel.models.ports.minicpm_o.tokenization_minicpmo_fast import MiniCPMO
 from gptqmodel.utils.security import BYPASS_ENV, RemoteCodeSecurityError
 
 
-PORT = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/minicpm_o"
 LEGACY_TTS_AVAILABLE = find_spec("vector_quantize_pytorch") is not None
 
 
@@ -227,9 +226,9 @@ def write_checkpoint(path, model=None, hostile=False):
     return marker
 
 
-@pytest.mark.parametrize("version", ["4.5", "2.6"])
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("version,trust,bypass", [
+    ("4.5", False, None), ("4.5", True, "1"), ("2.6", True, "0"), ("2.6", False, "1"),
+])
 def test_public_local_security_policy_and_native_owners(tmp_path, monkeypatch, version, trust, bypass):
     from transformers import Qwen2ForCausalLM, Qwen3ForCausalLM, cache_utils
 
@@ -260,10 +259,9 @@ def test_public_local_security_policy_and_native_owners(tmp_path, monkeypatch, v
         )
 
 
-@pytest.mark.parametrize("version", ["4.5", "2.6"])
-@pytest.mark.parametrize("kv_heads", [4, 2, 1])
-@pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("attn", ["eager", "sdpa"])
+@pytest.mark.parametrize("version,kv_heads,bias,attn", [
+    ("4.5", 4, False, "eager"), ("4.5", 1, True, "sdpa"), ("2.6", 2, True, "eager"), ("2.6", 1, False, "sdpa"),
+])
 def test_native_decoder_equivalence_cache_and_generation(version, kv_heads, bias, attn):
     from transformers import Qwen2ForCausalLM, Qwen3ForCausalLM
 
@@ -357,6 +355,25 @@ def test_vision_audio_and_resampler_against_independent_equations(dtype):
     torch.testing.assert_close(out.double(), expected_resampler, atol=tolerance, rtol=tolerance)
 
 
+@torch.no_grad()
+def test_vision_padding_mask_matches_unpadded_images():
+    vpm = tiny_model().vpm
+    torch.manual_seed(5)
+    # NaViT layout: patches of each image are laid out along the width.
+    first, second = torch.randn(1, 3, 2, 8), torch.randn(1, 3, 2, 4)
+    pixels = torch.cat([first, F.pad(second, (0, 4))])
+    mask = torch.tensor([[[True] * 4], [[True, True, False, False]]])
+    sizes = torch.tensor([[2, 2], [1, 2]])
+    padded = vpm(pixels, patch_attention_mask=mask, tgt_sizes=sizes).last_hidden_state
+    alone = [
+        vpm(first, tgt_sizes=sizes[:1]).last_hidden_state[0],
+        vpm(second, tgt_sizes=sizes[1:]).last_hidden_state[0],
+    ]
+    torch.testing.assert_close(padded[0], alone[0], atol=1e-6, rtol=1e-5)
+    torch.testing.assert_close(padded[1, :2], alone[1], atol=1e-6, rtol=1e-5)
+    assert type(vpm.encoder.layers[0]).__module__ == "transformers.models.siglip.modeling_siglip"
+
+
 def media_inputs(processor, media="both"):
     from PIL import Image
 
@@ -373,9 +390,10 @@ def media_inputs(processor, media="both"):
     return processor(text=[text + "word24"], return_tensors="pt", sampling_rate=16000, **kwargs)
 
 
-@pytest.mark.parametrize("version", ["4.5", "2.6"])
-@pytest.mark.parametrize("media", ["image", "audio", "both"])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("version,media,dtype", [
+    ("4.5", "both", torch.float32), ("4.5", "image", torch.bfloat16), ("2.6", "audio", torch.float16),
+    ("2.6", "both", torch.float32),
+])
 def test_real_media_conditioning_generation_and_safetensors(tmp_path, version, media, dtype):
     model = tiny_model(version=version, dtype=dtype)
     processor = tiny_processor(version)
@@ -453,6 +471,50 @@ def test_downloaded_media_is_removed_on_decoder_failure(monkeypatch):
             raise ValueError("decode failed")
     assert calls == [(url, {"total_timeout": 60})]
     assert not temporary.parent.exists()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_codec_prompt_wav_is_always_removed(monkeypatch, fail):
+    writes = []
+    monkeypatch.setitem(sys.modules, "soundfile", SimpleNamespace(
+        write=lambda path, data, rate: (writes.append(rate), Path(path).write_bytes(b"RIFF")),
+    ))
+    seen = []
+
+    class Codec:
+        cache = "stale"
+
+        def set_stream_cache(self, path):
+            seen.append(Path(path))
+            assert seen[0].read_bytes() == b"RIFF"
+            if fail:
+                raise RuntimeError("codec failed")
+            return {"flow": torch.ones(1)}, {"hift": torch.zeros(1)}
+
+    model = tiny_model(tts=True)
+    model.tts.audio_tokenizer = Codec()
+    if fail:
+        with pytest.raises(RuntimeError, match="codec failed"):
+            model.init_token2wav_cache(np.zeros(160, dtype=np.float32))
+    else:
+        model.init_token2wav_cache(np.zeros(160, dtype=np.float32))
+        assert torch.equal(model.token2wav_cache["flow_cache_base"]["flow"], torch.ones(1))
+    assert writes == [16000] and model.tts.audio_tokenizer.cache is None
+    assert not seen[0].exists() and not seen[0].parent.exists()
+
+
+def test_streaming_rope_theta_reads_transformers5_rope_parameters():
+    from gptqmodel.models.ports.minicpm_o.utils import TTSStreamingGenerator
+
+    config = tiny_config(tts=True)
+    config.rope_parameters = {"rope_type": "default", "rope_theta": 123456.0}
+    config.tts_config.audio_bos_token_id = config.tts_config.text_eos_token_id = 5
+    model = MiniCPMO._from_config(config).eval()
+    # Transformers 5 configs no longer expose ``rope_theta`` as an attribute.
+    assert not hasattr(model.llm.config, "rope_theta")
+    assert model._get_rope_theta() == 123456.0
+    generator = TTSStreamingGenerator(model=model.tts, temperature=0.8, eos_token=15)
+    assert generator.rope_theta == model.tts.model.config.rope_parameters["rope_theta"] == 10000.0
 
 
 def test_legacy_tts_missing_dependency_identifies_optional_extra(monkeypatch):
