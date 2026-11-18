@@ -514,7 +514,7 @@ def test_extra_vocabulary_source_tokens_roundtrip_and_collision_policy(tmp_path)
     assert tok.encode("hello 你好") == loaded.encode("hello 你好") == [14990, 220, 108386]
 
 
-def test_pinned_release_vocab_and_packaged_fixture_license_integrity():
+def test_pinned_release_vocab_and_fixture_license_integrity():
     manifest = json.loads((ASSETS / "provenance.json").read_text())
     vocab = read_port_asset(ASSETS / "fixtures/qwen.tiktoken")
     digest = hashlib.sha256(vocab).hexdigest()
@@ -523,7 +523,9 @@ def test_pinned_release_vocab_and_packaged_fixture_license_integrity():
         assert release["files"]["qwen.tiktoken"] == digest
     for group in ("fixture_files", "license_files"):
         for path, expected in manifest[group].items():
-            assert hashlib.sha256((ASSETS / path).read_bytes()).hexdigest() == expected
+            source = ASSETS / path
+            data = source.read_bytes() if source.is_file() else read_port_asset(source)
+            assert hashlib.sha256(data).hexdigest() == expected
 
 
 @pytest.mark.parametrize(
