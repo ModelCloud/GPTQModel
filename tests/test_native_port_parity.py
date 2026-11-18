@@ -62,21 +62,7 @@ ORACLE_UNAVAILABLE = {
 }
 
 
-# gptqmodel/__init__.py replaces Transformers' causal-conv1d hub kernel globally;
-# its kernel rejects the tester's activation in both native and vendored Jamba.
-# strict: this must start passing (and the marker be removed) once that patch goes.
-GLOBAL_KERNEL_OVERRIDE = {"jamba"}
-
-
-@pytest.mark.parametrize(
-    "family",
-    [
-        pytest.param(name, marks=pytest.mark.xfail(strict=True, reason="global causal-conv1d kernel override"))
-        if name in GLOBAL_KERNEL_OVERRIDE
-        else name
-        for name in CASES
-    ],
-)
+@pytest.mark.parametrize("family", CASES)
 def test_vendored_family_matches_transformers(family):
     if family in ORACLE_UNAVAILABLE:
         if family == "inkling":
