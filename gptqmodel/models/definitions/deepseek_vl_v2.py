@@ -109,9 +109,24 @@ class DeepSeekVLV2QModel(BaseQModel):
             )
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # MLA latent normalization, routed/shared consumers and image-conditioned
-        # replay have not been independently qualified for scale folding.
-        return []
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        attn = getattr(module, "self_attn", None)
+        # MLA: each latent norm feeds only its own up-projection. With equal
+        # q/kv LoRA ranks the shared q_b/kv_b stage resolves to kv_a_layernorm
+        # for both, which would rescale q_b_proj's input without its norm.
+        latent_consumer = {
+            id(norm): consumer
+            for norm, consumer in (
+                (getattr(attn, "q_a_layernorm", None), getattr(attn, "q_b_proj", None)),
+                (getattr(attn, "kv_a_layernorm", None), getattr(attn, "kv_b_proj", None)),
+            )
+            if norm is not None
+        }
+        return [
+            node for node in nodes
+            if id(node.get("prev_op")) not in latent_consumer
+            or all(layer is latent_consumer[id(node["prev_op"])] for layer in node.get("layers") or [])
+        ]
 
     def pre_quantize_generate_hook_start(self):
         if self.turtle_model is not None:
