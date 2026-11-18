@@ -29,10 +29,8 @@ PENDING_NATIVE_DEFINITIONS = frozenset({
 })
 
 PENDING_MODEL_IMPORT_PORTS = frozenset({
-    "bailing_moe", "chatglm", "deepseek_v2", "deepseek_v3", "dream", "ernie4_5_vl_moe", "exaone4", "internlm",
-    "internvl_chat", "kimi_k25", "kimi_k3", "lfm3_vl", "llama", "mimo", "minicpm_o", "minicpmv", "nemotron_h",
-    "nemotron_h_puzzle", "openvla", "ovis2_5", "ovis2_6_moe", "phi4", "qwen2_5_vl", "qwen2_vl", "qwen_drive",
-    "solar_open2", "unlimited_ocr", "zdtaichu5",
+    "chatglm", "deepseek_v3", "ernie4_5_vl_moe", "exaone4", "internvl_chat", "kimi_k3", "lfm3_vl", "llama", "mimo",
+    "minicpm_o", "nemotron_h_puzzle", "ovis2_6_moe", "phi4", "qwen2_vl", "unlimited_ocr",
 })
 
 PENDING_STALE_PATTERN_PORTS = frozenset({
