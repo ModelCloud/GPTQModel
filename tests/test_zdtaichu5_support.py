@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,7 @@ from gptqmodel.models.definitions.qwen3_5_text import Qwen3_5TextQModel
 from gptqmodel.models.definitions.zdtaichu5 import ZDTaichu5QModel
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.utils.model import MODALITY
+from tests import test_image_fetch
 
 
 def _tiny_qwen35_config():
@@ -324,3 +326,58 @@ def test_zdtaichu5_capture_preserves_raw_padding_mask(mask):
         layer_input_kwargs={},
     )
     assert torch.equal(captured["_zdtaichu5_padding_mask"], mask)
+
+
+image_server = test_image_fetch.image_server
+
+
+def test_zdtaichu5_url_images_use_bounded_ssrf_filtered_fetch(monkeypatch, image_server):
+    from gptqmodel.models.ports.zdtaichu5 import vision_utils
+    from gptqmodel.utils.image import ImageFetchError, load_image_from_url
+
+    base, _ = image_server
+    # The default policy refuses loopback destinations instead of calling requests directly.
+    with pytest.raises(ImageFetchError, match="private|loopback"):
+        vision_utils.fetch_image({"image": f"{base}/ok"})
+
+    cap = len(test_image_fetch.PNG) * 2
+    monkeypatch.setattr(vision_utils, "load_image_from_url", lambda url: load_image_from_url(
+        url, allow_private_addresses=True, max_bytes=cap,
+    ))
+    image = vision_utils.fetch_image({"image": f"{base}/ok"})
+    assert image.mode == "RGB" and image.size == (8, 8)
+    with pytest.raises(ImageFetchError, match="byte limit"):
+        vision_utils.fetch_image({"image_url": f"{base}/oversize-streamed"})
+
+
+def test_zdtaichu5_url_videos_are_downloaded_through_bounded_fetch(monkeypatch):
+    from gptqmodel.models.ports.zdtaichu5 import vision_utils
+    from gptqmodel.utils.image import ImageFetchError
+
+    fetched, decoded = [], []
+
+    def fake_bytes(url):
+        fetched.append(url)
+        if "huge" in url:
+            raise ImageFetchError(url, "response exceeded the 16 byte limit")
+        return b"video-bytes"
+
+    def fake_reader(ele):
+        path = ele["video"]
+        with open(path, "rb") as handle:
+            decoded.append((path, handle.read()))
+        return torch.zeros(2, 3, 4, 4, dtype=torch.uint8), {"fps": 2.0}, 2.0
+
+    monkeypatch.setattr(vision_utils, "load_bytes_from_url", fake_bytes)
+    monkeypatch.setattr(vision_utils, "_get_video_backend", lambda: "torchvision")
+    monkeypatch.setitem(vision_utils._VIDEO_BACKENDS, "torchvision", fake_reader)
+    frames, fps, _ = vision_utils.fetch_video({"video": "https://example.invalid/clip.mp4"})
+    assert len(frames) == 2 and fps == 2.0
+    assert fetched == ["https://example.invalid/clip.mp4"]
+    (path, data), = decoded
+    assert data == b"video-bytes" and path.endswith(".mp4")
+    assert not os.path.exists(path)
+
+    with pytest.raises(ImageFetchError, match="byte limit"):
+        vision_utils.fetch_video({"video": "https://example.invalid/huge.mp4"})
+    assert len(decoded) == 1

@@ -1,8 +1,0 @@
-{
-  "registered_module_plans": "UNCHANGED: ZDTaichu5QModel/gptq retains its native Qwen3.5 hybrid decoder groups.",
-  "fusable_models.models.zdtaichu5_0.reason": "Package-owned ZDTaichu5 C-RADIO/native Qwen3.5 hybrid multimodal binding; fusion executor has not been qualified.",
-  "awq_plain_quantization_families": "UNCHANGED: zdtaichu5_0 is not in the generic FAMILIES; owned public plain-AWQ cases qualify real quantization.",
-  "parent_support_test": "Migrate tests/test_zdtaichu5_support.py::test_zdtaichu5_model_type_registry_and_trust from AutoConfig/remote loader/trust=True expectations to auto.load_model_config and LocalModelLoader/require_trust_remote_code=False; other source/consumer assertions remain.",
-  "parent_packaging": "MANIFEST.in already includes port LICENSE/NOTICE/JSON/gz/md/Jinja and InternVL-LICENSE. Include port *.txt too for LICENSES/Apache-2.0.txt and LICENSES/NVIDIA-Open-Model-License.txt.",
-  "parent_dependencies": "timm>=1.0.22 (validated 1.0.22), published Tokenicer>=0.0.19 through the current parent dependency policy; no model-specific tokenizer normalization."
-}

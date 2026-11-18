@@ -1,16 +1,16 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""ZDTaichu5 configuration adapted from the pinned release in README.md."""
+"""ZDTaichu5 configuration adapted from the pinned TaichuAI/ZDTaichu5.0-9B release."""
 
 from copy import deepcopy
 
-from transformers import PretrainedConfig, Qwen3_5TextConfig
+from transformers import PreTrainedConfig, Qwen3_5TextConfig
 
 from .cradio_config import RADIOConfig
 
 
-class ZDTaichu5_0_Config(PretrainedConfig):
+class ZDTaichu5_0_Config(PreTrainedConfig):
     model_type = "zdtaichu5_0"
     sub_configs = {"llm_config": Qwen3_5TextConfig, "vision_config": RADIOConfig}
 

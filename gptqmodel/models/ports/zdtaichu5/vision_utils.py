@@ -46,17 +46,20 @@ import base64
 import copy
 import logging
 import math
+import os
 import sys
+import tempfile
 import time
 from functools import lru_cache
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple, Union
+from urllib.parse import urlsplit
 
 import numpy as np
 import torch
 from PIL import Image
 
-from ....utils.image import load_image_from_url
+from ....utils.image import load_bytes_from_url, load_image_from_url
 
 
 logger = logging.getLogger(__name__)
@@ -355,6 +358,22 @@ _VIDEO_BACKENDS = {
 # fetch_video — main entry point for video loading
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _localize_remote_video(ele: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Download an http(s) video through the bounded fetcher into a temp file.
+
+    Video decoders would otherwise stream the URL themselves without the byte,
+    time, redirect and private-address limits used for images.
+    """
+    video = ele["video"]
+    if not video.startswith(("http://", "https://")):
+        return ele, None
+    data = load_bytes_from_url(video)
+    suffix = os.path.splitext(urlsplit(video).path)[1] or ".mp4"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+        handle.write(data)
+    return {**ele, "video": handle.name}, handle.name
+
+
 def fetch_video(
     ele: Dict[str, Any],
 ) -> Tuple[List[Image.Image], float, dict]:
@@ -374,17 +393,22 @@ def fetch_video(
     """
     if isinstance(ele["video"], str):
         # ── Decode from video file ───────────────────────────────────────
-        backend = _get_video_backend()
+        ele, downloaded = _localize_remote_video(ele)
         try:
-            video_tensor, metadata, sample_fps = _VIDEO_BACKENDS[backend](ele)
-        except Exception as exc:
-            if backend != "torchvision":
-                logger.warning(
-                    f"{backend} failed ({exc}), falling back to torchvision"
-                )
-                video_tensor, metadata, sample_fps = _read_video_torchvision(ele)
-            else:
-                raise
+            backend = _get_video_backend()
+            try:
+                video_tensor, metadata, sample_fps = _VIDEO_BACKENDS[backend](ele)
+            except Exception as exc:
+                if backend != "torchvision":
+                    logger.warning(
+                        f"{backend} failed ({exc}), falling back to torchvision"
+                    )
+                    video_tensor, metadata, sample_fps = _read_video_torchvision(ele)
+                else:
+                    raise
+        finally:
+            if downloaded is not None:
+                os.unlink(downloaded)
 
         # Convert TCHW tensor → list of PIL images
         frames = []

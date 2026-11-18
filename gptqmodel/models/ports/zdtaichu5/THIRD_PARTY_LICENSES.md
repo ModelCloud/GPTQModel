@@ -15,7 +15,7 @@ summary.
 - The root `LICENSE` contains the NVIDIA Open Model License Agreement that
   governs the C-RADIOv4-H model and applicable derivative-model obligations.
 - Qwen3.5-9B artifacts remain under Apache License 2.0. A copy is provided in
-  `LICENSES/Apache-2.0.txt`.
+  the GPT-QModel repository root `LICENSE`.
 - Standalone-inference source files authored for this repository (for example
   `cradio_config.py` and `cradio_model.py`) are provided under the Apache
   License 2.0, as stated in their file headers.

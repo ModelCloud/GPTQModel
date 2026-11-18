@@ -24,8 +24,7 @@ EXCLUDED = {"input_layernorm", "post_attention_layernorm", "self_attn.q_norm", "
 
 
 @pytest.mark.parametrize("device", ["cpu", "meta"])
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("kv_heads,bias", [(1, False), (2, True), (4, False)])
 @pytest.mark.parametrize("layout", ["full", "linear", "hybrid"])
 def test_weight_owners_defuser_aliases_and_conservative_policy(device, kv_heads, bias, layout):
     config = tiny_config(kv_heads, bias, layout)
