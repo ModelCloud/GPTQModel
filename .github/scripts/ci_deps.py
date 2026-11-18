@@ -7,6 +7,7 @@ from typing import Any
 
 import yaml
 
+
 BASE_DIR = Path(__file__).resolve().parent
 _PKG_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+")
 
@@ -135,7 +136,7 @@ def install_deps(raw_name: str) -> int:
     test_path = resolve_test_path(raw_name.removeprefix("tests/").removesuffix(".py"))
     deps = load_yaml("deps.yaml")
     specific_pkgs, common_pkgs = collect_pkgs(test_path, deps, dedupe_common=True)
-    run_uv_pip("install", specific_pkgs + common_pkgs, extra_args=["--no-cache"])
+    run_uv_pip("install", specific_pkgs + common_pkgs, extra_args=["--no-cache", "--torch-backend", "cu132"])
     return 0
 
 

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-python -m pip install uv
-uv pip install -U build twine setuptools
+uv pip install build twine
 python -m build --sdist

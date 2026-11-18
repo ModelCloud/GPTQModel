@@ -1,57 +1,53 @@
-"""Fail a CI job that claims to run free-threaded but silently re-enabled the GIL.
+"""Verify the CI interpreter and model stack before using the installed package."""
 
-A 3.14t build can re-enable the GIL when an extension that has not declared
-free-threading support is imported; ``triton._C.libtriton`` is the known one.
-The job then looks free-threaded, every ``PYTHON_GIL=0``-only test skips, and
-the concurrency coverage is gone without a red build. This gate imports the
-model stack and re-checks ``sys._is_gil_enabled()`` after each import.
-"""
-
+import argparse
 import importlib
 import sys
+import sysconfig
+from pathlib import Path
 
 
-# Imported in order. `torch` and `gptqmodel` are mandatory: a job that cannot
-# import them is broken anyway, and the gate must not silently pass.
-MANDATORY = ("torch", "gptqmodel")
-OPTIONAL = ("triton", "gptqmodel.utils.p2p")
-
-
-def _gil_enabled():
-    gil_check = getattr(sys, "_is_gil_enabled", None)
-    return None if gil_check is None else gil_check()
+PYTHON_VERSION = (3, 14, 10)
+REQUIRED_MODULES = ("torch", "gptqmodel", "triton", "torchao")
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--python-only", action="store_true")
+    parser.add_argument("--installed", action="store_true", help="Require imports from the active virtual environment")
+    args = parser.parse_args()
+
     print(f"python: {sys.version}")
+    if sysconfig.get_config_var("Py_GIL_DISABLED") != 1:
+        raise SystemExit("FAIL: interpreter is not a free-threaded build")
+    if sys._is_gil_enabled():
+        raise SystemExit("FAIL: the GIL is enabled before the model stack is imported; run with PYTHON_GIL=0")
+    if sys.version_info[:3] != PYTHON_VERSION:
+        raise SystemExit(f"FAIL: expected CPython {'.'.join(map(str, PYTHON_VERSION))}t")
+    if args.python_only:
+        print("ok: the free-threaded interpreter starts with the GIL disabled")
+        return 0
 
-    enabled = _gil_enabled()
-    if enabled is None:
-        print("FAIL: interpreter is not a free-threaded build (no sys._is_gil_enabled)")
-        return 1
-    if enabled:
-        print("FAIL: the GIL is enabled before the model stack is imported; run with PYTHON_GIL=0")
-        return 1
+    for name in REQUIRED_MODULES:
+        module = importlib.import_module(name)
+        if sys._is_gil_enabled():
+            raise SystemExit(f"FAIL: importing {name} re-enabled the GIL")
+        if args.installed and not Path(module.__file__).is_relative_to(Path(sys.prefix)):
+            raise SystemExit(f"FAIL: expected {name} from the active environment, got {module.__file__}")
+        print(f"ok: GIL still disabled after importing {name} from {module.__file__}")
 
-    for name in MANDATORY:
-        importlib.import_module(name)
-        if _gil_enabled():
-            print(f"FAIL: importing {name} re-enabled the GIL; this lane cannot exercise GIL=0 code")
-            return 1
-        print(f"ok: GIL still disabled after importing {name}")
+    from torchao.prototype.mx_formats.kernels import f4_unpacked_to_f32, unpack_uint4  # noqa: F401
+    from torchao.prototype.mx_formats.nvfp4_tensor import NVFP4Tensor, nvfp4_quantize  # noqa: F401
 
-    for name in OPTIONAL:
-        try:
-            importlib.import_module(name)
-        except ImportError as exc:
-            print(f"note: {name} is not importable here ({exc})")
-            continue
-        if _gil_enabled():
-            print(f"FAIL: importing {name} re-enabled the GIL; this lane cannot exercise GIL=0 code")
-            return 1
-        print(f"ok: GIL still disabled after importing {name}")
+    if sys._is_gil_enabled():
+        raise SystemExit("FAIL: importing the TorchAO NVFP4 helpers re-enabled the GIL")
 
-    print("ok: GIL stays disabled after importing the model stack")
+    torch = sys.modules["torch"]
+    constraint = Path(__file__).resolve().parents[1] / "ci" / "torch-cu132.txt"
+    expected = next(line.removeprefix("torch==") for line in constraint.read_text().splitlines() if line.startswith("torch=="))
+    if torch.__version__ != expected or torch.version.cuda != "13.2":
+        raise SystemExit(f"FAIL: expected {expected} for CUDA 13.2, got {torch.__version__} for CUDA {torch.version.cuda}")
+    print(f"ok: GIL stays disabled after importing the model stack using torch {torch.__version__}")
     return 0
 
 
