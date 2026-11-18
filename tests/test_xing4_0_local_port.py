@@ -269,9 +269,11 @@ def test_safetensors_assignment_retry_generation_and_optional_outputs(tmp_path, 
 
 @pytest.mark.parametrize("offload", [False, True])
 @pytest.mark.parametrize("qlora,bias,dense", [(16, False, 1), (None, True, 0), (16, True, 2)])
-def test_public_plain_awq_every_linear_independent_stream_capture_two_reloads(tmp_path, offload, qlora, bias, dense):
+def test_public_awq_scale_search_every_linear_independent_stream_capture_two_reloads(
+        tmp_path, monkeypatch, offload, qlora, bias, dense):
     from safetensors.torch import load_file, save_file
 
+    from gptqmodel.looper import awq_processor
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
@@ -292,8 +294,22 @@ def test_public_plain_awq_every_linear_independent_stream_capture_two_reloads(tm
                             dtype=torch.float16, attn_implementation="eager")
     targets = {name for name, module in source.named_modules() if isinstance(module, torch.nn.Linear)
                and name.startswith("model.layers.") and not name.endswith(".gate")}
+    # Scale search folds into the decoder norms and compensates the router
+    # weight; hyper-connection mixers, router bias and the rest stay exact.
+    folded = {f"model.layers.{index}.{name}.weight" for index in range(2)
+              for name in ("input_layernorm", "post_attention_layernorm", "self_attn.kv_a_layernorm", "mlp.gate")}
     unchanged = {name: value.clone() for name, value in source.state_dict().items()
-                 if name.rsplit(".", 1)[0] not in targets}
+                 if name.rsplit(".", 1)[0] not in targets and name not in folded}
+    layer_index = {id(layer): index for index, layer in enumerate(wrapper.model.model.layers)}
+    applied = {index: [] for index in range(2)}
+    original_apply_scale = awq_processor.apply_scale
+
+    def record_apply_scale(module, scales_list, *args, **kwargs):
+        applied[layer_index[id(module)]].extend(
+            (source_name, tuple(names)) for source_name, names, _scales, _loss in scales_list)
+        return original_apply_scale(module, scales_list, *args, **kwargs)
+
+    monkeypatch.setattr(awq_processor, "apply_scale", record_apply_scale)
     rows = [{"input_ids": [4, 5, 6, 7, 8, 9], "attention_mask": [1] * 6},
             {"input_ids": [11, 10, 9, 8, 7], "attention_mask": [1] * 5}]
     expected_capture = source.model.embed_tokens.weight[torch.tensor([rows[0]["input_ids"]])].unsqueeze(2).expand(-1, -1, 3, -1)
@@ -305,13 +321,25 @@ def test_public_plain_awq_every_linear_independent_stream_capture_two_reloads(tm
 
     handle = wrapper.model.model.layers[0].register_forward_pre_hook(capture, with_kwargs=True)
     try:
-        for layer in wrapper.model.model.layers:
-            assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
         wrapper.quantize(calibration=CalibrationConfig(dataset=rows, batch_size=1, min_length=1, sort=None), backend=BACKEND.TORCH)
     finally:
         handle.remove()
     assert captures
     torch.testing.assert_close(captures[0], expected_capture, atol=0, rtol=0)
+    for index, layer in enumerate(wrapper.model.model.layers):
+        attention = ("self_attn.q_proj" if qlora is None else "self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa")
+        groups = dict(applied[index])
+        assert groups["input_layernorm"] == attention
+        # Equal Q/KV LoRA ranks make the planner's latent-norm group unsafe; it
+        # is dropped. Without Q LoRA the KV latent norm folds into kv_b_proj.
+        latent = {name for name in groups if name.startswith("self_attn.") and name.endswith("layernorm")}
+        assert latent == (set() if qlora else {"self_attn.kv_a_layernorm"})
+        if index < dense:
+            assert groups["post_attention_layernorm"] == ("mlp.gate_proj", "mlp.up_proj")
+            assert groups["mlp.up_proj"] == ("mlp.down_proj",)
+        else:
+            assert {"mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"} <= set(groups["post_attention_layernorm"])
+            assert groups["mlp.shared_experts.up_proj"] == ("mlp.shared_experts.down_proj",)
     packed = {name for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert packed == targets
     for name, value in unchanged.items():
