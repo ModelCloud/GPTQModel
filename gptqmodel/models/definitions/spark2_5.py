@@ -46,8 +46,29 @@ class Spark2_5QModel(BaseQModel):
     ]
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs=None):
-        """Head gating and packed partial-RoPE attention are not fold-qualified."""
-        return []
+        """Generic AWQ groups without any fold into ``self_attn.out_proj``.
+
+        ``out_proj`` reads the (optionally head-gated) attention output, and the
+        packed ``q_k_v_proj`` output is wider than that, so no producer in the
+        layer can absorb its scale. Without the head gate the declared
+        ``g_proj:!`` is absent and the generic planner falls back to the stale
+        ``input_layernorm`` for ``out_proj``, which is not its input.
+        """
+
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        out_proj = getattr(getattr(module, "self_attn", None), "out_proj", None)
+        kept = []
+        for node in nodes:
+            layers = [layer for layer in node.get("layers") or [] if layer is not out_proj]
+            if not layers:
+                continue
+            if len(layers) != len(node.get("layers") or []):
+                node = dict(node, layers=layers)
+                search = node.get("_awq_search_layers")
+                if search is not None:
+                    node["_awq_search_layers"] = [layer for layer in search if layer is not out_proj]
+            kept.append(node)
+        return kept
 
 
 __all__ = ["Spark2_5QModel"]

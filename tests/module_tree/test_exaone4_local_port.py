@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Exact native EXAONE decoder ownership, aliases and conservative AWQ policy."""
+"""Exact native EXAONE decoder ownership, aliases and post-norm-safe AWQ scale search."""
 
 import json
 import re
@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import _wrapper, assert_awq_folds_neutral
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.loop_processor import CalibrationConfig
@@ -76,14 +77,42 @@ def test_exact_native_state_dict_plan_ownership_and_roles(model_type, device, kv
     assert not observed_keys - checkpoint_keys
 
 
+def _language(model, model_type):
+    return model.model.language_model if model_type == "exaone4_5" else model.model
+
+
+@pytest.mark.parametrize("model_type,kv_heads", [("exaone4", 2), ("exaone4", 4), ("exaone4_5", 4)])
+def test_awq_folds_only_into_linear_producers_and_preserve_layer_output(model_type, kv_heads):
+    # EXAONE 4 is post-norm: q/k/v and gate/up read the raw residual stream, and
+    # post_attention/post_feedforward norms rescale block outputs. No norm may
+    # absorb a scale; only v_proj -> o_proj (MHA) and up_proj -> down_proj are valid.
+    torch.manual_seed(11)
+    model = tiny_model(model_type, num_key_value_heads=kv_heads)
+    definition = MODEL_MAP[model_type]
+    language = _language(model, model_type)
+    ids = torch.randint(3, 60, (1, 8))
+
+    def forward():
+        return language(input_ids=ids).last_hidden_state
+
+    for layer in language.layers:
+        checked = assert_awq_folds_neutral(definition, model, layer, forward)
+        pairs = {(source, tuple(targets)) for source, targets, _ in checked}
+        assert ("mlp.up_proj", ("mlp.down_proj",)) in pairs
+        if model_type == "exaone4" and kv_heads == 4:
+            assert ("self_attn.v_proj", ("self_attn.o_proj",)) in pairs
+        assert {source for source, _ in pairs} <= {"self_attn.v_proj", "mlp.up_proj"}
+
+
 @pytest.mark.parametrize("model_type,fallback", [("exaone4", None), ("exaone4_5", {})])
-def test_plain_awq_quantizes_every_native_linear_without_folding(tmp_path, monkeypatch, model_type, fallback):
+def test_awq_scales_and_quantizes_every_native_linear_without_norm_folds(tmp_path, monkeypatch, model_type, fallback):
     model = tiny_model(model_type)
     definition = MODEL_MAP[model_type]
     layer = model.get_submodule("model.language_model.layers.0" if model_type == "exaone4_5" else "model.layers.0")
+    planner = _wrapper(definition, model, definition.module_tree)
     wrapper = SimpleNamespace(
         model=model, qlinear_kernel=None, rotary_embedding=None, lm_head="lm_head",
-        awq_get_modules_for_scaling=lambda *args: definition.awq_get_modules_for_scaling(None, *args),
+        awq_get_modules_for_scaling=planner.awq_get_modules_for_scaling,
     )
     qcfg = AWQConfig(device="cpu", group_size=16, fallback=fallback)
     processor = AWQProcessor(tokenizer=None, qcfg=qcfg, calibration=CalibrationConfig(), gptq_model=wrapper,
@@ -99,7 +128,10 @@ def test_plain_awq_quantizes_every_native_linear_without_folding(tmp_path, monke
                      for name in sorted(LINEARS)}
     features = {name: torch.randn(5, item.module.in_features) for name, item in state.modules.items()}
     monkeypatch.setattr(processor, "_layer_input_features", lambda state: features)
-    assert wrapper.awq_get_modules_for_scaling(layer, features, {}) == []
+    nodes = wrapper.awq_get_modules_for_scaling(layer, features, {})
+    sources = {next(name for name, module in layer.named_modules() if module is node["prev_op"]) for node in nodes}
+    assert "mlp.up_proj" in sources
+    assert not sources & NORMS
     before = {name: tensor.clone() for name, tensor in layer.state_dict().items()}
     processor._quantize_layer(0, state)
     assert state.quantized

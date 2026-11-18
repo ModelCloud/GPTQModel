@@ -486,7 +486,7 @@ def test_streammind_missing_dependency_is_lazy_and_transactional(tmp_path, monke
 
 @pytest.mark.cpu
 @pytest.mark.parametrize("kv,bias", [(4, False), (2, True), (1, False)])
-def test_plain_awq_all_decoder_linears_pack_and_two_safetensors_roundtrips(tmp_path, kv, bias):
+def test_awq_scaled_decoder_linears_pack_and_two_safetensors_roundtrips(tmp_path, kv, bias):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
@@ -496,7 +496,11 @@ def test_plain_awq_all_decoder_linears_pack_and_two_safetensors_roundtrips(tmp_p
     _processor_assets(tmp_path)
     wrapper = GPTQModel.load(str(tmp_path), quantize_config=AWQConfig(device="cpu", group_size=16, fallback=None),
                              backend=BACKEND.TORCH, dtype=torch.float16)
-    assert wrapper.awq_get_modules_for_scaling(wrapper.model.model.language_model.layers[0], {}, {}) == []
+    layer0 = wrapper.model.model.language_model.layers[0]
+    features = {name: torch.zeros(1, module.in_features) for name, module in layer0.named_modules()
+                if isinstance(module, torch.nn.Linear)}
+    sources = {id(node["prev_op"]) for node in wrapper.awq_get_modules_for_scaling(layer0, features, {})}
+    assert {id(layer0.input_layernorm), id(layer0.post_attention_layernorm), id(layer0.mlp.up_proj)} <= sources
     dense = {k: v.to(torch.float16) for k, v in model.state_dict().items() if k.startswith("model.visual.")}
     image = Image.fromarray(np.arange(48, dtype=np.uint8).reshape(4, 4, 3))
     calibration = [[{"role": "user", "content": [{"type": "image", "image": image},

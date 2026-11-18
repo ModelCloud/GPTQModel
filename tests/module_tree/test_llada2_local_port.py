@@ -11,7 +11,9 @@ from gptqmodel.models.definitions.llada2 import LLaDA2MoeQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.llada2.modeling_llada2_moe import LLaDA2MoeModelLM
-from tests.test_llada2_local_port import VERSIONS, tiny_config
+from awq_neutrality import assert_awq_folds_neutral
+
+from tests.test_llada2_local_port import VERSIONS, tiny_config, tiny_model
 
 
 def test_exact_central_plan_proposal_and_no_fusion_admission():
@@ -77,6 +79,47 @@ def test_real_checkpoint_owned_modules_and_aliases(version, kv, bias, shared, de
         assert "1" in plan.find("attention.dense").flags
         assert not plan.find("attention.query_layernorm").quantize
         assert not plan.find("attention.key_layernorm").quantize
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     assert plan.find("attention.q_proj") is None
     assert plan.find("attention.query_key_value.unknown") is None
+
+
+@pytest.mark.parametrize(
+    "version,overrides",
+    [
+        ("2.1", {}),
+        ("2.0", {"num_key_value_heads": 4, "use_bias": True, "use_qkv_bias": True}),
+        ("2.2", {"use_qk_norm": False}),
+    ],
+)
+def test_awq_scale_folds_preserve_dense_and_moe_layer_outputs(version, overrides):
+    model = tiny_model(version, **overrides)
+    ids = (torch.arange(12).view(1, 12) % 30) + 2
+
+    def forward():
+        return model(input_ids=ids).logits
+
+    dense_layer, moe_layer = model.model.layers
+    dense = {source: (targets, consumers)
+             for source, targets, consumers in assert_awq_folds_neutral(LLaDA2MoeQModel, model, dense_layer, forward)}
+    assert dense == {
+        "input_layernorm": (["attention.query_key_value"], []),
+        "post_attention_layernorm": (["mlp.gate_proj", "mlp.up_proj"], []),
+        "mlp.up_proj": (["mlp.down_proj"], []),
+    }
+
+    checked = assert_awq_folds_neutral(LLaDA2MoeQModel, model, moe_layer, forward)
+    moe = {source: (targets, consumers) for source, targets, consumers in checked}
+    assert moe["input_layernorm"] == (["attention.query_key_value"], [])
+    targets, consumers = moe["post_attention_layernorm"]
+    # Shared and every routed gate/up read one norm; the biased sigmoid router
+    # reads it too and is compensated, so expert selection is unchanged.
+    assert targets == ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"] + [
+        f"mlp.experts.{i}.{name}" for i in range(4) for name in ("gate_proj", "up_proj")
+    ]
+    assert consumers == ["mlp.gate"]
+    assert moe["mlp.shared_experts.up_proj"] == (["mlp.shared_experts.down_proj"], [])
+    routed = [source for source in moe if source.startswith("mlp.experts.")]
+    assert routed and all(moe[source][0] == [source.replace("up_proj", "down_proj")] for source in routed)
+    # attention.dense reads the attention output and never receives a fold.
+    for layer_groups in (dense, moe):
+        assert all("attention.dense" not in targets for targets, _ in layer_groups.values())

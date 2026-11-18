@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Intern-S1 real-model checkpoint ownership, consumers and plain AWQ contracts."""
+"""Intern-S1 real-model checkpoint ownership, consumers and AWQ scale-fold contracts."""
 
 import copy
 import json
@@ -8,6 +8,7 @@ import re
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from PIL import Image
 from torch import nn
 
@@ -384,11 +385,67 @@ def test_real_wrapper_tree_owns_weights_roles_and_quantizer_consumers(layout, to
     for invalid in ("self_attn.q_proj_extra", "self_attn.q_proj.child", "other.mlp.down_proj"):
         assert plan.find(invalid) is None
     assert InternS1QModel.module_tree == declaration
-    assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
+
+
+def _layer_features(model, layer):
+    """Real calibration inputs of every quantized linear and the MoE root."""
+
+    features, handles = {}, []
+
+    def record(name):
+        def hook(module, args):
+            features[name] = args[0].detach().clone()
+        return hook
+
+    for name, module in layer.named_modules():
+        if (isinstance(module, nn.Linear) and name != "mlp.gate") or (name == "mlp" and hasattr(module, "experts")):
+            handles.append(module.register_forward_pre_hook(record(name)))
+    try:
+        with torch.no_grad():
+            model(torch.tensor([[1, 17, 18, 19, 20, 21, 22, 23]]))
+    finally:
+        for handle in handles:
+            handle.remove()
+    return features
+
+
+@pytest.mark.parametrize("layout", ["dense", "moe", "hybrid"])
+def test_awq_text_folds_preserve_dense_and_routed_layer_output(layout, tokenizer_assets):
+    torch.manual_seed(5)
+    wrapper = wrapper_for(layout, tokenizer_assets)
+    model = wrapper.model
+    tree = InternS1QModel._resolve_effective_module_tree(model, wrapper.quantize_config)
+    language = model.model.language_model
+    ids = torch.tensor([[1, 17, 18, 19, 20, 21, 22, 23]])
+
+    def forward():
+        return language(input_ids=ids).last_hidden_state
+
+    attention = ("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"], [])
+    for layer in language.layers:
+        # Production plans against the effective (MoE-expanded) tree.
+        with InternS1QModel._module_tree_context(tree):
+            checked = assert_awq_folds_neutral(InternS1QModel, model, layer, forward, tree=tree)
+        if hasattr(layer.mlp, "experts"):
+            experts = range(model.config.text_config.num_experts)
+            expected = [
+                attention,
+                ("post_attention_layernorm",
+                 [f"mlp.experts.{e}.{leaf}" for e in experts for leaf in ("gate_proj", "up_proj")],
+                 ["mlp.gate"]),
+                *((f"mlp.experts.{e}.up_proj", [f"mlp.experts.{e}.down_proj"], []) for e in experts),
+            ]
+        else:
+            expected = [
+                attention,
+                ("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"], []),
+                ("mlp.up_proj", ["mlp.down_proj"], []),
+            ]
+        assert checked == expected
 
 
 @pytest.mark.parametrize("layout", ["dense", "hybrid"])
-def test_plain_awq_real_consumer_quantizes_every_linear_and_retries(layout, tokenizer_assets, monkeypatch):
+def test_awq_real_consumer_scales_and_quantizes_every_linear_and_retries(layout, tokenizer_assets, monkeypatch):
     torch.manual_seed(103)
     wrapper = wrapper_for(layout, tokenizer_assets)
     model = wrapper.model
@@ -406,6 +463,11 @@ def test_plain_awq_real_consumer_quantizes_every_linear_and_retries(layout, toke
     named = {name: NamedModule(module, name, f"model.language_model.layers.1.{name}", 1)
              for name, module in layer.named_modules() if isinstance(module, nn.Linear) and name != "mlp.gate"}
     state.modules.update(named)
+    features = _layer_features(model, layer)
+    monkeypatch.setattr(processor, "_layer_input_features", lambda state: features)
+    probe_ids = torch.tensor([[1, 17, 18, 19, 20, 21, 22, 23]])
+    with torch.no_grad():
+        reference = model(probe_ids).logits
     pseudo_quantize = processor.pseudo_quantize_tensor
 
     def fail_once(*args, **kwargs):
@@ -416,8 +478,14 @@ def test_plain_awq_real_consumer_quantizes_every_linear_and_retries(layout, toke
         processor._quantize_layer(1, state)
     assert not state.quantized
     assert state.modules
+    # Scale folds are applied before per-module quantization. A failure after
+    # them leaves only output-neutral rescaling and no quantized weight.
     for key, value in layer.state_dict().items():
-        torch.testing.assert_close(value, originals[key], rtol=0, atol=0)
+        owner = key.rsplit(".", 1)[0]
+        if owner in ("self_attn.q_norm", "self_attn.k_norm", "self_attn.o_proj"):
+            torch.testing.assert_close(value, originals[key], rtol=0, atol=0)
+    with torch.no_grad():
+        torch.testing.assert_close(model(probe_ids).logits, reference, rtol=1e-5, atol=1e-5)
     monkeypatch.setattr(processor, "pseudo_quantize_tensor", pseudo_quantize)
     processor._quantize_layer(1, state)
     assert state.quantized
@@ -431,10 +499,14 @@ def test_plain_awq_real_consumer_quantizes_every_linear_and_retries(layout, toke
         assert module.state["q_scales"].numel() > 0
         assert module.state["q_zeros"].numel() > 0
         assert not torch.equal(module.weight, originals[name + ".weight"])
-    for name in ("input_layernorm", "post_attention_layernorm", "self_attn.q_norm", "self_attn.k_norm"):
+    # Both pre-norms absorb their AWQ scale; the router is compensated with
+    # the inverse column scale, and the head-dim Q/K norms are never sources.
+    for name in ("input_layernorm", "post_attention_layernorm"):
+        assert not torch.equal(layer.get_submodule(name).weight, originals[name + ".weight"])
+    for name in ("self_attn.q_norm", "self_attn.k_norm"):
         torch.testing.assert_close(layer.get_submodule(name).weight, originals[name + ".weight"], rtol=0, atol=0)
     if hasattr(layer.mlp, "gate"):
-        torch.testing.assert_close(layer.mlp.gate.weight, originals["mlp.gate.weight"], rtol=0, atol=0)
+        assert not torch.equal(layer.mlp.gate.weight, originals["mlp.gate.weight"])
     after = {key: value.clone() for key, value in layer.state_dict().items()}
     processor._quantize_layer(1, state)
     for key, value in layer.state_dict().items():
@@ -444,7 +516,7 @@ def test_plain_awq_real_consumer_quantizes_every_linear_and_retries(layout, toke
 
 
 @pytest.mark.parametrize("moe", [False, "hybrid", "moe_dense_only"])
-def test_public_awq_plain_quantization_pack_media_and_safetensors_reload(tokenizer_assets, moe):
+def test_public_awq_scaled_quantization_pack_media_and_safetensors_reload(tokenizer_assets, moe):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.models.ports.interns1.tokenization_interns1 import InternS1Tokenizer
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -499,3 +571,59 @@ def test_public_awq_plain_quantization_pack_media_and_safetensors_reload(tokeniz
         torch.testing.assert_close(again.model.state_dict()[key], value, rtol=0, atol=0)
     with torch.inference_mode():
         torch.testing.assert_close(again.model(**restored_inputs, use_cache=False).logits, expected, atol=2e-4, rtol=2e-3)
+
+
+def test_public_awq_routed_gate_up_searches_moe_root_with_unrouted_experts(tokenizer_assets, monkeypatch):
+    from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel.models.ports.interns1.tokenization_interns1 import InternS1Tokenizer
+    from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+
+    tokenizer = InternS1Tokenizer.from_pretrained(tokenizer_assets)
+    config = tiny_config(True)
+    # Top-1 of eight experts leaves some experts unrouted by the calibration.
+    config.text_config.num_experts = 8
+    config.text_config.num_experts_per_tok = 1
+    config.text_config.mlp_only_layers = [0]
+    config.image_token_id = tokenizer.context_image_token_id
+    torch.manual_seed(1)
+    model = InternS1ForConditionalGeneration._from_config(config).eval()
+    model.save_pretrained(tokenizer_assets, safe_serialization=True)
+    wrapper = GPTQModel.load(str(tokenizer_assets), quantize_config=AWQConfig(device="cpu", group_size=16, offload_to_disk=False),
+                             backend=BACKEND.TORCH, dtype=torch.float16)
+    planner = wrapper.awq_get_modules_for_scaling
+    planned = {}
+
+    def record(layer, input_feat, kwargs):
+        nodes = planner(layer, input_feat, kwargs)
+        planned[id(layer)] = (dict(input_feat), nodes)
+        return nodes
+
+    monkeypatch.setattr(wrapper, "awq_get_modules_for_scaling", record)
+    routed = wrapper.model.model.language_model.layers[1]
+    norm = routed.post_attention_layernorm.weight.detach().clone()
+    experts = [f"mlp.experts.{e}.{leaf}" for e in range(8) for leaf in ("gate_proj", "up_proj")]
+    wrapper.quantize(
+        CalibrationConfig(dataset=["A scientific test about atoms.", "Proteins."], batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
+    features, nodes = planned[id(routed)]
+    assert any(features.get(name) is None or features[name].numel() == 0 for name in experts), "every expert was routed"
+    gate_up = next(node for node in nodes if node["prev_op"] is routed.post_attention_layernorm)
+    # The effective-tree MoE root is captured, so the shared router/expert
+    # input drives the search instead of one expert's routed subset.
+    assert gate_up["_input_feature_name"] == "mlp"
+    # Unrouted experts stay in the fold (they read the same norm) and are
+    # quantized with the fallback after it.
+    assert len(gate_up["layers"]) == len(experts)
+    assert gate_up["_scale_consumers"] == ["mlp.gate"]
+    assert not torch.equal(routed.post_attention_layernorm.weight, norm.to(routed.post_attention_layernorm.weight.dtype))
+    assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 7 + 4 + 24
+    ids = torch.tensor([[1, 17, 18, 19]])
+    with torch.inference_mode():
+        expected = wrapper.model(input_ids=ids, use_cache=False).logits
+    assert torch.isfinite(expected).all()
+    saved = tokenizer_assets / "quantized"
+    wrapper.save_quantized(str(saved))
+    loaded = GPTQModel.load(str(saved), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
+    with torch.inference_mode():
+        torch.testing.assert_close(loaded.model(input_ids=ids, use_cache=False).logits, expected, atol=2e-4, rtol=2e-3)

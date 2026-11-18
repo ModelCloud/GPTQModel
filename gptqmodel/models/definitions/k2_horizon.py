@@ -136,9 +136,49 @@ class K2HorizonQModel(BaseQModel):
     moe_lifecycle_hooks = K2HorizonMoELifecycleHooks()
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Grouped norms, selection-only router biases and SiLU value experts
-        # have not been qualified for scale search and neutral folding.
-        return []
+        """Generic AWQ groups with the attention-input group pinned to its producer.
+
+        * ``q_norm``/``k_norm`` normalize the q/k *outputs*; the tree declares
+          them before the projections, so the planner picked ``q_norm`` as the
+          source for q/k/v/gate. Every attention input projection reads
+          ``input_layernorm`` (a grouped RMSNorm with a per-channel gain).
+        * MoVA value experts and their router read that same tensor. The fold
+          would be exact with them as compensated consumers, but the router is
+          applied as ``F.linear(x, v_router.weight)`` and never executes as a
+          module, so the AWQ replay cannot validate the group. MoVA layers keep
+          q/k/gate on plain quantization; their MLP groups still scale.
+        * ``o_proj`` reads the gated attention output; no producer in the
+          layer can absorb its scale. Without an attention gate the planner
+          fell back to the stale ``input_layernorm`` for it.
+        """
+
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        attention = getattr(module, "self_attn", None)
+        norm = getattr(module, "input_layernorm", None)
+        if attention is None or norm is None:
+            return nodes
+        o_proj = getattr(attention, "o_proj", None)
+        inputs = [
+            getattr(attention, name, None) for name in ("q_proj", "k_proj", "v_proj", "gate_proj")
+        ]
+        inputs = [projection for projection in inputs if projection is not None]
+        mova = getattr(attention, "v_router", None) is not None
+        kept = []
+        for node in nodes:
+            layers = [layer for layer in node.get("layers") or [] if layer is not o_proj]
+            if not layers:
+                continue
+            if len(layers) != len(node.get("layers") or []):
+                node = dict(node, layers=layers)
+                search = node.get("_awq_search_layers")
+                if search is not None:
+                    node["_awq_search_layers"] = [layer for layer in search if layer is not o_proj]
+            if any(layer is projection for layer in layers for projection in inputs):
+                if mova:
+                    continue
+                node = dict(node, prev_op=norm)
+            kept.append(node)
+        return kept
 
     module_tree = [
         "model",

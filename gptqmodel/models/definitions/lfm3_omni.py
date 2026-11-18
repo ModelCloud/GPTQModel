@@ -132,11 +132,6 @@ class LFM3OmniQModel(LFM3QModel):
             tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
         )
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Hybrid gated convolution, head gates and sandwich norms have not been
-        # qualified for AWQ folding/search. Quantize the declared linears plainly.
-        return []
-
     def preprocess_dataset(self, sample: Dict) -> Dict:
         return sample
 

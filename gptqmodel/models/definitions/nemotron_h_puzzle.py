@@ -44,8 +44,44 @@ class NemotronHPuzzleQModel(NemotronHQModel):
     ]
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Gated state-space mixing and latent/shared routed branches are not fold-qualified.
-        return []
+        """Generic AWQ groups minus the folds that do not follow the mixer data flow.
+
+        The flat ``mixer`` declaration lets the planner fall back to the block
+        ``norm`` for every later projection. Only the projections that read
+        ``norm`` directly may receive its scale:
+
+        * ``o_proj`` reads the attention output and ``out_proj`` reads the
+          gated-RMSNorm SSM output, never the block norm.
+        * With ``moe_latent_size`` the routed experts read the
+          ``fc1_latent_proj`` output (a different, narrower tensor).
+        * ``fc2_latent_proj`` reads the router-weighted sum of every routed
+          expert, so no single expert ``down_proj`` can absorb its scale.
+
+        What remains is ``norm -> q/k/v``, ``norm -> in_proj`` and
+        ``norm -> [fc1_latent_proj | routed up_proj] + shared up_proj`` with the
+        sigmoid router compensated.
+        """
+
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        mixer = getattr(module, "mixer", None)
+        if mixer is None:
+            return nodes
+        excluded = [getattr(mixer, name, None) for name in ("o_proj", "out_proj", "fc2_latent_proj")]
+        if isinstance(getattr(mixer, "fc1_latent_proj", None), torch.nn.Linear):
+            excluded.extend(expert.up_proj for expert in mixer.experts)
+        excluded = {id(target) for target in excluded if target is not None}
+        kept = []
+        for node in nodes:
+            layers = [layer for layer in node.get("layers") or [] if id(layer) not in excluded]
+            if not layers:
+                continue
+            if len(layers) != len(node.get("layers") or []):
+                node = dict(node, layers=layers)
+                search = node.get("_awq_search_layers")
+                if search is not None:
+                    node["_awq_search_layers"] = [layer for layer in search if id(layer) not in excluded]
+            kept.append(node)
+        return kept
 
     @classmethod
     def awq_input_feature_aggregation(cls, module_name):

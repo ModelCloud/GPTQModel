@@ -19,6 +19,10 @@ class XverseQModel(LlamaQModel):
     )
     dynamic_expert_index = "num_experts"
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
+    # `mlp:moe` exists only in the effective tree. Resolve the AWQ capture policy
+    # against it so the routed root input is captured: the expert gate/up group
+    # then replays the whole MoE block, which tolerates unrouted experts.
+    _MODULE_TREE_RUNTIME_METHODS = LlamaQModel._MODULE_TREE_RUNTIME_METHODS | {"awq_input_feature_aggregation"}
 
     @classmethod
     def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
@@ -38,16 +42,6 @@ class XverseQModel(LlamaQModel):
                 experts["shared_experts"] = ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down")
             blocks["mlp:moe"] = experts
         return tree
-
-    def awq_input_feature_aggregation(self, module_name):
-        # `mlp:moe` exists only in the effective tree. Resolve the policy against
-        # it so AWQ captures the routed root input: the expert gate/up group then
-        # replays the whole MoE block, which tolerates experts left unrouted.
-        tree = getattr(self, "effective_module_tree", None)
-        if tree is None:
-            return super().awq_input_feature_aggregation(module_name)
-        with type(self)._module_tree_context(tree):
-            return super().awq_input_feature_aggregation(module_name)
 
     def pre_quantize(self, module):
         if self.model.config.pretraining_tp > 1:

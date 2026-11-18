@@ -374,7 +374,7 @@ def test_embeddings_hidden_states_loss_and_invalid_mask_retry():
 
 @pytest.mark.parametrize("kv_heads,latent,bias,offload", [(1, None, False, False), (2, 32, False, True),
                                                         (4, 32, True, False)])
-def test_public_plain_awq_pack_infer_and_two_reload_cycles(tmp_path, kv_heads, latent, bias, offload):
+def test_public_awq_scaled_pack_infer_and_two_reload_cycles(tmp_path, kv_heads, latent, bias, offload):
     native = tmp_path / "native"
     native.mkdir()
     config = tiny_config(hidden_size=64, num_key_value_heads=kv_heads, head_dim=16, mamba_num_heads=4,
@@ -411,8 +411,9 @@ def test_public_plain_awq_pack_infer_and_two_reload_cycles(tmp_path, kv_heads, l
     with torch.no_grad():
         expected = wrapped.model(TOKENS, use_cache=False).logits
     assert expected.isfinite().all()
-    for layer in wrapped.model.model.layers:
-        assert wrapped.awq_get_modules_for_scaling(layer, {}, {}) == []
+    # Block norms absorb the searched scales; the MoE router is compensated.
+    folded = {key for key in dense if key.endswith(".norm.weight") and ".mixer." not in key}
+    folded |= {key for key in dense if key.endswith("mixer.gate.weight")}
     for cycle in range(2):
         out = tmp_path / f"awq{cycle}"
         wrapped.save(str(out))
@@ -421,8 +422,14 @@ def test_public_plain_awq_pack_infer_and_two_reload_cycles(tmp_path, kv_heads, l
         assert files
         disk_state = {k: v for file in files for k, v in load_file(file).items()}
         for key, value in dense.items():
-            if not any(key.startswith(name + ".") for name in packed):
+            if key not in folded and not any(key.startswith(name + ".") for name in packed):
                 torch.testing.assert_close(disk_state[key], value, atol=0, rtol=0)
+        assert any(not torch.equal(disk_state[key], dense[key]) for key in folded)
+        router = "model.layers.1.mixer.gate.weight"
+        norm = "model.layers.1.norm.weight"
+        # Router columns are multiplied by exactly what its input norm was divided by.
+        torch.testing.assert_close((disk_state[router] * disk_state[norm]).float(),
+                                   (dense[router] * dense[norm]).float(), rtol=2e-3, atol=2e-3)
         wrapped = GPTQModel.load(str(out), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
         loaded_state = wrapped.model.state_dict()
         assert set(disk_state) - set(loaded_state) == {mtp_key}
