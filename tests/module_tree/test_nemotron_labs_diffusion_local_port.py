@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-
 from awq_neutrality import assert_awq_folds_neutral
 
 from gptqmodel.models.auto import MODEL_MAP

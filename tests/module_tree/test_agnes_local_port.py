@@ -189,7 +189,7 @@ def test_awq_scaled_quantization_covers_every_declared_linear(parallel, monkeypa
             if isinstance(target, nn.Linear):
                 handles.append(target.register_forward_pre_hook(record(index, name)))
     try:
-        reference = model(input_ids=ids, use_cache=False).logits
+        model(input_ids=ids, use_cache=False).logits
     finally:
         for handle in handles:
             handle.remove()
