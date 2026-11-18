@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Dict
 
 import torch
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 from transformers.masking_utils import create_causal_mask
 
 from ...utils.calibration import batched_conversations
@@ -16,6 +16,7 @@ from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ._vlm_calibration import (
     finalize_conversation_batches,
     pop_conversation_calibration_options,
@@ -26,7 +27,11 @@ from ._vlm_calibration import (
 class LFM2VLQModel(BaseQModel):
     fusable = FusableConfig("lfm2_vl").merge(LlamaFusableConfig())
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+    )
     HF_CONVERSION_MAP_REVERSED = (
         # LFM2-VL mounts `Siglip2VisionModel` directly at `model.vision_tower`.
         # Runtime shell paths therefore expose `model.vision_tower.*`, while
@@ -116,7 +121,9 @@ class LFM2VLQModel(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)
+        # BaseQModel already loaded the vendored processor with the normalized
+        # tokenizer through this definition's loader.
+        return self.processor
 
     @classmethod
     def prepare_inputs_for_conversations(

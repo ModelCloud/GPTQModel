@@ -5,6 +5,7 @@
 """Native Transformers ``MiMoV2FlashForCausalLM`` (MiMo-V2-Flash)."""
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -15,6 +16,11 @@ class MimoV2FlashQModel(BaseQModel):
     MiMo-V2-Flash configs report `model_type == "mimo_v2_flash"`, which had no
     definition and fell back to `BaseQModel` ("no explicit module_tree").
     """
+
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
 
     # Transformers 5.22 fuses the checkpoint's per-expert projections into 3-D
     # parameters; Defuser has no registry entry for this model type, so the

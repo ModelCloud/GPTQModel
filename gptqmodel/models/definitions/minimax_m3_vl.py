@@ -6,13 +6,14 @@
 from typing import Dict, Optional
 
 from PIL import Image
-from transformers import AutoModelForImageTextToText, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 
@@ -20,7 +21,10 @@ from ._vlm_calibration import prepare_vlm_calibration_dataset
 class MiniMaxM3VLGPTQ(BaseQModel):
     fusable = FusableConfig("minimax_m3_vl").merge(LlamaFusableConfig(), profiles=("qkv",))
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+    )
 
     # The language tower consumes image embeddings at inference time, so the
     # calibration stream must include image-conditioned activations as well.
@@ -92,22 +96,29 @@ class MiniMaxM3VLGPTQ(BaseQModel):
         # The checkpoint advertises a remote `processing_minimax.MiniMaxVLProcessor`
         # that requires trust_remote_code; enabling that globally also swaps in a
         # remote config class that cannot rebuild the model. Build the equivalent
-        # native processor from the local image/tokenizer/video components instead.
-        from transformers import (
-            AutoImageProcessor,
-            AutoTokenizer,
-            AutoVideoProcessor,
+        # vendored processor from the local image/tokenizer/video components instead.
+        from ..ports.native.minimax_m3_vl.image_processing_minimax_m3_vl import (
+            MiniMaxM3VLImageProcessor,
         )
-        from transformers.models.minimax_m3_vl.processing_minimax_m3_vl import (
+        from ..ports.native.minimax_m3_vl.processing_minimax_m3_vl import (
             MiniMaxM3VLProcessor,
         )
+        from ..ports.native.minimax_m3_vl.video_processing_minimax_m3_vl import (
+            MiniMaxM3VLVideoProcessor,
+        )
 
+        tokenizer = getattr(self, "tokenizer", None)
+        tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
+        if tokenizer is None:
+            from ..ports.native.auto import NativeTokenizer
+
+            tokenizer = NativeTokenizer.from_pretrained(self.model_local_path)
         return MiniMaxM3VLProcessor(
-            image_processor=AutoImageProcessor.from_pretrained(
+            image_processor=MiniMaxM3VLImageProcessor.from_pretrained(
                 self.model_local_path
             ),
-            tokenizer=AutoTokenizer.from_pretrained(self.model_local_path),
-            video_processor=AutoVideoProcessor.from_pretrained(
+            tokenizer=tokenizer,
+            video_processor=MiniMaxM3VLVideoProcessor.from_pretrained(
                 self.model_local_path
             ),
         )

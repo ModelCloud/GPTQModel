@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from ...utils.exl3_router_candidates import bind_sigmoid_grouped_router_recovery
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -20,7 +21,7 @@ class _SeparateDots3Experts(nn.ModuleList):
     """
 
     def __init__(self, config):
-        from transformers.models.dots3_note.modeling_dots3_note import Dots3NoteTextMLP
+        from ..ports.native.dots3_note.modeling_dots3_note import Dots3NoteTextMLP
 
         super().__init__([
             Dots3NoteTextMLP(config, intermediate_size=config.moe_intermediate_size)
@@ -41,7 +42,43 @@ class _SeparateDots3Experts(nn.ModuleList):
         return output
 
 
+class Dots3NoteTextForCausalLM:
+    """Load the text-only ``Dots3NoteForCausalLM`` shell from a composite checkpoint.
+
+    Transformers' ``AutoModelForCausalLM`` swaps a composite ``dots3_note``
+    config for its ``text_config`` because the causal-LM class is declared on
+    the text config. Do the same here, resolving only vendored classes.
+    """
+
+    @staticmethod
+    def _text_config(config):
+        if getattr(config, "model_type", None) != "dots3_note":
+            return config
+        text_config = config.get_text_config()
+        quantization_config = getattr(config, "quantization_config", None)
+        if quantization_config is not None:
+            text_config.quantization_config = quantization_config
+        return text_config
+
+    @classmethod
+    def _from_config(cls, config, **kwargs):
+        from ..ports.native.auto import NativeForCausalLM
+
+        return NativeForCausalLM._from_config(cls._text_config(config), **kwargs)
+
+    @classmethod
+    def from_pretrained(cls, model_id_or_path, *, config, **kwargs):
+        from ..ports.native.auto import NativeForCausalLM
+
+        return NativeForCausalLM.from_pretrained(model_id_or_path, config=cls._text_config(config), **kwargs)
+
+
 class Dots3NoteQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.definitions.dots3_note.Dots3NoteTextForCausalLM",
+    )
+
     layer_modules_strict = False  # decoder layer 0 is dense
     dynamic_expert_index = "n_routed_experts"
     pre_lm_head_norm_module = "model.norm"
@@ -76,7 +113,7 @@ class Dots3NoteQModel(BaseQModel):
 
     def before_model_load(self, model_local_path: str, load_quantized_model: bool):
         del model_local_path, load_quantized_model
-        from transformers.models.dots3_note import modeling_dots3_note
+        from ..ports.native.dots3_note import modeling_dots3_note
 
         modeling_dots3_note.Dots3NoteTextExperts = _SeparateDots3Experts
         pretrained = modeling_dots3_note.Dots3NotePreTrainedModel

@@ -5,7 +5,7 @@
 
 from typing import Any, Dict
 
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.looper_helpers import normalize_device_like
 from ...utils.model import MODALITY, move_to
@@ -13,7 +13,27 @@ from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ._vlm_calibration import prepare_vlm_calibration_dataset
+
+
+class HunYuanVLPilProcessor:
+    """Vendored Hunyuan-VL processor with the PIL image backend.
+
+    The definition has always calibrated with ``backend="pil"`` image
+    preprocessing; keep that while resolving every component to vendored code.
+    """
+
+    @classmethod
+    def from_pretrained(cls, model_id_or_path, **kwargs):
+        from ..ports.native.auto import NativeProcessor
+        from ..ports.native.hunyuan_vl.image_processing_pil_hunyuan_vl import HunYuanVLImageProcessorPil
+
+        processor = NativeProcessor.from_pretrained(model_id_or_path, **kwargs)
+        kwargs.pop("config", None)
+        kwargs.pop("tokenizer", None)
+        processor.image_processor = HunYuanVLImageProcessorPil.from_pretrained(model_id_or_path, **kwargs)
+        return processor
 
 
 class HunYuanVLQModel(BaseQModel):
@@ -21,7 +41,12 @@ class HunYuanVLQModel(BaseQModel):
     fusable = FusableConfig("hunyuan_vl").merge(LlamaFusableConfig())
 
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.definitions.hunyuan_vl.HunYuanVLPilProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
 
     require_load_processor = True
 
@@ -101,11 +126,9 @@ class HunYuanVLQModel(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(
-            self.model_local_path,
-            trust_remote_code=False,
-            backend="pil",
-        )
+        # BaseQModel already loaded the vendored (PIL-backend) processor with the
+        # normalized tokenizer through this definition's loader.
+        return self.processor
 
     @classmethod
     def prepare_inputs_for_conversations(
@@ -137,4 +160,4 @@ class HunYuanVLQModel(BaseQModel):
         )
 
 
-__all__ = ["HunYuanVLQModel"]
+__all__ = ["HunYuanVLPilProcessor", "HunYuanVLQModel"]
