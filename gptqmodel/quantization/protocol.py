@@ -19,6 +19,10 @@ from .config import (
     GGUFConfig,
     QuantizeConfig,
     SmoothMAD,
+    _gguf_bits_from_components,
+    _gguf_bits_spec_from_format_value,
+    _normalize_gguf_config,
+    _normalize_gguf_public_format,
     _require_bool_value,
 )
 from .norm_tuning import norm_type_of
@@ -1328,20 +1332,53 @@ def _compile_supported_smoother(prepare: tuple[OperationSpec, ...]) -> Optional[
 
 
 def _resolve_gguf_public_format(bits: Any, export: Optional[ExportSpec]) -> Optional[str]:
-    variant = export.variant if export is not None else None
+    """Resolve a protocol GGUF ``export.variant`` without dropping its width.
 
+    ``variant`` may be a full subtype (``q4_k_m``, as documented) or the
+    width-less public token (``q_k_m``). Both normalize through the same alias
+    path as ``bits`` so a consistent pair compiles and a genuine width conflict
+    is rejected instead of silently adopting one side (issue #5106).
+    """
+
+    variant = export.variant if export is not None else None
+    bits_width, _, _ = _normalize_gguf_config(bits, None)
+
+    variant_public = _normalize_gguf_public_format(variant)
+    bits_spec = _gguf_bits_spec_from_format_value(bits)
+    variant_bits_spec = _gguf_bits_spec_from_format_value(variant)
+
+    def reject_conflict() -> None:
+        raise ValueError(
+            "GGUF protocol uses incompatible bits/export variant combination: "
+            f"bits={bits}, export.variant={variant}."
+        )
+
+    if variant_bits_spec is not None and variant_bits_spec.bits != bits_width:
+        reject_conflict()
+
+    # When `bits` itself names a full subtype, the variant must resolve to that
+    # same subtype, not merely the same width (for example q4_k_m vs q4_0).
+    if bits_spec is not None and variant_public is not None:
+        variant_effective = variant_bits_spec
+        if variant_effective is None:
+            try:
+                variant_effective = _gguf_bits_from_components(bits_width, variant_public)
+            except ValueError:
+                reject_conflict()
+        if variant_effective != bits_spec:
+            reject_conflict()
+
+    if variant_public is not None:
+        return variant_public
+
+    if isinstance(bits, GGUFBits):
+        return bits.to_public_format()
     if isinstance(bits, str):
         normalized = bits.strip().lower().replace("-", "_")
         if normalized and not normalized.isdigit():
-            bits_spec = GGUFBits.from_string(normalized)
-            public_format = bits_spec.to_public_format()
-            if variant is not None and variant != public_format:
-                raise ValueError(
-                    f"GGUF protocol uses incompatible bits/export variant combination: bits={bits}, export.variant={variant}."
-                )
-            return variant or public_format
+            return GGUFBits.from_string(normalized).to_public_format()
 
-    return variant
+    return None
 
 
 def _is_global_match(matchers: tuple[MatchSpec, ...]) -> bool:

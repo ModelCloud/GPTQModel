@@ -889,6 +889,38 @@ def _normalize_gguf_public_format(value: Any) -> Optional[str]:
     )
 
 
+def _gguf_bits_spec_from_format_value(value: Any) -> Optional[GGUFBits]:
+    """Return the width-bearing spec when ``value`` names a full GGUF alias.
+
+    A full subtype (``q8_0``, ``q4_k_m``, ``mxfp4``) carries its own bit width.
+    Projecting it to the width-less public token before comparing it with an
+    explicit ``bits`` discarded that width and let a conflict resolve to the
+    wrong subtype. Callers use this helper to compare the requested widths
+    first; width-less public tokens (``q_0``, ``q_k``) return ``None``.
+    """
+
+    if isinstance(value, GGUFBits):
+        return value
+    if isinstance(value, FORMAT):
+        value = value.value
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower().replace("-", "_")
+    if normalized in _GGUF_BITS_ALIAS_INFO:
+        return GGUFBits.from_alias(normalized)
+    return None
+
+
+def _gguf_requested_value_label(value: Any) -> str:
+    """Render a requested GGUF bits/format value for a rejection message."""
+
+    if isinstance(value, GGUFBits):
+        return value.to_string()
+    if isinstance(value, FORMAT):
+        return value.value
+    return str(value)
+
+
 def _default_gguf_public_format(bits: int) -> str:
     """Return the default GGUF subtype for a supported bit width."""
 
@@ -985,6 +1017,18 @@ def _normalize_gguf_config(
             )
         )
 
+    # A full subtype such as ``q8_0`` names its own width. Compare it with the
+    # explicit ``bits`` before projecting it to the width-less public token;
+    # otherwise the projection erases the 8 and the subtype is rebuilt from the
+    # conflicting width (issue #5106).
+    format_bits_spec = _gguf_bits_spec_from_format_value(format_value)
+    if format_bits_spec is not None and format_bits_spec.bits != normalized_bits:
+        raise ValueError(
+            "Unsupported GGUF combination: "
+            f"bits={_gguf_requested_value_label(bits)}, "
+            f"format={_gguf_requested_value_label(format_value)}."
+        )
+
     normalized_format = _normalize_gguf_public_format(format_value)
     if normalized_format is None:
         if bits_spec_from_bits is not None:
@@ -997,7 +1041,9 @@ def _normalize_gguf_config(
         bits_spec = _gguf_bits_from_components(normalized_bits, normalized_format)
         if bits_spec_from_bits is not None and bits_spec_from_bits != bits_spec:
             raise ValueError(
-                f"GGUFConfig: incompatible GGUF bits/format combination: bits={bits}, format={format_value}."
+                "Unsupported GGUF combination: "
+                f"bits={_gguf_requested_value_label(bits)}, "
+                f"format={_gguf_requested_value_label(format_value)}."
             )
 
     return normalized_bits, normalized_format, bits_spec

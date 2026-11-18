@@ -48,6 +48,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Native fusion inference on CPU, CUDA and ROCm](fusion-device-validation.md)
 - [Fusion model qualification](fusion-model-coverage.md)
 - [Post-quantization fusion planner](fusion-planner.md)
+- [GGUF bits and subtype resolution](gguf-config-resolution.md)
 - [GGUF checkpoint load policy](gguf-load-policy.md)
 - [GGUF dense fallback precision](gguf-dense-fallback-precision.md)
 - [GGUF packed scale overflow cache](gguf-k-scale-overflow-cache.md)
