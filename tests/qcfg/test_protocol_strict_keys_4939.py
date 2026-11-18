@@ -18,7 +18,7 @@ one of these paths used to "succeed" with a config that differed from the plan.
 
 import pytest
 
-from gptqmodel.quantization.config import FORMAT, GGUFConfig, GPTQConfig
+from gptqmodel.quantization.config import FORMAT, GGUFConfig, GPTQConfig, SmoothMAD
 from gptqmodel.quantization.protocol import (
     Rule,
     TargetSpec,
@@ -354,3 +354,73 @@ def test_export_options_survive_plan_compilation_only():
     plan = compile_protocol_yaml_text(_protocol(target_extra="export: {format: gptq, options: {pack_dtype: int16}}"))
     export = plan.stages[0].rules[0].weight.export
     assert export.options == {"pack_dtype": "int16"}
+
+
+# --- nested smoother payload keys (#5107) ---------------------------------
+#
+# ``_compile_supported_smoother`` read only ``k`` or ``smooth.type``/``k``
+# with ``.get(...)``, so ``kk``/``smoth``/``typ``/a missing ``type`` compiled
+# to the default ``SmoothMAD(k=2.75)``, ``group_size_threshold`` was dropped,
+# and ``k`` next to a ``smooth`` payload silently ignored one of them.
+
+
+def _gguf_with_prepare(prepare: str):
+    return compile_protocol_yaml_to_quantize_config(
+        _protocol(quantize="method: gguf, bits: 4", target_extra=f"prepare: [{prepare}]")
+    )
+
+
+def test_smooth_mad_forwards_k_and_group_size_threshold():
+    cfg = _gguf_with_prepare(
+        "{method: smooth.mad, k: 3.0, group_size_threshold: 64}"
+    )
+    assert isinstance(cfg.smoother.smooth, SmoothMAD)
+    assert cfg.smoother.smooth.k == pytest.approx(3.0)
+    assert cfg.smoother.smooth.group_size_threshold == 64
+
+
+@pytest.mark.parametrize(
+    ("prepare", "bad_key", "hint"),
+    [
+        ("{method: smooth.mad, kk: 3.0}", "kk", "k"),
+        ("{method: smoother, smooth: {type: mad, kk: 1.0}}", "kk", "k"),
+        ("{method: smoother, smooth: {typ: percentile, percentile: 99.0}}", "typ", "type"),
+        ("{method: smoother, smoth: {type: mad, k: 1.0}}", "smoth", "smooth"),
+    ],
+)
+def test_misspelled_smoother_protocol_keys_are_rejected(prepare, bad_key, hint):
+    with pytest.raises((TypeError, ValueError)) as excinfo:
+        _gguf_with_prepare(prepare)
+
+    message = str(excinfo.value)
+    assert f"`{bad_key}`" in message, message
+    assert f"did you mean `{hint}`?" in message, message
+
+
+def test_smoother_payload_without_type_is_rejected():
+    with pytest.raises((TypeError, ValueError), match="type"):
+        _gguf_with_prepare("{method: smoother, smooth: {k: 1.0}}")
+
+
+def test_ambiguous_k_and_smooth_payload_is_rejected():
+    with pytest.raises((TypeError, ValueError)) as excinfo:
+        _gguf_with_prepare(
+            "{method: smooth.mad, k: 1.5, smooth: {type: percentile}}"
+        )
+
+    assert "k" in str(excinfo.value)
+    assert "smooth" in str(excinfo.value)
+
+
+def test_smoother_payload_forwards_k_and_group_size_threshold():
+    cfg = _gguf_with_prepare(
+        "{method: smoother, smooth: {type: mad, k: 1.0, group_size_threshold: 64}}"
+    )
+    assert cfg.smoother.smooth.k == pytest.approx(1.0)
+    assert cfg.smoother.smooth.group_size_threshold == 64
+
+
+def test_default_smoother_still_uses_the_dataclass_default():
+    for prepare in ("{method: smoother}", "{method: smooth.mad}"):
+        cfg = _gguf_with_prepare(prepare)
+        assert cfg.smoother.smooth.k == pytest.approx(SmoothMAD().k)

@@ -23,7 +23,10 @@ from .config import (
     _gguf_bits_spec_from_format_value,
     _normalize_gguf_config,
     _normalize_gguf_public_format,
+    _reject_unknown_payload_keys,
     _require_bool_value,
+    _smooth_method_default,
+    _validate_smooth_method_payload,
 )
 from .norm_tuning import norm_type_of
 
@@ -1321,14 +1324,58 @@ def _compile_supported_smoother(prepare: tuple[OperationSpec, ...]) -> Optional[
         raise NotImplementedError(
             "Initial GGUF compiler supports only `smooth.mad` in `weight.prepare`."
         )
-    k = op.args.get("k")
+
+    if "k" in op.args and "smooth" in op.args:
+        # Picking one silently would ignore the other spelling.
+        raise ValueError(
+            "Quantization protocol: `weight.prepare` cannot set both `k` and a "
+            "`smooth` payload; use `{method: smooth.mad, k: ...}` or "
+            "`{method: smoother, smooth: {type: mad, k: ...}}`."
+        )
+
+    if op.method == "smooth.mad":
+        _reject_unknown_payload_keys(
+            "Quantization protocol",
+            "`weight.prepare.smooth.mad` argument",
+            op.args,
+            ("k", "group_size_threshold"),
+        )
+        k = op.args.get("k")
+        if k is None:
+            k = _smooth_method_default(SmoothMAD, "k")
+        threshold = op.args.get("group_size_threshold")
+        if threshold is None:
+            threshold = _smooth_method_default(SmoothMAD, "group_size_threshold")
+        return SmoothMAD(k=float(k), group_size_threshold=int(threshold))
+
+    _reject_unknown_payload_keys(
+        "Quantization protocol",
+        "`weight.prepare.smoother` argument",
+        op.args,
+        ("smooth",),
+    )
+    smooth_payload = op.args.get("smooth")
+    if smooth_payload is None:
+        return SmoothMAD()
+    if not isinstance(smooth_payload, Mapping):
+        raise TypeError(
+            "Quantization protocol: `weight.prepare.smoother` requires a `smooth` "
+            "mapping such as `{type: mad, k: 2.75}`."
+        )
+
+    method_type = _validate_smooth_method_payload(
+        smooth_payload, owner="Quantization protocol", allow_name=False
+    )
+    if method_type != "mad":
+        raise NotImplementedError("Initial GGUF compiler supports only MAD smoothers.")
+
+    k = smooth_payload.get("k")
     if k is None:
-        smooth_payload = op.args.get("smooth")
-        if isinstance(smooth_payload, Mapping):
-            if smooth_payload.get("type") not in {None, "mad"}:
-                raise NotImplementedError("Initial GGUF compiler supports only MAD smoothers.")
-            k = smooth_payload.get("k")
-    return SmoothMAD(k=2.75 if k is None else float(k))
+        k = _smooth_method_default(SmoothMAD, "k")
+    threshold = smooth_payload.get("group_size_threshold")
+    if threshold is None:
+        threshold = _smooth_method_default(SmoothMAD, "group_size_threshold")
+    return SmoothMAD(k=float(k), group_size_threshold=int(threshold))
 
 
 def _resolve_gguf_public_format(bits: Any, export: Optional[ExportSpec]) -> Optional[str]:
