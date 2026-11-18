@@ -12,7 +12,8 @@ import torch
 from torch import nn
 from transformers.masking_utils import create_bidirectional_mask
 from transformers.modeling_outputs import BaseModelOutputWithPooling
-from transformers.models.idefics2.modeling_idefics2 import Idefics2EncoderLayer
+
+from ..native.idefics2.modeling_idefics2 import Idefics2EncoderLayer
 
 
 class VisionEmbeddings(nn.Module):

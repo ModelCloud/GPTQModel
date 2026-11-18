@@ -12,8 +12,9 @@ import math
 
 from torch import nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaForCausalLM, LlamaModel
 from transformers.utils import can_return_tuple
+
+from ..native.llama.modeling_llama import LlamaDecoderLayer, LlamaForCausalLM, LlamaModel
 
 
 class MiniCPMDecoderLayer(LlamaDecoderLayer):

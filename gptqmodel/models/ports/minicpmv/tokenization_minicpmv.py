@@ -11,9 +11,10 @@ normalization. This is class ownership, not a custom-class recovery heuristic.
 import json
 from pathlib import Path
 
-from transformers import LlamaTokenizer, TokenizersBackend
+from transformers import TokenizersBackend
 from transformers.utils import cached_file
 
+from ..native.llama.tokenization_llama import LlamaTokenizer
 from .configuration_minicpm import MiniCPMVConfig
 
 
