@@ -312,11 +312,3 @@ def test_a_compile_capable_opt_out_must_record_its_reason():
     assert _Harness(_SilentOptOut())._kernels_support_compile() is False
     assert compile_policy_is_justified(_DocumentedOptOut) is True
     assert _Harness(_DocumentedOptOut())._kernels_support_compile() is False
-
-def test_mlx_fp8_does_not_inherit_the_torch_fp8_opt_in():
-    """The MPS holder runs native Metal kernels that were never traced (#4739)."""
-
-    from gptqmodel.nn_modules.qlinear.mlx import FP8MlxQuantLinear
-
-    assert issubclass(FP8MlxQuantLinear, TorchFP8Linear)
-    assert FP8MlxQuantLinear.SUPPORTS_COMPILE is False

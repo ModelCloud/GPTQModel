@@ -1,7 +1,7 @@
 # Fusion kernel inventory
 
 The native fusion adapters qualify 23 exact GPTQ/AWQ kernel classes on this host.
-This inventory accounts for all 57 registry classes and the three specialized
+This inventory accounts for all 56 registry classes and the three specialized
 EXL3/FP4 loaders. **Other quantization formats remain ineligible for projection
 fusion**; their presence in this inventory is not a numerical qualification.
 
@@ -35,7 +35,6 @@ not counted as validated. A registry declaration alone is not an executed test.
 | `BitsAndBytesLinear` | Other format | Other format | Other format |
 | `BitsAndBytesMlxQuantLinear` | — | — | — |
 | `ExllamaV2Linear` | — | Fusion tested | — |
-| `FP8MlxQuantLinear` | — | — | — |
 | `GGUFCppKernel` | Other format | — | — |
 | `GGUFCudaKernel` | — | Other format | — |
 | `GGUFMlxQuantLinear` | — | — | — |
