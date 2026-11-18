@@ -3,11 +3,13 @@
 """Regression tests for #4313: AWQ releases its allocator cache per layer on ROCm.
 
 AWQ's clip search allocates a ~256 MiB scratch buffer per clip-eligible module.
-On ROCm the default ``max_split_size_mb:256`` prevents the caching allocator
-from reusing a freed 256 MiB block for the next module's slightly smaller
-request, so reserved VRAM grew by roughly 1 GiB per decoder layer. ``apply_clip``
-is the once-per-layer boundary where those scratch tensors have already been
-released, so it must hand the unused cache back to the driver exactly once.
+While ROCm also pinned ``max_split_size_mb:256`` the caching allocator could not
+reuse a freed 256 MiB block for the next module's slightly smaller request, so
+reserved VRAM grew by roughly 1 GiB per decoder layer. ``apply_clip`` is the
+once-per-layer boundary where those scratch tensors have already been released,
+so it must hand the unused cache back to the driver exactly once. The default
+no longer pins the cap (#5072), but the release stays: it is also what bounds
+the cache for a caller who sets one, and it costs ROCm nothing.
 """
 
 from __future__ import annotations
