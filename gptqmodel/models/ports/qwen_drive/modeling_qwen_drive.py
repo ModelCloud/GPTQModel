@@ -15,8 +15,12 @@ from .configuration_qwen_drive import QwenDriveConfig
 class QwenDriveForConditionalGeneration(PreTrainedModel, GenerationMixin):
     config_class = QwenDriveConfig
     base_model_prefix = "vlm"
-    _supports_sdpa = True
-    _no_split_modules = ["Qwen3_5DecoderLayer", "Qwen3_5VisionBlock"]
+    # The wrapper adds only the ``vlm`` prefix: mirror the native capabilities.
+    _supports_sdpa = Qwen3_5ForConditionalGeneration._supports_sdpa
+    _supports_flash_attn = Qwen3_5ForConditionalGeneration._supports_flash_attn
+    _is_stateful = Qwen3_5ForConditionalGeneration._is_stateful
+    _no_split_modules = Qwen3_5ForConditionalGeneration._no_split_modules
+    input_modalities = Qwen3_5ForConditionalGeneration.input_modalities
     _tied_weights_keys = {"vlm.lm_head.weight": "vlm.model.language_model.embed_tokens.weight"}
     accepts_loss_kwargs = False
 
