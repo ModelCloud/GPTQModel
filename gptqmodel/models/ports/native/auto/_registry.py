@@ -182,6 +182,10 @@ CONFIG = {
         "gptqmodel.models.ports.native.flint.configuration_flint",
         "FlintConfig"
     ],
+    "gemma": [
+        "gptqmodel.models.ports.native.gemma.configuration_gemma",
+        "GemmaConfig"
+    ],
     "gemma2": [
         "gptqmodel.models.ports.native.gemma2.configuration_gemma2",
         "Gemma2Config"
@@ -317,6 +321,14 @@ CONFIG = {
     "glmasr_encoder": [
         "gptqmodel.models.ports.native.glmasr.configuration_glmasr",
         "GlmAsrEncoderConfig"
+    ],
+    "got_ocr2": [
+        "gptqmodel.models.ports.native.got_ocr2.configuration_got_ocr2",
+        "GotOcr2Config"
+    ],
+    "got_ocr2_vision": [
+        "gptqmodel.models.ports.native.got_ocr2.configuration_got_ocr2",
+        "GotOcr2VisionConfig"
     ],
     "gpt2": [
         "gptqmodel.models.ports.native.gpt2.configuration_gpt2",
@@ -866,6 +878,10 @@ CONFIG = {
         "gptqmodel.models.ports.native.starcoder2.configuration_starcoder2",
         "Starcoder2Config"
     ],
+    "timm_wrapper": [
+        "gptqmodel.models.ports.native.timm_wrapper.configuration_timm_wrapper",
+        "TimmWrapperConfig"
+    ],
     "voxtral": [
         "gptqmodel.models.ports.native.voxtral.configuration_voxtral",
         "VoxtralConfig"
@@ -1032,6 +1048,10 @@ MODEL = {
         "gptqmodel.models.ports.native.flint.modeling_flint",
         "FlintModel"
     ],
+    "gemma": [
+        "gptqmodel.models.ports.native.gemma.modeling_gemma",
+        "GemmaModel"
+    ],
     "gemma2": [
         "gptqmodel.models.ports.native.gemma2.modeling_gemma2",
         "Gemma2Model"
@@ -1055,6 +1075,10 @@ MODEL = {
     "gemma3n_text": [
         "gptqmodel.models.ports.native.gemma3n.modeling_gemma3n",
         "Gemma3nTextModel"
+    ],
+    "gemma3n_vision": [
+        "gptqmodel.models.ports.native.timm_wrapper.modeling_timm_wrapper",
+        "TimmWrapperModel"
     ],
     "gemma4": [
         "gptqmodel.models.ports.native.gemma4.modeling_gemma4",
@@ -1155,6 +1179,10 @@ MODEL = {
     "glmasr_encoder": [
         "gptqmodel.models.ports.native.glmasr.modeling_glmasr",
         "GlmAsrEncoder"
+    ],
+    "got_ocr2": [
+        "gptqmodel.models.ports.native.got_ocr2.modeling_got_ocr2",
+        "GotOcr2Model"
     ],
     "gpt2": [
         "gptqmodel.models.ports.native.gpt2.modeling_gpt2",
@@ -1584,6 +1612,10 @@ MODEL = {
         "gptqmodel.models.ports.native.starcoder2.modeling_starcoder2",
         "Starcoder2Model"
     ],
+    "timm_wrapper": [
+        "gptqmodel.models.ports.native.timm_wrapper.modeling_timm_wrapper",
+        "TimmWrapperModel"
+    ],
     "voxtral": [
         "gptqmodel.models.ports.native.voxtral.modeling_voxtral",
         "VoxtralModel"
@@ -1702,6 +1734,10 @@ CAUSAL_LM = {
         "gptqmodel.models.ports.native.flint.modeling_flint",
         "FlintForCausalLM"
     ],
+    "gemma": [
+        "gptqmodel.models.ports.native.gemma.modeling_gemma",
+        "GemmaForCausalLM"
+    ],
     "gemma2": [
         "gptqmodel.models.ports.native.gemma2.modeling_gemma2",
         "Gemma2ForCausalLM"
@@ -1757,6 +1793,10 @@ CAUSAL_LM = {
     "glm_moe_dsa": [
         "gptqmodel.models.ports.native.glm_moe_dsa.modeling_glm_moe_dsa",
         "GlmMoeDsaForCausalLM"
+    ],
+    "got_ocr2": [
+        "gptqmodel.models.ports.native.got_ocr2.modeling_got_ocr2",
+        "GotOcr2ForConditionalGeneration"
     ],
     "gpt2": [
         "gptqmodel.models.ports.native.gpt2.modeling_gpt2",
@@ -2005,5 +2045,1331 @@ CAUSAL_LM = {
     "zamba2": [
         "gptqmodel.models.ports.native.zamba2.modeling_zamba2",
         "Zamba2ForCausalLM"
+    ]
+}
+IMAGE_TEXT_TO_TEXT = {
+    "cohere_compass": [
+        "gptqmodel.models.ports.native.cohere_compass.modeling_cohere_compass",
+        "CohereCompassForConditionalGeneration"
+    ],
+    "deepseek_ocr2": [
+        "gptqmodel.models.ports.native.deepseek_ocr2.modeling_deepseek_ocr2",
+        "DeepseekOcr2ForConditionalGeneration"
+    ],
+    "deepseek_vl": [
+        "gptqmodel.models.ports.native.deepseek_vl.modeling_deepseek_vl",
+        "DeepseekVLForConditionalGeneration"
+    ],
+    "diffusion_gemma": [
+        "gptqmodel.models.ports.native.diffusion_gemma.modeling_diffusion_gemma",
+        "DiffusionGemmaForBlockDiffusion"
+    ],
+    "dots3_note": [
+        "gptqmodel.models.ports.native.dots3_note.modeling_dots3_note",
+        "Dots3NoteForConditionalGeneration"
+    ],
+    "ernie4_5_vl_moe": [
+        "gptqmodel.models.ports.native.ernie4_5_vl_moe.modeling_ernie4_5_vl_moe",
+        "Ernie4_5_VLMoeForConditionalGeneration"
+    ],
+    "exaone4_5": [
+        "gptqmodel.models.ports.native.exaone4_5.modeling_exaone4_5",
+        "Exaone4_5_ForConditionalGeneration"
+    ],
+    "gemma3": [
+        "gptqmodel.models.ports.native.gemma3.modeling_gemma3",
+        "Gemma3ForConditionalGeneration"
+    ],
+    "gemma3n": [
+        "gptqmodel.models.ports.native.gemma3n.modeling_gemma3n",
+        "Gemma3nForConditionalGeneration"
+    ],
+    "gemma4": [
+        "gptqmodel.models.ports.native.gemma4.modeling_gemma4",
+        "Gemma4ForConditionalGeneration"
+    ],
+    "gemma4_unified": [
+        "gptqmodel.models.ports.native.gemma4_unified.modeling_gemma4_unified",
+        "Gemma4UnifiedForConditionalGeneration"
+    ],
+    "glm4v": [
+        "gptqmodel.models.ports.native.glm4v.modeling_glm4v",
+        "Glm4vForConditionalGeneration"
+    ],
+    "glm4v_moe": [
+        "gptqmodel.models.ports.native.glm4v_moe.modeling_glm4v_moe",
+        "Glm4vMoeForConditionalGeneration"
+    ],
+    "glm5_next": [
+        "gptqmodel.models.ports.native.glm5_next.modeling_glm5_next",
+        "Glm5NextForConditionalGeneration"
+    ],
+    "glm_ocr": [
+        "gptqmodel.models.ports.native.glm_ocr.modeling_glm_ocr",
+        "GlmOcrForConditionalGeneration"
+    ],
+    "got_ocr2": [
+        "gptqmodel.models.ports.native.got_ocr2.modeling_got_ocr2",
+        "GotOcr2ForConditionalGeneration"
+    ],
+    "hunyuan_vl": [
+        "gptqmodel.models.ports.native.hunyuan_vl.modeling_hunyuan_vl",
+        "HunYuanVLForConditionalGeneration"
+    ],
+    "idefics2": [
+        "gptqmodel.models.ports.native.idefics2.modeling_idefics2",
+        "Idefics2ForConditionalGeneration"
+    ],
+    "inkling_mm_model": [
+        "gptqmodel.models.ports.native.inkling.modeling_inkling",
+        "InklingForConditionalGeneration"
+    ],
+    "internvl": [
+        "gptqmodel.models.ports.native.internvl.modeling_internvl",
+        "InternVLForConditionalGeneration"
+    ],
+    "kimi_k25": [
+        "gptqmodel.models.ports.native.kimi_k25.modeling_kimi_k25",
+        "Kimi_K25ForConditionalGeneration"
+    ],
+    "lfm2_vl": [
+        "gptqmodel.models.ports.native.lfm2_vl.modeling_lfm2_vl",
+        "Lfm2VlForConditionalGeneration"
+    ],
+    "llama4": [
+        "gptqmodel.models.ports.native.llama4.modeling_llama4",
+        "Llama4ForConditionalGeneration"
+    ],
+    "llava": [
+        "gptqmodel.models.ports.native.llava.modeling_llava",
+        "LlavaForConditionalGeneration"
+    ],
+    "minicpmv4_6": [
+        "gptqmodel.models.ports.native.minicpmv4_6.modeling_minicpmv4_6",
+        "MiniCPMV4_6ForConditionalGeneration"
+    ],
+    "minimax_m3_vl": [
+        "gptqmodel.models.ports.native.minimax_m3_vl.modeling_minimax_m3_vl",
+        "MiniMaxM3SparseForConditionalGeneration"
+    ],
+    "mistral3": [
+        "gptqmodel.models.ports.native.mistral3.modeling_mistral3",
+        "Mistral3ForConditionalGeneration"
+    ],
+    "mllama": [
+        "gptqmodel.models.ports.native.mllama.modeling_mllama",
+        "MllamaForConditionalGeneration"
+    ],
+    "muse_glimmer": [
+        "gptqmodel.models.ports.native.muse_glimmer.modeling_muse_glimmer",
+        "MuseGlimmerForConditionalGeneration"
+    ],
+    "nemotron_h_omni": [
+        "gptqmodel.models.ports.native.nemotron_h_omni.modeling_nemotron_h_omni",
+        "NemotronH_Omni_Reasoning_V3"
+    ],
+    "ovis2": [
+        "gptqmodel.models.ports.native.ovis2.modeling_ovis2",
+        "Ovis2ForConditionalGeneration"
+    ],
+    "qwen2_5_omni_thinker": [
+        "gptqmodel.models.ports.native.qwen2_5_omni.modeling_qwen2_5_omni",
+        "Qwen2_5OmniThinkerForConditionalGeneration"
+    ],
+    "qwen2_5_vl": [
+        "gptqmodel.models.ports.native.qwen2_5_vl.modeling_qwen2_5_vl",
+        "Qwen2_5_VLForConditionalGeneration"
+    ],
+    "qwen2_vl": [
+        "gptqmodel.models.ports.native.qwen2_vl.modeling_qwen2_vl",
+        "Qwen2VLForConditionalGeneration"
+    ],
+    "qwen3_5": [
+        "gptqmodel.models.ports.native.qwen3_5.modeling_qwen3_5",
+        "Qwen3_5ForConditionalGeneration"
+    ],
+    "qwen3_5_moe": [
+        "gptqmodel.models.ports.native.qwen3_5_moe.modeling_qwen3_5_moe",
+        "Qwen3_5MoeForConditionalGeneration"
+    ],
+    "qwen3_omni_moe_thinker": [
+        "gptqmodel.models.ports.native.qwen3_omni_moe.modeling_qwen3_omni_moe",
+        "Qwen3OmniMoeThinkerForConditionalGeneration"
+    ],
+    "qwen3_vl": [
+        "gptqmodel.models.ports.native.qwen3_vl.modeling_qwen3_vl",
+        "Qwen3VLForConditionalGeneration"
+    ],
+    "qwen3_vl_moe": [
+        "gptqmodel.models.ports.native.qwen3_vl_moe.modeling_qwen3_vl_moe",
+        "Qwen3VLMoeForConditionalGeneration"
+    ],
+    "qwen4_exp": [
+        "gptqmodel.models.ports.native.qwen4_exp.modeling_qwen4_exp",
+        "Qwen4ExpForConditionalGeneration"
+    ],
+    "smolvlm": [
+        "gptqmodel.models.ports.native.smolvlm.modeling_smolvlm",
+        "SmolVLMForConditionalGeneration"
+    ]
+}
+MULTIMODAL_LM = {
+    "cohere_compass": [
+        "gptqmodel.models.ports.native.cohere_compass.modeling_cohere_compass",
+        "CohereCompassForConditionalGeneration"
+    ],
+    "deepseek_ocr2": [
+        "gptqmodel.models.ports.native.deepseek_ocr2.modeling_deepseek_ocr2",
+        "DeepseekOcr2ForConditionalGeneration"
+    ],
+    "deepseek_vl": [
+        "gptqmodel.models.ports.native.deepseek_vl.modeling_deepseek_vl",
+        "DeepseekVLForConditionalGeneration"
+    ],
+    "diffusion_gemma": [
+        "gptqmodel.models.ports.native.diffusion_gemma.modeling_diffusion_gemma",
+        "DiffusionGemmaForBlockDiffusion"
+    ],
+    "dots3_note": [
+        "gptqmodel.models.ports.native.dots3_note.modeling_dots3_note",
+        "Dots3NoteForConditionalGeneration"
+    ],
+    "ernie4_5_vl_moe": [
+        "gptqmodel.models.ports.native.ernie4_5_vl_moe.modeling_ernie4_5_vl_moe",
+        "Ernie4_5_VLMoeForConditionalGeneration"
+    ],
+    "exaone4_5": [
+        "gptqmodel.models.ports.native.exaone4_5.modeling_exaone4_5",
+        "Exaone4_5_ForConditionalGeneration"
+    ],
+    "gemma3": [
+        "gptqmodel.models.ports.native.gemma3.modeling_gemma3",
+        "Gemma3ForConditionalGeneration"
+    ],
+    "gemma3n": [
+        "gptqmodel.models.ports.native.gemma3n.modeling_gemma3n",
+        "Gemma3nForConditionalGeneration"
+    ],
+    "gemma4": [
+        "gptqmodel.models.ports.native.gemma4.modeling_gemma4",
+        "Gemma4ForConditionalGeneration"
+    ],
+    "gemma4_unified": [
+        "gptqmodel.models.ports.native.gemma4_unified.modeling_gemma4_unified",
+        "Gemma4UnifiedForConditionalGeneration"
+    ],
+    "glm4v": [
+        "gptqmodel.models.ports.native.glm4v.modeling_glm4v",
+        "Glm4vForConditionalGeneration"
+    ],
+    "glm4v_moe": [
+        "gptqmodel.models.ports.native.glm4v_moe.modeling_glm4v_moe",
+        "Glm4vMoeForConditionalGeneration"
+    ],
+    "glm5_next": [
+        "gptqmodel.models.ports.native.glm5_next.modeling_glm5_next",
+        "Glm5NextForConditionalGeneration"
+    ],
+    "glm_ocr": [
+        "gptqmodel.models.ports.native.glm_ocr.modeling_glm_ocr",
+        "GlmOcrForConditionalGeneration"
+    ],
+    "glmasr": [
+        "gptqmodel.models.ports.native.glmasr.modeling_glmasr",
+        "GlmAsrForConditionalGeneration"
+    ],
+    "got_ocr2": [
+        "gptqmodel.models.ports.native.got_ocr2.modeling_got_ocr2",
+        "GotOcr2ForConditionalGeneration"
+    ],
+    "hunyuan_vl": [
+        "gptqmodel.models.ports.native.hunyuan_vl.modeling_hunyuan_vl",
+        "HunYuanVLForConditionalGeneration"
+    ],
+    "idefics2": [
+        "gptqmodel.models.ports.native.idefics2.modeling_idefics2",
+        "Idefics2ForConditionalGeneration"
+    ],
+    "inkling_mm_model": [
+        "gptqmodel.models.ports.native.inkling.modeling_inkling",
+        "InklingForConditionalGeneration"
+    ],
+    "internvl": [
+        "gptqmodel.models.ports.native.internvl.modeling_internvl",
+        "InternVLForConditionalGeneration"
+    ],
+    "kimi_k25": [
+        "gptqmodel.models.ports.native.kimi_k25.modeling_kimi_k25",
+        "Kimi_K25ForConditionalGeneration"
+    ],
+    "lfm2_vl": [
+        "gptqmodel.models.ports.native.lfm2_vl.modeling_lfm2_vl",
+        "Lfm2VlForConditionalGeneration"
+    ],
+    "llama4": [
+        "gptqmodel.models.ports.native.llama4.modeling_llama4",
+        "Llama4ForConditionalGeneration"
+    ],
+    "llava": [
+        "gptqmodel.models.ports.native.llava.modeling_llava",
+        "LlavaForConditionalGeneration"
+    ],
+    "minicpmv4_6": [
+        "gptqmodel.models.ports.native.minicpmv4_6.modeling_minicpmv4_6",
+        "MiniCPMV4_6ForConditionalGeneration"
+    ],
+    "minimax_m3_vl": [
+        "gptqmodel.models.ports.native.minimax_m3_vl.modeling_minimax_m3_vl",
+        "MiniMaxM3SparseForConditionalGeneration"
+    ],
+    "mistral3": [
+        "gptqmodel.models.ports.native.mistral3.modeling_mistral3",
+        "Mistral3ForConditionalGeneration"
+    ],
+    "mllama": [
+        "gptqmodel.models.ports.native.mllama.modeling_mllama",
+        "MllamaForConditionalGeneration"
+    ],
+    "muse_glimmer": [
+        "gptqmodel.models.ports.native.muse_glimmer.modeling_muse_glimmer",
+        "MuseGlimmerForConditionalGeneration"
+    ],
+    "nemotron_h_omni": [
+        "gptqmodel.models.ports.native.nemotron_h_omni.modeling_nemotron_h_omni",
+        "NemotronH_Omni_Reasoning_V3"
+    ],
+    "ovis2": [
+        "gptqmodel.models.ports.native.ovis2.modeling_ovis2",
+        "Ovis2ForConditionalGeneration"
+    ],
+    "phi4_multimodal": [
+        "gptqmodel.models.ports.native.phi4_multimodal.modeling_phi4_multimodal",
+        "Phi4MultimodalForCausalLM"
+    ],
+    "qwen2_5_omni": [
+        "gptqmodel.models.ports.native.qwen2_5_omni.modeling_qwen2_5_omni",
+        "Qwen2_5OmniForConditionalGeneration"
+    ],
+    "qwen2_5_omni_thinker": [
+        "gptqmodel.models.ports.native.qwen2_5_omni.modeling_qwen2_5_omni",
+        "Qwen2_5OmniThinkerForConditionalGeneration"
+    ],
+    "qwen2_5_vl": [
+        "gptqmodel.models.ports.native.qwen2_5_vl.modeling_qwen2_5_vl",
+        "Qwen2_5_VLForConditionalGeneration"
+    ],
+    "qwen2_audio": [
+        "gptqmodel.models.ports.native.qwen2_audio.modeling_qwen2_audio",
+        "Qwen2AudioForConditionalGeneration"
+    ],
+    "qwen2_vl": [
+        "gptqmodel.models.ports.native.qwen2_vl.modeling_qwen2_vl",
+        "Qwen2VLForConditionalGeneration"
+    ],
+    "qwen3_5": [
+        "gptqmodel.models.ports.native.qwen3_5.modeling_qwen3_5",
+        "Qwen3_5ForConditionalGeneration"
+    ],
+    "qwen3_5_moe": [
+        "gptqmodel.models.ports.native.qwen3_5_moe.modeling_qwen3_5_moe",
+        "Qwen3_5MoeForConditionalGeneration"
+    ],
+    "qwen3_omni_moe": [
+        "gptqmodel.models.ports.native.qwen3_omni_moe.modeling_qwen3_omni_moe",
+        "Qwen3OmniMoeForConditionalGeneration"
+    ],
+    "qwen3_omni_moe_thinker": [
+        "gptqmodel.models.ports.native.qwen3_omni_moe.modeling_qwen3_omni_moe",
+        "Qwen3OmniMoeThinkerForConditionalGeneration"
+    ],
+    "qwen3_vl": [
+        "gptqmodel.models.ports.native.qwen3_vl.modeling_qwen3_vl",
+        "Qwen3VLForConditionalGeneration"
+    ],
+    "qwen3_vl_moe": [
+        "gptqmodel.models.ports.native.qwen3_vl_moe.modeling_qwen3_vl_moe",
+        "Qwen3VLMoeForConditionalGeneration"
+    ],
+    "qwen4_exp": [
+        "gptqmodel.models.ports.native.qwen4_exp.modeling_qwen4_exp",
+        "Qwen4ExpForConditionalGeneration"
+    ],
+    "smolvlm": [
+        "gptqmodel.models.ports.native.smolvlm.modeling_smolvlm",
+        "SmolVLMForConditionalGeneration"
+    ],
+    "voxtral": [
+        "gptqmodel.models.ports.native.voxtral.modeling_voxtral",
+        "VoxtralForConditionalGeneration"
+    ]
+}
+PRETRAINING = {
+    "bart": [
+        "gptqmodel.models.ports.native.bart.modeling_bart",
+        "BartForConditionalGeneration"
+    ],
+    "bloom": [
+        "gptqmodel.models.ports.native.bloom.modeling_bloom",
+        "BloomForCausalLM"
+    ],
+    "exaone4": [
+        "gptqmodel.models.ports.native.exaone4.modeling_exaone4",
+        "Exaone4ForCausalLM"
+    ],
+    "falcon_mamba": [
+        "gptqmodel.models.ports.native.falcon_mamba.modeling_falcon_mamba",
+        "FalconMambaForCausalLM"
+    ],
+    "gemma3": [
+        "gptqmodel.models.ports.native.gemma3.modeling_gemma3",
+        "Gemma3ForConditionalGeneration"
+    ],
+    "gemma4": [
+        "gptqmodel.models.ports.native.gemma4.modeling_gemma4",
+        "Gemma4ForConditionalGeneration"
+    ],
+    "gemma4_unified": [
+        "gptqmodel.models.ports.native.gemma4_unified.modeling_gemma4_unified",
+        "Gemma4UnifiedForConditionalGeneration"
+    ],
+    "glmasr": [
+        "gptqmodel.models.ports.native.glmasr.modeling_glmasr",
+        "GlmAsrForConditionalGeneration"
+    ],
+    "gpt2": [
+        "gptqmodel.models.ports.native.gpt2.modeling_gpt2",
+        "GPT2LMHeadModel"
+    ],
+    "gpt_bigcode": [
+        "gptqmodel.models.ports.native.gpt_bigcode.modeling_gpt_bigcode",
+        "GPTBigCodeForCausalLM"
+    ],
+    "idefics2": [
+        "gptqmodel.models.ports.native.idefics2.modeling_idefics2",
+        "Idefics2ForConditionalGeneration"
+    ],
+    "inkling_mm_model": [
+        "gptqmodel.models.ports.native.inkling.modeling_inkling",
+        "InklingForConditionalGeneration"
+    ],
+    "llava": [
+        "gptqmodel.models.ports.native.llava.modeling_llava",
+        "LlavaForConditionalGeneration"
+    ],
+    "mistral3": [
+        "gptqmodel.models.ports.native.mistral3.modeling_mistral3",
+        "Mistral3ForConditionalGeneration"
+    ],
+    "mllama": [
+        "gptqmodel.models.ports.native.mllama.modeling_mllama",
+        "MllamaForConditionalGeneration"
+    ],
+    "mpt": [
+        "gptqmodel.models.ports.native.mpt.modeling_mpt",
+        "MptForCausalLM"
+    ],
+    "qwen2_audio": [
+        "gptqmodel.models.ports.native.qwen2_audio.modeling_qwen2_audio",
+        "Qwen2AudioForConditionalGeneration"
+    ],
+    "roberta": [
+        "gptqmodel.models.ports.native.roberta.modeling_roberta",
+        "RobertaForMaskedLM"
+    ],
+    "voxtral": [
+        "gptqmodel.models.ports.native.voxtral.modeling_voxtral",
+        "VoxtralForConditionalGeneration"
+    ]
+}
+TEXT_TO_WAVEFORM = {
+    "qwen2_5_omni": [
+        "gptqmodel.models.ports.native.qwen2_5_omni.modeling_qwen2_5_omni",
+        "Qwen2_5OmniForConditionalGeneration"
+    ],
+    "qwen3_omni_moe": [
+        "gptqmodel.models.ports.native.qwen3_omni_moe.modeling_qwen3_omni_moe",
+        "Qwen3OmniMoeForConditionalGeneration"
+    ]
+}
+PROCESSOR = {
+    "clip": [
+        "gptqmodel.models.ports.native.clip.processing_clip",
+        "CLIPProcessor"
+    ],
+    "cohere_compass": [
+        "gptqmodel.models.ports.native.cohere_compass.processing_cohere_compass",
+        "CohereCompassProcessor"
+    ],
+    "deepseek_ocr2": [
+        "gptqmodel.models.ports.native.deepseek_ocr2.processing_deepseek_ocr2",
+        "DeepseekOcr2Processor"
+    ],
+    "deepseek_vl": [
+        "gptqmodel.models.ports.native.deepseek_vl.processing_deepseek_vl",
+        "DeepseekVLProcessor"
+    ],
+    "diffusion_gemma": [
+        "gptqmodel.models.ports.native.gemma4.processing_gemma4",
+        "Gemma4Processor"
+    ],
+    "dots3_note": [
+        "gptqmodel.models.ports.native.dots3_note.processing_dots3_note",
+        "Dots3NoteProcessor"
+    ],
+    "ernie4_5_vl_moe": [
+        "gptqmodel.models.ports.native.ernie4_5_vl_moe.processing_ernie4_5_vl_moe",
+        "Ernie4_5_VLMoeProcessor"
+    ],
+    "exaone4_5": [
+        "gptqmodel.models.ports.native.exaone4_5.processing_exaone4_5",
+        "Exaone4_5_Processor"
+    ],
+    "gemma3": [
+        "gptqmodel.models.ports.native.gemma3.processing_gemma3",
+        "Gemma3Processor"
+    ],
+    "gemma3n": [
+        "gptqmodel.models.ports.native.gemma3n.processing_gemma3n",
+        "Gemma3nProcessor"
+    ],
+    "gemma4": [
+        "gptqmodel.models.ports.native.gemma4.processing_gemma4",
+        "Gemma4Processor"
+    ],
+    "gemma4_unified": [
+        "gptqmodel.models.ports.native.gemma4_unified.processing_gemma4_unified",
+        "Gemma4UnifiedProcessor"
+    ],
+    "glm4v": [
+        "gptqmodel.models.ports.native.glm4v.processing_glm4v",
+        "Glm4vProcessor"
+    ],
+    "glm4v_moe": [
+        "gptqmodel.models.ports.native.glm4v.processing_glm4v",
+        "Glm4vProcessor"
+    ],
+    "glm5_next": [
+        "gptqmodel.models.ports.native.glm5_next.processing_glm5_next",
+        "Glm5NextProcessor"
+    ],
+    "glmasr": [
+        "gptqmodel.models.ports.native.glmasr.processing_glmasr",
+        "GlmAsrProcessor"
+    ],
+    "got_ocr2": [
+        "gptqmodel.models.ports.native.got_ocr2.processing_got_ocr2",
+        "GotOcr2Processor"
+    ],
+    "hunyuan_vl": [
+        "gptqmodel.models.ports.native.hunyuan_vl.processing_hunyuan_vl",
+        "HunYuanVLProcessor"
+    ],
+    "idefics2": [
+        "gptqmodel.models.ports.native.idefics2.processing_idefics2",
+        "Idefics2Processor"
+    ],
+    "inkling_mm_model": [
+        "gptqmodel.models.ports.native.inkling.processing_inkling",
+        "InklingProcessor"
+    ],
+    "internvl": [
+        "gptqmodel.models.ports.native.internvl.processing_internvl",
+        "InternVLProcessor"
+    ],
+    "kimi_k25": [
+        "gptqmodel.models.ports.native.kimi_k25.processing_kimi_k25",
+        "Kimi_K25Processor"
+    ],
+    "lfm2_vl": [
+        "gptqmodel.models.ports.native.lfm2_vl.processing_lfm2_vl",
+        "Lfm2VlProcessor"
+    ],
+    "llama4": [
+        "gptqmodel.models.ports.native.llama4.processing_llama4",
+        "Llama4Processor"
+    ],
+    "llava": [
+        "gptqmodel.models.ports.native.llava.processing_llava",
+        "LlavaProcessor"
+    ],
+    "minicpmv4_6": [
+        "gptqmodel.models.ports.native.minicpmv4_6.processing_minicpmv4_6",
+        "MiniCPMV4_6Processor"
+    ],
+    "minimax_m3_vl": [
+        "gptqmodel.models.ports.native.minimax_m3_vl.processing_minimax_m3_vl",
+        "MiniMaxM3VLProcessor"
+    ],
+    "mistral3": [
+        "gptqmodel.models.ports.native.pixtral.processing_pixtral",
+        "PixtralProcessor"
+    ],
+    "mllama": [
+        "gptqmodel.models.ports.native.mllama.processing_mllama",
+        "MllamaProcessor"
+    ],
+    "muse_glimmer": [
+        "gptqmodel.models.ports.native.muse_glimmer.processing_muse_glimmer",
+        "MuseGlimmerProcessor"
+    ],
+    "nemotron_h_omni": [
+        "gptqmodel.models.ports.native.nemotron_h_omni.processing_nemotron_h_omni",
+        "NemotronH_Omni_Reasoning_V3Processor"
+    ],
+    "ovis2": [
+        "gptqmodel.models.ports.native.ovis2.processing_ovis2",
+        "Ovis2Processor"
+    ],
+    "parakeet_ctc": [
+        "gptqmodel.models.ports.native.parakeet.processing_parakeet",
+        "ParakeetProcessor"
+    ],
+    "parakeet_rnnt": [
+        "gptqmodel.models.ports.native.parakeet.processing_parakeet",
+        "ParakeetProcessor"
+    ],
+    "parakeet_tdt": [
+        "gptqmodel.models.ports.native.parakeet.processing_parakeet",
+        "ParakeetProcessor"
+    ],
+    "phi4_multimodal": [
+        "gptqmodel.models.ports.native.phi4_multimodal.processing_phi4_multimodal",
+        "Phi4MultimodalProcessor"
+    ],
+    "pixtral": [
+        "gptqmodel.models.ports.native.pixtral.processing_pixtral",
+        "PixtralProcessor"
+    ],
+    "qwen2_5_omni": [
+        "gptqmodel.models.ports.native.qwen2_5_omni.processing_qwen2_5_omni",
+        "Qwen2_5OmniProcessor"
+    ],
+    "qwen2_5_vl": [
+        "gptqmodel.models.ports.native.qwen2_5_vl.processing_qwen2_5_vl",
+        "Qwen2_5_VLProcessor"
+    ],
+    "qwen2_audio": [
+        "gptqmodel.models.ports.native.qwen2_audio.processing_qwen2_audio",
+        "Qwen2AudioProcessor"
+    ],
+    "qwen2_vl": [
+        "gptqmodel.models.ports.native.qwen2_vl.processing_qwen2_vl",
+        "Qwen2VLProcessor"
+    ],
+    "qwen3_5": [
+        "gptqmodel.models.ports.native.qwen3_vl.processing_qwen3_vl",
+        "Qwen3VLProcessor"
+    ],
+    "qwen3_5_moe": [
+        "gptqmodel.models.ports.native.qwen3_vl.processing_qwen3_vl",
+        "Qwen3VLProcessor"
+    ],
+    "qwen3_omni_moe": [
+        "gptqmodel.models.ports.native.qwen3_omni_moe.processing_qwen3_omni_moe",
+        "Qwen3OmniMoeProcessor"
+    ],
+    "qwen3_vl": [
+        "gptqmodel.models.ports.native.qwen3_vl.processing_qwen3_vl",
+        "Qwen3VLProcessor"
+    ],
+    "qwen3_vl_moe": [
+        "gptqmodel.models.ports.native.qwen3_vl.processing_qwen3_vl",
+        "Qwen3VLProcessor"
+    ],
+    "qwen4_exp": [
+        "gptqmodel.models.ports.native.qwen3_vl.processing_qwen3_vl",
+        "Qwen3VLProcessor"
+    ],
+    "siglip": [
+        "gptqmodel.models.ports.native.siglip.processing_siglip",
+        "SiglipProcessor"
+    ],
+    "siglip2": [
+        "gptqmodel.models.ports.native.siglip2.processing_siglip2",
+        "Siglip2Processor"
+    ],
+    "smolvlm": [
+        "gptqmodel.models.ports.native.smolvlm.processing_smolvlm",
+        "SmolVLMProcessor"
+    ],
+    "voxtral": [
+        "gptqmodel.models.ports.native.voxtral.processing_voxtral",
+        "VoxtralProcessor"
+    ],
+    "whisper": [
+        "gptqmodel.models.ports.native.whisper.processing_whisper",
+        "WhisperProcessor"
+    ]
+}
+TOKENIZER = {
+    "bart": [
+        "gptqmodel.models.ports.native.roberta.tokenization_roberta",
+        "RobertaTokenizer"
+    ],
+    "clip": [
+        "gptqmodel.models.ports.native.clip.tokenization_clip",
+        "CLIPTokenizer"
+    ],
+    "codegen": [
+        "gptqmodel.models.ports.native.gpt2.tokenization_gpt2",
+        "GPT2Tokenizer"
+    ],
+    "dbrx": [
+        "gptqmodel.models.ports.native.gpt2.tokenization_gpt2",
+        "GPT2Tokenizer"
+    ],
+    "diffusion_gemma": [
+        "gptqmodel.models.ports.native.gemma.tokenization_gemma",
+        "GemmaTokenizer"
+    ],
+    "dots3_note": [
+        "gptqmodel.models.ports.native.qwen2.tokenization_qwen2",
+        "Qwen2Tokenizer"
+    ],
+    "ernie4_5": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "ernie4_5_moe": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "falcon_mamba": [
+        "gptqmodel.models.ports.native.gpt_neox.tokenization_gpt_neox",
+        "GPTNeoXTokenizer"
+    ],
+    "gemma": [
+        "gptqmodel.models.ports.native.gemma.tokenization_gemma",
+        "GemmaTokenizer"
+    ],
+    "gemma2": [
+        "gptqmodel.models.ports.native.gemma.tokenization_gemma",
+        "GemmaTokenizer"
+    ],
+    "gemma3": [
+        "gptqmodel.models.ports.native.gemma.tokenization_gemma",
+        "GemmaTokenizer"
+    ],
+    "gemma3_text": [
+        "gptqmodel.models.ports.native.gemma.tokenization_gemma",
+        "GemmaTokenizer"
+    ],
+    "gemma3n": [
+        "gptqmodel.models.ports.native.gemma.tokenization_gemma",
+        "GemmaTokenizer"
+    ],
+    "gemma3n_text": [
+        "gptqmodel.models.ports.native.gemma.tokenization_gemma",
+        "GemmaTokenizer"
+    ],
+    "glm": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "glm4": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "glm4_moe": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "glm4_moe_lite": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "glm4v": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "glm4v_moe": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "glmasr": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "got_ocr2": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "gpt2": [
+        "gptqmodel.models.ports.native.gpt2.tokenization_gpt2",
+        "GPT2Tokenizer"
+    ],
+    "gpt_bigcode": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "gpt_neo": [
+        "gptqmodel.models.ports.native.gpt2.tokenization_gpt2",
+        "GPT2Tokenizer"
+    ],
+    "gpt_neox": [
+        "gptqmodel.models.ports.native.gpt_neox.tokenization_gpt_neox",
+        "GPTNeoXTokenizer"
+    ],
+    "gptj": [
+        "gptqmodel.models.ports.native.gpt2.tokenization_gpt2",
+        "GPT2Tokenizer"
+    ],
+    "granitemoe": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "granitemoehybrid": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "hunyuan_vl": [
+        "gptqmodel.models.ports.native.qwen2.tokenization_qwen2",
+        "Qwen2Tokenizer"
+    ],
+    "idefics2": [
+        "gptqmodel.models.ports.native.llama.tokenization_llama",
+        "LlamaTokenizer"
+    ],
+    "internvl": [
+        "gptqmodel.models.ports.native.qwen2.tokenization_qwen2",
+        "Qwen2Tokenizer"
+    ],
+    "jamba": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "kimi_k25": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "kimi_linear": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "llava": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "mimo_v2_flash": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "minicpm3": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "minicpmv4_6": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "minimax_m2": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "ministral3": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "mistral": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "mistral3": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "mixtral": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "mpt": [
+        "gptqmodel.models.ports.native.gpt_neox.tokenization_gpt_neox",
+        "GPTNeoXTokenizer"
+    ],
+    "olmo2": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "olmo3": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "olmo_hybrid": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "olmoe": [
+        "gptqmodel.models.ports.native.gpt_neox.tokenization_gpt_neox",
+        "GPTNeoXTokenizer"
+    ],
+    "opt": [
+        "gptqmodel.models.ports.native.gpt2.tokenization_gpt2",
+        "GPT2Tokenizer"
+    ],
+    "ovis2": [
+        "gptqmodel.models.ports.native.qwen2.tokenization_qwen2",
+        "Qwen2Tokenizer"
+    ],
+    "parakeet_ctc": [
+        "gptqmodel.models.ports.native.parakeet.tokenization_parakeet",
+        "ParakeetTokenizer"
+    ],
+    "parakeet_rnnt": [
+        "gptqmodel.models.ports.native.parakeet.tokenization_parakeet",
+        "ParakeetTokenizer"
+    ],
+    "parakeet_tdt": [
+        "gptqmodel.models.ports.native.parakeet.tokenization_parakeet",
+        "ParakeetTokenizer"
+    ],
+    "phi": [
+        "gptqmodel.models.ports.native.gpt2.tokenization_gpt2",
+        "GPT2Tokenizer"
+    ],
+    "phi3": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "phimoe": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "pixtral": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "qwen2": [
+        "gptqmodel.models.ports.native.qwen2.tokenization_qwen2",
+        "Qwen2Tokenizer"
+    ],
+    "qwen2_5_omni": [
+        "gptqmodel.models.ports.native.qwen2.tokenization_qwen2",
+        "Qwen2Tokenizer"
+    ],
+    "qwen2_5_vl": [
+        "gptqmodel.models.ports.native.qwen2.tokenization_qwen2",
+        "Qwen2Tokenizer"
+    ],
+    "qwen2_audio": [
+        "gptqmodel.models.ports.native.qwen2.tokenization_qwen2",
+        "Qwen2Tokenizer"
+    ],
+    "qwen2_moe": [
+        "gptqmodel.models.ports.native.qwen2.tokenization_qwen2",
+        "Qwen2Tokenizer"
+    ],
+    "qwen2_vl": [
+        "gptqmodel.models.ports.native.qwen2.tokenization_qwen2",
+        "Qwen2Tokenizer"
+    ],
+    "qwen3": [
+        "gptqmodel.models.ports.native.qwen2.tokenization_qwen2",
+        "Qwen2Tokenizer"
+    ],
+    "qwen3_5": [
+        "gptqmodel.models.ports.native.qwen3_5.tokenization_qwen3_5",
+        "Qwen3_5Tokenizer"
+    ],
+    "qwen3_5_moe": [
+        "gptqmodel.models.ports.native.qwen3_5.tokenization_qwen3_5",
+        "Qwen3_5Tokenizer"
+    ],
+    "qwen3_5_moe_text": [
+        "gptqmodel.models.ports.native.qwen3_5.tokenization_qwen3_5",
+        "Qwen3_5Tokenizer"
+    ],
+    "qwen3_5_text": [
+        "gptqmodel.models.ports.native.qwen3_5.tokenization_qwen3_5",
+        "Qwen3_5Tokenizer"
+    ],
+    "qwen3_moe": [
+        "gptqmodel.models.ports.native.qwen2.tokenization_qwen2",
+        "Qwen2Tokenizer"
+    ],
+    "qwen3_next": [
+        "gptqmodel.models.ports.native.qwen2.tokenization_qwen2",
+        "Qwen2Tokenizer"
+    ],
+    "qwen3_omni_moe": [
+        "gptqmodel.models.ports.native.qwen2.tokenization_qwen2",
+        "Qwen2Tokenizer"
+    ],
+    "qwen3_vl": [
+        "gptqmodel.models.ports.native.qwen2.tokenization_qwen2",
+        "Qwen2Tokenizer"
+    ],
+    "qwen3_vl_moe": [
+        "gptqmodel.models.ports.native.qwen2.tokenization_qwen2",
+        "Qwen2Tokenizer"
+    ],
+    "qwen4_exp": [
+        "gptqmodel.models.ports.native.qwen3_5.tokenization_qwen3_5",
+        "Qwen3_5Tokenizer"
+    ],
+    "roberta": [
+        "gptqmodel.models.ports.native.roberta.tokenization_roberta",
+        "RobertaTokenizer"
+    ],
+    "siglip": [
+        "gptqmodel.models.ports.native.siglip.tokenization_siglip",
+        "SiglipTokenizer"
+    ],
+    "siglip2": [
+        "gptqmodel.models.ports.native.siglip2.tokenization_siglip2",
+        "Siglip2Tokenizer"
+    ],
+    "smolvlm": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "starcoder2": [
+        "gptqmodel.models.ports.native.gpt2.tokenization_gpt2",
+        "GPT2Tokenizer"
+    ],
+    "voxtral": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
+    "whisper": [
+        "gptqmodel.models.ports.native.whisper.tokenization_whisper",
+        "WhisperTokenizer"
+    ]
+}
+IMAGE_PROCESSOR = {
+    "clip": [
+        "gptqmodel.models.ports.native.clip.image_processing_clip",
+        "CLIPImageProcessor"
+    ],
+    "cohere_compass": [
+        "gptqmodel.models.ports.native.cohere_compass.image_processing_cohere_compass",
+        "CohereCompassImageProcessor"
+    ],
+    "deepseek_ocr2": [
+        "gptqmodel.models.ports.native.deepseek_ocr2.image_processing_deepseek_ocr2",
+        "DeepseekOcr2ImageProcessor"
+    ],
+    "deepseek_vl": [
+        "gptqmodel.models.ports.native.deepseek_vl.image_processing_deepseek_vl",
+        "DeepseekVLImageProcessor"
+    ],
+    "dots3_note": [
+        "gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl",
+        "Qwen2VLImageProcessor"
+    ],
+    "ernie4_5_vl_moe": [
+        "gptqmodel.models.ports.native.ernie4_5_vl_moe.image_processing_ernie4_5_vl_moe",
+        "Ernie4_5_VLMoeImageProcessor"
+    ],
+    "exaone4_5": [
+        "gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl",
+        "Qwen2VLImageProcessor"
+    ],
+    "gemma3": [
+        "gptqmodel.models.ports.native.gemma3.image_processing_gemma3",
+        "Gemma3ImageProcessor"
+    ],
+    "gemma3n": [
+        "gptqmodel.models.ports.native.siglip.image_processing_siglip",
+        "SiglipImageProcessor"
+    ],
+    "gemma4": [
+        "gptqmodel.models.ports.native.gemma4.image_processing_gemma4",
+        "Gemma4ImageProcessor"
+    ],
+    "gemma4_unified": [
+        "gptqmodel.models.ports.native.gemma4_unified.image_processing_gemma4_unified",
+        "Gemma4UnifiedImageProcessor"
+    ],
+    "glm4v": [
+        "gptqmodel.models.ports.native.glm4v.image_processing_glm4v",
+        "Glm4vImageProcessor"
+    ],
+    "glm5_next": [
+        "gptqmodel.models.ports.native.glm5_next.image_processing_glm5_next",
+        "Glm5NextImageProcessor"
+    ],
+    "got_ocr2": [
+        "gptqmodel.models.ports.native.got_ocr2.image_processing_got_ocr2",
+        "GotOcr2ImageProcessor"
+    ],
+    "hunyuan_vl": [
+        "gptqmodel.models.ports.native.hunyuan_vl.image_processing_hunyuan_vl",
+        "HunYuanVLImageProcessor"
+    ],
+    "idefics2": [
+        "gptqmodel.models.ports.native.idefics2.image_processing_idefics2",
+        "Idefics2ImageProcessor"
+    ],
+    "inkling_mm_model": [
+        "gptqmodel.models.ports.native.inkling.image_processing_inkling",
+        "InklingImageProcessor"
+    ],
+    "internvl": [
+        "gptqmodel.models.ports.native.got_ocr2.image_processing_got_ocr2",
+        "GotOcr2ImageProcessor"
+    ],
+    "kimi_k25": [
+        "gptqmodel.models.ports.native.kimi_k25.image_processing_kimi_k25",
+        "Kimi_K25ImageProcessor"
+    ],
+    "lfm2_vl": [
+        "gptqmodel.models.ports.native.lfm2_vl.image_processing_lfm2_vl",
+        "Lfm2VlImageProcessor"
+    ],
+    "llama4": [
+        "gptqmodel.models.ports.native.llama4.image_processing_llama4",
+        "Llama4ImageProcessor"
+    ],
+    "llava": [
+        "gptqmodel.models.ports.native.llava.image_processing_llava",
+        "LlavaImageProcessor"
+    ],
+    "minicpmv4_6": [
+        "gptqmodel.models.ports.native.minicpmv4_6.image_processing_minicpmv4_6",
+        "MiniCPMV4_6ImageProcessor"
+    ],
+    "minimax_m3_vl": [
+        "gptqmodel.models.ports.native.minimax_m3_vl.image_processing_minimax_m3_vl",
+        "MiniMaxM3VLImageProcessor"
+    ],
+    "mistral3": [
+        "gptqmodel.models.ports.native.pixtral.image_processing_pixtral",
+        "PixtralImageProcessor"
+    ],
+    "mllama": [
+        "gptqmodel.models.ports.native.mllama.image_processing_mllama",
+        "MllamaImageProcessor"
+    ],
+    "muse_glimmer": [
+        "gptqmodel.models.ports.native.muse_glimmer.image_processing_muse_glimmer",
+        "MuseGlimmerImageProcessor"
+    ],
+    "nemotron_h_omni": [
+        "gptqmodel.models.ports.native.nemotron_h_omni.image_processing_nemotron_h_omni",
+        "NemotronH_Omni_Reasoning_V3ImageProcessor"
+    ],
+    "ovis2": [
+        "gptqmodel.models.ports.native.ovis2.image_processing_ovis2",
+        "Ovis2ImageProcessor"
+    ],
+    "phi4_multimodal": [
+        "gptqmodel.models.ports.native.phi4_multimodal.image_processing_phi4_multimodal",
+        "Phi4MultimodalImageProcessor"
+    ],
+    "pixtral": [
+        "gptqmodel.models.ports.native.pixtral.image_processing_pixtral",
+        "PixtralImageProcessor"
+    ],
+    "qwen2_5_omni": [
+        "gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl",
+        "Qwen2VLImageProcessor"
+    ],
+    "qwen2_5_vl": [
+        "gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl",
+        "Qwen2VLImageProcessor"
+    ],
+    "qwen2_vl": [
+        "gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl",
+        "Qwen2VLImageProcessor"
+    ],
+    "qwen3_5": [
+        "gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl",
+        "Qwen2VLImageProcessor"
+    ],
+    "qwen3_5_moe": [
+        "gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl",
+        "Qwen2VLImageProcessor"
+    ],
+    "qwen3_omni_moe": [
+        "gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl",
+        "Qwen2VLImageProcessor"
+    ],
+    "qwen3_vl": [
+        "gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl",
+        "Qwen2VLImageProcessor"
+    ],
+    "qwen4_exp": [
+        "gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl",
+        "Qwen2VLImageProcessor"
+    ],
+    "siglip": [
+        "gptqmodel.models.ports.native.siglip.image_processing_siglip",
+        "SiglipImageProcessor"
+    ],
+    "siglip2": [
+        "gptqmodel.models.ports.native.siglip2.image_processing_siglip2",
+        "Siglip2ImageProcessor"
+    ],
+    "smolvlm": [
+        "gptqmodel.models.ports.native.smolvlm.image_processing_smolvlm",
+        "SmolVLMImageProcessor"
+    ],
+    "timm_wrapper": [
+        "gptqmodel.models.ports.native.timm_wrapper.image_processing_timm_wrapper",
+        "TimmWrapperImageProcessor"
+    ]
+}
+VIDEO_PROCESSOR = {
+    "cohere_compass": [
+        "gptqmodel.models.ports.native.cohere_compass.video_processing_cohere_compass",
+        "CohereCompassVideoProcessor"
+    ],
+    "dots3_note": [
+        "gptqmodel.models.ports.native.qwen3_vl.video_processing_qwen3_vl",
+        "Qwen3VLVideoProcessor"
+    ],
+    "ernie4_5_vl_moe": [
+        "gptqmodel.models.ports.native.ernie4_5_vl_moe.video_processing_ernie4_5_vl_moe",
+        "Ernie4_5_VLMoeVideoProcessor"
+    ],
+    "exaone4_5": [
+        "gptqmodel.models.ports.native.qwen2_vl.video_processing_qwen2_vl",
+        "Qwen2VLVideoProcessor"
+    ],
+    "gemma4": [
+        "gptqmodel.models.ports.native.gemma4.video_processing_gemma4",
+        "Gemma4VideoProcessor"
+    ],
+    "gemma4_unified": [
+        "gptqmodel.models.ports.native.gemma4_unified.video_processing_gemma4_unified",
+        "Gemma4UnifiedVideoProcessor"
+    ],
+    "glm4v": [
+        "gptqmodel.models.ports.native.glm4v.video_processing_glm4v",
+        "Glm4vVideoProcessor"
+    ],
+    "glm5_next": [
+        "gptqmodel.models.ports.native.glm5_next.video_processing_glm5_next",
+        "Glm5NextVideoProcessor"
+    ],
+    "internvl": [
+        "gptqmodel.models.ports.native.internvl.video_processing_internvl",
+        "InternVLVideoProcessor"
+    ],
+    "kimi_k25": [
+        "gptqmodel.models.ports.native.kimi_k25.video_processing_kimi_k25",
+        "Kimi_K25VideoProcessor"
+    ],
+    "minicpmv4_6": [
+        "gptqmodel.models.ports.native.minicpmv4_6.video_processing_minicpmv4_6",
+        "MiniCPMV4_6VideoProcessor"
+    ],
+    "minimax_m3_vl": [
+        "gptqmodel.models.ports.native.minimax_m3_vl.video_processing_minimax_m3_vl",
+        "MiniMaxM3VLVideoProcessor"
+    ],
+    "muse_glimmer": [
+        "gptqmodel.models.ports.native.muse_glimmer.video_processing_muse_glimmer",
+        "MuseGlimmerVideoProcessor"
+    ],
+    "nemotron_h_omni": [
+        "gptqmodel.models.ports.native.nemotron_h_omni.video_processing_nemotron_h_omni",
+        "NemotronH_Omni_Reasoning_V3VideoProcessor"
+    ],
+    "qwen2_5_omni": [
+        "gptqmodel.models.ports.native.qwen2_vl.video_processing_qwen2_vl",
+        "Qwen2VLVideoProcessor"
+    ],
+    "qwen2_5_vl": [
+        "gptqmodel.models.ports.native.qwen2_vl.video_processing_qwen2_vl",
+        "Qwen2VLVideoProcessor"
+    ],
+    "qwen2_vl": [
+        "gptqmodel.models.ports.native.qwen2_vl.video_processing_qwen2_vl",
+        "Qwen2VLVideoProcessor"
+    ],
+    "qwen3_5": [
+        "gptqmodel.models.ports.native.qwen3_vl.video_processing_qwen3_vl",
+        "Qwen3VLVideoProcessor"
+    ],
+    "qwen3_5_moe": [
+        "gptqmodel.models.ports.native.qwen3_vl.video_processing_qwen3_vl",
+        "Qwen3VLVideoProcessor"
+    ],
+    "qwen3_omni_moe": [
+        "gptqmodel.models.ports.native.qwen2_vl.video_processing_qwen2_vl",
+        "Qwen2VLVideoProcessor"
+    ],
+    "qwen3_vl": [
+        "gptqmodel.models.ports.native.qwen3_vl.video_processing_qwen3_vl",
+        "Qwen3VLVideoProcessor"
+    ],
+    "qwen3_vl_moe": [
+        "gptqmodel.models.ports.native.qwen3_vl.video_processing_qwen3_vl",
+        "Qwen3VLVideoProcessor"
+    ],
+    "qwen4_exp": [
+        "gptqmodel.models.ports.native.qwen3_vl.video_processing_qwen3_vl",
+        "Qwen3VLVideoProcessor"
+    ],
+    "smolvlm": [
+        "gptqmodel.models.ports.native.smolvlm.video_processing_smolvlm",
+        "SmolVLMVideoProcessor"
+    ]
+}
+FEATURE_EXTRACTOR = {
+    "dots3_note": [
+        "gptqmodel.models.ports.native.dots3_note.feature_extraction_dots3_note",
+        "Dots3NoteFeatureExtractor"
+    ],
+    "gemma3n": [
+        "gptqmodel.models.ports.native.gemma3n.feature_extraction_gemma3n",
+        "Gemma3nAudioFeatureExtractor"
+    ],
+    "gemma4": [
+        "gptqmodel.models.ports.native.gemma4.feature_extraction_gemma4",
+        "Gemma4AudioFeatureExtractor"
+    ],
+    "gemma4_unified": [
+        "gptqmodel.models.ports.native.gemma4_unified.feature_extraction_gemma4_unified",
+        "Gemma4UnifiedAudioFeatureExtractor"
+    ],
+    "glmasr": [
+        "gptqmodel.models.ports.native.whisper.feature_extraction_whisper",
+        "WhisperFeatureExtractor"
+    ],
+    "inkling_mm_model": [
+        "gptqmodel.models.ports.native.inkling.feature_extraction_inkling",
+        "InklingFeatureExtractor"
+    ],
+    "parakeet_ctc": [
+        "gptqmodel.models.ports.native.parakeet.feature_extraction_parakeet",
+        "ParakeetFeatureExtractor"
+    ],
+    "parakeet_encoder": [
+        "gptqmodel.models.ports.native.parakeet.feature_extraction_parakeet",
+        "ParakeetFeatureExtractor"
+    ],
+    "parakeet_rnnt": [
+        "gptqmodel.models.ports.native.parakeet.feature_extraction_parakeet",
+        "ParakeetFeatureExtractor"
+    ],
+    "parakeet_tdt": [
+        "gptqmodel.models.ports.native.parakeet.feature_extraction_parakeet",
+        "ParakeetFeatureExtractor"
+    ],
+    "phi4_multimodal": [
+        "gptqmodel.models.ports.native.phi4_multimodal.feature_extraction_phi4_multimodal",
+        "Phi4MultimodalFeatureExtractor"
+    ],
+    "qwen2_5_omni": [
+        "gptqmodel.models.ports.native.whisper.feature_extraction_whisper",
+        "WhisperFeatureExtractor"
+    ],
+    "qwen2_audio": [
+        "gptqmodel.models.ports.native.whisper.feature_extraction_whisper",
+        "WhisperFeatureExtractor"
+    ],
+    "qwen3_omni_moe": [
+        "gptqmodel.models.ports.native.whisper.feature_extraction_whisper",
+        "WhisperFeatureExtractor"
+    ],
+    "voxtral": [
+        "gptqmodel.models.ports.native.whisper.feature_extraction_whisper",
+        "WhisperFeatureExtractor"
+    ],
+    "whisper": [
+        "gptqmodel.models.ports.native.whisper.feature_extraction_whisper",
+        "WhisperFeatureExtractor"
     ]
 }

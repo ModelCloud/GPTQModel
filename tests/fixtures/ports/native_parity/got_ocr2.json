@@ -1,0 +1,141 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "chunk_size_feed_forward": 0,
+  "dtype": null,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "image_seq_length": 576,
+  "image_token_index": 1,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "model_type": "got_ocr2",
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "problem_type": null,
+  "return_dict": true,
+  "text_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_dropout": 0.0,
+   "bos_token_id": 2,
+   "chunk_size_feed_forward": 0,
+   "dtype": null,
+   "eos_token_id": 3,
+   "hidden_act": "silu",
+   "hidden_size": 128,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "initializer_range": 0.02,
+   "intermediate_size": 37,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "layer_types": [
+    "full_attention",
+    "full_attention"
+   ],
+   "max_position_embeddings": 512,
+   "max_window_layers": 28,
+   "mlp_ratio": 4,
+   "model_type": "qwen2",
+   "num_attention_heads": 4,
+   "num_hidden_layers": 2,
+   "num_key_value_heads": 2,
+   "output_attentions": false,
+   "output_channels": 64,
+   "output_hidden_states": false,
+   "pad_token_id": 4,
+   "problem_type": null,
+   "return_dict": true,
+   "rms_norm_eps": 1e-06,
+   "rope_parameters": {
+    "rope_theta": 10000,
+    "rope_type": "default"
+   },
+   "sliding_window": null,
+   "tie_word_embeddings": true,
+   "use_cache": true,
+   "use_sliding_window": false,
+   "vocab_size": 99
+  },
+  "tie_word_embeddings": true,
+  "transformers_version": "5.23.0",
+  "vision_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_dropout": 0.0,
+   "chunk_size_feed_forward": 0,
+   "dtype": null,
+   "global_attn_indexes": [
+    2,
+    5,
+    8,
+    11
+   ],
+   "hidden_act": "quick_gelu",
+   "hidden_size": 32,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "image_size": 64,
+   "initializer_range": 1e-10,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "layer_norm_eps": 1e-06,
+   "mlp_dim": 128,
+   "model_type": "got_ocr2_vision",
+   "num_attention_heads": 4,
+   "num_channels": 3,
+   "num_hidden_layers": 2,
+   "output_attentions": false,
+   "output_channels": 64,
+   "output_hidden_states": false,
+   "patch_size": 2,
+   "problem_type": null,
+   "qkv_bias": true,
+   "return_dict": true,
+   "use_abs_pos": true,
+   "use_rel_pos": true,
+   "window_size": 14
+  }
+ },
+ "config_class": "GotOcr2Config",
+ "config_module": "configuration_got_ocr2",
+ "extra_inputs": {},
+ "float_inputs": {
+  "pixel_values": {
+   "dtype": "float32",
+   "shape": [
+    3,
+    3,
+    64,
+    64
+   ]
+  }
+ },
+ "model_classes": [
+  [
+   "modeling_got_ocr2",
+   "GotOcr2Model"
+  ],
+  [
+   "modeling_got_ocr2",
+   "GotOcr2ForConditionalGeneration"
+  ]
+ ]
+}

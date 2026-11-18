@@ -113,46 +113,98 @@ def vendor(family):
     return written
 
 
+TASK_TABLES = {
+    "CONFIG": ("configuration_auto", "CONFIG_MAPPING_NAMES"),
+    "MODEL": ("modeling_auto", "MODEL_MAPPING_NAMES"),
+    "CAUSAL_LM": ("modeling_auto", "MODEL_FOR_CAUSAL_LM_MAPPING_NAMES"),
+    "IMAGE_TEXT_TO_TEXT": ("modeling_auto", "MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES"),
+    "MULTIMODAL_LM": ("modeling_auto", "MODEL_FOR_MULTIMODAL_LM_MAPPING_NAMES"),
+    "PRETRAINING": ("modeling_auto", "MODEL_FOR_PRETRAINING_MAPPING_NAMES"),
+    "TEXT_TO_WAVEFORM": ("modeling_auto", "MODEL_FOR_TEXT_TO_WAVEFORM_MAPPING_NAMES"),
+    "PROCESSOR": ("processing_auto", "PROCESSOR_MAPPING_NAMES"),
+    "TOKENIZER": ("tokenization_auto", "TOKENIZER_MAPPING_NAMES"),
+    "IMAGE_PROCESSOR": ("image_processing_auto", "IMAGE_PROCESSOR_MAPPING_NAMES"),
+    "VIDEO_PROCESSOR": ("video_processing_auto", "VIDEO_PROCESSOR_MAPPING_NAMES"),
+    "FEATURE_EXTRACTOR": ("feature_extraction_auto", "FEATURE_EXTRACTOR_MAPPING_NAMES"),
+}
+
+
+def _table(module, name):
+    from importlib import import_module
+
+    return getattr(import_module(f"transformers.models.auto.{module}"), name)
+
+
+def _class_name(value):
+    """Pick one class name from a mapping value (str, tuple, or backend dict)."""
+
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return value.get("torchvision") or value.get("pil") or next(iter(value.values()), None)
+    if isinstance(value, (tuple, list)):
+        return next((item for item in value if item), None)
+    return None
+
+
+def _class_home(cls_name):
+    """Return ("family", family, module) for model-family classes, ("framework", module) otherwise."""
+
+    import transformers
+
+    value = getattr(transformers, cls_name, None)
+    module = getattr(value, "__module__", None)
+    if module is None:
+        return None
+    if module.startswith("transformers.models."):
+        parts = module.split(".")
+        return ("family", parts[2], parts[3])
+    return ("framework", module)
+
+
+def required_families(families):
+    """Families providing any class the vendored families' tables reference."""
+
+    needed = set()
+    for key, (module, name) in TASK_TABLES.items():
+        for model_type, value in _table(module, name).items():
+            if family_of(model_type) not in families:
+                continue
+            home = _class_home(_class_name(value) or "")
+            if home and home[0] == "family":
+                needed.add(home[1])
+    return needed
+
+
 def registry(families):
-    """Static model_type -> (module, class) tables for vendored families.
-
-    Built from the installed Transformers 5.23 auto tables (the same release
-    being vendored), restricted to vendored families.
-    """
-
-    from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
-    from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES, MODEL_MAPPING_NAMES
+    """model_type -> (module, class) tables for vendored families only."""
 
     vendored = set(families)
-
-    def locate(family, cls):
-        for path in family_files(family):
-            if re.search(rf"^class {re.escape(cls)}\b", path.read_text(), re.M):
-                return f"gptqmodel.models.ports.native.{family}.{path.stem}"
-        return None
-
-    def build(names):
+    tables = {}
+    for key, (module, name) in TASK_TABLES.items():
         result = {}
-        for mt, cls in names.items():
-            if not isinstance(cls, str):
+        for model_type, value in _table(module, name).items():
+            if family_of(model_type) not in vendored:
                 continue
-            family = family_of(mt)
-            if family not in vendored:
+            cls_name = _class_name(value)
+            home = _class_home(cls_name or "")
+            if home is None:
                 continue
-            module = locate(family, cls)
-            if module:
-                result[mt] = [module, cls]
-        return result
-
-    return {
-        "CONFIG": build(CONFIG_MAPPING_NAMES),
-        "MODEL": build(MODEL_MAPPING_NAMES),
-        "CAUSAL_LM": build(MODEL_FOR_CAUSAL_LM_MAPPING_NAMES),
-    }
+            if home[0] == "framework":
+                result[model_type] = [home[1], cls_name]
+            elif home[1] in vendored:
+                result[model_type] = [f"gptqmodel.models.ports.native.{home[1]}.{home[2]}", cls_name]
+        tables[key] = result
+    return tables
 
 
 def main():
     families = closure(REQUESTED)
+    while True:
+        extra = required_families(set(families)) - set(families)
+        if not extra:
+            break
+        families = closure(sorted(set(families) | extra))
     DEST.mkdir(parents=True, exist_ok=True)
     manifest = {}
     for family in families:
