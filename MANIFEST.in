@@ -31,7 +31,6 @@ recursive-include gptqmodel/models/ports *.md *.txt *.json *.ttf *.model *.jinja
 # Release inventories, original tokenizer samples and tests are checkout-only.
 prune gptqmodel/models/ports/*/fixtures
 prune gptqmodel/models/ports/*/tests
-prune gptqmodel/models/ports/xing4_0/assets
 recursive-exclude gptqmodel/models/ports *.gz central_fixture_proposals.json module_plan_fixture.json
 include gptqmodel_ext/pack_block_cpu.cpp
 include gptqmodel_ext/floatx_cpu.cpp
