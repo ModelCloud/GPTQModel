@@ -88,6 +88,7 @@ from ..utils.attn_mask import normalize_seq_mask
 from ..utils.backend import (
     BACKEND,
     awq_gemm_pack_backend,
+    awq_gemv_fast_pack_backend,
     awq_gemv_pack_backend,
     backend_for_activation,
     normalize_backend,
@@ -2565,12 +2566,13 @@ class BaseQModel(nn.Module):
                         device_type=quant_device_type, is_rocm=IS_ROCM
                     )
                 elif format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
-                    # The native GEMV_FAST extension is CUDA-only; a CPU-only
-                    # host packs with the portable Torch reader (issue #4736).
-                    preferred_backend = (
-                        BACKEND.AWQ_TORCH
-                        if quant_device_type == "cpu"
-                        else BACKEND.AWQ_GEMV_FAST
+                    # The native GEMV_FAST extension is CUDA-only. A host
+                    # without it -- CPU only (#4736) or ROCm, where hipcc
+                    # rejects the extension (#5109) -- packs the identical
+                    # interleaved layout with the portable Torch reader and
+                    # keeps it as the in-session kernel.
+                    preferred_backend = awq_gemv_fast_pack_backend(
+                        device_type=quant_device_type, is_rocm=IS_ROCM
                     )
                 else:
                     raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")

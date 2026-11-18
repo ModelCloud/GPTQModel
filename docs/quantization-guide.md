@@ -239,10 +239,13 @@ writes the requested GEMV checkpoint (issue #4554).
 
 `FORMAT.GEMV_FAST` and `FORMAT.LLM_AWQ` follow the same rule: the native
 CUDA GEMV_FAST kernel packs on CUDA, and the portable Torch readers
-(`AwqGEMVFastTorchLinear`, `LLMAwqTorchLinear`, `BACKEND.AWQ_TORCH`) pack on a
-CPU-only host and serve as the in-session CPU kernel, so `quantize()` ->
-`save()` keeps the calibration and writes the requested interleaved checkpoint
-(issue #4736).
+(`AwqGEMVFastTorchLinear`, `LLMAwqTorchLinear`, `BACKEND.AWQ_TORCH`) pack on
+every host without that extension - a CPU-only host (#4736) and ROCm, where
+hipcc cannot build it (#5109) - and serve as the in-session kernel, so
+`quantize()` -> `save()` keeps the calibration and writes the requested
+interleaved checkpoint. On CUDA an AUTO load still selects the native kernel;
+on CPU and ROCm the same AUTO load resolves the portable reader, because these
+two layouts have no Triton kernel.
 
 ### RTN W4A16 without calibration
 

@@ -1755,21 +1755,27 @@ def _load_tt_blockfloat_model(model_cls, *, model_local_path, dtype, trust_remot
 
 
 def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend=None) -> None:
-    """Refuse the CUDA-only AWQ GEMV/GEMV_FAST/LLM_AWQ layouts on ROCm.
+    """Refuse an AUTO GEMV load on ROCm when no portable reader applies.
 
-    Those three layouts are only readable by the native CUDA AWQ extension
-    (``gemv_forward``/``gemmv2_forward``/``gemv_fast_forward_decode``), which
-    hipcc cannot build: the sources include ``cuda_fp16.h`` and CUDA-only inline
-    asm, and the hipified warp-sync reduction rejects wave32.  Without this check
-    an AUTO load fails later with a bare "No valid quant linear", so point at the
-    layout and kernels that do run on ROCm.
+    ``FORMAT.GEMV`` is read by the native CUDA AWQ extension
+    (``gemv_forward``/``gemmv2_forward``), which hipcc cannot build: the
+    sources include ``cuda_fp16.h`` and CUDA-only inline asm, and the hipified
+    warp-sync reduction rejects wave32.  Without this check an AUTO load fails
+    later with a bare "No valid quant linear", so point at the layout and
+    kernels that do run on ROCm.
+
+    ``FORMAT.GEMV_FAST`` / ``FORMAT.LLM_AWQ`` are not refused here: their
+    portable Torch readers declare ROCm and read the identical interleaved
+    layout, so AUTO resolves to them on ROCm (issue #5109).  An explicit
+    selection of the CUDA-only native kernel still fails through
+    ``select_quant_linear`` with the device-family message.
     """
 
     if not IS_ROCM:
         return
     if export_quant_method != METHOD.AWQ:
         return
-    if format_code not in (FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
+    if format_code != FORMAT.GEMV:
         return
     # The portable Triton GEMV reads the GEMV layout without the extension, so an
     # explicit selection of it is a supported ROCm placement.

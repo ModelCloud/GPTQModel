@@ -84,7 +84,7 @@ python -m tests.kernels.gen_compile_matrix
 | `AwqGEMMLinear` | `gemm_awq` | `EAGER` | `EAGER` | yes | no | - |
 | `AwqGEMMTritonLinear` | `gemm_awq_triton` | `EAGER` | `EAGER` | yes | no | - |
 | `AwqGEMVFastLinear` | `gemv_fast_awq` | `EAGER` | `EAGER` | yes | no | - |
-| `AwqGEMVFastTorchLinear` | `gemv_fast_awq` | `INDUCTOR` | `INDUCTOR` | no | no | CPU-only portable GEMV_FAST fallback; no measured static-cache win (#4984) |
+| `AwqGEMVFastTorchLinear` | `gemv_fast_awq` | `INDUCTOR` | `INDUCTOR` | no | no | portable GEMV_FAST fallback; no measured static-cache win (#4984) |
 | `AwqGEMVLinear` | `gemv_awq` | `EAGER` | `EAGER` | yes | no | - |
 | `AwqGEMVTorchLinear` | `gemv_awq` | `INDUCTOR` | `INDUCTOR` | yes | no | CPU-only portable GEMV fallback; no measured static-cache win (#4984) |
 | `AwqGEMVTritonLinear` | `gemv_awq` | `CUDAGRAPH` | `CUDAGRAPH` | yes | no | explicit-selection-only GEMV decode kernel; no static-cache generate win measured (#4984) |
@@ -109,7 +109,7 @@ python -m tests.kernels.gen_compile_matrix
 | `GPTQMarlinMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
 | `LLMAwqLinear` | `gemv_fast_awq` | `EAGER` | `EAGER` | yes | no | - |
 | `LLMAwqMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
-| `LLMAwqTorchLinear` | `gemv_fast_awq` | `INDUCTOR` | `INDUCTOR` | no | no | CPU-only portable GEMV_FAST fallback; no measured static-cache win (#4984) |
+| `LLMAwqTorchLinear` | `gemv_fast_awq` | `INDUCTOR` | `INDUCTOR` | no | no | portable GEMV_FAST fallback; no measured static-cache win (#4984) |
 | `MacaqLinear` | `macaq` | `CUDAGRAPH` | `CUDAGRAPH` | no | yes | - |
 | `MacaqMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
 | `MacaqTritonLinear` | `macaq` | `EAGER` | `EAGER` | yes | no | - |

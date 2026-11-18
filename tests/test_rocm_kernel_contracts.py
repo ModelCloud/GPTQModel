@@ -31,6 +31,7 @@ ROCM_KERNELS = set("""
     TorchLinear TorchQuantEmbeddings AwqTorchLinear QQQTorchLinear
     GGUFTorchLinear ParoLinear ParoTritonLinear VPTQLinear NF12Linear
     MacaqLinear MacaqTritonLinear
+    AwqGEMVFastTorchLinear LLMAwqTorchLinear
     TTBlockfloatLinear
 """.split())
 CUDA_ONLY_KERNELS = set("""
@@ -43,7 +44,7 @@ CUDA_ONLY_KERNELS = set("""
 OTHER_KERNELS = set("""
     TorchFusedLinear TorchFusedAwqLinear TorchAtenLinear TorchAtenAwqLinear
     TorchCpuAvx512Linear TorchCpuAvx512AwqLinear TorchInt8Linear TorchInt8AwqLinear
-    AwqGEMVFastTorchLinear AwqGEMVTorchLinear LLMAwqTorchLinear
+    AwqGEMVTorchLinear
     GGUFCppKernel MlxQuantLinear GPTQMarlinMlxQuantLinear GPTQBitBLASMlxQuantLinear
     AwqMlxQuantLinear AWQMarlinMlxQuantLinear AWQBitBLASMlxQuantLinear
     AwqGemvMlxQuantLinear AwqGemvFastMlxQuantLinear LLMAwqMlxQuantLinear

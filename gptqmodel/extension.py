@@ -84,8 +84,9 @@ _EXTENSION_SPECS = (
         unsupported_error=lambda: (
             "The native AWQ JIT extension is CUDA-only and cannot be built by hipcc. "
             "On ROCm use BACKEND.AWQ_GEMM_TRITON (FORMAT.GEMM) or "
-            "BACKEND.AWQ_GEMV_TRITON (FORMAT.GEMV/GEMV_FAST/LLM_AWQ), which run "
-            "the same packed layouts in Triton."
+            "BACKEND.AWQ_GEMV_TRITON (FORMAT.GEMV), which run the same packed "
+            "layouts in Triton; FORMAT.GEMV_FAST/LLM_AWQ run through their "
+            "portable Torch readers."
         ),
     ),
     _ExtensionSpec(
