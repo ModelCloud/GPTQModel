@@ -41,7 +41,3 @@ class MiniCPMGPTQ(BaseQModel):
                 "experts": {"#": ("w1:0:gate", "w3:0:up", "w2:1:down")},
             }
         return tree
-
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Original scaled residuals and sparse expert replay have no qualified fold/search.
-        return []

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 
 from gptqmodel.models.auto import MODEL_MAP
@@ -13,7 +14,7 @@ from gptqmodel.models.definitions.zdtaichu5 import ZDTaichu5QModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.zdtaichu5.modeling import ZDTaichu5_0_ForConditionalGeneration
-from tests.test_zdtaichu5_local_port import tiny_config
+from tests.test_zdtaichu5_local_port import tiny_config, visual_inputs
 
 
 FULL = {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj"}
@@ -26,7 +27,7 @@ EXCLUDED = {"input_layernorm", "post_attention_layernorm", "self_attn.q_norm", "
 @pytest.mark.parametrize("device", ["cpu", "meta"])
 @pytest.mark.parametrize("kv_heads,bias", [(1, False), (2, True), (4, False)])
 @pytest.mark.parametrize("layout", ["full", "linear", "hybrid"])
-def test_weight_owners_defuser_aliases_and_conservative_policy(device, kv_heads, bias, layout):
+def test_weight_owners_and_defuser_aliases(device, kv_heads, bias, layout):
     config = tiny_config(kv_heads, bias, layout)
     with torch.device(device):
         model = ZDTaichu5_0_ForConditionalGeneration(config)
@@ -61,4 +62,39 @@ def test_weight_owners_defuser_aliases_and_conservative_policy(device, kv_heads,
     assert ZDTaichu5QModel.extract_layers_node() == ["language_model.model.layers"]
     assert {name for name, definition in MODEL_MAP.items() if definition is ZDTaichu5QModel} == {"zdtaichu5_0"}
     assert ZDTaichu5QModel.fusable is None
-    assert ZDTaichu5QModel.awq_get_modules_for_scaling(None, model.language_model.model.layers[0], {}, {}) == []
+
+
+@pytest.mark.parametrize("kv_heads,bias", [(4, False), (2, True), (1, False)])
+@pytest.mark.parametrize("layout", ["full", "linear", "hybrid"])
+def test_awq_scale_folds_preserve_hybrid_layer_output(kv_heads, bias, layout):
+    torch.manual_seed(71)
+    model = ZDTaichu5_0_ForConditionalGeneration(tiny_config(kv_heads, bias, layout)).eval()
+    _convert_model_with_defuser(ZDTaichu5QModel, model, cleanup_original=False)
+    tree = ZDTaichu5QModel._resolve_effective_module_tree(model, None)
+    # Run the real wrapper with an injected image so the decoder layer sees
+    # the projected visual tokens it is calibrated on.
+    inputs = visual_inputs()
+
+    def forward():
+        return model(**inputs, use_cache=False).logits
+
+    mlp = [("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"], []),
+           ("mlp.up_proj", ["mlp.down_proj"], [])]
+    for index, layer in enumerate(model.language_model.model.layers):
+        checked = assert_awq_folds_neutral(ZDTaichu5QModel, model, layer, forward, tree=tree)
+        if config_layer_type(model, index) == "linear_attention":
+            # DeltaNet's b/a gates read the same normed input and are
+            # compensated; out_proj reads a gated norm and has no source.
+            attention = [("input_layernorm", ["linear_attn.in_proj_qkv", "linear_attn.in_proj_z"],
+                          ["linear_attn.in_proj_b", "linear_attn.in_proj_a"])]
+        else:
+            attention = [("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"], [])]
+            if kv_heads == 4:
+                # The sigmoid output gate multiplies per channel, so v -> o
+                # stays exact; GQA leaves v_proj narrower than o_proj.
+                attention.append(("self_attn.v_proj", ["self_attn.o_proj"], []))
+        assert checked == attention + mlp
+
+
+def config_layer_type(model, index):
+    return model.config.llm_config.layer_types[index]

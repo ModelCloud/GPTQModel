@@ -86,9 +86,28 @@ def test_definition_owns_model_and_media_dispatch():
     assert ZDTaichu5QModel.fusable is None
 
 
-def test_definition_declines_unqualified_awq_folding():
-    assert "awq_get_modules_for_scaling" in ZDTaichu5QModel.__dict__
-    assert ZDTaichu5QModel.awq_get_modules_for_scaling(None, None, None, None) == []
+def test_definition_inherits_the_qwen35_awq_planner():
+    # Fold neutrality is qualified per layer type in
+    # tests/module_tree/test_zdtaichu5_local_port.py.
+    assert "awq_get_modules_for_scaling" not in ZDTaichu5QModel.__dict__
+
+
+def test_deltanet_awq_replay_gets_a_planar_keep_mask():
+    model = ZDTaichu5_0_ForConditionalGeneration(tiny_config(layout="hybrid")).eval()
+    linear, full = (layer for layer in model.language_model.model.layers)
+    wrapper = ZDTaichu5QModel.__new__(ZDTaichu5QModel)
+    x = torch.randn(1, 5, 32)
+    grid = torch.zeros(1, 1, 5, 5)
+    # The packed-row attention grid is replaced by the all-keep [batch, seq] mask.
+    _, kwargs = wrapper.awq_module_replay_inputs(linear.linear_attn, x, {"attention_mask": grid})
+    assert kwargs["attention_mask"].dtype == torch.bool and kwargs["attention_mask"].shape == (1, 5)
+    assert kwargs["attention_mask"].all()
+    planar = torch.tensor([[True, True, False, True, True]])
+    assert wrapper.awq_module_replay_inputs(linear.linear_attn, x, {"attention_mask": planar})[1]["attention_mask"] is planar
+    # Full attention keeps its grid; a live recurrent cache is refused.
+    assert wrapper.awq_module_replay_inputs(full.self_attn, x, {"attention_mask": grid})[1]["attention_mask"] is grid
+    with pytest.raises(NotImplementedError, match="uncached"):
+        wrapper.awq_module_replay_inputs(linear.linear_attn, x, {"past_key_values": object()})
 
 
 @pytest.mark.parametrize("layout", ["full", "linear", "hybrid"])
@@ -355,8 +374,10 @@ def test_ragged_beams_match_per_row_stepwise_logits_and_cache_isolation():
 
 @pytest.mark.parametrize("layout,kv_heads,bias", [("hybrid", 2, True), ("full", 4, False), ("hybrid", 1, False)])
 @pytest.mark.parametrize("offload", [False, True])
-def test_public_image_plain_awq_actual_pack_infer_and_two_exact_cycles(tmp_path, layout, kv_heads, bias, offload):
+def test_public_image_awq_scale_search_pack_infer_and_two_exact_cycles(
+        tmp_path, monkeypatch, layout, kv_heads, bias, offload):
     from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel.looper import awq_processor
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
@@ -384,6 +405,14 @@ def test_public_image_plain_awq_actual_pack_infer_and_two_exact_cycles(tmp_path,
         with_kwargs=True,
     )
     dense = {k: v.half().clone() for k, v in source.state_dict().items()}
+    applied = []
+    original_apply_scale = awq_processor.apply_scale
+
+    def record_apply_scale(module, scales_list, *args, **kwargs):
+        applied.append([source for source, _targets, _scales, _loss in scales_list])
+        return original_apply_scale(module, scales_list, *args, **kwargs)
+
+    monkeypatch.setattr(awq_processor, "apply_scale", record_apply_scale)
     try:
         model.quantize(CalibrationConfig(dataset=conversations, batch_size=1, min_length=1, sort="desc"), backend=BACKEND.TORCH)
     finally:
@@ -397,8 +426,21 @@ def test_public_image_plain_awq_actual_pack_infer_and_two_exact_cycles(tmp_path,
         and name not in {"linear_attn.in_proj_a", "linear_attn.in_proj_b"}
     }
     assert packed_modules == expected_modules
+    # Every decoder layer searched and folded its attention-input, MLP-input
+    # and up -> down scales (plus v -> o on MHA full-attention layers).
+    layer_types = source.config.llm_config.layer_types
+    assert applied == [
+        ["input_layernorm"] + (["self_attn.v_proj"] if kind == "full_attention" and kv_heads == 4 else [])
+        + ["post_attention_layernorm", "mlp.up_proj"]
+        for kind in layer_types
+    ]
+    # Fold sources and compensated consumers absorb the scales; every other
+    # unquantized tensor (vision tower, projector, embeddings, q/k norms,
+    # DeltaNet conv/norm/A/dt) stays bit-exact.
+    folded = ("input_layernorm.weight", "post_attention_layernorm.weight",
+              "linear_attn.in_proj_a.weight", "linear_attn.in_proj_b.weight", "self_attn.v_proj.bias")
     for key, value in model.model.state_dict().items():
-        if key in dense:
+        if key in dense and not key.endswith(folded):
             torch.testing.assert_close(value, dense[key], atol=0, rtol=0)
     data = {**prepared, "pixel_values": prepared["pixel_values"].half()}
     with torch.inference_mode():
