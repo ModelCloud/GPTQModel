@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Kwai-Klear Team, Kuaishou
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Klear configuration adapted from the pinned sources in README.md."""
+"""Klear configuration adapted from the pinned sources in NOTICE."""
 
 from copy import deepcopy
 

@@ -1,6 +1,6 @@
 # Copyright 2024 AIDC-AI
 # SPDX-License-Identifier: Apache-2.0
-"""Ovis 1.0/1.5/1.6 configuration; see README.md for pinned sources."""
+"""Ovis 1.0/1.5/1.6 configuration; see NOTICE for pinned sources."""
 
 import copy
 

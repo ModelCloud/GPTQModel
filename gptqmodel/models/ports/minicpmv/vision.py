@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2024 OpenBMB
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""NaViT SigLIP from the pinned MiniCPM-V implementation (see PROVENANCE.json).
+"""NaViT SigLIP embeddings from MiniCPM-V on native Idefics2/SigLIP encoder layers.
 
 Flattened patch strips retain their original 2D bucketed positions via tgt_sizes.
 The native 4.6 vision tower uses a different layout and is deliberately not used.
@@ -10,9 +10,9 @@ The native 4.6 vision tower uses a different layout and is deliberately not used
 
 import torch
 from torch import nn
-from torch.nn import functional as F
-from transformers.activations import ACT2FN
+from transformers.masking_utils import create_bidirectional_mask
 from transformers.modeling_outputs import BaseModelOutputWithPooling
+from transformers.models.idefics2.modeling_idefics2 import Idefics2EncoderLayer
 
 
 class VisionEmbeddings(nn.Module):
@@ -42,55 +42,6 @@ class VisionEmbeddings(nn.Module):
         return x + self.position_embedding(positions)
 
 
-class VisionAttention(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.num_heads = config.num_attention_heads
-        self.head_dim = config.hidden_size // self.num_heads
-        self.dropout = config.attention_dropout
-        self.config = config
-        for name in ("q_proj", "k_proj", "v_proj", "out_proj"):
-            setattr(self, name, nn.Linear(config.hidden_size, config.hidden_size))
-
-    def forward(self, x, mask):
-        b, n, d = x.shape
-        q, k, v = [getattr(self, name)(x).view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
-                   for name in ("q_proj", "k_proj", "v_proj")]
-        if self.config._attn_implementation == "sdpa":
-            out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask,
-                                                 dropout_p=self.dropout if self.training else 0.0)
-        else:
-            scores = (q @ k.transpose(-1, -2)) * self.head_dim ** -0.5
-            scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
-            weights = F.dropout(scores.float().softmax(-1).to(q.dtype), p=self.dropout, training=self.training)
-            out = weights @ v
-        return self.out_proj(out.transpose(1, 2).reshape(b, n, d))
-
-
-class VisionMLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size)
-        self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size)
-        self.act = ACT2FN[config.hidden_act]
-
-    def forward(self, x):
-        return self.fc2(self.act(self.fc1(x)))
-
-
-class VisionLayer(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.self_attn = VisionAttention(config)
-        self.layer_norm1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.layer_norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.mlp = VisionMLP(config)
-
-    def forward(self, x, mask):
-        x = x + self.self_attn(self.layer_norm1(x), mask)
-        return x + self.mlp(self.layer_norm2(x))
-
-
 class SiglipVisionTransformer(nn.Module):
     def __init__(self, config, drop_last=False):
         super().__init__()
@@ -99,7 +50,8 @@ class SiglipVisionTransformer(nn.Module):
         self.patch_size = config.patch_size
         self.embeddings = VisionEmbeddings(config)
         self.encoder = nn.Module()
-        self.encoder.layers = nn.ModuleList([VisionLayer(config)
+        # Native Idefics2/SigLIP layer: identical keys and attention-interface dispatch.
+        self.encoder.layers = nn.ModuleList([Idefics2EncoderLayer(config)
                                             for _ in range(config.num_hidden_layers - int(drop_last))])
         self.post_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
@@ -109,7 +61,8 @@ class SiglipVisionTransformer(nn.Module):
             patch_attention_mask = torch.ones((b, h // self.patch_size, w // self.patch_size),
                                               dtype=torch.bool, device=pixel_values.device)
         x = self.embeddings(pixel_values, patch_attention_mask, tgt_sizes)
-        mask = patch_attention_mask.flatten(1)[:, None, None, :]
+        mask = create_bidirectional_mask(config=self.config, inputs_embeds=x,
+                                         attention_mask=patch_attention_mask.flatten(1))
         for layer in self.encoder.layers:
             x = layer(x, mask)
         return BaseModelOutputWithPooling(last_hidden_state=self.post_layernorm(x))

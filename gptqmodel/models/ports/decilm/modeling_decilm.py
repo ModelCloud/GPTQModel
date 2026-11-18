@@ -10,7 +10,7 @@
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See README.md for pinned Deci/NVIDIA/Hugging Face source provenance.
+# See NOTICE for pinned Deci/NVIDIA/Hugging Face source provenance.
 """Transformers 5 DeciLM: heterogeneous GQA and pruned NAS decoder blocks."""
 
 import copy
@@ -307,16 +307,7 @@ class DeciLMPreTrainedModel(PreTrainedModel):
     _supports_sdpa = True
     _supports_flash_attn = False
     _supports_attention_backend = False
-
-    def _init_weights(self, module):
-        if isinstance(module, (nn.Linear, nn.Embedding)):
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-            if isinstance(module, nn.Linear) and module.bias is not None:
-                module.bias.data.zero_()
-            if isinstance(module, nn.Embedding) and module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
-        elif isinstance(module, DeciLMRMSNorm):
-            module.weight.data.fill_(1.0)
+    # TF5's default _init_weights covers Linear, padded Embedding and DeciLMRMSNorm.
 
 
 class DeciLMModel(DeciLMPreTrainedModel):

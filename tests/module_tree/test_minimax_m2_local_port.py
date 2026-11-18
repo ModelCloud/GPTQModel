@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from test_minimax_m2_local_port import ASSETS, tiny_model
+from test_minimax_m2_local_port import FIXTURES, tiny_model
 
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.fusable import require_fusable_config
@@ -64,7 +64,7 @@ def test_original_optional_shared_expert_is_a_real_bound_owner(postnorm, device)
 @pytest.mark.parametrize("model_type", ["minimax", "minimax_m2"])
 def test_owned_registry_proposal_pins_reviewed_blocks(model_type):
     definition = MODEL_MAP[model_type]
-    proposal = json.loads((ASSETS / "module_plan_cases.json").read_text())[f"{definition.__name__}/gptq"]
+    proposal = json.loads((FIXTURES / "module_plan_cases.json").read_text())[f"{definition.__name__}/gptq"]
     assert definition.extract_layers_node() == proposal["layers"]
     assert definition.build_layer_modules(definition.module_tree, include_capture_only=True) == proposal["blocks"]
     with pytest.raises(ValueError):

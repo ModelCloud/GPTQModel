@@ -10,10 +10,10 @@ import torch
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from tests.port_assets import read_port_json
-from tests.test_ovis2_6_moe_local_port import CASES, build
+from tests.test_ovis2_6_moe_local_port import CASES, FIXTURES, build
 
 
-FIXTURES = Path(__file__).parents[2] / "gptqmodel/models/ports/ovis2_6_moe/fixtures"
+PORT_FIXTURES = Path(__file__).parents[2] / "gptqmodel/models/ports/ovis2_6_moe/fixtures"
 
 
 @pytest.mark.parametrize("definition,config_class", CASES)
@@ -52,7 +52,7 @@ def test_every_released_safetensors_header_shape_matches_meta(size, case):
     with torch.device("meta"):
         model = definition.loader.from_config(config)
         _convert_model_with_defuser(definition, model, cleanup_original=True)
-    expected = read_port_json(FIXTURES / f"{size}_shapes.json")
+    expected = read_port_json(PORT_FIXTURES / f"{size}_shapes.json")
     actual = {key: list(value.shape) for key, value in model.state_dict().items()}
     assert len(expected) == (19308 if size == "30B" else 74832)
     assert actual == expected

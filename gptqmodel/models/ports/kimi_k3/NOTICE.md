@@ -2,7 +2,8 @@
 
 This directory adapts Moonshot AI's Kimi K3 inference implementation from
 [`moonshotai/Kimi-K3` at `f831ab66814297da540d832a5235f8e904f29d06`](https://huggingface.co/moonshotai/Kimi-K3/tree/f831ab66814297da540d832a5235f8e904f29d06).
-The unmodified checkpoint configuration is retained in `checkpoint_config.json`.
+A compacted copy of the checkpoint configuration is kept as a test fixture in
+`tests/fixtures/ports/kimi_k3/checkpoint_config.json`.
 No checkpoint Python is imported or downloaded by this package at runtime.
 
 | Shipped file | Original file and attribution |
@@ -15,9 +16,9 @@ No checkpoint Python is imported or downloaded by this package at runtime.
 
 The upstream custom **Kimi K3 License** is reproduced in `LICENSE`. It is not
 replaced by GPT-QModel's Apache-2.0 license; review its conditions before use or
-redistribution. The Apache-2.0 text for derived sections is in `LICENSE.apache`.
-The canonical OpenAI/Hugging Face GPT-2 byte-to-Unicode alphabet is copied into
-the tokenizer because Transformers 5 removed its former public import path.
+redistribution. The Apache-2.0 text for derived sections is in the repository root `LICENSE`.
+The GPT-2 byte-to-Unicode alphabet is imported from
+`transformers.convert_slow_tokenizer`.
 
 `eager_kda.py` adapts the MIT-licensed Torch recurrence, causal depthwise
 convolution and normalization equations from
@@ -61,7 +62,7 @@ from K3 XTML. Source/asset SHA-256 values:
 | `chat_template.jinja` | `75e3cd76bd26b77c02507eb35073b66c8ffd0c88eab185ebc6f8c6e425161809` |
 | `tiktoken.model` | `b6c497a7469b33ced9c38afb1ad6e47f03f5e5dc05f15930799210ec050c5103` |
 
-`a_log_reference.json` reproduces 512 tensor bytes from K3 at the same pinned
+`tests/fixtures/ports/kimi_k3/a_log_reference.json` reproduces 512 tensor bytes from K3 at the same pinned
 revision/license above: `model-00013-of-000096.safetensors`, header length824104,
 tensor offsets[3584,4096), file bytes[827696,828208), SHA-256
 `13f756b245c0f444a480166b5398f1ba788de4e4926f04b351edc0f4378643dd`.

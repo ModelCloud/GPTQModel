@@ -1,7 +1,7 @@
 # Copyright 2023-2026 Songlin Yang, Yu Zhang, Zhiyuan Li
 # Copyright 2026 ModelCloud.ai
 # SPDX-License-Identifier: MIT
-# Adapted from the pinned FLA Torch references listed in README.md; see LICENSE.fla.
+# Adapted from the pinned FLA Torch references listed in NOTICE.md; see LICENSE.fla.
 """Portable reference KDA with checkpoint-exact split convolution owners."""
 
 import torch

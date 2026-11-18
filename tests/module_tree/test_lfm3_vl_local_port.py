@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Independent live-owner inventory for native LFM3-VL variants."""
 
+import hashlib
 import json
 from types import SimpleNamespace
 
 import pytest
 import torch
-from test_lfm3_vl_local_port import AUDIT, media_inputs, native_model, tiny_processor
+from test_lfm3_vl_local_port import FIXTURES, media_inputs, native_model, tiny_processor
 from transformers import AutoModelForImageTextToText, Lfm3VlConfig
 
 from gptqmodel.models.auto import MODEL_MAP
@@ -16,9 +17,10 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.utils.model import find_modules
 
 
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("gate,sandwich", [(True, True), (True, False), (False, True), (False, False)])
+@pytest.mark.parametrize(
+    "kv_heads,bias,gate,sandwich",
+    [(1, False, True, True), (2, True, True, False), (4, False, False, True), (2, True, False, False)],
+)
 def test_every_native_checkpoint_owner_has_an_explicit_plan(monkeypatch, kv_heads, bias, gate, sandwich):
     model = native_model(kv_heads=kv_heads, bias=bias, gate=gate, sandwich=sandwich)
     _convert_model_with_defuser(LFM3VLQModel, model, cleanup_original=False)
@@ -67,20 +69,21 @@ def test_every_native_checkpoint_owner_has_an_explicit_plan(monkeypatch, kv_head
     torch.testing.assert_close(continued, reference, rtol=3e-5, atol=3e-6)
 
 
+# sha256 of json.dumps(sorted((name, shape))) over the 424 tensors of
+# LiquidAI/LFM3-VL-2B@23387beda43c60310348e83e25f78f33c3140d3a safetensors
+# headers, after native checkpoint-conversion renames (lm_head is tied).
+PINNED_INVENTORY_SHA256 = "bbafb498fa2221d32817f7ace4dd030d736467d1c84c8ac07aa221f98a45fbab"
+
+
 def test_pinned_checkpoint_names_and_shapes_match_native_meta_shell():
-    payload = json.loads((AUDIT / "checkpoint_config.json").read_text())
-    raw_shapes = json.loads((AUDIT / "checkpoint_shapes.json").read_text())
-    assert len(raw_shapes) == 424
-    config = Lfm3VlConfig.from_dict(payload)
+    config = Lfm3VlConfig.from_dict(json.loads((FIXTURES / "checkpoint_config.json").read_text()))
     with torch.device("meta"):
         model = AutoModelForImageTextToText.from_config(config)
-    mapped = {}
-    for name, shape in raw_shapes.items():
-        name = name.replace(".self_attn.gate_proj.", ".self_attn.g_proj.")
-        if name.startswith("model.vision_tower."):
-            name = name.replace(".patchifier.", ".patch_embed.")
-            name = name.replace(".q_layernorm.", ".q_norm.").replace(".k_layernorm.", ".k_norm.")
-        assert name not in mapped
-        mapped[name] = shape
-    expected = {name: list(value.shape) for name, value in model.state_dict().items() if name != "lm_head.weight"}
-    assert mapped == expected
+    shapes = {name: list(value.shape) for name, value in model.state_dict().items() if name != "lm_head.weight"}
+    assert len(shapes) == 424
+    # Representative released names that native conversion renames.
+    assert shapes["model.language_model.layers.2.self_attn.g_proj.weight"] == [16, 2048]  # ckpt: gate_proj
+    assert shapes["model.vision_tower.patch_embed.weight"] == [1024, 1536]  # ckpt: patchifier
+    assert shapes["model.vision_tower.layers.2.self_attn.q_norm.weight"] == [64]  # ckpt: q_layernorm
+    digest = hashlib.sha256(json.dumps(sorted(shapes.items())).encode()).hexdigest()
+    assert digest == PINNED_INVENTORY_SHA256

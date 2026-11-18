@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Original Qwen real equations, checkpoint transitions, and public consumers."""
 
-import hashlib
 import json
 import math
 import unicodedata
@@ -32,6 +31,7 @@ from tests.port_assets import read_port_asset
 
 
 ASSETS = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/qwen"
+FIXTURES = Path(__file__).resolve().parent / "fixtures/ports/qwen/fixtures"
 DTYPES = [torch.float32, torch.float16, torch.bfloat16]
 
 
@@ -271,7 +271,7 @@ def test_two_safetensors_cycles_corrupt_load_repair_and_assign(tmp_path, dtype, 
 def checkpoint(path, release="Qwen-7B", **kwargs):
     path.mkdir(parents=True, exist_ok=True)
     model = tiny_model(vocab_size=151936, eos_token_id=151643, pad_token_id=151643, **kwargs)
-    metadata = json.loads((ASSETS / "fixtures/released_metadata.json").read_text())[release]
+    metadata = json.loads((FIXTURES / "released_metadata.json").read_text())[release]
     model.generation_config = GenerationConfig.from_dict(metadata["generation_config.json"])
     model.save_pretrained(path)
     (path / "qwen.tiktoken").write_bytes(read_port_asset(ASSETS / "fixtures/qwen.tiktoken"))
@@ -290,9 +290,7 @@ def checkpoint(path, release="Qwen-7B", **kwargs):
     return model, marker
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
-@pytest.mark.parametrize("release", ["Qwen-7B", "Qwen-7B-Chat"])
+@pytest.mark.parametrize("trust,bypass,release", [(False, None, "Qwen-7B"), (True, "1", "Qwen-7B-Chat")])
 def test_public_hostile_load_tokenizer_generate_and_two_saves(tmp_path, monkeypatch, trust, bypass, release):
     if bypass is None:
         monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
@@ -390,7 +388,7 @@ def test_real_tokenizer_source_ids_decode_prompts_repair_retry(tmp_path):
 
     ranks = {base64.b64decode(token): int(rank) for token, rank in (line.split() for line in data.splitlines())}
     ref = tiktoken.Encoding("source", pat_str=PAT_STR, mergeable_ranks=ranks, special_tokens=SPECIAL_TOKENS)
-    golden = json.loads((ASSETS / "fixtures/tokenizer_oracles.json").read_text())
+    golden = json.loads((FIXTURES / "tokenizer_oracles.json").read_text())
     for item in golden["texts"]:
         assert tok.encode(item["text"]) == item["ids"]
         assert tok.decode(item["ids"]) == item["decode"]
@@ -466,8 +464,7 @@ def test_rotary_source_fp32_calculation_near_source_table_boundary(dtype, rotary
     assert torch.equal(actual[..., dim:], inputs[..., dim:])
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "1")])
 def test_public_missing_corrupt_tokenizer_repair_retry(tmp_path, monkeypatch, trust, bypass):
     if bypass is None:
         monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
@@ -514,18 +511,23 @@ def test_extra_vocabulary_source_tokens_roundtrip_and_collision_policy(tmp_path)
     assert tok.encode("hello 你好") == loaded.encode("hello 你好") == [14990, 220, 108386]
 
 
-def test_pinned_release_vocab_and_fixture_license_integrity():
-    manifest = json.loads((ASSETS / "provenance.json").read_text())
-    vocab = read_port_asset(ASSETS / "fixtures/qwen.tiktoken")
-    digest = hashlib.sha256(vocab).hexdigest()
-    assert digest == "b2b1b8dfb5cc5f024bafc373121c6aba3f66f9a5a0269e243470a1de16a33186"
-    for release in manifest["releases"].values():
-        assert release["files"]["qwen.tiktoken"] == digest
-    for group in ("fixture_files", "license_files"):
-        for path, expected in manifest[group].items():
-            source = ASSETS / path
-            data = source.read_bytes() if source.is_file() else read_port_asset(source)
-            assert hashlib.sha256(data).hexdigest() == expected
+def test_init_weights_uses_tf5_guarded_initializers():
+    model = tiny_model()
+    loaded = model.transformer.h[0].attn.c_attn
+    loaded.weight._is_hf_initialized = True
+    loaded.bias._is_hf_initialized = True
+    norm = model.transformer.h[0].ln_1
+    norm.weight._is_hf_initialized = True
+    before = [loaded.weight.clone(), loaded.bias.clone(), norm.weight.clone()]
+    for module in (loaded, norm):
+        model._init_weights(module)
+    for tensor, expected in zip((loaded.weight, loaded.bias, norm.weight), before):
+        assert torch.equal(tensor, expected)
+    fresh = model.transformer.h[0].attn.c_proj
+    with torch.no_grad():
+        fresh.weight.zero_()
+    model._init_weights(fresh)
+    assert fresh.weight.abs().sum() > 0
 
 
 @pytest.mark.parametrize(

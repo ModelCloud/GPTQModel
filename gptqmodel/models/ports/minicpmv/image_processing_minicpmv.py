@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2024 OpenBMB
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# Adapted from pinned MiniCPM-V-4_5; see PROVENANCE.json.
+# Adapted from MiniCPM-V-4_5; see NOTICE.
 import math
 from itertools import chain
 from typing import Any, Dict, List, Optional, Union

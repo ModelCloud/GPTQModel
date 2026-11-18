@@ -12,6 +12,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from transformers import GenerationMixin, PreTrainedModel
+from transformers import initialization as init
 from transformers.cache_utils import DynamicCache
 from transformers.generation import LogitsProcessor, LogitsProcessorList
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
@@ -184,13 +185,15 @@ class QWenPreTrainedModel(PreTrainedModel):
     _no_split_modules = ["QWenBlock"]
     _supports_sdpa = True
 
+    @torch.no_grad()
     def _init_weights(self, module):
+        # TF5 `initialization` helpers skip tensors already loaded from a checkpoint.
         if isinstance(module, (nn.Linear, nn.Embedding)):
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if isinstance(module, nn.Linear) and module.bias is not None:
-                nn.init.zeros_(module.bias)
+                init.zeros_(module.bias)
         elif isinstance(module, RMSNorm):
-            nn.init.ones_(module.weight)
+            init.ones_(module.weight)
 
 
 class QWenModel(QWenPreTrainedModel):

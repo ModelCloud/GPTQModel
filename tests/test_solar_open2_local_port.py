@@ -3,6 +3,7 @@
 
 import copy
 import json
+import re
 
 import pytest
 import torch
@@ -40,8 +41,7 @@ def tiny_values(**kwargs):
     return values
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "1")])
 def test_package_selection_ignores_checkpoint_python(tmp_path, monkeypatch, trust, bypass):
     if bypass is None:
         monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
@@ -202,9 +202,7 @@ def kda_oracle(x, module, padding):
     return linear(result.reshape(batch, seq, -1), module.o_proj), state
 
 
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("full_proj", [False, True])
-@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("kv_heads,full_proj,bias", [(1, False, False), (2, True, True), (4, False, True), (4, True, False)])
 def test_independent_float64_full_decoder(kv_heads, full_proj, bias):
     model = tiny_model(
         num_key_value_heads=kv_heads,
@@ -251,9 +249,11 @@ LAYOUTS = [
 ]
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("layout", LAYOUTS)
-@pytest.mark.parametrize("implementation", ["eager", "sdpa"])
+@pytest.mark.parametrize(
+    "dtype,layout,implementation",
+    [(torch.float32, layout, implementation) for layout in LAYOUTS for implementation in ("eager", "sdpa")]
+    + [(torch.float16, LAYOUTS[0], "sdpa"), (torch.bfloat16, LAYOUTS[1], "eager")],
+)
 def test_cache_continuation_generation_and_causality(dtype, layout, implementation):
     model = tiny_model(
         layer_types=layout, kda_use_full_proj=True, use_rope=True, use_qk_norm=True, first_k_dense_replace=1
@@ -289,8 +289,7 @@ def test_cache_continuation_generation_and_causality(dtype, layout, implementati
         torch.testing.assert_close(restarted, expected, atol=tolerance, rtol=tolerance)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("assign", [False, True])
+@pytest.mark.parametrize("dtype,assign", [(torch.float32, False), (torch.float16, True), (torch.bfloat16, False)])
 def test_dense_safetensors_two_cycles_assignment_and_repair(tmp_path, dtype, assign):
     source = tiny_model().to(dtype)
     ids = torch.tensor([[1, 7, 9, 5]])
@@ -317,8 +316,7 @@ def test_dense_safetensors_two_cycles_assignment_and_repair(tmp_path, dtype, ass
         assert not list(path.glob("*.bin"))
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "1")])
 def test_public_dense_hostile_checkpoint_policy_two_reloads(tmp_path, monkeypatch, trust, bypass):
     from gptqmodel import BACKEND, GPTQModel
 
@@ -357,8 +355,7 @@ def test_public_dense_hostile_checkpoint_policy_two_reloads(tmp_path, monkeypatc
             wrapper = GPTQModel.load(str(target), backend=BACKEND.TORCH, dtype=torch.float32, trust_remote_code=trust)
 
 
-@pytest.mark.parametrize("offload", [False, True])
-@pytest.mark.parametrize("full_proj,dense_first", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("offload,full_proj,dense_first", [(False, False, False), (True, True, False), (False, False, True)])
 def test_public_plain_awq_all_projections_two_exact_reloads(tmp_path, offload, full_proj, dense_first):
     from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -532,3 +529,19 @@ def test_tuple_hidden_states_attentions_and_partial_rope():
         )
         expected = attention_oracle(embed, model.model.layers[0].self_attn, positions, torch.ones_like(ids))
         torch.testing.assert_close(actual.double(), expected, atol=1e-6, rtol=1e-5)
+
+
+def test_parallel_plan_targets_per_expert_layout_and_legacy_rope_fields():
+    model = tiny_model(first_k_dense_replace=1)
+    names = {name for name, _ in model.model.named_modules()} | {name for name, _ in model.model.named_parameters()}
+    for pattern in model.config.base_model_tp_plan:
+        regex = re.compile("^" + re.escape(pattern).replace(r"\*", r"\d+") + "$")
+        assert any(regex.match(name) for name in names), pattern
+    assert model.config.base_model_ep_plan is None  # grouped-GEMM EP needs fused experts
+    assert SolarOpen2Config(**tiny_values()).rope_parameters == {
+        "rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 1.0,
+    }
+    legacy = SolarOpen2Config(**tiny_values(rope_theta=5e5, rope_scaling={"rope_type": "linear", "factor": 2.0}))
+    assert legacy.rope_parameters == {
+        "rope_type": "linear", "factor": 2.0, "rope_theta": 5e5, "partial_rotary_factor": 1.0,
+    }

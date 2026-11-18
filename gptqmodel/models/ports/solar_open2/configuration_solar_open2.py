@@ -46,7 +46,7 @@ class SolarOpen2Config(PreTrainedConfig):
             factored low-rank `f_a_proj`/`f_b_proj` and `g_a_proj`/`g_b_proj`.
         kda_gate_lower_bound (`float`, *optional*, defaults to -5.0):
             Lower bound on the KDA log-decay gate.
-        kda_allow_neg_eigval (`bool`, *optional*, defaults to `False`):
+        kda_allow_neg_eigval (`bool`, *optional*, defaults to `True`):
             When `True`, the KDA `beta` gate is scaled by 2 (allowing negative eigenvalues of the state transition).
         layer_types (`list[str]`, *optional*):
             Per-layer attention type (`"full_attention"` / `"linear_attention"`). Derived from `gqa_layers` /
@@ -66,14 +66,16 @@ class SolarOpen2Config(PreTrainedConfig):
     model_type = "solar_open2"
     keys_to_ignore_at_inference = ["past_key_values"]
 
+    # Routed experts are a per-expert ModuleList (released checkpoint layout), not fused
+    # `gate_up_proj` tensors, so no packed/grouped-GEMM expert plans apply.
     base_model_tp_plan = {
         "layers.*.self_attn.q_proj": "colwise",
         "layers.*.self_attn.k_proj": "colwise",
         "layers.*.self_attn.v_proj": "colwise",
         "layers.*.self_attn.o_proj": "rowwise",
-        "layers.*.mlp.experts.gate_up_proj": "packed_colwise",
-        "layers.*.mlp.experts.down_proj": "rowwise",
-        "layers.*.mlp.experts": "moe_tp_experts",
+        "layers.*.mlp.experts.*.gate_proj": "colwise",
+        "layers.*.mlp.experts.*.up_proj": "colwise",
+        "layers.*.mlp.experts.*.down_proj": "rowwise",
         "layers.*.mlp.shared_experts.gate_proj": "colwise",
         "layers.*.mlp.shared_experts.up_proj": "colwise",
         "layers.*.mlp.shared_experts.down_proj": "rowwise",
@@ -85,12 +87,6 @@ class SolarOpen2Config(PreTrainedConfig):
         "embed_tokens": (["input_ids"], ["inputs_embeds"]),
         "layers": (["hidden_states", "attention_mask"], ["hidden_states"]),
         "norm": (["hidden_states"], ["hidden_states"]),
-    }
-    base_model_ep_plan = {
-        "layers.*.mlp.gate": "ep_router",
-        "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
-        "layers.*.mlp.experts.down_proj": "grouped_gemm",
-        "layers.*.mlp.experts": "moe_tp_experts",
     }
     attribute_map = {"num_local_experts": "n_routed_experts"}
 
@@ -119,7 +115,8 @@ class SolarOpen2Config(PreTrainedConfig):
     bos_token_id: int | None = None
     eos_token_id: int | list[int] | None = None
     pad_token_id: int | None = None
-    default_theta = 1_000_000.0
+    # Released checkpoints store `rope_theta`; configs without it keep the 10k base.
+    default_theta = 10_000.0
     head_dim: int = 128
     intermediate_size: int = 10240
     first_k_dense_replace: int = 0
@@ -138,17 +135,7 @@ class SolarOpen2Config(PreTrainedConfig):
     layer_types: list | None = None
 
     def __post_init__(self, **kwargs):
-        # RoPE BC: SolarOpen2 checkpoints carry `rope_theta` / `rope_scaling`; fold into `rope_parameters`.
-        rope_theta = kwargs.pop("rope_theta", None)
-        rope_scaling = kwargs.pop("rope_scaling", None)
-        if self.rope_parameters is None:
-            rope_parameters = dict(rope_scaling) if rope_scaling else {"rope_type": "default"}
-            if "type" in rope_parameters and "rope_type" not in rope_parameters:
-                rope_parameters["rope_type"] = rope_parameters.pop("type")
-            rope_parameters.setdefault("rope_type", "default")
-            rope_parameters.setdefault("rope_theta", rope_theta if rope_theta is not None else 10000.0)
-            self.rope_parameters = rope_parameters
-
+        # Legacy `rope_theta`/`rope_scaling` are folded into `rope_parameters` by PreTrainedConfig.
         # Full attention is NoPE by default; keep the full rotary dim available when use_rope=True.
         kwargs.setdefault("partial_rotary_factor", 1.0)
 
