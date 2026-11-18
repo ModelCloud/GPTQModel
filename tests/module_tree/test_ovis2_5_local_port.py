@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Actual Ovis2.5 Qwen3/NaViT weight owners, released headers and aliases."""
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,11 +17,9 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.ovis2_5.configuration_ovis2_5 import Ovis2_5_Config
 from gptqmodel.models.ports.ovis2_5.modeling_ovis2_5 import Ovis2_5
-from tests.port_assets import read_port_json
 from tests.test_ovis2_5_local_port import _config
 
 
-PORT = Path(__file__).parents[2] / "gptqmodel/models/ports/ovis2_5"
 EXPECTED_PLAN = {
     "layers": ["llm.model.layers"],
     "blocks": [["input_layernorm:!"],
@@ -30,23 +29,42 @@ EXPECTED_PLAN = {
 }
 
 
+_VIT = {"model_type": "siglip2_navit", "hidden_size": 1152, "intermediate_size": 4304, "num_hidden_layers": 27,
+        "num_attention_heads": 16, "patch_size": 16, "image_size": 512, "hidden_stride": 2, "window_size": 112,
+        "num_patches": -1, "preserve_original_pe": True, "use_rope": True, "fullatt_block_indexes": None}
+_LLM = {"model_type": "qwen3", "head_dim": 128, "num_key_value_heads": 8, "vocab_size": 151936,
+        "rms_norm_eps": 1e-06, "rope_theta": 1000000, "max_position_embeddings": 40960}
+# Released AIDC-AI/Ovis2.5 config.json decoder dimensions (2B @ 393c932b, 9B @ d73b2283) and the sha256
+# of the sorted (name, shape) inventory of all original safetensors headers. The 2B index omits its tied
+# output alias, which is added to its inventory; the 9B index contains an untied lm_head.
+RELEASES = {
+    "2B": ({"hidden_size": 2048, "intermediate_size": 6144, "num_hidden_layers": 28, "num_attention_heads": 16,
+            "tie_word_embeddings": True},
+           "63d2ee343d491840509737266c591998f9fdd1c7b49252b87d90dc9aff9b9c96", 752),
+    "9B": ({"hidden_size": 4096, "intermediate_size": 12288, "num_hidden_layers": 36, "num_attention_heads": 32},
+           "ff1b33b35e51a37d75cb05e05994fee2cb4b9e91014d22b42e525a7afb3098f6", 840),
+}
+
+
 @pytest.mark.parametrize("release", ["2B", "9B"])
 def test_exact_released_headers_and_tied_embedding_alias(release):
-    # Read all six original safetensors headers via byte ranges, independent of the model.
-    headers = read_port_json(PORT / "released_headers.json")[release]
-    config = Ovis2_5_Config(**json.loads((PORT / f"release_{release}_config.json").read_text()))
+    llm, digest, count = RELEASES[release]
+    config = Ovis2_5_Config(llm_config={**_LLM, **llm}, vit_config=dict(_VIT), hidden_size=llm["hidden_size"],
+                            visual_vocab_size=65536)
     with torch.device("meta"):
         model = Ovis2_5(config)
-    actual = {k: list(v.shape) for k, v in model.state_dict().items()}
-    expected = {k: v["shape"] for k, v in headers.items()}
-    if release == "2B":
-        # The 2B safetensors index omits its tied output alias; the 9B index contains it.
-        assert model.llm.lm_head.weight is model.llm.model.embed_tokens.weight
-        expected["llm.lm_head.weight"] = expected["llm.model.embed_tokens.weight"]
-    assert actual == expected
+    state = model.state_dict()
+    assert len(state) == count
+    inventory = sorted((name, list(value.shape)) for name, value in state.items())
+    assert hashlib.sha256(json.dumps(inventory).encode()).hexdigest() == digest
+    tied = model.llm.lm_head.weight is model.llm.model.embed_tokens.weight
+    assert tied == (release == "2B")
     assert model.config.max_pixels == (1344 * 1792 if release == "2B" else 1792 * 1792)
-    proposal = json.loads((PORT / "central_fixture_proposals.json").read_text())
-    assert proposal["registered_module_plans.cases.Ovis2_5QModel/gptq"] == EXPECTED_PLAN
+
+
+def test_central_registered_plan_is_unchanged():
+    fixtures = Path(__file__).parent / "fixtures/registered_module_plans.json"
+    assert json.loads(fixtures.read_text())["cases"]["Ovis2_5QModel/gptq"] == EXPECTED_PLAN
 
 
 @pytest.mark.parametrize("kv", [4, 2, 1])
@@ -83,3 +101,15 @@ def test_all_decoder_weight_owners_and_native_head_variants(kv, bias, device):
     assert wrapper.extract_layers_node() == EXPECTED_PLAN["layers"]
     assert {key for key, value in MODEL_MAP.items() if value is Ovis2_5QModel} == {"ovis2_5"}
     assert Ovis2_5QModel.fusable is None
+
+
+def test_meta_shell_vision_rotary_buffer_is_rebuilt_by_nested_vit_init():
+    # The NaViT inverse frequencies are a nonpersistent buffer: no checkpoint carries them, so the
+    # nested Siglip2 PreTrainedModel init (dispatched by Transformers' smart_apply) must rebuild them.
+    with torch.device("meta"):
+        model = Ovis2_5(_config())
+    model.to_empty(device="cpu")
+    rotary = model.visual_tokenizer.vit.vision_model.encoder.rotary_pos_emb
+    model.initialize_weights()
+    expected = 1.0 / (rotary.theta ** (torch.arange(0, rotary.dim, 2, dtype=torch.float32) / rotary.dim))
+    torch.testing.assert_close(rotary.inv_freq, expected, rtol=0, atol=0)

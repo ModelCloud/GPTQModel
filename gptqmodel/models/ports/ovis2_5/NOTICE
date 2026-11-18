@@ -3,8 +3,9 @@ Copyright (C) 2025 AIDC-AI. Apache License 2.0.
 GPT-QModel adaptations Copyright (C) 2026 ModelCloud.ai. Apache License 2.0.
 
 Derived from AIDC-AI/Ovis2.5-2B and AIDC-AI/Ovis2.5-9B's published
-configuration_ovis2_5.py and modeling_ovis2_5.py at the exact revisions in
-source_manifest.json. The upstream LICENSE and release-specific NOTICE-2B
+configuration_ovis2_5.py and modeling_ovis2_5.py at revisions
+393c932b2a03e28eb9aaa503e3c4ab3ad384d958 (2B) and
+d73b2283ae2a930b7762f8d7b8b8a3f0f3b5c3bd (9B). The upstream LICENSE and release-specific NOTICE-2B
 and NOTICE-9B are retained here; the full Apache 2.0 text is in the repository
 LICENSE. Source-derived vision helpers retain their upstream Qwen2.5-VL
 attribution. The Qwen3 decoder is provided by installed Transformers.
@@ -15,5 +16,4 @@ and image-processor asset selection; eager/SDPA attention; source soft visual
 vocabulary and visual-token ordering; input validation; derived-buffer lifecycle;
 standalone processor serialization; conservative plain-AWQ decoder quantization.
 
-The header inventories and asset hashes are metadata, not trained weight payloads.
 No AIDC-AI checkpoint Python executes at load time.

@@ -1,4 +1,3 @@
 # Preserve inspected upstream notice/config whitespace in these source assets.
 NOTICE-2B -whitespace
 NOTICE-9B -whitespace
-release_9B_config.json -whitespace

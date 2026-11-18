@@ -1,12 +1,12 @@
 # Copyright (C) 2025 AIDC-AI
 # SPDX-License-Identifier: Apache-2.0
-# GPT-QModel adaptation; pinned source and changes: README.md, NOTICE.
+# GPT-QModel adaptation; pinned source and changes: NOTICE.
 """Ovis2.5's Qwen3 decoder and custom SigLIP2 NaViT configuration."""
 
-from transformers import PretrainedConfig, Qwen3Config
+from transformers import PreTrainedConfig, Qwen3Config
 
 
-class Siglip2NavitConfig(PretrainedConfig):
+class Siglip2NavitConfig(PreTrainedConfig):
     model_type = "siglip2_navit"
 
     def __init__(self, hidden_size=1024, intermediate_size=4096, num_hidden_layers=24,
@@ -29,7 +29,7 @@ class Siglip2NavitConfig(PretrainedConfig):
             raise ValueError("Ovis2.5 positional embedding table must be square")
 
 
-class Ovis2_5_Config(PretrainedConfig):
+class Ovis2_5_Config(PreTrainedConfig):
     model_type = "ovis2_5"
     sub_configs = {"llm_config": Qwen3Config, "vit_config": Siglip2NavitConfig}
 

@@ -1,6 +1,6 @@
 # Copyright (C) 2025 AIDC-AI
 # SPDX-License-Identifier: Apache-2.0
-# Source prompt/media processing adapted for direct native asset loading; see README.md.
+# Source prompt/media processing adapted for direct native asset loading; see NOTICE.
 """Ovis2.5 chat/media preparation without checkpoint Python dispatch."""
 
 import os

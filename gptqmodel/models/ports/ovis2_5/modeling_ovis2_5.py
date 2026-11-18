@@ -1,6 +1,6 @@
 # Copyright (C) 2025 AIDC-AI
 # SPDX-License-Identifier: Apache-2.0
-# GPT-QModel adaptation; exact source hashes and changes: README.md, NOTICE.
+# GPT-QModel adaptation; source revisions and changes: NOTICE.
 """Ovis2.5 local wrapper: native Qwen3 plus the source's custom NaViT/soft vocabulary."""
 
 from typing import Optional, Union
@@ -14,7 +14,6 @@ from .vision_ovis2_5 import (
     INDICATOR_IDS,
     VISUAL_ATOM_ID,
     Siglip2NavitModel,
-    VisionRotaryEmbedding,
     VisualEmbedding,
     VisualTokenizer,
 )
@@ -35,13 +34,6 @@ class Ovis2_5(PreTrainedModel, GenerationMixin):
         self.tokenizer = None
         self.processor = None
         self.post_init()
-
-    def _init_weights(self, module):
-        super()._init_weights(module)
-        with torch.no_grad():
-            if isinstance(module, VisionRotaryEmbedding):
-                module.inv_freq.copy_(1.0 / (module.theta ** (
-                    torch.arange(0, module.dim, 2, dtype=torch.float32, device=module.inv_freq.device) / module.dim)))
 
     @property
     def text_tokenizer(self):
