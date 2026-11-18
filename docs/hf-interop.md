@@ -291,6 +291,74 @@ per-format table also appears in [the MACaQ page](macaq.md#transformers-interop)
 | `quant_method` transformers already implements | its own quantizer | unchanged (`setdefault`) |
 | save of a GPT-QModel-only layout | silent | `hf_compat_warnings` entry naming the method |
 
+## 6. Keyword `device_map` and `max_memory`
+
+Transformers calls a quantizer's `preprocess_model` *before* it resolves
+`device_map="auto"` from `max_memory`, and it never forwards `max_memory` to
+the quantizer. The bridge therefore receives an unresolved accelerate keyword,
+not a placement.
+
+### Before: the keyword expanded to every visible GPU
+
+`hf_select_quant_linear{,_v2}` and `hf_gptqmodel_prepare_model_for_load` sent
+the keyword to `hf_normalize_device_device_map`, which expanded it with
+`expand_selector_device_family` and validated the result. On a host whose GPUs
+span compute-capability groups, the load was refused before `max_memory` was
+considered, even when the budget named one card. `GPTQModel.load` was already
+fixed for that (#4632/#4747) because it resolves the budget itself.
+
+```mermaid
+flowchart TD
+    A["from_pretrained device_map=auto max_memory N card"] --> B["preprocess_model device_map=auto"]
+    B --> C["hf_normalize_device_device_map expands every visible GPU"]
+    C --> D{"capabilities differ?"}
+    D -->|"yes"| E["ValueError: mixed compute capabilities"]
+    D -->|"no"| F["kernel valid on every GPU"]
+    E --> G["max_memory never applied"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class E,G failure;
+```
+
+### After: defer placement, validate what was resolved
+
+The bridge now normalizes an accelerate keyword to the accelerator *family*
+(`defer_keyword_placement`) instead of a concrete ordinal. A family selector
+makes kernel selection validate the candidate against every visible device, so
+whichever card the budget names is served; a homogeneous host keeps the
+historical concrete expansion, so kernel choice there is unchanged. Once
+Transformers has applied `max_memory` and Accelerate has dispatched the model,
+`model.hf_device_map` is the real placement and
+`validate_device_map_capability_groups` keeps the refusal for a map that truly
+spans generations, with a remedy that can work on this path.
+
+```mermaid
+flowchart TD
+    A["from_pretrained device_map=auto max_memory N card"] --> B["preprocess_model device_map=auto"]
+    B --> C{"host spans capability groups?"}
+    C -->|"no"| D["expand to every visible GPU as before"]
+    C -->|"yes"| E["keep accelerator family"]
+    D --> F["kernel valid on every expanded GPU"]
+    E --> G["kernel valid on every visible GPU"]
+    F --> H["Transformers resolves max_memory"]
+    G --> H
+    H --> I["Accelerate dispatches and sets hf_device_map"]
+    I --> J["validate_device_map_capability_groups"]
+    J -->|"one capability group"| K["load succeeds"]
+    J -->|"mixed groups"| L["ValueError: explicit map or CUDA_VISIBLE_DEVICES"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    classDef ok fill:#d9f2d9,stroke:#2e7d32;
+    class L failure;
+    class K ok;
+```
+
+| Situation | Before | After |
+| --- | --- | --- |
+| `device_map="auto", max_memory={1: ...}` on a mixed host | `ValueError: cuda:0=..., cuda:1=...` | Loads on the budgeted card |
+| `device_map="auto", max_memory={... , "cpu": ...}` on a mixed host | Same `ValueError` | Loads; CPU-offload kernel contract still applies (#5022) |
+| `max_memory` naming both capability groups | `ValueError` before weights load | `ValueError` after dispatch, naming an explicit map |
+| Homogeneous host, any keyword | One kernel for all visible GPUs | Unchanged |
+| Explicit `device_map={"": "cuda:0", "model.layers.1": "cuda:1"}` | `ValueError` | Unchanged, still refused up front |
+
 ## Failure contract
 
 | Condition | Before | After |
@@ -300,6 +368,7 @@ per-format table also appears in [the MACaQ page](macaq.md#transformers-interop)
 | AWQ module with non-divisible `in_features` | `ValueError` after calibration | Retuned group size before calibration |
 | Native save of a source with `auto_map` | Dangling `auto_map`, `OSError` on load | `auto_map` removed; config loads natively |
 | GPT-QModel-only `quant_method` in plain HF | warning + random weights | refusing quantizer raises when `gptqmodel` is imported |
+| Keyword `max_memory` budget on a mixed-capability host | `ValueError` before the budget applies | Loads when the budget names one capability group; a resolved mixed map is still refused |
 
 ## Tests
 
@@ -314,3 +383,4 @@ per-format table also appears in [the MACaQ page](macaq.md#transformers-interop)
 | `tests/test_checkpoint_interop_4053.py::test_hf_from_pretrained_refuses_every_gptqmodel_only_method` | Every table entry raises instead of loading random weights |
 | `tests/test_checkpoint_compat.py::test_every_gptqmodel_only_method_registers_a_refusing_quantizer` | The package-init guard covers the whole table |
 | `tests/test_checkpoint_compat.py::test_hf_compat_warning_for_every_gptqmodel_only_method` | Save-time warnings name every table entry |
+| `tests/test_hf_bridge_mixed_capability_5084.py` | A keyword map is not validated before `max_memory`; the resolved map is |

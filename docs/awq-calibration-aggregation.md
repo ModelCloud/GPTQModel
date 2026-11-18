@@ -72,10 +72,16 @@ gate/up scaling group (`AWQProcessor.register_moe_root_capture_hook`).
 
 ## Token-row budget
 
-`AWQProcessor._token_row_budget` derives the bound from the captures themselves:
+`AWQProcessor._token_row_budget` derives the bound from the captures themselves,
+and `AWQProcessor._cap_token_rows` then clamps it to the model's declared
+sequence limit:
 
 ```
-retained = min(total_rows, max(largest_batch_rows, non_empty_batch_count))
+retained = min(
+    total_rows,
+    max(largest_batch_rows, non_empty_batch_count),
+    resolve_position_limit(model.config),
+)
 ```
 
 For `batch_size=1` that is one longest-sample equivalent, so 512 rows for a
@@ -85,6 +91,58 @@ batch guarantees every non-empty calibration batch contributes at least one row
 when the budget is at least the batch count; below that, evenly spaced batches
 contribute one row each. `_pack_token_rows` samples evenly inside each batch and
 is deterministic for a fixed capture order.
+
+The position-limit clamp (#5085) is required because the packed rows are
+replayed as **one** sequence. Without it `batch_size > 1` asks for about
+`batch_size * seq_len` rows, and a corpus with more batches than the limit does
+the same. Attention implementations that read their causal structure from the
+`attention_mask` argument tolerate that, but `GPTNeoSelfAttention` slices a
+fixed `[max_position_embeddings, max_position_embeddings]` buffer:
+
+```python
+causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length]
+attn_weights = torch.where(causal_mask, attn_weights, mask_value)
+```
+
+An over-long replay clips that slice and `torch.where` raises
+`RuntimeError: The size of tensor a (2048) must match the size of tensor b
+(2200)`. OpenAI GPT's `[n_positions, n_positions]` buffer is the quieter
+variant: it clips the same way without raising, so rows past the limit would be
+scored against a truncated causal mask. `resolve_position_limit` in
+`gptqmodel/utils/model.py` reads the same keys calibration truncation already
+uses (`max_position_embeddings`, `max_sequence_length`, `max_seq_len`,
+`n_positions`, `seq_length`), so a row that calibration kept can always be
+replayed. A definition-declared `max_tokens` is clamped the same way.
+
+```mermaid
+flowchart TD
+    A["_layer_input_features"] --> B["policy max_tokens?"]
+    B -- yes --> C["int(max_tokens)"]
+    B -- no --> D["_token_row_budget<br/>max(largest_batch, batches)"]
+    C --> E["_cap_token_rows<br/>min(budget, position_limit)"]
+    D --> E
+    E --> F["_pack_token_rows<br/>[1, retained, hidden]"]
+    F --> G["_search_best_scale<br/>reference replay"]
+    G --> H{"Torch tensor geometry error?"}
+    H -- yes --> I["_AWQScaleGroupError<br/>configured fallback or raise"]
+    H -- no --> J["20-candidate grid<br/>apply_scale"]
+    style I fill:#ffe9b3,stroke:#b38600
+```
+
+`_cap_token_rows` caches `resolve_position_limit` once per processor, so the
+budget path costs no per-module config walk.
+
+### Replay geometry failures
+
+The clamp covers the declared limit, but a module can bound its context below
+the config value, or a definition can declare a `max_tokens` of its own. A
+replay that still raises a Torch tensor-geometry failure
+(`must match the size of tensor`, `expanded size of the tensor`,
+`shapes cannot be multiplied`, `mat1 and mat2 shapes`) is reported as an
+`_AWQScaleGroupError` by `AWQProcessor._search_best_scale`. The configured
+fallback then quantizes the group plainly instead of aborting `quantize()`;
+`fallback=None` still propagates the error. Memory, kernel and numerical
+failures keep propagating unchanged.
 
 Host memory for the packed tensor is `retained * hidden * dtype_bytes` per
 module, and the raw per-batch captures are dropped by
@@ -391,3 +449,16 @@ with a different checkpoint (inference: the base `gemma-3-1b-pt`, which is not
 present locally). The Llama values differ from #4095 as well because `main`
 moved after that table was taken: #4089 changed replay chunk sizing. Qwen RTN
 reproduces #4063's 24.84 / 22.77 exactly, which anchors the harness.
+
+## Regression coverage
+
+| Test node | Guarantee |
+| --- | --- |
+| `tests/test_awq_gpt_neo_packed_replay_5085.py::test_position_limit_resolves_each_declared_key` | `resolve_position_limit` reads every calibration key and nested decoder config |
+| `tests/test_awq_gpt_neo_packed_replay_5085.py::test_token_row_budget_is_capped_at_the_position_limit` | the clamp binds, and an absent limit keeps the unclamped budget |
+| `tests/test_awq_gpt_neo_packed_replay_5085.py::test_awq_gpt_neo_batch_of_two_quantizes_within_the_limit` | native GPT-Neo, two 40-token rows against a 64-position limit: every packed replay stays within the limit and all 12 leaves pack |
+| `tests/test_awq_gpt_neo_packed_replay_5085.py::test_control_batch_of_one_keeps_every_row` | a single document under the limit still replays all 40 rows |
+| `tests/test_awq_gpt_neo_packed_replay_5085.py::test_replay_geometry_error_becomes_a_scale_group_error` | an over-long replay raises `_AWQScaleGroupError`; fallback quantizes every leaf, `fallback=None` propagates |
+
+The first three nodes fail on `main` before the fix; the geometry-error node
+asserts the fallback contract introduced with it.

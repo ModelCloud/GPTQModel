@@ -4791,6 +4791,56 @@ def find_config_seq_len(config_dict, target_keys):
     return None
 
 
+#: Config keys that declare a model's maximum sequence length, in the order
+#: calibration resolves them. Multimodal wrappers nest the text decoder's
+#: config, so resolution recurses through mappings (#5085).
+POSITION_LIMIT_CONFIG_KEYS = (
+    "max_position_embeddings",
+    "max_sequence_length",
+    "max_seq_len",
+    "n_positions",
+    "seq_length",
+)
+
+
+def resolve_position_limit(config: Any) -> Optional[int]:
+    """Return the sequence length limit ``config`` declares, or ``None``.
+
+    A model's declared limit is the longest sequence it promises to run.
+    Calibration rows are already truncated to it, but a packed replay can be
+    longer than any single row, so callers that build a synthetic sequence must
+    respect the same bound (#5085). Non-positive and non-integer values are
+    ignored, and nested decoder configs are searched when the wrapper does not
+    declare the limit itself.
+    """
+
+    if config is None:
+        return None
+    as_dict = getattr(config, "to_dict", None)
+    if callable(as_dict):
+        try:
+            config = as_dict()
+        except Exception:
+            pass
+    for key in POSITION_LIMIT_CONFIG_KEYS:
+        value = config.get(key) if isinstance(config, dict) else getattr(config, key, None)
+        if value is None:
+            continue
+        try:
+            limit = int(value)
+        except (TypeError, ValueError):
+            continue
+        if limit > 0:
+            return limit
+    if isinstance(config, dict):
+        for value in config.values():
+            if isinstance(value, dict):
+                limit = resolve_position_limit(value)
+                if limit is not None:
+                    return limit
+    return None
+
+
 def get_module_name(module: nn.Module, child_module: nn.Module) -> str:
     for name, candidate in module.named_modules():
         if candidate is child_module:
