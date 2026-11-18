@@ -89,9 +89,51 @@ class InternS2PreviewQModel(BaseQModel):
         return sample
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Hybrid recurrence, gated full attention and packed MoE are not
-        # qualified for complete AWQ search/replay. Quantize without folding.
-        return []
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        if getattr(module, "block_type", None) != "linear_attention":
+            return nodes
+
+        # Native Qwen3.5-MoE decoder: `input_layernorm` feeds all four DeltaNet
+        # input projections. The capture-only `linear_attn:!` owner breaks the
+        # generic norm run, so the planner pairs `in_proj_qkv` with `in_proj_z`
+        # instead. Drop every group touching DeltaNet internals (convolution,
+        # recurrence and the gated per-head norm separate inputs from
+        # `out_proj`) and bind the real input edge directly.
+        attn = module.linear_attn
+        internal = {id(child) for child in attn.modules()}
+        nodes = [
+            node for node in nodes
+            if id(node["prev_op"]) not in internal
+            and not any(id(target) in internal for target in node["layers"])
+        ]
+        feature = "linear_attn.in_proj_qkv"
+        if feature not in input_feat:
+            return nodes
+        kwargs = dict(module_kwargs or {})
+        per_feature = kwargs.pop("_awq_feature_kwargs", {})
+        kwargs.update(per_feature.get(feature, {}))
+        # The decoder passes its cache as `past_key_values`; DeltaNet calls it `cache_params`.
+        if "past_key_values" in kwargs:
+            kwargs.setdefault("cache_params", kwargs.pop("past_key_values"))
+        node = {
+            "prev_op": module.input_layernorm,
+            "layers": [attn.in_proj_qkv, attn.in_proj_z],
+            "inp": input_feat[feature],
+            "module2inspect": attn,
+            "kwargs": kwargs,
+            "_input_feature_name": feature,
+            # Unquantized gate projections read the same normed input.
+            "_scale_consumers": ["linear_attn.in_proj_b", "linear_attn.in_proj_a"],
+        }
+        return self._filter_awq_scaling_sources(module, [node, *nodes])
+
+    def awq_module_replay_inputs(self, module, x, module_kwargs):
+        x, kwargs = super().awq_module_replay_inputs(module, x, module_kwargs)
+        # Calibration is an uncached prefill; a mutable recurrent/KV cache would
+        # advance on the reference and again on each candidate replay.
+        if any(kwargs.get(key) is not None for key in ("cache_params", "past_key_values")):
+            raise NotImplementedError("Intern-S2 AWQ requires uncached calibration context")
+        return x, kwargs
 
     def _materialize_core_module(self, parent, attr_name: str):
         module = getattr(parent, attr_name)
