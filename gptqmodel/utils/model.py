@@ -3033,6 +3033,11 @@ def get_state_dict_for_save(
             tensor = source
             if getattr(tensor, "is_meta", False) or tensor.device.type == "meta":
                 key = ("meta", id(tensor))
+            elif tensor.numel() == 0:
+                # Every empty allocation reports the same null storage, so a
+                # storage key would collapse unrelated empty tensors (QQQ's
+                # per-channel `s_group`) into one and drop the rest (#4458).
+                key = ("tensor", id(tensor))
             else:
                 try:
                     # Distinct checkpoint weights may be views into one fused
