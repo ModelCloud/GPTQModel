@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Native Transformers aliases, with explicit native media component selection.
 
-No modeling implementation is copied. See README.md for the reviewed native
-version and the pinned checkpoint whose historical processor names differ.
+No modeling implementation is copied. The pinned checkpoint's historical
+``Lfm3Vl{Image,Video}Processor`` names map to the native Qwen media processors.
 """
 
 from transformers import (

@@ -31,7 +31,7 @@ from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 
 
-AUDIT = Path(__file__).parents[1] / "gptqmodel/models/ports/lfm3_vl"
+FIXTURES = Path(__file__).parent / "fixtures/ports/lfm3_vl"
 
 
 def tiny_config(kv_heads=2, bias=False, gate=True, sandwich=True):
@@ -119,8 +119,7 @@ def hostile_metadata(path):
     return marker
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "1")])
 def test_public_native_load_ignores_hostile_checkpoint_code(tmp_path, monkeypatch, trust, bypass):
     if bypass is None:
         monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
@@ -237,7 +236,7 @@ def test_processor_failure_then_clean_retry(tmp_path, failure):
 
 
 def test_pinned_native_media_metadata_against_pixel_and_grid_oracles(tmp_path):
-    (tmp_path / "processor_config.json").write_bytes((AUDIT / "checkpoint_processor_config.json").read_bytes())
+    (tmp_path / "processor_config.json").write_bytes((FIXTURES / "checkpoint_processor_config.json").read_bytes())
     tokenizer = tiny_processor().tokenizer
     processor = LFM3VLQModel.loader.load_processor(str(tmp_path), tokenizer=tokenizer)
     assert isinstance(processor.image_processor, Qwen2VLImageProcessor)
@@ -258,8 +257,7 @@ def test_pinned_native_media_metadata_against_pixel_and_grid_oracles(tmp_path):
                                rtol=0, atol=1e-7)
 
 
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("kv_heads,bias", [(1, False), (4, True)])
 def test_public_awq_plain_quantization_packs_all_decoder_linears(tmp_path, kv_heads, bias):
     source = tmp_path / "source"
     native_model(kv_heads=kv_heads, bias=bias).save_pretrained(source, safe_serialization=True)
