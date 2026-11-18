@@ -59,6 +59,63 @@ codes and zero points in natural column order. Other widths use the continuous
 little-endian bit stream. `_unpack_columnwise` keeps INT64 as its default so
 packing and repacking consumers retain their existing arithmetic.
 
+## Capture-safe extraction offsets
+
+`_awq_shifts` keeps one four-bit extraction table per device in
+`_AWQ_SHIFTS_CACHE`, keyed by `(device.type, device.index, bits)`. A CUDA-graph
+capture records device work instead of running it, so a table first built
+inside `torch.cuda.graph(...)` holds uninitialized memory until the graph is
+replayed. Publishing that table made an abandoned capture leave every later
+eager dequant decoding with zeros (#5094). The lookup now bypasses the cache
+for the duration of a capture: the fresh tensor is recorded into the graph and
+is valid on replay, and the first eager call builds and publishes the real
+table.
+
+Before #5094, a cold miss inside a capture published the never-computed table:
+
+```mermaid
+flowchart TD
+    A["_awq_shifts miss"] --> B["derive with device arithmetic"]
+    B --> C["publish _AWQ_SHIFTS_CACHE[key]"]
+    C --> D["return table"]
+    D -. "inside capture: arithmetic recorded, not run" .-> E["table holds zeros"]
+    E -. "capture abandoned" .-> F["every later eager dequant decodes wrong weights"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class E,F failure
+```
+
+After #5094, only an eager miss publishes; a capture gets its own recorded
+table:
+
+```mermaid
+flowchart TD
+    A["dequantize_gemm: bits == 4"] --> B["_awq_shifts(device, bits)"]
+    B --> C{"cache hit?"}
+    C -- "yes" --> D["return cached table"]
+    C -- "no" --> E{"torch.compiler.is_compiling()?"}
+    E -- "yes" --> F["derive fresh, uncached<br/>recorded into the traced graph"]
+    E -- "no" --> G{"is_current_stream_capturing()?"}
+    G -- "yes" --> H["derive fresh, uncached<br/>recorded into the captured graph"]
+    G -- "no" --> I["derive and publish<br/>_AWQ_SHIFTS_CACHE[key]"]
+    I --> D
+    classDef added fill:#e6f4ea,stroke:#2e7d32,color:#111
+    class F,H added
+```
+
+| Situation | Before #5094 | After #5094 |
+| --- | --- | --- |
+| First four-bit dequant on the device runs inside a capture | cache published with uninitialized (zero) offsets | capture receives an uncached table recorded into the graph |
+| Capture is abandoned | every later eager dequant on that device decodes wrong weights for the life of the process | the next eager call derives and publishes the correct table |
+| Capture succeeds, eager call before `replay()` | eager call reads the zero table | eager call publishes its own correct table; the captured graph keeps its recorded tensor |
+| Eager steady state | one cached table per device/bits | unchanged: one cached table, no per-call allocation or H2D copy |
+| `torch.compile` trace | uncached, derived tensor | unchanged |
+
+The `AwqTorchLinear` and `ParoLinear` dense forwards reach this through the
+shared `_dequantize_weight_for_inference`, and the CPU kernels call the same
+`dequantize_gemm`; fixing the helper covers all of them. `AwqTorchLinear` now
+declares `SUPPORTS_GRAPH_CAPTURE = True`, matching the measured first-call
+capture on RTX 4090.
+
 ## Before and after
 
 Paths below are relative to `gptqmodel/quantization/awq/utils/`. The original
@@ -136,6 +193,14 @@ unchanged and no additional persistent inference weight storage is introduced.
 | `test_missing_zero_points_is_rejected` | explicit failure for missing zero points |
 | `test_forward_keeps_weights_quantized_between_calls` | FP16/BF16 forward output matches an independent oracle; checkpoint buffers stay exact and no dense weight persists |
 | `test_temporary_storage_is_bounded_by_the_weight_size` | 4096x4096 group 128/1024/4096/-1 stays below 2.5x the FP16 dense weight |
+| `test_abandoned_capture_does_not_poison_dequantize_gemm` | abandoned first-call capture publishes no table; the next eager dequant is exactly the CPU reference |
+| `test_eager_call_before_replay_uses_a_computed_table` | eager dequant before the first replay is correct; the replayed capture is still correct |
+| `test_successful_capture_does_not_publish_shift_table` | a successful capture leaves the cache empty until an eager call |
+| `test_awq_torch_linear_after_abandoned_capture` | FP16/BF16 `AwqTorchLinear` matches the FP64 oracle after an abandoned capture |
+| `test_awq_torch_linear_first_dequant_capture_replays` | a real first-call `AwqTorchLinear` capture replays to the FP64 oracle |
+| `test_paro_linear_dense_after_abandoned_capture` | FP16/BF16 dense `ParoLinear` matches the FP64 oracle after an abandoned capture |
+| `test_cpu_awq_torch_linear_matches_oracle` | the CPU kernel sharing `dequantize_gemm` still matches the oracle |
+| `test_eager_shift_table_is_cached_once` | eager calls reuse one published table; repeated dequant does not rebuild it |
 
 Numerical tests run on CPU and the available CUDA or ROCm runtime. The
 `AWQ tiled dequantize_gemm` GIL=0 probe checks independent FP64 expected weights
@@ -145,3 +210,5 @@ subprocesses per backend, each using 8 threads x 4 iterations and per-thread
 streams; see `pytorch_gil_0_compat.md`.
 
 This mechanism was introduced in [#3819](https://github.com/ModelCloud/GPTQModel/pull/3819).
+The capture-safe extraction table was added in
+[#5094](https://github.com/ModelCloud/GPTQModel/pull/5094).
