@@ -451,7 +451,10 @@ class TorchFusedAwqLinear(AWQuantLinear):
         x_flat = x.reshape(-1, x.shape[-1])
         input_dtype = x_flat.dtype
         self.assert_supported_dtype(input_dtype)
-        if input_dtype == torch.float32:
+        # The CPU int4pack op consumes FP32 activations natively, so narrowing
+        # them to BF16 would round the input and the result for no speedup.
+        # The XPU op keeps its BF16 contract.
+        if input_dtype == torch.float32 and x_flat.device.type != "cpu":
             x_flat = x_flat.to(torch.bfloat16)
         if torch.compiler.is_compiling():
             # ``_cpu_transform_lock`` is an ``RLock``: dynamo cannot enter it (a
@@ -468,14 +471,18 @@ class TorchFusedAwqLinear(AWQuantLinear):
                     and not x_flat.requires_grad
                     and self.linear_mode is None
                     and TORCH_HAS_FUSED_OPS
-                    # FP16 can overflow before a cancelling bias. BF16 has
-                    # FP32's range, so it can use the fused op and add the bias
-                    # once. The CPU fused op returns an FP32 product for a
-                    # biased FP16 layer, so it can add the bias before the
-                    # single visible cast too.
+                    # FP16 can overflow before a cancelling bias. FP32 and BF16
+                    # have FP32's range, so they can use the fused op and add
+                    # the bias once. The CPU fused op returns an FP32 product
+                    # for a biased FP16 layer, so it can add the bias before
+                    # the single visible cast too.
                     and (
                         self.bias is None
-                        or x_flat.dtype in (torch.bfloat16, torch.float16)
+                        or x_flat.dtype in (
+                            torch.float32,
+                            torch.bfloat16,
+                            torch.float16,
+                        )
                     )
                 ):
                     capture_fused_train_state(self)
