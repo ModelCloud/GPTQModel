@@ -55,7 +55,7 @@ PENDING_STALE_PATTERN_PORTS = frozenset({
     "ernie4_5_vl_moe", "kimi_k3", "minicpm_o", "native/bloom", "native/codegen",
     "native/diffusion_gemma", "native/falcon", "native/falcon_h1", "native/falcon_mamba", "native/gpt_neo",
     "native/gptj", "native/hunyuan_vl", "native/minimax_m3_vl", "native/mpt", "native/nemotron_h",
-    "native/nemotron_h_omni", "native/ovis2", "native/timm_wrapper", "native/voxtral", "native/zamba",
+    "native/ovis2", "native/timm_wrapper", "native/voxtral", "native/zamba",
     "native/zamba2",
 })
 
