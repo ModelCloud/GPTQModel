@@ -38,6 +38,10 @@ from gptqmodel.quantization import FORMAT, QuantizeConfig
 from gptqmodel.utils.model import convert_gptq_v2_to_v1_format
 
 
+# Every case loads through ``AutoModelForCausalLM.from_pretrained``, whose GPTQ
+# quantizer requires the optional ``hf`` extra (optimum).
+pytest.importorskip("optimum", reason="Transformers' GPTQ quantizer needs optimum")
+
 HIDDEN = 32
 INTERMEDIATE = 64
 VOCAB = 32
