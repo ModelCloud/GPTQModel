@@ -781,6 +781,108 @@ def model_accelerator_devices(model) -> List[str]:
     return devices
 
 
+def _first_accelerator_tensor_device(value) -> Optional[torch.device]:
+    """The first accelerator tensor device in ``value`` (one nesting level)."""
+
+    if isinstance(value, torch.Tensor):
+        device = value.device
+        return device if device.type in _ACCELERATOR_DEVICE_TYPES else None
+    if isinstance(value, dict):
+        values = value.values()
+    elif isinstance(value, (list, tuple)):
+        values = value
+    else:
+        return None
+    for item in values:
+        device = _first_accelerator_tensor_device(item)
+        if device is not None:
+            return device
+    return None
+
+
+def _module_accelerator_device(module) -> Optional[torch.device]:
+    """The first accelerator device held by ``module``'s parameters or buffers."""
+
+    for source in (getattr(module, "parameters", None), getattr(module, "buffers", None)):
+        if not callable(source):
+            continue
+        for tensor in source():
+            device = getattr(tensor, "device", None)
+            if device is not None and device.type in _ACCELERATOR_DEVICE_TYPES:
+                return device
+    return None
+
+
+def model_execution_device(model, *inputs) -> Optional[torch.device]:
+    """The accelerator device a model call executes on, or ``None`` for CPU.
+
+    A multi-device map is not pinned to one GPU: the first accelerator input
+    wins, then the input embedding, then the first accelerator parameter or
+    buffer. The inputs are the call's positional values (nested tuples, lists
+    and dicts are inspected one level deep), so a device map's first stage is
+    used for that stage's call.
+    """
+
+    for value in inputs:
+        device = _first_accelerator_tensor_device(value)
+        if device is not None:
+            return device
+
+    embedding = None
+    try:
+        get_input_embeddings = getattr(model, "get_input_embeddings", None)
+        if callable(get_input_embeddings):
+            embedding = get_input_embeddings()
+    except Exception:  # pragma: no cover - exotic module trees
+        embedding = None
+    for candidate in (embedding, model):
+        if candidate is None:
+            continue
+        device = _module_accelerator_device(candidate)
+        if device is not None:
+            return device
+    return None
+
+
+@contextmanager
+def model_execution_device_scope(model, *inputs):
+    """Enter the device a compiled model call executes on, then restore the caller's.
+
+    Inductor initializes its lazy graph patterns from the traced frame's input
+    device (``torch/_inductor/fx_passes/joint_graph.py::joint_graph_passes`` ->
+    ``lazy_init`` -> ``fuse_attention._sfdp_init``). A quantized-kernel graph
+    break can leave that frame without a device-bearing input, and
+    ``_get_sfdp_patterns`` then falls back to ``"cuda"`` -- the *current*
+    device. A compiled model loaded on ``cuda:1`` therefore claimed the primary
+    context of ``cuda:0`` when a later shape recompiled (#5101).
+
+    Entering the model's execution device for the compiled call makes those
+    device-less defaults resolve to the GPU that holds the model. Only the
+    current device changes; tensor placement is untouched. The previous current
+    device is restored on exit, including when the call raises. A CPU model, or
+    a model with no accelerator tensor, runs the call unchanged.
+    """
+
+    device = model_execution_device(model, *inputs)
+    if device is None or device.type not in _ACCELERATOR_DEVICE_TYPES:
+        yield
+        return
+
+    if device.type == "cuda":
+        # Also the ROCm spelling: HIP exposes the CUDA device namespace.
+        with torch.cuda.device(device):
+            yield
+        return
+
+    runtime = getattr(torch, device.type, None)
+    device_context = getattr(runtime, "device", None)
+    if callable(device_context):
+        with device_context(device):
+            yield
+        return
+    yield
+
+
 @contextmanager
 def defuser_conversion_scope(model):
     """Bound Defuser's ``clear_memory()`` to the devices the model occupies.

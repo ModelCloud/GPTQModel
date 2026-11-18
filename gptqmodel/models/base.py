@@ -137,6 +137,7 @@ from ..utils.torch import (
     TORCH_HAS_COMPILE,
     as_torch_device,
     dynamo_traced_frames,
+    model_execution_device_scope,
     release_compile_trace_garbage,
     release_pinned_host_cache,
     torch_compile,
@@ -472,7 +473,13 @@ class _CompiledModelForward:
                 "compiled model `forward` called after its model was released"
             )
         try:
-            return self._compiled(module, *args, **kwargs)
+            # Inductor's lazy pattern init uses the *current* device when a
+            # graph-break frame has no device-bearing input, which claimed
+            # cuda:0 for a model compiled on cuda:1 (#5101). Enter the model's
+            # execution device for the compiled call; the caller's device is
+            # restored on exit, including on error.
+            with model_execution_device_scope(module, args, kwargs):
+                return self._compiled(module, *args, **kwargs)
         finally:
             self._release_trace_garbage()
 

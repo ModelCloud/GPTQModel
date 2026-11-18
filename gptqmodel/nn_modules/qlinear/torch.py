@@ -34,7 +34,7 @@ from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.planar_packing import planar_decode_rows
 from ...utils.rocm import IS_ROCM
-from ...utils.torch import model_global_state_lock, torch_compile
+from ...utils.torch import model_execution_device_scope, model_global_state_lock, torch_compile
 from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
 from ._numerics import (
@@ -88,7 +88,12 @@ class _CompiledDequantizeWeight:
         module = self._module_ref()
         if module is None:
             raise RuntimeError("compiled `dequantize_weight` called after its module was released")
-        return self._compiled(module, *args, **kwargs)
+        # The compiled kernel is reachable outside the model-forward proxy
+        # (e.g. a direct kernel call). Enter the module's device so inductor's
+        # device-less lazy patterns cannot resolve to the current, excluded
+        # GPU (#5101); the caller's device is restored on exit.
+        with model_execution_device_scope(module, args, kwargs):
+            return self._compiled(module, *args, **kwargs)
 
     def __repr__(self):
         return f"<compiled dequantize_weight {self._compiled!r}>"
