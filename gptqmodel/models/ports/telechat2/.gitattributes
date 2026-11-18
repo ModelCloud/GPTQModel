@@ -1,2 +1,0 @@
-# Preserve the byte-pinned upstream JSON, including its terminal blank line.
-fixtures/config.json whitespace=-blank-at-eof
