@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2024 Zhipu AI
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# Adapted from pinned THUDM ChatGLM sources; see PROVENANCE.md.
+# Adapted from THUDM ChatGLM sources.
 """Package-owned ChatGLM checkpoint shells and Transformers 5 cache boundary.
 
 Decoder math and tensor names come from the reviewed upstream cores. Only this
@@ -31,11 +31,11 @@ class ChatGLMPreTrainedModel(PreTrainedModel):
             nn.init.normal_(module.weight, mean=0.0, std=getattr(self.config, "initializer_range", 0.02))
             if getattr(module, "bias", None) is not None:
                 nn.init.zeros_(module.bias)
-        elif isinstance(module, (core.RMSNorm, core_glm4.RMSNorm, nn.LayerNorm)):
+        elif isinstance(module, (core.RMSNorm, nn.LayerNorm)):
             nn.init.ones_(module.weight)
             if getattr(module, "bias", None) is not None:
                 nn.init.zeros_(module.bias)
-        elif isinstance(module, (core.RotaryEmbedding, core_glm4.RotaryEmbedding)):
+        elif isinstance(module, core.RotaryEmbedding):
             module.inv_freq.copy_(1.0 / (
                 10000 ** (torch.arange(0, module.dim, 2, device=module.inv_freq.device).float() / module.dim)
             ))
