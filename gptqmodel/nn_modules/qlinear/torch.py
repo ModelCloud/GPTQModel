@@ -1227,11 +1227,21 @@ class TorchQuantEmbeddings(TorchLinear):
     # not be discovered as a general backend: their forward contract accepts
     # integer token IDs, not hidden states.
     SUPPORTS_BACKEND_SELECTION = False
-    # The forward branches on host values (`input_ids.numel()` against the
-    # row-decode limit, dtype/device checks) before choosing a dense decode or
-    # `F.embedding`, so dynamo breaks and a CUDA-graph capture cannot cross the
-    # branch. Not probed: the branches are unconditional on every call.
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all pass for both paths: the whole-table
+    # `F.embedding(dequantize_weight())` decode and the row-decode gather once
+    # the eager warmup has built `_embedding_row_decode_state()`. A traced
+    # forward reads that cached metadata instead of re-keying it with
+    # `tensor_cache_key`, whose `is_inference()` is a hard graph break.
+    #
+    # CUDA keeps ``EAGER``: not re-measured on this CPU-only host.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for this kernel in this change; the INDUCTOR level is opt-in via "
+        "optimize() (#4984 policy unchanged)."
+    )
     SUPPORTS_GRAPH_CAPTURE = False
     SUPPORTS_BITS = [2, 3, 4, 5, 6, 7, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 512, 1024]
@@ -1280,6 +1290,15 @@ class TorchQuantEmbeddings(TorchLinear):
         weight is retained. The state is keyed on the packed tensors so a
         replaced or mutated checkpoint invalidates it.
         """
+        if torch.compiler.is_compiling():
+            # `tensor_cache_key` reads `is_inference()`/`_version`/`data_ptr()`,
+            # all hard dynamo graph breaks, and publishing the metadata is a
+            # state write. The eager warmup built it for this constant
+            # checkpoint, so a traced graph reads it; without a warmup it
+            # returns None and the forward takes the whole-table
+            # `F.embedding` path, which is traceable on its own.
+            state = getattr(self, "_embedding_row_state", None)
+            return None if state is None else state[1]
         key = (
             tensor_cache_key(self.qweight),
             tensor_cache_key(self.g_idx),
