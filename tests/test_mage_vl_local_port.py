@@ -297,20 +297,29 @@ def test_explicit_implicit_grid_rope_and_numpy_frame_retry(tmp_path):
         assert torch.isfinite(model(**fixed).logits).all()
 
 
-def test_vision_encoder_optional_outputs_keep_native_tuple_contract():
+def test_vision_outputs_are_recorded_and_gradient_checkpointing_matches():
     model = _model()
-    encoder = model.model.visual.encoder
-    hidden = torch.randn(1, 4, model.config.vision_config.hidden_size)
+    visual = model.model.visual
+    inputs = _image_inputs(model, frames=2)
+    args = (inputs["pixel_values"], inputs["image_grid_thw"], inputs["patch_positions"])
     with torch.no_grad():
-        baseline = encoder(hidden, return_dict=True)
-        assert baseline.hidden_states is None
-        assert baseline.attentions is None
-        assert len(encoder(hidden, return_dict=False)) == 1
-        output = encoder(hidden, output_attentions=True, output_hidden_states=True, return_dict=True)
+        baseline = visual(*args)
+        assert baseline.hidden_states is None and baseline.attentions is None
+        output = visual(*args, output_hidden_states=True, output_attentions=True)
+        # Initial encoder input plus one entry per encoder layer; the last one is pre-merger.
         assert len(output.hidden_states) == 3
-        assert len(output.attentions) == 2
-        assert output.attentions == (None, None)  # The pinned encoder does not expose attention weights.
+        assert output.hidden_states[-1].shape[-1] == model.config.vision_config.hidden_size
         torch.testing.assert_close(output.last_hidden_state, baseline.last_hidden_state)
+        assert isinstance(visual(*args, return_dict=False), tuple)
+        full = model(**inputs, output_hidden_states=True)
+        assert len(full.hidden_states) == model.config.text_config.num_hidden_layers + 1
+    model.train()
+    model.activation_checkpointing_enable()
+    assert visual.encoder.layers[0].gradient_checkpointing
+    checkpointed = visual(*args).last_hidden_state
+    checkpointed.sum().backward()
+    torch.testing.assert_close(checkpointed.detach(), baseline.last_hidden_state)
+    assert visual.encoder.layers[0].self_attn.qkv.weight.grad is not None
 
 
 @pytest.mark.parametrize("norm,head,position", [("layer_norm", False, False), ("rms_norm", True, True)])

@@ -4,7 +4,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Union, cast
+from typing import Any, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -12,12 +12,18 @@ from torch.nn import LayerNorm
 from transformers import AutoModel
 from transformers.cache_utils import Cache
 from transformers.generation.utils import GenerationMixin
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
 from transformers.models.siglip.modeling_siglip import SiglipMLP
 from transformers.utils.auto_docstring import auto_docstring
-from transformers.utils.doc import replace_return_docstrings
-from transformers.utils.generic import ModelOutput, can_return_tuple, is_flash_attention_requested
+from transformers.utils.generic import (
+    ModelOutput,
+    can_return_tuple,
+    is_flash_attention_requested,
+    merge_with_config_defaults,
+)
+from transformers.utils.output_capturing import capture_outputs
 
 from .configuration_mage_vl import MageVLConfig, MageVLVisionConfig
 
@@ -419,7 +425,6 @@ class MageVLVisionAttention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         rotary_pos_emb: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
         cu_seqlens: Optional[torch.Tensor] = None,
         max_seqlen: Optional[int] = None,
         **kwargs,
@@ -443,6 +448,7 @@ class MageVLVisionAttention(nn.Module):
             self.config._attn_implementation or "eager", eager_attention_forward
         )
         dropout = 0.0 if not self.training else self.attention_dropout
+        attn_weights = None
 
         if cu_seqlens is not None and is_flash_attention_requested(self.config):
             # Flash Attention varlen path: pass cu_seq_lens / max_length kwargs.
@@ -494,7 +500,7 @@ class MageVLVisionAttention(nn.Module):
                 if attn_mask.shape[0] == 1 and batch_size > 1:
                     attn_mask = attn_mask.expand(batch_size, -1, -1)
                 attn_mask = attn_mask.unsqueeze(1)  # (B, 1, L, L)
-            attn_output, _ = attention_interface(
+            attn_output, attn_weights = attention_interface(
                 self,
                 query_states,
                 key_states,
@@ -509,11 +515,11 @@ class MageVLVisionAttention(nn.Module):
         attn_output = attn_output.reshape(batch_size, q_len, self.embed_dim)
         attn_output = self.proj(attn_output)
 
-        return attn_output, None
+        return attn_output, attn_weights
 
 
-class MageVLVisionEncoderLayer(nn.Module):
-    """Vision encoder layer with pre-norm and Flash Attention 2."""
+class MageVLVisionEncoderLayer(GradientCheckpointingLayer):
+    """Pre-norm vision encoder layer."""
 
     def __init__(self, config: MageVLVisionConfig):
         super().__init__()
@@ -528,97 +534,53 @@ class MageVLVisionEncoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         rotary_pos_emb: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
         cu_seqlens: Optional[torch.Tensor] = None,
         max_seqlen: Optional[int] = None,
-    ) -> tuple:
+        **kwargs,
+    ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.layer_norm1(hidden_states)
-
-        hidden_states, attn_weights = self.self_attn(
+        hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             rotary_pos_emb=rotary_pos_emb,
-            output_attentions=output_attentions,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            **kwargs,
         )
         hidden_states = residual + hidden_states
 
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-
-        outputs = (hidden_states, attn_weights) if output_attentions else (hidden_states,)
-        return outputs
+        return residual + hidden_states
 
 
 class MageVLVisionEncoder(nn.Module):
-    _gradient_checkpointing_func: Callable
     def __init__(self, config: MageVLVisionConfig):
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList([MageVLVisionEncoderLayer(config) for _ in range(config.num_hidden_layers)])
-        # Gradient checkpointing support
-        self.gradient_checkpointing = False
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         rotary_pos_emb: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        return_dict: bool = True,
         cu_seqlens: Optional[torch.Tensor] = None,
         max_seqlen: Optional[int] = None,
-    ) -> Union[tuple, BaseModelOutput]:
-        all_hidden_states = ()
-        all_self_attentions = ()
-
+        **kwargs,
+    ) -> BaseModelOutput:
         for layer in self.layers:
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)
-
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    layer.__call__,
-                    hidden_states,
-                    attention_mask,
-                    rotary_pos_emb,
-                    output_attentions,
-                    cu_seqlens,
-                    max_seqlen,
-                )
-            else:
-                layer_outputs = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    rotary_pos_emb=rotary_pos_emb,
-                    output_attentions=output_attentions,
-                    cu_seqlens=cu_seqlens,
-                    max_seqlen=max_seqlen,
-                )
-
-            hidden_states = layer_outputs[0]
-
-            if output_attentions:
-                all_self_attentions = all_self_attentions + (layer_outputs[1],)
-
-        if output_hidden_states:
-            all_hidden_states = all_hidden_states + (hidden_states,)
-
-        hidden_states_output = all_hidden_states if output_hidden_states else None
-        attention_output = all_self_attentions if output_attentions else None
-        if not return_dict:
-            return tuple(v for v in [hidden_states, hidden_states_output, attention_output] if v is not None)
-
-        return BaseModelOutput(
-            last_hidden_state=hidden_states,
-            hidden_states=hidden_states_output,
-            attentions=attention_output,
-        )
+            hidden_states = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                rotary_pos_emb=rotary_pos_emb,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                **kwargs,
+            )
+        return BaseModelOutput(last_hidden_state=hidden_states)
 
 
 class MageVLPreTrainedModel(PreTrainedModel):
@@ -630,6 +592,7 @@ class MageVLPreTrainedModel(PreTrainedModel):
     _skip_keys_device_placement = ["past_key_values"]
     _supports_flash_attn = True
     _supports_sdpa = True
+    _supports_attention_backend = True
 
     def _init_weights(self, module):
         super()._init_weights(module)
@@ -693,6 +656,11 @@ class MageVLVisionPretrainedModel(MageVLPreTrainedModel):
         hidden_state: [total_patches, num_channels, patch_size, patch_size]
         grid_thw: [num_samples, 3] with [t, h, w] for each sample
     """
+
+    _can_record_outputs = {
+        "hidden_states": MageVLVisionEncoderLayer,
+        "attentions": MageVLVisionAttention,
+    }
 
     def __init__(self, config: MageVLVisionConfig):
         super().__init__(config)
@@ -839,18 +807,17 @@ class MageVLVisionPretrainedModel(MageVLPreTrainedModel):
 
         return attn_mask
 
-    @replace_return_docstrings(output_type=BaseModelOutputWithPooling, config_class=MageVLVisionConfig)
+    @merge_with_config_defaults
+    @capture_outputs(tie_last_hidden_states=False)
     def forward(
         self,
         hidden_state: torch.Tensor,
         grid_thw: Optional[torch.Tensor] = None,
         patch_positions: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
         skip_merger: Optional[bool] = False,
         rope_dtype=None,
-    ) -> Union[tuple, BaseModelOutputWithPooling]:
+        **kwargs,
+    ) -> BaseModelOutputWithPooling:
         r"""
         Forward pass for vision model.
 
@@ -864,24 +831,13 @@ class MageVLVisionPretrainedModel(MageVLPreTrainedModel):
             grid_thw: Grid sizes tensor of shape [num_samples, 3] with [t, h, w] for each sample.
                 Required for computing RoPE and handling visible indices.
             patch_positions: Optional explicit patch positions for RoPE computation.
-            output_attentions: Whether to return attention weights.
-            output_hidden_states: Whether to return all hidden states.
-            return_dict: Whether to return a ModelOutput instead of tuple.
             skip_merger: If True, skip patch merger (useful for consistency checking).
 
         Returns:
             BaseModelOutputWithPooling with last_hidden_state containing merged features.
+            Encoder-layer hidden states / attentions are recorded via ``output_hidden_states`` /
+            ``output_attentions``.
         """
-        output_attentions = (
-            output_attentions if output_attentions is not None else getattr(self.config, "output_attentions", False)
-        )
-        output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else getattr(self.config, "output_hidden_states", False)
-        )
-        return_dict = True if return_dict is None else return_dict
-
         # 1. Embeddings
         # Note: embeddings returns [total_patches, embed_dim], we need to add batch dimension
         hidden_states = self.embeddings(hidden_state)
@@ -914,22 +870,14 @@ class MageVLVisionPretrainedModel(MageVLPreTrainedModel):
             device=hidden_states.device,
         )
 
-        encoder_outputs = self.encoder(
+        sequence_output = self.encoder(
             hidden_states,
             attention_mask=None,
             rotary_pos_emb=freqs_visible,
-            output_attentions=output_attentions,
-            output_hidden_states=True,  # Always get hidden states to use -2 layer
-            return_dict=True,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
-        )
-
-        # Use second-to-last layer output for better feature representation
-        if encoder_outputs.hidden_states is not None and len(encoder_outputs.hidden_states) >= 2 and not skip_merger:
-            sequence_output = encoder_outputs.hidden_states[-1]
-        else:
-            sequence_output = encoder_outputs[0]
+            **kwargs,
+        ).last_hidden_state
 
         # Post-Norm
         if self.layernorm_post is not None:
@@ -937,33 +885,12 @@ class MageVLVisionPretrainedModel(MageVLPreTrainedModel):
 
         # Skip merger for consistency check with original ViT
         if skip_merger:
-            pooled_output = None
-            if self.head is not None:
-                pooled_output = self.head(sequence_output)
-
-            if not return_dict:
-                return (sequence_output, pooled_output) + (
-                    encoder_outputs.hidden_states if output_hidden_states else None,
-                )
-            return BaseModelOutputWithPooling(
-                last_hidden_state=sequence_output,
-                pooler_output=pooled_output,
-                hidden_states=encoder_outputs.hidden_states if output_hidden_states else None,
-                attentions=encoder_outputs.attentions if output_attentions else None,
-            )
+            pooled_output = self.head(sequence_output) if self.head is not None else None
+            return BaseModelOutputWithPooling(last_hidden_state=sequence_output, pooler_output=pooled_output)
 
         # Patch merger: input patches are already in 2x2 block order from Qwen2VL processor
         merged_output = self.merger(sequence_output, patch_positions=patch_positions)
-
-        if not return_dict:
-            return (merged_output,) + (encoder_outputs.hidden_states if output_hidden_states else None,)
-
-        return BaseModelOutputWithPooling(
-            last_hidden_state=merged_output,
-            pooler_output=None,
-            hidden_states=encoder_outputs.hidden_states if output_hidden_states else None,
-            attentions=encoder_outputs.attentions if output_attentions else None,
-        )
+        return BaseModelOutputWithPooling(last_hidden_state=merged_output, pooler_output=None)
 
 
 @auto_docstring
@@ -1091,11 +1018,7 @@ class MageVLModel(MageVLPreTrainedModel):
         # Forward through vision model with grid_thw
         vision_output = self.visual(pixel_values_videos, grid_thw=video_grid_thw, patch_positions=patch_positions)
 
-        # Extract the actual tensor from BaseModelOutputWithPooling
-        if hasattr(vision_output, "last_hidden_state"):
-            video_embeds = vision_output.last_hidden_state
-        else:
-            video_embeds = vision_output[0]  # Fallback for tuple output
+        video_embeds = vision_output.last_hidden_state
 
         # Compute split sizes from video_grid_thw or from input shape
         if video_grid_thw is not None:
@@ -1133,11 +1056,7 @@ class MageVLModel(MageVLPreTrainedModel):
             # Forward through vision model with grid_thw
             vision_output = self.visual(pixel_values, grid_thw=image_grid_thw, patch_positions=patch_positions)
 
-            # Extract the actual tensor from BaseModelOutputWithPooling
-            if hasattr(vision_output, "last_hidden_state"):
-                image_embeds = vision_output.last_hidden_state
-            else:
-                image_embeds = vision_output[0]
+            image_embeds = vision_output.last_hidden_state
 
             # Compute split sizes from grid_thw
             if image_grid_thw is not None:
@@ -1200,6 +1119,7 @@ class MageVLModel(MageVLPreTrainedModel):
 
         return special_image_mask, special_video_mask
 
+    @can_return_tuple
     @auto_docstring
     def forward(
         self,
@@ -1209,18 +1129,14 @@ class MageVLModel(MageVLPreTrainedModel):
         past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
         pixel_values: Optional[torch.Tensor] = None,
         pixel_values_videos: Optional[torch.Tensor] = None,
         image_grid_thw: Optional[torch.Tensor] = None,
         patch_positions: Optional[torch.Tensor] = None,
         video_grid_thw: Optional[torch.Tensor] = None,
-        cache_position: Optional[torch.Tensor] = None,
         second_per_grid_ts: Optional[torch.Tensor] = None,
         **kwargs: Any,
-    ) -> Union[tuple, MageVLModelOutputWithPast]:
+    ) -> MageVLModelOutputWithPast:
         r"""
         image_grid_thw (`torch.Tensor` of shape `(num_images, 3)`, *optional*):
             The temporal, height and width of feature shape of each image in LLM.
@@ -1233,21 +1149,12 @@ class MageVLModel(MageVLPreTrainedModel):
             the layout produced by the Qwen2VL-style image processor.
         second_per_grid_ts (`torch.Tensor` of shape `(num_videos)`, *optional*):
             The time interval (in seconds) for each grid along the temporal dimension in the 3D position IDs.
-        cache_position (`torch.Tensor` of shape `(sequence_length)`, *optional*):
-              Indices depicting the position of the input sequence tokens in the sequence. Contrarily to
-              `position_ids`, this tensor is not affected by padding.
 
         Note: see the top-level ``MageVLForConditionalGeneration.forward``
         docstring; currently video flows in via the ``image_grid_thw`` / ``pixel_values``
         alias, so ``pixel_values_videos`` / ``video_grid_thw`` /
         ``second_per_grid_ts`` are unused at this layer.
         """
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = True if return_dict is None else return_dict
-
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
         if not isinstance(inputs_embeds, torch.Tensor):
@@ -1275,19 +1182,11 @@ class MageVLModel(MageVLPreTrainedModel):
             )
             inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
-        # Use simple 1D position_ids
-        if position_ids is None:
-            batch_size, seq_length, _ = inputs_embeds.shape
-            if attention_mask is not None:
-                all_positions = attention_mask.long().cumsum(-1) - 1
-                all_positions.masked_fill_(attention_mask == 0, 1)
-                position_ids = all_positions[:, -seq_length:]
-            else:
-                past_length = past_key_values.get_seq_length() if past_key_values is not None else 0
-                start = cache_position[0] if cache_position is not None else past_length
-                position_ids = (
-                    (torch.arange(seq_length, device=inputs_embeds.device) + start).unsqueeze(0).expand(batch_size, -1)
-                )
+        # Simple 1D position_ids; a 2D padding mask yields per-row positions (left padding).
+        if position_ids is None and attention_mask is not None and attention_mask.ndim == 2:
+            all_positions = attention_mask.long().cumsum(-1) - 1
+            all_positions.masked_fill_(attention_mask == 0, 1)
+            position_ids = all_positions[:, -inputs_embeds.shape[1]:]
 
         outputs = self.language_model(
             input_ids=None,
@@ -1296,20 +1195,15 @@ class MageVLModel(MageVLPreTrainedModel):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
-            cache_position=cache_position,
             **kwargs,
         )
 
-        output = MageVLModelOutputWithPast(
+        return MageVLModelOutputWithPast(
             last_hidden_state=outputs.last_hidden_state,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-        return output if return_dict else output.to_tuple()
 
 
 @auto_docstring
@@ -1383,18 +1277,15 @@ class MageVLForConditionalGeneration(MageVLPreTrainedModel, GenerationMixin):
         inputs_embeds: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
         pixel_values: Optional[torch.Tensor] = None,
         pixel_values_videos: Optional[torch.Tensor] = None,
         image_grid_thw: Optional[torch.Tensor] = None,
         patch_positions: Optional[torch.Tensor] = None,
         video_grid_thw: Optional[torch.Tensor] = None,
-        cache_position: Optional[torch.Tensor] = None,
         second_per_grid_ts: Optional[torch.Tensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         **kwargs: Any,
-    ) -> Union[tuple, MageVLCausalLMOutputWithPast]:
+    ) -> MageVLCausalLMOutputWithPast:
         r"""
         labels (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
             Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
@@ -1411,9 +1302,6 @@ class MageVLForConditionalGeneration(MageVLPreTrainedModel, GenerationMixin):
             the layout produced by the Qwen2VL-style image processor.
         second_per_grid_ts (`torch.Tensor` of shape `(num_videos)`, *optional*):
             The time interval (in seconds) for each grid along the temporal dimension in the 3D position IDs.
-        cache_position (`torch.Tensor` of shape `(sequence_length)`, *optional*):
-              Indices depicting the position of the input sequence tokens in the sequence. Contrarily to
-              `position_ids`, this tensor is not affected by padding.
 
         Note (native-video alias):
             The companion ``MageVLProcessor.__call__(videos=...)`` does NOT
@@ -1454,10 +1342,6 @@ class MageVLForConditionalGeneration(MageVLPreTrainedModel, GenerationMixin):
         >>> generate_ids = model.generate(**inputs, max_new_tokens=30)
         >>> processor.batch_decode(generate_ids, skip_special_tokens=True)
         ```"""
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
         outputs = self.model(
             input_ids=input_ids,
             pixel_values=pixel_values,
@@ -1471,18 +1355,11 @@ class MageVLForConditionalGeneration(MageVLPreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
-            cache_position=cache_position,
             **kwargs,
         )
 
-        hidden_states = outputs[0]
-
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
+        logits = self.lm_head(slice_logits_to_keep(outputs.last_hidden_state, logits_to_keep))
 
         loss = None
         if labels is not None:
@@ -1497,60 +1374,6 @@ class MageVLForConditionalGeneration(MageVLPreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-
-
-
-    def prepare_inputs_for_generation(
-        self,
-        input_ids,
-        next_sequence_length=None,
-        past_key_values=None,
-        attention_mask=None,
-        inputs_embeds=None,
-        is_first_iteration: bool | None = False,
-        *,
-        cache_position=None,
-        position_ids=None,
-        use_cache=True,
-        pixel_values=None,
-        pixel_values_videos=None,
-        image_grid_thw=None,
-        patch_positions=None,
-        video_grid_thw=None,
-        second_per_grid_ts=None,
-        **kwargs,
-    ):
-        # Overwritten -- in specific circumstances we don't want to forward image inputs to the model
-        model_inputs = cast(Any, super()).prepare_inputs_for_generation(
-            input_ids,
-            next_sequence_length=next_sequence_length,
-            past_key_values=past_key_values,
-            attention_mask=attention_mask,
-            inputs_embeds=inputs_embeds,
-            cache_position=cache_position,
-            position_ids=position_ids,
-            pixel_values=pixel_values,
-            pixel_values_videos=pixel_values_videos,
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
-            second_per_grid_ts=second_per_grid_ts,
-            patch_positions=patch_positions,
-            use_cache=use_cache,
-            is_first_iteration=is_first_iteration,
-            **kwargs,
-        )
-
-        # After the prefill iteration, drop image inputs so the vision tower
-        # isn't re-run on decode steps. Gating on `is_first_iteration` (the
-        # Qwen3-VL convention) is the only reliable signal in transformers
-        # 5.x: `past_key_values` is non-None even on the first call (an empty
-        # DynamicCache is created up-front by `generate`), and `cache_position`
-        # may be `None` for remote-code models.
-        if not is_first_iteration and use_cache:
-            model_inputs["pixel_values"] = None
-            model_inputs["pixel_values_videos"] = None
-
-        return model_inputs
 
     def _get_image_nums_and_video_nums(
         self,
@@ -1692,8 +1515,7 @@ class MageVLForConditionalGeneration(MageVLPreTrainedModel, GenerationMixin):
         def _expand_dict_for_generation(dict_to_expand):
             for key in dict_to_expand:
                 if (
-                    key != "cache_position"
-                    and dict_to_expand[key] is not None
+                    dict_to_expand[key] is not None
                     and isinstance(dict_to_expand[key], torch.Tensor)
                     and key not in visual_keys
                 ):
