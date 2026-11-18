@@ -25,10 +25,15 @@ from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEVICE_THREAD_POOL
 from ..looper.inflight_layer import InflightLayerTracker
-from ..looper.loop_processor import record_quant_log, rehome_failed_run_kernels
+from ..looper.loop_processor import (
+    record_quant_log,
+    rehome_failed_run_kernels,
+    release_failed_run_processors,
+)
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.module_preprocessor import ModulePreProcessor
 from ..looper.named_module import NamedModule
+from ..looper.run_exit_recovery import RunExitRecovery
 from ..looper.weight_only_processor import WeightOnlyProcessor
 from ..models import BaseQModel
 from ..models._const import CPU, SUPPORTS_MODULE_TYPES
@@ -982,82 +987,79 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
             raise RuntimeError(message)
         log.error(message)
 
+    def _fence_run_work(self) -> None:
+        """Wait for work this run already submitted before tearing its state down."""
+
+        from ..utils.stream import STREAM_DEVICE_POOL
+
+        waits = (
+            ("device thread pool", DEVICE_THREAD_POOL.wait),
+            ("stream device pool", STREAM_DEVICE_POOL.wait),
+        )
+        for label, wait in waits:
+            try:
+                wait()
+            except Exception:
+                log.warning(
+                    "failed to drain the %s while failing the weight-only run",
+                    label,
+                    exc_info=True,
+                )
+
+    def _release_failed_run_processors(self) -> None:
+        """Close the per-run resources a successful run releases in ``finalize``."""
+
+        release_failed_run_processors((self.processor,))
+
+    def _release_run_workspace(self) -> None:
+        """Release processor-owned scratch shared across the whole run."""
+
+        release = getattr(self.processor, "release_run_workspace", None)
+        if callable(release):
+            release()
+
+    def _release_or_keep_private_offload_root(self) -> None:
+        """Keep the per-run root while a disk-offloaded shell still reads it."""
+
+        model = getattr(self.gptq_model, "model", None)
+        if model is not None and has_disk_offloaded_modules(model):
+            log.debug(
+                "Offload: keeping the per-run directory for the "
+                "disk-offloaded layers of a cancelled/failed weight-only run."
+            )
+        else:
+            release_private_offload_root(self.gptq_model)
+
+    def _make_run_exit_recovery(self) -> RunExitRecovery:
+        """Build the one run-scoped owner of this run's exit obligations."""
+
+        def materialize_success() -> None:
+            self._materialize_meta_base_modules(strict=True)
+            self._materialize_remaining_meta_modules()
+
+        return RunExitRecovery(
+            fence=self._fence_run_work,
+            release_processors=self._release_failed_run_processors,
+            restore_inflight=self._restore_inflight_layer,
+            restore_offloaded=self._restore_offloaded_base_modules,
+            materialize_unreached=self._materialize_unreached_meta_modules,
+            rehome_kernels=lambda: rehome_failed_run_kernels(self.gptq_model),
+            repair_counters=lambda: ensure_version_counters(self.gptq_model.model),
+            release_private_root=self._release_or_keep_private_offload_root,
+            restore_disk=self._restore_disk_offloaded_modules,
+            materialize_success=materialize_success,
+            release_workspace=self._release_run_workspace,
+            release_processors_before_restore=False,
+        )
+
     def loop(self, **kwargs):
         """Quantize layers directly from weights without calibration forwards."""
 
-        try:
-            result = self._loop_impl(**kwargs)
-            # The success tail turns the lazy offloaded shell back into a
-            # usable in-session model, and every step can fail (a Ctrl-C, an
-            # OOM, an I/O error). Keep it inside the guard so a failure here
-            # runs the same best-effort recovery instead of leaving
-            # `embed_tokens`/`norm`/`rotary_emb` on meta (#5023).
-            self._restore_offloaded_base_modules(strict=True)
-            self._restore_disk_offloaded_modules()
-            self._materialize_meta_base_modules(strict=True)
-            self._materialize_remaining_meta_modules()
-            # Unquantized layers keep the parameters `pre_quantize` materialized
-            # under inference mode, and `post_quantize`'s `param.data =` move
-            # leaves them without a version counter (issue #4572).
-            ensure_version_counters(self.gptq_model.model)
-        except BaseException:
-            try:
-                # The success path moves the layer back to its home device only
-                # in ``post_quantize``, which the exception skipped. Without
-                # this the in-flight layer keeps accelerator tensors while the
-                # rest of the model is on CPU, and every later forward raises a
-                # device-mismatch error (#5011).
-                self._restore_inflight_layer()
-                # A failed run must not leave the base modules stranded on meta.
-                self._restore_offloaded_base_modules(strict=False)
-            finally:
-                # The loop never materialized the layers past the cancel point;
-                # fill them before the next forward (#4860).
-                self._materialize_unreached_meta_modules()
-                # A weight-only kernel can be accelerator-only too (GGUF
-                # Triton); leave the finished layers runnable (#4947).
-                rehome_failed_run_kernels(self.gptq_model)
-                # A cancelled run must return the same ordinary tensors a
-                # completed one does: the norms, biases and buffers
-                # `pre_quantize` materialized under inference mode otherwise
-                # stay inference tensors, and a plain grad-mode forward raises
-                # "Inference tensors cannot be saved for backward" (#5012).
-                # Best-effort so it can never mask the run failure.
-                try:
-                    ensure_version_counters(self.gptq_model.model)
-                except Exception:
-                    log.warning(
-                        "failed to repair tensor version counters while failing "
-                        "the weight-only run",
-                        exc_info=True,
-                    )
-                # ``finalize()`` is the only other place the processor closes
-                # its Device-SMI handles, and a failed run never reaches it
-                # (#4813). The release is idempotent and must not mask the run
-                # failure; a processor that does not implement it is skipped.
-                release = getattr(self.processor, "release_failed_run", None)
-                if callable(release):
-                    try:
-                        release()
-                    except Exception:
-                        log.warn(
-                            "failed to release processor resources while failing the weight-only run",
-                            exc_info=True,
-                        )
-                # Finished layers stay as disk-offloaded meta shells pointing
-                # into this run's private offload root; keep it while they read
-                # from it (#4807). The model-lifetime finalizer reclaims it and
-                # the next run on this model releases it (#4368).
-                model = getattr(self.gptq_model, "model", None)
-                if model is not None and has_disk_offloaded_modules(model):
-                    log.debug(
-                        "Offload: keeping the per-run directory for the "
-                        "disk-offloaded layers of a cancelled/failed weight-only run."
-                    )
-                else:
-                    release_private_offload_root(self.gptq_model)
-            raise
-        return result
+        recovery = self._make_run_exit_recovery()
+        # Exposed for diagnostics and tests: the run, not the exception
+        # handler, owns the exit sequence (#5060).
+        self._run_exit_recovery = recovery
+        return recovery.run(lambda: self._loop_impl(**kwargs))
 
     def _loop_impl(self, **kwargs):
         """Run the weight-only quantization workflow."""
