@@ -48,6 +48,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import (
     TransformersKwargs,
@@ -129,7 +130,7 @@ def kaiser_sinc_filter1d(cutoff, half_width, kernel_size):
 
 
 @auto_docstring
-class Qwen2_5OmniPreTrainedModel(PreTrainedModel):
+class Qwen2_5OmniPreTrainedModel(NativePreTrainedModel):
     config: Qwen2_5OmniConfig
     base_model_prefix = "model"
     input_modalities = ("image", "video", "audio", "text")

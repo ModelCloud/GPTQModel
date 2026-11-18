@@ -1,4 +1,5 @@
 # Vendored from huggingface/transformers v5.23.0 (Apache-2.0) by GPT-QModel.
+# GPT-QModel: modernized to Transformers 5.23 conventions (no legacy return paths).
 # Do not edit by hand except to keep it on the 5.23 ABI; see docs/transformers5-model-ports.md.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
 #           This file was automatically generated from src/transformers/models/hunyuan_vl/modular_hunyuan_vl.py.
@@ -37,6 +38,7 @@ from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, BaseModelOutputWithPooling, CausalLMOutputWithPast
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, torch_compilable_check
 from transformers.utils.generic import (
@@ -626,7 +628,7 @@ class HunYuanVLDenseV1DecoderLayer(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class HunYuanVLPreTrainedModel(PreTrainedModel):
+class HunYuanVLPreTrainedModel(NativePreTrainedModel):
     config: HunYuanVLConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
@@ -1161,7 +1163,7 @@ class HunYuanVLForConditionalGeneration(HunYuanVLPreTrainedModel, GenerationMixi
         >>> model_id = "tencent/HunyuanOCR"
         >>> processor = AutoProcessor.from_pretrained(model_id, backend="pil")
         >>> model = HunYuanVLForConditionalGeneration.from_pretrained(
-        ...     model_id, attn_implementation="eager", torch_dtype=torch.bfloat16, device_map="auto"
+        ...     model_id, attn_implementation="eager", dtype=torch.bfloat16, device_map="auto"
         ... )
 
         >>> messages = [

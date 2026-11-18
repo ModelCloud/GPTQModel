@@ -24,9 +24,10 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 import torch.nn.utils.parametrize as P
+from transformers.cache_utils import DynamicCache, EncoderDecoderCache
 
 from ....utils.image import load_bytes_from_url, load_image_from_url
-from .cache import DynamicCache
+from .cache import cache_from_pairs, cache_length, cache_pairs, set_layer_states
 
 
 logger = logging.getLogger(__name__)
@@ -424,7 +425,7 @@ class SpeculativeSnapshot:
     mel_processor_snapshot: Optional[dict] = None
 
     # Audio encoder KV cache (requires cloning to ensure determinism after recovery)
-    audio_past_key_values: Optional[tuple] = None
+    audio_past_key_values: Optional[EncoderDecoderCache] = None
 
     # timestamp (for debugging)
     timestamp: float = 0.0
@@ -571,31 +572,15 @@ class TTSStreamingGenerator:
         if self.past_key_values is None:
             return
 
-        if hasattr(self.past_key_values, "get_seq_length"):
-            current_kv_len = self.past_key_values.get_seq_length()
-        else:
-            current_kv_len = self.past_key_values[0][0].shape[2]
+        current_kv_len = self.past_key_values.get_seq_length()
 
         if current_kv_len <= self.token_window_size:
             return
 
-        new_cache = DynamicCache()
-        num_layers = (
-            len(self.past_key_values.key_cache)
-            if hasattr(self.past_key_values, "key_cache")
-            else len(self.past_key_values)
+        window = self.token_window_size
+        self.past_key_values = cache_from_pairs(
+            (key[:, :, -window:, :], value[:, :, -window:, :]) for key, value in cache_pairs(self.past_key_values)
         )
-
-        for layer_idx in range(num_layers):
-            if hasattr(self.past_key_values, "key_cache"):
-                key = self.past_key_values.key_cache[layer_idx][:, :, -self.token_window_size :, :]
-                value = self.past_key_values.value_cache[layer_idx][:, :, -self.token_window_size :, :]
-            else:
-                key = self.past_key_values[layer_idx][0][:, :, -self.token_window_size :, :]
-                value = self.past_key_values[layer_idx][1][:, :, -self.token_window_size :, :]
-            new_cache.update(key, value, layer_idx)
-
-        self.past_key_values = new_cache
 
     @staticmethod
     def _apply_rope_rotation(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -628,10 +613,7 @@ class TTSStreamingGenerator:
             return
 
         # Get current KV cache length
-        if hasattr(self.past_key_values, "get_seq_length"):
-            current_kv_len = self.past_key_values.get_seq_length()
-        else:
-            current_kv_len = self.past_key_values[0][0].shape[2]
+        current_kv_len = self.past_key_values.get_seq_length()
 
         # Calculate sink length (first chunk)
         sink_len = self._chunk_info[0]["condition_len"] + self._chunk_info[0]["audio_token_count"]
@@ -643,8 +625,9 @@ class TTSStreamingGenerator:
         keep_len = sink_len + last_chunk_len
 
         # Get device and dtype
-        device = self.past_key_values.key_cache[0].device
-        dtype = self.past_key_values.key_cache[0].dtype
+        pairs = cache_pairs(self.past_key_values)
+        device = pairs[0][0].device
+        dtype = pairs[0][0].dtype
 
         if current_kv_len <= keep_len:
             last_chunk_kv_len = current_kv_len - sink_len
@@ -655,7 +638,6 @@ class TTSStreamingGenerator:
 
         # Step 1: Truncate KV cache - keep sink and last chunk
         new_cache = DynamicCache()
-        num_layers = len(self.past_key_values.key_cache)
 
         original_start_pos = current_kv_len - last_chunk_len
         new_start_pos = sink_len
@@ -667,9 +649,7 @@ class TTSStreamingGenerator:
         cos = cos.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, head_dim]
         sin = sin.unsqueeze(0).unsqueeze(0)
 
-        for layer_idx in range(num_layers):
-            key_full = self.past_key_values.key_cache[layer_idx]
-            value_full = self.past_key_values.value_cache[layer_idx]
+        for layer_idx, (key_full, value_full) in enumerate(pairs):
 
             # Extract sink and last chunk
             key_sink = key_full[:, :, :sink_len, :]
@@ -736,11 +716,7 @@ class TTSStreamingGenerator:
             current_condition = condition
             # Always update text_start_pos based on actual KV cache length (like reference code)
             if self.past_key_values is not None:
-                if hasattr(self.past_key_values, "get_seq_length"):
-                    kv_len = self.past_key_values.get_seq_length()
-                else:
-                    kv_len = self.past_key_values[0][0].shape[2]
-                self.text_start_pos = kv_len
+                self.text_start_pos = self.past_key_values.get_seq_length()
         else:
             current_condition = condition
 
@@ -888,10 +864,7 @@ class TTSStreamingGenerator:
         elif self.attention_type == "reindex":
             # reindex: position based on actual KV cache length (positions have been reindexed to be continuous)
             if self.past_key_values is not None:
-                if hasattr(self.past_key_values, "get_seq_length"):
-                    self.text_start_pos = self.past_key_values.get_seq_length()
-                else:
-                    self.text_start_pos = self.past_key_values[0][0].shape[2]
+                self.text_start_pos = self.past_key_values.get_seq_length()
             else:
                 self.text_start_pos += condition.shape[1] + len(chunk_generated_tokens)
         else:
@@ -937,38 +910,9 @@ def config_rope_theta(config, default: float = 10000.0) -> float:
     return float(parameters.get("rope_theta", getattr(config, "rope_theta", default)))
 
 
-def as_dynamic_cache(past_key_values):
-    """Convert legacy tuple cache to DynamicCache if needed."""
-    if isinstance(past_key_values, DynamicCache):
-        return past_key_values
-
-    if isinstance(past_key_values, tuple):
-        return DynamicCache.from_legacy_cache(past_key_values)
-
-    return past_key_values
-
-
 def get_kv_cache_length(cache) -> int:
-    """Get the sequence length of a KV cache.
-
-    Args:
-        cache: DynamicCache or tuple-based cache
-
-    Returns:
-        The number of tokens in the cache
-    """
-    if cache is None:
-        return 0
-
-    if isinstance(cache, DynamicCache):
-        if not cache.key_cache or not cache.key_cache[0].numel():
-            return 0
-        return cache.key_cache[0].shape[-2]
-
-    if isinstance(cache, tuple):
-        return cache[0][0].shape[2]
-
-    return 0
+    """Number of tokens held by a ``Cache`` (0 for ``None``)."""
+    return cache_length(cache)
 
 
 def get_rotary_cos_sin(
@@ -1058,7 +1002,7 @@ def realign_rotary_suffix(
 
 
 def drop_tokens_from_cache(
-    cache: Optional[DynamicCache | Tuple],
+    cache: Optional[DynamicCache],
     length: int,
     preserve: int,
     position_offset: int,
@@ -1071,7 +1015,7 @@ def drop_tokens_from_cache(
     realigning RoPE embeddings for the suffix.
 
     Args:
-        cache: DynamicCache or tuple-based cache (will be converted to DynamicCache)
+        cache: DynamicCache, edited in place
         length: Number of tokens to drop
         preserve: Number of tokens to preserve at the start (system prompt)
         position_offset: Current position offset for RoPE calculation
@@ -1080,12 +1024,10 @@ def drop_tokens_from_cache(
 
     Returns:
         Tuple of (cache, new_position_offset, success)
-        Note: Tuple cache will be converted to DynamicCache. Modification is in-place.
+        Modification is in-place.
     """
     if cache is None or length <= 0:
         return cache, position_offset, False
-
-    cache = as_dynamic_cache(cache)
 
     total_len = get_kv_cache_length(cache)
     if total_len <= 0:
@@ -1114,7 +1056,7 @@ def drop_tokens_from_cache(
     old_positions = None
     new_positions = None
     if suffix_len > 0:
-        device = cache.key_cache[0].device
+        device = cache_pairs(cache)[0][0].device
         old_positions = torch.arange(
             suffix_offset,
             suffix_offset + suffix_len,
@@ -1131,10 +1073,7 @@ def drop_tokens_from_cache(
     keep_len = total_len - length
 
     # Process each layer (in-place modification)
-    for layer_idx in range(len(cache.key_cache)):
-        key_tensor = cache.key_cache[layer_idx]
-        value_tensor = cache.value_cache[layer_idx]
-
+    for layer_idx, (key_tensor, value_tensor) in enumerate(cache_pairs(cache)):
         if not key_tensor.numel():
             continue
 
@@ -1156,14 +1095,14 @@ def drop_tokens_from_cache(
                     inv_freq_cache,
                 )
 
-            cache.key_cache[layer_idx] = torch.cat([prefix_keys, suffix_keys], dim=-2).contiguous()
-            cache.value_cache[layer_idx] = torch.cat([prefix_values, suffix_values], dim=-2).contiguous()
+            set_layer_states(
+                cache,
+                layer_idx,
+                torch.cat([prefix_keys, suffix_keys], dim=-2).contiguous(),
+                torch.cat([prefix_values, suffix_values], dim=-2).contiguous(),
+            )
         else:
-            cache.key_cache[layer_idx] = prefix_keys.contiguous()
-            cache.value_cache[layer_idx] = prefix_values.contiguous()
-
-    cache.crop(keep_len)
-    cache._seen_tokens = max(keep_len, 0)
+            set_layer_states(cache, layer_idx, prefix_keys.contiguous(), prefix_values.contiguous())
 
     new_offset = position_offset + length
     logger.debug("Dropped %d tokens from cache, new length=%d", length, keep_len)
@@ -1337,14 +1276,7 @@ class StreamDecoder:
         self._total_dropped_units = 0  # total dropped unit count
 
     def get_cache_length(self) -> int:
-        if self.cache is None:
-            return 0
-        if isinstance(self.cache, DynamicCache):
-            if len(self.cache.key_cache) > 0 and self.cache.key_cache[0].numel() > 0:
-                return self.cache.key_cache[0].shape[2]
-            return 0
-        # Tuple cache format
-        return self.cache[0][0].shape[2]
+        return cache_length(self.cache)
 
     def get_total_generated_tokens(self) -> int:
         return sum(len(u.get("generated_tokens", [])) for u in self._unit_history)
@@ -1408,13 +1340,9 @@ class StreamDecoder:
         """remove specified number of tokens from cache (protect system prompt)
 
         remove tokens in the range [preserve, preserve + length)
-        supports DynamicCache and tuple cache formats
         """
         if self.cache is None or length <= 0:
             return False
-
-        "DynamicCache" if isinstance(self.cache, DynamicCache) else "TupleCache"
-        self.get_cache_length()
 
         new_cache, new_offset, success = drop_tokens_from_cache(
             cache=self.cache,
@@ -1425,7 +1353,7 @@ class StreamDecoder:
             inv_freq_cache=self._rope_inv_freq_cache,
         )
         if success:
-            self.cache = new_cache  # For DynamicCache this is the same object (in-place)
+            self.cache = new_cache  # the same object (edited in place)
             self._position_offset = new_offset
 
         return success
@@ -1716,40 +1644,16 @@ class StreamDecoder:
         """
         if self.cache is None:
             return None
-        if isinstance(self.cache, DynamicCache):
-            # DynamicCache
-            new_key_cache = [
-                k[:, :, start:end, :].clone() if clone else k[:, :, start:end, :] for k in self.cache.key_cache
-            ]
-            new_value_cache = [
-                v[:, :, start:end, :].clone() if clone else v[:, :, start:end, :] for v in self.cache.value_cache
-            ]
-            new_cache = DynamicCache()
-            new_cache.key_cache = new_key_cache
-            new_cache.value_cache = new_value_cache
-            return new_cache
-        else:
-            # Tuple cache
-            if clone:
-                return tuple(
-                    (layer[0][:, :, start:end, :].clone(), layer[1][:, :, start:end, :].clone())
-                    for layer in self.cache
-                )
-            else:
-                return tuple((layer[0][:, :, start:end, :], layer[1][:, :, start:end, :]) for layer in self.cache)
+        return cache_from_pairs(
+            (k[:, :, start:end, :].clone(), v[:, :, start:end, :].clone())
+            if clone
+            else (k[:, :, start:end, :], v[:, :, start:end, :])
+            for k, v in cache_pairs(self.cache)
+        )
 
     @staticmethod
     def _get_cache_len(cache) -> int:
-        if cache is None:
-            return 0
-        if isinstance(cache, DynamicCache):
-            if len(cache.key_cache) > 0 and cache.key_cache[0].numel() > 0:
-                return cache.key_cache[0].shape[2]
-            return 0
-
-        if cache and cache[0] and cache[0][0] is not None:
-            return cache[0][0].shape[2]
-        return 0
+        return cache_length(cache)
 
     @staticmethod
     def _concat_caches(cache1, cache2):
@@ -1757,56 +1661,30 @@ class StreamDecoder:
             return cache2
         if cache2 is None:
             return cache1
-
-        if isinstance(cache1, DynamicCache):
-            new_cache = DynamicCache()
-            new_cache.key_cache = [torch.cat([k1, k2], dim=2) for k1, k2 in zip(cache1.key_cache, cache2.key_cache)]
-            new_cache.value_cache = [
-                torch.cat([v1, v2], dim=2) for v1, v2 in zip(cache1.value_cache, cache2.value_cache)
-            ]
-            return new_cache
-        else:
-            return tuple(
-                (
-                    torch.cat([layer1[0], layer2[0]], dim=2),
-                    torch.cat([layer1[1], layer2[1]], dim=2),
-                )
-                for layer1, layer2 in zip(cache1, cache2)
-            )
+        return cache_from_pairs(
+            (torch.cat([k1, k2], dim=2), torch.cat([v1, v2], dim=2))
+            for (k1, v1), (k2, v2) in zip(cache_pairs(cache1), cache_pairs(cache2))
+        )
 
     def _reindex_rope_for_cache(self, cache, old_start: int, new_start: int, length: int):
         """reindex RoPE position for cache"""
         if cache is None or length <= 0:
             return cache
 
-        if isinstance(cache, DynamicCache):
-            device = cache.key_cache[0].device if cache.key_cache else None
-        else:
-            device = cache[0][0].device if cache and cache[0] else None
-
-        if device is None:
+        pairs = cache_pairs(cache)
+        if not pairs:
             return cache
+        device = pairs[0][0].device
 
         old_positions = torch.arange(old_start, old_start + length, device=device, dtype=torch.long)
         new_positions = torch.arange(new_start, new_start + length, device=device, dtype=torch.long)
 
         rope_theta = self._get_rope_theta()
 
-        if isinstance(cache, DynamicCache):
-            new_key_cache = []
-            for k in cache.key_cache:
-                new_k = realign_rotary_suffix(k, old_positions, new_positions, rope_theta, self._rope_inv_freq_cache)
-                new_key_cache.append(new_k)
-            cache.key_cache = new_key_cache
-            return cache
-        else:
-            new_cache = []
-            for layer in cache:
-                new_k = realign_rotary_suffix(
-                    layer[0], old_positions, new_positions, rope_theta, self._rope_inv_freq_cache
-                )
-                new_cache.append((new_k, layer[1]))
-            return tuple(new_cache)
+        for layer_idx, (k, v) in enumerate(pairs):
+            new_k = realign_rotary_suffix(k, old_positions, new_positions, rope_theta, self._rope_inv_freq_cache)
+            set_layer_states(cache, layer_idx, new_k, v)
+        return cache
 
     def _update_previous(
         self,
