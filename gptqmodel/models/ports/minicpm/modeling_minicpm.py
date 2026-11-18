@@ -9,6 +9,7 @@ distinct scaling; eager RoPE retains FP32 trig, while SDPA uses V-dtype trig.
 """
 
 import math
+from collections.abc import Callable
 
 import torch
 from torch import nn
@@ -19,7 +20,12 @@ from transformers.activations import ACT2FN
 from transformers.cache_utils import DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.masking_utils import create_causal_mask
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, slice_logits_to_keep
+from transformers.utils import can_return_tuple
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
 
 from .configuration_minicpm import MiniCPMConfig
 
@@ -42,9 +48,11 @@ class MiniCPMRotaryEmbedding(nn.Module):
         self.config = config
 
     @torch.no_grad()
-    def forward(self, x, position_ids, seq_len):
+    def forward(self, x, position_ids, seq_len=None):
+        # Dynamic NTK keys on cached + current length, which the model passes; uncached callers use the window.
+        seq_len = position_ids.shape[-1] if seq_len is None else seq_len
         config = self.config
-        base = config.rope_theta
+        base = config.rope_parameters["rope_theta"]
         positions = position_ids.float()
         kind = config.rope_parameters["rope_type"]
         if kind != "default":
@@ -67,6 +75,26 @@ def _rotate(x, cos, sin):
     x = x.float()
     a, b = x.chunk(2, dim=-1)
     return (x * cos + torch.cat((-b, a), dim=-1) * sin).to(dtype)
+
+
+def repeat_kv(hidden_states, n_rep):
+    batch, heads, length, dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, heads, n_rep, length, dim)
+    return hidden_states.reshape(batch, heads * n_rep, length, dim)
+
+
+def eager_attention_forward(module, query, key, value, attention_mask, scaling, dropout=0.0, **kwargs):
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+    if attention_mask is not None:
+        attn_weights = attn_weights + attention_mask
+    attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_weights = F.dropout(attn_weights, p=dropout, training=module.training)
+    attn_output = torch.matmul(attn_weights, value_states).transpose(1, 2).contiguous()
+    return attn_output, attn_weights
 
 
 def _column_parallel(module, x, tp):
@@ -139,54 +167,44 @@ class MiniCPMAttention(nn.Module):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
+        self.head_dim = config.head_dim
+        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.scaling = self.head_dim**-0.5
+        self.attention_dropout = config.attention_dropout
+        self.is_causal = True
         for name, heads in (("q_proj", config.num_attention_heads), ("k_proj", config.num_key_value_heads),
                             ("v_proj", config.num_key_value_heads)):
             setattr(self, name, nn.Linear(config.hidden_size, heads * config.head_dim, bias=config.attention_bias))
         self.o_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
-        self.rotary_emb = MiniCPMRotaryEmbedding(config)
 
-    def forward(self, hidden_states, attention_mask, position_ids, past_key_value=None, output_attentions=False, **kwargs):
+    def forward(self, hidden_states, position_embeddings, attention_mask=None, past_key_values=None, **kwargs):
         c = self.config
         batch, length, _ = hidden_states.shape
-        eager = c._attn_implementation == "eager" or output_attentions
-        tp = c.pretraining_tp if eager else 1
+        # The source pretraining_tp simulation only exists on its eager path.
+        tp = c.pretraining_tp if c._attn_implementation == "eager" else 1
         projections = []
         for module, heads in ((self.q_proj, c.num_attention_heads), (self.k_proj, c.num_key_value_heads),
                               (self.v_proj, c.num_key_value_heads)):
             value = _column_parallel(module, hidden_states, tp) if tp > 1 else module(hidden_states)
             projections.append(value.view(batch, length, heads, c.head_dim).transpose(1, 2))
         q, k, v = projections
-        seq_len = length + (past_key_value.get_seq_length(self.layer_idx) if past_key_value is not None else 0)
-        cos, sin = self.rotary_emb(v.float() if eager else v, position_ids, seq_len)
+        cos, sin = position_embeddings
         q, k = _rotate(q, cos, sin), _rotate(k, cos, sin)
-        if past_key_value is not None:
-            k, v = past_key_value.update(k, v, self.layer_idx)
-        repeats = c.num_attention_heads // c.num_key_value_heads
-        k, v = k.repeat_interleave(repeats, dim=1), v.repeat_interleave(repeats, dim=1)
-        dropout = c.attention_dropout if self.training else 0.0
-        if eager:
-            scores = q @ k.transpose(-1, -2) / math.sqrt(c.head_dim)
-            if attention_mask is not None:
-                if attention_mask.dtype == torch.bool:
-                    # An SDPA-configured model returning attention weights
-                    # receives the boolean mask from create_causal_mask.
-                    attention_mask = torch.zeros_like(attention_mask, dtype=scores.dtype).masked_fill(
-                        ~attention_mask, torch.finfo(scores.dtype).min
-                    )
-                scores = scores + attention_mask
-            weights = F.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
-            weights = F.dropout(weights, p=dropout, training=self.training)
-            output = weights @ v
-        else:
-            weights = None
-            output = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask, dropout_p=dropout,
-                                                   is_causal=attention_mask is None and length > 1)
-        output = output.transpose(1, 2).reshape(batch, length, c.hidden_size)
+        if past_key_values is not None:
+            k, v = past_key_values.update(k, v, self.layer_idx)
+        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+            c._attn_implementation, eager_attention_forward
+        )
+        output, weights = attention_interface(
+            self, q, k, v, attention_mask,
+            dropout=0.0 if not self.training else self.attention_dropout, scaling=self.scaling, **kwargs,
+        )
+        output = output.reshape(batch, length, c.hidden_size).contiguous()
         output = _row_parallel(self.o_proj, output, tp) if tp > 1 else self.o_proj(output)
-        return output, weights if output_attentions else None
+        return output, weights
 
 
-class MiniCPMDecoderLayer(nn.Module):
+class MiniCPMDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.self_attn = MiniCPMAttention(config, layer_idx)
@@ -195,21 +213,27 @@ class MiniCPMDecoderLayer(nn.Module):
         self.post_attention_layernorm = MiniCPMRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.residual_scale = config.scale_depth / math.sqrt(config.num_hidden_layers)
 
-    def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_value=None,
-                output_attentions=False, **kwargs):
-        attention, weights = self.self_attn(self.input_layernorm(hidden_states), attention_mask, position_ids,
-                                           past_key_value=past_key_value, output_attentions=output_attentions)
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_values=None,
+                use_cache=False, position_embeddings=None, **kwargs):
+        attention, _ = self.self_attn(
+            self.input_layernorm(hidden_states), position_embeddings=position_embeddings,
+            attention_mask=attention_mask, past_key_values=past_key_values, **kwargs,
+        )
         hidden_states = hidden_states + attention * self.residual_scale
-        hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states)) * self.residual_scale
-        return (hidden_states, weights) if output_attentions else (hidden_states,)
+        return hidden_states + self.mlp(self.post_attention_layernorm(hidden_states)) * self.residual_scale
 
 
 class MiniCPMPreTrainedModel(PreTrainedModel):
     config_class = MiniCPMConfig
     base_model_prefix = "model"
+    supports_gradient_checkpointing = True
     _no_split_modules = ["MiniCPMDecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
     _supports_sdpa = True
+    _can_record_outputs = {
+        "hidden_states": MiniCPMDecoderLayer,
+        "attentions": MiniCPMAttention,
+    }
 
     @torch.no_grad()
     def _init_weights(self, module):
@@ -230,6 +254,8 @@ class MiniCPMModel(MiniCPMPreTrainedModel):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
         self.layers = nn.ModuleList([MiniCPMDecoderLayer(config, i) for i in range(config.num_hidden_layers)])
         self.norm = MiniCPMRMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.rotary_emb = MiniCPMRotaryEmbedding(config)
+        self.gradient_checkpointing = False
         self.post_init()
 
     def get_input_embeddings(self):
@@ -238,48 +264,41 @@ class MiniCPMModel(MiniCPMPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-                inputs_embeds=None, use_cache=None, output_attentions=None, output_hidden_states=None,
-                return_dict=None, **kwargs):
+                inputs_embeds=None, use_cache=None, **kwargs):
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Specify exactly one of input_ids and inputs_embeds")
-        use_cache = self.config.use_cache if use_cache is None else use_cache
-        output_attentions = self.config.output_attentions if output_attentions is None else output_attentions
-        output_hidden_states = self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
-        return_dict = self.config.return_dict if return_dict is None else return_dict
         if past_key_values is not None and (
             not isinstance(past_key_values, DynamicCache) or getattr(past_key_values, "offloading", False)
         ):
-            raise ValueError("MiniCPM supports Transformers DynamicCache, not legacy tuples or static/offloaded caches")
+            raise ValueError("MiniCPM requires a non-offloaded DynamicCache")
         if past_key_values is not None and not use_cache:
             raise ValueError("past_key_values requires use_cache=True")
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids) * self.config.scale_emb
-        past_length = past_key_values.get_seq_length() if past_key_values is not None else 0
+        past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
         if position_ids is None:
-            position_ids = torch.arange(past_length, past_length + inputs_embeds.shape[1],
-                                        device=inputs_embeds.device).unsqueeze(0)
-        mask = create_causal_mask(self.config, inputs_embeds, attention_mask, past_key_values,
-                                  position_ids=position_ids, allow_is_causal_skip=not output_attentions)
+            position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device) + past_seen_tokens
+            position_ids = position_ids.unsqueeze(0)
+        causal_mask = create_causal_mask(
+            config=self.config, inputs_embeds=inputs_embeds, attention_mask=attention_mask,
+            past_key_values=past_key_values, position_ids=position_ids,
+        )
         hidden_states = inputs_embeds
-        states = () if output_hidden_states else None
-        attentions = () if output_attentions else None
+        # Source eager attention keeps FP32 RoPE trig; SDPA uses the activation dtype.
+        trig_like = hidden_states.float() if self.config._attn_implementation == "eager" else hidden_states
+        position_embeddings = self.rotary_emb(trig_like, position_ids, past_seen_tokens + inputs_embeds.shape[1])
         for layer in self.layers:
-            if output_hidden_states:
-                states += (hidden_states,)
-            outputs = layer(hidden_states, attention_mask=mask, position_ids=position_ids,
-                            past_key_value=past_key_values, output_attentions=output_attentions)
-            hidden_states = outputs[0]
-            if output_attentions:
-                attentions += (outputs[1],)
-        hidden_states = self.norm(hidden_states)
-        if output_hidden_states:
-            states += (hidden_states,)
-        output = BaseModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=past_key_values,
-                                         hidden_states=states, attentions=attentions)
-        return output if return_dict else output.to_tuple()
+            hidden_states = layer(
+                hidden_states, attention_mask=causal_mask, position_ids=position_ids,
+                past_key_values=past_key_values, use_cache=use_cache,
+                position_embeddings=position_embeddings, **kwargs,
+            )
+        return BaseModelOutputWithPast(last_hidden_state=self.norm(hidden_states), past_key_values=past_key_values)
 
 
 class MiniCPMForCausalLM(MiniCPMPreTrainedModel, GenerationMixin):
@@ -310,18 +329,13 @@ class MiniCPMForCausalLM(MiniCPMPreTrainedModel, GenerationMixin):
     def set_decoder(self, value):
         self.model = value
 
+    @can_return_tuple
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-                inputs_embeds=None, labels=None, use_cache=None, output_attentions=None,
-                output_hidden_states=None, return_dict=None, logits_to_keep=0, **kwargs):
+                inputs_embeds=None, labels=None, use_cache=None, logits_to_keep=0, **kwargs):
         outputs = self.model(input_ids, attention_mask=attention_mask, position_ids=position_ids,
                              past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache,
-                             output_attentions=output_attentions, output_hidden_states=output_hidden_states,
-                             return_dict=True, **kwargs)
-        hidden_states = outputs.last_hidden_state
-        if isinstance(logits_to_keep, int):
-            hidden_states = hidden_states[:, -logits_to_keep:, :]
-        else:
-            hidden_states = hidden_states[:, logits_to_keep, :]
+                             **kwargs)
+        hidden_states = slice_logits_to_keep(outputs.last_hidden_state, logits_to_keep)
         # The original pretraining_tp branch intentionally omits dim_model_base scaling.
         if self.config.pretraining_tp > 1:
             logits = _column_parallel(self.lm_head, hidden_states, self.config.pretraining_tp).float()
@@ -329,9 +343,6 @@ class MiniCPMForCausalLM(MiniCPMPreTrainedModel, GenerationMixin):
             logits = self.lm_head(hidden_states / (self.config.hidden_size / self.config.dim_model_base)).float()
         loss = None
         if labels is not None:
-            loss = F.cross_entropy(logits[..., :-1, :].reshape(-1, self.vocab_size),
-                                   labels[..., 1:].reshape(-1).to(logits.device))
-        output = CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=outputs.past_key_values,
-                                        hidden_states=outputs.hidden_states, attentions=outputs.attentions)
-        return_dict = self.config.return_dict if return_dict is None else return_dict
-        return output if return_dict else output.to_tuple()
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.vocab_size, **kwargs)
+        return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=outputs.past_key_values,
+                                      hidden_states=outputs.hidden_states, attentions=outputs.attentions)
