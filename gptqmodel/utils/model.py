@@ -1773,6 +1773,42 @@ def _single_resident_device(model: nn.Module, device_map: Dict[str, Union[str, i
     return device
 
 
+def has_cpu_offload_hooks(model: nn.Module) -> bool:
+    """Whether ``model`` carries an Accelerate hook that moves tensors per forward.
+
+    ``simple_dispatch_model`` attaches ``CpuOffload`` to every ``cpu`` map entry;
+    transformers' own dispatch attaches ``AlignDevicesHook(offload=True)``. Both
+    call ``Module._apply`` on every forward, so they materialize parameters and
+    buffers each time. Inside ``torch.inference_mode`` those materialized
+    tensors are inference tensors without a version counter (#4572); dynamo
+    reads version counters when it traces the forward installed by
+    ``optimize()``, so the first compiled ``generate()`` failed (#5099).
+
+    A hook may be wrapped in ``SequentialHook``; only a hook that actually
+    offloads counts, because a resident ``AlignDevicesHook`` does not move the
+    tensors back and forth.
+    """
+
+    if not isinstance(model, nn.Module):
+        return False
+
+    from accelerate.hooks import AlignDevicesHook, CpuOffload, SequentialHook
+
+    for module in model.modules():
+        pending = [getattr(module, "_hf_hook", None)]
+        while pending:
+            hook = pending.pop()
+            if hook is None:
+                continue
+            if isinstance(hook, SequentialHook):
+                pending.extend(hook.hooks)
+            elif isinstance(hook, CpuOffload):
+                return True
+            elif isinstance(hook, AlignDevicesHook) and hook.offload:
+                return True
+    return False
+
+
 def simple_dispatch_model(model, device_map):
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 

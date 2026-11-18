@@ -105,6 +105,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [EXL3 wide activation dispatch](exl3-wide-activation-dispatch.md)
 - [External runtime device mapping](external-runtime-device-mapping.md)
 - [Fused kernel dispatch and bias epilogues](fused-kernel-epilogues.md)
+- [Generate on a CPU-offloaded model](generate-cpu-offload-autograd.md)
 - [GGUF C++ bias epilogue](gguf-cpp-bias-epilogue.md)
 - [GGUF kernel selection and fallback](gguf-kernel-selection.md)
 - [GGUF Triton activation range](gguf-triton-activation-range.md)

@@ -356,7 +356,9 @@ For Apple silicon, use the [native MLX workflow](https://github.com/ModelCloud/G
 - **Calibration:** Choose representative text and enough examples to cover your
   use case. MoE and multimodal models may need specialized data preparation.
 - **Memory and recovery:** Configure multi-GPU placement and offload before a
-  large run, and use checkpoint/resume where supported.
+  large run, and use checkpoint/resume where supported. A CPU-offloaded
+  placement also changes the autograd context `generate()` uses; see
+  [generate on a CPU-offloaded model](docs/generate-cpu-offload-autograd.md).
 - **Deployment:** Reload the saved checkpoint, evaluate it, and verify its format
   in the intended engine. A successful native load is not an external-engine
   compatibility guarantee.

@@ -109,6 +109,7 @@ from ..utils.model import (
     get_module,
     get_module_by_name_prefix,
     get_module_name,
+    has_cpu_offload_hooks,
     move_module_to_cpu_pinned,
     move_to,
     warn_fused_unit_dynamic_conflicts,
@@ -3751,12 +3752,21 @@ class BaseQModel(nn.Module):
         # construction. Inference tensors cannot receive a version counter, so
         # ``torch.inference_mode`` fails before model math on the TT PJRT path.
         # no_grad keeps autograd disabled without changing tensor semantics.
+        #
+        # The same constraint applies to an Accelerate CPU-offload hook: its
+        # per-forward ``Module._apply`` materializes parameters and buffers, and
+        # under ``torch.inference_mode`` those become inference tensors without
+        # a version counter. Dynamo reads version counters when it traces the
+        # forward that ``optimize()`` compiled, so the first compiled
+        # ``generate()`` crashed with "Inference tensors do not track version
+        # counter" (#5099). ``no_grad`` disables autograd without changing the
+        # moved tensors' semantics, so the offloaded layer keeps its counter.
+        # Models without an offload hook keep inference_mode.
         model_device = getattr(self.model, "device", torch.device("cpu"))
-        generate_context = (
-            torch.no_grad()
-            if getattr(model_device, "type", None) == "xla"
-            else torch.inference_mode()
-        )
+        if getattr(model_device, "type", None) == "xla" or has_cpu_offload_hooks(self.model):
+            generate_context = torch.no_grad()
+        else:
+            generate_context = torch.inference_mode()
         with generate_context:
             # fix hf generate not applying correct pad token
             pad_token_id = kwargs.get("pad_token_id", None)
