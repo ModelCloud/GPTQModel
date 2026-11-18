@@ -43,11 +43,6 @@ class ApertusQModel(BaseQModel):
         }
     ]
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Q/K normalization and nonlinear xIELU require separately qualified folds.
-        # All decoder linears still use AWQ's plain-quantization fallback.
-        return []
-
 
 class Apertus1p5TextQModel(ApertusQModel):
     """Apertus 1.5 text backbone, including extended/pruned vocabulary layouts."""
@@ -66,7 +61,6 @@ class Apertus1p5QModel(BaseQModel):
         model_class="gptqmodel.models.ports.apertus.modeling_apertus1p5.Apertus1p5ForConditionalGeneration",
         processor_class="gptqmodel.models.ports.apertus.processing_apertus1p5.Apertus1p5Processor",
     )
-    awq_get_modules_for_scaling = ApertusQModel.awq_get_modules_for_scaling
     require_load_processor = True
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
 

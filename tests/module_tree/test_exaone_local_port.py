@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Actual EXAONE checkpoint owners, live plans, and conservative AWQ packing."""
+"""Actual EXAONE checkpoint owners, live plans, AWQ fold neutrality and packing."""
 
 import hashlib
 import json
@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 
 from gptqmodel import CalibrationConfig
@@ -85,15 +86,38 @@ def test_live_decoder_plan_covers_all_checkpoint_owners(kv_heads, tied, device):
             assert plan.find(owner + "_extra") is None
     for projection, role in [("q_proj", "q"), ("k_proj", "k"), ("v_proj", "v")]:
         assert plan.roles("attn.attention." + projection) == (role,)
-    assert wrapper.awq_get_modules_for_scaling(model.transformer.h[0], {}, {}) == []
     registry = json.loads((Path(__file__).parent / "fixtures/registered_module_plans.json").read_text())
     assert registry["models"]["exaone"] == "ExaOneQModel"
     assert registry["cases"]["ExaOneQModel/gptq"] == {"layers": ["transformer.h"], "blocks": BLOCKS}
 
 
+ATTENTION_GROUP = ("ln_1", ["attn.attention.q_proj", "attn.attention.k_proj", "attn.attention.v_proj"], [])
+VALUE_GROUP = ("attn.attention.v_proj", ["attn.attention.out_proj"], [])
+MLP_GROUPS = [("ln_2", ["mlp.c_fc_0", "mlp.c_fc_1"], []), ("mlp.c_fc_1", ["mlp.c_proj"], [])]
+
+
+@pytest.mark.parametrize("kv_heads", [2, 4])
+def test_awq_scale_folds_preserve_every_decoder_layer_output(kv_heads):
+    model = tiny_model(num_key_value_heads=kv_heads)
+    for name, value in model.named_parameters():
+        if ".ln_" in name:
+            with torch.no_grad():
+                value.uniform_(0.5, 1.5)
+    _convert_model_with_defuser(ExaOneQModel, model, cleanup_original=False)
+    ids = torch.tensor([[4, 5, 6, 7, 8, 9, 10, 11]])
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    # v_proj -> out_proj is only an exact fold without GQA head repetition.
+    expected = [ATTENTION_GROUP, *([VALUE_GROUP] if kv_heads == 4 else []), *MLP_GROUPS]
+    for layer in model.transformer.h:
+        assert assert_awq_folds_neutral(ExaOneQModel, model, layer, forward) == expected
+
+
 @pytest.mark.parametrize("tied,rope", [(False, "default"), (True, "llama3")])
 @torch.no_grad()
-def test_plain_awq_quantizes_packs_every_linear_and_round_trips(tmp_path, tied, rope):
+def test_awq_scale_search_quantizes_packs_every_linear_and_round_trips(tmp_path, tied, rope):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
@@ -107,8 +131,6 @@ def test_plain_awq_quantizes_packs_every_linear_and_round_trips(tmp_path, tied, 
     write_tokenizer(tmp_path)
     qcfg = AWQConfig(device="cpu", group_size=16, fallback=None)
     wrapper = GPTQModel.load(str(tmp_path), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
-    layer = wrapper.model.transformer.h[0]
-    assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[4, 5, 6, 7, 8, 9, 10, 11]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
     wrapper.quantize(
@@ -126,6 +148,6 @@ def test_plain_awq_quantizes_packs_every_linear_and_round_trips(tmp_path, tied, 
     assert list(saved.glob("*.safetensors")) and not list(saved.glob("*.bin"))
     restored = GPTQModel.load(str(saved), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
     assert sum(isinstance(module, AwqTorchLinear) for module in restored.model.modules()) == 14
-    for name, value in norms.items():
-        assert torch.equal(restored.model.state_dict()[name], value), "plain AWQ must not fold a norm"
+    # Scale search folds input scales into ln_1/ln_2, so they must differ from the source.
+    assert any(not torch.equal(restored.model.state_dict()[name], value) for name, value in norms.items())
     torch.testing.assert_close(restored.model(**calibration[0], use_cache=False).logits, expected, atol=2e-4, rtol=2e-3)

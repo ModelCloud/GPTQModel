@@ -56,10 +56,6 @@ class KimiK25QModel(BaseQModel):
         },
     ]
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # MLA latent norms and routed/shared consumers are not qualified for folding/search.
-        return []
-
     @classmethod
     def get_base_modules(cls, model):
         base_modules = super().get_base_modules(model)

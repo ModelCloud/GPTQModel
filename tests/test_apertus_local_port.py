@@ -439,7 +439,7 @@ def test_supported_head_tying_width_loss_and_safetensors_roundtrip(tmp_path, kin
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("hidden_act", ["xielu", "silu"])
 @pytest.mark.parametrize("attention_bias", [False, True])
-def test_awq_plain_quantization_covers_every_decoder_projection_and_retry(
+def test_awq_scale_search_covers_every_decoder_projection_and_retry(
     monkeypatch, tmp_path, kind, hidden_act, attention_bias,
 ):
     from gptqmodel.looper.awq_processor import AWQProcessor
@@ -460,18 +460,23 @@ def test_awq_plain_quantization_covers_every_decoder_projection_and_retry(
     linears = {name: module for name, module in layer.named_modules() if isinstance(module, torch.nn.Linear)}
     def record(name):
         def hook(module, args):
-            features[f"{prefix}.0.{name}"] = args[0].detach().clone()
+            features[name] = args[0].detach().clone()
         return hook
     try:
         for name, module in linears.items():
             handles.append(module.register_forward_pre_hook(record(name)))
-        with torch.inference_mode():
+        # Not inference_mode: AWQ rescales the captured features in place after a fold.
+        with torch.no_grad():
             model(torch.tensor([[3, 1, 12, 13], [1, 21, 22, 23]]), attention_mask=torch.tensor([[0, 1, 1, 1], [1, 1, 1, 1]]), use_cache=False)
     finally:
         for handle in handles:
             handle.remove()
     assert len(features) == len(linears) == 6
-    assert wrapper.awq_get_modules_for_scaling(layer, features, {}) == []
+    groups = wrapper.awq_get_modules_for_scaling(layer, features, {})
+    assert [(n["prev_op"], n["layers"]) for n in groups] == [
+        (layer.attention_layernorm, [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj]),
+        (layer.feedforward_layernorm, [layer.mlp.up_proj]),
+    ]
     processor = AWQProcessor(tokenizer=None, qcfg=AWQConfig(device="cpu", group_size=8),
                              calibration=CalibrationConfig(), gptq_model=wrapper, model=model,
                              calculate_w_wq_diff=False)
@@ -479,7 +484,8 @@ def test_awq_plain_quantization_covers_every_decoder_projection_and_retry(
     monkeypatch.setattr(processor, "log_new_row", lambda *a, **k: None)
     state = processor._get_layer_state(0)
     state.layer_module = layer
-    named = {f"{prefix}.0.{name}": NamedModule(module, name, f"{prefix}.0.{name}", 0) for name, module in linears.items()}
+    # The processor keys layer modules and captured features by layer-relative name.
+    named = {name: NamedModule(module, name, f"{prefix}.0.{name}", 0) for name, module in linears.items()}
     state.modules = dict(named)
     before = {k: v.clone() for k, v in layer.state_dict().items()}
     def fail_features(state):
@@ -498,8 +504,11 @@ def test_awq_plain_quantization_covers_every_decoder_projection_and_retry(
         assert {"q_scales", "q_zeros", "wq"} <= module.state.keys()
         assert torch.isfinite(module.state["q_scales"]).all()
         assert not torch.equal(before[f"{module.name}.weight"], module.weight)
+    folded = {"attention_layernorm.weight", "feedforward_layernorm.weight"}
+    # The searched input scales are folded into both decoder norms (#4620).
+    assert any(not torch.equal(after[name], before[name]) for name in folded)
     for name, value in before.items():
-        if not any(name == f"{linear}.weight" for linear in linears):
+        if name not in folded and not any(name == f"{linear}.weight" for linear in linears):
             torch.testing.assert_close(after[name], value, rtol=0, atol=0)
     processor._quantize_layer(0, state)
     for name, value in after.items():

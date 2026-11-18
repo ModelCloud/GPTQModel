@@ -49,5 +49,10 @@ class NanbeigeQModel(LoopedLayerCaptureMixin, BaseQModel):
         return tree
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Looped replay and optional cross-depth/HC consumers have no qualified fold/search boundary.
-        return []
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        if not getattr(self.model.config, "enable_depth_attention", False):
+            return nodes
+        # Depth-Attention mixes this layer's values with other layers' cached
+        # values before `o_proj`, so a `v_proj -> o_proj` fold is not neutral.
+        v_proj = getattr(getattr(module, "self_attn", None), "v_proj", None)
+        return [node for node in nodes if v_proj is None or node.get("prev_op") is not v_proj]

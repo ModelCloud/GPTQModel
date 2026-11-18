@@ -16,10 +16,6 @@ class MobileLLMQModel(LlamaQModel):
         model_class="gptqmodel.models.ports.mobilellm.MobileLLMForCausalLM",
     )
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Repeated shared decoder uses have not been qualified for AWQ folding.
-        return []
-
     def pre_quantize(self, module):
         if self.model.config.pretraining_tp > 1:
             raise ValueError("MobileLLM pretraining_tp > 1 uses dense weight slices; quantization is not qualified")

@@ -122,7 +122,6 @@ def test_real_layouts_have_complete_owned_weight_plan(device, kv_heads, bias, va
                 assert not spec.quantize, key
         assert quantized == set(PROJECTIONS)
         assert set(find_modules(layer)) >= set(PROJECTIONS)
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     for bad in ["self_attn.q_proj_extra", "self_attn.q_proj.weight", "self_attn.unknown", "mlp.down_proj.extra"]:
         assert plan.find(bad) is None
     if variant == "plain":

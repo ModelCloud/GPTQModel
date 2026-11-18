@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 
 from gptqmodel.models.auto import MODEL_MAP
@@ -60,7 +61,7 @@ def test_full_pinned_release_inventory_matches_meta(release):
 @pytest.mark.parametrize("postnorm", [False, True])
 @pytest.mark.parametrize("embednorm", [False, True])
 @pytest.mark.parametrize("device", ["cpu", "meta"])
-def test_all_decoder_owners_resolve_and_plain_policy(kvheads, postnorm, embednorm, device):
+def test_all_decoder_owners_resolve(kvheads, postnorm, embednorm, device):
     config = _config(num_key_value_heads=kvheads, embed_layernorm=embednorm,
                      apply_residual_connection_post_layernorm=postnorm)
     with torch.device(device):
@@ -87,7 +88,34 @@ def test_all_decoder_owners_resolve_and_plain_policy(kvheads, postnorm, embednor
             else:
                 assert "!" in spec.flags
             assert plan.find(owner + ".undeclared") is None
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     assert wrapper.fusable is None
     assert not wrapper.require_trust_remote_code
     assert wrapper.require_dtype is None
+
+
+@pytest.mark.parametrize("kvheads", [1, 2, 4])
+@pytest.mark.parametrize("postnorm", [False, True])
+def test_awq_scale_folds_preserve_every_decoder_layer_output(kvheads, postnorm):
+    torch.manual_seed(5)
+    model = Telechat2ForCausalLM(_config(num_key_value_heads=kvheads,
+                                         apply_residual_connection_post_layernorm=postnorm)).eval()
+    with torch.no_grad():
+        for name, value in model.named_parameters():
+            if "layernorm" in name:
+                value.uniform_(0.5, 1.5)
+    _convert_model_with_defuser(TeleChat2QModel, model, cleanup_original=False)
+    ids = torch.tensor([[4, 5, 6, 7, 8, 9, 10, 11]])
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    # `key_value` (interleaved K/V rows) is never a source; with post-layernorm
+    # residuals the norms feed the residual too, so they are not sources either.
+    norm_groups = [
+        ("input_layernorm", ["self_attention.query", "self_attention.key_value"], []),
+        ("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"], []),
+    ]
+    expected = ([] if postnorm else norm_groups) + [("mlp.up_proj", ["mlp.down_proj"], [])]
+    for layer in model.transformer.h:
+        checked = assert_awq_folds_neutral(TeleChat2QModel, model, layer, forward)
+        assert sorted(checked) == sorted(expected)

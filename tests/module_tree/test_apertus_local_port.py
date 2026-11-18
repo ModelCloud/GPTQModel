@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from transformers import ApertusConfig, ApertusForCausalLM
 
 from gptqmodel.models.auto import MODEL_MAP
@@ -84,3 +85,31 @@ def test_exact_real_meta_checkpoint_ownership_and_consumer_plan(kind, hidden_act
         }
         assert any("parametrizations.weight.original" in key for key in before)
         assert "model.audio_tokenizer.quantizer.codebook.embed" in before
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("hidden_act", ["xielu", "silu"])
+@pytest.mark.parametrize("attention_bias", [False, True])
+def test_awq_scale_folds_preserve_every_decoder_layer_output(kind, hidden_act, attention_bias):
+    torch.manual_seed(11)
+    model = tiny_model(kind, hidden_act=hidden_act, attention_bias=attention_bias)
+    with torch.no_grad():
+        for name, value in model.named_parameters():
+            if "layernorm" in name:
+                value.uniform_(0.5, 1.5)
+    definition = MODEL_MAP[kind.removesuffix("_pruned")]
+    _convert_model_with_defuser(definition, model, cleanup_original=False)
+    prefix = "model.language_model.layers" if kind.removesuffix("_pruned") == "apertus1p5" else "model.layers"
+    ids = torch.tensor([[1, 12, 13, 14, 21, 22]])
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    # Q/K head norms act after the projections, so they do not see the input
+    # scale; xIELU keeps `up_proj` from being a source for `down_proj`.
+    expected = [
+        ("attention_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"], []),
+        ("feedforward_layernorm", ["mlp.up_proj"], []),
+    ]
+    for layer in model.get_submodule(prefix):
+        assert assert_awq_folds_neutral(definition, model, layer, forward) == expected

@@ -34,8 +34,3 @@ class ExaOneQModel(BaseQModel):
             "mlp": ("c_fc_0:0", "c_fc_1:0", "c_proj:1"),
         }
     ]
-
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Scale-search/replay is unqualified for EXAONE 3; quantize every linear
-        # without folding rather than inferring producer relationships.
-        return []

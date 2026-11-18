@@ -585,7 +585,7 @@ def test_invalid_or_unimplemented_source_policies_fail_closed(settings):
 
 @pytest.mark.parametrize("layout", ["hybrid", "reverse", "rda", "mla"])
 @pytest.mark.parametrize("offload", [False, True])
-def test_public_plain_awq_all_projections_pack_infer_and_two_exact_reloads(tmp_path, layout, offload):
+def test_public_awq_all_projections_pack_infer_and_two_exact_reloads(tmp_path, layout, offload):
     from gptqmodel import GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
@@ -611,8 +611,18 @@ def test_public_plain_awq_all_projections_pack_infer_and_two_exact_reloads(tmp_p
         for name, module in wrapped.model.named_modules()
         if isinstance(module, torch.nn.Linear) and name != "lm_head"
     }
+    # AWQ scale search folds into the two decoder norms and compensates the
+    # router that reads the post-attention norm; every other non-linear tensor
+    # must be preserved exactly.
+    folded = {
+        f"model.layers.{i}.{norm}.weight"
+        for i in range(len(model.model.layers))
+        for norm in ("input_layernorm", "post_attention_layernorm", "moe.gate")
+    }
     dense = {
-        name: value.clone() for name, value in model.state_dict().items() if name.rsplit(".", 1)[0] not in linear_names
+        name: value.clone()
+        for name, value in model.state_dict().items()
+        if name.rsplit(".", 1)[0] not in linear_names and name not in folded
     }
     captured = []
 
@@ -637,11 +647,12 @@ def test_public_plain_awq_all_projections_pack_infer_and_two_exact_reloads(tmp_p
     assert cfg.fallback is None
     packed = {name for name, module in wrapped.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert packed == linear_names
-    assert wrapped.awq_get_modules_for_scaling(wrapped.model.model.layers[0], {}, {}) == []
     with torch.no_grad():
         expected = wrapped.model(ids).logits
         assert torch.isfinite(expected).all()
         state = {name: value.clone() for name, value in wrapped.model.state_dict().items() if not value.is_meta}
+        # Scale search is active: at least one decoder norm absorbed a scale.
+        assert any(not torch.equal(state[name], model.state_dict()[name]) for name in folded if name in state)
         state.update(dense)
         for name, value in dense.items():
             if not wrapped.model.state_dict()[name].is_meta:

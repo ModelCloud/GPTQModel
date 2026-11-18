@@ -321,7 +321,7 @@ def test_failure_repair_retry_subfolder_and_assign(tmp_path, layout, alias):
 @pytest.mark.parametrize("layout,alias,offload", [
     ("mha", "refinedWebModel", False), ("mqa", "refinedWebModel", True), ("gqa", "refinedWeb", False),
     ("mha", "falcon", True), ("mqa", "falcon", False), ("gqa", "falcon", True)])
-def test_public_plain_awq_packs_every_projection_and_two_exact_reloads(tmp_path, layout, alias, offload):
+def test_public_awq_scale_search_packs_every_projection_and_two_exact_reloads(tmp_path, layout, alias, offload):
     from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
     from gptqmodel.nn_modules.qlinear import BaseQuantLinear
     from gptqmodel.quantization import FORMAT, METHOD
@@ -334,9 +334,7 @@ def test_public_plain_awq_packs_every_projection_and_two_exact_reloads(tmp_path,
                           offload_to_disk_path=str(tmp_path / "offload"))
     wrapped = GPTQModel.load(str(original_dir), quantize_config=qcfg, backend=BACKEND.TORCH,
                             attn_implementation="eager", dtype=torch.float16)
-    layer = wrapped.model.transformer.h[0]
-    assert wrapped.awq_get_modules_for_scaling(layer, {}, {}) == []
-    # Actual public calibration, search-free plain quantization, and packing.
+    # Actual public calibration, AWQ scale search, and packing.
     calibration = [{"input_ids": [1, 4, 6, 9, 3, 8, 5, 7] * 4, "attention_mask": [1] * 32},
                    {"input_ids": [1, 7, 5, 9, 8, 6, 4, 3] * 4, "attention_mask": [1] * 32}]
     wrapped.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1, sort="desc", concat_size=None),
@@ -347,9 +345,13 @@ def test_public_plain_awq_packs_every_projection_and_two_exact_reloads(tmp_path,
     packed = {name for name, module in modules.items() if isinstance(module, BaseQuantLinear)}
     assert packed == expected
     state = {name: value.clone() for name, value in wrapped.model.state_dict().items()}
+    norms = {"input_layernorm", "post_attention_layernorm", "ln_attn", "ln_mlp"}
+    folded = {key for key in dense if key.startswith("transformer.h.") and key.split(".")[3] in norms}
+    # Every layout folds its searched input scales into the decoder norms.
+    assert any(not torch.equal(state[key], dense[key]) for key in folded)
     for key, tensor in dense.items():
         owner, leaf = key.rsplit(".", 1)
-        if owner not in expected or leaf == "bias":
+        if key not in folded and (owner not in expected or leaf == "bias"):
             torch.testing.assert_close(state[key], tensor, atol=0, rtol=0)
     ids = torch.tensor([[1, 4, 8, 7]])
     with torch.no_grad():

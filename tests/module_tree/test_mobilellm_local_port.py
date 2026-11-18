@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.mobilellm import MobileLLMQModel
@@ -61,12 +62,40 @@ def test_live_weight_owners_and_plan(device, kv, bias, sharing, shared_embedding
         assert layer.self_attn.v_proj.out_features == kv * config.head_dim
     assert set(model.state_dict()) == expected
     assert len(model.model.layers) == 2  # Sharing repeats execution, not checkpoint owners.
-    assert wrapper.awq_get_modules_for_scaling(model.model.layers[0], {}, {}) == []
     assert MODEL_MAP["mobilellm"] is MobileLLMQModel
     with pytest.raises(ValueError):
         require_fusable_config(MobileLLMQModel, "mobilellm")
     tree = MobileLLMQModel._resolve_effective_module_tree(SimpleNamespace(), SimpleNamespace(method="gptq"))
     assert MobileLLMQModel.build_layer_modules(tree, include_capture_only=True) == EXPECTED_BLOCKS
+
+
+@pytest.mark.parametrize("kv,bias,sharing", list(itertools.product([1, 2, 4], [False, True], [False, True])))
+def test_awq_scale_folds_preserve_every_decoder_layer_output(kv, bias, sharing):
+    # A fold reparametrizes one physical layer, so it is exact for every shared use.
+    torch.manual_seed(3)
+    config = MobileLLMConfig(vocab_size=48, hidden_size=32, intermediate_size=64,
+                            num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=kv,
+                            attention_bias=bias, mlp_bias=bias, layer_sharing=sharing,
+                            max_position_embeddings=32, pad_token_id=0)
+    model = MobileLLMForCausalLM(config).eval()
+    with torch.no_grad():
+        for name, value in model.named_parameters():
+            if "norm" in name:
+                value.uniform_(0.5, 1.5)
+    _convert_model_with_defuser(MobileLLMQModel, model, cleanup_original=False)
+    ids = torch.tensor([[1, 4, 9, 13, 7, 5, 19, 8]])
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    # v_proj -> o_proj is only exact without GQA head repetition.
+    expected = [("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"], [])]
+    if kv == 4:
+        expected.append(("self_attn.v_proj", ["self_attn.o_proj"], []))
+    expected += [("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"], []),
+                 ("mlp.up_proj", ["mlp.down_proj"], [])]
+    for layer in model.model.layers:
+        assert assert_awq_folds_neutral(MobileLLMQModel, model, layer, forward) == expected
 
 
 @pytest.mark.parametrize("hidden,intermediate,layers,heads,kv", [

@@ -58,7 +58,6 @@ def test_live_raon_module_plan_owns_every_decoder_tensor(layout, settings, devic
                 assert plan.is_expert(owner)
         for name in linears:
             assert plan.find(name).quantize
-        assert Raon1MiniQModel.awq_get_modules_for_scaling(None, layer, {}, {}) == []
 
 
 def test_all_19434_released_tensor_shapes_and_storage_dtypes_match_exact_meta_owners():
