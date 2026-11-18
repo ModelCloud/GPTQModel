@@ -5,7 +5,9 @@
 Streaming code passes Transformers 5 ``Cache`` objects directly, so no cache adaptation is needed.
 """
 
-from transformers import LlamaModel, Qwen2ForCausalLM, Qwen3ForCausalLM
+from ..native.llama.modeling_llama import LlamaModel
+from ..native.qwen2.modeling_qwen2 import Qwen2ForCausalLM
+from ..native.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 
 
 __all__ = ["LlamaModel", "Qwen2ForCausalLM", "Qwen3ForCausalLM"]

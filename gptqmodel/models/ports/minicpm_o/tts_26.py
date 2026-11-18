@@ -27,10 +27,11 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.parametrizations import weight_norm
 from tqdm import tqdm
-from transformers import LlamaConfig, LogitsProcessor, PreTrainedModel, TopKLogitsWarper, TopPLogitsWarper
+from transformers import LogitsProcessor, PreTrainedModel, TopKLogitsWarper, TopPLogitsWarper
 from transformers.cache_utils import DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 
+from ..native.llama.configuration_llama import LlamaConfig
 from .cache import cache_from_pairs, cache_pairs
 from .native import LlamaModel
 

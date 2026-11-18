@@ -33,10 +33,11 @@ from transformers.image_utils import (
     to_numpy_array,
     valid_images,
 )
-from transformers.models.whisper.feature_extraction_whisper import WhisperFeatureExtractor
 from transformers.processing_utils import ProcessorMixin
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.utils import TensorType, is_torch_device, is_torch_dtype, requires_backends
+
+from ..native.whisper.feature_extraction_whisper import WhisperFeatureExtractor
 
 
 def recursive_converter(converter, value):

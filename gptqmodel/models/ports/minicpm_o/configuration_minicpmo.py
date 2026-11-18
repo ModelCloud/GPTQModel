@@ -17,9 +17,11 @@
 import os
 from typing import Union
 
-from transformers import PretrainedConfig, Qwen3Config, WhisperConfig
+from transformers import PretrainedConfig
 from transformers.utils import logging
 
+from ..native.qwen3.configuration_qwen3 import Qwen3Config
+from ..native.whisper.configuration_whisper import WhisperConfig
 from .modeling_navit_siglip import SiglipVisionConfig
 
 

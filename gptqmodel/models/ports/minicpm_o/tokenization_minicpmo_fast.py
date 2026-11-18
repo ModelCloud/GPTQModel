@@ -16,7 +16,7 @@
 
 from typing import List
 
-from transformers import Qwen2TokenizerFast
+from ..native.qwen2.tokenization_qwen2 import Qwen2Tokenizer as Qwen2TokenizerFast
 
 
 class MiniCPMOTokenizerFast(Qwen2TokenizerFast):

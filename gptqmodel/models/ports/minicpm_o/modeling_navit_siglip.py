@@ -22,13 +22,14 @@ from typing import Optional
 
 import torch
 from torch import nn
-from transformers import SiglipVisionConfig
 from transformers.masking_utils import create_bidirectional_mask
 from transformers.modeling_outputs import BaseModelOutputWithPooling
-from transformers.models.siglip.modeling_siglip import SiglipEncoder, SiglipPreTrainedModel
-from transformers.models.siglip.modeling_siglip import SiglipVisionEmbeddings as NativeSiglipVisionEmbeddings
 from transformers.utils.generic import merge_with_config_defaults
 from transformers.utils.output_capturing import capture_outputs
+
+from ..native.siglip.configuration_siglip import SiglipVisionConfig
+from ..native.siglip.modeling_siglip import SiglipEncoder, SiglipPreTrainedModel
+from ..native.siglip.modeling_siglip import SiglipVisionEmbeddings as NativeSiglipVisionEmbeddings
 
 
 __all__ = ["SiglipVisionConfig", "SiglipVisionEmbeddings", "SiglipVisionTransformer"]
