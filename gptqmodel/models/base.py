@@ -135,6 +135,8 @@ from ..utils.tied_weights import lm_head_is_tied, word_embeddings_tied
 from ..utils.torch import (
     TORCH_HAS_COMPILE,
     as_torch_device,
+    dynamo_traced_frames,
+    release_compile_trace_garbage,
     release_pinned_host_cache,
     torch_compile,
     torch_empty_cache,
@@ -453,12 +455,15 @@ class _CompiledModelForward:
     ``dequantize_weight`` (#4871).
     """
 
-    __slots__ = ("_compiled", "_unbound", "_module_ref")
+    __slots__ = ("_compiled", "_unbound", "_module_ref", "_traced_frames")
 
     def __init__(self, compiled, unbound, module):
         self._compiled = compiled
         self._unbound = unbound
         self._module_ref = weakref.ref(module)
+        # Frames dynamo had already traced when this proxy was installed. Only a
+        # call that adds frames produces new trace garbage (#5020).
+        self._traced_frames = dynamo_traced_frames()
 
     def __call__(self, *args, **kwargs):
         module = self._module_ref()
@@ -466,7 +471,28 @@ class _CompiledModelForward:
             raise RuntimeError(
                 "compiled model `forward` called after its model was released"
             )
-        return self._compiled(module, *args, **kwargs)
+        try:
+            return self._compiled(module, *args, **kwargs)
+        finally:
+            self._release_trace_garbage()
+
+    def _release_trace_garbage(self) -> None:
+        """Collect dynamo's trace cycles once per newly traced frame.
+
+        The proxy itself holds no strong reference to the model, but dynamo
+        leaves the trace's ``VariableTracker`` objects in reference cycles that
+        do, and reference counting cannot reclaim them. Collecting here, while
+        the caller still owns the model, leaves the model reachable only from
+        that owner, so dropping it frees its VRAM immediately instead of
+        waiting for a user-issued cyclic ``gc.collect()`` (#5020). A call that
+        reused the compiled cache adds no frames and needs no collection.
+        """
+
+        traced = dynamo_traced_frames()
+        if traced == self._traced_frames:
+            return
+        self._traced_frames = traced
+        release_compile_trace_garbage()
 
     @property
     def _torchdynamo_orig_callable(self):
@@ -4137,6 +4163,11 @@ class BaseQModel(nn.Module):
         ``generate`` calls the original module's own ``forward`` (#4669). The
         first ``generate()`` after this call pays the compile cost, and a
         graph-breaking kernel runs slower compiled than eager.
+
+        Compiled calls do not pin the model: dynamo's per-frame trace cycles are
+        collected as soon as a call traces a new frame, so dropping the model
+        frees its weights and VRAM immediately instead of waiting for a
+        user-issued ``gc.collect()`` (#4937, #5020).
         """
 
         if not self.quantized:
@@ -4188,10 +4219,15 @@ class BaseQModel(nn.Module):
             # call so the class method is used again (no instance attribute,
             # no cycle).
             model.__dict__.pop("forward", None)
+            self.compiled = False
         else:
             model.forward = _CompiledModelForward(
                 compiled_forward, unbound_forward, model
             )
+            # Inductor compiles on the first call, so "compiled" means the
+            # instance attribute is the compiled proxy, which is what the
+            # `compiled` flag has always documented.
+            self.compiled = True
         self.model = model
 
         #trigger kernel compilation hooks
