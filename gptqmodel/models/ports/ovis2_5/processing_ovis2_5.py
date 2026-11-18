@@ -7,9 +7,10 @@ import os
 from typing import Dict, List, Union
 
 import torch
-from transformers import ProcessorMixin, SiglipImageProcessorPil
+from transformers import ProcessorMixin
 from transformers.feature_extraction_utils import BatchFeature
 
+from ..native.siglip.image_processing_pil_siglip import SiglipImageProcessorPil
 from .configuration_ovis2_5 import Ovis2_5_Config
 from .vision_ovis2_5 import (
     IMAGE_PLACEHOLDER,

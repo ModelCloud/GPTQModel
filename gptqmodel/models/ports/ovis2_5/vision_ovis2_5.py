@@ -11,7 +11,6 @@ import PIL.Image
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
-from transformers import SiglipImageProcessorPil
 from transformers import initialization as init
 from transformers.activations import ACT2FN
 from transformers.modeling_layers import GradientCheckpointingLayer
@@ -19,6 +18,7 @@ from transformers.modeling_outputs import BaseModelOutputWithNoAttention
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import can_return_tuple
 
+from ..native.siglip.image_processing_pil_siglip import SiglipImageProcessorPil
 from .configuration_ovis2_5 import Siglip2NavitConfig
 
 
