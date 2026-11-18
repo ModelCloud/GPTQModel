@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import copy
+import functools
 import inspect
 import math
 import re
@@ -57,6 +58,7 @@ from ..utils.attn_mask import exclude_attention_sinks, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
+from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import (
     create_quant_module,
@@ -347,6 +349,12 @@ def _forward_accepts_var_kwargs(module: nn.Module) -> bool:
     ``attention_mask``, ``position_ids``, ``kv_last_layer`` and ``use_swa``
     that way (#4891). Every name-based signature filter therefore has to treat
     such a module as accepting every key, not as accepting none of them.
+
+    This inspects the *declared* signature: ``inspect.signature`` follows
+    ``__wrapped__``, so an instance-level forward wrapper that carries
+    ``functools.wraps(original_forward)`` is reported with the signature of the
+    forward it replaces. That distinction keeps this predicate from mistaking
+    AWQ's all-experts replay wrapper for a real ``**kwargs`` block (#5095).
     """
 
     try:
@@ -3374,6 +3382,14 @@ class AWQProcessor(LoopProcessor):
 
         original_forward = moe_block.forward
 
+        # Keep the block's real signature visible. `inspect.signature` follows
+        # `__wrapped__`, so the replay machinery still sees e.g.
+        # `OlmoeSparseMoeBlock.forward(hidden_states)` instead of this
+        # catch-all. Without it, `_forward_accepts_var_kwargs` classifies the
+        # MoE block like Hymba's real `**kwargs` block and `_sanitize_kwargs` /
+        # `_prepare_module_forward` hand it layer kwargs it never accepted
+        # (#5095).
+        @functools.wraps(original_forward)
         def all_experts_forward(hidden_states, **kwargs):
             if hidden_states.dim() == 3:
                 hidden_states_2d = hidden_states.reshape(-1, hidden_states.shape[-1])
@@ -3407,7 +3423,10 @@ class AWQProcessor(LoopProcessor):
                         down_ref(intermediate)
                         del intermediate
                 del gate_out, up_out, expert_input
-            return original_forward(hidden_states, **kwargs)
+            # The wrapper's `**kwargs` exists only to stay call-compatible with
+            # the replay caller; it must not widen the original block's
+            # contract. Forward just the keywords that block declares.
+            return safe_kwargs_call(original_forward, hidden_states, kwargs=kwargs)
 
         moe_block.forward = all_experts_forward
         try:
