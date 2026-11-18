@@ -26,11 +26,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-from transformers import LlamaConfig, PreTrainedModel
+from transformers import LlamaConfig, PretrainedConfig, PreTrainedModel
 
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.models.definitions.hymba import HymbaQModel
-from gptqmodel.utils.hf import assert_loaded_model_state
+from gptqmodel.utils.hf import _normalize_remote_code_config_compat, assert_loaded_model_state
 
 
 class _RootBareParameterModel(nn.Module):
@@ -92,6 +92,34 @@ class _GuardModel(PreTrainedModel):
         self.decoder_weight = nn.Parameter(torch.ones(8, dtype=torch.bfloat16))
         self.construction_fp32 = nn.Parameter(torch.randn(16, dtype=torch.float32))
         self.post_init()
+
+
+def test_hymba_config_keeps_the_mixer_selection_within_the_supported_set():
+    """#5090: transformers 5 rejects the legacy `flex` value before the copy.
+
+    `HymbaConfig` selects its mixer with `attn_implementation_new` and
+    `HymbaModel.__init__` copies it into `_attn_implementation`, but
+    transformers 5 validates `_attn_implementation` in `PreTrainedModel.__init__`
+    first (`ValueError: Specified attn_implementation="flex" is not supported`).
+    """
+
+    class _FlexHymbaConfig(PretrainedConfig):
+        model_type = "hymba"
+
+    config = _FlexHymbaConfig(attn_implementation_new="sdpa")
+    # `HymbaConfig.from_pretrained` keeps the checkpoint's `flex` here.
+    config._attn_implementation = "flex"
+    _normalize_remote_code_config_compat(config)
+    assert config.attn_implementation_new == "sdpa"
+    assert config._attn_implementation == "sdpa"
+
+    # A checkpoint that really asked for flex is switched to a supported
+    # implementation, exactly as the existing fallback does.
+    flex_config = _FlexHymbaConfig(attn_implementation_new="flex")
+    flex_config._attn_implementation = "flex"
+    _normalize_remote_code_config_compat(flex_config)
+    assert flex_config.attn_implementation_new in ("sdpa", "flash_attention_2")
+    assert flex_config._attn_implementation == flex_config.attn_implementation_new
 
 
 def test_dtype_guard_accepts_fp32_widened_from_bf16():
