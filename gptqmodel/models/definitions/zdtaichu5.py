@@ -128,9 +128,36 @@ class ZDTaichu5QModel(Qwen3_5TextQModel):
             tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
         )
 
-    def awq_get_modules_for_scaling(self, *args, **kwargs):
-        """Plain AWQ only; hybrid recurrence and visual folds are unqualified."""
-        return []
+    def awq_module_replay_inputs(self, module, x, module_kwargs):
+        """Give a DeltaNet scale-search replay the planar keep mask it consumes.
+
+        The Qwen3.5 decoder sits under ``llm_config`` rather than
+        ``text_config``, so the generic token-row packer cannot see that a
+        ``linear_attention`` layer is recurrent and hands it the additive
+        ``[1, 1, T, T]`` attention grid. Every packed row is a kept token, which
+        is exactly the all-keep ``[batch, seq]`` mask the packer builds for a
+        recognised recurrent mixer.
+        """
+
+        x, kwargs = super().awq_module_replay_inputs(module, x, module_kwargs)
+        if getattr(module, "layer_type", None) != "linear_attention":
+            return x, kwargs
+        # Calibration is an uncached prefill; a recurrent cache would advance
+        # on the reference and again on every candidate replay.
+        if any(kwargs.get(key) is not None for key in ("cache_params", "past_key_values")):
+            raise NotImplementedError("ZDTaichu5 DeltaNet AWQ replay requires uncached calibration context")
+        if x.ndim != 3:
+            raise NotImplementedError("ZDTaichu5 DeltaNet AWQ replay requires batch/sequence/hidden inputs")
+        mask = kwargs.get("attention_mask")
+        if torch.is_tensor(mask) and mask.ndim == 2 and tuple(mask.shape) == tuple(x.shape[:2]):
+            return x, kwargs
+        if torch.is_tensor(mask) and mask.ndim == 4:
+            kwargs = dict(kwargs)
+            kwargs["attention_mask"] = torch.ones(x.shape[:2], dtype=torch.bool, device=x.device)
+            return x, kwargs
+        if mask is not None:
+            raise NotImplementedError("ZDTaichu5 DeltaNet AWQ replay requires a planar or packed-grid mask")
+        return x, kwargs
 
     def run_input_capture(self, example, use_cache: bool, data_device):
         """Keep the original 2-D padding mask for hybrid-layer replay."""

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 
 from gptqmodel.models.auto import MODEL_MAP
@@ -15,7 +16,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.minicpm import MiniCPMConfig, MiniCPMForCausalLM
 from tests.port_assets import read_port_json
-from tests.test_minicpm_local_port import _config
+from tests.test_minicpm_local_port import _config, _model
 
 
 FIXTURE = Path(__file__).parents[2] / "gptqmodel/models/ports/minicpm/checkpoint_inventories.json"
@@ -100,3 +101,36 @@ def test_dense_registry_plan_is_unchanged_and_moe_selection_is_request_local():
     tree = MiniCPMGPTQ._resolve_effective_module_tree(moe, None)
     moe.gptqmodel_effective_module_tree = tree
     assert MiniCPMGPTQ._resolve_effective_module_tree(moe, None) == tree
+
+
+@pytest.mark.parametrize("moe", [False, True])
+@pytest.mark.parametrize("kv", [1, 4])
+@pytest.mark.parametrize("bias", [False, True])
+def test_awq_scale_folds_preserve_dense_and_moe_layer_output(moe, kv, bias):
+    # MiniCPM scales each branch output by scale_depth/sqrt(L) before the
+    # residual add; every fold below is internal to a branch, so it is exact.
+    model = _model(num_key_value_heads=kv, attention_bias=bias,
+                   num_experts=3 if moe else 0, num_experts_per_tok=2 if moe else 0)
+    _convert_model_with_defuser(MiniCPMGPTQ, model, cleanup_original=False)
+    tree = MiniCPMGPTQ._resolve_effective_module_tree(model, None)
+    ids = torch.tensor([[4, 5, 6, 7, 4, 7, 6, 5]])
+
+    def forward():
+        return model(ids).logits
+
+    expected = [("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"], [])]
+    if kv == 4:
+        # GQA leaves v_proj narrower than o_proj, so only MHA folds v -> o.
+        expected.append(("self_attn.v_proj", ["self_attn.o_proj"], []))
+    if moe:
+        # The unquantized router reads the same normed tensor and is compensated.
+        expected.append(("post_attention_layernorm",
+                         [f"mlp.experts.{i}.{name}" for i in range(3) for name in ("w1", "w3")], ["mlp.gate"]))
+        expected += [(f"mlp.experts.{i}.w3", [f"mlp.experts.{i}.w2"], []) for i in range(3)]
+    else:
+        expected += [("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"], []),
+                     ("mlp.up_proj", ["mlp.down_proj"], [])]
+    # The processor plans against the compiled effective (MoE) tree.
+    with MiniCPMGPTQ._module_tree_context(tree):
+        for layer in model.model.layers:
+            assert assert_awq_folds_neutral(MiniCPMGPTQ, model, layer, forward, tree=tree) == expected
