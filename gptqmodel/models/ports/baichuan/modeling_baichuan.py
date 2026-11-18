@@ -5,8 +5,8 @@
 # Licensed under the Apache License, Version 2.0; see the repository LICENSE.
 """Baichuan fused-MHA decoder adapted for Transformers 5 Cache/GenerationMixin.
 
-The four upstream variants and numerical differences are recorded in
-PROVENANCE.md. No checkpoint Python, optional CUDA imports, global registration,
+Covers Baichuan 1/2 7B (RoPE) and 13B (ALiBi), with Baichuan 2's NormHead.
+No checkpoint Python, optional CUDA imports, global registration,
 mutable position caches, or first-forward weight normalization are used.
 """
 
@@ -108,17 +108,17 @@ class Attention(nn.Module):
             self.rotary_emb = RotaryEmbedding(config)
 
     def forward(self, hidden_states, attention_mask=None, position_ids=None,
-                past_key_value=None, output_attentions=False, use_cache=False, **kwargs):
+                past_key_values=None, output_attentions=False, use_cache=False, **kwargs):
         batch, length, width = hidden_states.shape
         # Checkpoint rows are contiguous Q, K, V, each head-major (not QKV
         # interleaved per head, and not a Llama split-projection checkpoint).
         q, k, v = [x.view(batch, length, self.num_heads, self.head_dim).transpose(1, 2)
                    for x in self.W_pack(hidden_states).chunk(3, dim=-1)]
         if hasattr(self, "rotary_emb"):
-            past_length = past_key_value.get_seq_length(self.layer_idx) if past_key_value is not None else 0
+            past_length = past_key_values.get_seq_length(self.layer_idx) if past_key_values is not None else 0
             q, k = self.rotary_emb(q, k, position_ids, seq_len=past_length + length)
-        if past_key_value is not None:
-            k, v = past_key_value.update(k, v, self.layer_idx)
+        if past_key_values is not None:
+            k, v = past_key_values.update(k, v, self.layer_idx)
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         if attention_mask is not None:
             scores = (scores + attention_mask).clamp_min(torch.finfo(scores.dtype).min)
@@ -137,11 +137,11 @@ class DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
 
     def forward(self, hidden_states, attention_mask=None, position_ids=None,
-                past_key_value=None, output_attentions=False, use_cache=False, **kwargs):
+                past_key_values=None, output_attentions=False, use_cache=False, **kwargs):
         residual = hidden_states
         attention, weights = self.self_attn(
             self.input_layernorm(hidden_states), attention_mask=attention_mask,
-            position_ids=position_ids, past_key_value=past_key_value,
+            position_ids=position_ids, past_key_values=past_key_values,
             output_attentions=output_attentions, use_cache=use_cache,
         )
         hidden_states = residual + attention
@@ -228,7 +228,7 @@ class BaichuanModel(BaichuanPreTrainedModel):
             if output_hidden_states:
                 all_hidden += (hidden_states,)
             hidden_states, attn = layer(hidden_states, attention_mask=mask, position_ids=position_ids,
-                                        past_key_value=cache, use_cache=use_cache,
+                                        past_key_values=cache, use_cache=use_cache,
                                         output_attentions=output_attentions)
             if output_attentions:
                 all_attn += (attn,)
@@ -256,24 +256,6 @@ class BaichuanForCausalLM(BaichuanPreTrainedModel, GenerationMixin):
         head = NormHead if config.normalize_lm_head else nn.Linear
         self.lm_head = head(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
-
-    def get_input_embeddings(self):
-        return self.model.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.model.embed_tokens = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, value):
-        self.lm_head = value
-
-    def get_decoder(self):
-        return self.model
-
-    def set_decoder(self, value):
-        self.model = value
 
     def forward(self, input_ids=None, attention_mask=None, position_ids=None,
                 past_key_values=None, inputs_embeds=None, labels=None, use_cache=None,

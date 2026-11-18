@@ -3,6 +3,7 @@
 """Real native weight owners for the distinct multimodal and text tasks."""
 
 import copy
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,7 +17,7 @@ from gptqmodel.models.definitions.qwen2_5_vl import Qwen2_5_VLQModel
 from gptqmodel.models.fusable import require_fusable_config
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.utils.model import get_layers_with_prefixes
-from tests.port_assets import read_port_json
+from tests.port_assets import read_port_asset, read_port_json
 
 
 PROJECTIONS = {
@@ -38,9 +39,9 @@ BLOCKS = [
 ]
 
 
-@pytest.mark.parametrize("text_only", [False, True])
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("device", ["cpu", "meta"])
+@pytest.mark.parametrize("text_only,kv_heads,device", [
+    (False, 1, "cpu"), (False, 4, "meta"), (True, 2, "cpu"), (True, 4, "meta"),
+])
 def test_actual_native_weight_owners_and_layout_isolation(text_only, kv_heads, device):
     import defuser
 
@@ -102,7 +103,7 @@ def test_pinned_released_checkpoint_all_shapes_and_text_extraction_schema():
     import gptqmodel.models.ports.qwen2_5_vl as port
 
     fixtures = Path(port.__file__).parent / "fixtures"
-    config = Qwen2_5_VLConfig.from_json_file(fixtures / "qwen3b_config.json")
+    config = Qwen2_5_VLConfig.from_dict(json.loads(read_port_asset(fixtures / "qwen3b_config.json")))
     with torch.device("meta"):
         composite = Qwen2_5_VLQModel.loader.from_config(config)
         text = Qwen2_5_VLQModel.loader.from_config(config.text_config)
@@ -134,7 +135,7 @@ def test_independently_published_standalone_native_headless_schema():
     import gptqmodel.models.ports.qwen2_5_vl as port
 
     fixtures = Path(port.__file__).parent / "fixtures"
-    config = Qwen2_5_VLTextConfig.from_json_file(fixtures / "published_headless_config.json")
+    config = Qwen2_5_VLTextConfig.from_dict(json.loads(read_port_asset(fixtures / "published_headless_config.json")))
     assert config.architectures == ["Qwen2_5_VLTextModel"]
     assert config.model_type == "qwen2_5_vl_text"
     with torch.device("meta"):

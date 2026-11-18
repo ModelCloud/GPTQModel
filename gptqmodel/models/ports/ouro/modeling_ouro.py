@@ -2,17 +2,22 @@
 # Copyright 2025 ByteDance and the Ouro authors.
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Transformers 5 Ouro port. Pinned source, changes and boundaries: README.md."""
+"""Transformers 5 Ouro port: Qwen2 blocks with sandwich norms, a shared recurrent stack and early exit."""
 
 import torch
 from torch import nn
-from transformers.activations import ACT2FN
 from transformers.cache_utils import DynamicCache, DynamicLayer
 from transformers.generation import GenerationMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
-from transformers.models.qwen2.modeling_qwen2 import Qwen2RotaryEmbedding
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.models.qwen2.modeling_qwen2 import (
+    Qwen2MLP,
+    Qwen2RMSNorm,
+    Qwen2RotaryEmbedding,
+    apply_rotary_pos_emb,
+    eager_attention_forward,
+)
 
 from .configuration_ouro import OuroConfig
 
@@ -50,32 +55,9 @@ class UniversalTransformerCache(DynamicCache):
         self.layers = []
 
 
-class OuroRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        dtype = hidden_states.dtype
-        x = hidden_states.float()
-        x = x * torch.rsqrt(x.square().mean(-1, keepdim=True) + self.variance_epsilon)
-        return self.weight * x.to(dtype)
-
-
-class OuroMLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
-
-    def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-
-
 class OuroAttention(nn.Module):
+    """Qwen2 attention without q/k/v bias; KV slot = recurrent step * depth + layer."""
+
     def __init__(self, config, layer_idx):
         super().__init__()
         self.config = config
@@ -84,6 +66,8 @@ class OuroAttention(nn.Module):
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
+        self.is_causal = True
+        self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
         self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=False)
@@ -94,50 +78,43 @@ class OuroAttention(nn.Module):
         hidden_states,
         position_embeddings,
         attention_mask=None,
-        past_key_value=None,
+        past_key_values=None,
         current_ut=0,
-        output_attentions=False,
         **kwargs,
     ):
-        shape = (*hidden_states.shape[:-1], -1, self.head_dim)
+        input_shape = hidden_states.shape[:-1]
+        shape = (*input_shape, -1, self.head_dim)
         q = self.q_proj(hidden_states).view(shape).transpose(1, 2)
         k = self.k_proj(hidden_states).view(shape).transpose(1, 2)
         v = self.v_proj(hidden_states).view(shape).transpose(1, 2)
-        cos, sin = (x.unsqueeze(1) for x in position_embeddings)
-
-        def rotate(x):
-            a, b = x.chunk(2, dim=-1)
-            return x * cos + torch.cat((-b, a), dim=-1) * sin
-
-        q, k = rotate(q), rotate(k)
-        if past_key_value is not None:
-            k, v = past_key_value.update(k, v, current_ut * self.config.num_hidden_layers + self.layer_idx)
-        k = k.repeat_interleave(self.num_key_value_groups, dim=1)
-        v = v.repeat_interleave(self.num_key_value_groups, dim=1)
-        dropout = self.attention_dropout if self.training else 0.0
-        weights = None
-        if self.config._attn_implementation == "sdpa" and not output_attentions:
-            result = nn.functional.scaled_dot_product_attention(
-                q, k, v, attn_mask=attention_mask, dropout_p=dropout, scale=self.scaling
-            )
-        else:
-            scores = q @ k.transpose(-1, -2) * self.scaling
-            if attention_mask is not None:
-                scores = scores + attention_mask[..., : k.shape[-2]]
-            weights = scores.softmax(dim=-1, dtype=torch.float32).to(q.dtype)
-            weights = nn.functional.dropout(weights, p=dropout, training=self.training)
-            result = weights @ v
-        result = result.transpose(1, 2).reshape(*hidden_states.shape[:-1], -1).contiguous()
-        return self.o_proj(result), weights
+        q, k = apply_rotary_pos_emb(q, k, *position_embeddings)
+        if past_key_values is not None:
+            k, v = past_key_values.update(k, v, current_ut * self.config.num_hidden_layers + self.layer_idx)
+        # Masks are built for config._attn_implementation, so the kernel must match it.
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
+        result, weights = attention_interface(
+            self,
+            q,
+            k,
+            v,
+            attention_mask,
+            dropout=self.attention_dropout if self.training else 0.0,
+            scaling=self.scaling,
+            sliding_window=self.sliding_window,
+            **kwargs,
+        )
+        return self.o_proj(result.reshape(*input_shape, -1).contiguous()), weights
 
 
 class OuroDecoderLayer(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.self_attn = OuroAttention(config, layer_idx)
-        self.mlp = OuroMLP(config)
+        self.mlp = Qwen2MLP(config)
         for name in ("input_layernorm", "input_layernorm_2", "post_attention_layernorm", "post_attention_layernorm_2"):
-            setattr(self, name, OuroRMSNorm(config.hidden_size, config.rms_norm_eps))
+            setattr(self, name, Qwen2RMSNorm(config.hidden_size, config.rms_norm_eps))
         self.attention_type = config.layer_types[layer_idx]
 
     def forward(self, hidden_states, position_embeddings=None, attention_mask=None, **kwargs):
@@ -165,7 +142,7 @@ class OuroModel(OuroPreTrainedModel):
         super().__init__(config)
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
         self.layers = nn.ModuleList([OuroDecoderLayer(config, i) for i in range(config.num_hidden_layers)])
-        self.norm = OuroRMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.norm = Qwen2RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.rotary_emb = Qwen2RotaryEmbedding(config)
         self.total_ut_steps = config.total_ut_steps
         self.early_exit_gate = nn.Linear(config.hidden_size, 1)
@@ -243,7 +220,7 @@ class OuroModel(OuroPreTrainedModel):
                     attention_mask=masks[layer.attention_type],
                     position_ids=position_ids,
                     position_embeddings=position_embeddings,
-                    past_key_value=past_key_values,
+                    past_key_values=past_key_values,
                     current_ut=current_ut,
                     output_attentions=output_attentions,
                     **kwargs,

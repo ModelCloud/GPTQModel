@@ -46,7 +46,7 @@ def upstream_equations(model, ids, mask=None, positions=None):
     """Independent full-forward oracle transcribed from pinned upstream code.
 
     Uses checkpoint tensors, not port layer/attention/norm/rotary forwards.
-    See port PROVENANCE.md for sources. No checkpoint Python is executed.
+    No checkpoint Python is executed.
     """
     state, config = model.state_dict(), model.config
     x = F.embedding(ids, state["model.embed_tokens.weight"])
@@ -243,6 +243,10 @@ def test_safetensors_roundtrip_exact_ownership_and_failed_load_retry(tmp_path, p
     assert not info["missing_keys"] and not info["unexpected_keys"] and not info["mismatched_keys"]
     assert loaded.config.position_embedding_type == position
     assert loaded.config.normalize_lm_head == normalized
+    # Transformers 5's default embedding/decoder accessors resolve the Baichuan layout.
+    assert loaded.get_input_embeddings() is loaded.model.embed_tokens
+    assert loaded.get_output_embeddings() is loaded.lm_head
+    assert loaded.get_decoder() is loaded.model
     assert set(before) == set(loaded.state_dict())
     for key, value in loaded.state_dict().items():
         torch.testing.assert_close(value, before[key], rtol=0, atol=0)

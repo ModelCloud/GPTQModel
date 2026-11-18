@@ -142,22 +142,28 @@ def test_definition_owns_loader_without_remote_hooks():
 @pytest.mark.parametrize("kv_heads", [1, 2, 4])
 @pytest.mark.parametrize("steps", [1, 3, 4])
 @pytest.mark.parametrize("sliding", [False, True])
-def test_recurrent_decoder_matches_independent_equations(kv_heads, steps, sliding):
+@pytest.mark.parametrize("backend", ["eager", "sdpa"])
+def test_recurrent_decoder_matches_independent_equations(kv_heads, steps, sliding, backend):
     model = tiny_model(
         num_key_value_heads=kv_heads,
         total_ut_steps=steps,
         use_sliding_window=sliding,
         sliding_window=3,
         max_window_layers=1,
-        attn_implementation="eager",
+        attn_implementation=backend,
     )
     ids = torch.tensor([[4, 5, 6, 7, 8, 9], [9, 7, 8, 6, 5, 4]])
     _, expected, _, cache_expected = oracle(model, ids)
     with torch.inference_mode():
+        # TF5 attention interface: sdpa/eager dispatch with per-layer sliding windows.
+        actual = model(ids, output_hidden_states=True)
+        torch.testing.assert_close(actual.logits.double(), expected[-1], atol=3e-5, rtol=2e-4)
+        # Regression: sdpa boolean masks were once added to eager scores here.
         actual = model(ids, output_hidden_states=True, output_attentions=True)
     torch.testing.assert_close(actual.logits.double(), expected[-1], atol=3e-5, rtol=2e-4)
     assert len(actual.hidden_states) == steps * 2 + 2
     assert len(actual.attentions) == steps * 2
+    assert all((weights is None) == (backend == "sdpa") for weights in actual.attentions)
     assert len(actual.past_key_values.layers) == steps * 2
     for layer, (k, v) in zip(actual.past_key_values.layers, cache_expected):
         torch.testing.assert_close(layer.keys.double(), k, atol=3e-5, rtol=2e-4)

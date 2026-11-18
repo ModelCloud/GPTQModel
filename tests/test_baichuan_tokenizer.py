@@ -20,7 +20,7 @@ from gptqmodel.utils.hf import load_hf_tokenizer
 from gptqmodel.utils.security import BYPASS_ENV
 
 
-CONTRACTS = json.loads((Path(__file__).parents[1] / 'gptqmodel/models/ports/baichuan/tokenizer_contracts.json').read_text())['cases']
+CONTRACTS = json.loads((Path(__file__).parent / 'fixtures/ports/baichuan/tokenizer_contracts.json').read_text())['cases']
 
 
 @pytest.fixture(scope='module', params=CONTRACTS, ids=lambda c: c['repo_id'].split('/')[-1])

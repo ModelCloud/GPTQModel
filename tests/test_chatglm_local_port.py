@@ -19,8 +19,8 @@ from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.utils.hf import load_model_config
 
 
-TOKENIZER_CONTRACTS = json.loads((Path(__file__).resolve().parents[1] /
-    'gptqmodel/models/ports/chatglm/tokenizer_contracts.json').read_text())
+TOKENIZER_CONTRACTS = json.loads((Path(__file__).resolve().parent /
+    'fixtures/ports/chatglm/tokenizer_contracts.json').read_text())
 
 
 @lru_cache(maxsize=3)
