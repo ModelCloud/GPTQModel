@@ -28,7 +28,6 @@ class BrumbyConfig(PreTrainedConfig):
         use_cache=True,
         tie_word_embeddings=False,
         rope_theta=10000.0,
-        rope_scaling=None,
         rope_parameters=None,
         attention_bias=False,
         attention_dropout=0.0,
@@ -72,7 +71,8 @@ class BrumbyConfig(PreTrainedConfig):
         self.switch_over_seq_len = switch_over_seq_len
         self.use_exp = use_exp
         self.p = p
-        self.rope_parameters = dict(rope_parameters or rope_scaling or {})
+        # Released checkpoints store RoPE metadata as `rope_scaling`; convert it once, at parse time.
+        self.rope_parameters = dict(rope_parameters or kwargs.pop("rope_scaling", None) or {})
         self.rope_parameters.setdefault("rope_type", self.rope_parameters.pop("type", "default"))
         self.rope_parameters.setdefault("rope_theta", rope_theta)
         if p != 2:
