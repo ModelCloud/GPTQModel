@@ -258,7 +258,7 @@ def test_pinned_native_media_metadata_against_pixel_and_grid_oracles(tmp_path):
 
 
 @pytest.mark.parametrize("kv_heads,bias", [(1, False), (4, True)])
-def test_public_awq_plain_quantization_packs_all_decoder_linears(tmp_path, kv_heads, bias):
+def test_public_awq_quantization_packs_all_decoder_linears(tmp_path, kv_heads, bias):
     source = tmp_path / "source"
     native_model(kv_heads=kv_heads, bias=bias).save_pretrained(source, safe_serialization=True)
     tiny_processor().save_pretrained(source)
@@ -270,10 +270,19 @@ def test_public_awq_plain_quantization_packs_all_decoder_linears(tmp_path, kv_he
                                    [f"self_attn.{p}_proj" for p in ("q", "k", "v", "o")])}
     expected_names.update(f"model.language_model.layers.{i}.feed_forward.w{p}"
                           for i in range(3) for p in (1, 2, 3))
+    # AWQ folds its scales into the input norms and the compensated gate.
+    folded = {f"model.language_model.layers.{i}.{name}" for i in range(3)
+              for name in ("operator_norm", "ffn_norm", "self_attn.g_proj")}
     before = {name: value.clone() for name, value in wrapper.model.state_dict().items()
-              if not any(name.startswith(prefix + ".") for prefix in expected_names)}
-    assert all(wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
-               for layer in wrapper.model.model.language_model.layers)
+              if not any(name.startswith(prefix + ".") for prefix in expected_names | folded)}
+    planner, emitted = wrapper.awq_get_modules_for_scaling, []
+
+    def record_groups(layer, input_feat, module_kwargs):
+        nodes = planner(layer, input_feat, module_kwargs)
+        emitted.append({id(node["prev_op"]) for node in nodes} >= {id(layer.operator_norm), id(layer.ffn_norm)})
+        return nodes
+
+    wrapper.awq_get_modules_for_scaling = record_groups
     samples = [[{"role": "user", "content": [
         {"type": "text", "text": "t5 t6 t7 t8 t9 t10 t11 t12"},
         {"type": "image", "image": Image.new("RGB", (4, 4), (100, 40, 20))},
@@ -282,6 +291,7 @@ def test_public_awq_plain_quantization_packs_all_decoder_linears(tmp_path, kv_he
         CalibrationConfig(dataset=samples, batch_size=1, min_length=1),
         backend=BACKEND.TORCH,
     )
+    assert emitted == [True, True, True]
     packed = {name: module for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert set(packed) == expected_names
     assert len(packed) == 19
