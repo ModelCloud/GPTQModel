@@ -7,9 +7,17 @@ import torch
 
 from ...utils.model import move_to
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 class PanguAlphaQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.pangu_alpha.GPTPanguConfig",
+        model_class="gptqmodel.models.ports.pangu_alpha.GPTPanguForCausalLM",
+        tokenizer_class="gptqmodel.models.ports.pangu_alpha.tokenization_pangu.GPTPanguTokenizer",
+    )
+    require_trust_remote_code = False
+    fusable = None
     pre_lm_head_norm_module = "transformer.ln_f"
 
     # Full tree of quantizable modules
@@ -23,43 +31,18 @@ class PanguAlphaQModel(BaseQModel):
         "#",
         {
             "ln_1": ("ln_1:!",),
-            "attn": ("q_proj:0", "k_proj:0", "v_proj:0", "c_proj:1"),
+            "attn": ("attn:!", "q_proj:0", "k_proj:0", "v_proj:0", "c_proj:1"),
             "ln_2": ("ln_2:!",),
             # `GPTPanguMLP.forward` is `c_proj(act(c_fc(x)))` with GELU, which is
             # not positively homogeneous: folding a scale into `c_fc` changes the
             # MLP output (4.5e-2 on a tiny model).
             "mlp": ("c_fc:0:nosrc", "c_proj:1"),
-        }
+        },
     ]
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        """Drop the top-query layer's `q_proj` from the `ln_1` scaling group.
-
-        ``GPTPanguModel.forward`` passes ``custom_query = wqe(position_ids)`` to
-        the last block, so that block's ``q_proj`` does not read ``ln_1``'s
-        output. Scaling it with the ``ln_1`` group changes the attention output
-        (q is multiplied by the scale while its input is not divided).
-        """
-
-        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
-        transformer = getattr(self.model, "transformer", None)
-        blocks = getattr(transformer, "h", None)
-        if not blocks or blocks[-1] is not module:
-            return nodes
-        q_proj = getattr(getattr(module, "attn", None), "q_proj", None)
-        if q_proj is None:
-            return nodes
-
-        filtered = []
-        for node in nodes:
-            layers = node.get("layers") or []
-            if q_proj not in layers:
-                filtered.append(node)
-                continue
-            remaining = [consumer for consumer in layers if consumer is not q_proj]
-            if remaining:
-                filtered.append({**node, "layers": remaining})
-        return filtered
+        """Plain AWQ only: top-query replay/fold search has not been qualified."""
+        return []
 
     def prepare_layer_replay_kwargs(
         self,
@@ -90,6 +73,10 @@ class PanguAlphaQModel(BaseQModel):
         if transformer is None or not blocks or blocks[-1] is not layer:
             return additional_inputs
 
+        # In a one-block model the captured block is already the top-query block.
+        if additional_inputs.get("custom_query") is not None:
+            return additional_inputs
+
         if layer_input:
             hidden_states = layer_input[0]
             norm = transformer.ln_f
@@ -108,17 +95,14 @@ class PanguAlphaQModel(BaseQModel):
         if not torch.is_tensor(position_ids):
             if not torch.is_tensor(hidden_states):
                 return additional_inputs
-            seq_len = (
-                int(hidden_states.shape[-2])
-                if hidden_states.dim() >= 2
-                else int(hidden_states.shape[0])
-            )
+            seq_len = int(hidden_states.shape[-2]) if hidden_states.dim() >= 2 else int(hidden_states.shape[0])
             batch = int(hidden_states.shape[0]) if hidden_states.dim() >= 3 else 1
-            position_ids = torch.arange(
-                seq_len, device=hidden_states.device, dtype=torch.long
-            ).unsqueeze(0).expand(batch, -1)
+            position_ids = (
+                torch.arange(seq_len, device=hidden_states.device, dtype=torch.long).unsqueeze(0).expand(batch, -1)
+            )
 
-        additional_inputs["custom_query"] = transformer.wqe(
-            position_ids.to(target_device)
-        )
+        query = transformer.wqe(position_ids.to(target_device))
+        if torch.is_tensor(hidden_states) and hidden_states.ndim == 3:
+            query = query.expand(hidden_states.shape[0], -1, -1)
+        additional_inputs["custom_query"] = query
         return additional_inputs
