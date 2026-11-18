@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2024 Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: MIT
-"""OpenVLA configuration, adapted from the pinned sources in PROVENANCE.json."""
+"""OpenVLA configuration, adapted from github.com/openvla/openvla@c8f03f48af692657d3060c19588038c7220e9af9."""
 
 from typing import Dict, List, Optional
 

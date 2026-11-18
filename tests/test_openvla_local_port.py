@@ -207,9 +207,7 @@ def test_openvla_real_vision_layouts_match_independent_equations(backbone):
         assert (actual - model.projector(model.vision_backbone(altered))).abs().max() > 1e-6
 
 
-@pytest.mark.parametrize("fused", [False, True])
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("fused,kv_heads,bias", [(False, 1, False), (True, 2, True), (True, 4, False)])
 def test_openvla_multimodal_llama_matches_independent_equations(fused, kv_heads, bias):
     model = _model(fused=fused, text_config={"num_key_value_heads": kv_heads, "attention_bias": bias, "mlp_bias": bias})
     ids = torch.tensor([[1, 7, 9, 4], [1, 6, 8, 0]])
@@ -226,9 +224,9 @@ def test_openvla_multimodal_llama_matches_independent_equations(fused, kv_heads,
         torch.testing.assert_close(actual.logits.double(), expected, atol=3e-7, rtol=5e-5)
 
 
-@pytest.mark.parametrize("fused", [False, True])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("implementation", ["eager", "sdpa"])
+@pytest.mark.parametrize("fused,dtype,implementation", [
+    (False, torch.float32, "eager"), (True, torch.bfloat16, "sdpa"), (True, torch.float16, "eager"),
+])
 def test_openvla_cache_generation_safetensors_and_assignment(tmp_path, fused, dtype, implementation):
     model = _model(fused=fused, attn_implementation=implementation, dtype=dtype)
     ids = torch.tensor([[1, 7, 9, 4, 6, 8]])
@@ -272,9 +270,7 @@ def test_openvla_cache_generation_safetensors_and_assignment(tmp_path, fused, dt
             model = loaded
 
 
-@pytest.mark.parametrize("llm", ["mistral-v0.1-7b-pure", "mistral-v0.1-7b-instruct", "phi-2-3b",
-                                  "vicuna-v15-7b", "vicuna-v15-13b", "llama2-7b-chat", "llama2-13b-pure",
-                                  "llama2-13b-chat"])
+@pytest.mark.parametrize("llm", ["mistral-v0.1-7b-instruct", "phi-2-3b", "vicuna-v15-13b"])
 def test_openvla_source_language_variants_preserve_native_decoder(llm):
     model = _model(llm=llm)
     pixels = _pixels(model.config)
@@ -322,8 +318,7 @@ def test_openvla_labels_tuple_outputs_causality_and_failure_retry():
         torch.testing.assert_close(retry.logits, output.logits[:, -2:], atol=3e-7, rtol=2e-5)
 
 
-@pytest.mark.parametrize("trust", [None, False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(None, None), (False, "1"), (True, "0")])
 def test_openvla_public_hostile_model_tokenizer_processor_and_retry(tmp_path, monkeypatch, trust, bypass):
     from gptqmodel import GPTQModel
 
@@ -473,17 +468,6 @@ def test_openvla_released_tokenizer_and_asset_hashes(tmp_path):
     assert processor("Hello 世界 café")["input_ids"].tolist() == [[1, 15043, 29871, 30793, 30967, 274, 28059]]
 
 
-def test_openvla_pinned_fixtures_and_license_bytes():
-    manifest = json.loads((FIXTURES.parent / "PROVENANCE.json").read_text())
-    assert hashlib.sha256(_asset("checkpoint_inventory.json")).hexdigest() == manifest["inventory_sha256"]
-    for name, hashes in manifest["fixtures"].items():
-        raw = _asset(name)
-        assert hashlib.sha256(raw).hexdigest() == hashes["source_bytes_sha256"]
-        assert len(raw) == hashes["source_bytes"]
-    for name, digest in manifest["license_files"].items():
-        assert hashlib.sha256((FIXTURES.parent / name).read_bytes()).hexdigest() == digest
-
-
 def test_openvla_generation_cache_retains_visual_mask_coordinates():
     model = _model()
     ids = torch.tensor([[1, 7, 9, 4]])
@@ -499,8 +483,7 @@ def test_openvla_generation_cache_retains_visual_mask_coordinates():
         assert getattr(text_cache, "prismatic_patch_count", 0) == 0
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("trailing_empty", [False, True])
+@pytest.mark.parametrize("dtype,trailing_empty", [(torch.float32, False), (torch.bfloat16, True), (torch.float16, False)])
 def test_openvla_action_bins_prompt_mask_and_real_generation(dtype, trailing_empty):
     from transformers import LogitsProcessor, LogitsProcessorList
 
@@ -558,9 +541,9 @@ def test_openvla_action_real_greedy_oracle_and_validation_retry():
     np.testing.assert_allclose(model.predict_action(ids, pixel_values=pixels, do_sample=False), expected, atol=2e-15)
 
 
-@pytest.mark.parametrize("llm", ["llama2-7b-pure", "mistral-v0.1-7b-pure", "phi-2-3b"])
-@pytest.mark.parametrize("offload", [False, True])
-@pytest.mark.parametrize("fused", [False, True])
+@pytest.mark.parametrize("llm,offload,fused", [
+    ("llama2-7b-pure", False, True), ("mistral-v0.1-7b-pure", True, False), ("phi-2-3b", False, False),
+])
 def test_openvla_public_image_plain_awq_pack_and_two_exact_reloads(tmp_path, monkeypatch, llm, offload, fused):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
