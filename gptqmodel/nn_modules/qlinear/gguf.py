@@ -1491,8 +1491,14 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         host-dequantized formats (Q2_K/Q3_K and the remaining codebook types)
         still cannot be captured, so callers that capture a specific layer ask
         the instance instead of the class (#5014).
+
+        A subclass that turns the class claim off (``GGUFCppKernel``,
+        ``GGUFCudaKernel``) keeps ``False``: this hook may only narrow the
+        declaration, never widen it.
         """
 
+        if not type(self).SUPPORTS_GRAPH_CAPTURE:
+            return False
         return self.gguf_tensor_qtype in self.GRAPH_CAPTURE_QTYPES
 
     def _dequantize_q4_0(

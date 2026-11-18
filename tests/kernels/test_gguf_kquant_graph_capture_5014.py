@@ -47,12 +47,12 @@ def _require_cuda() -> None:
         pytest.skip("GGUF graph capture needs a CUDA device")
 
 
-def _build(bits: str) -> GGUFTorchLinear:
+def _build(bits: str, cls=GGUFTorchLinear) -> GGUFTorchLinear:
     torch.manual_seed(7)
     linear = nn.Linear(IN_FEATURES, OUT_FEATURES, bias=False, dtype=torch.float32)
     with torch.no_grad():
         linear.weight.normal_(0.0, 0.02)
-    module = GGUFTorchLinear(
+    module = cls(
         bits=bits,
         group_size=-1,
         sym=True,
@@ -61,7 +61,7 @@ def _build(bits: str) -> GGUFTorchLinear:
         out_features=OUT_FEATURES,
         bias=False,
     )
-    GGUFTorchLinear.pack_original(module, linear, scales=None, zeros=None)
+    cls.pack_original(module, linear, scales=None, zeros=None)
     return module.cuda().eval()
 
 
@@ -180,3 +180,35 @@ def test_graph_capture_declaration_is_per_format():
             f"{bits} dequantizes on the host, so it cannot be graph captured"
         )
         assert graph_capture_safe(module) is False, bits
+
+
+def test_instance_refinement_cannot_widen_a_subclass_declaration():
+    """A subclass that declares capture off keeps it off (#5014).
+
+    ``GGUFCppKernel``/``GGUFCudaKernel`` inherit ``GGUFTorchLinear`` (and its
+    per-format hook) but declare ``SUPPORTS_GRAPH_CAPTURE = False``. The hook
+    may only narrow the declaration, never raise it, or the helper would claim
+    capture for a kernel that never had it.
+    """
+
+    class _DeclaredUnsafe(GGUFTorchLinear):
+        # ``__new__`` bypasses ``__init__`` (and its SUPPORTS_* registration
+        # check) -- this only needs a real instance that inherits the hook.
+        SUPPORTS_GRAPH_CAPTURE = False
+        gguf_tensor_qtype = "q4_k"  # a format the inherited hook would allow
+
+    assert graph_capture_safe(_DeclaredUnsafe) is False
+    module = _DeclaredUnsafe.__new__(_DeclaredUnsafe)
+    # The hook must honour the declaration too (q4_k alone would say True), and
+    # the helper must not widen what the class declared.
+    assert GGUFTorchLinear.supports_graph_capture(module) is False
+    assert graph_capture_safe(module) is False
+
+    class _DuckDeclaredUnsafe:
+        SUPPORTS_GRAPH_CAPTURE = False
+
+        @staticmethod
+        def supports_graph_capture() -> bool:
+            return True
+
+    assert graph_capture_safe(_DuckDeclaredUnsafe()) is False

@@ -146,13 +146,18 @@ def graph_capture_safe(kernel: Any) -> bool:
     may refine it through ``supports_graph_capture()`` when only some of its
     runtime formats are capturable -- GGUF's host-dequantized Q2_K/Q3_K layers
     declare the class-level ``True`` for the device formats (#5014).
+
+    The refinement may only *narrow* the declaration: a subclass that declares
+    ``False`` (``GGUFCppKernel``, ``GGUFCudaKernel``) keeps answering ``False``
+    even though it inherits the hook from ``GGUFTorchLinear``.
     """
 
-    if not isinstance(kernel, type):
+    declared = bool(getattr(kernel, "SUPPORTS_GRAPH_CAPTURE", False))
+    if not isinstance(kernel, type) and declared:
         refine = getattr(kernel, "supports_graph_capture", None)
         if callable(refine):
             return bool(refine())
-    return bool(getattr(kernel, "SUPPORTS_GRAPH_CAPTURE", False))
+    return declared
 
 
 def reaches_level(kernel: Any, level: COMPILE_LEVEL) -> bool:
