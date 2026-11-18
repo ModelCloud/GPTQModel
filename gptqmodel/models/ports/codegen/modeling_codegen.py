@@ -23,26 +23,26 @@ Four-partition checkpoints retain the native Transformers implementation.
 import torch
 from torch import nn
 from transformers.modeling_layers import GradientCheckpointingLayer
-from transformers.models.codegen.modeling_codegen import (
+
+from ..native.codegen.modeling_codegen import (
     CodeGenAttention as NativeCodeGenAttention,
 )
-from transformers.models.codegen.modeling_codegen import (
+from ..native.codegen.modeling_codegen import (
     CodeGenBlock as NativeCodeGenBlock,
 )
-from transformers.models.codegen.modeling_codegen import (
+from ..native.codegen.modeling_codegen import (
     CodeGenForCausalLM as NativeCodeGenForCausalLM,
 )
-from transformers.models.codegen.modeling_codegen import (
+from ..native.codegen.modeling_codegen import (
     CodeGenMLP,
     apply_rotary_pos_emb,
 )
-from transformers.models.codegen.modeling_codegen import (
+from ..native.codegen.modeling_codegen import (
     CodeGenModel as NativeCodeGenModel,
 )
-from transformers.models.codegen.modeling_codegen import (
+from ..native.codegen.modeling_codegen import (
     CodeGenPreTrainedModel as NativeCodeGenPreTrainedModel,
 )
-
 from .configuration_codegen import CodeGenConfig
 
 

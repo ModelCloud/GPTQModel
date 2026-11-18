@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """CodeGen layout metadata; remote import hints never select an implementation."""
 
-from transformers.models.codegen.configuration_codegen import CodeGenConfig as NativeCodeGenConfig
+from ..native.codegen.configuration_codegen import CodeGenConfig as NativeCodeGenConfig
 
 
 _MISSING = object()
