@@ -1783,7 +1783,11 @@ class AWQProcessor(LoopProcessor):
                 h = max(int(t.shape[-1]), 1)
                 raw_len = int(t.numel() // h)
                 if exclude_sinks and torch.is_tensor(sink_positions):
-                    raw_len = max(0, raw_len - int(sink_positions.numel()))
+                    # ``sink_positions`` is the ``[B, S]`` BOS mask, not a list
+                    # of positions: subtracting ``numel()`` drops the whole
+                    # batch and zeroes every planned length (#5275). The masked
+                    # branch above already subtracts the excluded positions.
+                    raw_len = max(0, raw_len - int(sink_positions.sum().item()))
                 lengths.append(raw_len)
             else:
                 lengths.append(0)
