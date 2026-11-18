@@ -16,6 +16,12 @@ no device list, so it too used to claim ``cuda:0`` (#5105).
 
 The check runs in a subprocess: a primary context is process-wide and cannot be
 released, so an in-process assertion would depend on what ran before it.
+
+Issue #5101 is the same class on the compiled path: ``optimize()`` installs a
+compiled ``forward`` that runs without a device guard, and inductor's lazy SDPA
+pattern init resolves its device-less default to the *current* device. A model
+loaded on ``cuda:1`` therefore claimed ``cuda:0`` when a later generate
+recompiled for a new batch shape.
 """
 
 from __future__ import annotations
@@ -51,6 +57,36 @@ print("ctx1=", torch._C._cuda_hasPrimaryContext(1), flush=True)
 print("device=", device, flush=True)
 print("finite=", bool(torch.isfinite(logits).all()), flush=True)
 """
+
+
+CHILD_COMPILED = r"""
+import torch
+from gptqmodel import GPTQModel
+from gptqmodel.utils.torch import dynamo_traced_frames
+
+checkpoint = {checkpoint!r}
+model = GPTQModel.load(checkpoint, device="cuda:1", dtype=torch.float16)
+print("after_load_ctx0=", torch._C._cuda_hasPrimaryContext(0), flush=True)
+
+model.optimize()
+print("compiled=", bool(model.compiled), flush=True)
+
+for batch in (2, 1):
+    ids = torch.randint(5, 128, (batch, 8), device="cuda:1")
+    out = model.generate(
+        input_ids=ids,
+        attention_mask=torch.ones_like(ids),
+        max_new_tokens=4,
+    )
+    print(f"after_batch{{batch}}_ctx0=", torch._C._cuda_hasPrimaryContext(0), flush=True)
+    print(f"after_batch{{batch}}_new_tokens=", int(out.shape[1]) - int(ids.shape[1]), flush=True)
+
+print("traced_frames=", dynamo_traced_frames(), flush=True)
+"""
+
+
+_GPTQ_CHECKPOINT_ENV = "GPTQMODEL_DEVICE_CONTEXT_GPTQ_CHECKPOINT"
+_GPTQ_CACHE_CANDIDATES = ("sliuau/llama3.2-1b-4bit-group128",)
 
 
 def _quantized_checkpoint(target: Path, family: str) -> Path:
@@ -134,6 +170,39 @@ def fused_expert_moe_checkpoint(tmp_path_factory) -> Path:
     return _quantized_checkpoint(tmp_path_factory.mktemp("olmoe"), "olmoe")
 
 
+@pytest.fixture(scope="module")
+def compiled_gptq_checkpoint() -> str:
+    """A real 4-bit GPTQ checkpoint whose Marlin graph breaks hit #5101.
+
+    The tiny fixtures above compile without claiming ``cuda:0`` in this
+    environment, so they cannot pin the recompile path. Point the test at a
+    checkpoint with ``GPTQMODEL_DEVICE_CONTEXT_GPTQ_CHECKPOINT`` or reuse the
+    warm cache; skip when neither is available rather than downloading in a
+    device-context test.
+    """
+
+    configured = os.environ.get(_GPTQ_CHECKPOINT_ENV)
+    if configured:
+        if not Path(configured).exists():
+            pytest.skip(f"{_GPTQ_CHECKPOINT_ENV} points at a missing path: {configured}")
+        return configured
+
+    try:
+        from huggingface_hub import snapshot_download
+    except Exception:  # pragma: no cover - optional test dependency
+        pytest.skip("huggingface_hub is unavailable")
+
+    for repo in _GPTQ_CACHE_CANDIDATES:
+        try:
+            return snapshot_download(repo, local_files_only=True)
+        except Exception:
+            continue
+    pytest.skip(
+        "no cached 4-bit GPTQ checkpoint for the compiled device-context "
+        f"regression; set {_GPTQ_CHECKPOINT_ENV}"
+    )
+
+
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two visible GPUs")
 @pytest.mark.skipif(
     not hasattr(torch._C, "_cuda_hasPrimaryContext"),
@@ -170,3 +239,106 @@ def test_load_on_the_second_gpu_leaves_the_first_untouched(
         "loading onto cuda:1 initialized a primary context on cuda:0\n"
         f"stdout:\n{result.stdout}"
     )
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two visible GPUs")
+@pytest.mark.skipif(
+    not hasattr(torch._C, "_cuda_hasPrimaryContext"),
+    reason="torch does not expose primary-context introspection",
+)
+def test_optimize_compiled_forward_on_the_second_gpu_leaves_the_first_untouched(
+    compiled_gptq_checkpoint,
+):
+    """Two compiled generates with different batch sizes must not claim cuda:0.
+
+    The second generate recompiles the forward for a new batch shape, which is
+    when inductor's device-less SDPA pattern init used to fall back to the
+    current device (cuda:0) instead of the model's device (cuda:1).
+    """
+
+    env = os.environ.copy()
+    env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    env["CUDA_VISIBLE_DEVICES"] = _visible_cuda_pair()
+    env["HF_HUB_OFFLINE"] = "1"
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(REPO_ROOT)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", CHILD_COMPILED.format(checkpoint=str(compiled_gptq_checkpoint))],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
+    assert result.returncode == 0, f"stdout:\n{result.stdout[-4000:]}\nstderr:\n{result.stderr[-4000:]}"
+
+    assert "after_load_ctx0= False" in result.stdout, result.stdout
+    assert "compiled= True" in result.stdout, (
+        "optimize() did not install the compiled forward proxy\n"
+        f"stdout:\n{result.stdout}"
+    )
+    assert "after_batch2_ctx0= False" in result.stdout, (
+        "the first compiled generate on cuda:1 initialized cuda:0\n"
+        f"stdout:\n{result.stdout}"
+    )
+    assert "after_batch1_ctx0= False" in result.stdout, (
+        "a recompile for a new batch shape on cuda:1 initialized cuda:0\n"
+        f"stdout:\n{result.stdout}"
+    )
+    assert "after_batch2_new_tokens= 4" in result.stdout, result.stdout
+    assert "after_batch1_new_tokens= 4" in result.stdout, result.stdout
+
+    traced = [
+        line.split("=", 1)[1].strip()
+        for line in result.stdout.splitlines()
+        if line.startswith("traced_frames=")
+    ]
+    assert traced and int(traced[-1]) > 0, (
+        "the compiled path traced no frames; the regression did not exercise it\n"
+        f"stdout:\n{result.stdout}"
+    )
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two visible GPUs")
+def test_model_execution_device_scope_restores_the_caller_device():
+    """The compiled-call scope enters the model device and always restores."""
+
+    from gptqmodel.utils.torch import model_execution_device_scope
+
+    module = torch.nn.Linear(2, 2, bias=False, device="cuda:1")
+    torch.cuda.set_device(0)
+    assert torch.cuda.current_device() == 0
+
+    with model_execution_device_scope(module):
+        assert torch.cuda.current_device() == 1
+    assert torch.cuda.current_device() == 0
+
+    with pytest.raises(RuntimeError, match="compiled call failed"):
+        with model_execution_device_scope(module):
+            assert torch.cuda.current_device() == 1
+            raise RuntimeError("compiled call failed")
+    assert torch.cuda.current_device() == 0
+
+    del module
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two visible GPUs")
+def test_model_execution_device_prefers_the_first_accelerator_input():
+    """A multi-device map follows the call's first accelerator input."""
+
+    from gptqmodel.utils.torch import model_execution_device, model_execution_device_scope
+
+    module = torch.nn.Linear(2, 2, bias=False, device="cuda:1")
+    input_ids = torch.zeros((1, 2), dtype=torch.long, device="cuda:1")
+
+    assert model_execution_device(module, (input_ids,)) == torch.device("cuda:1")
+    # A CPU-only input falls back to the module's own placement.
+    assert model_execution_device(module, (torch.zeros((1, 2)),)) == torch.device("cuda:1")
+
+    torch.cuda.set_device(0)
+    with model_execution_device_scope(module, (input_ids,), {}):
+        assert torch.cuda.current_device() == 1
+    assert torch.cuda.current_device() == 0
+
+    del module, input_ids

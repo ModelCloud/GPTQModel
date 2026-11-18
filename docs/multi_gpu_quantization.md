@@ -202,6 +202,103 @@ pinned by `tests/test_load_device_context_4863.py` and
 See [PR #5158](https://github.com/ModelCloud/GPTQModel/pull/5158) (draft) for the
 diff.
 
+## Compiled forward device scope
+
+`optimize()` compiles the model `forward` in place, so `generate()` runs the
+compiled proxy at `gptqmodel/models/base.py:461-476`. Inductor initializes its
+lazy graph patterns from the traced frame's input device
+(`torch/_inductor/fx_passes/joint_graph.py:812` -> `lazy_init` ->
+`fuse_attention._sfdp_init`). A quantized-kernel graph break can leave that
+frame without a device-bearing input, and
+`_get_sfdp_patterns(input_device=None)` then uses `device = "cuda"`
+(`torch/_inductor/fx_passes/fuse_attention.py:1514`). `"cuda"` means the
+*current* device, so a model loaded and compiled on `cuda:1` claimed the
+primary context of `cuda:0` when a later call recompiled for a new batch shape
+(#5101).
+
+Old flow (`04e745269`):
+
+```mermaid
+flowchart TD
+    A["generate() enters compiled forward<br/>base.py:461-470 proxy"] --> B["compiled forward<br/>no device guard"]
+    B --> C["inductor joint_graph_passes<br/>joint_graph.py:812"]
+    C --> D["lazy_init(input_device=None)<br/>graph-break frame has no device input"]
+    D --> E["_sfdp_init -> _get_sfdp_patterns<br/>fuse_attention.py:1514"]
+    E --> F["device = 'cuda'<br/>resolves to current device cuda:0"]
+    F --> G["primary context on cuda:0<br/>excluded GPU claimed"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class G failure;
+```
+
+New flow:
+
+```mermaid
+flowchart TD
+    A["generate() enters compiled forward<br/>base.py:476"] --> S["model_execution_device_scope<br/>utils/torch.py:848"]
+    S --> P0["model_execution_device<br/>utils/torch.py:816"]
+    P0 --> P1{"first accelerator input?"}
+    P1 -- Yes --> P2["use that input's device"]
+    P1 -- No --> P3{"input embedding on an accelerator?"}
+    P3 -- Yes --> P4["use the embedding's device"]
+    P3 -- No --> P5["first accelerator parameter or buffer"]
+    P2 --> E0{"accelerator device?"}
+    P4 --> E0
+    P5 --> E0
+    E0 -- No --> C0["compiled forward unchanged<br/>CPU or no accelerator"]
+    E0 -- Yes --> E1["enter torch.cuda.device(model device)"]
+    E1 --> B["compiled forward"]
+    B --> C["inductor joint_graph_passes<br/>joint_graph.py:812"]
+    C --> D["lazy_init(input_device=None)"]
+    D --> E["_sfdp_init -> _get_sfdp_patterns<br/>fuse_attention.py:1514"]
+    E --> F["device = 'cuda'<br/>resolves to cuda:1"]
+    F --> R["restore caller's current device<br/>on success and on exception"]
+    classDef ok fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    class E1,F,R ok;
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Compiled forward proxy (`gptqmodel/models/base.py:461-470`) | Ran the compiled forward with no device guard | Enters the model's execution device for the call and restores the caller's device |
+| Inductor lazy SDPA init (`joint_graph.py:812`, `fuse_attention.py:1514`) | Device-less fallback `"cuda"` resolved to the current `cuda:0` | Resolves inside the scope to the model's `cuda:1` |
+| Compiled `dequantize_weight` proxy (`gptqmodel/nn_modules/qlinear/torch.py:87-95`) | A direct compiled-kernel call had no device guard | Scoped to the module's device |
+| Multi-device map | Not handled | First accelerator input, then input embedding, then first parameter/buffer |
+
+Failure contract:
+
+- The scope changes only the current device. Tensor placement and the caller's
+  device map are untouched.
+- The caller's previous current device is restored on success and when the
+  compiled call raises, so an exception cannot leak the model's device into
+  later code.
+- A CPU model, or a model whose parameters, buffers and inputs hold no
+  accelerator tensor, runs the call unchanged.
+- Multi-device placement follows the call, not a fixed index: the first
+  accelerator input wins, then the input embedding, then the first
+  parameter/buffer. A per-layer call on `cuda:2` is scoped to `cuda:2` rather
+  than pinning every call to the embedding's GPU.
+- The scope does not create a context on any other device; `torch.cuda.device`
+  changes the current index and does not allocate.
+
+Measured with two RTX 4090s visible as `cuda:0`/`cuda:1` (torch 2.15.0+cu132,
+transformers 5.22.1, triton 3.9). The model is loaded on `cuda:1`, compiled
+with `optimize()`, then generated with batch 2 and batch 1:
+
+| Checkpoint / kernel | Before | After |
+| --- | --- | --- |
+| Llama-3.2-1B GPTQ-4bit-g128, `MarlinLinear` | `ctx0=False` after batch 2, `ctx0=True` after batch 1 | `ctx0=False` after both; 4 new tokens each; 244 dynamo frames traced |
+| Qwen2.5-0.5B-Instruct-AWQ, `AwqMarlinLinear` | `ctx0=False` after batch 2, `ctx0=True` after batch 1 | `ctx0=False` after both; 4 new tokens each |
+| EXL3 (`ExllamaV3Linear`) | Reported in #5101 on a first generate | Unverified here: no EXL3 checkpoint is cached and `exllamav3` is not installed |
+
+The `with torch.cuda.device(1):` control around the same sequence also left
+`cuda:0` untouched before the change, which identifies the current device as
+the input to inductor's fallback.
+
+The regressions are
+`tests/test_load_device_context_4863.py::test_optimize_compiled_forward_on_the_second_gpu_leaves_the_first_untouched`
+and the scope-restoration unit cases in the same file.
+
+See the draft PR that introduces this section for the diff.
+
 ## Forward device selection
 
 `ForwardExecutor.run` expands the base device to its family through
