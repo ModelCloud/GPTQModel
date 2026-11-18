@@ -7,7 +7,7 @@
 MiniMax-M2 Hugging Face checkpoint sanity check with streaming output.
 
 Usage:
-    python test_minimax_m2_hf.py \
+    python scripts/minimax_m2_hf_smoke.py \
         --model-path /monster/data/model/MiniMax-M2-bf16 \
         --question "How many letter A are there in the word Alphabet? Reply with the number only."
 """

@@ -14,10 +14,13 @@ def _package_version() -> str:
     return version_vars["__version__"]
 
 
-# Keep repository-only trees out of the wheel: `scripts/` and `tests/` are
-# checkouts helpers, and shipping either creates top-level name clashes.
-packages = find_packages(exclude=("tests", "tests.*", "scripts", "scripts.*"))
-for package_name in find_namespace_packages(include=("gptqmodel_ext.*",)):
+# Keep checkout-only test packages out of regular and namespace discovery.
+test_packages = ("tests", "tests.*", "*.tests", "*.tests.*")
+packages = find_packages(exclude=(*test_packages, "scripts", "scripts.*"))
+for package_name in find_namespace_packages(
+    include=("gptqmodel_ext.*",),
+    exclude=(*test_packages, "gptqmodel_ext.ttbfp.tools"),
+):
     if package_name not in packages:
         packages.append(package_name)
 
