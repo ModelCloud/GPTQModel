@@ -101,7 +101,6 @@ def requant_embed_lm_head(args: argparse.Namespace) -> Path:
         "sym": True,
         "desc_act": args.desc_act,
         "act_group_aware": not args.no_act_group_aware,
-        "scale_search": args.scale_search,
     }
     # Dynamic lookups are cached because configs are otherwise immutable after
     # construction. Build a new mapping so lookups performed during checkpoint
