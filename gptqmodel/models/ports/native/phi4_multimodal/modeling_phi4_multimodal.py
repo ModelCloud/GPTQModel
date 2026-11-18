@@ -44,6 +44,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import auto_docstring, torch_int
 from transformers.utils.generic import TransformersKwargs, can_return_tuple, maybe_autocast, merge_with_config_defaults
@@ -209,7 +210,7 @@ class Phi4MultimodalVisionEncoder(nn.Module):
 
 
 @auto_docstring
-class Phi4MultimodalVisionPreTrainedModel(PreTrainedModel):
+class Phi4MultimodalVisionPreTrainedModel(NativePreTrainedModel):
     config: Phi4MultimodalVisionConfig
     base_model_prefix = "phi4_vision"
     input_modalities = ("image",)
@@ -841,7 +842,7 @@ class Phi4MultimodalAudioMeanVarianceNormLayer(nn.Module):
 
 
 @auto_docstring
-class Phi4MultimodalAudioPreTrainedModel(PreTrainedModel):
+class Phi4MultimodalAudioPreTrainedModel(NativePreTrainedModel):
     config: Phi4MultimodalAudioConfig
     input_modalities = "audio"
     supports_gradient_checkpointing = True
@@ -1385,7 +1386,7 @@ class Phi4MultimodalFeatureEmbedding(nn.Module):
 
 
 @auto_docstring
-class Phi4MultimodalPreTrainedModel(PreTrainedModel):
+class Phi4MultimodalPreTrainedModel(NativePreTrainedModel):
     config: Phi4MultimodalConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
