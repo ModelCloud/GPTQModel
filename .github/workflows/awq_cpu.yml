@@ -75,6 +75,7 @@ jobs:
                 tests/test_awq_conv1d_gpt2_4887.py \
                 tests/test_calibration_messages_tools_4858.py \
                 tests/test_calibration_tools_formats_4934.py \
+                tests/test_calibration_messages_arrow_5082.py \
                 tests/test_awq_hybrid_moe_root_4903.py \
                 tests/test_awq_deepseek_v4_hash_moe_4880.py \
                 tests/test_weight_only_failed_run_device_5011.py \
