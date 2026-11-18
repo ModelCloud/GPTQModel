@@ -1,13 +1,18 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Issue #4863: a load onto ``cuda:N`` must not initialize a context on ``cuda:0``.
+"""Issues #4863/#5105: a load onto ``cuda:N`` must not initialize ``cuda:0``.
 
 The inference load path hands the device map to Accelerate, which passes the
 map value straight to ``safetensors.safe_open(device=...)``. A *string* device
 (``"cuda:1"``) makes safetensors initialize the primary context of the current
 CUDA device as well, so every non-zero-ordinal load claimed ~500 MiB on a GPU
 the caller never asked for. An int ordinal only touches the requested device.
+
+A fused-expert MoE checkpoint (OLMoE) additionally runs Defuser's conversion
+before any weight reaches the target GPU. That conversion flushes the cache
+through ``clear_memory()``, which synchronizes the *current* device when it has
+no device list, so it too used to claim ``cuda:0`` (#5105).
 
 The check runs in a subprocess: a primary context is process-wide and cannot be
 released, so an in-process assertion would depend on what ran before it.
@@ -48,7 +53,7 @@ print("finite=", bool(torch.isfinite(logits).all()), flush=True)
 """
 
 
-def _quantized_checkpoint(target: Path) -> Path:
+def _quantized_checkpoint(target: Path, family: str) -> Path:
     """A tiny GPTQ checkpoint, saved the way a user's checkpoint is written."""
 
     import transformers
@@ -59,19 +64,37 @@ def _quantized_checkpoint(target: Path) -> Path:
 
     source = target / "source"
     torch.manual_seed(0)
-    transformers.Qwen2ForCausalLM(
-        transformers.Qwen2Config(
-            vocab_size=128,
-            hidden_size=64,
-            intermediate_size=128,
-            num_hidden_layers=2,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            max_position_embeddings=128,
-            tie_word_embeddings=True,
-            pad_token_id=0,
-        )
-    ).to(torch.float16).save_pretrained(source)
+    if family == "olmoe":
+        transformers.OlmoeForCausalLM(
+            transformers.OlmoeConfig(
+                vocab_size=128,
+                hidden_size=64,
+                intermediate_size=128,
+                num_hidden_layers=2,
+                num_attention_heads=4,
+                num_key_value_heads=2,
+                num_experts_per_tok=2,
+                num_local_experts=4,
+                max_position_embeddings=64,
+                bos_token_id=1,
+                eos_token_id=2,
+                pad_token_id=0,
+            )
+        ).to(torch.float16).save_pretrained(source)
+    else:
+        transformers.Qwen2ForCausalLM(
+            transformers.Qwen2Config(
+                vocab_size=128,
+                hidden_size=64,
+                intermediate_size=128,
+                num_hidden_layers=2,
+                num_attention_heads=4,
+                num_key_value_heads=2,
+                max_position_embeddings=128,
+                tie_word_embeddings=True,
+                pad_token_id=0,
+            )
+        ).to(torch.float16).save_pretrained(source)
     build_wordlevel_tokenizer().save_pretrained(source)
 
     model = GPTQModel.load(
@@ -91,18 +114,43 @@ def _quantized_checkpoint(target: Path) -> Path:
     return saved
 
 
+def _visible_cuda_pair() -> str:
+    """The first two GPUs this test process may use, as a visibility string."""
+
+    raw = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if raw is None:
+        return "0,1"
+    entries = [entry.strip() for entry in raw.split(",") if entry.strip()]
+    return ",".join(entries[:2]) if len(entries) >= 2 else "0,1"
+
+
+@pytest.fixture(scope="module")
+def dense_checkpoint(tmp_path_factory) -> Path:
+    return _quantized_checkpoint(tmp_path_factory.mktemp("dense"), "dense")
+
+
+@pytest.fixture(scope="module")
+def fused_expert_moe_checkpoint(tmp_path_factory) -> Path:
+    return _quantized_checkpoint(tmp_path_factory.mktemp("olmoe"), "olmoe")
+
+
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two visible GPUs")
 @pytest.mark.skipif(
     not hasattr(torch._C, "_cuda_hasPrimaryContext"),
     reason="torch does not expose primary-context introspection",
 )
 @pytest.mark.parametrize("placement", ["cuda:1", {"": "cuda:1"}])
-def test_load_on_the_second_gpu_leaves_the_first_untouched(tmp_path, placement):
-    checkpoint = _quantized_checkpoint(tmp_path)
+@pytest.mark.parametrize(
+    "checkpoint_fixture", ["dense_checkpoint", "fused_expert_moe_checkpoint"]
+)
+def test_load_on_the_second_gpu_leaves_the_first_untouched(
+    request, checkpoint_fixture, placement
+):
+    checkpoint = request.getfixturevalue(checkpoint_fixture)
 
     env = os.environ.copy()
     env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    env["CUDA_VISIBLE_DEVICES"] = "0,1"
+    env["CUDA_VISIBLE_DEVICES"] = _visible_cuda_pair()
     env["PYTHONPATH"] = os.pathsep.join(
         [str(REPO_ROOT)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
     )

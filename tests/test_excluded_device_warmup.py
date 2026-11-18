@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Excluded accelerators must stay unclaimed during quantization (#4320, #4653).
+"""Excluded accelerators must stay unclaimed during quantization (#4320, #4653, #5105).
 
 #4320 made the pool's device activation lazy, but three later paths still
 touched an excluded GPU: ``torch_sync()`` synchronized every *visible* index,
@@ -208,6 +208,40 @@ def test_prewarm_target_follows_the_filtered_pool(monkeypatch):
 
     assert auto._resolve_prewarm_device(None, None, config) == torch.device("cuda:1")
     assert auto._resolve_prewarm_device(None, None) == torch.device("cuda")
+
+
+def test_defuser_conversion_scope_passes_the_model_devices(monkeypatch):
+    """The cache flush must receive the devices the converted model occupies.
+
+    Defuser calls ``clear_memory()`` with no argument, so the scope injects the
+    list. A CPU/meta model gets a CPU-only list (no synchronize); a model that
+    already holds CUDA tensors gets exactly those ordinals.
+    """
+
+    defuser_moe = pytest.importorskip("defuser.modeling.moe_experts_interface")
+    from gptqmodel.utils.torch import defuser_conversion_scope
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    calls = []
+
+    def recorder(*args, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(defuser_moe, "clear_memory", recorder)
+
+    def _model(device):
+        tensor = SimpleNamespace(device=torch.device(device))
+        return SimpleNamespace(parameters=lambda: iter([tensor]), buffers=lambda: iter([]))
+
+    with defuser_conversion_scope(_model("cpu")):
+        defuser_moe.clear_memory()
+        assert defuser_moe.clear_memory is not recorder
+    assert defuser_moe.clear_memory is recorder
+    with defuser_conversion_scope(_model("cuda:1")):
+        defuser_moe.clear_memory()
+
+    assert calls[0]["device_list"] == ["cpu"]
+    assert calls[1]["device_list"] == ["cuda:1"]
 
 
 def _patch_sync_surface(monkeypatch, torch_utils, claimed):
@@ -442,6 +476,36 @@ def _tiny_llama_dir(tmp_path: Path) -> Path:
     return model_dir
 
 
+def _tiny_olmoe_dir(tmp_path: Path) -> Path:
+    """Two-layer fused-expert MoE: the families that run Defuser's conversion."""
+
+    from transformers import OlmoeConfig, OlmoeForCausalLM
+
+    from tests.tiny_remote_models import build_wordlevel_tokenizer
+
+    model_dir = tmp_path / "tiny-olmoe"
+    model_dir.mkdir()
+    torch.manual_seed(1234)
+    OlmoeForCausalLM(
+        OlmoeConfig(
+            vocab_size=256,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_experts_per_tok=2,
+            num_local_experts=4,
+            max_position_embeddings=128,
+            bos_token_id=1,
+            eos_token_id=2,
+            pad_token_id=0,
+        )
+    ).to(torch.float16).eval().save_pretrained(model_dir)
+    build_wordlevel_tokenizer(vocab_size=256).save_pretrained(model_dir)
+    return model_dir
+
+
 _EXCLUDED_DEVICE_SCRIPT = r"""
 import json
 import sys
@@ -466,6 +530,9 @@ calibration = [
     ] * 2
 ]
 
+query = getattr(torch._C, "_cuda_hasPrimaryContext", None)
+before_load = bool(query(0)) if query is not None else None
+
 if mode == "filter":
     config = GPTQConfig(
         bits=4,
@@ -485,8 +552,8 @@ else:
         device=("cuda:1",),
     )
 
-query = getattr(torch._C, "_cuda_hasPrimaryContext", None)
-before = bool(query(0)) if query is not None else None
+after_load = bool(query(0)) if query is not None else None
+before = after_load
 model.quantize(
     CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
     backend=BACKEND.TORCH,
@@ -495,6 +562,8 @@ print(
     "RESULT="
     + json.dumps(
         {
+            "before_load": before_load,
+            "after_load": after_load,
             "before": before,
             "claimed": bool(query(0)) if query is not None else None,
             "peak0": int(torch.cuda.max_memory_allocated(0)),
@@ -547,7 +616,64 @@ def test_quantize_never_claims_the_excluded_device(tmp_path, mode):
         for line in result.stdout.splitlines()
         if line.startswith("RESULT=")
     )
+    assert payload["before_load"] is False, "the excluded GPU was claimed before the load"
+    assert payload["after_load"] is False, "the load claimed the excluded GPU"
     assert payload["before"] is False, "the excluded GPU was claimed before quantization"
+    assert payload["peak1"] > 0, "the permitted device did not quantize"
+    assert payload["claimed"] is False, (
+        f"excluded GPU still has a primary context after quantize ({payload})"
+    )
+    assert payload["peak0"] == 0, f"excluded GPU got allocations ({payload})"
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires at least two CUDA devices")
+def test_quantize_fused_expert_moe_never_claims_the_excluded_device(tmp_path):
+    """Defuser's conversion must not claim the GPU the caller excluded (#5105).
+
+    The quantize load builds the model on CPU and runs Defuser's fused-expert
+    conversion there. Defuser's ``clear_memory()`` synchronized the *current*
+    device when it got no device list, which initialized cuda:0 for every
+    OLMoE-family load even though the caller passed ``device=("cuda:1",)``.
+    """
+
+    query = getattr(torch._C, "_cuda_hasPrimaryContext", None)
+    if query is None:
+        pytest.skip("this torch build cannot report per-device primary contexts")
+    if torch.version.hip is not None:
+        pytest.skip("HIP reports a process-wide primary context, not a per-device one")
+
+    visible = _visible_cuda_pair()
+    if visible is None:
+        pytest.skip("requires numeric CUDA_VISIBLE_DEVICES entries")
+
+    model_dir = _tiny_olmoe_dir(tmp_path)
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = visible
+    env["PYTHONPATH"] = str(REPO_ROOT)
+    env.setdefault("OMP_NUM_THREADS", "4")
+
+    result = subprocess.run(
+        [sys.executable, "-c", _EXCLUDED_DEVICE_SCRIPT, str(model_dir), "loaddev"],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
+    assert result.returncode == 0, result.stderr[-4000:]
+
+    payload = next(
+        json.loads(line[len("RESULT=") :])
+        for line in result.stdout.splitlines()
+        if line.startswith("RESULT=")
+    )
+    assert payload["before_load"] is False, "the excluded GPU was claimed before the load"
+    assert payload["after_load"] is False, (
+        f"Defuser's conversion claimed the excluded GPU during the load ({payload})"
+    )
     assert payload["peak1"] > 0, "the permitted device did not quantize"
     assert payload["claimed"] is False, (
         f"excluded GPU still has a primary context after quantize ({payload})"
