@@ -117,6 +117,138 @@ def test_qqq_torch_cpu_int_mm_failure_is_shape_scoped(monkeypatch):
     assert output.shape == (x.shape[0], module.out_features)
 
 
+_LARGE_K_IN_FEATURES = 262144
+_LARGE_K_OUT_FEATURES = 64
+_LARGE_K_CHANNEL_SCALE = 1.0 / 65536.0
+
+
+def _build_large_k_cpu_module(*, mixed_signs: bool) -> qqq_module.QQQTorchLinear:
+    """Build a real channelwise QQQ module whose contraction crosses INT32.
+
+    ``in_features`` is 262144, twice the INT32 INT8-GEMM reduction limit, and
+    the packed words are ``0x88888888``: every signed INT4 code is -8, which
+    the Torch kernel expands to the INT8 value -128.  With an all-ones FP16
+    activation the exact integer accumulator is 262144 * 127 * (-128), far
+    outside the INT32 range, so a single-accumulator GEMM wraps silently.
+    """
+
+    in_features = _LARGE_K_IN_FEATURES
+    out_features = _LARGE_K_OUT_FEATURES
+    # Channelwise codes are signed INT4 scaled by 16: code -8 is the INT8 value
+    # -128, code 7 is +112.  Both products are exact in FP16 at this scale.
+    code_scale = 16.0 * _LARGE_K_CHANNEL_SCALE
+    linear = torch.nn.Linear(in_features, out_features, bias=False, dtype=torch.float16)
+    if mixed_signs:
+        negative = 7 * in_features // 8
+        linear.weight.data[:, :negative] = -8.0 * code_scale
+        linear.weight.data[:, negative:] = 7.0 * code_scale
+    else:
+        linear.weight.data.fill_(-8.0 * code_scale)
+    scales = torch.full((out_features, 1), code_scale, dtype=torch.float16)
+    module = qqq_module.QQQTorchLinear(
+        bits=4,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        register_buffers=False,
+    )
+    module.pack(linear, scales)
+    module.post_init()
+    return module.eval()
+
+
+def test_qqq_torch_cpu_int_mm_large_k_does_not_wrap():
+    """K=262144 with the most negative code must not wrap a 32-bit accumulator."""
+
+    if not hasattr(torch, "_int_mm"):
+        pytest.skip("torch._int_mm is unavailable")
+
+    module = _build_large_k_cpu_module(mixed_signs=False)
+    activation = torch.ones(1, module.in_features, dtype=torch.float16)
+    quant_a, _ = module.dynamic_quant(activation)
+    weight = module._int8_weight_for_forward()
+    assert torch.equal(weight, torch.full_like(weight, -128))
+    assert torch.equal(quant_a, torch.full_like(quant_a, 127))
+
+    exact = torch.matmul(quant_a.to(torch.int64), weight.to(torch.int64))
+    exact_value = exact[0, 0].item()
+    assert exact_value == -4261412864
+    assert exact_value < torch.iinfo(torch.int32).min
+
+    # The packed CPU kernel already declines this contraction; the Torch INT8
+    # path must handle it instead of handing it to a single-accumulator GEMM.
+    assert module._packed_cpu_matmul(quant_a) is None
+
+    accum = module._int8_matmul(quant_a, weight)
+    assert accum is not None
+    torch.testing.assert_close(accum, exact.to(torch.float32), rtol=0, atol=0)
+    # The pre-fix accumulator wrapped to +33554432, i.e. 2**32 away.
+    assert accum[0, 0].item() != float(2**32 + exact_value)
+    assert module._torch_int_mm_failed_shapes == set()
+
+    with torch.inference_mode():
+        output = module(activation)
+    assert output.dtype == torch.float16
+    # 262144 * 127 * (-128) / (127 * 65536) = -512, exactly representable.
+    torch.testing.assert_close(output, torch.full_like(output, -512.0), rtol=0, atol=0)
+
+
+def test_qqq_torch_cpu_int_mm_large_k_mixed_signs():
+    """A long contraction with both signs must still use the exact accumulator."""
+
+    if not hasattr(torch, "_int_mm"):
+        pytest.skip("torch._int_mm is unavailable")
+
+    module = _build_large_k_cpu_module(mixed_signs=True)
+    activation = torch.ones(1, module.in_features, dtype=torch.float16)
+    quant_a, s1 = module.dynamic_quant(activation)
+    weight = module._int8_weight_for_forward()
+    assert set(torch.unique(weight).tolist()) == {-128, 112}
+
+    exact = torch.matmul(quant_a.to(torch.int64), weight.to(torch.int64))
+    # 7/8 of the terms are -16256 and 1/8 are +14224; the sum is still outside
+    # the INT32 range, so a wrapped partial would not be cancelled by the
+    # opposing terms.
+    assert exact[0, 0].item() == -3262644224
+    assert exact[0, 0].item() < torch.iinfo(torch.int32).min
+
+    accum = module._int8_matmul(quant_a, weight)
+    assert accum is not None
+    torch.testing.assert_close(accum, exact.to(torch.float32), rtol=0, atol=0)
+
+    expected = (
+        exact.to(torch.float64)
+        * s1.to(torch.float64)
+        * module.s_channel.to(torch.float64)
+    ).to(torch.float16)
+    with torch.inference_mode():
+        output = module(activation)
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "reduction",
+    [131071, 131072],
+)
+def test_qqq_torch_cpu_int_mm_reduction_boundary(reduction):
+    """The last in-range contraction and the first one that needs chunking."""
+
+    if not hasattr(torch, "_int_mm"):
+        pytest.skip("torch._int_mm is unavailable")
+
+    module = _build_cpu_torch_module()
+    quant_a = torch.full((2, reduction), -128, dtype=torch.int8)
+    weight = torch.full((reduction, 8), -128, dtype=torch.int8)
+    exact = torch.matmul(quant_a.to(torch.int64), weight.to(torch.int64))
+
+    accum = module._int8_matmul(quant_a, weight)
+    assert accum is not None
+    torch.testing.assert_close(accum, exact.to(torch.float32), rtol=0, atol=0)
+
+
 def test_qqq_torch_cpu_cache_invalidates_on_mutation_load_and_move():
     module = _build_cpu_torch_module()
     first_weight, _, first_channel = module._packed_weight_for_cpu()

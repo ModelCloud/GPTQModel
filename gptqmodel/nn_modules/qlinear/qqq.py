@@ -25,6 +25,20 @@ from ._runtime_cache import tensor_cache_key
 log = setup_logger()
 
 
+# INT32 accumulation bound shared by every CPU INT8 GEMM path.  The most
+# negative INT8 product is (-128) * (-128) = 16384, so one INT32 accumulator may
+# sum at most floor((2**31 - 1) / 16384) = 131071 terms before it wraps.
+# ``torch._int_mm`` and the packed CPU kernel both accumulate in INT32, and
+# neither raises on overflow, so each path has to reject or split a longer
+# contraction explicitly instead of relying on an exception.
+INT8_INT32_MAX_REDUCTION = (2**31 - 1) // (128 * 128)
+
+# Long contractions are summed in INT64 over bounded INT8 GEMM chunks.  65536
+# is a power-of-two multiple of the 64-wide kernel alignment and keeps every
+# partial sum at or below 2**30.
+INT8_INT32_CHUNK_REDUCTION = 1 << 16
+
+
 @lru_cache(maxsize=1)
 def _qqq_gpu_quantizer():
     try:
@@ -1089,7 +1103,7 @@ class QQQTorchLinear(QQQLinear):
             quant_A.device.type != "cpu"
             or weight_device is None
             or weight_device.type != "cpu"
-            or self.in_features > 131071
+            or self.in_features > INT8_INT32_MAX_REDUCTION
         ):
             return None
         kernel = _qqq_cpu_kernel()
@@ -1142,7 +1156,25 @@ class QQQTorchLinear(QQQLinear):
         ):
             return None
         try:
-            return torch._int_mm(quant_A, weight).to(torch.float32)
+            reduction = int(quant_A.shape[1])
+            if reduction <= INT8_INT32_MAX_REDUCTION:
+                return torch._int_mm(quant_A, weight).to(torch.float32)
+            # A longer contraction would wrap silently inside ``_int_mm``, so
+            # the failure memo below would never see it.  Sum bounded chunks
+            # in INT64 instead; each chunk stays inside the INT32 range and the
+            # wider accumulator preserves the exact integer result.
+            accum = None
+            for start in range(0, reduction, INT8_INT32_CHUNK_REDUCTION):
+                end = min(start + INT8_INT32_CHUNK_REDUCTION, reduction)
+                partial = torch._int_mm(
+                    quant_A[:, start:end].contiguous(),
+                    weight[start:end].contiguous(),
+                )
+                if accum is None:
+                    accum = partial.to(torch.int64)
+                else:
+                    accum = accum + partial.to(torch.int64)
+            return accum.to(torch.float32)
         except (RuntimeError, NotImplementedError):
             # A build may not expose an integer GEMM kernel for this exact
             # shape. Remember only that shape so a later batch size/device can
