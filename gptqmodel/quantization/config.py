@@ -6945,7 +6945,10 @@ class ParoConfig(PreProcessorConfig):
     opt_finetune_epochs: int = field(default=10)
     opt_train_samples: int = field(default=2048)
     opt_validation_samples: int = field(default=64)
-    opt_batch_size: int = field(default=64)
+    # Replay the sampled calibration rows in larger optimizer steps: the stage
+    # loop is launch-bound, so the step count (not the row count) drives wall
+    # time. Every row is still visited once per epoch, see `_chunk_rows`.
+    opt_batch_size: int = field(default=128)
     opt_rotation_lr: float = field(default=0.05)
     opt_weight_lr: float = field(default=1e-5)
     opt_quantizer_lr: float = field(default=1e-6)

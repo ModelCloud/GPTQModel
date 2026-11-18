@@ -577,3 +577,38 @@ from 14 breaks / 4 graphs / 0.47x eager to 0 breaks / 1 graph / 1.34x eager.
 | `test_nonidentity_layer_reaches_declared_cudagraph_level` | `compile_probe` reaches the declared `CUDAGRAPH` level and captures a CUDA graph |
 | `test_fused_rotate_ops_have_fake_tensor_implementations` | `rotate`, `rotate_pair_grad` run under `FakeTensorMode` and report the CUDA metadata |
 | `test_optimize_compiles_a_tiny_paro_model_without_breaks` | Model-level `optimize()` installs a forward with zero graph breaks |
+
+## Calibration step batching
+
+Paro's optimizer replays the sampled calibration rows for
+`opt_rotation_epochs` + `opt_finetune_epochs` epochs, one optimizer step per
+`opt_batch_size` rows. #5175 made every module replay the full row budget
+(`opt_train_samples + opt_validation_samples`, 2112 rows with the defaults),
+which restored the accuracy the pre-#5175 first-batch fallback had lost but
+also multiplied the step count by `ceil(2112 / opt_batch_size)`.
+
+That step loop is launch-bound, not math-bound: each step issues ~40 host
+launches (rotation forward/backward, the fused quantize/dequantize STE, the
+loss and `AdamW`) over a weight-sized tensor, while the per-step GPU work is a
+few hundred microseconds. Wall time therefore tracks the number of steps
+almost exactly, and the number of steps is `ceil(train_rows / opt_batch_size)`
+per epoch.
+
+The default `opt_batch_size` is 128, so the 2048-row training budget is
+replayed in 16 steps per epoch instead of 32. Every row is still visited
+exactly once per epoch: `_chunk_rows` slices the sampled rows contiguously and
+concatenating its chunks reproduces the input order. A larger step batch
+trades no calibration data for the lower launch count; it only changes how
+many rows share one optimizer step.
+
+| Step batch | Steps/epoch | Qwen2.5-0.5B quantize | wikitext-2 PPL |
+| --- | --- | --- | --- |
+| 64 | 32 | 148.9 s | 20.08 |
+| 128 (default) | 16 | 100.5 s | 19.94 |
+| 160 | 13 | 87.7 s | 19.97 |
+| 256 | 8 | 61.8 s | 20.19 |
+
+| Test | Invariant |
+| --- | --- |
+| `test_paro_chunk_rows_covers_every_row_exactly_once` | Concatenating the step chunks reproduces the full sampled row set in order, for divisible, ragged and oversized step batches |
+| `test_paro_stage_runs_one_step_per_chunk_and_covers_each_epoch` | A stage runs exactly `ceil(rows / batch_size)` steps per epoch and each epoch replays every training row once |
