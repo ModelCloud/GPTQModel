@@ -92,7 +92,7 @@ def test_minicpmv_4_6_linear_attn_tags_preserve_layer_output():
 
 
 @pytest.mark.parametrize("model_type", ["minicpmv", "minicpmo"])
-def test_minicpm_plain_awq_keeps_attention_and_mlp_stages(model_type):
+def test_minicpm_attention_and_mlp_folds_preserve_layer_output(model_type):
     from tests.test_minicpm_o_local_port import tiny_config as minicpmo_config
     from tests.test_minicpmv_local_port import tiny_config as minicpmv_config
 
@@ -101,18 +101,19 @@ def test_minicpm_plain_awq_keeps_attention_and_mlp_stages(model_type):
     torch.manual_seed(7)
     definition = MODEL_MAP[model_type]
     model = definition.loader.from_config(config).eval()
-    wrapper = _wrapper(definition, model, definition.module_tree)
-
     ids = torch.randint(2, 60, (1, 8))
 
     def forward():
         return model.llm(input_ids=ids, use_cache=False).logits
 
+    checked = []
     for layer in model.llm.model.layers:
-        _, features = _capture(layer, forward)
-        features = _quantized_features(layer, features, definition.module_tree)
-        assert "self_attn.q_proj" in features
-        assert wrapper.awq_get_modules_for_scaling(layer, features, {}) == []
+        checked.extend(_assert_neutral(definition, model, layer, forward))
+
+    flat = {(source, tuple(targets)) for source, targets, _consumers in checked}
+    assert ("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")) in flat
+    assert ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj")) in flat
+    assert ("mlp.up_proj", ("mlp.down_proj",)) in flat
 
     blocks = [
         [entry.split(":", 1)[0] for entry in block]
