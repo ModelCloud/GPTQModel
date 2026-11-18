@@ -123,6 +123,12 @@ to the bound preparer itself, so the minimum length no longer travels through a
 * Norm tuning (`requantize(norm=...)`) and post-quantization EoRA generation
   reject `exclude_attention_sinks` and `adapter_dataset`, which they cannot
   apply.
+* A combined `requantize(embed_quant_mode=..., norm=...)` validates the whole
+  norm half first: the calibration flags, a non-empty
+  `norm_module_names(norm.types, norm.skip)` selection, the tokenizer type and
+  the teacher path/id. Those checks run before the embeddings are re-packed, so
+  a rejected request leaves the model unchanged and a corrected retry works on
+  the same object instead of failing on the already-quantized endpoint.
 
 Tests: `tests/test_calibration_config.py` (validation, the signatures,
 `TypeError` for every removed keyword and for a bare dataset, a tiny-Llama
