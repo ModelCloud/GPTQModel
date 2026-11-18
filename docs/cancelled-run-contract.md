@@ -17,8 +17,8 @@ stateDiagram-v2
     Running --> Completed: last layer finalized
     Running --> Stopped: StopMainLoop, exception, or Ctrl-C
     Completed --> Runnable: restore offloaded modules, repair version counters
-    Stopped --> Repaired: fence work, restore layer, clear hooks, repair counters
-    Repaired --> Runnable: same forward contract as Completed
+    Stopped --> Repaired: fence work, publish deferred weights, restore layer
+    Repaired --> Runnable: clear hooks, repair counters; same contract as Completed
     Runnable --> [*]
 ```
 
@@ -38,8 +38,9 @@ flowchart TD
     B -->|"other unwind"| E["RunExitRecovery.abort (both loopers)"]
     C -->|"other unwind"| E
     D --> F["ensure_version_counters(model) (success path)"]
-    E --> G["_fence_run_work, _restore_inflight_layer"]
-    G --> H["_clear_layer_capture_hooks(layer)"]
+    E --> G["_fence_run_work, _finalize_deferred_runtime_weights"]
+    G --> G2["_restore_inflight_layer"]
+    G2 --> H["_clear_layer_capture_hooks(layer)"]
     H --> I["ensure_version_counters(model)"]
     F --> J["model is Runnable"]
     I --> J
@@ -60,6 +61,36 @@ Pre-fix locations are from revision `bfbb7a2b4`; the symbols are unchanged.
 | A `receive_layer_*` call or a `KeyboardInterrupt` in the same window | Same leak. | Same guard. |
 | Zero-route-recovery callbacks (`zero_route_recovery_start` / `_end`) or any other unwind the stage guard cannot reach | `ModuleLooper.loop()`'s failure branch restored devices, materialized layers and rehomed kernels but never cleared `forward_hook` (#5009). | `gptqmodel/looper/module_looper.py::ModuleLooper._restore_inflight_layer` calls `_clear_layer_capture_hooks` on the in-flight layer before rehoming it. |
 | Any cancelled or failed run (`ModuleLooper`, `weight_only_looper`) | `ensure_version_counters` ran only on the success path (`module_looper.py:2154`, `weight_only_looper.py:1033` at `bfbb7a2b4`), so norms, biases and buffers materialized under `inference_mode()` stayed inference tensors. A plain grad-mode forward raised `RuntimeError: Inference tensors cannot be saved for backward` (#5012). | Both failure branches call `gptqmodel/utils/offload.py::ensure_version_counters` after materialization. The repair is best-effort and never replaces the exception that failed the run. |
+| EXL3 `quant_complete` stop, exception or Ctrl-C with `offload_to_disk=False` (#5083) | `EXL3Processor._stage_runtime_weight` replaced each just-packed projection's dense weight with a META placeholder and rebuilt it only for the next replay. `RunExitRecovery.abort` did not know about that state, so the in-flight layer kept 1-3 META parameters and the next forward raised `RuntimeError: Tensor on device cpu is not on the expected device meta!`. `offload_to_disk=True` escaped because its layer shells are restored from the checkpoint. | `ModuleLooper._finalize_deferred_runtime_weights` runs `EXL3Processor.finalize_deferred_runtime_weights` before `_restore_inflight_layer`. It installs the packed `ExllamaV3Linear` for every registered deferred projection, exactly as `submodule_finalize` does on the success path, so no dense copy is retained. The processor registers a projection in `_stage_runtime_weight` and deregisters it when the replay weight or the packed module is published. |
+
+## Deferred runtime weights (#5083)
+
+EXL3 defers the dense replay weight of every packed projection until the layer's
+next forward. That is a run-scoped obligation, like the in-flight-layer device,
+so it is published by the exit sequence above and not by a special case in the
+layer stage.
+
+```mermaid
+flowchart TD
+    A["EXL3Processor.process: pack projection"] --> B["_stage_runtime_weight: META placeholder + register"]
+    B --> C{"run reaches the next replay?"}
+    C -- "yes" --> D["prepare_runtime_weight_for_forward: dense replay weight + deregister"]
+    D --> E["layer forward runs"]
+    C -- "no: stop / exception / Ctrl-C" --> F["RunExitRecovery.abort"]
+    F --> G["_finalize_deferred_runtime_weights"]
+    G --> H{"deferred marker still set?"}
+    H -- "yes" --> I["submodule_finalize: packed ExllamaV3Linear + deregister"]
+    H -- "no" --> J["terminal sentinel owns publication; skip"]
+    I --> K["_restore_inflight_layer moves the packed layer home"]
+    J --> K
+    K --> L["_materialize_unreached_meta_modules: no unresolved META"]
+    style F fill:#ffe9b3,stroke:#b38600
+    style I fill:#d7f0d7,stroke:#2f7d32
+```
+
+The terminal layer is out of scope for this hook: `prepare_layer_post_quantize`
+retires its placeholders to zero-sized sentinels and the pending
+`submodule_finalize` owns them, so recovery must not publish them a second time.
 
 ## What is not covered
 
@@ -77,6 +108,10 @@ Pre-fix locations are from revision `bfbb7a2b4`; the symbols are unchanged.
 fixture for both loopers: a next-layer fault and a final-restore fault with
 disk offload on and off, the calibrated post-forward stop, a secondary repair
 failure that must not replace the primary error, and a successful-run control.
+
+`tests/test_exl3_cancelled_run_5083.py` — the EXL3 deferred-weight matrix: a
+`quant_complete` stop in the in-flight layer and in the last layer, raised and
+returned stops, disk offload on and off, and the completed-run control.
 
 `tests/test_failed_run_model_state_5009.py`:
 
