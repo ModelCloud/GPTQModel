@@ -111,6 +111,97 @@ regression report and rationale.
 | `device=("cuda:1", "cuda")` | Both used all four | `ValueError` for the ambiguous mix |
 | `device=("cuda:1", "cuda:1")` | Quantization used `cuda:1`; loader map used all four | Both use only `cuda:1` |
 
+## Fused-expert conversion device scope
+
+Fused-expert MoE checkpoints (OLMoE, PhiMoE, Granite MoE, ...) are rebuilt by
+Defuser before any weight reaches the target GPU. Defuser's
+`prepare_model_for_moe_quantization()` calls `clear_memory()` without a device
+list, and that helper synchronizes the *current* CUDA device. A conversion that
+ran on CPU/meta therefore created the primary context of `cuda:0` — hundreds of
+MiB on a GPU the caller never requested — even for
+`GPTQModel.load(..., device="cuda:1")`, `device=("cuda:1",)` quantization, or a
+CPU-only load (#5105).
+
+GPT-QModel pins Defuser and cannot pass a device to `clear_memory()`, so
+`gptqmodel/utils/torch.py:679` (`defuser_conversion_scope`) scopes Defuser's
+module-level reference for the duration of the conversion.
+`model_accelerator_devices()` (`gptqmodel/utils/torch.py:653`) reads the
+ordinals that actually hold parameters or buffers: a model that already lives on
+an accelerator synchronizes exactly those ordinals, while a CPU/meta model
+passes a CPU-only list so no accelerator is claimed. Placement is never
+changed; only the devices the cache flush may touch.
+
+Old flow (`e2f9676c6`):
+
+```mermaid
+flowchart TD
+    A["_convert_model_with_defuser<br/>loader.py:1094"] --> B["defuser.convert_model<br/>loader.py:1096"]
+    B --> C["prepare_model_for_moe_quantization<br/>moe_experts_interface.py:790"]
+    C --> D["clear_memory() with no device_list<br/>defuser/utils/device.py:61"]
+    D --> E{"torch.cuda.is_available?"}
+    E -- Yes --> F["torch.cuda.synchronize()<br/>current device is cuda:0"]
+    F --> G["primary context created on cuda:0<br/>excluded GPU claimed"]
+    E -- No --> H["no accelerator touched"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class G failure;
+```
+
+New flow:
+
+```mermaid
+flowchart TD
+    A["_convert_model_with_defuser<br/>loader.py:1101"] --> S["defuser_conversion_scope(model)<br/>utils/torch.py:679"]
+    S --> D0["model_accelerator_devices(model)<br/>utils/torch.py:653"]
+    D0 --> D1{"Accelerator tensors present?"}
+    D1 -- Yes --> D2["device_list = exact ordinals"]
+    D1 -- No --> D3["device_list = CPU-only"]
+    D2 --> P["scope defuser<br/>moe_experts_interface.clear_memory"]
+    D3 --> P
+    P --> B["defuser.convert_model"]
+    B --> C["prepare_model_for_moe_quantization<br/>moe_experts_interface.py:790"]
+    C --> D["clear_memory(device_list=...)"]
+    D --> E{"CUDA entries in device_list?"}
+    E -- Yes --> F["torch.cuda.synchronize(ordinal)<br/>only devices holding tensors"]
+    E -- No --> G["skip synchronize<br/>torch.cuda.empty_cache() only"]
+    F --> R["restore original clear_memory"]
+    G --> R
+    R --> I["caller's device map still places every weight"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    classDef ok fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    class I,R ok;
+```
+
+The scope wraps every Defuser entry point: the native load and quantize load at
+`gptqmodel/models/loader.py:1101`, the Transformers bridge at
+`gptqmodel/utils/hf_load.py:340`, and the DeepSeek V4 MTP conversion at
+`gptqmodel/models/definitions/deepseek_v4.py:353`.
+
+Failure contract:
+
+- A CPU/meta model passes a CPU-only device list. Defuser still calls
+  `torch.cuda.empty_cache()`, which does not create a primary context, so no
+  accelerator is claimed.
+- A model that already holds accelerator tensors synchronizes exactly those
+  ordinals; the barrier its data needs is preserved.
+- If the pinned Defuser layout does not expose
+  `defuser.modeling.moe_experts_interface.clear_memory`, the scope yields
+  unchanged (fail-open to the historical single-device synchronize) instead of
+  failing the load.
+- Defuser's XPU flush synchronizes unconditionally and takes no device list;
+  that path is outside this scope and remains unverified for exclusion.
+- The scope never moves tensors or changes the caller's device map.
+
+Measured on an RTX 5090 visible as `cuda:1` (torch 2.15.0+cu132, transformers
+5.22.1, Defuser 0.0.28): before the change the OLMoE inference load and the
+`device=("cuda:1",)` quantize load both reported `ctx0=True`; after it both
+report `ctx0=False` with finite logits on `cuda:1`, while the dense and
+per-expert Qwen1.5-MoE controls stay `False` throughout. The regressions are
+pinned by `tests/test_load_device_context_4863.py` and
+`tests/test_excluded_device_warmup.py`.
+
+See [PR #5105 fix](https://github.com/ModelCloud/GPTQModel/pull/) (draft) for the
+diff.
+
 ## Forward device selection
 
 `ForwardExecutor.run` expands the base device to its family through

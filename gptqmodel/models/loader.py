@@ -120,7 +120,7 @@ from ..utils.model import (
     simple_dispatch_model,
     validate_checkpoint_qweights,
 )
-from ..utils.torch import xla_device_count
+from ..utils.torch import defuser_conversion_scope, xla_device_count
 from ._const import DEVICE, EXPERT_INDEX_PLACEHOLDER, HAS_NPU, normalize_device
 
 
@@ -1093,36 +1093,42 @@ def _check_defuser_version() -> None:
 
 def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     _check_defuser_version()
-    converted = defuser.convert_model(model, cleanup_original=cleanup_original)
+    # Defuser's conversion flushes the accelerator cache through
+    # `clear_memory()`, which synchronizes the *current* device when no device
+    # list is supplied. Scope that call to the devices this model actually
+    # occupies so a CPU/meta conversion does not claim cuda:0 on the way to
+    # cuda:1 (#5105).
+    with defuser_conversion_scope(model):
+        converted = defuser.convert_model(model, cleanup_original=cleanup_original)
 
-    # Defuser gates `convert_model()` on its own model registry. Model types
-    # that GPT-QModel supports through the generic Transformers experts
-    # interface (native Kimi-Linear / MiMo-V2-Flash) have no registry entry,
-    # so run Defuser's generic replacement pass explicitly instead of leaving
-    # the fused 3-D expert parameters unquantized.
-    if not converted and getattr(cls, "defuser_generic_experts", False):
-        from defuser.modeling.update_module import update_module
+        # Defuser gates `convert_model()` on its own model registry. Model types
+        # that GPT-QModel supports through the generic Transformers experts
+        # interface (native Kimi-Linear / MiMo-V2-Flash) have no registry entry,
+        # so run Defuser's generic replacement pass explicitly instead of leaving
+        # the fused 3-D expert parameters unquantized.
+        if not converted and getattr(cls, "defuser_generic_experts", False):
+            from defuser.modeling.update_module import update_module
 
-        update_module(model, cleanup_original=cleanup_original)
-        converted = True
+            update_module(model, cleanup_original=cleanup_original)
+            converted = True
 
-    defuser_module_paths = getattr(cls, "defuser_module_paths", ())
-    if defuser_module_paths:
-        for module_path in defuser_module_paths:
-            module, _ = get_module_by_name_prefix(model, module_path)
-            if module is None:
-                log.warn("Loader: defuser module path `%s` was not found.", module_path)
-                continue
-            converted = defuser.convert_model(module, cleanup_original=cleanup_original) or converted
+        defuser_module_paths = getattr(cls, "defuser_module_paths", ())
+        if defuser_module_paths:
+            for module_path in defuser_module_paths:
+                module, _ = get_module_by_name_prefix(model, module_path)
+                if module is None:
+                    log.warn("Loader: defuser module path `%s` was not found.", module_path)
+                    continue
+                converted = defuser.convert_model(module, cleanup_original=cleanup_original) or converted
 
-    after_conversion = getattr(cls, "after_defuser_conversion", None)
-    # Model-specific finalizers may also normalize metadata that Defuser does
-    # not own. Run them after the conversion attempt even when the installed
-    # Defuser has no matching registration and reports no structural change.
-    if callable(after_conversion):
-        after_conversion(model)
+        after_conversion = getattr(cls, "after_defuser_conversion", None)
+        # Model-specific finalizers may also normalize metadata that Defuser does
+        # not own. Run them after the conversion attempt even when the installed
+        # Defuser has no matching registration and reports no structural change.
+        if callable(after_conversion):
+            after_conversion(model)
 
-    return converted
+        return converted
 
 
 # Fused expert projections that Defuser splits from one 3-D tensor into a
