@@ -9,8 +9,9 @@ Adapted from QwenLM/Qwen-Drive-1.0 at
 
 from copy import deepcopy
 
-from transformers import PreTrainedConfig, Qwen3_5Config
-from transformers.configuration_utils import SubConfigSpec
+from transformers.configuration_utils import PreTrainedConfig, SubConfigSpec
+
+from ..native.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
 
 
 class QwenDriveConfig(PreTrainedConfig):
