@@ -2,6 +2,9 @@
 
 Describe the bug, fix, or feature clearly and briefly.
 
+<!-- Add a visible "Fixes #<issue-number>" line for each issue this PR resolves.
+Use "Fixes OWNER/REPO#<issue-number>" for issues in other repositories. -->
+
 ## What Changed
 
 - List the main code changes.
@@ -83,7 +86,9 @@ Diagram summary (or "not applicable" with one sentence of justification):
 
 ## Review Requirements
 
-AI-assisted code is welcome. The PR must still be reviewed before it is opened as ready for review.
+AI-assisted code is welcome. Open the PR as a draft. Mark it ready only after
+review and after GitHub confirms the pushed head has no conflicts with the
+current remote base.
 
 I or an AI agent (such as Codex or Claude) have:
 

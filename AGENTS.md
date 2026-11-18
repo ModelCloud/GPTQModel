@@ -32,6 +32,11 @@ method, a kernel, a device, a dtype, and a thread.
 
 ## When: the life of a change
 
+**Start in an isolated workspace.** Each agent and sub-agent must make a
+separate clone directly from the remote and branch from current `origin/main`.
+Do not inherit or share a parent's checkout unless explicitly instructed to do
+so. Follow [the workspace and PR skill](.agents/skills/gptqmodel-agent-workflow/SKILL.md).
+
 1. **Screen and claim.** Before you reproduce, edit, or spend GPU time on a
    GitHub issue, scan, screen, and claim it with `$gptqmodel-issue-claims`.
    Claim only issues opened by @Qubitium or @ZX-ModelCloud that pass the
@@ -52,8 +57,12 @@ method, a kernel, a device, a dtype, and a thread.
 7. **Document flow changes** with `$gptqmodel-logic-flow-diagrams` when
    control flow, selection order, or tensor lifecycle changes.
 8. **Publish.** Fill in `.github/PULL_REQUEST_TEMPLATE.md` with exact commands,
-   red/green evidence, and skips. Run the claim helper's `verify` before
-   pushing and `release --pr <url>` after opening the pull request.
+   red/green evidence, and skips. Open every new PR as a draft. For each issue
+   it fixes, put `Fixes #<issue-number>` in the PR body. Mark the PR ready for
+   review only after reviewing it and confirming the pushed head merges without
+   conflicts into the current remote base (`origin/main` by default). For
+   claimed issues, run `verify` before pushing or opening the PR and
+   `release --pr <url>` after opening it.
 
 ## Why: invariants that override convenience
 
@@ -115,6 +124,7 @@ procedure; the rule holds even when no skill is loaded.
 
 | Task | Skill |
 | --- | --- |
+| Starting or delegating any task; opening a PR or marking it ready | `gptqmodel-agent-workflow` |
 | Choosing work; screening, claiming, or releasing a GitHub issue | `gptqmodel-issue-claims` |
 | Any bug fix or behaviour-changing refactor | `gptqmodel-regression-test-design` |
 | Quantization math, packers, inference kernels, dispatch, weight caches, fusion backends, MLX kernels | `gptqmodel-torch-oracle-numerics` |
