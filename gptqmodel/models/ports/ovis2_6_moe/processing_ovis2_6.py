@@ -6,8 +6,9 @@
 from types import SimpleNamespace
 
 import torch
-from transformers import ProcessorMixin, SiglipImageProcessor
+from transformers import ProcessorMixin
 
+from ..native.siglip.image_processing_siglip import SiglipImageProcessor
 from .vision import (
     IMAGE_PLACEHOLDER,
     IMAGE_PLACEHOLDER_ID,

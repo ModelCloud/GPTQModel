@@ -11,15 +11,15 @@ import PIL.Image
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
-from transformers import SiglipImageProcessor
 from transformers import initialization as init
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithNoAttention
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import apply_rotary_pos_emb_vision
-from transformers.models.siglip2.modeling_siglip2 import Siglip2MLP, eager_attention_forward
 from transformers.utils import can_return_tuple
 
+from ..native.qwen2_5_vl.modeling_qwen2_5_vl import apply_rotary_pos_emb_vision
+from ..native.siglip.image_processing_siglip import SiglipImageProcessor
+from ..native.siglip2.modeling_siglip2 import Siglip2MLP, eager_attention_forward
 from .configuration_ovis2_6 import Siglip2NavitConfig
 
 
