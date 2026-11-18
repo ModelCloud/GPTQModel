@@ -41,6 +41,7 @@ requires_nvidia_capability = pytest.mark.skipif(
 
 
 def _gpu_capabilities(monkeypatch, capabilities):
+    monkeypatch.setattr(torch.accelerator, "current_accelerator", lambda: torch.device("cuda"))
     monkeypatch.setattr("torch.cuda.is_available", lambda: True)
     monkeypatch.setattr(
         "gptqmodel.utils.importer.torch.cuda.get_device_capability",
@@ -64,7 +65,7 @@ def test_keyword_map_is_not_rejected_before_max_memory(monkeypatch, keyword):
 
     _gpu_capabilities(monkeypatch, [(8, 9), (12, 0)])
 
-    assert hf_normalize_device_device_map(None, keyword) is not None
+    assert hf_normalize_device_device_map(None, keyword) == DEVICE.CUDA
 
 
 @requires_nvidia_capability

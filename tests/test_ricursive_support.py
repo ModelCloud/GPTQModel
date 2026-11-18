@@ -301,5 +301,3 @@ def test_config_owned_chunked_mlp_is_bit_identical():
     assert len(rows) > 1 and sum(rows) == 600 and max(rows) <= 64
     assert torch.equal(mlp(x.reshape(-1, 128)), reference.reshape(-1, 128))
     assert torch.equal(mlp(x[:, :10]), reference[:, :10])
-
-

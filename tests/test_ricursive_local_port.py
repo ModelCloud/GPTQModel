@@ -433,5 +433,3 @@ def test_public_plain_awq_every_linear_dense_owner_and_two_reloads(tmp_path, off
         with torch.inference_mode():
             torch.testing.assert_close(wrapper.model(**calibration[0], use_cache=False).logits, expected, atol=0, rtol=0)
             assert torch.equal(wrapper.generate(input_ids=calibration[0]["input_ids"], max_new_tokens=3, do_sample=False), generated)
-
-

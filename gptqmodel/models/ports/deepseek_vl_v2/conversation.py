@@ -222,4 +222,3 @@ register_conv_template(
         stop_str=["</s>"],
     )
 )
-

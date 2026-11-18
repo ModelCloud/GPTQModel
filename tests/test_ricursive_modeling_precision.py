@@ -31,5 +31,3 @@ def test_attention_weights_preserve_logits_and_dtype(runtime_device, dtype, quer
     assert all(weights.dtype == dtype for weights in output.attentions)
     torch.testing.assert_close(output.logits, expected, atol=2e-3, rtol=2e-3)
     assert torch.equal(output.logits.argmax(-1), expected.argmax(-1))
-
-
