@@ -366,3 +366,58 @@ def test_awq_token_row_quotas_skip_empty_batches():
     assert quotas == [0, 2, 2]
     assert local[1].tolist() == [0, 6]
     assert local[2].tolist() == [0, 2]
+
+
+def test_awq_token_rows_streaming_reservoir_keeps_every_quarter_proportional():
+    """A routed expert's bounded sample must not drift toward the tail.
+
+    Once the buffer fills, resampling the kept rows evenly together with each
+    new batch (the pre-#5204 behaviour) makes the kept rows weigh the same as
+    the fresh batch, so earlier batches decay geometrically and the sample ends
+    up dominated by the last few documents. A uniform priority reservoir keeps a
+    share proportional to each batch's length, so every quarter of the
+    calibration stream contributes about a quarter of the rows.
+    """
+
+    hidden = 8
+    cache = SimpleNamespace()
+    cache.layer_inputs = None  # cache-less: routed expert with varying rows
+    cache.attention_masks = []
+    cache.position_ids = []
+    cache.layer_input_kwargs = []
+
+    processor = _create_awq_processor(cache, policy_mode="token_rows", max_tokens=906)
+    module_name = "mlp.experts.1.gate_proj"
+
+    batch_count = 128
+    lengths = [40 + (b % 7) * 6 for b in range(batch_count)]
+    for b, length in enumerate(lengths):
+        processor._set_current_batch_index(b)
+        processor._record_input_feature(module_name, torch.randn(1, length, hidden))
+
+    entry = processor.tasks[module_name]
+    provenance = entry["provenance"]
+    counts = entry["batch_row_counts"]
+
+    # The capture stays bounded by the sampling budget.
+    assert len(provenance) == 906
+    assert sum(int(t.shape[-2]) for t in entry["inputs"]) == 906
+
+    # Every quarter of the calibration stream keeps about a quarter of the rows.
+    kept = [0, 0, 0, 0]
+    raw = [0, 0, 0, 0]
+    for slot, count in enumerate(counts):
+        raw[min(3, 4 * slot // len(counts))] += count
+    for slot, _row in provenance:
+        kept[min(3, 4 * slot // len(counts))] += 1
+
+    for quarter in range(4):
+        share = kept[quarter] / len(provenance)
+        assert 0.15 <= share <= 0.35, (
+            f"quarter {quarter} kept {share:.1%} of the rows "
+            f"(raw share {raw[quarter] / sum(counts):.1%}); kept={kept}"
+        )
+
+    # No part of the stream is dropped entirely.
+    contributing = {slot for slot, _row in provenance}
+    assert len(contributing) == batch_count
