@@ -1,0 +1,37 @@
+name: Set up CI runtime
+description: Install the pinned uv and create a managed Python environment for this job.
+
+inputs:
+  python-version:
+    description: Exact managed CPython version, including t for a free-threaded build.
+    required: true
+  source-build:
+    description: Install the Rust toolchain used by source dependencies.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Create the pinned CI environment
+      shell: bash
+      env:
+        CI_PYTHON_VERSION: ${{ inputs.python-version }}
+      run: |
+        bin="$RUNNER_TEMP/gptqmodel-ci-bin"
+        venv="$RUNNER_TEMP/gptqmodel-ci-venv"
+        bash .github/scripts/ci_install_uv.sh "$bin"
+        "$bin/uv" venv --managed-python --python "$CI_PYTHON_VERSION" "$venv"
+        "$venv/bin/python" .github/scripts/ci_assert_free_threaded.py --python-only
+        printf '%s\n' "$bin" "$venv/bin" >> "$GITHUB_PATH"
+        printf 'VIRTUAL_ENV=%s\n' "$venv" >> "$GITHUB_ENV"
+
+    - name: Install the pinned Rust toolchain
+      if: ${{ inputs.source-build == 'true' }}
+      shell: bash
+      run: |
+        export CARGO_HOME="$RUNNER_TEMP/gptqmodel-cargo"
+        export RUSTUP_HOME="$RUNNER_TEMP/gptqmodel-rustup"
+        bash .github/scripts/ci_install_rust.sh
+        printf '%s\n' "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+        printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' "$CARGO_HOME" "$RUSTUP_HOME" >> "$GITHUB_ENV"

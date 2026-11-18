@@ -10,8 +10,9 @@ Hessian/workspace churn then maps new pages instead of reusing the cache:
 1.23 GiB allocated, 5.40 GiB reserved with the old default, 1.67 GiB with
 expandable segments alone).
 
-The ROCm default is intentionally unchanged here: #4313's tests pin
-``max_split_size_mb:256,garbage_collection_threshold:0.7``.
+The ROCm default carried the same split cap until #5072 measured the same
+reservation growth there and dropped it; ROCm keeps only the
+``expandable_segments:False`` VMM exclusion (#4072).
 """
 
 from __future__ import annotations
@@ -43,13 +44,15 @@ def test_cuda_default_keeps_expandable_segments_without_split_cap():
     assert "garbage_collection_threshold" not in conf
 
 
-def test_rocm_default_still_matches_the_4313_contract():
+def test_rocm_default_drops_the_split_cap_too():
+    """ROCm gets the same fix as CUDA: no cap, no inert GC threshold (#5072)."""
+
     conf = _alloc_conf.default_alloc_conf("rocm")
 
     assert conf == _alloc_conf.ROCM_DEFAULT_ALLOC_CONF
-    assert "expandable_segments" not in conf
-    assert "max_split_size_mb:256" in conf
-    assert "garbage_collection_threshold:0.7" in conf
+    assert "expandable_segments:True" not in conf
+    assert "max_split_size_mb" not in conf
+    assert "garbage_collection_threshold" not in conf
 
 
 def test_cuda_install_drops_split_cap_and_keeps_expandable_segments(clean_alloc_env, monkeypatch):

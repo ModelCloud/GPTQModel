@@ -9,16 +9,23 @@ call and both defer to a value the caller already set:
 
 | Variable | ROCm default | Why |
 |---|---|---|
-| `PYTORCH_ALLOC_CONF` / `PYTORCH_CUDA_ALLOC_CONF` | `max_split_size_mb:256,garbage_collection_threshold:0.7` | `expandable_segments:True` plus `torch.cuda.empty_cache()` corrupts ordinary Torch results on ROCm 10.1 / gfx1201 |
+| `PYTORCH_ALLOC_CONF` / `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:False` | `expandable_segments:True` plus `torch.cuda.empty_cache()` corrupts ordinary Torch results on ROCm 10.1 / gfx1201 |
 | `ROCBLAS_USE_HIPBLASLT` | `0` | rocBLAS forwards GEMMs to hipBLASLt, which selects a different kernel per process for the same shape; identical quantization runs then save different checkpoints |
 
 CUDA installs `expandable_segments:True` only, and never has
 `ROCBLAS_USE_HIPBLASLT` set by GPT-QModel. `max_split_size_mb` is deliberately
-left unset on CUDA: pinning it to 256 MiB stops the allocator from splitting and
-reusing 256 MiB blocks, so GPTQ's per-layer churn grows reserved VRAM while
-active memory stays flat (#4389). `garbage_collection_threshold` is omitted too:
+left unset on both backends: pinning it to 256 MiB stops the allocator from
+splitting and reusing 256 MiB blocks, so a layer's churn grows reserved VRAM
+while active memory stays flat (#4389 on CUDA, #5072 on ROCm, where one
+14336x4096 MACaQ layer peaked at 5258 MiB reserved for 4224 MiB allocated and
+4466 MiB after the cap was dropped, with identical tensors).
+`garbage_collection_threshold` is omitted too:
 without a memory fraction it only fires above a fraction of the whole device,
 which a quantization run never reaches.
+
+The ROCm default now pins exactly one thing, `expandable_segments:False`.
+Everything else is Torch's own default, so a future Torch allocator change
+reaches ROCm users unless it also needs this exclusion.
 
 ## The import-time flow
 
@@ -32,7 +39,7 @@ flowchart TD
     E -- "yes" --> G["preserve the caller value"]
     E -- "no" --> H["install DEFAULT_ALLOC_CONF with expandable_segments"]
     F -- "yes" --> G
-    F -- "no" --> I["install ROCM_DEFAULT_ALLOC_CONF without expandable_segments"]
+    F -- "no" --> I["install ROCM_DEFAULT_ALLOC_CONF = expandable_segments:False"]
     H --> J["_rocm_env.apply_default_rocm_blas_env"]
     I --> J
     G --> J
