@@ -16,7 +16,6 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
-from gptqmodel.models.ports import exaone4
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.model import get_layers_with_prefixes
 from tests.test_exaone4_local_port import tiny_model
@@ -25,7 +24,7 @@ from tests.test_exaone4_local_port import tiny_model
 LINEARS = {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
            "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"}
 NORMS = {"self_attn.q_norm", "self_attn.k_norm", "post_attention_layernorm", "post_feedforward_layernorm"}
-CHECKPOINTS = json.loads(Path(exaone4.__file__).with_name("checkpoint_contract.json").read_text())["models"]
+CHECKPOINTS = json.loads((Path(__file__).resolve().parents[1] / "fixtures/ports/exaone4/checkpoint_contract.json").read_text())["models"]
 
 
 @pytest.mark.parametrize(
