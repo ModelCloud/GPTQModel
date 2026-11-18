@@ -13,6 +13,7 @@ import math
 from torch import nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaForCausalLM, LlamaModel
+from transformers.utils import can_return_tuple
 
 
 class MiniCPMDecoderLayer(LlamaDecoderLayer):
@@ -44,6 +45,7 @@ class MiniCPMForCausalLM(LlamaForCausalLM):
         self.model = MiniCPMModel(config)
         self.post_init()
 
+    @can_return_tuple
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
                 inputs_embeds=None, labels=None, use_cache=None, logits_to_keep=0, **kwargs):
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
