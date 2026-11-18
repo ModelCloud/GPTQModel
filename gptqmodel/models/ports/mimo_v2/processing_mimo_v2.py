@@ -7,8 +7,9 @@ fixed here, never delegated to checkpoint processor/tokenizer Python. MiMo's
 decoder consumes ordinary positions and different video argument names.
 """
 
-from transformers import Qwen2_5_VLProcessor, Qwen2VLImageProcessor, Qwen2VLVideoProcessor
-
+from ..native.qwen2_5_vl.processing_qwen2_5_vl import Qwen2_5_VLProcessor
+from ..native.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
+from ..native.qwen2_vl.video_processing_qwen2_vl import Qwen2VLVideoProcessor
 from .configuration_mimo_v2 import MiMoV2Config
 
 
