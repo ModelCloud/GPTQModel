@@ -6,8 +6,8 @@
 """Weight-only quantization loop for methods that do not capture activations.
 
 This looper intentionally does not share the activation-capture lifecycle used
-by GPTQ/AWQ calibration flows. Weight-only methods such as RTN, FP8, NVFP4, or
-GGUF can usually process each linear layer directly, so the control flow here
+by GPTQ/AWQ calibration flows. Weight-only methods such as RTN, NVFP4, GGUF, or
+BitsAndBytes can usually process each linear layer directly, so the control flow here
 stays narrow: iterate quantizable modules, quantize weights, finalize, and
 optionally offload.
 """
@@ -42,7 +42,6 @@ from ..nn_modules.converter import MODULE_CONVERTER_MAP
 from ..quantization.config import (
     BitsAndBytesConfig,
     CalibrationConfig,
-    FP8Config,
     GGUFConfig,
     NF12Config,
     QuantizeEmbed,
@@ -505,7 +504,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
         target_device: torch.device,
     ) -> Tuple[
         NamedModule,
-        Optional[RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config],
+        Optional[RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config],
     ]:
         """Run one module's weight-only quantization on its assigned device."""
 
@@ -519,7 +518,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
     def _finalize_quantized_module(
         self,
         named: NamedModule,
-        active_qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
+        active_qcfg: RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config,
     ) -> str:
         """Move a quantized module back to CPU, pack it, and optionally offload it."""
 
@@ -569,7 +568,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
 
     def _finalize_target_device(
         self,
-        active_qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
+        active_qcfg: RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config,
     ) -> torch.device:
         """Resolve the worker device for one finalize task."""
 
@@ -583,7 +582,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
         quantized_modules: List[
             Tuple[
                 NamedModule,
-                RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
+                RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config,
             ]
         ],
     ) -> None:
@@ -687,7 +686,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
     ) -> List[
         Tuple[
             NamedModule,
-            RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
+            RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config,
         ]
     ]:
         """Quantize one subset, using multiple devices when available."""
@@ -696,7 +695,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
             str,
             Tuple[
                 NamedModule,
-                RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig | NF12Config,
+                RTNConfig | GGUFConfig | BitsAndBytesConfig | NF12Config,
             ],
         ] = {}
         task_specs = [
@@ -1075,11 +1074,11 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
         quant_config = self.gptq_model.quantize_config
         if not isinstance(
             quant_config,
-            (RTNConfig, GGUFConfig, FP8Config, BitsAndBytesConfig, NF12Config),
+            (RTNConfig, GGUFConfig, BitsAndBytesConfig, NF12Config),
         ):
             raise NotImplementedError(
                 "Weight-only looper only supports `RTNConfig`, `GGUFConfig`, "
-                "`FP8Config`, `BitsAndBytesConfig`, and `NF12Config` today."
+                "`BitsAndBytesConfig`, and `NF12Config` today."
             )
 
         embedding_targets = self._embedding_quant_targets()

@@ -110,7 +110,6 @@ CONFIG_FACTORIES: Dict[str, Callable[[], object]] = {
     ),
     "gguf": lambda: C.GGUFConfig(bits=4, device="cuda"),
     "gguf-q-k-m": lambda: C.GGUFConfig(bits=4, format="q_k_m", device="cuda"),
-    "fp8": lambda: C.FP8Config(device="cuda"),
 }
 
 

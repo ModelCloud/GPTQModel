@@ -22,6 +22,7 @@ import torch
 
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.quantization import FP8Config
+from tests.fp8_test_utils import pack_fp8_module
 
 
 HIDDEN = 64
@@ -79,7 +80,7 @@ def _fp8_module(source: torch.nn.Linear, fp8_config: FP8Config) -> TorchFP8Linea
         bias=source.bias is not None,
         **fp8_config.quant_linear_init_kwargs(),
     )
-    module.pack(source, scales=None, zeros=None)
+    pack_fp8_module(module, source)
     return module.eval()
 
 

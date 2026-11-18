@@ -1883,8 +1883,10 @@ def _load_tt_blockfloat_model(model_cls, *, model_local_path, dtype, trust_remot
     )
 
 
-def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend=None) -> None:
-    """Refuse an AUTO GEMV load on ROCm when no portable reader applies.
+def _reject_native_awq_gemv_on_rocm(
+    export_quant_method, format_code, backend=None, device=None
+) -> None:
+    """Refuse a GEMV load only when the target placement itself is ROCm.
 
     ``FORMAT.GEMV`` is read by the native CUDA AWQ extension
     (``gemv_forward``/``gemmv2_forward``), which hipcc cannot build: the
@@ -1892,6 +1894,12 @@ def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend=No
     warp-sync reduction rejects wave32.  Without this check an AUTO load fails
     later with a bare "No valid quant linear", so point at the layout and
     kernels that do run on ROCm.
+
+    The gate keys on the *target* device family, not on the installed torch
+    build (#5219).  A ROCm wheel can still serve ``device="cpu"``, where
+    ``AwqGEMVTorchLinear`` reads the identical packed layout, so refusing every
+    load in a HIP process would break a supported placement for a reason that
+    has nothing to do with where the weights run.
 
     ``FORMAT.GEMV_FAST`` / ``FORMAT.LLM_AWQ`` are not refused here: their
     portable Torch readers declare ROCm and read the identical interleaved
@@ -1909,6 +1917,12 @@ def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend=No
     # The portable Triton GEMV reads the GEMV layout without the extension, so an
     # explicit selection of it is a supported ROCm placement.
     if backend == BACKEND.AWQ_GEMV_TRITON:
+        return
+    # ``device=None`` means the caller did not resolve a placement; keep the
+    # conservative refusal.  A resolved non-ROCm family (CPU, XPU, ...) falls
+    # through to ``select_quant_linear``, whose ``PORTABLE_FALLBACK`` pass picks
+    # a reader that declares that family.
+    if device is not None and selector_device_family(device) != DEVICE.ROCM:
         return
 
     from ..nn_modules.qlinear.gemv_awq import AWQ_GEMV_ROCM_UNSUPPORTED
@@ -3075,7 +3089,7 @@ def ModelLoader(cls):
             if backend == BACKEND.AUTO:
                 backend = BACKEND.BITSANDBYTES
 
-        _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend)
+        _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend, device)
 
         dtype = _coerce_quantized_awq_dtype(
             backend=backend,

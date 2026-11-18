@@ -29,7 +29,6 @@ class ProcessorStep(str, Enum):
     AWQ = "awq"
     PARO = "paro"
     EXL3 = "exl3"
-    FP8_GSQ = "fp8_gsq"
     WEIGHT_ONLY = "weight_only"
     EORA = "eora"
 
@@ -67,7 +66,6 @@ _PROCESSOR_TYPES = {
     ProcessorStep.AWQ: ("awq_processor", "AWQProcessor"),
     ProcessorStep.PARO: ("paro_processor", "ParoProcessor"),
     ProcessorStep.EXL3: ("exllamav3_processor", "EXL3Processor"),
-    ProcessorStep.FP8_GSQ: ("fp8_gsq_processor", "FP8GSQProcessor"),
     ProcessorStep.WEIGHT_ONLY: ("weight_only_processor", "WeightOnlyProcessor"),
     ProcessorStep.EORA: ("eora_processor", "EoraProcessor"),
 }
@@ -145,15 +143,10 @@ class QuantizationRunPlan:
                     raise NotImplementedError("EXL3 quantization does not support GPTAQ/native activation capture.")
                 if has_foem:
                     raise NotImplementedError("EXL3 quantization does not support FOEM/native activation capture.")
-            if config.method == METHOD.FP8 and getattr(config, "gsq_calibration", False):
-                if needs_lora:
-                    raise NotImplementedError("Calibrated FP8 GSQ does not support adapter generation")
-                primary = ProcessorStep.FP8_GSQ
-            else:
-                try:
-                    primary = _CALIBRATED_PRIMARY[config.method]
-                except KeyError as exc:
-                    raise ValueError(f"No calibrated processor for {config.method}") from exc
+            try:
+                primary = _CALIBRATED_PRIMARY[config.method]
+            except KeyError as exc:
+                raise ValueError(f"No calibrated processor for {config.method}") from exc
 
             steps_list = []
             if has_gptaq or (has_foem and config.foem.alpha > 0):

@@ -140,6 +140,7 @@ from ..utils.tied_weights import (
 from ..utils.torch import (
     TORCH_HAS_COMPILE,
     as_torch_device,
+    dynamo_is_compiling,
     dynamo_traced_frames,
     model_execution_device_scope,
     release_compile_trace_garbage,
@@ -180,7 +181,7 @@ if TYPE_CHECKING:
 # Processor steps whose quantization GEMMs must run on rocBLAS to be
 # reproducible across processes (issues #4075, #4092, #4123, #4460).
 #
-# GPTQ, QQQ, VPTQ, MACaQ, calibrated FP8 GSQ and EoRA accumulate an input
+# GPTQ, QQQ, VPTQ, MACaQ and EoRA accumulate an input
 # Hessian/Gram from the calibration activations; EXL3 reuses GPTQ's capture.
 # EoRA runs after the primary, so an AWQ + EoRA plan would otherwise keep its
 # adapter Gram on hipBLASLt and produce a different adapter per process (#4614).
@@ -196,7 +197,6 @@ _DETERMINISTIC_BLAS_PROCESSOR_STEPS = frozenset({
     ProcessorStep.MACAQ,
     ProcessorStep.PARO,
     ProcessorStep.EXL3,
-    ProcessorStep.FP8_GSQ,
     ProcessorStep.EORA,
 })
 
@@ -502,6 +502,13 @@ class _CompiledModelForward:
 
         traced = dynamo_traced_frames()
         if traced == self._traced_frames:
+            return
+        if dynamo_is_compiling():
+            # An outer ``torch.compile`` (transformers' static-cache generate)
+            # is tracing this call. ``gc.collect`` is untraceable, so running it
+            # here is a graph break per model call (#5224), and collecting while
+            # dynamo still holds the trace's trackers is the wrong time. Leave
+            # the count unchanged so the next eager call releases the garbage.
             return
         self._traced_frames = traced
         release_compile_trace_garbage()
@@ -2395,6 +2402,13 @@ class BaseQModel(nn.Module):
             raise ValueError(
                 "quantize() binds the model's dataset preparer; pass an unbound CalibrationConfig."
             )
+        if self.quantize_config.is_load_only():
+            raise ValueError(
+                "FP8 is load-only: GPT-QModel no longer quantizes or exports FP8 "
+                "checkpoints. Load a production FP8 checkpoint (transformers "
+                "`FineGrainedFP8`, DeepSeek/Qwen block scales, NVIDIA ModelOpt, "
+                "MXFP8, or NVFP8), or quantize with GPTQ/AWQ/RTN."
+            )
         for pattern, override in (getattr(self.quantize_config, "dynamic", None) or {}).items():
             if isinstance(override, Mapping) and "exclude_attention_sinks" in override:
                 # The sink rows are a property of the calibration batch, not of
@@ -2630,8 +2644,6 @@ class BaseQModel(nn.Module):
                 preferred_backend = BACKEND.EXL3_EXLLAMA_V3
             elif self.quantize_config.method == METHOD.GGUF:
                 preferred_backend = BACKEND.AUTO
-            elif self.quantize_config.method == METHOD.FP8:
-                preferred_backend = BACKEND.FP8_TORCH
             elif self.quantize_config.method == METHOD.BITSANDBYTES:
                 preferred_backend = BACKEND.BITSANDBYTES
             else:
@@ -2833,7 +2845,7 @@ class BaseQModel(nn.Module):
 
         # On ROCm the deterministic rocBLAS selection is scoped to methods
         # whose quantization GEMMs must be reproducible (GPTQ, QQQ, VPTQ,
-        # MACaQ, EXL3, calibrated FP8 GSQ, and Paro). For the Hessian
+        # MACaQ, EXL3, and Paro). For the Hessian
         # builders, the calibration forward and replay produce the activations
         # accumulated into the Hessian, so those GEMMs must be reproducible
         # too: pinning only the fp32 X^T X GEMM regressed Qwen2.5-0.5B to
@@ -3504,9 +3516,6 @@ class BaseQModel(nn.Module):
                 elif step is ProcessorStep.EXL3:
                     exl3_args = {key: value for key, value in args.items() if key != "calculate_w_wq_diff"}
                     processors.append(factory(**exl3_args, lm_head_name=self.lm_head))
-                elif step is ProcessorStep.FP8_GSQ:
-                    fp8_args = {key: value for key, value in args.items() if key != "calculate_w_wq_diff"}
-                    processors.append(factory(**fp8_args))
                 elif step is ProcessorStep.QQQ:
                     processors.append(factory(**args, backend=run_plan.loop_backend))
                 elif step is ProcessorStep.MACAQ:

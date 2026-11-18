@@ -1295,6 +1295,9 @@ def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
 
 
 class GGUFTorchLinear(WeightOnlyQuantLinear):
+    # GGUF publishes its quantized block payload as the module's only tensor.
+    CHECKPOINT_REQUIRED_BUFFERS = ("qweight",)
+
     # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager runs and an explicit
     # torch.cuda.graph capture succeeds, but dynamo breaks on
     # `tensor.is_inference()` in `tensor_cache_key`, so only EAGER is reachable.

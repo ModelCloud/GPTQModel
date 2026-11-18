@@ -483,6 +483,12 @@ class BitblasQuantizationConfig:
 
 
 class BitblasBaseQuantLinear(GroupedQuantLinear):
+    # BitBLAS stores its packed weight, scales and (asymmetric) zero points in
+    # the checkpoint. A symmetric layer registers an empty ``qzeros``, so that
+    # suffix is only required when the live buffer holds data.
+    CHECKPOINT_REQUIRED_BUFFERS = ("qweight", "scales", "qzeros")
+    CHECKPOINT_OPTIONAL_EMPTY_BUFFERS = ("qzeros",)
+
     OPT_FEATURES = BITBLAS_OPTIMIZE_FEATURES
     TORCH_DTYPE = torch.float16
 

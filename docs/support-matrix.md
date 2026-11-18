@@ -25,9 +25,9 @@ reference inventories, not a promise that every combination works on every devic
 | Rotation                  | ✅          | x | x | x | x             |
 | GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
 | FOEM                      | ✅          | ✅ | ✅ | ✅ | ✅             |
-| GSQ (GPTQ, AWQ, RTN, QQQ, FP8, Paro) | ✅ | Existing format† | Existing format† | Existing format† | Existing format† |
+| GSQ (GPTQ, AWQ, RTN, QQQ, Paro) | ✅ | Existing format† | Existing format† | Existing format† | Existing format† |
 
-`GGUF`, `FP8`, `EXL3`, `Paro`, `VPTQ`, `MACaQ`, and `NF12` are currently native GPT-QModel quantization/runtime paths. Every GPT-QModel FP8 export publishes `quant_method: "gptqmodel_fp8"` and is refused by transformers: GPT-QModel writes inverse scales for `row`, `tensor`, and `block`, while `FineGrainedFP8` reads block scales as multipliers. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
+`GGUF`, `EXL3`, `Paro`, `VPTQ`, `MACaQ`, and `NF12` are currently native GPT-QModel quantization/runtime paths. FP8 is load-only: GPT-QModel reads production FP8 checkpoints (transformers `FineGrainedFP8`, DeepSeek/Qwen block scales, NVIDIA ModelOpt, MXFP8, NVFP8) and no longer writes its own FP8 layout, so there is no `gptqmodel_fp8` alias. The MLX backend does not implement FP8: its invented Metal FP8 kernels and loader were removed, so an FP8 load with `backend="mlx"` raises a `ValueError` pointing at the Torch backend. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
 
 † GSQ preserves the initializer's checkpoint format; it does not add a runtime format.
 
@@ -96,7 +96,7 @@ See also [CPU dispatch](kernel-dispatch-cpu.md), [MLX](mlx-runtime.md),
 | 🐧 Linux | Huawei Ascend NPU | ✅ | `Ascend 910B`, `torch-npu` / `CANN` | Native Torch kernels for GPTQ, AWQ, Paro, GGUF, QQQ, and EXL3 |
 | 🐧 Linux | Intel XPU | ✅ | `Arc`, `Datacenter Max` | TorchFused, TorchFusedAWQ, FP8 Torch, Torch |
 | 🐧 Linux | Intel/AMD CPU | ✅ | x86-64; AVX2, AVX512-BF16, or AMX for applicable optimized paths | GPTQ/AWQ AVX512-BF16, TorchFused, TorchFusedAWQ, TorchAten int4, GPTQ INT8 (8-bit sources), GGUF C++, BitsAndBytes, VPTQ, NF12 Torch, `ttbfp` block floats, Torch |
-| 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Native MLX quantization and packed inference (GPTQ, AWQ, Paro, QQQ, GGUF, FP8, MACaQ, NF12, EXL3); MPS/Torch, FP8 Torch, NF12 Torch |
+| 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Native MLX quantization and packed inference (GPTQ, AWQ, Paro, QQQ, GGUF, MACaQ, NF12, EXL3); MPS/Torch, FP8 Torch, NF12 Torch |
 | 🪟 Windows | GPU (NVIDIA) / CPU | ✅ | `NVIDIA` | Torch |
 
 Availability depends on each backend's architecture, dtype, shape, and runtime

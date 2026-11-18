@@ -13,16 +13,6 @@ import it before the quantization package finishes initializing.
 # `quant_method: "gguf"` (plus `method: "gguf"`) keep loading in GPT-QModel.
 GGUF_EXPORT_QUANT_METHOD = "gptqmodel_gguf"
 
-# GPT-QModel's FP8 layout always stores an inverse scale (`weight = fp8 / scale`).
-# transformers registers its own `fp8` quantizer (`FineGrainedFP8`), which
-# reads a 2-D block grid as a multiplier (`weight = fp8 * scale`) and allocates
-# e4m3 weights. That mismatch makes every GPT-QModel layout — row, tensor and
-# block — unreadable: the load either broadcasts a 1-D scale into a
-# multi-billion-element temporary and fails with a shape error, or silently
-# multiplies where it should divide and produces NaN. Publish a non-colliding
-# name for every FP8 export; `fp8` is reserved for third-party block/multiplier
-# checkpoints.
-FP8_EXPORT_QUANT_METHOD = "gptqmodel_fp8"
 
 # Checkpoints written before the rename store this method and format name. It
 # is accepted on load so those checkpoints keep working; new checkpoints only
@@ -44,7 +34,6 @@ REFUSED_HF_QUANT_METHODS = {
     # of returning a bf16 `nn.Linear` full of int8 codes (#4664).
     "bitsandbytes": "BitsAndBytes",
     "exl3": "EXL3",
-    FP8_EXPORT_QUANT_METHOD: "FP8",
     "macaq": "MACaQ MXFP4",
     "paro": "Paro",
     LEGACY_PARO_QUANT_METHOD: "Paro",
@@ -63,7 +52,6 @@ REFUSED_HF_QUANT_METHODS = {
 REFUSED_HF_QUANT_METHOD_REMEDIES = {
     "bitsandbytes": "`GPTQModel.load`",
     "exl3": "`GPTQModel.load` with the ExLlamaV3 backend",
-    FP8_EXPORT_QUANT_METHOD: "`GPTQModel.load`",
     "macaq": "`GPTQModel.load`",
     "paro": "`GPTQModel.load`",
     LEGACY_PARO_QUANT_METHOD: "`GPTQModel.load`",
@@ -78,7 +66,6 @@ REFUSED_HF_QUANT_METHOD_REMEDIES = {
 REFUSED_HF_QUANT_METHOD_SUPPORT_ROWS = {
     "bitsandbytes": "BitsAndBytes",
     "exl3": "Exllama V3 / EXL3",
-    FP8_EXPORT_QUANT_METHOD: "FP8",
     "macaq": "MACaQ (MXFP4 W4A4)",
     "paro": "Paro",
     LEGACY_PARO_QUANT_METHOD: "Paro",

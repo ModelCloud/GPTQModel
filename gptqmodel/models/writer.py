@@ -23,7 +23,6 @@ from transformers import PreTrainedTokenizerFast, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
 
 from .._quant_methods import (
-    FP8_EXPORT_QUANT_METHOD,
     REFUSED_HF_QUANT_METHODS,
     refused_hf_load_remedy,
 )
@@ -48,7 +47,6 @@ from ..quantization.config import (
     META_VALUE_URI,
     METHOD,
     MIN_VERSION_WITH_V2,
-    _fp8_layout_is_hf_readable,
     resolve_quant_format,
 )
 from ..utils.backend import BACKEND
@@ -380,27 +378,6 @@ def hf_compat_warnings(
             f"`quant_method: \"{GGUF_EXPORT_QUANT_METHOD}\"` so an HF loader "
             "refuses it instead of random-initializing every linear layer. Load "
             "it with `GPTQModel.load`."
-        )
-    if (
-        getattr(quantize_config, "method", None) == METHOD.FP8
-        and not _fp8_layout_is_hf_readable(quantize_config)
-    ):
-        scale_method = getattr(quantize_config, "weight_scale_method", None) or "row"
-        warnings.append(
-            "This FP8 checkpoint stores GPT-QModel's inverse weight scales "
-            f"(`weight_scale_method: \"{scale_method}\"`, "
-            "`weight_scale_semantics: \"inverse\"`). `transformers` registers "
-            "its own `fp8` loader (`FineGrainedFP8`), which reads a 2-D block "
-            "`weight_scale_inv` grid as a multiplier; GPT-QModel's layout "
-            "multiplies where it should divide, so plain transformers either "
-            "broadcasts the codes against the scale and fails with a shape "
-            "error or silently produces a NaN model. This applies to every "
-            "layout, including `block`. This checkpoint publishes "
-            f"`quant_method: \"{FP8_EXPORT_QUANT_METHOD}\"`, so "
-            "`AutoModelForCausalLM.from_pretrained` random-initializes every "
-            "linear layer unless `gptqmodel` is imported (which installs a "
-            "refusing quantizer). Load it with `GPTQModel.load`; MXFP8/NVFP8 "
-            "export is the planned portable replacement."
         )
     method = getattr(quantize_config, "method", None)
     method_name = getattr(method, "value", method)

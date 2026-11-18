@@ -27,7 +27,6 @@ _LOGGING_PROCESSORS = (
     "qqq",
     "vptq",
     "paro",
-    "fp8_gsq",
     "weight_only_rtn",
 )
 
@@ -139,8 +138,6 @@ def _tiny_llama(path):
 def _configs():
     from gptqmodel.quantization.config import (
         FOEMConfig,
-        FP8Config,
-        GSQConfig,
         ParoConfig,
         QQQConfig,
         QuantizeConfig,
@@ -158,14 +155,12 @@ def _configs():
         "paro": lambda: ParoConfig(bits=4, group_size=32, opt_rotation_epochs=1,
                                         opt_finetune_epochs=0, opt_train_samples=4,
                                         opt_validation_samples=4, opt_batch_size=2),
-        "fp8_gsq": lambda: FP8Config(gsq=GSQConfig(enabled=True, steps=1, candidates=2),
-                                     gsq_calibration=True),
         "foem": lambda: QuantizeConfig(bits=4, group_size=32,
                                        foem=FOEMConfig(alpha=0.25, beta=0.2)),
     }
 
 
-@pytest.mark.parametrize("method", ["gptq", "rtn", "qqq", "vptq", "paro", "fp8_gsq", "foem"])
+@pytest.mark.parametrize("method", ["gptq", "rtn", "qqq", "vptq", "paro", "foem"])
 def test_every_quantizer_writes_quant_log_csv(method, tmp_path):
     """Fail-before/pass-after coverage for #4321 (the log used to be empty)."""
 

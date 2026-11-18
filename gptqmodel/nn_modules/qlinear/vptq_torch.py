@@ -20,6 +20,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.python import has_gil_disabled
 from ...utils.torch import torch_compile
 from ...utils.vptq import (
     unpack_vptq_indices,
@@ -44,6 +45,21 @@ def _as_pair(value: Any, name: str) -> List[int]:
 
 class VPTQLinear(WeightOnlyQuantLinear):
     """Weight-only VPTQ linear layer with the portable Torch implementation."""
+
+    # Packed codebook indices plus the codebooks that decode them. The
+    # residual/outlier codebooks, their indices, the norm scales and the
+    # permutation exist only when the layer was configured with them, so the
+    # validator skips a suffix whose live tensor is absent.
+    CHECKPOINT_REQUIRED_BUFFERS = (
+        "indices",
+        "centroids.weight",
+        "res_centroids.weight",
+        "outlier_centroids.weight",
+        "outlier_indices",
+        "weight_scale",
+        "weight_bias",
+        "perm",
+    )
 
     # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager, dynamo, aot_eager,
     # inductor and reduce-overhead pass, and an explicit torch.cuda.graph
@@ -312,6 +328,21 @@ class VPTQLinear(WeightOnlyQuantLinear):
             # deployments; keep the portable eager path there.
             self.optimized = True
             log.info.once("Optimize: `VPTQLinear` torch.compile skipped on NPU.")
+            return
+
+        if has_gil_disabled():
+            # `dequantize` is one code object shared by every VPTQ layer, so a
+            # per-module `torch.compile` wrapper makes dynamo trace and guard
+            # that code object once per layer. Under free-threading a compiled
+            # call on one layer can then read the cache entry another thread is
+            # still tracing and return silently wrong tensors (#5228); the
+            # model-level forward compile still serves the graph. Re-enable
+            # once dynamo's per-code-object cache is thread-safe.
+            self.optimized = True
+            log.info.once(
+                "Optimize: `VPTQLinear` per-layer torch.compile skipped on "
+                "free-threaded Python (GIL disabled)."
+            )
             return
 
         if backend is None:

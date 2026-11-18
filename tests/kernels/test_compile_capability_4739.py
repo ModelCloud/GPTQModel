@@ -35,6 +35,7 @@ from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.config import CalibrationConfig, FP8Config
+from tests.fp8_test_utils import pack_fp8_module
 
 
 pytestmark = [
@@ -86,7 +87,7 @@ def _fp8_module() -> TorchFP8Linear:
         register_buffers=False,
         format="float8_e4m3fn",
     )
-    module.pack_original(linear, scales=None, zeros=None)
+    pack_fp8_module(module, linear)
     return module.half().to(DEVICE)
 
 

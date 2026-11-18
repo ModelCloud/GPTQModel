@@ -3,9 +3,6 @@
 
 from __future__ import annotations
 
-import platform
-import sys
-from functools import lru_cache
 from typing import Optional, Tuple
 
 import torch
@@ -36,9 +33,6 @@ from ._numerics import autocast_active, matmul_fp32_reduce
 
 
 log = setup_logger()
-
-_MLX_FP8_MIN_ELEMENTS = 60 * 1024 * 1024
-
 
 _FP8_ACTIVATION_QUANT_METHODS = ("none", "per_token")
 
@@ -126,10 +120,9 @@ def _normalize_fp8_activation_quant_method(value: Optional[str]) -> str:
 def _normalize_linear_scale_semantics(value: Optional[str]) -> str:
     """Normalize a loaded checkpoint's ``weight_scale_inv`` convention.
 
-    ``FP8Config`` only emits GPT-QModel's own inverse scales, so its
-    normalizer accepts ``inverse`` alone. A loaded HF/DeepSeek checkpoint can
-    additionally store a multiplier under the historical
-    ``weight_scale_inv`` name, which this wrapper must decode.
+    A loaded HF/DeepSeek checkpoint can store a multiplier under the
+    historical ``weight_scale_inv`` name, while legacy GPT-QModel checkpoints
+    store an inverse. This wrapper decodes either.
     """
 
     normalized = "inverse" if value is None else str(value).strip().lower()
@@ -139,46 +132,6 @@ def _normalize_linear_scale_semantics(value: Optional[str]) -> str:
             f"got `{value}`."
         )
     return normalized
-_MLX_FP8_FORMATS = {
-    "float8_e4m3fn",
-    "float8_e5m2",
-    "float8_e4m3fnuz",
-    "float8_e5m2fnuz",
-}
-
-
-@lru_cache(maxsize=1)
-def _mlx_quantization_available() -> bool:
-    if sys.platform != "darwin" or platform.machine() != "arm64":
-        return False
-    try:
-        import mlx.core  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
-def _quantize_fp8_weight_mlx_to_torch(
-    weight: torch.Tensor,
-    *,
-    format: str,
-    weight_scale_method: str,
-    weight_block_size: Optional[Tuple[int, int]],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    import mlx.core as mx
-
-    from ...quantization.mlx_fp8 import quantize_fp8_weight_mlx
-
-    codes, scale_inv = quantize_fp8_weight_mlx(
-        mx.from_dlpack(weight),
-        format=format,
-        weight_scale_method=weight_scale_method,
-        weight_block_size=weight_block_size,
-    )
-    qweight = torch.from_dlpack(codes).cpu().contiguous().view(_fp8_dtype_from_name(format))
-    return qweight, torch.from_dlpack(scale_inv).cpu().contiguous()
-
-
 def _fp8_dtype_from_name(fmt: str) -> torch.dtype:
     return getattr(torch, _normalize_fp8_fmt(fmt))
 
@@ -204,78 +157,11 @@ def _compute_scale_inv(abs_max: torch.Tensor, fp8_max: float) -> torch.Tensor:
     )
 
 
-def _require_finite_fp8_source(weight: torch.Tensor) -> None:
-    if not bool(torch.isfinite(weight).all()):
-        raise ValueError("FP8 quantization requires finite source weights representable as float32.")
-
-
-def quantize_fp8_weight(
-    weight: torch.Tensor,
-    *,
-    format: str = "float8_e4m3fn",
-    weight_scale_method: str = "row",
-    weight_block_size: Optional[Tuple[int, int]] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if weight.ndim != 2:
-        raise ValueError(f"FP8 quantization expects a 2D weight matrix, got shape {tuple(weight.shape)}.")
-
-    format = _normalize_fp8_fmt(format)
-    if format == "float8_e8m0fnu":
-        raise ValueError(
-            "TorchFP8Linear does not quantize dense weights to float8_e8m0fnu; "
-            "use that format only for dequantization of existing checkpoints."
-        )
-    block_size = _normalize_fp8_weight_block_size(weight_block_size)
-    weight_scale_method = _normalize_fp8_weight_scale_method(
-        weight_scale_method,
-        weight_block_size=block_size,
-    )
-    fp8_dtype = _fp8_dtype_from_name(format)
-    fp8_max = torch.finfo(fp8_dtype).max
-
-    weight = weight.to(device="cpu", dtype=torch.float32).contiguous()
-
-    if weight_scale_method == "tensor":
-        abs_max = weight.abs().amax()
-        _require_finite_fp8_source(abs_max)
-        scale_inv = _compute_scale_inv(abs_max, fp8_max)
-        quantized = torch.clamp(weight * scale_inv, min=-fp8_max, max=fp8_max).to(fp8_dtype)
-        return quantized.contiguous(), scale_inv.to(torch.float32)
-
-    if weight_scale_method == "row":
-        abs_max = weight.abs().amax(dim=1)
-        _require_finite_fp8_source(abs_max)
-        scale_inv = _compute_scale_inv(abs_max, fp8_max)
-        quantized = torch.clamp(
-            weight * scale_inv.unsqueeze(1),
-            min=-fp8_max,
-            max=fp8_max,
-        ).to(fp8_dtype)
-        return quantized.contiguous(), scale_inv.to(torch.float32).contiguous()
-
-    if block_size is None:
-        raise ValueError("FP8 block quantization requires `weight_block_size`.")
-
-    block_rows, block_cols = block_size
-    rows, cols = weight.shape
-    if rows % block_rows != 0 or cols % block_cols != 0:
-        raise ValueError(
-            f"FP8 block quantization expects shape {tuple(weight.shape)} to be divisible by block size "
-            f"{block_size}."
-        )
-
-    row_blocks = rows // block_rows
-    col_blocks = cols // block_cols
-    blocks = weight.reshape(row_blocks, block_rows, col_blocks, block_cols)
-    abs_max = blocks.abs().amax(dim=(1, 3))
-    _require_finite_fp8_source(abs_max)
-    scale_inv = _compute_scale_inv(abs_max, fp8_max)
-    scaled = blocks * scale_inv.unsqueeze(1).unsqueeze(3)
-    quantized = torch.clamp(scaled, min=-fp8_max, max=fp8_max).to(fp8_dtype).reshape(rows, cols)
-    return quantized.contiguous(), scale_inv.to(torch.float32).contiguous()
-
-
 class TorchFP8Linear(WeightOnlyQuantLinear):
+    # FP8 stores the scaled weight and its inverse scale; either one missing
+    # decodes to zeros or a wrong scale (the issue measured a 20.2 logit diff).
+    CHECKPOINT_REQUIRED_BUFFERS = ("weight", "weight_scale_inv")
+
     # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager, dynamo, aot_eager,
     # inductor and reduce-overhead pass, and an explicit torch.cuda.graph
     # capture succeeds with output matching eager.
@@ -487,136 +373,18 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
     def _weight_to_matrix(self, linear: nn.Module) -> torch.Tensor:
         return _weight_to_matrix(linear)
 
-    def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor = None):
-        self.pack_original(linear=linear, scales=scales, zeros=zeros, g_idx=g_idx)
+    def _refuse_fp8_encode(self, *_args, **_kwargs):
+        raise ValueError(
+            "FP8 is load-only: GPT-QModel no longer quantizes or exports FP8 "
+            "weights. Load a production FP8 checkpoint (transformers "
+            "`FineGrainedFP8`, DeepSeek/Qwen block scales, NVIDIA ModelOpt, "
+            "MXFP8, or NVFP8) instead."
+        )
 
-    def pack_block(
-        self,
-        linear: nn.Module,
-        scales: torch.Tensor,
-        zeros: torch.Tensor,
-        g_idx: torch.Tensor = None,
-        block_in: int = 8192,
-        workers: int = 1,
-    ):
-        del block_in, workers
-        self.pack_original(linear=linear, scales=scales, zeros=zeros, g_idx=g_idx)
-
-    def pack_gpu(
-        self,
-        linear: nn.Module,
-        scales: torch.Tensor,
-        zeros: torch.Tensor,
-        g_idx: torch.Tensor = None,
-        *,
-        block_in: int = 8192,
-        device: torch.device | None = None,
-    ):
-        del block_in, device
-        self.pack_original(linear=linear, scales=scales, zeros=zeros, g_idx=g_idx)
-
-    @torch.inference_mode()
-    def pack_original(
-        self,
-        linear: nn.Module,
-        scales: torch.Tensor,
-        zeros: torch.Tensor,
-        g_idx: torch.Tensor = None,
-        *,
-        smooth=None,
-    ):
-        del scales, zeros, g_idx
-
-        from .gguf import _apply_optional_smoother
-
-        weight = self._weight_to_matrix(linear).to(device="cpu", dtype=torch.float32)
-        if smooth is not None:
-            _require_finite_fp8_source(weight)
-        weight = _apply_optional_smoother(
-            weight,
-            smooth=smooth,
-            group_size=self.smooth_block_size(),
-        ).contiguous()
-        if (
-            self.fp8_format in _MLX_FP8_FORMATS
-            and _mlx_quantization_available()
-            and weight.numel() >= _MLX_FP8_MIN_ELEMENTS
-        ):
-            _require_finite_fp8_source(weight)
-            qweight, weight_scale_inv = _quantize_fp8_weight_mlx_to_torch(
-                weight,
-                format=self.fp8_format,
-                weight_scale_method=self.weight_scale_method,
-                weight_block_size=self.weight_block_size,
-            )
-        else:
-            qweight, weight_scale_inv = quantize_fp8_weight(
-                weight,
-                format=self.fp8_format,
-                weight_scale_method=self.weight_scale_method,
-                weight_block_size=self.weight_block_size,
-            )
-
-        if "weight" in self._buffers:
-            self.weight = qweight
-        else:
-            self.register_buffer("weight", qweight)
-
-        if "weight_scale_inv" in self._buffers:
-            self.weight_scale_inv = weight_scale_inv
-        else:
-            self.register_buffer("weight_scale_inv", weight_scale_inv)
-
-        if linear.bias is not None:
-            # Match ``_allocate_buffers`` and the loader's FP32 FP8 bias
-            # buffers: a reload always builds an FP32 bias, so an in-session
-            # module must hold the same dtype or the two run different GEMMs.
-            bias = linear.bias.detach().to(device="cpu", dtype=torch.float32).contiguous()
-            if "bias" in self._buffers:
-                self.bias = bias
-            else:
-                self.register_buffer("bias", bias)
-        else:
-            self.bias = None
-
-        self._scaled_mm_hard_disabled = False
-        self._native_dequant_disabled = False
-        self._invalidate_compiled()
-
-    @torch.inference_mode()
-    def pack_calibrated(self, linear: nn.Module, weight: torch.Tensor, scale_inv: torch.Tensor):
-        """Install an already fitted FP8 payload without recomputing its scales."""
-        if weight.shape != (self.out_features, self.in_features) or weight.dtype != self.fp8_dtype:
-            raise ValueError("Calibrated FP8 weight does not match packed storage geometry or dtype")
-        if scale_inv.shape != self._scale_shape() or scale_inv.dtype != torch.float32:
-            raise ValueError("Calibrated FP8 scale does not match packed storage geometry or dtype")
-        if not torch.isfinite(scale_inv).all() or (scale_inv <= 0).any():
-            raise ValueError("Calibrated FP8 inverse scales must be finite and positive")
-
-        packed_weight = weight.detach().to(device="cpu").contiguous()
-        packed_scale = scale_inv.detach().to(device="cpu").contiguous()
-        if "weight" in self._buffers:
-            self.weight = packed_weight
-        else:
-            self.register_buffer("weight", packed_weight)
-        if "weight_scale_inv" in self._buffers:
-            self.weight_scale_inv = packed_scale
-        else:
-            self.register_buffer("weight_scale_inv", packed_scale)
-        if linear.bias is not None:
-            # Match ``_allocate_buffers`` and the loader's FP32 FP8 bias
-            # buffers: a reload always builds an FP32 bias, so an in-session
-            # module must hold the same dtype or the two run different GEMMs.
-            bias = linear.bias.detach().to(device="cpu", dtype=torch.float32).contiguous()
-            if "bias" in self._buffers:
-                self.bias = bias
-            else:
-                self.register_buffer("bias", bias)
-        else:
-            self.bias = None
-        self._scaled_mm_hard_disabled = False
-        self._native_dequant_disabled = False
-        self._invalidate_compiled()
+    pack = _refuse_fp8_encode
+    pack_block = _refuse_fp8_encode
+    pack_gpu = _refuse_fp8_encode
+    pack_original = _refuse_fp8_encode
 
     def _resolve_target(self, device=None, dtype=None) -> tuple[torch.device, torch.dtype]:
         target_device = self.weight.device if device is None else torch.device(device)
@@ -1157,4 +925,4 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         return output.reshape(original_shape)
 
 
-__all__ = ["TorchFP8Linear", "quantize_fp8_weight"]
+__all__ = ["TorchFP8Linear"]

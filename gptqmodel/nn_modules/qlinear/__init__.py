@@ -557,6 +557,16 @@ class BaseQuantLinear(nn.Module):
             #     torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora_test math
             # )
 
+    def checkpoint_required_buffers(self) -> Tuple[str, ...]:
+        """Checkpoint tensor suffixes this module instance cannot rebuild.
+
+        The class declaration is the default. A kernel whose required payload
+        depends on its configuration overrides this (GPTQ activation order
+        needs ``g_idx`` only when ``desc_act`` is set).
+        """
+
+        return self.CHECKPOINT_REQUIRED_BUFFERS
+
     def list_buffers(self) -> List:
         tensors = []
         seen = set()
@@ -1271,9 +1281,13 @@ class GroupedQuantLinear(BaseQuantLinear):
 
 
 class PackedGroupedQuantLinear(GroupedQuantLinear):
-    # GPTQ/AWQ/Marlin/BitBLAS-family checkpoints all publish the packed weight
-    # as `qweight`; a checkpoint without it loads uninitialized buffers.
-    CHECKPOINT_REQUIRED_BUFFERS = ("qweight",)
+    # GPTQ/AWQ/Marlin/BitBLAS-family checkpoints publish the packed weight as
+    # `qweight` plus its per-group `scales`; a checkpoint missing either loads
+    # uninitialized buffers (NaN logits). `qzeros` is required whenever the
+    # live kernel owns zero-point storage. AllSpark has no `qzeros` buffer at
+    # all, so the validator skips that suffix for it instead of refusing every
+    # AllSpark load.
+    CHECKPOINT_REQUIRED_BUFFERS = ("qweight", "scales", "qzeros")
 
     def __init__(self, *args, pack_dtype: t.dtype, **kwargs):
         super().__init__(*args, pack_dtype=pack_dtype, **kwargs)
@@ -1734,6 +1748,15 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
                 register_buffers_out_features=register_buffers_out_features,
                 bias_dtype=self.bias_dtype,
             )
+
+    def checkpoint_required_buffers(self) -> Tuple[str, ...]:
+        # Activation-order GPTQ stores the group assignment in `g_idx`; the
+        # kernel cannot derive it from the packed weight. Plain contiguous
+        # quantization derives the canonical mapping, so it stays optional.
+        required = super().checkpoint_required_buffers()
+        if getattr(self, "desc_act", False) and "g_idx" not in required:
+            required = required + ("g_idx",)
+        return required
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,

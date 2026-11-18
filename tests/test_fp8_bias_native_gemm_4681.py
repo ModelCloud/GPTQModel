@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+from tests.fp8_test_utils import pack_fp8_module
 
 
 pytestmark = [pytest.mark.cpu]
@@ -38,7 +39,7 @@ def _biased_module(bias_value=70000.0):
         linear.weight.zero_()
         linear.bias.fill_(bias_value)
     module = _module()
-    module.pack_original(linear, scales=None, zeros=None)
+    pack_fp8_module(module, linear)
     return module
 
 
@@ -74,7 +75,7 @@ def test_out_of_range_weight_still_falls_back_on_cuda():
     with torch.no_grad():
         linear.weight.fill_(65536.0)
     module = _module(rows=1, columns=2, bias=False)
-    module.pack_original(linear, scales=None, zeros=None)
+    pack_fp8_module(module, linear)
 
     x = torch.zeros((1, 2), dtype=torch.float16)
 

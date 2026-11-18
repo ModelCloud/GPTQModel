@@ -441,6 +441,28 @@ def _dynamo_config():
     return getattr(dynamo, "config", None)
 
 
+def dynamo_is_compiling() -> bool:
+    """Return True when dynamo is already tracing this thread.
+
+    ``torch.compile`` is lazy, so the wrapper ``torch_compile`` installs can be
+    entered from inside another ``torch.compile`` trace: transformers compiles
+    ``generate``'s forward, and ``VPTQLinear.optimize()`` installs one of these
+    wrappers on ``dequantize`` at post-init. ``suppress_errors`` is a ContextVar,
+    so writing it there is a ``ContextVar mutation not supported`` graph break in
+    the outer trace, which turns a cudagraph static-cache decode into
+    overwritten-output corruption (#5224). Nested calls therefore stay
+    read-only; the eager body is inlined into the outer graph instead.
+    """
+    compiler = getattr(torch, "compiler", None)
+    is_compiling = getattr(compiler, "is_compiling", None)
+    if is_compiling is None:
+        return False
+    try:
+        return bool(is_compiling())
+    except Exception:
+        return False
+
+
 def _call_with_dynamo_suppression(compiled: Callable, fullgraph: bool, args: tuple, kwargs: dict):
     """Invoke ``compiled`` with dynamo allowed to fall back for the failing frame.
 
@@ -449,8 +471,12 @@ def _call_with_dynamo_suppression(compiled: Callable, fullgraph: bool, args: tup
     is restored in a ``finally`` block: this is a per-call behaviour switch, not
     a process setting, and a concurrent compile in another thread must not see
     it (a GLOBAL_STATE guard failure from that race is issue #4094).
+
+    A nested compile is already inside an outer trace, where the ContextVar
+    write is untraceable; the caller normally short-circuits to the eager body
+    before reaching here, and this guard keeps the helper safe on its own.
     """
-    if fullgraph:
+    if fullgraph or dynamo_is_compiling():
         return compiled(*args, **kwargs)
     config = _dynamo_config()
     if config is None:
@@ -501,6 +527,11 @@ def _install_callable_compile_fallback(original: Callable, compiled: Callable, f
 
     def call(*args, **kwargs):
         if state["fallback"]:
+            return original(*args, **kwargs)
+        if dynamo_is_compiling():
+            # An outer torch.compile is already tracing this frame. Its trace
+            # owns error handling; mutate no dynamo config and inline the eager
+            # body instead of opening a redundant nested compile (#5224).
             return original(*args, **kwargs)
 
         def run_compiled():
@@ -567,6 +598,10 @@ def _install_module_compile_fallback(module: torch.nn.Module, compiled, fullgrap
 
     def forward(*args, **kwargs):
         if state["fallback"]:
+            return module(*args, **kwargs)
+        if dynamo_is_compiling():
+            # See `_install_callable_compile_fallback.call`: a nested module
+            # forward is inlined into the outer graph without a config write.
             return module(*args, **kwargs)
 
         def run_compiled():

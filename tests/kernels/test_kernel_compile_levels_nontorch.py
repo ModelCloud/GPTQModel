@@ -50,7 +50,7 @@ class Case:
     label: str
 
 
-#: The 16 MLX checkpoint holders declared NOT_APPLICABLE below.
+#: The 15 MLX checkpoint holders declared NOT_APPLICABLE below.
 MLX_KERNEL_NAMES = (
     "AWQBitBLASMlxQuantLinear",
     "AWQMarlinMlxQuantLinear",
@@ -58,7 +58,6 @@ MLX_KERNEL_NAMES = (
     "AwqGemvMlxQuantLinear",
     "AwqMlxQuantLinear",
     "BitsAndBytesMlxQuantLinear",
-    "FP8MlxQuantLinear",
     "GGUFMlxQuantLinear",
     "GPTQBitBLASMlxQuantLinear",
     "GPTQMarlinMlxQuantLinear",

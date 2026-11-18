@@ -10,8 +10,11 @@ import torch
 
 
 @pytest.mark.parametrize("method,block_size", [("row", None), ("block", [2, 2])])
-def test_calibrated_fp8_installs_exact_payload_and_decodes_against_torch(method, block_size):
+def test_fp8_load_only_payload_decodes_against_torch(method, block_size):
+    """A production FP8 checkpoint payload installs directly; nothing is encoded."""
+
     from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+    from tests.fp8_test_utils import install_fp8_payload
 
     values = torch.tensor(
         [
@@ -41,7 +44,7 @@ def test_calibrated_fp8_installs_exact_payload_and_decodes_against_torch(method,
         weight_scale_method=method,
         weight_block_size=block_size,
     )
-    packed.pack_calibrated(linear, codes, scales)
+    install_fp8_payload(packed, linear, codes, scales)
 
     assert torch.equal(packed.weight.view(torch.uint8), codes.view(torch.uint8))
     assert torch.equal(packed.weight_scale_inv, scales)
@@ -69,9 +72,8 @@ def test_awq_gsq_saturates_like_native_packing():
         assert recovered.item() == 15
 
 
-@pytest.mark.parametrize("method", ["awq", "fp8", "fp8_e5m2", "fp8_block",
-                                     "fp8_calibrated", "paro", "rtn"])
-def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
+@pytest.mark.parametrize("method", ["awq", "paro", "rtn"])
+def test_gsq_method_checkpoint_roundtrip(tmp_path, method):
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel
     from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
@@ -79,7 +81,7 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
     from gptqmodel import CalibrationConfig, GPTQModel
     from gptqmodel.models._const import DEVICE
     from gptqmodel.models.definitions.llama import LlamaQModel
-    from gptqmodel.quantization import AWQConfig, FP8Config, GSQConfig
+    from gptqmodel.quantization import AWQConfig, GSQConfig
     from gptqmodel.quantization.config import ParoConfig, RTNConfig
     from gptqmodel.utils.backend import BACKEND
 
@@ -87,7 +89,7 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
     hidden_size, intermediate_size = (64, 128) if method == "awq" else (32, 64)
     config = LlamaConfig(vocab_size=128, hidden_size=hidden_size, intermediate_size=intermediate_size,
                          num_attention_heads=4, num_key_value_heads=4, num_hidden_layers=1,
-                         attention_bias=method == "fp8_e5m2")
+                         attention_bias=False)
     config._attn_implementation = "eager"
     model = LlamaForCausalLM(config).half().eval()
     if method == "awq":
@@ -104,15 +106,6 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
         quant_config = AWQConfig(bits=4, group_size=32, sym=False, device=DEVICE.CPU,
                                  offload_to_disk=False, gsq=gsq)
         backend = BACKEND.TORCH
-    elif method.startswith("fp8"):
-        fp8_options = {}
-        if method == "fp8_e5m2":
-            fp8_options["format"] = "float8_e5m2"
-        if method == "fp8_block":
-            fp8_options.update(weight_scale_method="block", weight_block_size=[16, 16])
-        quant_config = FP8Config(device=DEVICE.CPU, offload_to_disk=False, gsq=gsq,
-                                 gsq_calibration=method == "fp8_calibrated", **fp8_options)
-        backend = BACKEND.FP8_TORCH
     elif method == "paro":
         quant_config = ParoConfig(bits=4, group_size=32, krot=1, device=DEVICE.CPU,
                                   offload_to_disk=False, opt_rotation_epochs=1,
@@ -124,22 +117,6 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
         quant_config = RTNConfig(bits=4, group_size=32, device=DEVICE.CPU,
                                  offload_to_disk=False, gsq=gsq)
         backend = BACKEND.TORCH
-    fitted_payloads = {}
-    if method == "fp8_calibrated":
-        from gptqmodel.looper.fp8_gsq_processor import FP8GSQProcessor
-
-        original_process = FP8GSQProcessor.process
-
-        def record_fitted_payload(processor, module, **kwargs):
-            result = original_process(processor, module, **kwargs)
-            payload = module.state["gsq_fp8_result"]
-            fitted_payloads[module.full_name] = (
-                payload["weight"].detach().cpu().clone(),
-                payload["scale_inv"].detach().cpu().clone(),
-            )
-            return result
-
-        monkeypatch.setattr(FP8GSQProcessor, "process", record_fitted_payload)
     wrapper = LlamaQModel(model=model, quantized=False, quantize_config=quant_config,
                           tokenizer=tokenizer, model_local_path=str(source))
     wrapper.quantize(
@@ -149,67 +126,14 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
         ),
         backend=backend,
     )
-    if method == "fp8_calibrated":
-        assert fitted_payloads
-        for name, (fitted_weight, fitted_scale) in fitted_payloads.items():
-            packed = wrapper.model.get_submodule(name)
-            assert torch.equal(packed.weight.cpu().view(torch.uint8), fitted_weight.view(torch.uint8))
-            assert torch.equal(packed.weight_scale_inv.cpu(), fitted_scale)
-            assert packed.weight_scale_inv.dtype == torch.float32
     ids = torch.tensor([[1, 2, 3]])
     with torch.no_grad():
         before = wrapper.model(ids, use_cache=False).logits.detach()
     checkpoint = tmp_path / "quantized"
     wrapper.save(str(checkpoint))
-    if method == "fp8_calibrated":
-        from safetensors.torch import load_file
-
-        saved = load_file(checkpoint / "model.safetensors")
-        for name, (fitted_weight, fitted_scale) in fitted_payloads.items():
-            assert torch.equal(saved[f"{name}.weight"].view(torch.uint8), fitted_weight.view(torch.uint8))
-            assert torch.equal(saved[f"{name}.weight_scale_inv"], fitted_scale)
     loaded = GPTQModel.load(str(checkpoint), backend=backend, device="cpu",
                             dtype=torch.float16, attn_implementation="eager")
-    if method == "fp8_e5m2":
-        from safetensors.torch import load_file
-
-        saved = load_file(checkpoint / "model.safetensors")
-        loaded_bf16 = GPTQModel.load(str(checkpoint), backend=backend, device="cpu",
-                                     dtype=torch.bfloat16, attn_implementation="eager")
-        for name, scale in saved.items():
-            if not name.endswith(".weight_scale_inv"):
-                continue
-            module = loaded_bf16.model.get_submodule(name.removesuffix(".weight_scale_inv"))
-            assert module.weight_scale_inv.dtype == torch.float32
-            torch.testing.assert_close(module.weight_scale_inv.cpu(), scale, rtol=0, atol=0)
-        fp8_biases = [
-            name for name in saved
-            if name.endswith(".bias")
-            and saved[f"{name.removesuffix('.bias')}.weight"].dtype == torch.float8_e5m2
-        ]
-        assert fp8_biases
-        for name in fp8_biases:
-            module = loaded_bf16.model.get_submodule(name.removesuffix(".bias"))
-            assert module.bias.dtype == torch.float32
-            torch.testing.assert_close(module.bias.cpu(), saved[name].float(), rtol=0, atol=0)
-        for reloaded in (loaded, loaded_bf16):
-            for name, packed in saved.items():
-                if packed.dtype != torch.float8_e5m2:
-                    continue
-                module = reloaded.model.get_submodule(name.removesuffix(".weight"))
-                assert module.weight.dtype == torch.float8_e5m2
-                assert module.weight.numel() * module.weight.element_size() == packed.numel()
-                assert torch.equal(module.weight.cpu().view(torch.uint8), packed.view(torch.uint8))
-                assert torch.equal(reloaded.model.state_dict()[name].cpu().view(torch.uint8),
-                                   packed.view(torch.uint8))
-    if method == "fp8_calibrated":
-        for name, (_, fitted_scale) in fitted_payloads.items():
-            reloaded = loaded.model.get_submodule(name)
-            assert reloaded.weight_scale_inv.dtype == torch.float32
-            assert torch.equal(reloaded.weight_scale_inv.cpu(), fitted_scale)
     assert loaded.quantize_config.gsq == gsq
-    if method.startswith("fp8"):
-        assert loaded.quantize_config.gsq_calibration == (method == "fp8_calibrated")
     with torch.no_grad():
         after = loaded.model(ids, use_cache=False).logits.detach()
     if method == "rtn":
