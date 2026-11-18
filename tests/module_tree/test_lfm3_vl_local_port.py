@@ -87,3 +87,37 @@ def test_pinned_checkpoint_names_and_shapes_match_native_meta_shell():
     assert shapes["model.vision_tower.layers.2.self_attn.q_norm.weight"] == [64]  # ckpt: q_layernorm
     digest = hashlib.sha256(json.dumps(sorted(shapes.items())).encode()).hexdigest()
     assert digest == PINNED_INVENTORY_SHA256
+
+
+@pytest.mark.parametrize(
+    "kv_heads,bias,gate,sandwich",
+    [(2, False, True, True), (4, True, True, True), (4, False, False, False), (1, True, False, True)],
+)
+def test_awq_folds_are_neutral_on_conv_and_attention_layers(kv_heads, bias, gate, sandwich):
+    from awq_neutrality import assert_awq_folds_neutral
+
+    model = native_model(kv_heads=kv_heads, bias=bias, gate=gate, sandwich=sandwich)
+    text = model.model.language_model
+    ids = torch.randint(5, 59, (1, 8))
+
+    def forward():
+        return text(input_ids=ids).last_hidden_state
+
+    mlp = {"ffn_norm": ["feed_forward.w1", "feed_forward.w3"], "feed_forward.w3": ["feed_forward.w2"]}
+    for index, layer in enumerate(text.layers):
+        checked = assert_awq_folds_neutral(LFM3VLQModel, model, layer, forward)
+        groups = {source: (targets, consumers) for source, targets, consumers in checked}
+        assert len(groups) == len(checked)
+        expected = {source: (targets, []) for source, targets in mlp.items()}
+        if index == 0:
+            # The short convolution reads only its gated input projection.
+            expected["operator_norm"] = (["conv.in_proj"], [])
+        else:
+            # The per-head sigmoid gate reads the normed input too and is
+            # compensated rather than left reading a rescaled tensor.
+            consumers = ["self_attn.g_proj"] if gate else []
+            expected["operator_norm"] = (["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"], consumers)
+            if kv_heads == 4:
+                expected["self_attn.v_proj"] = (["self_attn.o_proj"], [])
+        # Sandwich post-norms sit after the residual branch and never fold.
+        assert groups == expected

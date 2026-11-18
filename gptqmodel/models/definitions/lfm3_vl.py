@@ -3,13 +3,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from collections.abc import Mapping
 from typing import Dict
 
+from torch import nn
 from transformers import BatchFeature, ProcessorMixin
 
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
+from ..base import BaseQModel, generate_node_for_awq_scaling
 from ..local import LocalModelLoader
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .lfm3 import LFM3QModel
@@ -136,11 +139,48 @@ class LFM3VLQModel(LFM3QModel):
             tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
         )
 
+    def begin_input_capture_example(self, example, batch_device):
+        # Processor batches are a `BatchFeature` (a Mapping, not a dict). The
+        # per-layer-type replay rebuild only reads a dict source; without it a
+        # conv layer's AWQ replay received the attention grid instead of its
+        # planar recurrent mask.
+        if isinstance(example, Mapping) and not isinstance(example, dict):
+            example = dict(example)
+        super().begin_input_capture_example(example=example, batch_device=batch_device)
+
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Native hybrid conv/attention has sigmoid gates, Q/K head norms and
-        # sandwich norms. Its complete source/consumer folds are unqualified;
-        # keep every declared linear on the existing plain AWQ path.
-        return []
+        # Qualified generic plan (not LFM3's norm-only subset): operator_norm ->
+        # in_proj or q/k/v (+ the g_proj gate consumer), ffn_norm -> w1/w3 and
+        # w3 -> w2. Sandwich post-norms are `:postnorm`. `o_proj` reads the
+        # attention output, but after the Q/K/V block ends in an absent or
+        # non-producer entry the planner can attach it to operator_norm; strip
+        # it and add its real producer, v_proj (per-head sigmoid gating commutes
+        # with a per-channel scale). GQA v_proj is too narrow to fold.
+        attn = getattr(module, "self_attn", None)
+        o_proj = getattr(attn, "o_proj", None)
+        nodes = []
+        for node in BaseQModel.awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+            node["layers"] = [layer for layer in node["layers"] if layer is not o_proj]
+            prev_op = node["prev_op"]
+            # conv.in_proj (B|C|x) and the per-head g_proj never fold forward.
+            if isinstance(prev_op, nn.Linear) and any(
+                prev_op.out_features != layer.in_features for layer in node["layers"]
+            ):
+                continue
+            if node["layers"]:
+                nodes.append(node)
+        inp = input_feat.get("self_attn.o_proj")
+        if o_proj is not None and inp is not None and inp.numel() and attn.v_proj.out_features == o_proj.in_features:
+            kwargs = module_kwargs
+            if isinstance(module_kwargs, dict):
+                kwargs = {key: value for key, value in module_kwargs.items() if key != "_awq_feature_kwargs"}
+            node, _ = generate_node_for_awq_scaling(
+                inp=inp, prev_op=attn.v_proj, module_kwargs=kwargs, nodes_size=len(nodes),
+                subset=[o_proj], module2inspect=None,
+            )
+            node["_input_feature_name"] = "self_attn.o_proj"
+            nodes.append(node)
+        return nodes
 
     def preprocess_dataset(self, sample: Dict) -> Dict:
         return sample

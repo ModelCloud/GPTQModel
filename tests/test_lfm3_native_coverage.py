@@ -233,8 +233,20 @@ def test_awq_quantizes_and_packs_every_projection_and_preserves_excluded_owners(
         fold_sources = {"ffn_norm"} if kind in {"lfm3", "lfm3_omni"} else set()
         if kind in {"lfm3", "lfm3_omni"} and layer_type == "conv":
             fold_sources.add("operator_norm")
+        if kind == "lfm3_vl":
+            # LFM3-VL qualifies the full generic plan (module-tree neutrality
+            # test): both input norms, the linear MLP branch and, without GQA,
+            # the attention value projection.
+            fold_sources = {"operator_norm", "ffn_norm", "feed_forward.w3"}
+            attention = getattr(layer, "self_attn", None)
+            if attention is not None and attention.v_proj.out_features == attention.o_proj.in_features:
+                fold_sources.add("self_attn.v_proj")
         groups = wrapper.awq_get_modules_for_scaling(layer, local_features, {})
         assert {node["prev_op"] for node in groups} == {layer.get_submodule(name) for name in fold_sources}
+        # Folds also divide a linear source's bias and compensate non-quantized
+        # readers of the folded norm (the attention gate).
+        folded_extras = {f"{name}.bias" for name in fold_sources}
+        folded_extras |= {f"{name}.weight" for node in groups for name in node.get("_scale_consumers") or []}
         before = {key: value.clone() for key, value in layer.state_dict().items()}
         state = processor._get_layer_state(index)
         state.layer_module = layer
@@ -269,7 +281,7 @@ def test_awq_quantizes_and_packs_every_projection_and_preserves_excluded_owners(
             assert isinstance(packed.qweight, torch.Tensor) and isinstance(packed.qzeros, torch.Tensor)
             assert packed.qweight.dtype == packed.qzeros.dtype == torch.int32
             assert packed.qweight.numel() * 8 == module.weight.numel()
-        mutable_weights = {f"{name}.weight" for name in QUANTIZED[layer_type] | fold_sources}
+        mutable_weights = {f"{name}.weight" for name in QUANTIZED[layer_type] | fold_sources} | folded_extras
         for key, value in before.items():
             if key not in mutable_weights:
                 torch.testing.assert_close(layer.state_dict()[key], value, rtol=0, atol=0)

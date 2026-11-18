@@ -197,7 +197,7 @@ def test_original_numbered_experts_and_legacy_statics_checkpoint_load_exactly(tm
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
-def test_plain_awq_quantizes_every_native_projection_and_preserves_routers(tmp_path, caplog, dtype):
+def test_awq_scales_and_quantizes_every_native_projection_and_preserves_routers(tmp_path, caplog, dtype):
     source = tmp_path / "source"
     reference, marker = checkpoint(source, num_hidden_layers=2, intermediate_size=32, moe_intermediate_size=16)
     router = {
@@ -223,10 +223,21 @@ def test_plain_awq_quantizes_every_native_projection_and_preserves_routers(tmp_p
                           for index in range(3) for projection in ("gate_proj", "up_proj", "down_proj"))
     assert len(packed) == 23 and set(packed) == expected_names
     assert all(module.qweight.dtype == torch.int32 for module in packed.values())
-    assert "no AWQ scaling groups were generated" in caplog.text
+    assert "no AWQ scaling groups were generated" not in caplog.text
+    searched = {(int(row["layer"]), str(row["module"])) for row in model.quant_log if row["loss"] != "not applicable"}
+    # Scale search ran on both the dense prefix and the routed/shared MoE layer.
+    assert {(0, "self_attn.q_proj"), (0, "mlp.gate_proj"), (1, "self_attn.q_proj"),
+            (1, "mlp.shared_experts.gate_proj")} <= searched
     assert not marker.exists()
     for name, expected in router.items():
-        torch.testing.assert_close(model.model.state_dict()[name].float(), expected, rtol=0, atol=0)
+        actual = model.model.state_dict()[name]
+        assert actual.shape == expected.shape and actual.dtype == torch.float32, name
+        if name.endswith("e_score_correction_bias"):
+            # The routing bias is added after softmax and never sees the scale.
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        else:
+            # The fp32 router stays dense; it only absorbs the folded input scale.
+            assert torch.isfinite(actual).all() and not torch.equal(actual, expected), name
     with torch.inference_mode():
         logits = model.model(ids).logits
     assert torch.isfinite(logits).all()

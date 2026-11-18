@@ -70,7 +70,7 @@ def test_complete_pinned_release_ownership_keys_and_available_header_shapes(rele
 
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("kv_heads,bias", [(1, False), (2, True), (4, False)])
-def test_actual_cpu_meta_live_module_plans_exclusions_and_plain_awq_policy(layout, kv_heads, bias):
+def test_actual_cpu_meta_live_module_plans_exclusions_and_awq_norm_order(layout, kv_heads, bias):
     config = tiny_config(layout, kv_heads, bias)
     with torch.device("meta"):
         model = Ovis(config)
@@ -81,7 +81,14 @@ def test_actual_cpu_meta_live_module_plans_exclusions_and_plain_awq_policy(layou
     assert wrapper.extract_layers_node() == EXPECTED_PLAN["layers"]
     groups = wrapper.simple_layer_modules(config, SimpleNamespace(dynamic=None))
     assert {name for group in groups for name in group} == LINEARS
-    assert wrapper.awq_get_modules_for_scaling(model.llm.model.layers[0], {}, {}) == []
+    blocks = list(wrapper.effective_module_tree[-1])
+    if config.llm_config.model_type == "gemma2":
+        # The MLP input norm precedes the MLP so AWQ folds gate/up into it,
+        # never into the sandwich post-attention norm.
+        assert blocks.index("post_attention_layernorm") < blocks.index("pre_feedforward_layernorm") < blocks.index("mlp")
+        assert blocks[-1] == "post_feedforward_layernorm"
+    else:
+        assert "pre_feedforward_layernorm" not in blocks
     assert wrapper.lm_head == "llm.lm_head"
     assert wrapper.pre_lm_head_norm_module == "llm.model.norm"
     assert {"visual_tokenizer", "vte", "llm.model.embed_tokens", "llm.model.norm", "llm.model.rotary_emb"} <= set(wrapper.get_base_modules(model))

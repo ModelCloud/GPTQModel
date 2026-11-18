@@ -43,7 +43,3 @@ class KlearQModel(BaseQModel):
         }
     ]
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Routing bias, Q/K norms and the learned shared/routed mixer are not
-        # qualified for scale-search replay. Keep all declared linears in AWQ.
-        return []

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Real native dense/routed/shared ownership and conservative AWQ policy."""
+"""Real native dense/routed/shared ownership and neutral AWQ scale folds."""
 
 from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.models.definitions.ernie4_5_moe import Ernie4_5_MoeQModel
@@ -70,30 +71,41 @@ def test_plan_roles_expert_families_and_looper_consumer(case):
         assert plan.find(unknown) is None
 
 
-def test_awq_is_explicit_plain_quantization_even_with_complete_features(case):
-    captured = {}
-    handles = []
-    for index, layer in enumerate(case.model.model.layers):
-        captured[index] = {}
-        for name, module in find_modules(layer).items():
-            def capture(_module, inputs, *, name=name, index=index):
-                captured[index][name] = inputs[0].detach().clone()
-            handles.append(module.register_forward_pre_hook(capture))
-    ids = torch.tensor([[1, 7, 8, 9]])
-    try:
-        with torch.inference_mode():
-            reference = case.model(ids).logits
-    finally:
-        for handle in handles:
-            handle.remove()
-    before = {name: value.clone() for name, value in case.model.state_dict().items()}
-    for index, layer in enumerate(case.model.model.layers):
-        assert captured[index]
-        assert case.awq_get_modules_for_scaling(layer, captured[index], {}) == []
-    for name, value in case.model.state_dict().items():
-        torch.testing.assert_close(value, before[name], rtol=0, atol=0)
-    with torch.inference_mode():
-        torch.testing.assert_close(case.model(ids).logits, reference, rtol=0, atol=0)
+@pytest.mark.parametrize("kv_heads", [2, 4], ids=["gqa", "mha"])
+def test_awq_folds_are_neutral_on_dense_and_moe_layers(case, kv_heads):
+    if kv_heads != case.model.config.num_key_value_heads:
+        config = case.model.config
+        model = tiny_model(moe_num_shared_experts=config.moe_num_shared_experts, use_bias=config.use_bias,
+                           moe_layer_interval=config.moe_layer_interval,
+                           moe_layer_start_index=config.moe_layer_start_index, num_key_value_heads=kv_heads)
+        assert _convert_model_with_defuser(Ernie4_5_MoeQModel, model, cleanup_original=True)
+    else:
+        model = case.model
+    ids = torch.tensor([[1, 7, 8, 9, 5, 6, 11, 3]])
+
+    def forward():
+        return model(ids).logits
+
+    shared = model.config.moe_num_shared_experts > 0
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(Ernie4_5_MoeQModel, model, layer, forward)
+        groups = {(source, tuple(targets)): consumers for source, targets, consumers in checked}
+        assert groups[("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"))] == []
+        # GQA narrows v_proj below o_proj's input, so only MHA can fold it.
+        assert (("self_attn.v_proj", ("self_attn.o_proj",)) in groups) == (kv_heads == 4)
+        if hasattr(layer.mlp, "experts"):
+            experts = range(model.config.moe_num_experts)
+            targets = [f"mlp.shared_experts.{p}" for p in ("gate_proj", "up_proj") if shared]
+            targets += [f"mlp.experts.{i}.{p}" for i in experts for p in ("gate_proj", "up_proj")]
+            # The fp32 router reads the same normed input and is compensated;
+            # the score-correction bias is added after softmax and is scale-free.
+            assert groups[("post_attention_layernorm", tuple(targets))] == ["mlp.gate"]
+            for index in experts:
+                assert (f"mlp.experts.{index}.up_proj", (f"mlp.experts.{index}.down_proj",)) in groups
+            assert (("mlp.shared_experts.up_proj", ("mlp.shared_experts.down_proj",)) in groups) == shared
+        else:
+            assert groups[("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj"))] == []
+            assert ("mlp.up_proj", ("mlp.down_proj",)) in groups
 
 
 def test_native_meta_model_defuses_without_materializing_large_weights():

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn.functional as F
+from awq_neutrality import assert_awq_folds_neutral
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast
 
 from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
@@ -455,25 +456,55 @@ def test_public_hostile_selection_and_retry(tmp_path, monkeypatch, model_type, t
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("model_type", ["minimax", "minimax_m2"])
-def test_plain_awq_policy(model_type):
-    model = tiny_model(model_type)
-    _convert_model_with_defuser(MODEL_MAP[model_type], model, cleanup_original=False)
-    wrapper = bare_wrapper(model_type, model)
+@pytest.mark.parametrize("kv", [2, 4], ids=["gqa", "mha"])
+def test_minimax_m2_awq_folds_are_neutral(kv):
+    model = tiny_model("minimax_m2", kv=kv)
+    _convert_model_with_defuser(MODEL_MAP["minimax_m2"], model, cleanup_original=False)
+
+    def forward():
+        return model(IDS, use_cache=False).logits
+
+    experts = range(model.config.num_local_experts)
     for layer in model.model.layers:
-        features = {
-            name: torch.randn(2, 7, module.in_features)
-            for name, module in layer.named_modules()
-            if isinstance(module, torch.nn.Linear)
-        }
-        assert wrapper.awq_get_modules_for_scaling(layer, features, {}) == []
+        checked = assert_awq_folds_neutral(MODEL_MAP["minimax_m2"], model, layer, forward)
+        groups = {(source, tuple(targets)): consumers for source, targets, consumers in checked}
+        assert groups[("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"))] == []
+        assert (("self_attn.v_proj", ("self_attn.o_proj",)) in groups) == (kv == 4)
+        targets = tuple(f"mlp.experts.{i}.{p}" for i in experts for p in ("gate_proj", "up_proj"))
+        # The sigmoid router reads the normed input and absorbs the scale; the
+        # score-correction bias is added after the sigmoid and is scale-free.
+        assert groups[("post_attention_layernorm", targets)] == ["mlp.gate"]
+        for index in experts:
+            assert (f"mlp.experts.{index}.up_proj", (f"mlp.experts.{index}.down_proj",)) in groups
+
+
+@pytest.mark.parametrize("layout", ["mixed", "full", "linear"])
+@pytest.mark.parametrize("shared,postnorm", [(True, True), (True, False), (False, True)])
+def test_minimax_text01_awq_folds_are_neutral(layout, shared, postnorm):
+    model = tiny_model("minimax", kv=4, layout=layout, shared=shared, postnorm=postnorm)
+    _convert_model_with_defuser(MODEL_MAP["minimax"], model, cleanup_original=False)
+
+    def forward():
+        return model(IDS, use_cache=False).logits
+
+    experts = range(model.config.num_local_experts)
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(MODEL_MAP["minimax"], model, layer, forward)
+        groups = {(source, tuple(targets)) for source, targets, _consumers in checked}
+        expected = {(f"mlp.experts.{i}.up_proj", (f"mlp.experts.{i}.down_proj",)) for i in experts}
+        if shared:
+            expected.add(("shared_mlp.up_proj", ("shared_mlp.down_proj",)))
+        # The postnorm residual is the normed value, and the lightning output
+        # is sigmoid-gated after a scale-free norm, so neither norm nor any
+        # attention projection may absorb a scale. Only the MLP folds remain.
+        assert groups == expected
 
 
 @pytest.mark.parametrize(
     "model_type,shared,postnorm", [("minimax", False, True), ("minimax", True, False), ("minimax_m2", False, True)]
 )
 @pytest.mark.parametrize("offload", [False, True])
-def test_public_plain_awq_pack_infer_and_two_reloads(tmp_path, model_type, shared, postnorm, offload):
+def test_public_awq_pack_infer_and_two_reloads(tmp_path, model_type, shared, postnorm, offload):
     from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
     path = tmp_path / "native"
@@ -486,10 +517,19 @@ def test_public_plain_awq_pack_infer_and_two_reloads(tmp_path, model_type, share
     )
     packed = {name for name, m in wrapper.model.named_modules() if isinstance(m, BaseQuantLinear)}
     assert packed
+    searched = {(int(row["layer"]), str(row["module"])) for row in wrapper.quant_log if row["loss"] != "not applicable"}
+    expected_search = "self_attn.q_proj" if model_type == "minimax_m2" else "shared_mlp.down_proj" if shared else None
+    if expected_search is not None:
+        assert {(0, expected_search), (1, expected_search)} <= searched, sorted(searched)
     assert any(".self_attn." in name for name in packed)
     assert any(".mlp.experts." in name for name in packed)
+    # M2 folds scales into its decoder norms and compensates the router.
+    folded = (".input_layernorm.", ".post_attention_layernorm.", ".mlp.gate.") if model_type == "minimax_m2" else ()
     for key, value in original.state_dict().items():
         if ".experts." in key or any(key.startswith(name + ".") for name in packed):
+            continue
+        if any(part in key for part in folded):
+            assert not torch.equal(wrapper.model.state_dict()[key], value.half()), key
             continue
         torch.testing.assert_close(wrapper.model.state_dict()[key], value.half(), rtol=0, atol=0)
     expected_linear_count = 26 if model_type == "minimax_m2" else 31 if shared else 25

@@ -424,7 +424,7 @@ def test_independent_original_minicpm_mup_decoder(version, kv):
 
 @pytest.mark.parametrize("version", VERSIONS)
 @pytest.mark.parametrize("offload", [False, True])
-def test_public_image_awq_plain_quantize_pack_infer_and_reload(tmp_path, version, offload):
+def test_public_image_awq_scaled_quantize_pack_infer_and_reload(tmp_path, version, offload):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
@@ -443,9 +443,12 @@ def test_public_image_awq_plain_quantize_pack_infer_and_reload(tmp_path, version
         {"type": "image", "image": Image.new("RGB", (28, 28), (80, 140, 200))},
         {"type": "text", "text": "hello image test hello test image hello image test"},
     ]}] for _ in range(2)]
+    # AWQ scale search folds into the decoder norms; everything outside the
+    # decoder layer stays exact.
     dense = {name: tensor.clone() for name, tensor in source.state_dict().items()
-             if not name.startswith("llm.model.layers.0.") or not name.endswith(("q_proj.weight", "k_proj.weight", "v_proj.weight",
-                                                                               "o_proj.weight", "gate_proj.weight", "up_proj.weight", "down_proj.weight"))}
+             if not name.startswith("llm.model.layers.0.")}
+    layer_norms = {name: tensor.clone() for name, tensor in source.state_dict().items()
+                   if name.startswith("llm.model.layers.0.") and name.endswith("layernorm.weight")}
     model.quantize(
         CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
         backend=BACKEND.TORCH,
@@ -462,6 +465,7 @@ def test_public_image_awq_plain_quantize_pack_infer_and_reload(tmp_path, version
     model.shell_module_materialize(model.model.llm.lm_head, "cpu")
     for name, tensor in dense.items():
         torch.testing.assert_close(model.model.state_dict()[name], tensor, rtol=0, atol=0)
+    assert any(not torch.equal(model.model.state_dict()[name], tensor) for name, tensor in layer_norms.items())
     with torch.inference_mode():
         expected = model.model(**inputs).logits
         assert torch.isfinite(expected).all()
@@ -477,3 +481,34 @@ def test_public_image_awq_plain_quantize_pack_infer_and_reload(tmp_path, version
         with torch.inference_mode():
             torch.testing.assert_close(restored.model(**inputs).logits, expected, rtol=0, atol=0)
         model = restored
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+@pytest.mark.parametrize("kv", [2, 4])
+def test_awq_scale_folds_are_neutral_on_every_llm_variant(version, kv):
+    # 1.0/2.0 are the original muP MiniCPM decoder, 2.5/4.0 Llama, 2.6 Qwen2
+    # and 4.5 Qwen3 with per-head Q/K norms.
+    from awq_neutrality import assert_awq_folds_neutral
+
+    from gptqmodel.models.loader import _convert_model_with_defuser
+
+    torch.manual_seed(71)
+    model = MiniCPMV(tiny_config(version, num_key_value_heads=kv, num_hidden_layers=2)).eval()
+    _convert_model_with_defuser(MiniCPMVQModel, model, cleanup_original=False)
+    ids = torch.tensor([[1, 10, 11, 12, 13, 14]])
+
+    def forward():
+        return model(input_ids=ids).logits
+
+    expected = {
+        ("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),
+        ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj")),
+        ("mlp.up_proj", ("mlp.down_proj",)),
+    }
+    if kv == 4:
+        # o_proj reads the value width only without grouped KV heads.
+        expected.add(("self_attn.v_proj", ("self_attn.o_proj",)))
+    for layer in model.llm.model.layers:
+        checked = assert_awq_folds_neutral(MiniCPMVQModel, model, layer, forward)
+        # o_proj never joins the input-norm group (it reads the attention output).
+        assert {(source, tuple(targets)) for source, targets, _consumers in checked} == expected

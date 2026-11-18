@@ -51,9 +51,6 @@ class MiniMaxM2GPTQ(BaseQModel):
         },
     ]
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Whole-MoE scale search/replay has not been qualified for this family.
-        return []
 
 
 class MiniMaxQModel(BaseQModel):
@@ -119,7 +116,3 @@ class MiniMaxQModel(BaseQModel):
             },
         },
     ]
-
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Normalized residuals and the lightning gate prevent plain norm folds.
-        return []

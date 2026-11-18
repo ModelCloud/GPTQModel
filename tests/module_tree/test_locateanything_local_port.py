@@ -68,7 +68,6 @@ def test_real_plan_covers_every_decoder_weight_and_concrete_consumer(architectur
             assert plan.find(name) is None
     assert wrapper.lm_head == "language_model.lm_head"
     assert {"vision_model", "mlp1"} <= set(wrapper.get_base_modules(model))
-    assert wrapper.awq_get_modules_for_scaling(layers[0], {}, {}) == []
     if "2" in architecture:
         assert wrapper.build_layer_modules(wrapper.effective_module_tree, include_capture_only=True) == EXPECTED_PLAN["blocks"]
 
