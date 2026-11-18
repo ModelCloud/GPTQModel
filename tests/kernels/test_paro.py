@@ -1639,8 +1639,8 @@ def test_paro_cuda_long_prefill_matches_the_dense_oracle(monkeypatch, dtype):
 
     in_features, out_features, group_size = 896, 4864, 128
     module = _paro_module(in_features, out_features, group_size, dtype)
-    # A prefill row count above the shape-aware large-M crossover (2048 for
-    # this 896x4864 layer).
+    # A prefill row count above the shape-aware large-M crossover (916 for
+    # this 896x4864 layer on SM 8.9).
     rows = 4096
     x = torch.randn(rows, in_features, device="cuda", dtype=dtype)
     rotated = module._rotate_inputs(x)
@@ -1687,17 +1687,29 @@ def test_paro_cuda_long_prefill_matches_the_dense_oracle(monkeypatch, dtype):
     reason="native CUDA Paro kernel required (unavailable on ROCm)",
 )
 @pytest.mark.cuda
-@pytest.mark.parametrize("rows, expected", [(641, "native"), (2048, "native"), (2400, "dense")])
-def test_paro_cuda_dense_dispatch_uses_the_shape_aware_crossover(monkeypatch, rows, expected):
-    """Issue #5210: the 641-2000 row band must stay on the native kernel.
+@pytest.mark.parametrize(
+    "in_features, out_features, rows, expected",
+    [
+        # 7-8B square projection: #5210's native win at 641 rows is kept.
+        (4096, 4096, 641, "native"),
+        (4096, 4096, 1024, "native"),
+        (4096, 4096, 1536, "dense"),
+        (4096, 4096, 4096, "dense"),
+        # Small-model wide projection: #5260 flips the 1024-2047 band.
+        (896, 4864, 641, "native"),
+        (896, 4864, 1024, "dense"),
+    ],
+)
+def test_paro_cuda_dense_dispatch_uses_the_shape_aware_crossover(
+    monkeypatch, in_features, out_features, rows, expected
+):
+    """The CUDA dispatch must follow the shape-aware crossover.
 
-    The previous global 640-row threshold sent every prefill above 640 rows to
-    dequantize + cuBLAS, which is slower than the native split-K GEMM for 7-8B
-    projection shapes until the shape-dependent crossover. Pin both sides of
-    the 4096x4096 contract: 641 and 2048 rows stay native, 2400 rows use dense.
+    Issue #5210 pinned the 641-row native choice for 7-8B projections; issue
+    #5260 flipped the 1024-2047 band of small wide projections to dense.
     """
 
-    in_features, out_features, group_size = 4096, 4096, 128
+    group_size = 128
     module = _paro_module(in_features, out_features, group_size, torch.float16)
     x = torch.randn(rows, in_features, device="cuda", dtype=torch.float16)
 
@@ -1719,28 +1731,107 @@ def test_paro_cuda_dense_dispatch_uses_the_shape_aware_crossover(monkeypatch, ro
 def test_paro_dense_crossover_is_shape_aware():
     """The dense/split-K crossover must follow the projection shape.
 
-    A single global constant either regresses the 641-2000 row band on 7-8B
-    projections or delays the dense win on small ones. These values are the
-    measured crossovers on SM 12.0 (see docs/paro.md#native-prefill-dispatch),
-    rounded to the dispatch contract.
+    These are the fitted thresholds for the measured SM 8.9 crossovers (see
+    docs/paro.md#shape-aware-crossover). A global constant either regresses
+    the 641-2000 row band on 7-8B projections or delays the dense win on the
+    small wide projections.
     """
 
-    assert paro_awq_dense_min_rows(4096, 4096) == 2400
-    assert paro_awq_dense_min_rows(4096, 14336) == 2048
-    assert paro_awq_dense_min_rows(14336, 4096) == 2896
-    assert paro_awq_dense_min_rows(896, 4864) == 2048
-    assert paro_awq_dense_min_rows(4864, 896) == 4096
-    # A wider output must not lower the threshold below the 4096x4096 anchor,
-    # and a narrow output must raise it.
-    assert paro_awq_dense_min_rows(8192, 8192) == 2400
-    assert paro_awq_dense_min_rows(4864, 896) > paro_awq_dense_min_rows(896, 4864)
-    # Every 7-8B projection keeps the native kernel across the regression band
-    # and switches to dense by 3072 rows (the >2500-row dense win).
-    for shape in ((4096, 4096), (4096, 14336), (14336, 4096)):
-        threshold = paro_awq_dense_min_rows(*shape)
-        assert threshold >= 2048
-        assert all(rows < threshold for rows in (641, 768, 1024, 2000))
-        assert threshold <= 3072
+    assert paro_awq_dense_min_rows(4096, 4096) == 1342
+    assert paro_awq_dense_min_rows(4096, 14336) == 1434
+    assert paro_awq_dense_min_rows(14336, 4096) == 3072
+    assert paro_awq_dense_min_rows(896, 4864) == 916
+    assert paro_awq_dense_min_rows(2048, 8192) == 880
+    assert paro_awq_dense_min_rows(1536, 8960) == 800
+    assert paro_awq_dense_min_rows(2048, 2048) == 1537
+    assert paro_awq_dense_min_rows(4864, 896) == 3070
+    assert paro_awq_dense_min_rows(8960, 1536) == 2491
+    assert paro_awq_dense_min_rows(8192, 2048) == 2045
+    # A non-positive dimension is not a layer; return the floor.
+    assert paro_awq_dense_min_rows(0, 10) == 768
+    assert paro_awq_dense_min_rows(10, 0) == 768
+
+
+# Issue #5260 route contract: the measured winner for each sweep shape and
+# row count. The 7-8B rows pin #5210's native choice at 641 and the dense win
+# at 4096; the small wide projections pin the 1024-2047 band that #5250 had
+# left on the native kernel.
+_PARO_DENSE_ROUTE_TABLE = (
+    (896, 4864, 641, "native"),
+    (896, 4864, 1024, "dense"),
+    (896, 4864, 1536, "dense"),
+    (896, 4864, 2047, "dense"),
+    (896, 4864, 2048, "dense"),
+    (896, 4864, 3072, "dense"),
+    (896, 4864, 4096, "dense"),
+    (2048, 8192, 641, "native"),
+    (2048, 8192, 1024, "dense"),
+    (2048, 8192, 1536, "dense"),
+    (2048, 8192, 2047, "dense"),
+    (2048, 8192, 2048, "dense"),
+    (2048, 8192, 3072, "dense"),
+    (2048, 8192, 4096, "dense"),
+    (1536, 8960, 641, "native"),
+    (1536, 8960, 1024, "dense"),
+    (1536, 8960, 1536, "dense"),
+    (1536, 8960, 2047, "dense"),
+    (1536, 8960, 2048, "dense"),
+    (1536, 8960, 3072, "dense"),
+    (1536, 8960, 4096, "dense"),
+    (4096, 4096, 641, "native"),
+    (4096, 4096, 1024, "native"),
+    (4096, 4096, 1536, "dense"),
+    (4096, 4096, 2047, "dense"),
+    (4096, 4096, 2048, "dense"),
+    (4096, 4096, 3072, "dense"),
+    (4096, 4096, 4096, "dense"),
+    (4096, 14336, 641, "native"),
+    (4096, 14336, 1024, "native"),
+    (4096, 14336, 1536, "dense"),
+    (4096, 14336, 2047, "dense"),
+    (4096, 14336, 2048, "dense"),
+    (4096, 14336, 3072, "dense"),
+    (4096, 14336, 4096, "dense"),
+    (14336, 4096, 641, "native"),
+    (14336, 4096, 1024, "native"),
+    (14336, 4096, 1536, "native"),
+    (14336, 4096, 2047, "native"),
+    (14336, 4096, 2048, "native"),
+    (14336, 4096, 3072, "dense"),
+    (14336, 4096, 4096, "dense"),
+    (2048, 2048, 641, "native"),
+    (2048, 2048, 1024, "native"),
+    (2048, 2048, 1536, "native"),
+    (2048, 2048, 2047, "dense"),
+    (2048, 2048, 2048, "dense"),
+    (2048, 2048, 3072, "dense"),
+    (2048, 2048, 4096, "dense"),
+)
+
+
+@pytest.mark.parametrize("in_features, out_features, rows, expected", _PARO_DENSE_ROUTE_TABLE)
+def test_paro_dense_dispatch_route_table(in_features, out_features, rows, expected):
+    """The dispatch must pick the measured winner for each shape family."""
+
+    threshold = paro_awq_dense_min_rows(in_features, out_features)
+    route = "dense" if rows >= threshold else "native"
+    assert route == expected, (
+        f"{in_features}x{out_features} at {rows} rows: threshold {threshold} "
+        f"chose {route}, expected {expected}"
+    )
+
+
+def test_paro_dense_dispatch_keeps_the_7_8b_choice():
+    """#5260 must not undo #5210's 7-8B choice at the pinned row counts."""
+
+    for in_features, out_features in ((4096, 4096), (4096, 14336), (14336, 4096)):
+        threshold = paro_awq_dense_min_rows(in_features, out_features)
+        assert 641 < threshold, (
+            f"{in_features}x{out_features} must keep the native kernel at 641 rows"
+        )
+        assert threshold <= 4096, (
+            f"{in_features}x{out_features} must take the dense route at 4096 rows"
+        )
 
 
 @pytest.mark.skipif(
