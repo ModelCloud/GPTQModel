@@ -123,7 +123,7 @@ python -m tests.kernels.gen_compile_matrix
 | `ParoTritonLinear` | `paro_triton` | `CUDAGRAPH` | `CUDAGRAPH` | yes | no | single-layer trace is clean, but static-cache generate recompiles per step and is 1.3-8x slower than eager (#4984) |
 | `QQQLinear` | `qqq` | `EAGER` | `EAGER` | no | no | - |
 | `QQQMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
-| `QQQTorchLinear` | `qqq` | `CUDAGRAPH` | `INDUCTOR` | no | no | static-cache generate recompiles per step (172 graphs, 24-115 breaks) and is 1.3-8x slower than eager (#4984) |
+| `QQQTorchLinear` | `qqq` | `CUDAGRAPH` | `INDUCTOR` | no | yes | - |
 | `SwordfishLinear` | `swordfish` | `EAGER` | `EAGER` | no | no | - |
 | `TTBlockfloatLinear` | `tt_blockfloat` | `EAGER` | `INDUCTOR` | no | no | static-cache generate() auto-compile stays off: the portable CPU block-float decode has no measured static-cache win (#4984). |
 | `TTNNBlockFloat8Linear` | `ttnn_blockfloat` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
@@ -140,8 +140,8 @@ python -m tests.kernels.gen_compile_matrix
 | `TorchLinear` | `torch` | `EAGER` | `INDUCTOR` | yes | no | static-cache generate() auto-compile stays off: no CPU win was measured for the portable Torch decode in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
 | `TorchQuantEmbeddings` | `torch` | `EAGER` | `INDUCTOR` | no | no | static-cache generate() auto-compile stays off: no CPU win was measured for this kernel in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
 | `TritonV2Linear` | `tritonv2` | `EAGER` | `EAGER` | yes | no | static-cache generate() auto-compile stays off: no CPU win was measured for the portable Torch decode in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
-| `VPTQCudaLinear` | `vptq_cuda` | `EAGER` | `EAGER` | yes | no | no measured static-cache generate win for the portable torch path; re-measure before opting in (#4984) |
-| `VPTQLinear` | `vptq_torch` | `CUDAGRAPH` | `INDUCTOR` | yes | no | no measured static-cache generate win for the portable torch path; re-measure before opting in (#4984) |
+| `VPTQCudaLinear` | `vptq_cuda` | `EAGER` | `EAGER` | yes | no | static-cache generate recompiles the lazy op loader per step (23 graphs, 33 breaks) and decodes 1.7x slower than eager (#5102) |
+| `VPTQLinear` | `vptq_torch` | `CUDAGRAPH` | `INDUCTOR` | yes | yes | - |
 | `W4AFP8Linear` | `w4a_floatx` | `EAGER` | `EAGER` | yes | no | - |
 | `W4ANVFP4Linear` | `w4a_nvfp4` | `EAGER` | `EAGER` | yes | no | - |
 | `XLALinear` | `tt_xla` | `NOT_APPLICABLE` | `NOT_APPLICABLE` | no | no | - |
