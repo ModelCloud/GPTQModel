@@ -262,8 +262,9 @@ def test_internlm_public_dispatch_uses_definition_owned_model(tmp_path, monkeypa
 
 @pytest.mark.cpu
 @pytest.mark.parametrize("bias", [False, True])
-def test_internlm_plain_awq_quantizes_every_linear_and_reloads(tmp_path, bias):
+def test_internlm_awq_scale_search_quantizes_every_linear_and_reloads(tmp_path, bias, monkeypatch):
     from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel.looper import awq_processor
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
     model = _model(bias=bias)
@@ -271,7 +272,14 @@ def test_internlm_plain_awq_quantizes_every_linear_and_reloads(tmp_path, bias):
     _write_release_tokenizer(tmp_path)
     qcfg = AWQConfig(device="cpu", group_size=16, fallback=None)
     wrapper = GPTQModel.load(str(tmp_path), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
-    assert wrapper.awq_get_modules_for_scaling(wrapper.model.model.layers[0], {}, {}) == []
+    applied = []
+    original_apply_scale = awq_processor.apply_scale
+
+    def record_apply_scale(module, scales_list, *args, **kwargs):
+        applied.extend((source, tuple(targets)) for source, targets, _scales, _loss in scales_list)
+        return original_apply_scale(module, scales_list, *args, **kwargs)
+
+    monkeypatch.setattr(awq_processor, "apply_scale", record_apply_scale)
     calibration = [{"input_ids": torch.tensor([[4, 5, 6, 7, 8, 9, 10, 11]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
     wrapper.quantize(
@@ -279,6 +287,13 @@ def test_internlm_plain_awq_quantizes_every_linear_and_reloads(tmp_path, bias):
         backend=BACKEND.TORCH,
     )
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 14
+    # Every decoder layer searched and folded all four Llama-style scale groups.
+    assert applied == 2 * [
+        ("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),
+        ("self_attn.v_proj", ("self_attn.o_proj",)),
+        ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj")),
+        ("mlp.up_proj", ("mlp.down_proj",)),
+    ]
     with torch.inference_mode():
         expected = wrapper.model(**calibration[0], use_cache=False).logits
     assert torch.isfinite(expected).all()
