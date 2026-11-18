@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Standalone quantization-method names shared by package-init shims.
+"""Standalone quantization-method names shared by config and save warnings.
 
-Kept out of ``gptqmodel.quantization.config`` so ``gptqmodel/__init__.py`` can
-import it before the quantization package finishes initializing.
+Kept out of ``gptqmodel.quantization.config`` so it imports without the
+quantization package.
 """
 
 # GPT-QModel's packed GGUF tensors are not readable by transformers' own
 # `GgufHfQuantizer`, which owns the `gguf` name and expects a `.gguf` file.
-# Publish a non-colliding name so an HF loader fails loudly instead of
-# random-initializing every linear layer. Existing checkpoints that carry
+# Publish a non-colliding name so transformers' GGUF quantizer never claims it.
+# Existing checkpoints that carry
 # `quant_method: "gguf"` (plus `method: "gguf"`) keep loading in GPT-QModel.
 GGUF_EXPORT_QUANT_METHOD = "gptqmodel_gguf"
 
@@ -21,9 +21,9 @@ LEGACY_PARO_QUANT_METHOD = "paroquant"
 
 # Other published `quant_method` names that transformers does not implement.
 # In transformers 5.x an unknown name only emits "Unknown quantization type"
-# and returns a model whose packed weights were randomly initialized, so
-# `gptqmodel/__init__.py` registers a refusing quantizer for every entry here.
-# Keep this as one table: parallel fixes extend the same mapping.
+# and returns a model whose packed weights were randomly initialized. GPT-QModel
+# never registers into transformers, so the save path warns for every entry here
+# and these checkpoints load only through `GPTQModel.load`.
 # Values are the human-readable format labels used in the refusal message.
 REFUSED_HF_QUANT_METHODS = {
     # GPT-QModel's BitsAndBytes layout is not HF bnb's: it stores

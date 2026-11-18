@@ -720,7 +720,6 @@ def create_quant_module(
     dtype: Optional[torch.dtype] = None,
     bias_dtype: Optional[torch.dtype] = None,
     resolved_module_config: Optional[ResolvedModuleConfig] = None,
-    transfer_from: Optional[nn.Module] = None,
     install: bool = True,
 
 ):
@@ -755,10 +754,8 @@ def create_quant_module(
 
     # Transformers builds quantized models on the meta device before assigning
     # checkpoint tensors, so allow either CPU or meta here and keep the
-    # replacement layer on the device the original layer occupied. A rebuild of
-    # an already-loaded layer (`transfer_from`) legitimately sees a live device:
-    # its checkpoint tensors are moved into the replacement below.
-    if transfer_from is None and ori_layer_device.type not in {CPU.type, "meta"}:
+    # replacement layer on the device the original layer occupied.
+    if ori_layer_device.type not in {CPU.type, "meta"}:
         raise AssertionError(
             f"Expected `{name}` to reside on CPU or meta during quant module creation, "
             f"but found tensors on `{ori_layer_device}`."
@@ -881,26 +878,6 @@ def create_quant_module(
                 embedding_dtype = source_weight.dtype
         if embedding_dtype is not None:
             new_layer.set_embedding_output_dtype(embedding_dtype)
-    if transfer_from is not None:
-        # The caller already loaded the checkpoint tensors into the module this
-        # one replaces (a load started before the native bridge was installed,
-        # #4795). The replacement was constructed from the same serialized
-        # config, so every persistent tensor keeps the checkpoint's shape and
-        # only has to be copied over before the device move.
-        source_state = transfer_from.state_dict()
-        missing = sorted(set(new_layer.state_dict()) - set(source_state))
-        if missing:
-            sample = ", ".join(missing[:8])
-            raise ValueError(
-                f"Cannot rebuild `{name}` from its loaded tensors: the checkpoint "
-                f"did not assign {sample}. Load this checkpoint with `GPTQModel.load`."
-            )
-        new_layer.load_state_dict(source_state, strict=False)
-        # A freshly constructed module is in training mode; the module it
-        # replaces may not be (a completed load is in eval). The CPU int4pack
-        # kernels pick their layout from `self.training` on the first forward
-        # and latch it, so carry the replaced module's mode over (#4907).
-        new_layer.train(transfer_from.training)
     new_layer = new_layer.to(ori_layer_device)
     if install:
         install_quant_module(module, name, new_layer)
@@ -924,7 +901,6 @@ def create_quant_layer(
         init_kwargs: Optional[Dict[str, Any]] = None,
         dtype: Optional[torch.dtype] = None,
         bias_dtype: Optional[torch.dtype] = None,
-        transfer_from: Optional[Dict[str, nn.Module]] = None,
 
 ) -> Type[BaseQuantLinear]:
     if any(isinstance(module, candidate) for candidate in linear_candidates):
@@ -960,9 +936,6 @@ def create_quant_layer(
                     init_kwargs=init_kwargs,
                     dtype=dtype,
                     bias_dtype=bias_dtype,
-                    transfer_from=(
-                        transfer_from.get(name) if transfer_from is not None else None
-                    ),
                 )
             except NotImplementedError as error:
                 last_error = error
@@ -2040,25 +2013,7 @@ def simple_dispatch_model(model, device_map):
 # public/stable api exposed to transformer/optimum
 def hf_gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
                         max_input_length: Optional[int] = None):
-    # Optimum calls this after ``convert_model``. Retrying here keeps the
-    # package-init probe from caching a partially initialized ``optimum.gptq``
-    # as "Optimum not installed" (#4749).
-    from gptqmodel import _ensure_optimum_gptqmodel_load_bridge
-
-    _ensure_optimum_gptqmodel_load_bridge()
     return gptqmodel_post_init(model, use_act_order, quantize_config, max_input_length)
-
-
-# public/stable api exposed to transformers/optimum: native load bridge.
-# Re-exported here so callers can keep importing from `gptqmodel.utils.model`.
-# These names are intentionally not referenced in this module: they exist only to
-# keep the `gptqmodel.utils.model` entry point stable for transformers/optimum,
-# so the unused-import exemption is deliberate rather than dead code.
-from .hf_load import (  # noqa: E402,F401
-    HFGPTQModelLoadContext,
-    hf_gptqmodel_post_init_for_load,
-    hf_gptqmodel_prepare_model_for_load,
-)
 
 
 def _cpu_offload_writable_storage(weights_map):
