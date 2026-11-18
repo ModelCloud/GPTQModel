@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Dict, Iterable, Optional, Tuple
 
 import torch
 from safetensors import safe_open
-from safetensors.torch import save_file
 
 from ..quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
 from ..quantization.config import dynamic_get, quant_bits_width
@@ -39,6 +38,7 @@ from ..utils.planar_packing import (
     planar_unpack_cols,
     planar_unpack_rows,
 )
+from ..utils.safe import safetensors_save_file as save_file
 
 
 LOG = logging.getLogger(__name__)

@@ -96,11 +96,14 @@ bitsandbytes = [
 ]
 # ggml runtime for the GGUF_CPP kernels. llama-cpp-python 0.3.37 is the first
 # release that vendors ggml v1.0.0; the kernels load its shared
-# ggml-base/ggml-cpu/ggml-cuda libraries directly. The `gguf` package is not
-# required: gptqmodel vendors its own reader/writer in utils/internal_gguf.py.
-# NumPy stays declared here because the GGUF reader/dequantizers import it and
-# it is no longer a base requirement.
+# ggml-base/ggml-cpu/ggml-cuda libraries directly. GPT-QModel's own GGUF
+# reader/writer lives in utils/internal_gguf.py, but loading a `.gguf` file
+# goes through Transformers' GGUF integration (config, tokenizer and the dense
+# import), which needs the real `gguf` package: GPT-QModel never substitutes
+# its reader for Transformers'. NumPy stays declared here because the GGUF
+# reader/dequantizers import it and it is no longer a base requirement.
 gguf = [
+    "gguf>=0.10.0",
     "llama-cpp-python>=0.3.37",
     "numpy>=2.4.6; python_version < \"3.12\"",
     "numpy>=2.5.4; python_version >= \"3.12\"",

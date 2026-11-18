@@ -18,7 +18,6 @@ from typing import Any, Dict, List, Optional, Union
 import pcre
 import torch
 from safetensors import safe_open
-from safetensors.torch import save_file
 from transformers import PreTrainedTokenizerFast, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
 
@@ -87,6 +86,7 @@ from ..utils.model import (
     resolve_resave_format_conversion,
     streaming_state_dict_to_shards,
 )
+from ..utils.safe import safetensors_save_file as save_file
 from ..utils.structure import alias_all_from_turtle_if_meta, alias_from_turtle_for_submodule
 from ..utils.tied_weights import (
     lm_head_is_tied,
@@ -348,16 +348,11 @@ def hf_compat_warnings(
     ):
         warnings.append(
             "This AWQ checkpoint carries `dynamic` per-module overrides "
-            "(`bits`/`group_size`). A loader that does not install GPT-QModel's "
-            "native AWQ bridge builds every module from the global `bits` and "
-            "`group_size`, so the overrides are ignored: on CPU the checkpoint "
-            "loads with silently wrong logits and on CUDA the Marlin pack raises "
-            "a qzeros shape error. Transformers' own AWQ quantizer only reaches "
-            "the bridge after it has already replaced the layers, so an older "
-            "Transformers or a third-party loader still needs `import gptqmodel` "
-            "before loading. Load this checkpoint with `GPTQModel.load` (or a "
-            "Transformers version with the native AWQ bridge) to honor the "
-            "overrides."
+            "(`bits`/`group_size`). Transformers' AWQ loader builds every module "
+            "from the global `bits` and `group_size`, so the overrides are "
+            "ignored: on CPU the checkpoint loads with silently wrong logits and "
+            "on CUDA the Marlin pack raises a qzeros shape error. Load this "
+            "checkpoint with `GPTQModel.load` to honor the overrides."
         )
     if (
         getattr(quantize_config, "method", None) == METHOD.AWQ
@@ -375,9 +370,8 @@ def hf_compat_warnings(
             "Packed GGUF checkpoints are not readable by `transformers`' "
             "`GgufHfQuantizer`, which owns `quant_method: \"gguf\"` and expects a "
             "`.gguf` file. This checkpoint publishes "
-            f"`quant_method: \"{GGUF_EXPORT_QUANT_METHOD}\"` so an HF loader "
-            "refuses it instead of random-initializing every linear layer. Load "
-            "it with `GPTQModel.load`."
+            f"`quant_method: \"{GGUF_EXPORT_QUANT_METHOD}\"` so it never "
+            "collides with that name. Load it with `GPTQModel.load`."
         )
     method = getattr(quantize_config, "method", None)
     method_name = getattr(method, "value", method)
@@ -386,8 +380,8 @@ def hf_compat_warnings(
             f"`quant_method: \"{method_name}\"` is a GPT-QModel-only layout that "
             "`transformers` cannot read: `AutoModelForCausalLM.from_pretrained` "
             "only warns `Unknown quantization type` and then random-initializes "
-            "every linear layer. Importing `gptqmodel` installs a refusing "
-            "quantizer, so plain HF raises instead. Load this checkpoint with "
+            "every linear layer. GPT-QModel never patches `transformers`, so "
+            "load this checkpoint with "
             f"{refused_hf_load_remedy(method_name)}."
         )
     if _has_per_expert_quantized_modules(model):
@@ -395,11 +389,10 @@ def hf_compat_warnings(
             "This checkpoint stores per-expert quantized weights "
             "(`experts.<n>.*.qweight`). Transformers 5 builds fused 3-D expert "
             "tensors and its built-in GPTQ/AWQ loaders only replace `nn.Linear`, "
-            "so a loader without the native bridge reports every expert tensor "
+            "so those loaders report every expert tensor "
             "as MISSING/UNEXPECTED and silently random-initializes the experts "
-            "(garbage output, no error). Import `gptqmodel` before Transformers "
-            "to install the native loading bridge for both methods, or load this "
-            "checkpoint with `GPTQModel.load`."
+            "(garbage output, no error). Load this checkpoint with "
+            "`GPTQModel.load`."
         )
     return warnings
 

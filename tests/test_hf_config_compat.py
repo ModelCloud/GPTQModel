@@ -1,12 +1,10 @@
 import json
-import sys
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 from gptqmodel.utils import hf as hf_utils
-from gptqmodel.utils import internal_gguf
 from gptqmodel.utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
     get_hf_config_dtype,
@@ -15,7 +13,6 @@ from gptqmodel.utils.hf import (
     normalize_torch_dtype_kwarg,
     resolve_trust_remote_code,
 )
-from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 def test_get_hf_config_dtype_avoids_modern_deprecated_alias():
@@ -98,11 +95,9 @@ def test_normalize_model_id_or_path_for_hf_gguf_rejects_public_kwarg():
         normalize_model_id_or_path_for_hf_gguf("/tmp/fake-model", kwargs, api_name="test")
 
 
-def test_normalize_model_id_or_path_for_hf_gguf_normalizes_local_file(monkeypatch, tmp_path):
+def test_normalize_model_id_or_path_for_hf_gguf_normalizes_local_file(tmp_path):
     gguf_path = tmp_path / "bonsai.gguf"
     gguf_path.write_bytes(b"GGUF")
-
-    monkeypatch.setattr(hf_utils, "_patch_transformers_prism_gguf_compat", lambda **_kwargs: None)
 
     kwargs = {}
     model_root = normalize_model_id_or_path_for_hf_gguf(str(gguf_path), kwargs, api_name="test")
@@ -110,61 +105,6 @@ def test_normalize_model_id_or_path_for_hf_gguf_normalizes_local_file(monkeypatc
     assert model_root == str(tmp_path)
     assert kwargs[INTERNAL_HF_GGUF_FILE_KWARG] == "bonsai.gguf"
     assert get_hf_gguf_load_kwargs(kwargs) == {"gguf_file": "bonsai.gguf"}
-
-
-def test_patch_transformers_prism_gguf_compat_registers_internal_runtime(monkeypatch):
-    import transformers.modeling_gguf_pytorch_utils as gguf_utils
-    from transformers.utils import import_utils as hf_import_utils
-
-    monkeypatch.delitem(sys.modules, "gguf", raising=False)
-    monkeypatch.setattr(gguf_utils, "is_gguf_available", lambda *args, **kwargs: False)
-    monkeypatch.setattr(hf_import_utils, "is_gguf_available", lambda *args, **kwargs: False)
-    monkeypatch.setattr(hf_utils, "_transformers_has_native_prism_gguf_support", lambda: False)
-
-    hf_utils._patch_transformers_prism_gguf_compat(api_name="test")
-
-    assert sys.modules["gguf"] is internal_gguf
-    assert gguf_utils.is_gguf_available() is True
-    assert hf_import_utils.is_gguf_available() is True
-    assert gguf_utils.PRISM_Q1_0_G128_NAME == hf_utils.PRISM_Q1_0_G128_NAME
-    assert gguf_utils._dequantize_prism_q1_0_g128 is hf_utils._dequantize_prism_q1_0_g128
-
-
-def test_patch_transformers_prism_gguf_compat_wraps_load_checkpoint_for_torch_loader(monkeypatch):
-    import transformers.modeling_gguf_pytorch_utils as gguf_utils
-    from transformers.utils import import_utils as hf_import_utils
-
-    calls = {"direct": 0, "torch_dtype": None}
-
-    def _original_load_gguf_checkpoint(*args, **kwargs):
-        return {"variant": "original"}
-
-    def _direct_loader(**kwargs):
-        calls["direct"] += 1
-        calls["torch_dtype"] = kwargs["torch_dtype"]
-        return {"variant": "direct", "path": kwargs["gguf_checkpoint_path"]}
-
-    monkeypatch.delitem(sys.modules, "gguf", raising=False)
-    monkeypatch.setattr(gguf_utils, "load_gguf_checkpoint", _original_load_gguf_checkpoint)
-    monkeypatch.delattr(gguf_utils, "_GPTQMODEL_GGUF_TORCH_LOADER_PATCHED", raising=False)
-    monkeypatch.delattr(gguf_utils, "_gptqmodel_original_load_gguf_checkpoint", raising=False)
-    monkeypatch.setattr(gguf_utils, "is_gguf_available", lambda *args, **kwargs: False)
-    monkeypatch.setattr(hf_import_utils, "is_gguf_available", lambda *args, **kwargs: False)
-    monkeypatch.setattr(hf_utils, "_transformers_has_native_prism_gguf_support", lambda: False)
-    monkeypatch.setattr(hf_utils, "_load_gguf_checkpoint_torch_direct", _direct_loader)
-
-    hf_utils._patch_transformers_prism_gguf_compat(api_name="test")
-    configure_kernel(KernelConfig(gguf_torch_dequant_loader=True))
-    result = gguf_utils.load_gguf_checkpoint(
-        "bonsai.gguf",
-        return_tensors=True,
-        model_to_load=object(),
-        torch_dtype=torch.bfloat16,
-    )
-
-    assert calls["direct"] == 1
-    assert calls["torch_dtype"] is torch.bfloat16
-    assert result == {"variant": "direct", "path": "bonsai.gguf"}
 
 
 def test_local_brumby_runs_without_legacy_default_rope_init(monkeypatch):
@@ -228,5 +168,3 @@ def test_resolve_trust_remote_code_keeps_true_without_native_support(monkeypatch
 
     assert resolved is True
     assert caplog.text == ""
-
-

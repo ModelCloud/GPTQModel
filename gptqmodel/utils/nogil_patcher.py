@@ -15,12 +15,10 @@ from typing import Optional
 from packaging.version import InvalidVersion, Version
 
 from .logger import setup_logger
-from .safe import ThreadSafe
 
 
 log = setup_logger()
 
-_PATCHED_ATTR = "_gptqmodel_locked_save_file"
 _MISSING = object()
 
 TRITON_MIN_VERSION_STR = "3.5.0"
@@ -34,23 +32,8 @@ TRITON_COMPATIBLE_PKGS = (
 )
 
 
-def patch_safetensors_save_file() -> None:
-    try:
-        from safetensors import torch as safetensors_torch
-    except ImportError:
-        return
-
-    if getattr(safetensors_torch.save_file, _PATCHED_ATTR, False):
-        return
-
-    wrapper = ThreadSafe(safetensors_torch).save_file
-    setattr(wrapper, _PATCHED_ATTR, True)
-    safetensors_torch.save_file = wrapper
-
-
 __all__ = [
     "TritonPatch",
-    "patch_safetensors_save_file",
     "patch_triton_autotuner",
     "patch_triton_jit_compile",
 ]

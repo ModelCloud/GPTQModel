@@ -187,10 +187,12 @@ Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kerne
 
 ### Inference and deployment 🚢
 
-Run compatible checkpoints directly with GPT-QModel, integrate with Transformers
-(import `gptqmodel` first so packed MoE experts load through the
-[native bridge](https://github.com/ModelCloud/GPTQModel/blob/main/docs/hf-interop.md)),
-or deploy supported GPTQ/AWQ formats through vLLM and SGLang. Apple silicon has
+Load GPT-QModel checkpoints with `GPTQModel.load`. GPT-QModel never patches
+Transformers, so plain `AutoModelForCausalLM.from_pretrained` reads only what
+Transformers itself supports: no per-module `dynamic` configs, per-expert MoE
+tensors or GPT-QModel-only formats (see
+[Hugging Face interop](https://github.com/ModelCloud/GPTQModel/blob/main/docs/hf-interop.md)).
+You can also deploy supported GPTQ/AWQ formats through vLLM and SGLang. Apple silicon has
 native MLX quantization and packed inference. Optional projection fusion can
 combine supported attention and MLP operations without changing the saved format.
 
@@ -284,7 +286,9 @@ for source installs and platform setup. Install vLLM or SGLang in a separate
 environment aligned with that engine's dependency pins.
 
 The native GGUF C++ backends live in the `gguf` extra
-(`llama-cpp-python>=0.3.37`, which vendors ggml 1.0). `GGUF_CPP` reads the
+(`llama-cpp-python>=0.3.37`, which vendors ggml 1.0). The extra also installs
+the `gguf` package, which loading a `.gguf` file through Transformers' GGUF
+integration requires. `GGUF_CPP` reads the
 loaded release through `ggml_version()`; ggml 1.0 adds the `F8_E4M3` tensor
 type, which the native GGUF reader can dequantize.
 

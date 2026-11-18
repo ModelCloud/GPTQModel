@@ -60,7 +60,7 @@ _BOOL_FIELDS = (
     "rocm_llc",
 )
 
-_OPTIONAL_BOOL_FIELDS = ("torch_triton_dequant", "gguf_cpp_native_matmul", "gguf_torch_dequant_loader")
+_OPTIONAL_BOOL_FIELDS = ("torch_triton_dequant", "gguf_cpp_native_matmul")
 
 # A GGUF dequant target is a Torch execution device, not a hardware family:
 # ROCm is addressed through Torch's ``cuda`` spelling, as everywhere else.
@@ -205,14 +205,12 @@ class KernelConfig:
     # options.
     #
     # ``gguf_native_quantized_loader`` parses a checkpoint whose tensors declare
-    # one quantized layout with the native GGUF reader. ``gguf_torch_dequant_loader``
-    # makes the dense Transformers import dequantize straight to Torch instead of
-    # the reference NumPy path; ``None`` follows ``gguf_dequant_device`` (the
-    # historical default: off unless a dequant device is requested).
-    # ``gguf_dequant_device`` is the Torch device the direct conversion targets;
+    # one quantized layout with the native GGUF reader. A dense import goes
+    # through Transformers' own GGUF loader, which GPT-QModel never redirects.
+    # ``gguf_dequant_device`` is the Torch device GPT-QModel's own GGUF
+    # dequantization targets;
     # ``gguf_dequant_chunk_bytes`` bounds one NumPy-sign-only conversion chunk.
     gguf_native_quantized_loader: bool = True
-    gguf_torch_dequant_loader: Optional[bool] = None
     gguf_dequant_device: Optional[str] = None
     gguf_dequant_chunk_bytes: int = 256 * 1024 * 1024
 

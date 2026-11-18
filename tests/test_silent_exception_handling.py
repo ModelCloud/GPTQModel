@@ -38,22 +38,6 @@ def _captured_stderr(fn) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_transformers_device_map_compat_reports_upstream_api_change(monkeypatch):
-    """An upstream rename must produce a visible warning, not a silent no-op."""
-    import transformers.quantizers.quantizer_gptq as quantizer_gptq
-
-    recording = _RecordingLogger()
-    monkeypatch.setattr(gptqmodel, "log", recording)
-    monkeypatch.delattr(quantizer_gptq, "GptqHfQuantizer")
-
-    gptqmodel._patch_transformers_gptq_device_map_compat()
-
-    assert recording.warning_calls, "an upstream rename was reported at no level at all"
-    msg, exc_info = recording.warning_calls[0]
-    assert "device-map compat is inactive" in msg
-    assert exc_info is True, "the warning must carry the upstream traceback"
-
-
 class _RecordingLogger:
     """Minimal stand-in for the project logger that records call levels."""
 
@@ -79,38 +63,6 @@ def _block_imports(monkeypatch, prefix, exc_factory):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-
-
-def test_openvino_compat_stays_quiet_when_dependency_is_absent(monkeypatch):
-    """A genuinely optional dependency must not spam warnings when missing."""
-    recording = _RecordingLogger()
-    monkeypatch.setattr(gptqmodel, "log", recording)
-    _block_imports(monkeypatch, "openvino", lambda: ImportError("openvino not installed"))
-
-    gptqmodel._patch_openvino_gptqmodel_compat()
-
-    assert not recording.warning_calls, (
-        f"a missing optional dependency must not log at warning level: {recording.warning_calls}"
-    )
-    assert any("OpenVINO" in msg for msg, _ in recording.debug_calls), (
-        f"the skipped OpenVINO shim was not recorded at debug level: {recording.debug_calls}"
-    )
-
-
-def test_openvino_compat_reports_unexpected_probe_failure(monkeypatch):
-    """A broken (not merely missing) OpenVINO install must be visible."""
-    recording = _RecordingLogger()
-    monkeypatch.setattr(gptqmodel, "log", recording)
-    _block_imports(
-        monkeypatch,
-        "openvino",
-        lambda: RuntimeError("openvino native library is corrupt"),
-    )
-
-    gptqmodel._patch_openvino_gptqmodel_compat()
-
-    assert recording.warning_calls, "an unexpected OpenVINO probe failure was silently dropped"
-    assert recording.warning_calls[0][1] is True, "the warning must carry the traceback"
 
 
 def test_triton_patch_failure_is_reported_by_import_guard(monkeypatch):

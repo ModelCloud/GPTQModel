@@ -19,7 +19,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn.functional as F
-from transformers.quantizers.auto import AutoQuantizationConfig
 
 import gptqmodel.looper.paro_processor as paro_processor_module
 import gptqmodel.utils.paro as paro_utils_module
@@ -2397,42 +2396,14 @@ def test_paro_is_not_aliased_to_a_transformers_gptq_quantizer():
 
     Issue #4074 item 3: mapping `quant_method="paro"` to HF's `GPTQConfig`
     renamed the method to `gptq`, so optimum kernel selection rejected the
-    checkpoint with a FORMAT/METHOD mismatch. Issue #4090 item 2: leaving the
-    name unknown is not enough either, because transformers 5.x only warns and
-    returns a randomly initialized model. The registered quantizer must refuse
-    instead of aliasing GPTQ.
+    checkpoint with a FORMAT/METHOD mismatch. GPT-QModel never registers into
+    transformers, so transformers must not know the name at all: a Paro
+    checkpoint loads only through `GPTQModel.load`.
     """
     from transformers.quantizers import auto as hf_quant_auto
-    from transformers.quantizers.auto import AutoHfQuantizer
 
-    from gptqmodel.utils.hf_gguf_quantizer import GPTQModelGGUFHfQuantizer
-    from gptqmodel.utils.hf_refusing_quantizer import (
-        GPTQModelRefusingHfQuantizer,
-        GPTQModelRefusingQuantizationConfig,
-    )
-
-    assert (
-        hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING["paro"]
-        is GPTQModelRefusingQuantizationConfig
-    )
-    assert (
-        hf_quant_auto.AUTO_QUANTIZER_MAPPING["paro"]
-        is GPTQModelRefusingHfQuantizer
-    )
-    assert hf_quant_auto.AUTO_QUANTIZER_MAPPING["paro"] is not GPTQModelGGUFHfQuantizer
-
-    config = AutoQuantizationConfig.from_dict(
-        {
-            "quant_method": "paro",
-            "bits": 4,
-            "group_size": 128,
-            "sym": True,
-            "format": "paro",
-        }
-    )
-    assert isinstance(config, GPTQModelRefusingQuantizationConfig)
-    with pytest.raises(ValueError, match="Paro checkpoints cannot be loaded"):
-        AutoHfQuantizer.from_config(config)
+    assert "paro" not in hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING
+    assert "paro" not in hf_quant_auto.AUTO_QUANTIZER_MAPPING
 
 
 def test_paro_kernel_mapping_uses_paro_backend():

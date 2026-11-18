@@ -97,7 +97,9 @@ weight layout and is refused with an actionable error.
 ## 3. `save_pretrained()` and runtime kernel layouts
 
 `transformers`' `save_pretrained()` calls `state_dict()`, which serializes the
-live module buffers. Some kernels keep a converted runtime layout:
+live module buffers. Some kernels keep a converted runtime layout. "Checkpoint
+write" below means a GPT-QModel writer (`GPTQModel.save()` / `save_quantized()`),
+which runs inside `checkpoint_serialization()`:
 
 | Kernel | Runtime state | Save behaviour |
 | --- | --- | --- |
@@ -162,12 +164,12 @@ returns the runtime tensors. This is required because PEFT's
 `set_peft_model_state_dict` calls `model.state_dict()`, so an unconditional
 raise made *loading* an adapter fail on the default CUDA kernel.
 
-`PreTrainedModel.save_pretrained()` is wrapped once at import
-(`gptqmodel._patch_transformers_save_pretrained_runtime_layout_guard`) so it
-runs inside that scope. Without the wrapper the Transformers writer collected
-`state_dict()` on the read-only side and published the private layout with no
-error: the directory then reloaded as garbage (ExLlamaV2) or with a shape error
-(Marlin), and AUTO picks those kernels by default on CUDA.
+GPT-QModel never patches Transformers, so `PreTrainedModel.save_pretrained()`
+is not wrapped and runs outside that scope: it collects `state_dict()` on the
+read-only side. On a Marlin/ExLlamaV2 (or other runtime-layout) model it writes
+the runtime tensors without an error, and AUTO picks those kernels by default
+on CUDA. Save GPT-QModel models with `GPTQModel.save()` / `save_quantized()`,
+which never publish a runtime layout.
 
 ```mermaid
 flowchart TD
@@ -179,18 +181,18 @@ flowchart TD
     B --> G["Marlin / ExLlamaV2 hook"]
     G --> H{"runtime layout applied<br/>AND checkpoint_serialization() active"}
     H -- yes --> I["raise: checkpoint layout<br/>cannot be reconstructed"]
-    H -- "no (read-only, e.g. PEFT)" --> E
-    A --> J["PreTrainedModel.save_pretrained<br/>wrapper enters the scope"]
-    J --> G
+    H -- "no (read-only, e.g. PEFT, HF save_pretrained)" --> E
+    S["GPTQModel.save / module-replacement writer"] --> T["checkpoint_serialization()"]
+    T --> B
 ```
 
 GPT-QModel's own writers enter that scope before they collect tensors: the
-module-replacement path in `models/writer.py` wraps `module.state_dict()`, and
-the Transformers wrapper covers `PreTrainedModel.save_pretrained()`.
+module-replacement path in `models/writer.py` wraps `module.state_dict()`.
 `save_quantized()` builds a separate export shell that owns the raw checkpoint
 tensors, so it never serializes a runtime layout in the first place.
 
-A caller that bypasses both writers — `torch.save(model.state_dict())` — cannot
+A caller that bypasses GPT-QModel's writers — `torch.save(model.state_dict())`
+or HF `save_pretrained()` — cannot
 be intercepted at save time, so the payload marks itself instead: the
 `qzeros_format` buffer is written as `0` for a runtime layout, and
 `_load_from_state_dict` raises `RuntimeError` when that value reaches a module
@@ -202,8 +204,8 @@ because that is how ExLlamaV2 rebinds finalized words between matching layers.
 That marker is deliberately **not** persisted in a checkpoint.
 `PackedGroupedQuantLinear._write_state_dict_layout_marker` removes the
 persistent buffer from the destination while `checkpoint_serialization()` is
-active, so HF `save_pretrained()` writes exactly the tensor set that
-`GPTQModel.save()` writes: no `*.qzeros_format` key per quantized layer. The
+active, so a GPT-QModel checkpoint write carries no `*.qzeros_format` key per
+quantized layer. HF `save_pretrained()` runs outside that scope and keeps it. The
 tensor is still emitted for read-only `state_dict()` transports — a plain dict
 copy or a safetensors round trip within a live process — which is what keeps
 the v1/v2 label attached when `_metadata` is dropped (#4125 item 3). A
@@ -500,7 +502,8 @@ back to GPTQ.
 
 Packed GGUF is different: `transformers` owns the `gguf` name and routes it to
 `GgufHfQuantizer`, which expects a `.gguf` file. GPT-QModel publishes
-`gptqmodel_gguf` instead and registers a refusing quantizer for that name.
+`gptqmodel_gguf` instead, so plain Transformers only warns
+`Unknown quantization type` for it; load it with `GPTQModel.load`.
 FP8 is load-only. GPT-QModel no longer quantizes or exports FP8 weights and no
 longer publishes a `gptqmodel_fp8` alias, so `to_dict()` returns the plain
 `fp8` value and transformers' `FineGrainedFP8` remains the loader for the
@@ -516,16 +519,15 @@ declare `weight_scale_semantics="inverse"`; that spelling is accepted on load
 and never written. A checkpoint that still carries `quant_method: "fp8"`
 resolves to `METHOD.FP8`. The removed `gptqmodel_fp8` name is not recognized.
 
-Every other GPT-QModel-only layout (`exl3`, `qqq`, `paro`, `macaq`,
-`nf12`, `tt-blockfloat`) is registered from
-`REFUSED_HF_QUANT_METHODS` in `gptqmodel/_quant_methods.py`.
+Every other GPT-QModel-only layout (`bitsandbytes`, `exl3`, `qqq`, `paro`,
+`macaq`, `nf12`, `tt-blockfloat`) is listed in `REFUSED_HF_QUANT_METHODS` in
+`gptqmodel/_quant_methods.py`.
 
-The registration only exists after `import gptqmodel`. Plain `transformers`
-without that import does **not** raise for these names; `5.22` logs
+GPT-QModel never registers into Transformers, so nothing refuses these names
+there: Transformers logs
 `Unknown quantization type, got <name> ... skip the quantization` and then
-random-initializes every linear layer. Importing `gptqmodel` (or loading
-through `GPTQModel.load`) installs the refusing quantizer, which turns the
-same checkpoint into an actionable `ValueError`.
+random-initializes every linear layer. These checkpoints load only through
+`GPTQModel.load`.
 
 ```mermaid
 flowchart TD
@@ -537,8 +539,8 @@ flowchart TD
     C -- "METHOD.EXL3 / QQQ / PARO / MACAQ / NF12 / TT_BLOCKFLOAT" --> L["quant_method: exl3, qqq, ..."]
     D --> G["transformers get_hf_quantizer"]
     L --> G
-    G -- "gptqmodel_gguf" --> H["GPTQModelGGUFHfQuantizer.__init__<br/>raise ValueError"]
-    G -- "REFUSED_HF_QUANT_METHODS entry" --> K["GPTQModelRefusingHfQuantizer.__init__<br/>raise ValueError"]
+    G -- "gptqmodel_gguf" --> H["Unknown quantization type<br/>random weights"]
+    G -- "REFUSED_HF_QUANT_METHODS entry" --> K["Unknown quantization type<br/>random weights"]
     E --> I["AwqHfQuantizer"]
     F --> J["GptqHfQuantizer"]
     style H fill:#f8d7da,stroke:#b02a37
@@ -745,7 +747,7 @@ Notes for extension:
 | Missing `qweight` on an AWQ module | no validation, zero placeholder | clear `Missing required quantized weights` |
 | Format changed to another qzero layout | stale words copied under the new label | exact v1/v2 conversion |
 | Format changed to a different packing | stale words copied, silent garbage | `ValueError` before writing |
-| `save_pretrained()` on a Marlin/ExLlamaV2 model | runtime layout written as v1 | `RuntimeError` naming the kernel; read-only `state_dict()` still returns the runtime tensors |
+| `GPTQModel.save()` on a Marlin/ExLlamaV2 model | runtime layout written as v1 | `RuntimeError` naming the kernel; read-only `state_dict()` (including HF `save_pretrained()`) still returns the runtime tensors |
 
 ### State-dict round-trips, HF methods, and pickling (items 9-11)
 
@@ -759,8 +761,8 @@ Notes for extension:
 | State dict copied through safetensors or a plain dict | layout metadata dropped, logits drift | layout recorded in the `qzeros_format` tensor, exact |
 | `PeftModel.from_pretrained()` on a Marlin base | `RuntimeError` from `state_dict()` | adapter loads; only checkpoint writes refuse |
 | RTN `format="gemm"` config | `quant_method: gptq` with `format: gemm` | `quant_method: awq` |
-| New packed GGUF checkpoint in plain HF | `gguf` routed to `GgufHfQuantizer`, random weights | `gptqmodel_gguf` raises an actionable `ValueError` once `gptqmodel` is imported; otherwise HF only warns |
-| `exl3` / `qqq` / `paro` / `macaq` / `nf12` / `tt-blockfloat` checkpoint in plain HF | `Unknown quantization type ... skip the quantization`, random weights | refusing quantizer raises once `gptqmodel` is imported; save-time warning otherwise |
+| New packed GGUF checkpoint in plain HF | `gguf` routed to `GgufHfQuantizer`, random weights | `gptqmodel_gguf` no longer collides with `gguf`; HF only warns, save-time warning names `GPTQModel.load` |
+| `exl3` / `qqq` / `paro` / `macaq` / `nf12` / `tt-blockfloat` checkpoint in plain HF | `Unknown quantization type ... skip the quantization`, random weights | unchanged in HF (GPT-QModel registers no refusal); save-time warning names `GPTQModel.load` |
 | `torch.save(model)` after `optimize()` | `PicklingError` on the compiled bound method (FP8, EXL3 Torch, VPTQ) | round-trips; unpickled module runs eager |
 
 ### Save, Marlin, export, and mixed-bit dequantization (items 4-8)
@@ -790,7 +792,7 @@ Notes for extension:
 oracle, the Optimum inclusion parse, v1 to v2 re-save, the refusal path, the
 `save_pretrained` qzero bytes, the runtime-layout refusal hooks, the
 `load_state_dict(state_dict())` identity (Torch and Triton), the partial-load
-layout, `torch.save`/`torch.load`, and the packed-GGUF refusal. The items 4-8
+layout, and `torch.save`/`torch.load`. The items 4-8
 tests live beside their modules (`tests/test_q4_marlin.py`,
 `tests/test_model_dequant_dynamic_bits.py`, `tests/test_model_dequant_dense.py`, and the
 Marlin `g_idx` regressions). `tests/qcfg/test_config_serialization.py` pins the

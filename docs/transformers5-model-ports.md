@@ -21,8 +21,13 @@ quantizes, runs inference and trains **only** on the Transformers 5.23 ABI.
   `return_dict` tuple plumbing, no version checks or import fallbacks for
   Transformers symbols. Released configs with old field names are converted
   once at config-parse time.
-- **No global changes.** GPT-QModel never monkeypatches Transformers or
-  registers classes with `AutoConfig`/`AutoModel`. Checkpoint `auto_map`,
+- **No global changes.** GPT-QModel never patches, monkeypatches or registers
+  into Transformers or the HF ecosystem (Optimum, OpenVINO, safetensors,
+  `huggingface_hub`), not even temporarily or scoped; this includes
+  `AutoConfig`/`AutoModel` and quantizer registries. GPT-QModel checkpoints load
+  with `GPTQModel.load`; loading GPT-QModel-only features through plain
+  Transformers is unsupported. `tests/test_transformers_unpatched.py` enforces
+  it. Checkpoint `auto_map`,
   `trust_remote_code` and the safety bypass cannot replace a definition-owned
   loader. Checkpoint Python for an unsupported model still needs both
   `trust_remote_code=True` and `GPTQ_BYPASS_SAFETY_CHECKS=1`, and runs on

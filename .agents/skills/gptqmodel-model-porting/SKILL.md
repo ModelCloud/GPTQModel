@@ -57,8 +57,11 @@ GPT-QModel quantizes, runs inference and trains **only** on the Transformers
    `rope_scaling`; convert it once at config-parse time. Nothing downstream
    reads the old name.
 4. **No global changes to Transformers.** Ports never register with
-   `AutoConfig`/`AutoModel`, never monkeypatch Transformers, and never rely on
-   GPT-QModel patching it.
+   `AutoConfig`/`AutoModel`, and GPT-QModel never patches, monkeypatches or
+   registers into Transformers or the HF ecosystem (optimum, OpenVINO,
+   safetensors, huggingface_hub), not even temporarily or scoped. GPT-QModel
+   checkpoints load through `GPTQModel.load`.
+   `tests/test_transformers_unpatched.py` enforces this.
 5. **Checkpoint fidelity.** Keep the released checkpoint's state_dict keys,
    numerics and module names. A port reproducing a non-native original keeps
    that original's math; a port of a Transformers-native family must match

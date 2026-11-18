@@ -85,7 +85,6 @@ from ..utils.hf import (
     load_model_config,
     normalize_model_id_or_path_for_hf_gguf,
     normalize_torch_dtype_kwarg,
-    record_construction_dtypes,
     resolve_checkpoint_subfolder,
     resolve_trust_remote_code,
     set_hf_config_dtype,
@@ -1798,11 +1797,6 @@ def _is_broken_transformers_dynamic_module_error(exc: Exception) -> bool:
 
 
 def _hf_loader_from_pretrained_with_dynamic_module_retry(loader, model_local_path: str, **kwargs):
-    with record_construction_dtypes():
-        return _hf_loader_from_pretrained_with_dynamic_module_retry_impl(loader, model_local_path, **kwargs)
-
-
-def _hf_loader_from_pretrained_with_dynamic_module_retry_impl(loader, model_local_path: str, **kwargs):
     try:
         return loader.from_pretrained(model_local_path, **kwargs)
     except Exception as exc:

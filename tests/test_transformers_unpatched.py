@@ -1,11 +1,14 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""GPT-QModel targets Transformers 5.23+ and must not patch it for 4.x code.
+"""GPT-QModel targets Transformers 5.23+ and never patches the HF ecosystem.
 
-Importing ``gptqmodel``, loading a native model and building a package-owned
-port must leave Transformers' cache, generation, RoPE, import-utils and
-``PreTrainedModel`` APIs exactly as Transformers ships them. The check runs in
-a fresh interpreter so no other test can have imported ``gptqmodel`` first.
+Importing ``gptqmodel``, loading a native model, building a package-owned port
+and loading a GPT-QModel quantized checkpoint must leave Transformers' cache,
+generation, RoPE, import-utils, quantizer registry, GGUF integration and
+``PreTrainedModel`` APIs, plus ``torch.nn.init`` and ``safetensors.torch``,
+exactly as they ship. There is no allow-list: GPT-QModel installs no
+integration hook either. The check runs in a fresh interpreter so no other
+test can have imported ``gptqmodel`` first.
 """
 
 from __future__ import annotations
@@ -20,19 +23,25 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# GPT-QModel's own integration hooks (not Transformers 4.x compatibility):
-# ``save_pretrained`` refuses to write a checkpoint while a kernel holds a
-# runtime-only weight layout.
-_ALLOWED_INTEGRATION_PATCHES = {("PreTrainedModel", "save_pretrained")}
+# Every entry here would be a patch GPT-QModel applies to a third-party API.
+# The policy forbids them all, so the set stays empty.
+_ALLOWED_INTEGRATION_PATCHES: set[tuple[str, str]] = set()
 
 _SCRIPT = textwrap.dedent(
     r"""
     import json
     import sys
 
+    import importlib.util
+
+    import safetensors.torch as safetensors_torch
     import torch
+    import torch.nn.init as torch_init
     import transformers
     import transformers.cache_utils as cache_utils
+    import transformers.integrations.ggml as hf_ggml
+    import transformers.modeling_gguf_pytorch_utils as hf_gguf_utils
+    import transformers.quantizers.auto as quant_auto
     import transformers.generation.utils as generation_utils
     import transformers.modeling_rope_utils as rope_utils
     import transformers.utils as hf_utils
@@ -41,6 +50,8 @@ _SCRIPT = textwrap.dedent(
     from transformers import PreTrainedModel, PreTrainedConfig
     from transformers.generation import GenerationMixin
     from transformers.integrations import hub_kernels
+    from transformers.quantizers.quantizer_awq import AwqQuantizer
+    from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
 
     WATCHED = {
         "cache_utils": cache_utils,
@@ -55,7 +66,30 @@ _SCRIPT = textwrap.dedent(
         "PreTrainedModel": PreTrainedModel,
         "PreTrainedConfig": PreTrainedConfig,
         "hub_kernels": hub_kernels,
+        "quant_auto": quant_auto,
+        "quant_auto.AUTO_QUANTIZER_MAPPING": quant_auto.AUTO_QUANTIZER_MAPPING,
+        "quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING": quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING,
+        "AutoHfQuantizer": quant_auto.AutoHfQuantizer,
+        "AutoQuantizationConfig": quant_auto.AutoQuantizationConfig,
+        "GptqHfQuantizer": GptqHfQuantizer,
+        "AwqQuantizer": AwqQuantizer,
+        "modeling_gguf_pytorch_utils": hf_gguf_utils,
+        "integrations.ggml": hf_ggml,
+        "torch.nn.init": torch_init,
+        "safetensors.torch": safetensors_torch,
     }
+    # Optional HF-ecosystem loaders GPT-QModel used to bridge into.
+    for _label, _name in (("optimum.gptq", "optimum.gptq"), ("openvino.gptq", "openvino.frontend.pytorch.gptq")):
+        try:
+            if importlib.util.find_spec(_name) is not None:
+                import importlib
+
+                _module = importlib.import_module(_name)
+                WATCHED[_label] = _module
+                if hasattr(_module, "GPTQQuantizer"):
+                    WATCHED[_label + ".GPTQQuantizer"] = _module.GPTQQuantizer
+        except Exception:
+            pass
 
     import types
 
@@ -102,6 +136,23 @@ _SCRIPT = textwrap.dedent(
 
     after_load = snapshot()
 
+    from gptqmodel import BACKEND
+
+    quantized = GPTQModel.load(
+        sys.argv[2], backend=BACKEND.GPTQ_TORCH, device="cpu", dtype=torch.float16,
+        local_files_only=True,
+    )
+    with torch.inference_mode():
+        quantized.model(torch.tensor([[1, 2, 3]]))
+
+    # GGUF path resolution is where Transformers' GGUF loader used to be
+    # redirected; it must only resolve the file.
+    from gptqmodel.utils.hf import normalize_model_id_or_path_for_hf_gguf
+
+    normalize_model_id_or_path_for_hf_gguf(sys.argv[3], {}, api_name="probe")
+
+    after_quantized = snapshot()
+
     def diff(a, b):
         changed = {}
         for label in a:
@@ -117,6 +168,7 @@ _SCRIPT = textwrap.dedent(
     print(json.dumps({
         "import": diff(before, after_import),
         "load": diff(before, after_load),
+        "quantized": diff(before, after_quantized),
         "legacy": {
             "DynamicCache.from_legacy_cache": hasattr(cache_utils.DynamicCache, "from_legacy_cache"),
             "DynamicCache.to_legacy_cache": hasattr(cache_utils.DynamicCache, "to_legacy_cache"),
@@ -132,6 +184,13 @@ _SCRIPT = textwrap.dedent(
             "PreTrainedModel.get_head_mask": hasattr(PreTrainedModel, "get_head_mask"),
             "sys.modules.causal_conv1d": "causal_conv1d" in sys.modules
             and sys.modules["causal_conv1d"].__name__.startswith("gptqmodel"),
+            # GPT-QModel's GGUF reader must never pose as the `gguf` package.
+            "sys.modules.gguf": "gguf" in sys.modules
+            and getattr(sys.modules["gguf"], "__name__", "").startswith("gptqmodel"),
+            "quant_auto.gptqmodel_entries": sorted(
+                name for name, cls in quant_auto.AUTO_QUANTIZER_MAPPING.items()
+                if getattr(cls, "__module__", "").startswith("gptqmodel")
+            ),
         },
     }))
     """
@@ -152,18 +211,25 @@ def _write_native_checkpoint(path: Path) -> None:
 
 
 def test_gptqmodel_leaves_transformers_unpatched(tmp_path):
+    from tests.test_checkpoint_interop_4053 import _build_gptq_v1_checkpoint
+
     model_dir = tmp_path / "llama"
     _write_native_checkpoint(model_dir)
+    quantized_dir = tmp_path / "gptq"
+    _build_gptq_v1_checkpoint(str(quantized_dir))
+    gguf_file = tmp_path / "probe" / "probe.gguf"
+    gguf_file.parent.mkdir()
+    gguf_file.write_bytes(b"GGUF")
 
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(_REPO_ROOT), env.get("PYTHONPATH")]))
     result = subprocess.run(
-        [sys.executable, "-c", _SCRIPT, str(model_dir)],
+        [sys.executable, "-c", _SCRIPT, str(model_dir), str(quantized_dir), str(gguf_file)],
         capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=500,
     )
     assert result.returncode == 0, result.stderr[-4000:]
     report = json.loads(result.stdout.strip().splitlines()[-1])
-    for phase in ("import", "load"):
+    for phase in ("import", "load", "quantized"):
         for label, change in list(report[phase].items()):
             change["replaced"] = [
                 name for name in change["replaced"]
@@ -174,5 +240,8 @@ def test_gptqmodel_leaves_transformers_unpatched(tmp_path):
 
     assert report["import"] == {}, f"`import gptqmodel` patched Transformers: {report['import']}"
     assert report["load"] == {}, f"native/port model use patched Transformers: {report['load']}"
+    assert report["quantized"] == {}, (
+        f"GPTQModel.load of a quantized checkpoint patched the HF ecosystem: {report['quantized']}"
+    )
     # None of these exist in Transformers 5.23; GPT-QModel must not recreate them.
     assert not any(report["legacy"].values()), report["legacy"]

@@ -115,11 +115,11 @@ modeling file subclasses the checkpoint's own causal-LM class; a fixed Llama
 base class only works for Llama. The class comes from the live model, with the
 declared `model_type` as the fallback for wrappers and subclasses.
 
-The quantization config records the shipped modeling file. The HF
-refusing-quantizer guard, which stops silent random-init loads of packed
-formats that transformers cannot read, therefore lets this documented
-`auto_map` path through. A `tt-blockfloat` config with no shipped loader still
-fails closed.
+The quantization config records the shipped modeling file. Transformers has no
+`tt-blockfloat` quantizer, so it only warns `Unknown quantization type`, and the
+`auto_map` modeling file reads the packed state. GPT-QModel registers no
+refusing quantizer: a `tt-blockfloat` config with no shipped loader loads with
+random weights in plain Transformers; use `GPTQModel.load`.
 
 ```mermaid
 flowchart TD
