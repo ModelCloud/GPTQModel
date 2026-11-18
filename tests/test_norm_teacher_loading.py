@@ -7,11 +7,13 @@ import json
 import pytest
 import torch
 from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
+from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 
 from gptqmodel import CalibrationConfig, GPTQModel, NormConfig
 from gptqmodel.models.ports.internlm.configuration_internlm import InternLMConfig
 from gptqmodel.models.ports.internlm.modeling_internlm import InternLMForCausalLM
+from gptqmodel.models.ports.native.gpt2.configuration_gpt2 import GPT2Config
+from gptqmodel.models.ports.native.gpt2.modeling_gpt2 import GPT2LMHeadModel
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import FORMAT, QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
@@ -72,6 +74,7 @@ def student(path, *, trust=False, dtype=torch.float16):
 
 
 def dense_teacher(path, family):
+    # "native" is a Transformers-native family; the GPT-2 definition loads its vendored 5.23 classes.
     torch.manual_seed(230)
     if family == "owned":
         config = InternLMConfig(vocab_size=64, hidden_size=32, intermediate_size=64,
