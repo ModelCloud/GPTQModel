@@ -51,7 +51,7 @@ class FlashMTPDecoder(nn.Module):
     """Ordinary residual decoder, with exactly the checkpoint's MTP leaves."""
     def __init__(self, config, layer_idx):
         super().__init__()
-        from transformers.models.glm5_next.modeling_glm5_next import (
+        from gptqmodel.models.ports.native.glm5_next.modeling_glm5_next import (
             Glm5NextTextAttention,
             Glm5NextTextMoE,
             Glm5NextTextRMSNorm,
@@ -91,7 +91,7 @@ class GlmFlashMTP(nn.Module):
 
 @torch.inference_mode()
 def load_mtp(source, device="cuda:0", *, include_experts=False):
-    from transformers.models.glm5_next.modeling_glm5_next import Glm5NextTextRMSNorm
+    from gptqmodel.models.ports.native.glm5_next.modeling_glm5_next import Glm5NextTextRMSNorm
     config = copy.deepcopy(source.native_config())
     layer = config.num_hidden_layers
     if config.num_nextn_predict_layers != 1:

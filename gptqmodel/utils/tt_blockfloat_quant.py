@@ -1938,16 +1938,17 @@ def _modeling_base(model) -> "tuple[str, str]":
     names an importable architecture.
     """
 
-    cls = type(model)
-    if cls.__module__.startswith("transformers."):
-        return cls.__module__, cls.__name__
+    from ..models.ports.native.auto import causal_lm_class_name
 
-    from transformers.models.auto.modeling_auto import (
-        MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
-    )
+    # The exported file is read by plain Transformers (an external runtime), so
+    # it names the top-level ``transformers.<Class>`` that the vendored 5.23
+    # class copies; GPT-QModel itself never imports it.
+    cls = type(model)
+    if cls.__module__.startswith(("transformers.", "gptqmodel.models.ports.native.")):
+        return "transformers", cls.__name__
 
     model_type = getattr(getattr(model, "config", None), "model_type", None)
-    class_name = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.get(model_type)
+    class_name = causal_lm_class_name(model_type)
     if class_name is None:
         raise ValueError(
             f"{cls.__name__} (model_type={model_type!r}) has no known "
@@ -2309,10 +2310,7 @@ def build_blockfloat_model(
     ``from_pretrained``; pass ``torch.float32`` to force upcasting.
     """
 
-    import transformers
-    from transformers import AutoConfig
-    from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
-
+    from ..models.ports.native.auto import MODEL_FOR_CAUSAL_LM_MAPPING, NativeConfig
     from ..nn_modules.qlinear.tt_blockfloat import swap_blockfloat_modules
 
     # Read the index first: a directory with no standard HF weight files is not a
@@ -2321,7 +2319,7 @@ def build_blockfloat_model(
     if not state:
         raise ValueError(f"{checkpoint_dir} has no tensors in its index")
 
-    config = AutoConfig.from_pretrained(checkpoint_dir)
+    config = NativeConfig.from_pretrained(checkpoint_dir)
     dtype = resolve_blockfloat_dtype(dtype, config)
     quantization_config = getattr(config, "quantization_config", None) or {}
     if not isinstance(quantization_config, dict):
@@ -2333,10 +2331,10 @@ def build_blockfloat_model(
             f"{checkpoint_dir} has no block-float tensors; it is a dense checkpoint"
         )
 
-    # Build through the concrete class rather than ``AutoModelForCausalLM`` so a
-    # checkpoint's own ``auto_map`` cannot make this path import remote code.
-    class_name = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.get(config.model_type)
-    if class_name is None:
+    # Build through the vendored concrete class so a checkpoint's own
+    # ``auto_map`` cannot make this path import remote code.
+    model_class = MODEL_FOR_CAUSAL_LM_MAPPING.get(config.model_type)
+    if model_class is None:
         raise ValueError(
             f"{checkpoint_dir} has unsupported model_type `{config.model_type}`"
         )
@@ -2348,7 +2346,7 @@ def build_blockfloat_model(
     from ..models.loader import model_load_lock
 
     with model_load_lock():
-        model = getattr(transformers, class_name)._from_config(config)
+        model = model_class._from_config(config)
     _cast_model_dtype(model, dtype)
     _sync_config_dtype(model.config, dtype)
 

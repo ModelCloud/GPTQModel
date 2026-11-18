@@ -21,7 +21,6 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import PreTrainedTokenizerFast, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
-from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
 from .._quant_methods import REFUSED_HF_QUANT_METHODS, refused_hf_load_remedy
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
@@ -92,6 +91,7 @@ from ..utils.tied_weights import (
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
 from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE, EXPERT_INDEX_PLACEHOLDER
+from .ports.native.auto import get_tokenizer_config
 
 
 log = setup_logger()

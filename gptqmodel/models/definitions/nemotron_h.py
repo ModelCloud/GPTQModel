@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModelForCausalLM
-
 from ..base import BaseQModel
 from ..local import LocalModelLoader
 
@@ -12,7 +10,7 @@ from ..local import LocalModelLoader
 class _NativeLoader(LocalModelLoader):
     def __get__(self, instance, owner):
         # Puzzle and Omni own different architectures and their own migration.
-        return self if owner is NemotronHQModel else AutoModelForCausalLM
+        return self if owner is NemotronHQModel else BaseQModel.loader
 
 
 class _LegacySiblingPolicy:

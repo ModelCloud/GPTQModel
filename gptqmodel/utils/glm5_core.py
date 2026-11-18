@@ -142,7 +142,7 @@ class GlmBF16Source:
         return value.get_dtype(), value.get_shape()
 
     def native_config(self):
-        from transformers.models.glm_moe_dsa.configuration_glm_moe_dsa import GlmMoeDsaConfig
+        from gptqmodel.models.ports.native.glm_moe_dsa.configuration_glm_moe_dsa import GlmMoeDsaConfig
         config = GlmMoeDsaConfig.from_dict(self.config)
         config._attn_implementation = "sdpa"
         config._experts_implementation = "eager"
@@ -194,7 +194,7 @@ class GlmBF16Source:
 
     @torch.no_grad()
     def load_block(self, layer, device="cuda:0", *, include_experts=False):
-        from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaDecoderLayer
+        from gptqmodel.models.ports.native.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaDecoderLayer
         config = self.native_config()
         if isinstance(layer, bool) or not isinstance(layer, int) or not 0 <= layer < config.num_hidden_layers:
             raise ValueError("layer outside native GLM target schedule")
@@ -246,7 +246,7 @@ class GlmBF16Source:
         return block
 
     def rotary(self, device="cuda:0"):
-        from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaRotaryEmbedding
+        from gptqmodel.models.ports.native.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaRotaryEmbedding
         return GlmMoeDsaRotaryEmbedding(self.native_config()).to(device)
 
 

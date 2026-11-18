@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModelForCausalLM
-
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
 from ..local import LocalModelLoader
@@ -13,7 +11,7 @@ from ..local import LocalModelLoader
 class _LlamaAliasLoader(LocalModelLoader):
     def __get__(self, instance, owner):
         # Other definitions inherit this module tree, not this alias allowlist.
-        return self if owner is LlamaQModel else AutoModelForCausalLM
+        return self if owner is LlamaQModel else BaseQModel.loader
 
 
 class LlamaQModel(BaseQModel):

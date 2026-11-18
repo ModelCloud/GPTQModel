@@ -1005,11 +1005,13 @@ class ParoProcessor(LoopProcessor):
 
     @staticmethod
     def _can_cache_rotary_position_embeddings(rotary: Optional[nn.Module]) -> bool:
-        """Allow memoized rotary embeddings only for known HF rotary classes that depend on ids, device, and dtype."""
+        """Allow memoized rotary embeddings only for Transformers 5.23 rotary classes (vendored copies) that depend on ids, device, and dtype."""
         if rotary is None:
             return False
         rotary_type = type(rotary)
-        return rotary_type.__module__.startswith("transformers.models.") and rotary_type.__name__.endswith("RotaryEmbedding")
+        return rotary_type.__module__.startswith(
+            ("gptqmodel.models.ports.native.", "transformers.models.")
+        ) and rotary_type.__name__.endswith("RotaryEmbedding")
 
     def _cached_group_position_ids(
         self,

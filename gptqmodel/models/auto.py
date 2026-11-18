@@ -49,7 +49,7 @@ from typing import Any, Dict, List, Optional, Union  # noqa: E402
 
 import torch  # noqa: E402
 from packaging.version import Version  # noqa: E402
-from transformers import AutoConfig, PreTrainedTokenizerBase  # noqa: E402
+from transformers import PreTrainedConfig, PreTrainedTokenizerBase  # noqa: E402
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
@@ -506,7 +506,7 @@ def _unsupported_quantization_metadata(quantization_config: dict):
     return find_unsupported_metadata(quantization_config)
 
 
-def _is_supported_quantization_config(config: AutoConfig) -> bool:
+def _is_supported_quantization_config(config: PreTrainedConfig) -> bool:
     quantization_config = getattr(config, "quantization_config", None)
     if not isinstance(quantization_config, dict):
         return False

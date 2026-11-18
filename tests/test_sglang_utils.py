@@ -49,11 +49,8 @@ def test_engine_aliases_dtype_device_and_config_reuse(fake_sglang, monkeypatch):
     monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
     config = object()
     monkeypatch.setattr(
-        sglang_utils,
-        "AutoConfig",
-        SimpleNamespace(
-            from_pretrained=lambda *_args, **_kwargs: pytest.fail("config was reloaded")
-        ),
+        "gptqmodel.utils.hf.load_model_config",
+        lambda *_args, **_kwargs: pytest.fail("config was reloaded"),
     )
 
     runtime, returned_config = sglang_utils.load_model_by_sglang(
@@ -96,11 +93,7 @@ def test_legacy_runtime_is_selected_when_engine_is_absent(monkeypatch):
     )
     monkeypatch.setattr(sglang_utils, "SGLANG_AVAILABLE", True)
     monkeypatch.setattr(sglang_utils, "sgl", fake)
-    monkeypatch.setattr(
-        sglang_utils,
-        "AutoConfig",
-        SimpleNamespace(from_pretrained=lambda *_a, **_k: "config"),
-    )
+    monkeypatch.setattr("gptqmodel.utils.hf.load_model_config", lambda *_a, **_k: "config")
 
     runtime, config = sglang_utils.load_model_by_sglang(
         "model", trust_remote_code=False

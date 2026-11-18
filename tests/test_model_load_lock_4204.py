@@ -21,7 +21,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-import transformers
 
 from gptqmodel.models import loader as loader_module
 from gptqmodel.models.base import BaseQModel
@@ -151,9 +150,9 @@ def test_tt_blockfloat_from_config_enters_model_load_lock(tmp_path, monkeypatch)
         observed.append(lock.held())
         raise _Stop
 
-    monkeypatch.setattr(
-        transformers.LlamaForCausalLM, "_from_config", classmethod(_fake_from_config)
-    )
+    from gptqmodel.models.ports.native.llama.modeling_llama import LlamaForCausalLM
+
+    monkeypatch.setattr(LlamaForCausalLM, "_from_config", classmethod(_fake_from_config))
 
     with pytest.raises(_Stop):
         tt_module.build_blockfloat_model(str(checkpoint), dtype=torch.float32)

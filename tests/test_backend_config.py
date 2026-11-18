@@ -160,7 +160,7 @@ def test_public_entry_points_forward_typed_selection(monkeypatch, tmp_path, entr
     monkeypatch.setattr(auto, "native_floatx_source_format", lambda *args, **kwargs: None)
     monkeypatch.setattr(auto, "_kick_quantize_prewarms", lambda *args, **kwargs: None)
     monkeypatch.setattr(auto, "_prebuild_device_thread_pool", lambda *args, **kwargs: None)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: SimpleNamespace())
+    monkeypatch.setattr("transformers.AutoConfig.from_pretrained", lambda *args, **kwargs: SimpleNamespace())
     monkeypatch.setattr(auto, "_is_supported_quantization_config", lambda *args: entry != "from_pretrained")
     kwargs = {"backend": MarlinConfig(fp32=False)}
     if entry == "from_pretrained":
