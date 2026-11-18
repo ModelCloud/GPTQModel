@@ -58,3 +58,35 @@ def test_loaders_reject_native_transformers_configs():
 
     with pytest.raises(TypeError, match="not a vendored GPT-QModel config"):
         auto.NativeForCausalLM._from_config(Qwen2Config(num_hidden_layers=1))
+
+
+def _tiny_dots3_note_config():
+    spec = json.loads((
+        __import__("pathlib").Path(__file__).resolve().parent / "fixtures" / "ports" / "native_parity" / "dots3_note.json"
+    ).read_text())
+    return auto.CONFIG_MAPPING["dots3_note"].from_dict(dict(spec["config"]))
+
+
+def test_composite_config_builds_text_task_class_from_text_config(tmp_path):
+    """Like Transformers' auto factory, a task class declared on ``text_config``
+    is built from the composite config's text sub-config (with its quantization config)."""
+
+    config = _tiny_dots3_note_config()
+    config.quantization_config = {"quant_method": "gptq", "bits": 4}
+    model = auto.NativeForCausalLM._from_config(config)
+    assert type(model).__name__ == "Dots3NoteForCausalLM" and _is_vendored(type(model))
+    assert type(model.config) is type(config.text_config)
+    assert model.config.quantization_config == {"quant_method": "gptq", "bits": 4}
+
+    del model.config.quantization_config
+    model.save_pretrained(tmp_path)
+    reloaded = auto.NativeForCausalLM.from_pretrained(tmp_path, config=_tiny_dots3_note_config())
+    assert type(reloaded.config) is type(config.text_config)
+    assert list(reloaded.state_dict()) == list(model.state_dict())
+
+
+def test_composite_task_class_keeps_the_composite_config():
+    config = _tiny_dots3_note_config()
+    model_class = auto.NativeModel._model_class(config)
+    assert model_class.config_class is type(config)
+    assert auto.NativeModel._task_config(model_class, config) is config

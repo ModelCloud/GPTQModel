@@ -191,13 +191,34 @@ class _NativeModel:
         _require_vendored_config(config)
         return _resolve(cls._table, config.model_type, cls._kind)
 
+    @staticmethod
+    def _task_config(model_class, config):
+        """Build from ``config.text_config`` when the task class is declared on it.
+
+        Mirrors Transformers' auto factory: a composite checkpoint whose task
+        class (for example a text-only causal LM) takes the text sub-config is
+        built from that sub-config, carrying the parent's quantization config.
+        """
+
+        text_config_class = config.sub_configs.get("text_config", None)
+        if text_config_class is None or getattr(model_class, "config_class", None) != text_config_class:
+            return config
+        parent_config = config
+        config = config.get_text_config()
+        parent_quant = getattr(parent_config, "quantization_config", None)
+        if parent_quant is not None:
+            config.quantization_config = parent_quant
+        return config
+
     @classmethod
     def _from_config(cls, config, **kwargs):
-        return cls._model_class(config)._from_config(config, **kwargs)
+        model_class = cls._model_class(config)
+        return model_class._from_config(cls._task_config(model_class, config), **kwargs)
 
     @classmethod
     def from_pretrained(cls, model_id_or_path, *, config, **kwargs):
-        return cls._model_class(config).from_pretrained(model_id_or_path, config=config, **kwargs)
+        model_class = cls._model_class(config)
+        return model_class.from_pretrained(model_id_or_path, config=cls._task_config(model_class, config), **kwargs)
 
 
 class NativeModel(_NativeModel):
