@@ -1198,6 +1198,49 @@ def _normalize_legacy_tied_weights_keys(model: PreTrainedModel) -> None:
             submodule._tied_weights_keys = {}
 
 
+def _install_rope_init_precedence_compat(rope_utils: Any) -> None:
+    """Keep a model's own default RoPE initializer ahead of the remote shim.
+
+    Legacy ``trust_remote_code`` modules index
+    ``ROPE_INIT_FUNCTIONS["default"]`` directly, so the compat entry installed
+    above has to stay in the global table. transformers 5.x builds its
+    ``_init_weights`` lookup as
+    ``{"default": module.compute_default_rope_parameters, **ROPE_INIT_FUNCTIONS}``,
+    so that global entry used to replace every native family's own
+    initializer: ``import gptqmodel`` changed ERNIE-4.5-VL's pre-rotated h/w
+    RoPE layout and its logits (#5226). Wrap ``_init_weights`` so a
+    module-owned initializer wins for that module, while modules that rely on
+    the shim still get it.
+    """
+
+    try:
+        from transformers.modeling_utils import PreTrainedModel
+    except Exception:
+        log.debug("RoPE init precedence compat skipped: PreTrainedModel unavailable", exc_info=True)
+        return
+
+    original = PreTrainedModel._init_weights
+    if getattr(original, "_gptqmodel_rope_precedence", False):
+        return
+
+    def _init_weights_with_rope_precedence(self, module):
+        if hasattr(module, "original_inv_freq") and "RotaryEmbedding" in module.__class__.__name__:
+            own = getattr(module, "compute_default_rope_parameters", None)
+            table = getattr(rope_utils, "ROPE_INIT_FUNCTIONS", None)
+            if own is not None and isinstance(table, dict) and "default" in table:
+                with _MONKEY_PATCH_LOCK:
+                    installed = table.pop("default")
+                    try:
+                        return original(self, module)
+                    finally:
+                        table["default"] = installed
+        return original(self, module)
+
+    _init_weights_with_rope_precedence._gptqmodel_rope_precedence = True
+    with _MONKEY_PATCH_LOCK:
+        PreTrainedModel._init_weights = _init_weights_with_rope_precedence
+
+
 # Bridge a few transformers 5.x API changes so older trust_remote_code model
 # files still import and initialize without editing the cached remote source.
 def _patch_transformers_remote_code_compat() -> None:
@@ -1318,6 +1361,11 @@ def _patch_transformers_remote_code_compat() -> None:
                 return inv_freq, attention_factor
 
             rope_utils.ROPE_INIT_FUNCTIONS["default"] = _compute_default_rope_parameters_compat
+
+        if rope_utils is not None:
+            # Keep the shim available for legacy remote code without letting it
+            # replace a native family's own initializer (#5226).
+            _install_rope_init_precedence_compat(rope_utils)
 
         if cache_utils is not None and not hasattr(cache_utils, "SlidingWindowCache") and hasattr(cache_utils, "StaticCache"):
             # transformers 5.x folds sliding-window behavior into StaticCache
