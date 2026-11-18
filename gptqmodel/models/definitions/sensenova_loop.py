@@ -3,10 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from ..looped_capture import LoopedLayerCaptureMixin
 from .qwen3_5 import Qwen3_5QModel
 
 
-class SenseNovaLoopQModel(Qwen3_5QModel):
+class SenseNovaLoopQModel(LoopedLayerCaptureMixin, Qwen3_5QModel):
     """GPTQ definition for OpenSenseNova's SenseNova-Loop decoder.
 
     `sensenova/SenseNova-Loop-9B` declares `model_type = "sensenova_loop"` and
@@ -22,7 +23,11 @@ class SenseNovaLoopQModel(Qwen3_5QModel):
       executes physical layers 4..27 twice and reuses the *same* physical layer
       objects for both visits. One quantized copy per physical layer is
       therefore correct, and the calibration Hessian accumulates over both
-      visits. The looper already supports looped decoders.
+      visits. The default capture aborts the forward at the first layer, so it
+      would only ever see a layer's first visit and the post-loop layers would
+      be calibrated on one-loop inputs; this definition therefore opts into
+      `LoopedLayerCaptureMixin`, which runs one full forward per sample and
+      replays every invocation of the layer being quantized.
     * **mHC residual-stream routers.** `mhc = {start: 4, end: 28, streams: 2}`
       gives every layer in 4..27 an `mhc_attn` / `mhc_ffn` `MHCRouter`. These
       are not `nn.Linear`: each holds a raw FP32 `weight` (`[2*streams +
