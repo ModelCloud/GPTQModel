@@ -514,7 +514,12 @@ production layouts GPT-QModel consumes:
 Legacy GPT-QModel checkpoints that store an inverse scale still load when they
 declare `weight_scale_semantics="inverse"`; that spelling is accepted on load
 and never written. A checkpoint that still carries `quant_method: "fp8"`
-resolves to `METHOD.FP8`. The removed `gptqmodel_fp8` name is not recognized.
+resolves to `METHOD.FP8`. The legacy `gptqmodel_fp8` name is also accepted on
+load and normalized to `METHOD.FP8`; it is never written again. Importing
+`gptqmodel` registers a refusing quantizer for `gptqmodel_fp8` and refuses
+the standard `fp8` name when the config declares `weight_scale_semantics:
+"inverse"`, because `FineGrainedFP8` would multiply the inverse scale. Both
+raise the same actionable "load with `GPTQModel.load`" error.
 
 Every other GPT-QModel-only layout (`exl3`, `qqq`, `paro`, `macaq`,
 `nf12`, `tt-blockfloat`) is registered from
@@ -550,8 +555,8 @@ flowchart TD
 Already-published GGUF checkpoints keep `quant_method: "gguf"` (plus
 `method: "gguf"`) and still load through `GPTQModel.load`; `gguf` remains
 accepted by `_normalize_quant_method`. An FP8 checkpoint that carries
-`quant_method: "fp8"` resolves to `METHOD.FP8`; the removed `gptqmodel_fp8`
-spelling is rejected. `hf_compat_warnings` warns at save time that a packed
+`quant_method: "fp8"` resolves to `METHOD.FP8`; the legacy `gptqmodel_fp8`
+spelling is accepted on load and normalized to `METHOD.FP8`. `hf_compat_warnings` warns at save time that a packed
 GGUF checkpoint is not loadable by plain Transformers, and emits the same
 save-time warning for every method in `REFUSED_HF_QUANT_METHODS`.
 

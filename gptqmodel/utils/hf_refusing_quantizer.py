@@ -35,14 +35,23 @@ class GPTQModelRefusingQuantizationConfig(QuantizationConfigMixin):
         return cls(**config_dict)
 
 
-def refusal_message(method) -> str:
-    """The actionable error for a checkpoint transformers cannot read."""
+def refusal_message(method, *, label: str | None = None, detail: str | None = None) -> str:
+    """The actionable error for a checkpoint transformers cannot read.
 
-    label = REFUSED_HF_QUANT_METHODS.get(method, method)
+    ``label`` overrides the human-readable format name for a method that is
+    not itself in ``REFUSED_HF_QUANT_METHODS`` (the standard ``fp8`` name is
+    owned by transformers and only refused for GPT-QModel's inverse layout).
+    ``detail`` appends an extra config marker (for example
+    ``weight_scale_semantics: 'inverse'``) so the refusal names why the
+    standard ``fp8`` method is still a GPT-QModel-only layout.
+    """
+
+    label = label or REFUSED_HF_QUANT_METHODS.get(method, method)
+    marker = f", {detail}" if detail else ""
     return (
         f"GPT-QModel {label} checkpoints cannot be loaded by `transformers`; "
         f"load them with {refused_hf_load_remedy(method)}. "
-        f"(quant_method: {method!r})"
+        f"(quant_method: {method!r}{marker})"
     )
 
 

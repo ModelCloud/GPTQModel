@@ -28,6 +28,7 @@ from packaging import version
 
 from .._quant_methods import (
     GGUF_EXPORT_QUANT_METHOD,
+    LEGACY_FP8_QUANT_METHOD,
     LEGACY_PARO_QUANT_METHOD,
 )
 from ..adapter.adapter import Lora, normalize_adapter
@@ -4185,6 +4186,10 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
         value = value.lower()
         if value == LEGACY_PARO_QUANT_METHOD:
             return METHOD.PARO
+        if value == LEGACY_FP8_QUANT_METHOD:
+            # Checkpoints written between #5181 and #5242 publish this alias.
+            # It is read-only compatibility: exports always write `fp8`.
+            return METHOD.FP8
         if value == FORMAT.MARLIN:
             return METHOD.GPTQ
         if value == FORMAT.BITBLAS:
