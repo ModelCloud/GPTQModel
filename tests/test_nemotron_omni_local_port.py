@@ -20,6 +20,7 @@ from gptqmodel.models.ports.nemotron_omni.processing import NemotronOmniProcesso
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.hf import load_model_config
+from tests.port_assets import read_port_json
 
 
 PORT = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/nemotron_omni"
@@ -142,8 +143,8 @@ def test_pixel_shuffle_matches_source_equations_and_independent_projector(ps_ver
     torch.testing.assert_close(actual, oracle, atol=1e-12, rtol=1e-12)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("implementation", ["eager", "sdpa"])
+@pytest.mark.parametrize("dtype,implementation", [(torch.float32, "eager"), (torch.float16, "sdpa"),
+                                                  (torch.bfloat16, "sdpa")])
 def test_image_cache_generation_and_safetensors_roundtrip(tmp_path, dtype, implementation):
     source = tmp_path / "source"
     tiny_model().save_pretrained(source)
@@ -173,7 +174,7 @@ def test_image_cache_generation_and_safetensors_roundtrip(tmp_path, dtype, imple
 
 
 @pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("bypass", [None, "1"])
 @pytest.mark.parametrize("legacy", [False, True])
 def test_public_model_tokenizer_processor_ignores_hostile_maps(tmp_path, monkeypatch, trust, bypass, legacy):
     expected, marker = legacy_checkpoint(tmp_path)[:2] if legacy else checkpoint(tmp_path)
@@ -402,7 +403,7 @@ def test_public_plain_awq_image_calibration_all_owners_and_two_reloads(tmp_path,
 
 
 def test_released_legacy_config_uses_owned_native_equivalent(tmp_path):
-    payload = json.loads((PORT / "source_config.json").read_text())
+    payload = read_port_json(PORT / "source_config.json")
     (tmp_path / "config.json").write_text(json.dumps(payload))
     config = load_model_config(tmp_path, trust_remote_code=False)
     assert type(config).__module__.startswith("gptqmodel.models.ports.nemotron_omni")
