@@ -304,3 +304,24 @@ def test_public_checkpoint_load_uses_packaged_model_and_diffusion_generate(tmp_p
     torch.testing.assert_close(actual, expected)
     assert loaded.module_plan().find("self_attn.v_proj").quantize
     assert not marker.exists()
+
+
+def test_native_init_rebuilds_rope_buffers_after_load_and_checkpointing_matches(tmp_path):
+    model = DreamModel(tiny_config(rope_scaling={"type": "linear", "factor": 2.0})).eval()
+    dim = model.config.hidden_size // model.config.num_attention_heads
+    expected = 1.0 / (10000.0 ** (torch.arange(0, dim, 2).float() / dim)) / 2.0
+    model.save_pretrained(tmp_path)
+    loaded = DreamQModel.loader.from_pretrained(tmp_path)
+    rotaries = [loaded.model.rotary_emb, *(layer.self_attn.rotary_emb for layer in loaded.model.layers)]
+    for rotary in rotaries:
+        torch.testing.assert_close(rotary.inv_freq, expected, rtol=0, atol=0)
+        torch.testing.assert_close(rotary.original_inv_freq, expected, rtol=0, atol=0)
+    ids = torch.tensor([[1, 2, 3, 4]])
+    loaded.train()
+    loaded.model(ids).last_hidden_state.square().sum().backward()
+    reference = {name: param.grad.clone() for name, param in loaded.named_parameters() if param.grad is not None}
+    loaded.zero_grad(set_to_none=True)
+    loaded.activation_checkpointing_enable()
+    loaded.model(ids).last_hidden_state.square().sum().backward()
+    for name, grad in reference.items():
+        torch.testing.assert_close(dict(loaded.named_parameters())[name].grad, grad, rtol=0, atol=0)
