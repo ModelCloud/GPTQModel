@@ -193,9 +193,14 @@ def _awq_cases():
     ]
 
 
-def _require(device: str) -> None:
+def _require(device: str, name: str = "") -> None:
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is required")
+    if name.endswith("cpu_avx512"):
+        from gptqmodel.utils.cpu_features import avx512_bf16_error, has_avx512_bf16
+
+        if not has_avx512_bf16():
+            pytest.skip(avx512_bf16_error())
 
 
 def _run(module: BaseQuantLinear, x: torch.Tensor) -> torch.Tensor:
@@ -264,7 +269,7 @@ def _assert_state_dict_is_a_checkpoint(
 @pytest.mark.parametrize("case", _gptq_cases(), ids=[case[0] for case in _gptq_cases()])
 def test_gptq_state_dict_round_trip_is_identity(case, on_disk):
     name, build, device = case
-    _require(device)
+    _require(device, name)
 
     module = _as_loaded_from(build(), on_disk).to(device)
     dtype = torch.bfloat16 if name == "torch_fused" else torch.float16
@@ -276,7 +281,7 @@ def test_gptq_state_dict_round_trip_is_identity(case, on_disk):
 @pytest.mark.parametrize("case", _awq_cases(), ids=[case[0] for case in _awq_cases()])
 def test_awq_state_dict_round_trip_is_identity(case):
     name, build, device, dtype = case
-    _require(device)
+    _require(device, name)
 
     # ``eval()`` is required: the CPU int4pack/AVX512 transform only runs
     # outside training, and it is what overwrites the checkpoint tensors.
@@ -309,7 +314,7 @@ def test_awq_cpu_kernels_emit_checkpoint_layout_after_transform(case):
     """
 
     name, build, device, dtype = case
-    _require(device)
+    _require(device, name)
 
     module = build().to(device).eval()
     checkpoint_shape = tuple(module.qweight.shape)
