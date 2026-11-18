@@ -1,9 +1,8 @@
 # GPT-QModel Transformers 5 model ports
 
-GPT-QModel requires `transformers>=5.23.0`, the latest stable release when this
-migration was qualified. Transformers 5.23.0 requires Python 3.11 or newer;
-the project's Python requirement follows that floor. Transformers 4.x and
-older Transformers 5 releases are outside this dependency contract.
+GPT-QModel requires `transformers>=5.23.0,<6`. The ports are qualified against
+the latest stable Transformers 5.x release, 5.23.0 at qualification time.
+The project follows its Python 3.11 minimum.
 
 Definitions select package-owned implementations through `LocalModelLoader`.
 Checkpoint `auto_map`, API trust, and the safety bypass cannot replace these

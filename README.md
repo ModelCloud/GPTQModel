@@ -293,7 +293,7 @@ print(model.tokenizer.decode(tokens))
 
 [Loading and inference](https://github.com/ModelCloud/GPTQModel/wiki/Loading-and-Inference)
 covers backend selection, generation, and adapters. GPT-QModel targets
-Transformers 5.23.0 or newer and requires Python 3.11 or newer. Model definitions
+Transformers 5.x starting at 5.23.0 and requires Python 3.11 or newer. Model definitions
 use native Transformers implementations or
 local modeling code shipped with GPT-QModel; local ports always ignore
 checkpoint `auto_map`. Executing unsupported checkpoint Python requires both
