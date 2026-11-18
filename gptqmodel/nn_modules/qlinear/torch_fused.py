@@ -134,10 +134,10 @@ def pack_scales_and_zeros(scales, zeros):
 def _cpu_int4pack_mm(x, qweight, group_size, scales_and_zeros, out_dtype=None):
     """Run int4pack with FP32 operands without expanding stored weights.
 
-    BF16 inputs, and FP16 inputs whose caller requests an FP32 product,
-    accumulate in FP32. ``out_dtype`` lets a biased layer keep that product
-    until the bias has been added, so the epilogue rounds once instead of
-    overflowing or rounding the pre-bias sum.
+    FP32 and BF16 inputs, and FP16 inputs whose caller requests an FP32
+    product, accumulate in FP32. ``out_dtype`` lets a biased layer keep that
+    product until the bias has been added, so the epilogue rounds once instead
+    of overflowing or rounding the pre-bias sum.
 
     When the operands already carry the compute dtype there is no cast to
     fuse, the extern op receives real graph inputs, and inductor lowers it
@@ -146,7 +146,7 @@ def _cpu_int4pack_mm(x, qweight, group_size, scales_and_zeros, out_dtype=None):
     """
     compute_dtype = (
         torch.float32
-        if x.dtype == torch.bfloat16 or out_dtype == torch.float32
+        if x.dtype in (torch.float32, torch.bfloat16) or out_dtype == torch.float32
         else scales_and_zeros.dtype
     )
     if x.dtype is compute_dtype and scales_and_zeros.dtype is compute_dtype:
@@ -593,11 +593,18 @@ class TorchFusedLinear(PackableQuantLinear):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
         input_dtype = x.dtype
-        if input_dtype == torch.float32:
+        # The CPU int4pack op consumes FP32 activations natively, so narrowing
+        # them to BF16 would round the input and the result for no speedup.
+        # The XPU op keeps its BF16 contract.
+        if input_dtype == torch.float32 and x.device.type != "cpu":
             x = x.to(torch.bfloat16)
-        # The CPU fused op now returns FP32 when a bias is present, so both
+        # The CPU fused op now returns FP32 when a bias is present, so FP32,
         # FP16 and BF16 can add the bias before the single output cast.
-        fused_bias_safe = self.bias is None or x.dtype in (torch.bfloat16, torch.float16)
+        fused_bias_safe = self.bias is None or x.dtype in (
+            torch.float32,
+            torch.bfloat16,
+            torch.float16,
+        )
         if torch.compiler.is_compiling():
             # `_cpu_transform_lock` is an ``RLock``: dynamo cannot enter it (a
             # hard graph break), and the one-time ``transform()`` rewrites the
