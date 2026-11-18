@@ -3,6 +3,7 @@
 """Real Hymba checkpoint and tiny-layout module-plan contracts (no downloads)."""
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,7 +21,11 @@ from gptqmodel.models.ports.hymba.configuration_hymba import HymbaConfig
 from gptqmodel.models.ports.hymba.modeling_hymba import HymbaForCausalLM
 
 
-PORT = Path(__file__).resolve().parents[2] / "gptqmodel/models/ports/hymba"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures/ports/hymba"
+# sha256 of json.dumps(sorted({key: shape}.items()), separators=(",", ":")) over
+# the 611 tensors in the nvidia/Hymba-1.5B-Base safetensors header.
+RELEASED_INVENTORY_SHA256 = "ab32db21e01eee88afb9a11b41ae4d8e9d7a6cd3291a5165f19822f42ece0023"
+KV_PRODUCERS = [0, 1, 3, 5, 7, 9, 11, 13, 15, 16, 19, 21, 23, 25, 27, 29, 31]
 QC = SimpleNamespace(dynamic=None)
 
 
@@ -58,17 +63,22 @@ def _audit_layer(layer, config):
 
 
 def test_published_1_5b_state_dict_matches_every_checkpoint_key_and_shape():
-    config = HymbaConfig(**json.loads((PORT / "upstream_config.json").read_text()))
+    config = HymbaConfig(**json.loads((FIXTURES / "upstream_config.json").read_text()))
     with torch.device("meta"):
         model = HymbaQModel.loader.from_config(config)
     actual = {name: list(tensor.shape) for name, tensor in model.state_dict().items()}
-    expected = json.loads((PORT / "checkpoint_shapes.json").read_text())
     # The official safetensors header stores the tied embedding once. HF's
     # state_dict exposes its lm_head alias too; it is not a missing weight.
     assert model.lm_head.weight is model.model.embed_tokens.weight
-    lm_head_shape = actual.pop("lm_head.weight")
-    assert lm_head_shape == expected["model.embed_tokens.weight"]
-    assert actual == expected
+    assert actual.pop("lm_head.weight") == actual["model.embed_tokens.weight"] == [32001, 1600]
+    assert actual["model.memory_tokens"] == [128, 1600]
+    assert actual["model.layers.0.mamba.x_proj.0.weight"] == [132, 3200]
+    assert actual["model.layers.31.moe.experts.0.down_proj.weight"] == [1600, 5504]
+    # Only KV producers carry K/V rows in the fused in_proj.
+    assert [i for i in range(32) if actual[f"model.layers.{i}.mamba.in_proj.weight"] == [8960, 1600]] == KV_PRODUCERS
+    canonical = json.dumps(sorted(actual.items()), separators=(",", ":")).encode()
+    assert len(actual) == 611
+    assert hashlib.sha256(canonical).hexdigest() == RELEASED_INVENTORY_SHA256
     assert len(model.model.layers) == config.num_hidden_layers == 32
     for layer in model.model.layers:
         _audit_layer(layer, config)
@@ -125,9 +135,13 @@ def test_registry_aliases_moe_hooks_and_looper_consumers():
         assert consumer._extract_moe_group_key("moe.experts.2.gate_proj.extra") is None
 
 
-def test_explicit_integrator_registry_fixture():
-    # Parent owns the central registry JSON; this independent local fixture
-    # pins the exact replacement entry that it must install during integration.
-    expected = json.loads((PORT / "module_plan_fixture.json").read_text())["HymbaQModel/gptq"]
-    assert expected["layers"] == HymbaQModel.extract_layers_node()
-    assert expected["blocks"] == HymbaQModel.build_layer_modules(HymbaQModel.module_tree, include_capture_only=True)
+def test_registered_module_plan_blocks():
+    assert HymbaQModel.extract_layers_node() == ["model.layers"]
+    mixer = ["mamba.in_proj"] + [f"mamba.{name}:!" for name in (
+        "conv1d", "x_proj.0", "dt_proj.0", "A_log", "D", "dt_layernorm", "B_layernorm", "C_layernorm",
+        "pre_avg_layernorm1", "pre_avg_layernorm2", "self_attn.q_norm", "self_attn.k_norm")]
+    assert HymbaQModel.build_layer_modules(HymbaQModel.module_tree, include_capture_only=True) == [
+        ["input_layernorm:!"], mixer, ["mamba.out_proj"], ["pre_moe_layernorm:!"], ["moe.router:!"],
+        ["moe.experts.{expert_index}.gate_proj", "moe.experts.{expert_index}.up_proj"],
+        ["moe.experts.{expert_index}.down_proj"],
+    ]
