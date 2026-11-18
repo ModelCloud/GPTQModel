@@ -440,6 +440,20 @@ def test_cache_generation_and_safetensors_roundtrip(tmp_path, dtype, implementat
         torch.testing.assert_close(reloaded(ids).logits, full, atol=0, rtol=0)
 
 
+def test_recorded_hidden_states_and_attentions_use_output_capture():
+    model = make_model()
+    ids = torch.tensor([[1, 5, 6, 7, 8, 9]])
+    with torch.inference_mode():
+        out = model(ids, use_cache=False, output_hidden_states=True, output_attentions=True)
+        plain = model(ids, use_cache=False)
+    torch.testing.assert_close(out.logits, plain.logits, atol=0, rtol=0)
+    assert len(out.hidden_states) == model.config.num_hidden_layers + 1
+    torch.testing.assert_close(out.hidden_states[0], model.get_input_embeddings()(ids), atol=0, rtol=0)
+    assert len(out.attentions) == model.config.num_hidden_layers
+    assert out.attentions[0].shape[-2:] == (6, 6)
+    assert model(ids, use_cache=False, return_dict=False)[0].shape == plain.logits.shape
+
+
 @pytest.mark.parametrize("sink", ["full", "none"])
 @pytest.mark.parametrize("implementation", ["eager", "sdpa"])
 def test_full_sink_and_native_swa_without_sink_against_oracle(sink, implementation):

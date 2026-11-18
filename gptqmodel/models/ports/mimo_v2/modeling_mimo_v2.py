@@ -27,6 +27,7 @@ from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
@@ -34,6 +35,8 @@ from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
 from transformers.models.qwen2.modeling_qwen2 import Qwen2Model
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, can_return_tuple, logging
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
 
 from .configuration_mimo_v2 import MiMoV2Config
 
@@ -306,7 +309,6 @@ class MiMoV2Attention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor],
         past_key_values: Optional[Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.v_scale is not None:
@@ -370,7 +372,6 @@ class MiMoV2Attention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor],
         past_key_values: Optional[Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -395,12 +396,11 @@ class MiMoV2Attention(nn.Module):
             position_embeddings,
             attention_mask,
             past_key_values=past_key_values,
-            cache_position=cache_position,
             position_ids=position_ids,
         )
 
 
-class MiMoV2DecoderLayer(nn.Module):
+class MiMoV2DecoderLayer(GradientCheckpointingLayer):
     attention_projection_layout = "split"
 
     def __init__(self, config, layer_idx: int, attention_projection_layout: Optional[str] = None):
@@ -426,7 +426,6 @@ class MiMoV2DecoderLayer(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Cache] = None,
         use_cache: Optional[bool] = False,
-        cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
@@ -438,7 +437,6 @@ class MiMoV2DecoderLayer(nn.Module):
             position_ids=position_ids,
             past_key_values=past_key_values,
             use_cache=use_cache,
-            cache_position=cache_position,
             position_embeddings=position_embeddings,
             **kwargs,
         )
@@ -985,7 +983,7 @@ class MiMoAudioEncoder(nn.Module):
 
     def _apply_input_local_transformer(self, speech_embeddings: torch.Tensor) -> torch.Tensor:
         output = self.input_local_transformer(
-            inputs_embeds=speech_embeddings, return_dict=True, use_cache=False,
+            inputs_embeds=speech_embeddings, use_cache=False,
             is_causal=not self.input_full_attention,
         )
         return output.last_hidden_state
@@ -1024,6 +1022,10 @@ class MiMoAudioEncoder(nn.Module):
 
 class MiMoV2PreTrainedModel(PreTrainedModel):
     _no_split_modules = ["MiMoV2DecoderLayer"]
+    _can_record_outputs = {
+        "hidden_states": MiMoV2DecoderLayer,
+        "attentions": MiMoV2Attention,
+    }
 
     @torch.no_grad()
     def _init_weights(self, module):
@@ -1084,6 +1086,8 @@ class MiMoV2Model(MiMoV2PreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -1092,13 +1096,10 @@ class MiMoV2Model(MiMoV2PreTrainedModel):
         past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
-
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -1106,14 +1107,10 @@ class MiMoV2Model(MiMoV2PreTrainedModel):
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
 
-        if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-            )
-
         if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device) + past_seen_tokens
+            position_ids = position_ids.unsqueeze(0)
 
         if not isinstance(causal_mask_mapping := attention_mask, dict):
             mask_kwargs = {
@@ -1145,7 +1142,6 @@ class MiMoV2Model(MiMoV2PreTrainedModel):
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
-                cache_position=cache_position,
                 **kwargs,
             )
 
@@ -1258,7 +1254,6 @@ class MiMoV2ForCausalLM(MiMoV2PreTrainedModel, GenerationMixin):
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         pixel_values: Optional[torch.Tensor] = None,
         image_grid_thw: Optional[torch.Tensor] = None,
@@ -1288,7 +1283,6 @@ class MiMoV2ForCausalLM(MiMoV2PreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            cache_position=cache_position,
             **kwargs,
         )
 
