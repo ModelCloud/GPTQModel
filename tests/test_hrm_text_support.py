@@ -11,6 +11,7 @@ import transformers
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.hrm_text import HrmTextQModel
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 from gptqmodel.utils.model import get_layers_with_prefixes
 from gptqmodel.utils.structure import LazyTurtle
 
@@ -38,13 +39,10 @@ class _DummyHrmModel(nn.Module):
         self.model.H_module = _DummyStack(3)
 
 
-def test_hrm_text_model_type_selects_hrm_text_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="hrm_text")
+def test_hrm_text_model_type_selects_hrm_text_definition(tmp_path):
+    CONFIG_MAPPING["hrm_text"]().save_pretrained(tmp_path)
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition("/tmp/hrm_text") is HrmTextQModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is HrmTextQModel
 
 
 def test_get_layers_with_prefixes_flattens_hrm_stacks_in_order():

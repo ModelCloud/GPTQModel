@@ -9,6 +9,7 @@ from gptqmodel.models import auto
 from gptqmodel.models.definitions.glm5_next import Glm5NextQModel, _attach_glm5_next_mtp
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 from gptqmodel.utils.model import find_modules
 from gptqmodel.utils.structure import LazyTurtle
 
@@ -56,12 +57,10 @@ def _tiny_text_config():
     )
 
 
-def test_glm5_next_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="glm5_next")
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+def test_glm5_next_model_type_selects_definition(tmp_path):
+    CONFIG_MAPPING["glm5_next"]().save_pretrained(tmp_path)
 
-    assert auto.check_and_get_model_definition("glm-5.3-flash-fixture") is Glm5NextQModel
+    assert auto.check_and_get_model_definition(str(tmp_path)) is Glm5NextQModel
 
 
 def test_glm5_next_module_tree_preserves_upstream_quantization_boundary():
