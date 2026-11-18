@@ -414,6 +414,12 @@ class BaseQuantLinear(nn.Module):
     # fail to trace. Every concrete kernel declares it explicitly.
     SUPPORTS_GRAPH_CAPTURE: bool = False
 
+    # Checkpoint tensor suffixes this kernel cannot rebuild without them.
+    # ``validate_checkpoint_qweights`` fails a load when one is missing, so a
+    # truncated checkpoint raises instead of leaving uninitialized buffers
+    # (#5010). Empty means this kernel does not publish a payload of its own.
+    CHECKPOINT_REQUIRED_BUFFERS: Tuple[str, ...] = ()
+
     SUPPORTS_AUTO_PADDING: bool = None
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
@@ -604,6 +610,18 @@ class BaseQuantLinear(nn.Module):
         clear = getattr(self, "clear_weight_cache", None)
         if callable(clear):
             clear()
+
+    def materialize_checkpoint_layout_for_export(self) -> bool:
+        """Restore checkpoint buffers a derived cache replaced; True if restored.
+
+        A kernel may drop its checkpoint buffers once the first forward has
+        built a packed cache (QQQ does, #4856). ``named_buffers`` skips a
+        ``None`` buffer, so a save that walks the module tree instead of
+        calling ``state_dict()`` would silently omit the quantized weights
+        (#5010). The export path calls this first.
+        """
+
+        return False
 
     def _load_from_state_dict(self, *args, **kwargs):
         """Restore checkpoint layout, then load, then invalidate derived caches.
@@ -1246,6 +1264,10 @@ class GroupedQuantLinear(BaseQuantLinear):
 
 
 class PackedGroupedQuantLinear(GroupedQuantLinear):
+    # GPTQ/AWQ/Marlin/BitBLAS-family checkpoints all publish the packed weight
+    # as `qweight`; a checkpoint without it loads uninitialized buffers.
+    CHECKPOINT_REQUIRED_BUFFERS = ("qweight",)
+
     def __init__(self, *args, pack_dtype: t.dtype, **kwargs):
         super().__init__(*args, pack_dtype=pack_dtype, **kwargs)
 
@@ -1309,17 +1331,18 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         )
 
     #: CPU int4pack family whose runtime words have a verified inverse:
-    #: ``"gptq"`` or ``"awq"``. ``None`` keeps a full checkpoint snapshot.
+    #: ``"gptq"``, ``"awq"``, ``"avx512_gptq"`` or ``"avx512_awq"``. ``None``
+    #: keeps a full checkpoint snapshot.
     _FUSED_TRAIN_STATE_REBUILD = None
 
     def _can_rebuild_checkpoint_qweight(self) -> bool:
         """Whether the checkpoint ``qweight`` can be rebuilt on demand.
 
         Only the CPU int4pack permutations have an inverse: the ATen layout
-        (``"gptq"``/``"awq"``) and the AVX512 layout (``"avx512_gptq"``, whose
-        ``unpack_hf_int4`` is the documented inverse of ``pack_hf_int4``). The
-        XPU packing uses a different layout, so its subclass leaves
-        ``_FUSED_TRAIN_STATE_REBUILD`` as ``None``.
+        (``"gptq"``/``"awq"``) and the AVX512 layouts
+        (``"avx512_gptq"``/``"avx512_awq"``, pure-Torch inverses of the two
+        AVX512-BF16 packers). The XPU packing uses a different layout, so its
+        subclass leaves ``_FUSED_TRAIN_STATE_REBUILD`` as ``None``.
 
         This is only a cheap pre-filter: the clone is dropped by
         ``finalize_fused_train_state`` only after the rebuilt words match the
@@ -1334,26 +1357,18 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
             return False
         if weight.dtype != t.int32:
             # The rebuilt words are int32; any other checkpoint dtype keeps
-            # its snapshot.
+            # its snapshot. This runs before the transform, so ``qweight`` is
+            # still the checkpoint tensor here.
             return False
-        if kind == "avx512_gptq":
+        if kind in ("avx512_gptq", "avx512_awq"):
             # ``unpack_hf_int4`` is the verified inverse of ``pack_hf_int4`` and
-            # is pure Torch, so this path needs no ATen int4pack support and can
-            # undo the ``ret_idx`` channel reorder of a ``desc_act`` checkpoint.
+            # the AWQ packer is the same kind of pure nibble permutation, so
+            # these paths need no ATen int4pack support and can undo the
+            # ``ret_idx`` channel reorder of a ``desc_act`` checkpoint.
             return True
         from ._cpu_int4pack_layout import int4pack_block_size
 
         if int4pack_block_size() is None:
-            return False
-        identity = getattr(self, "_ret_idx_is_identity", None)
-        if (
-            kind == "gptq"
-            and callable(identity)
-            and not identity()
-        ):
-            # The ATen fused transform reorders the input rows by ``ret_idx``
-            # without keeping the gather, so only the identity order leaves the
-            # packed words invertible here.
             return False
         return True
 
@@ -1366,6 +1381,7 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
                 f"{self.__class__.__name__} cannot rebuild its checkpoint qweight"
             )
         from ._cpu_int4pack_layout import (
+            rebuild_avx512_awq_qweight,
             rebuild_avx512_qweight,
             rebuild_awq_qweight,
             rebuild_gptq_qweight,
@@ -1373,6 +1389,8 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
 
         if kind == "awq":
             return rebuild_awq_qweight(self)
+        if kind == "avx512_awq":
+            return rebuild_avx512_awq_qweight(self)
         if kind == "avx512_gptq":
             return rebuild_avx512_qweight(self)
         return rebuild_gptq_qweight(self)

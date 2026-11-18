@@ -164,6 +164,12 @@ def mul(
 
 
 class QQQLinear(GroupedQuantLinear):
+    # The AVX512 CPU forward drops these after building its packed cache, so
+    # they have to be materialized before an export and required on load
+    # (#5010). `s_group` is legitimately empty when `group_size` spans the whole
+    # input, so only its presence is checked.
+    CHECKPOINT_REQUIRED_BUFFERS = ("B", "s_group", "s_channel")
+
     # The native Marlin W4A8 `qqq_gemm` custom op has no fake impl and the
     # per-call reduce scratch/locks allocation is host-side; the JIT extension
     # is also unbuildable here (no CUDA toolkit). Static: EAGER.
@@ -978,6 +984,11 @@ class QQQTorchLinear(QQQLinear):
             if getattr(self, "_torch_packed_cache", None) is not None:
                 self._torch_packed_cache_key = self._torch_weight_state_key()
             return True
+
+    def materialize_checkpoint_layout_for_export(self) -> bool:
+        """Publish the dropped checkpoint buffers so an export can see them."""
+
+        return self._materialize_dropped_checkpoint()
 
     def _maybe_drop_checkpoint_tensors(self) -> bool:
         """Release the checkpoint copy once the cache proves it is rebuildable.

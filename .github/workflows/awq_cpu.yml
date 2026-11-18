@@ -8,12 +8,18 @@ on:
       - 'gptqmodel/quantization/**'
       - 'gptqmodel/models/**'
       - 'gptqmodel/nn_modules/qlinear/torch_awq.py'
+      - 'gptqmodel/nn_modules/qlinear/torch_fused_awq.py'
       - 'gptqmodel/utils/calibration.py'
       - 'gptqmodel/nn_modules/qlinear/_numerics.py'
       - 'gptqmodel/nn_modules/qlinear/gemm_awq.py'
       - 'gptqmodel/nn_modules/qlinear/gemm_awq_triton.py'
+      - 'gptqmodel/nn_modules/qlinear/_cpu_int4pack_layout.py'
+      - 'gptqmodel/nn_modules/qlinear/_fused_train_state.py'
+      - 'gptqmodel/nn_modules/qlinear/__init__.py'
+      - 'gptqmodel/nn_modules/qlinear/torch_cpu_avx512_awq.py'
       - 'docs/**'
       - 'tests/test_awq_*.py'
+      - 'tests/test_hymba_awq_*.py'
       - 'tests/test_calibration_*.py'
       - 'tests/test_docs_contract_refs.py'
       - 'tests/module_tree/**'
@@ -67,11 +73,16 @@ jobs:
                 tests/test_calibration_tools_formats_4934.py \
                 tests/test_awq_hybrid_moe_root_4903.py \
                 tests/test_awq_deepseek_v4_hash_moe_4880.py \
+                tests/test_awq_torch_fused_mode_5018.py \
+                tests/test_awq_hash_moe_kept_rows_5015.py \
                 tests/test_awq_cohere2_moe_parallel_norm_4898.py \
+                tests/test_cpu_int4_snapshot_5013.py \
                 tests/test_training_kernel_inplace_4974.py \
                 tests/test_peft_adalora_training_4974.py \
+                tests/test_hymba_awq_4891.py \
                 tests/test_smooth_percentile_bounds_5005.py \
                 tests/test_hf_bridge_cpu_offload_5022.py \
+                tests/test_failed_run_model_state_5009.py \
                 tests/module_tree/test_awq_relationships.py \
                 tests/module_tree/test_granitemoehybrid_model_tree.py \
                 tests/module_tree/test_registered_module_plans.py \

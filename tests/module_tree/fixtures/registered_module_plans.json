@@ -1273,9 +1273,9 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["mamba.in_proj"],
+        ["mamba.in_proj", "mamba.conv1d:!", "mamba.x_proj.0:!", "mamba.dt_proj.0:!"],
         ["mamba.out_proj"],
-        ["post_attention_layernorm:!"],
+        ["pre_moe_layernorm:!"],
         ["moe.experts.0.gate_proj", "moe.experts.0.up_proj"],
         ["moe.experts.0.down_proj"]
       ]

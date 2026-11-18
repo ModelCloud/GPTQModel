@@ -1451,6 +1451,78 @@ def _is_safe_relative_checkpoint_shard(shard_name: str) -> bool:
     return True
 
 
+def _exllamav3_owned_native_source_names(
+    model,
+    checkpoint_source,
+    names,
+) -> Optional[set]:
+    """Return the subset of native source names the loaded model owns (#5029).
+
+    The source index describes the whole on-disk checkpoint, which can contain
+    entries the model never instantiated: layers above a reduced
+    ``num_hidden_layers`` and MTP / next-token heads are the common cases. An
+    exact passthrough that republishes them writes dense state the model does
+    not have, inflating the saved checkpoint and the reload peak.
+
+    An entry is owned when its owning module exists in the loaded model (the
+    model's own state covers that module, possibly under an aliased spelling),
+    or when a runtime parameter/buffer resolves to it through the checkpoint
+    source's runtime -> checkpoint alias chain. ``None`` means ownership cannot
+    be determined, which callers must treat as "keep every entry".
+    """
+
+    candidate_names = {str(name) for name in names}
+    if not candidate_names:
+        return set()
+
+    named_modules = getattr(model, "named_modules", None)
+    named_parameters = getattr(model, "named_parameters", None)
+    if not callable(named_modules) or not callable(named_parameters):
+        return None
+
+    try:
+        module_paths = set()
+        runtime_names = set()
+        for module_name, module in named_modules():
+            module_paths.add(module_name)
+            non_persistent = getattr(module, "_non_persistent_buffers_set", ())
+            for buffer_name, _buffer in module.named_buffers(recurse=False):
+                if buffer_name in non_persistent:
+                    continue
+                runtime_names.add(
+                    f"{module_name}.{buffer_name}" if module_name else buffer_name
+                )
+        runtime_names.update(name for name, _parameter in named_parameters())
+    except Exception:
+        log.debug(
+            "Model save: could not enumerate the loaded model's owned tensors",
+            exc_info=True,
+        )
+        return None
+
+    owned = {
+        name
+        for name in candidate_names
+        if name.rpartition(".")[0] in module_paths
+    }
+    remaining = candidate_names - owned
+    if remaining:
+        # A converted or renamed checkpoint spells the same tensor differently.
+        # Resolve every runtime name through the source's alias chain so an
+        # owned tensor is never dropped just because its runtime spelling
+        # differs from the checkpoint key.
+        alias_resolver = getattr(checkpoint_source, "checkpoint_source_aliases", None)
+        if callable(alias_resolver):
+            for runtime_name in runtime_names:
+                for candidate in alias_resolver(runtime_name):
+                    if candidate in remaining:
+                        owned.add(candidate)
+                        remaining.discard(candidate)
+                if not remaining:
+                    break
+    return owned
+
+
 def _build_exllamav3_checkpoint_passthrough_state_dict(
     owner,
     plan,
@@ -1487,6 +1559,27 @@ def _build_exllamav3_checkpoint_passthrough_state_dict(
     weight_map = checkpoint_source._weight_map
     replaced = set(plan["replaced_source_names"])
     native_names = set(weight_map) - replaced
+    owned_native_names = _exllamav3_owned_native_source_names(
+        owner.model,
+        checkpoint_source,
+        native_names,
+    )
+    if owned_native_names is None:
+        log.info(
+            "Model save: checkpoint ownership is unknown; preserving all %s "
+            "native source tensors.",
+            len(native_names),
+        )
+    else:
+        skipped_native_names = sorted(native_names - owned_native_names)
+        native_names = owned_native_names
+        if skipped_native_names:
+            log.info(
+                "Model save: skipped %s native source tensor(s) the loaded model "
+                "does not own: %s",
+                len(skipped_native_names),
+                skipped_native_names[:8],
+            )
     by_shard: Dict[str, List[str]] = {}
     for name in native_names:
         shard_name = weight_map.get(name)

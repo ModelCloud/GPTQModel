@@ -1446,43 +1446,53 @@ def _run_single_subset_pass(
                     ),
                 )
 
-    returned_outputs = None
-    if execute_forward and capture_layer_forward_context:
-        processor.receive_layer_forward_context(
-            layer_index=layer_index,
-            layer_inputs=layer_inputs,
-            layer_input_kwargs=layer_input_kwargs,
-            layer_outputs=forward_outputs,
-            subset_index=subset_index,
-            subset_total=subset_total,
-        )
+    # The capture hooks are still installed here. A cancellation in this
+    # window (the documented `forward_end` stop point, a failing
+    # `receive_layer_*`, Ctrl-C) used to unwind past the success-path
+    # release below, leaving the in-flight layer's hooks and
+    # `forward_hook_last` set so every later forward raised StopForward
+    # (#5009). Release them on that path too.
+    try:
+        returned_outputs = None
+        if execute_forward and capture_layer_forward_context:
+            processor.receive_layer_forward_context(
+                layer_index=layer_index,
+                layer_inputs=layer_inputs,
+                layer_input_kwargs=layer_input_kwargs,
+                layer_outputs=forward_outputs,
+                subset_index=subset_index,
+                subset_total=subset_total,
+            )
 
-    if execute_forward and plan.need_forward_outputs:
-        # For pre-process consumers, the next stage needs the forward outputs
-        # immediately rather than after the later layer replay step.
-        processor.receive_layer_inputs(forward_outputs)
-        if return_outputs:
-            returned_outputs = processor.inputs_cache.layer_inputs
-        del forward_outputs
+        if execute_forward and plan.need_forward_outputs:
+            # For pre-process consumers, the next stage needs the forward outputs
+            # immediately rather than after the later layer replay step.
+            processor.receive_layer_inputs(forward_outputs)
+            if return_outputs:
+                returned_outputs = processor.inputs_cache.layer_inputs
+            del forward_outputs
 
-    if execute_forward and subset_event_cb:
-        subset_event_cb(
-            stage="forward_end",
-            layer_idx=layer_index,
-            subset_index=subset_index,
-            subset_total=subset_total,
-            module_names=subset_names,
-            processor=getattr(processor, "name", type(processor).__name__),
-        )
+        if execute_forward and subset_event_cb:
+            subset_event_cb(
+                stage="forward_end",
+                layer_idx=layer_index,
+                subset_index=subset_index,
+                subset_total=subset_total,
+                module_names=subset_names,
+                processor=getattr(processor, "name", type(processor).__name__),
+            )
 
-    fwd_time = (time.perf_counter() - fwd_start) if fwd_start is not None else 0.0
-    processor.set_fwd_time(fwd_time)
-    if region_timer is not None:
-        region_timer.record(
-            "pre_quant_forward",
-            fwd_time,
-            source=forward_source,
-        )
+        fwd_time = (time.perf_counter() - fwd_start) if fwd_start is not None else 0.0
+        processor.set_fwd_time(fwd_time)
+        if region_timer is not None:
+            region_timer.record(
+                "pre_quant_forward",
+                fwd_time,
+                source=forward_source,
+            )
+    except BaseException:
+        _release_capture_hooks()
+        raise
 
     # Detach temporary hooks to avoid leaking state into future passes.
     _release_capture_hooks()

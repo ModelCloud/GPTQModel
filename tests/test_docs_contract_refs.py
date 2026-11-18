@@ -67,7 +67,10 @@ CONTRACT_REFS = (
     ("docs/layer-type-replay-masks.md", "gptqmodel/models/definitions/olmo3.py",
      "Olmo3QModel", 53),
     ("docs/multi_gpu_quantization.md", "gptqmodel/utils/torch.py", "torch_sync", 611),
-    ("docs/native-checkpoint-export.md", "gptqmodel/models/writer.py", "ModelWriter", 1935),
+    # `writer.py` keeps growing (the #5029 passthrough ownership scope added
+    # ~70 lines above the class), so cite the symbol instead of a line.
+    ("docs/native-checkpoint-export.md", "gptqmodel/models/writer.py",
+     "ModelWriter", SYMBOL_CITATION),
     ("docs/openai-server-exposure.md", "gptqmodel/utils/openai_server.py",
      "_validate_bind", None),
     ("docs/openai-server-exposure.md", "gptqmodel/utils/openai_server.py",

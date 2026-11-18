@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from accelerate.utils import find_tied_parameters
 
 from .. import DEVICE_THREAD_POOL
 from ..looper.dequantize_processor import DequantizeProcessor
@@ -91,7 +90,7 @@ from ..utils.p2p import (
     safe_move_to,
 )
 from ..utils.python import has_gil_control, has_gil_disabled
-from ..utils.tied_weights import lm_head_is_tied
+from ..utils.tied_weights import lm_head_quantization_is_tied
 from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
 from .execution_state import DeviceAssignmentState
@@ -1391,94 +1390,12 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     def _lm_head_is_tied(self) -> bool:
         """Return whether `lm_head` shares its source weight with another module.
 
-        Real storage identity is authoritative. Composite/VLM configs commonly
-        leave a nested ``text_config.tie_word_embeddings=True`` while the loaded
-        model keeps independent input and output embeddings (for example
-        Qwen3-VL), so nested config flags must not be treated as proof of tying
-        (issue #4369).
-
-        `find_tied_parameters` only compares materialized parameters. A lazily
-        loaded shell keeps both sides as independent META parameters until the
-        loader ties them, so identity never matches and quantization continues
-        until the source reload fails with a misleading "missing checkpoint
-        tensors" error. Detect that shape from the checkpoint instead: a tied
-        HF checkpoint omits `lm_head.weight`, so the head has no independent
-        source tensor to quantize. The declared tied key at the root config is
-        the final fallback for checkpoints that do store `lm_head.weight`
-        (Qwen3) while the loader still ties it.
+        The check is shared with `WeightOnlyLooper`, which used
+        `find_tied_parameters` alone and therefore missed a lazily loaded shell
+        (#4034, #5027).
         """
 
-        model = self.gptq_model.model
-        lm_head_name = self.gptq_model.lm_head
-
-        # 1. Actual storage identity: the input embedding and output head are
-        #    the same parameter (or share materialized storage).
-        try:
-            input_embeddings = model.get_input_embeddings()
-            output_embeddings = model.get_output_embeddings()
-        except (AttributeError, TypeError):
-            input_embeddings = output_embeddings = None
-        input_weight = getattr(input_embeddings, "weight", None)
-        output_weight = getattr(output_embeddings, "weight", None)
-        if torch.is_tensor(input_weight) and torch.is_tensor(output_weight):
-            if output_weight is input_weight:
-                return True
-            # Meta tensors all report data_ptr() == 0, so only compare storage
-            # for materialized parameters.
-            if not (
-                getattr(input_weight, "is_meta", False)
-                or getattr(output_weight, "is_meta", False)
-            ):
-                try:
-                    same_storage = (
-                        input_weight.untyped_storage().data_ptr()
-                        == output_weight.untyped_storage().data_ptr()
-                        and input_weight.data_ptr() == output_weight.data_ptr()
-                    )
-                except Exception:  # pragma: no cover - backend without untyped_storage
-                    same_storage = False
-                if same_storage:
-                    return True
-
-        # 2. Accelerate's tied-parameter report (materialized parameters only).
-        if any(
-            f"{lm_head_name}.weight" in names
-            for names in find_tied_parameters(model)
-        ):
-            return True
-
-        lm_head_module = get_module(model, key=lm_head_name)
-        if lm_head_module is None:
-            return False
-        weight = getattr(lm_head_module, "weight", None)
-        if not torch.is_tensor(weight) or not getattr(weight, "is_meta", False):
-            # A materialized head either has its own storage or shares it; the
-            # identity check above already covered the shared case.
-            return False
-        checker = getattr(getattr(self.gptq_model, "turtle_model", None), "has_checkpoint_tensor", None)
-        if not callable(checker):
-            return False
-        if not checker(target_model=model, target_submodule=lm_head_module):
-            return True
-
-        # A tied checkpoint may still contain `lm_head.weight` (Qwen3 stores it
-        # even though the head is tied). The load-time snapshot resolved this
-        # from the decoder config and the checkpoint, so prefer it over the
-        # wrapper's config flag (#4799, #4369).
-        snapshot = lm_head_is_tied(model, lm_head_name)
-        if snapshot is not None:
-            return snapshot
-
-        config = getattr(model, "config", None)
-        if not bool(getattr(config, "tie_word_embeddings", False)):
-            return False
-        tied_keys = getattr(model, "_tied_weights_keys", None)
-        tied_head = f"{lm_head_name}.weight"
-        if isinstance(tied_keys, dict):
-            return tied_head in tied_keys
-        if tied_keys:
-            return tied_head in set(tied_keys)
-        return False
+        return lm_head_quantization_is_tied(self.gptq_model)
 
     def _prepare_layer_direct_state_for_forward(
         self,
@@ -2020,6 +1937,12 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         forward. The success path relies on ``post_quantize`` to move it back,
         but a ``StopMainLoop``/exception unwinds before that step, leaving every
         parameter and buffer of the layer on the accelerator (issue #4546).
+
+        A cancelled subset can also unwind while its capture hooks are still
+        installed, and the failure path never reached the stage's release. The
+        inline ``forward_hook``/``forward_hook_last`` pair would then make every
+        later forward raise ``StopForward`` (issue #5009), so clear it here as a
+        safety net for the windows the stage guard cannot see.
         """
 
         inflight = self._inflight_layer
@@ -2027,6 +1950,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         if inflight is None:
             return
         module, home_device = inflight
+        self._clear_layer_capture_hooks(module)
         try:
             rehome_module_to_device(
                 module,
@@ -2044,6 +1968,16 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 home_device,
                 exc_info=True,
             )
+
+    @staticmethod
+    def _clear_layer_capture_hooks(module: torch.nn.Module) -> None:
+        """Drop capture hooks a cancelled subset stage did not release (#5009)."""
+
+        for submodule in module.modules():
+            if getattr(submodule, "forward_hook", None) is not None:
+                submodule.forward_hook = None
+            if getattr(submodule, "forward_hook_last", False):
+                submodule.forward_hook_last = False
 
     def _fence_run_work(self) -> None:
         """Wait for work this run already submitted before tearing its state down.
@@ -2117,6 +2051,22 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                             # them to a kernel this device can run before the
                             # next forward (#4947).
                             rehome_failed_run_kernels(self.gptq_model)
+                            # A cancelled run must return the same ordinary
+                            # tensors a completed one does: the norms, biases
+                            # and buffers `pre_quantize` materialized under
+                            # inference mode otherwise stay inference tensors,
+                            # and a plain grad-mode forward raises "Inference
+                            # tensors cannot be saved for backward" (#5012).
+                            # The repair is best-effort so it can never mask
+                            # the failure that got us here.
+                            try:
+                                ensure_version_counters(self.gptq_model.model)
+                            except Exception:
+                                log.warning(
+                                    "failed to repair tensor version counters while "
+                                    "failing the quantization run",
+                                    exc_info=True,
+                                )
                             # Layers that finished before the cancel stay as
                             # disk-offloaded meta shells pointing into this run's
                             # private offload root. Deleting that root now would
@@ -2144,15 +2094,65 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 # outlives the model unless the run releases it, and a failed
                 # run must release it too.
                 self._release_run_workspace()
-            self._restore_offloaded_base_modules(strict=True)
-            self._restore_disk_offloaded_modules()
-            self._materialize_remaining_meta_modules()
-            # Unquantized layers keep the parameters `pre_quantize`
-            # materialized under inference mode, and `post_quantize`'s
-            # `param.data =` move leaves them without a version counter
-            # (issue #4572). Repair every one before the model is returned.
-            ensure_version_counters(self.gptq_model.model)
+            try:
+                self._restore_offloaded_base_modules(strict=True)
+                self._restore_disk_offloaded_modules()
+                self._materialize_remaining_meta_modules()
+                # Unquantized layers keep the parameters `pre_quantize`
+                # materialized under inference mode, and `post_quantize`'s
+                # `param.data =` move leaves them without a version counter
+                # (issue #4572). Repair every one before the model is returned.
+                ensure_version_counters(self.gptq_model.model)
+            except BaseException:
+                # The tail turns the lazy offloaded shell back into a usable
+                # in-session model, and a Ctrl-C, OOM or I/O error can land in
+                # any of its steps. Recover before re-raising, or the base
+                # modules stay on meta and every later forward fails (#5023).
+                self._recover_post_loop_tail_failure()
+                raise
             return result
+
+    def _recover_post_loop_tail_failure(self) -> None:
+        """Best-effort recovery when the post-loop tail itself fails (#5023).
+
+        ``_loop_impl`` already returned, so the layer that was mid-stage and the
+        processors are fine: only the base-module restore and the
+        meta-materialization steps still need to run. Every step is best effort
+        so the recovery can never mask the failure that brought us here.
+        """
+
+        try:
+            self._restore_offloaded_base_modules(strict=False)
+        except Exception:
+            log.warning(
+                "failed to restore the offloaded base modules after a post-loop "
+                "failure",
+                exc_info=True,
+            )
+        try:
+            self._materialize_unreached_meta_modules()
+        except Exception:
+            log.warning(
+                "failed to materialize the meta modules after a post-loop failure",
+                exc_info=True,
+            )
+        try:
+            ensure_version_counters(self.gptq_model.model)
+        except Exception:
+            log.warning(
+                "failed to repair tensor version counters after a post-loop failure",
+                exc_info=True,
+            )
+        # Completed layers stay as disk-offloaded meta shells pointing into this
+        # run's private offload root; keep it while they read from it (#4807).
+        model = getattr(self.gptq_model, "model", None)
+        if model is not None and has_disk_offloaded_modules(model):
+            log.debug(
+                "Offload: keeping the per-run directory for the disk-offloaded "
+                "layers of a post-loop failure."
+            )
+        else:
+            release_private_offload_root(self.gptq_model)
 
     def _materialize_deferred_boundary_prefix(self, checkpoint) -> None:
         """Install a recovered packed prefix only when publication needs it."""

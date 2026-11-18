@@ -1884,6 +1884,21 @@ class LazyTurtle:
 
             return tensors
 
+    def checkpoint_source_aliases(self, runtime_name: str) -> tuple[str, ...]:
+        """Return every source-checkpoint spelling of one runtime tensor name.
+
+        Exposes the same runtime -> checkpoint alias chain the materializers use
+        (declared renamings, the reversed Hugging Face conversion map,
+        base-model-prefix variants and one-to-one converter aliases) so a caller
+        can decide whether a source index entry belongs to the loaded model
+        without loading it (#5029).
+        """
+
+        if not isinstance(runtime_name, str) or not runtime_name:
+            return ()
+        with self._lock:
+            return tuple(self._all_runtime_to_checkpoint_candidates(runtime_name))
+
     def sync_all_meta(
         self,
         *,
