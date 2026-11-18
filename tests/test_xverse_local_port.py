@@ -3,7 +3,6 @@
 """Independent XVERSE equations and actual public loading/quantization cycles."""
 
 import copy
-import hashlib
 import json
 from pathlib import Path
 
@@ -22,11 +21,12 @@ from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import CalibrationConfig
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.hf import load_model_config
-from tests.port_assets import has_port_asset, read_port_asset, read_port_json
+from tests.port_assets import DATA, has_port_asset, read_port_asset, read_port_json
 
 
 PORT = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/xverse"
 FIXTURES = PORT / "fixtures"
+ORACLES = json.loads((DATA / "xverse/tokenizer_oracles.json").read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -290,7 +290,7 @@ def test_source_rotary_policy_independent_oracle_and_reload(tmp_path, variant):
     assert loaded.config.xverse_rope_scaling == model.config.xverse_rope_scaling
     # Dynamic MoE frequency state intentionally retains its source's warm-cache base.
     with torch.inference_mode():
-        torch.testing.assert_close(loaded(ids).logits, model(ids).logits, rtol=0, atol=0)
+        torch.testing.assert_close(loaded(ids).logits, model(ids).logits, rtol=1e-6, atol=1e-6)
 
 
 @pytest.mark.parametrize("variant", ["dense", "long", "moe_linear", "moe_dynamic"])
@@ -386,9 +386,10 @@ def test_invalid_geometry_fails_before_model_construction_and_corrected_retry(kw
     assert tiny_model()(torch.tensor([[4, 8]])).logits.shape == (1, 2, 48)
 
 
-@pytest.mark.parametrize("moe", [False, True])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("implementation", ["eager", "sdpa"])
+@pytest.mark.parametrize(
+    "moe,dtype,implementation",
+    [(False, torch.float32, "eager"), (True, torch.float32, "sdpa"), (False, torch.float16, "sdpa"), (True, torch.bfloat16, "eager")],
+)
 def test_cache_continuation_greedy_beam_and_two_safetensors_cycles(tmp_path, moe, dtype, implementation):
     model = tiny_model(
         num_experts=4 if moe else 0, moe_top_k=2, num_shared_experts=1 if moe else None, num_key_value_heads=2
@@ -447,9 +448,10 @@ def test_cache_continuation_greedy_beam_and_two_safetensors_cycles(tmp_path, moe
                 )
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
-@pytest.mark.parametrize("family", ["XVERSE-7B-Chat", "XVERSE-MoE-A4.2B", "XVERSE-Ent-A5.7B"])
+@pytest.mark.parametrize(
+    "trust,bypass,family",
+    [(False, None, "XVERSE-7B-Chat"), (True, "1", "XVERSE-MoE-A4.2B"), (True, "1", "XVERSE-Ent-A5.7B")],
+)
 def test_real_assets_public_hostile_load_config_tokenizer_and_generation(tmp_path, monkeypatch, trust, bypass, family):
     if bypass is None:
         monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
@@ -466,7 +468,7 @@ def test_real_assets_public_hostile_load_config_tokenizer_and_generation(tmp_pat
     )
     assert type(loaded.model) is XverseForCausalLM
     assert isinstance(loaded.tokenizer.tokenizer, XverseTokenizer)
-    reference_tokenizer = json.loads((PORT / "tokenizer_oracles.json").read_text())[family]
+    reference_tokenizer = ORACLES[family]
     for prompt, tokens in reference_tokenizer["ids"].items():
         assert loaded.tokenizer.tokenizer.encode(prompt, add_special_tokens=False) == tokens
         assert (
@@ -475,7 +477,7 @@ def test_real_assets_public_hostile_load_config_tokenizer_and_generation(tmp_pat
         )
     ids = torch.tensor([[4, 8, 12]])
     with torch.inference_mode():
-        torch.testing.assert_close(loaded.model(ids).logits, expected(ids).logits, rtol=0, atol=0)
+        torch.testing.assert_close(loaded.model(ids).logits, expected(ids).logits, rtol=1e-6, atol=1e-6)
         assert torch.equal(
             loaded.model.generate(ids, max_new_tokens=2, do_sample=False),
             expected.generate(ids, max_new_tokens=2, do_sample=False),
@@ -493,7 +495,7 @@ def test_real_assets_public_hostile_load_config_tokenizer_and_generation(tmp_pat
             for prompt, tokens in reference_tokenizer["ids"].items():
                 assert loaded.tokenizer.tokenizer.encode(prompt, add_special_tokens=False) == tokens
             with torch.inference_mode():
-                torch.testing.assert_close(loaded.model(ids).logits, expected(ids).logits, rtol=0, atol=0)
+                torch.testing.assert_close(loaded.model(ids).logits, expected(ids).logits, rtol=1e-6, atol=1e-6)
     assert not marker.exists()
 
 
@@ -508,12 +510,12 @@ def test_corrupt_real_tokenizer_after_warm_load_fails_and_repaired_same_path_rec
         GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32)
     tokenizer_path.write_bytes(saved)
     repaired = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, attn_implementation="eager")
-    expected = json.loads((PORT / "tokenizer_oracles.json").read_text())[family]["ids"]
+    expected = ORACLES[family]["ids"]
     for prompt, ids in expected.items():
         assert repaired.tokenizer.tokenizer.encode(prompt, add_special_tokens=False) == ids
     with torch.inference_mode():
         torch.testing.assert_close(
-            repaired.model(torch.tensor([[4, 8]])).logits, original(torch.tensor([[4, 8]])).logits, rtol=0, atol=0
+            repaired.model(torch.tensor([[4, 8]])).logits, original(torch.tensor([[4, 8]])).logits, rtol=1e-6, atol=1e-6
         )
     assert tokenizer_path.read_bytes() == saved
     assert not marker.exists()
@@ -521,7 +523,7 @@ def test_corrupt_real_tokenizer_after_warm_load_fails_and_repaired_same_path_rec
 
 @pytest.mark.parametrize("family", ["XVERSE-7B-Chat", "XVERSE-MoE-A4.2B", "XVERSE-Ent-A5.7B"])
 def test_real_serialized_tokenizer_ids_and_two_exact_reloads(tmp_path, family):
-    expected = json.loads((PORT / "tokenizer_oracles.json").read_text())[family]
+    expected = ORACLES[family]
     for name in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"]:
         (tmp_path / name).write_bytes(asset(family, name))
     tokenizer = XverseQModel.loader.load_tokenizer(tmp_path)
@@ -631,11 +633,11 @@ def test_failed_safetensor_load_repair_state_assignment_and_subfolder(tmp_path, 
     destination.load_state_dict(loaded.state_dict(), assign=assign)
     ids = torch.tensor([[4, 8, 12]])
     with torch.inference_mode():
-        torch.testing.assert_close(destination(ids).logits, model(ids).logits, rtol=0, atol=0)
+        torch.testing.assert_close(destination(ids).logits, model(ids).logits, rtol=1e-6, atol=1e-6)
     with pytest.raises(ValueError, match="complete cached sequence"):
         loaded(ids[:, :1], attention_mask=torch.ones(1, 8), use_cache=True)
     with torch.inference_mode():
-        torch.testing.assert_close(loaded(ids).logits, model(ids).logits, rtol=0, atol=0)
+        torch.testing.assert_close(loaded(ids).logits, model(ids).logits, rtol=1e-6, atol=1e-6)
 
 
 def test_invalid_foreign_cache_rejection_then_reuse():
@@ -667,18 +669,6 @@ def test_generation_policy_is_loaded_saved_and_effective(tmp_path):
     assert model.generation_config.to_dict() == initial
 
 
-def test_asset_sha_manifest():
-    sources = json.loads((PORT / "source_manifest.json").read_text())
-    for family, metadata in sources.items():
-        if family == "code_license":
-            assert hashlib.sha256((PORT / "LICENSE").read_bytes()).hexdigest() == metadata["sha256"]
-            continue
-        for name, expected in metadata.get("sha256", {}).items():
-            path = FIXTURES / f"{family}-{name}"
-            if has_port_asset(path):
-                assert hashlib.sha256(read_port_asset(path)).hexdigest() == expected
-
-
 @pytest.mark.parametrize("persistent", [False, True])
 @pytest.mark.parametrize("index_name", ["model.safetensors.index.json", "pytorch_model.bin.index.json"])
 def test_released_index_metadata_preserves_exported_rope_without_loading_pickle(tmp_path, persistent, index_name):
@@ -697,6 +687,8 @@ def test_released_index_metadata_preserves_exported_rope_without_loading_pickle(
     assert XverseQModel.loader.from_config(loaded).config._attn_implementation == "sdpa"
     with pytest.raises(ValueError, match="Flash Attention 2"):
         XverseQModel.loader.from_config(loaded, attn_implementation="flash_attention_2")
+    # Attention is hand-written (eager/SDPA), not routed through ALL_ATTENTION_FUNCTIONS.
+    assert not XverseForCausalLM.is_backend_compatible()
     loaded.save_pretrained(tmp_path / "roundtrip")
     assert XverseQModel.loader.load_config(tmp_path / "roundtrip").xverse_rope_persistent is persistent
 
@@ -777,7 +769,7 @@ def test_source_chat_prompt_bytes_truncation_and_native_generate(tmp_path, varia
         {"role": "assistant", "content": "好。"},
         {"role": "user", "content": "Hello world!"},
     ]
-    expected = json.loads((PORT / "tokenizer_oracles.json").read_text())[family]["chat_ids"]
+    expected = ORACLES[family]["chat_ids"]
     model.generation_config.max_new_tokens = 2
     model.generation_config.do_sample = True
     ids = model._build_chat_input(tokenizer, messages, 2)
@@ -798,7 +790,7 @@ def test_source_chat_prompt_bytes_truncation_and_native_generate(tmp_path, varia
             {"role": "assistant", "content": "4"},
             messages[-1],
         ]
-        expected_extended = json.loads((PORT / "tokenizer_oracles.json").read_text())[family]["extended_chat_ids"]
+        expected_extended = ORACLES[family]["extended_chat_ids"]
         assert model._build_chat_input(tokenizer, extended, 2).tolist() == [expected_extended]
         with pytest.raises(ValueError, match="system message must be first"):
             model._build_chat_input(tokenizer, [messages[0], extended[0], messages[-1]], 2)

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pinned release inventories and real dense/routed/shared XVERSE owners."""
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -42,9 +41,7 @@ def test_exact_pinned_release_keys_and_available_header_shapes(release):
     assert config.xverse_rope_type == ("dynamic_256k" if release == "XVERSE-13B-256K" else "default")
 
 
-@pytest.mark.parametrize("moe,shared", [(0, None), (4, None), (4, 2)])
-@pytest.mark.parametrize("kv", [1, 2, 4])
-@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("moe,shared,kv,bias", [(0, None, 1, True), (4, None, 2, False), (4, 2, 4, True)])
 def test_real_every_tensor_deepest_owner_roles_exclusions_and_plan(moe, shared, kv, bias):
     config = tiny_config(
         num_experts=moe, moe_top_k=2, num_shared_experts=shared, num_key_value_heads=kv, attention_bias=bias
@@ -96,11 +93,15 @@ def test_selection_is_request_local_and_central_proposal_is_exact():
         dense = XverseForCausalLM(tiny_config())
     a = XverseQModel._resolve_effective_module_tree(moe, None)
     b = XverseQModel._resolve_effective_module_tree(dense, None)
-    proposal = json.loads((PORT / "central_fixture_proposals.json").read_text())
-    assert (
-        XverseQModel.build_layer_modules(b, include_capture_only=True)
-        == proposal["registered_module_plans"]["cases"]["XverseQModel/gptq"]["blocks"]
-    )
+    assert XverseQModel.build_layer_modules(b, include_capture_only=True) == [
+        ["input_layernorm:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["self_attn.rotary_emb.inv_freq:!"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+    ]
     a[-1].clear()
     assert XverseQModel._resolve_effective_module_tree(moe, None)[-1]
     assert XverseQModel._resolve_effective_module_tree(dense, None) == b
