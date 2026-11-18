@@ -8,9 +8,10 @@ from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
-import torch.utils.checkpoint
 from torch import nn
+from transformers import initialization as init
 from transformers.activations import ACT2FN
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
@@ -165,7 +166,7 @@ class InternMLP(nn.Module):
         return hidden_states
 
 
-class InternVisionEncoderLayer(nn.Module):
+class InternVisionEncoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: InternVisionConfig, drop_path_rate: float):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -215,7 +216,7 @@ class InternVisionEncoder(nn.Module):
                for i in range(config.num_hidden_layers)]
         self.layers = nn.ModuleList([
             InternVisionEncoderLayer(config, dpr[idx]) for idx in range(config.num_hidden_layers)])
-        self.gradient_checkpointing = True
+        self.gradient_checkpointing = False
 
     def forward(
             self,
@@ -244,15 +245,7 @@ class InternVisionEncoder(nn.Module):
         for idx, encoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = torch.utils.checkpoint.checkpoint(
-                    encoder_layer,
-                    hidden_states, use_reentrant=False)
-            else:
-                layer_outputs = encoder_layer(
-                    hidden_states,
-                )
-            hidden_states = layer_outputs
+            hidden_states = encoder_layer(hidden_states)
 
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
@@ -281,13 +274,13 @@ class InternVisionModel(PreTrainedModel):
     def _init_weights(self, module):
         super()._init_weights(module)
         if isinstance(module, InternVisionEmbeddings):
-            nn.init.normal_(module.class_embedding, std=self.config.initializer_range)
-            nn.init.normal_(module.position_embedding, std=self.config.initializer_range)
+            init.normal_(module.class_embedding, std=self.config.initializer_range)
+            init.normal_(module.position_embedding, std=self.config.initializer_range)
         elif isinstance(module, InternVisionEncoderLayer):
-            nn.init.constant_(module.ls1, self.config.initializer_factor)
-            nn.init.constant_(module.ls2, self.config.initializer_factor)
+            init.constant_(module.ls1, self.config.initializer_factor)
+            init.constant_(module.ls2, self.config.initializer_factor)
         elif isinstance(module, InternRMSNorm):
-            nn.init.ones_(module.weight)
+            init.ones_(module.weight)
 
     def resize_pos_embeddings(self, old_size, new_size, patch_size):
         pos_emb = self.embeddings.position_embedding

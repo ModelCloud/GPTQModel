@@ -23,8 +23,11 @@ from gptqmodel.models.ports.internvl_chat.modeling_internvl_chat import InternVL
 
 ARCHITECTURES = ["LlamaForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM", "Qwen3MoeForCausalLM", "Phi3ForCausalLM", "InternLM2ForCausalLM"]
 
-TOKENIZER_ASSETS = json.loads((Path(__file__).parents[1] / "gptqmodel/models/ports/internvl_chat/tokenizer_assets.json").read_text())
-SOURCE_FAST_REFERENCE = json.loads((Path(__file__).parents[1] / "gptqmodel/models/ports/internvl_chat/tokenizer_source_reference.json").read_text())
+FIXTURES = Path(__file__).parent / "fixtures/ports/internvl_chat"
+TOKENIZER_ASSETS = json.loads((FIXTURES / "tokenizer_assets.json").read_text())
+SOURCE_FAST_REFERENCE = json.loads((FIXTURES / "tokenizer_source_reference.json").read_text())
+# sha256 of sorted "<key> <dim>x<dim>..." lines of the pinned 1B (Qwen3-0.6B decoder) checkpoint index, 657 tensors.
+CHECKPOINT_INVENTORY_SHA256 = "e167115f15f19d5e5569d222ce1847cbac627bdf6b44cf9f7e09627343817394"
 
 
 @lru_cache(maxsize=None)
@@ -543,16 +546,17 @@ def test_mutated_config_revalidated_before_allocation():
 
 
 def test_pinned_1b_checkpoint_parameter_names_and_shapes_on_meta():
-    import gptqmodel.models.ports.internvl_chat as port
-
-    root = Path(port.__file__).parent
-    cfg = InternVLChatConfig(**json.loads((root / "checkpoint_config.json").read_text()))
+    cfg = InternVLChatConfig(**json.loads((FIXTURES / "checkpoint_config.json").read_text()))
     with torch.device("meta"):
         model = InternVLChatModel(cfg)
-    manifest = json.loads((root / "checkpoint_manifest.json").read_text())
-    assert set(model.state_dict()) == set(manifest)
-    for key, value in model.state_dict().items():
-        assert list(value.shape) == manifest[key]["shape"], key
+    state = model.state_dict()
+    assert len(state) == 657
+    inventory = "\n".join(f"{key} {'x'.join(map(str, state[key].shape))}" for key in sorted(state))
+    assert hashlib.sha256(inventory.encode()).hexdigest() == CHECKPOINT_INVENTORY_SHA256
+    assert state["vision_model.embeddings.position_embedding"].shape == (1, 1025, 1024)
+    assert state["vision_model.encoder.layers.0.attn.qkv.weight"].shape == (3072, 1024)
+    assert state["mlp1.1.weight"].shape == (1024, 4096)
+    assert state["language_model.model.layers.0.self_attn.q_norm.weight"].shape == (128,)
 
 
 def _vision_oracle(model, pixels):
@@ -640,3 +644,21 @@ def test_legacy_phi3_rope_short_long_and_reset_matches_equations(kind):
         theta = torch.cat((freq, freq), dim=-1)
         torch.testing.assert_close(cos, theta.cos() * amplitude, atol=1e-6, rtol=1e-5)
         torch.testing.assert_close(sin, theta.sin() * amplitude, atol=1e-6, rtol=1e-5)
+
+
+def test_vision_gradient_checkpointing_follows_transformers_toggle():
+    torch.manual_seed(0)
+    model = InternVLChatModel(tiny_config()).train()
+    encoder = model.vision_model.encoder
+    assert not encoder.gradient_checkpointing
+    pixels = torch.randn(2, 3, 8, 8)
+    model.vision_model(pixel_values=pixels).last_hidden_state.sum().backward()
+    reference = [p.grad.clone() for p in model.vision_model.parameters()]
+    model.zero_grad()
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    assert all(layer.gradient_checkpointing for layer in encoder.layers)
+    model.vision_model(pixel_values=pixels).last_hidden_state.sum().backward()
+    for expected, param in zip(reference, model.vision_model.parameters()):
+        torch.testing.assert_close(param.grad, expected)
+    model.gradient_checkpointing_disable()
+    assert not any(layer.gradient_checkpointing for layer in encoder.layers)
