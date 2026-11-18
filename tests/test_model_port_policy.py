@@ -29,11 +29,11 @@ PENDING_NATIVE_DEFINITIONS = frozenset({
 })
 
 PENDING_MODEL_IMPORT_PORTS = frozenset({
-    "bailing_moe", "chatglm", "codegen", "deepseek_v2", "deepseek_v3", "deepseek_vl_v2", "dream", "ernie4_5_vl_moe",
-    "exaone4", "instella", "intern_s2_preview", "internlm", "internvl_chat", "kimi_k25", "kimi_k3", "lfm3_omni",
-    "lfm3_vl", "llama", "mage_vl", "mimo", "mimo_v2", "minicpm_o", "minicpmv", "moss", "nemotron_h",
-    "nemotron_h_puzzle", "nemotron_omni", "openvla", "ovis", "ovis2_5", "ovis2_6_moe", "phi4", "qwen2_5_vl",
-    "qwen2_vl", "qwen3", "qwen_drive", "sensenova_loop", "solar_open2", "unlimited_ocr", "xing4_0", "zdtaichu5",
+    "bailing_moe", "chatglm", "deepseek_v2", "deepseek_v3", "dream", "ernie4_5_vl_moe", "exaone4",
+    "intern_s2_preview", "internlm", "internvl_chat", "kimi_k25", "kimi_k3", "lfm3_omni", "lfm3_vl", "llama",
+    "mage_vl", "mimo", "mimo_v2", "minicpm_o", "minicpmv", "nemotron_h", "nemotron_h_puzzle", "nemotron_omni",
+    "openvla", "ovis", "ovis2_5", "ovis2_6_moe", "phi4", "qwen2_5_vl", "qwen2_vl", "qwen_drive", "sensenova_loop",
+    "solar_open2", "unlimited_ocr", "zdtaichu5",
 })
 
 PENDING_STALE_PATTERN_PORTS = frozenset({
