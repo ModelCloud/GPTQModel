@@ -24,7 +24,7 @@ from typing import Dict, List, Literal, Optional, Tuple
 import torch
 from PIL import Image, ImageOps
 from torch.nn.utils.rnn import pad_sequence
-from transformers import LlamaTokenizerFast
+from transformers import PreTrainedTokenizerBase
 from transformers.processing_utils import ProcessorMixin
 
 from .conversation import get_conv_template
@@ -132,11 +132,10 @@ class ImageTransform(object):
 
 class DeepseekVLV2Processor(ProcessorMixin):
     tokenizer_class = "AutoTokenizer"
-    attributes = ["tokenizer"]
 
     def __init__(
         self,
-        tokenizer: LlamaTokenizerFast,
+        tokenizer: PreTrainedTokenizerBase,
         candidate_resolutions: Tuple[Tuple[int, int]],
         patch_size: int,
         downsample_ratio: int,
@@ -658,9 +657,6 @@ class DeepseekVLV2Processor(ProcessorMixin):
         """padding input_ids and images_seq_mask"""
         if padding == "left":
             # the tokenizer is default to pad at left
-            ## TODO, You're using a LlamaTokenizerFast tokenizer.
-            #   Please note that with a fast tokenizer, using the `__call__` method is faster than
-            #   using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
             padded_input_ids = self.tokenizer.pad({"input_ids": batched_input_ids}, return_tensors="pt")
             batched_input_ids, batched_attention_mask = (
                 padded_input_ids["input_ids"],

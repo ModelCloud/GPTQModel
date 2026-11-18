@@ -123,29 +123,6 @@ class Conversation:
         """Reset a new message."""
         self.messages = []
 
-    def to_gradio_chatbot(self):
-        """Convert the conversation to gradio chatbot format."""
-        ret = []
-        for i, (role, msg) in enumerate(self.messages[self.offset :]):
-            if i % 2 == 0:
-                ret.append([msg, None])
-            else:
-                ret[-1][-1] = msg
-        return ret
-
-    def to_openai_api_messages(self):
-        """Convert the conversation to OpenAI chat completion format."""
-        system_prompt = self.system_template.format(system_message=self.system_message)
-        ret = [{"role": "system", "content": system_prompt}]
-
-        for i, (_, msg) in enumerate(self.messages[self.offset :]):
-            if i % 2 == 0:
-                ret.append({"role": "user", "content": msg})
-            else:
-                if msg is not None:
-                    ret.append({"role": "assistant", "content": msg})
-        return ret
-
     def copy(self):
         return Conversation(
             name=self.name,
@@ -160,15 +137,6 @@ class Conversation:
             stop_str=self.stop_str,
             stop_token_ids=self.stop_token_ids,
         )
-
-    def dict(self):
-        return {
-            "template_name": self.name,
-            "system_message": self.system_message,
-            "roles": self.roles,
-            "messages": self.messages,
-            "offset": self.offset,
-        }
 
 
 # A global registry for all conversation templates
@@ -188,23 +156,6 @@ def get_conv_template(name: str) -> Conversation:
     return conv_templates[name].copy()
 
 
-# register_conv_template(
-#     Conversation(
-#         name="deepseek",
-#         system_template="{system_message}",
-#         # system_message="You are a helpful assistant. Please answer truthfully and write out your "
-#         # "thinking step by step to be sure you get the right answer.",
-#         system_message="",
-#         roles=("User", "Assistant"),
-#         messages=(),
-#         offset=0,
-#         sep_style=SeparatorStyle.DeepSeek,
-#         sep="\n\n",
-#         sep2="<｜end▁of▁sentence｜>",
-#         stop_token_ids=[100001],
-#         stop_str=["User:", "<｜end▁of▁sentence｜>"]
-#     )
-# )
 register_conv_template(
     Conversation(
         name="deepseek",
@@ -222,21 +173,6 @@ register_conv_template(
         stop_str=["User:", "<｜end▁of▁sentence｜>"],
     )
 )
-# register_conv_template(
-#     Conversation(
-#         name="deepseekv2",
-#         system_template="{system_message}",
-#         system_message="",
-#         roles=("User", "Assistant"),
-#         messages=(),
-#         offset=0,
-#         sep_style=SeparatorStyle.DeepSeekV2,
-#         sep="\n<｜sft▁end｜>",
-#         sep2="<｜end▁of▁sentence｜>",
-#         stop_token_ids=[100001],
-#         stop_str=["User:", "<｜end▁of▁sentence｜>"]
-#     )
-# )
 register_conv_template(
     Conversation(
         name="deepseekv2",
@@ -287,24 +223,3 @@ register_conv_template(
     )
 )
 
-
-if __name__ == "__main__":
-    print("deepseek template:")
-    conv = get_conv_template("deepseek")
-    conv.append_message(conv.roles[0], "Hello!")
-    conv.append_message(conv.roles[1], "Hi! This is Tony.")
-    conv.append_message(conv.roles[0], "Who are you?")
-    conv.append_message(conv.roles[1], "I am a helpful assistant.")
-    conv.append_message(conv.roles[0], "How are you?")
-    conv.append_message(conv.roles[1], None)
-    print(conv.get_prompt())
-
-    print("deepseekv2 template:")
-    conv = get_conv_template("deepseekv2")
-    conv.append_message(conv.roles[0], "Hello!")
-    conv.append_message(conv.roles[1], "Hi! This is Tony.")
-    conv.append_message(conv.roles[0], "Who are you?")
-    conv.append_message(conv.roles[1], "I am a helpful assistant.")
-    conv.append_message(conv.roles[0], "How are you?")
-    conv.append_message(conv.roles[1], None)
-    print(conv.get_prompt())

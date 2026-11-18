@@ -1,21 +1,15 @@
 # Copyright (c) 2023-2024 DeepSeek. Distributed under LICENSE-CODE (MIT).
-from transformers.configuration_utils import PretrainedConfig
-from transformers.utils import logging
+from transformers import PreTrainedConfig
 
 
-logger = logging.get_logger(__name__)
-
-DEEPSEEK_PRETRAINED_CONFIG_ARCHIVE_MAP = {}
-
-
-class DeepseekV2Config(PretrainedConfig):
+class DeepseekV2Config(PreTrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`DeepseekV2Model`]. It is used to instantiate an DeepSeek
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
     defaults will yield a similar configuration to that of the DeepSeek-V2 with multi-latent attention.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
 
     Args:
@@ -200,7 +194,8 @@ class DeepseekV2Config(PretrainedConfig):
         self.pretraining_tp = pretraining_tp
         self.use_cache = use_cache
         self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
+        # Transformers 5 standardizes the legacy `rope_scaling` dict into `rope_parameters`.
+        self.rope_parameters = kwargs.pop("rope_parameters", None) or rope_scaling
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.use_mla = use_mla

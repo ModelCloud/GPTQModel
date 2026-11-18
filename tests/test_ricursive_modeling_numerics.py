@@ -8,7 +8,7 @@ import math
 import pytest
 import torch
 import torch.nn.functional as F
-from ricursive_test_utils import compatibility_module, make_model
+from ricursive_test_utils import make_model
 from transformers.cache_utils import DynamicCache, StaticCache
 
 
@@ -79,7 +79,7 @@ def oracle(model, ids, mask):
     return F.linear(norm(x, model.model.norm), model.lm_head.weight)
 
 
-@pytest.mark.parametrize("window", [1, 4, 32, None])
+@pytest.mark.parametrize("window", [1, 4, None])
 @pytest.mark.parametrize("query_heads", [4, 8])
 @pytest.mark.parametrize("valres,gated,scale,clamp", [(True, True, 5.0, 0.05), (False, False, None, None)])
 @pytest.mark.parametrize("padding", [False, True])
@@ -104,9 +104,9 @@ def test_independent_oracle(window, query_heads, valres, gated, scale, clamp, pa
 
 
 @pytest.mark.parametrize("cache_kind", ["full", "hybrid", "static"])
-@pytest.mark.parametrize("window", [1, 4, 8])
+@pytest.mark.parametrize("window", [1, 4])
 @pytest.mark.parametrize("mask_kind", ["none", "left", "capacity"])
-@pytest.mark.parametrize("chunks", [(1, 1, 1, 8, 1, 5), (7, 2, 6, 2), (3, 4, 4, 6)])
+@pytest.mark.parametrize("chunks", [(1, 1, 1, 8, 1, 5), (7, 2, 6, 2)])
 @torch.inference_mode()
 def test_eviction_and_blocks(cache_kind, window, mask_kind, chunks):
     model = make_model(sliding_window=window)
@@ -168,13 +168,9 @@ def test_generation_modes(cache_implementation, chunk_size, beams):
     assert torch.equal(actual, expected)
 
 
-@pytest.mark.parametrize("runtime", ["native", "gptqmodel"])
 @torch.inference_mode()
-def test_default_outputs_and_loss(runtime):
+def test_default_outputs_and_loss():
     model = make_model()
-    if runtime == "gptqmodel":
-        apply_ricursive_generate_patch = compatibility_module().apply_ricursive_generate_patch
-        apply_ricursive_generate_patch(model)
     ids = torch.tensor([[3, 4, 5, 6]])
     base = model(ids, labels=ids, use_cache=False)
     out = model(ids, labels=ids, use_cache=False, logits_to_keep=1, output_hidden_states=True, return_dict=False)

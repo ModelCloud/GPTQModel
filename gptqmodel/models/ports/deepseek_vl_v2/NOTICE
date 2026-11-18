@@ -1,16 +1,15 @@
 DeepSeek-VL2 local Transformers 5 port
 
 Adapted from DeepSeek-AI/DeepSeek-VL2 revision
-ef9f91e2b6426536b83294c11742c27be66361b1 and the pinned checkpoint
-sources listed in PORTING.md. Copyright (c) 2023-2024 DeepSeek.
+ef9f91e2b6426536b83294c11742c27be66361b1. Copyright (c) 2023-2024 DeepSeek.
 DeepSeek distributes this code under the MIT license in LICENSE-CODE.
 
 modeling_deepseek.py retains its upstream Apache-2.0 header and the
 DeepSeek-AI/Hugging Face, GPT-NeoX, OPT and Llama attributions.
 siglip_vit.py retains its upstream timm vision_transformer source link.
 conversation.py retains its upstream FastChat conversation source link.
-These Apache-2.0-derived components are additionally covered by
-LICENSE-APACHE-2.0. Existing notices are retained in their source files.
+These Apache-2.0-derived components are additionally covered by the
+Apache-2.0 LICENSE at the repository root. Existing notices are retained in their source files.
 
 The local port changes Transformers cache/config/generation integration,
 package-owned loading/processing, dense attention compatibility and the

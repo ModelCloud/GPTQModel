@@ -61,7 +61,6 @@ class MlpProjector(nn.Module):
             w = h = int(wxh**0.5)
             x = x.view(batch_size, w, h, channels)
             x = x.permute(0, 3, 1, 2)
-            # import ipdb; ipdb.set_trace()
             patches = x.unfold(2, 2, 2).unfold(3, 2, 2)
             batch_size, channels, h_patches, w_patches, _, _ = patches.size()
             # 在通道维度上拼接
@@ -101,6 +100,7 @@ class DeepseekVLV2PreTrainedModel(PreTrainedModel):
     base_model_prefix = "deepseek_vl_v2"
     _no_split_modules = []
     _skip_keys_device_placement = "past_key_values"
+    _supports_sdpa = True  # dispatched to the text decoder; the vision tower has its own attention
 
 
 class DeepseekVLV2ForCausalLM(DeepseekVLV2PreTrainedModel, GenerationMixin):
@@ -339,9 +339,6 @@ class DeepseekVLV2ForCausalLM(DeepseekVLV2PreTrainedModel, GenerationMixin):
         images_spatial_crop=None,
         labels=None,
         use_cache=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
         **kwargs,
     ):
         if inputs_embeds is None:
@@ -358,9 +355,6 @@ class DeepseekVLV2ForCausalLM(DeepseekVLV2PreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             labels=labels,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
             **kwargs,
         )
 

@@ -21,19 +21,19 @@
 
 import math
 from dataclasses import dataclass
+from functools import partial
 from typing import List, Optional, Tuple, Union
 
 import torch
-import torch.utils.checkpoint
 from torch import nn
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from torch.nn import CrossEntropyLoss
+from transformers import initialization as init
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
-    SequenceClassifierOutputWithPast,
 )
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import (
@@ -45,7 +45,6 @@ from .longllama_utils import LongLlamaMemCache, LongLlamaMemConfig, mem_apply_up
 
 
 logger = logging.get_logger(__name__)
-_CONFIG_FOR_DOC = "LongLlamaConfig"
 
 
 @dataclass
@@ -407,27 +406,16 @@ class LongLlamaPreTrainedModel(PreTrainedModel):
     _skip_keys_device_placement = "past_key_values"
     _keys_to_ignore_on_load_unexpected = ["decoder\\.version"]
 
+    @torch.no_grad()
     def _init_weights(self, module):
-        std = self.config.initializer_range
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
-        elif isinstance(module, LongLlamaRMSNorm):
-            nn.init.ones_(module.weight)
-        elif isinstance(module, LongLlamaRotaryEmbedding):
+        # TF5 base init covers Linear/Embedding/RMSNorm via guarded `initialization` helpers.
+        super()._init_weights(module)
+        if isinstance(module, LongLlamaRotaryEmbedding):
             dim = module.inv_freq.numel() * 2
-            module.inv_freq.copy_(
-                1.0 / (10000 ** (torch.arange(0, dim, 2, device=module.inv_freq.device).float() / dim))
+            init.copy_(
+                module.inv_freq,
+                1.0 / (10000 ** (torch.arange(0, dim, 2, device=module.inv_freq.device).float() / dim)),
             )
-
-    def _set_gradient_checkpointing(self, module, value=False):
-        if isinstance(module, LongLlamaModel):
-            module.gradient_checkpointing = value
 
 
 def _prepare_pos_ids(past_key_values, batch_size, input_length, device):
@@ -516,7 +504,7 @@ class LongLlamaModel(LongLlamaPreTrainedModel):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")
         elif input_ids is not None:
@@ -569,15 +557,13 @@ class LongLlamaModel(LongLlamaPreTrainedModel):
                 and (idx % self.config.gradient_checkpoint_every_ith == 0)
             ):
 
-                def create_custom_forward(module):
-
-                    def custom_forward(*inputs):
-                        return module(*inputs, output_attentions, None, mem_cache=None)
-
-                    return custom_forward
-
-                layer_outputs = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(decoder_layer), hidden_states, attention_mask, position_ids, None
+                # TF5 installs `_gradient_checkpointing_func` (explicit use_reentrant).
+                layer_outputs = self._gradient_checkpointing_func(
+                    partial(decoder_layer.__call__, output_attentions=output_attentions, use_cache=None, mem_cache=None),
+                    hidden_states,
+                    attention_mask,
+                    position_ids,
+                    None,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -759,7 +745,7 @@ def _handle_long_input(
 ):
     if output_attentions:
         logger.warning(
-            "Outputing attentions is not supported in LongLlamaForCausalLM and LongLlamaForSequenceClassification. Attention of the last window will be returned"
+            "Outputing attentions is not supported in LongLlamaForCausalLM. Attention of the last window will be returned"
         )
     past_key_values, mem_caches = _split_past_key_values(past_key_values)
     if past_key_values is not None and use_cache is False:
@@ -930,7 +916,7 @@ class LongLlamaForCausalLM(LongLlamaPreTrainedModel, GenerationMixin):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
         outputs = _handle_long_input(
             model=self.model,
             input_ids=input_ids,
@@ -1002,113 +988,3 @@ class LongLlamaForCausalLM(LongLlamaPreTrainedModel, GenerationMixin):
             }
         )
         return model_inputs
-
-    @staticmethod
-    def _reorder_cache(past_key_values, beam_idx):
-        reordered_past = ()
-        for layer_past in past_key_values:
-            reordered_past += (
-                tuple((past_state.index_select(0, beam_idx.to(past_state.device)) for past_state in layer_past)),
-            )
-        return LongLlamaCache(reordered_past)
-
-
-class LongLlamaForSequenceClassification(LongLlamaPreTrainedModel):
-    _keys_to_ignore_on_load_missing = ["lm_head.weight"]
-
-    def __init__(self, config):
-        super().__init__(config)
-        self.num_labels = config.num_labels
-        self.context_window_length = config.max_position_embeddings
-        self.model = LongLlamaModel(config)
-        self.score = nn.Linear(config.hidden_size, self.num_labels, bias=False)
-        self.post_init()
-
-    def get_input_embeddings(self):
-        return self.model.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.model.embed_tokens = value
-
-    def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        last_context_length: Optional[int] = None,
-    ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
-        last_context_length = (
-            last_context_length if last_context_length is not None else self.config.last_context_length
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        transformer_outputs = _handle_long_input(
-            model=self.model,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            context_window_length=self.context_window_length,
-            last_context_length=last_context_length,
-        )
-        hidden_states = transformer_outputs[0]
-        logits = self.score(hidden_states)
-        if input_ids is not None:
-            batch_size = input_ids.shape[0]
-        else:
-            batch_size = inputs_embeds.shape[0]
-        if self.config.pad_token_id is None and batch_size != 1:
-            raise ValueError("Cannot handle batch sizes > 1 if no padding token is defined.")
-        if self.config.pad_token_id is None:
-            sequence_lengths = -1
-        elif input_ids is not None:
-            sequence_lengths = (torch.ne(input_ids, self.config.pad_token_id).sum(-1) - 1).to(logits.device)
-        else:
-            sequence_lengths = -1
-        pooled_logits = logits[torch.arange(batch_size, device=logits.device), sequence_lengths]
-        loss = None
-        if labels is not None:
-            labels = labels.to(logits.device)
-            if self.config.problem_type is None:
-                if self.num_labels == 1:
-                    self.config.problem_type = "regression"
-                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
-                    self.config.problem_type = "single_label_classification"
-                else:
-                    self.config.problem_type = "multi_label_classification"
-            if self.config.problem_type == "regression":
-                loss_fct = MSELoss()
-                if self.num_labels == 1:
-                    loss = loss_fct(pooled_logits.squeeze(), labels.squeeze())
-                else:
-                    loss = loss_fct(pooled_logits, labels)
-            elif self.config.problem_type == "single_label_classification":
-                loss_fct = CrossEntropyLoss()
-                loss = loss_fct(pooled_logits.view(-1, self.num_labels), labels.view(-1))
-            elif self.config.problem_type == "multi_label_classification":
-                loss_fct = BCEWithLogitsLoss()
-                loss = loss_fct(pooled_logits, labels)
-        if not return_dict:
-            output = (pooled_logits,) + transformer_outputs[1:]
-            return (loss,) + output if loss is not None else output
-        return SequenceClassifierOutputWithPast(
-            loss=loss,
-            logits=pooled_logits,
-            past_key_values=transformer_outputs.past_key_values,
-            hidden_states=transformer_outputs.hidden_states,
-            attentions=transformer_outputs.attentions,
-        )

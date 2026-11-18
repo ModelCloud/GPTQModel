@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real released owners, including the entire RADIO and Parakeet checkpoint."""
 
-import json
 import re
 
 import pytest
@@ -53,7 +52,7 @@ def source_to_runtime_shapes(source):
 def test_all_released_tensor_shapes_and_defused_owners_match_exactly():
     source = read_port_json(PORT / "checkpoint_inventory.json")
     assert len(source) == 7349
-    config = NemotronOmniConfig(**json.loads((PORT / "source_config.json").read_text()))
+    config = NemotronOmniConfig(**read_port_json(PORT / "source_config.json"))
     with torch.device("meta"):
         model = NemotronH_Omni_Reasoning_V3(config)
         _convert_model_with_defuser(NemotronOmniQModel, model, cleanup_original=False)

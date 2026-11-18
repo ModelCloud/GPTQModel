@@ -31,8 +31,8 @@ def test_mimo_layer_replay_matches_native_forward(tmp_path, first_sliding, mask_
         mask = None
     elif mask_kind == "mapping":
         modeling = import_module(type(model).__module__)
-        mask_kwargs = {"config": model.config, "input_embeds": model.model.embed_tokens(ids), "attention_mask": mask,
-                       "cache_position": torch.arange(16), "past_key_values": None, "position_ids": positions}
+        mask_kwargs = {"config": model.config, "inputs_embeds": model.model.embed_tokens(ids), "attention_mask": mask,
+                       "past_key_values": None, "position_ids": positions}
         mask = {"full_attention": modeling.create_causal_mask(**mask_kwargs),
                 "sliding_window_attention": modeling.create_sliding_window_causal_mask(**mask_kwargs)}
     captured = {}

@@ -321,8 +321,10 @@ def test_dense_attention_matches_native_llama_oracle(dtype):
     from transformers import LlamaConfig
     from transformers.models.llama.modeling_llama import LlamaAttention, LlamaRotaryEmbedding
 
-    model = DeepseekVLV2ForCausalLM(tiny_config()).eval().to(dtype)
+    model = DeepseekVLV2ForCausalLM(tiny_config(attn_implementation="eager")).eval().to(dtype)
+    assert model.language.config._attn_implementation == "eager"
     attention = model.language.model.layers[0].self_attn
+    rotary = model.language.model.rotary_emb
     config = LlamaConfig(
         hidden_size=16,
         num_attention_heads=4,
@@ -342,7 +344,7 @@ def test_dense_attention_matches_native_llama_oracle(dtype):
         expected = native(
             hidden, position_embeddings=LlamaRotaryEmbedding(config)(hidden, positions), attention_mask=mask
         )[0]
-        actual = attention(hidden, attention_mask=mask, position_ids=positions)[0]
+        actual = attention(hidden, position_embeddings=rotary(hidden, positions, 10), attention_mask=mask)[0]
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
@@ -371,7 +373,8 @@ def test_mla_matches_pinned_absorbed_weight_equations(q_lora, dtype):
             },
         },
     )
-    attn = DeepseekVLV2ForCausalLM(config).eval().to(dtype).language.model.layers[0].self_attn
+    text_model = DeepseekVLV2ForCausalLM(config).eval().to(dtype).language.model
+    attn, rotary = text_model.layers[0].self_attn, text_model.rotary_emb
     hidden = torch.randn(2, 7, 16, dtype=dtype)
     positions = torch.arange(40, 47).unsqueeze(0)
     mask = torch.zeros(2, 1, 7, 7, dtype=dtype).masked_fill(
@@ -411,7 +414,7 @@ def test_mla_matches_pinned_absorbed_weight_equations(q_lora, dtype):
         probabilities = (scores + mask).softmax(-1, dtype=torch.float32).to(dtype)
         output = (probabilities @ latent.unsqueeze(1)) @ value_weight.mT
         expected = F.linear(output.transpose(1, 2).reshape(2, 7, -1), attn.o_proj.weight)
-        actual = attn(hidden, attention_mask=mask, position_ids=positions)[0]
+        actual = attn(hidden, position_embeddings=rotary(hidden, positions, 47), attention_mask=mask)[0]
         tolerance = 2e-8 if dtype == torch.float32 else 8e-4
         torch.testing.assert_close(actual, expected, atol=tolerance, rtol=0.02 if dtype != torch.float32 else 1e-5)
 
@@ -532,6 +535,7 @@ def test_dense_only_tied_biased_config_outputs_and_save(tmp_path, mla):
             "output_attentions": True,
             "output_hidden_states": True,
         },
+        attn_implementation="eager",
     )
     model = DeepseekVLV2ForCausalLM(config).eval()
     ids = torch.tensor([[1, 5, 7, 9]])
@@ -541,7 +545,7 @@ def test_dense_only_tied_biased_config_outputs_and_save(tmp_path, mla):
     assert len(output.hidden_states) == 3
     assert model.language.lm_head.weight is model.language.model.embed_tokens.weight
     model.save_pretrained(tmp_path)
-    restored = DeepSeekVLV2QModel.loader.from_pretrained(tmp_path).eval()
+    restored = DeepSeekVLV2QModel.loader.from_pretrained(tmp_path, attn_implementation="eager").eval()
     assert restored.language.lm_head.weight is restored.language.model.embed_tokens.weight
     with torch.no_grad():
         torch.testing.assert_close(restored(ids, use_cache=False).logits, output.logits, atol=0, rtol=0)
@@ -599,3 +603,27 @@ def test_vision_attention_matches_independent_softmax_equations():
         expected = ((q @ k.mT * 0.5).softmax(-1) @ v).transpose(1, 2).reshape(2, 16, 8)
         expected = F.linear(expected, attn.proj.weight, attn.proj.bias)
         torch.testing.assert_close(attn(x), expected, rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.parametrize("mla", [False, True])
+def test_tf5_attention_backends_rope_parameters_and_static_cache(mla):
+    import warnings
+
+    rope = {"rope_scaling": {"type": "linear", "factor": 2.0}}
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)  # legacy rope_scaling lands in rope_parameters
+        eager_config = tiny_config(mla, attn_implementation="eager", language=rope)
+    assert eager_config.language_config.rope_parameters["rope_type"] == "linear"
+    torch.manual_seed(5)
+    eager = DeepseekVLV2ForCausalLM(eager_config).eval()
+    sdpa = DeepseekVLV2ForCausalLM(tiny_config(mla, language=rope)).eval()
+    sdpa.load_state_dict(eager.state_dict())
+    assert sdpa.language.config._attn_implementation == "sdpa"
+    ids = torch.tensor([[1, 4, 5, 6, 7], [1, 8, 9, 10, 11]])
+    with torch.no_grad():
+        torch.testing.assert_close(
+            sdpa(ids, use_cache=False).logits, eager(ids, use_cache=False).logits, atol=1e-5, rtol=1e-5
+        )
+        dynamic = eager.generate(ids, max_new_tokens=3, do_sample=False)
+        static = eager.generate(ids, max_new_tokens=3, do_sample=False, cache_implementation="static")
+    assert torch.equal(static, dynamic)

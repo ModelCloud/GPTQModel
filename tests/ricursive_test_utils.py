@@ -21,16 +21,6 @@ def package_source_dir():
 COUNTER = itertools.count()
 
 
-@lru_cache(maxsize=1)
-def compatibility_module():
-    """Exercise legacy shim unit contracts separately from public local loading."""
-    path = Path(__file__).resolve().parents[1] / "gptqmodel/utils/ricursive_patch.py"
-    spec = importlib.util.spec_from_file_location("ricursive_compat_test_module", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def make_model(**overrides):
     # Only inspect/import installed package files. Unique namespaces prevent a
     # deliberate legacy-method mutation from leaking into the next test.
