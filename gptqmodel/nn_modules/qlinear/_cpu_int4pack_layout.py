@@ -143,7 +143,10 @@ def rebuild_gptq_qweight(module) -> torch.Tensor:
 
     codes = int4pack_to_codes(module.qweight)  # [out_features, in_features]
     identity = getattr(module, "_ret_idx_is_identity", None)
-    if callable(identity) and not identity():
+    # A ``meta`` move (offload, ``to_empty``) carries no values: the inverse
+    # permutation cannot be decided from ``g_idx`` and would not change the
+    # shape-only result, so only the checkpoint layout is rebuilt.
+    if callable(identity) and not codes.is_meta and not identity():
         ret_idx = module._build_ret_idx().to(
             device=codes.device, dtype=torch.long
         )
