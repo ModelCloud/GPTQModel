@@ -300,7 +300,9 @@ def test_cpu_bf16x3_capability_probe_respects_an_active_scope(monkeypatch):
         return value
 
     monkeypatch.setattr(cpu_features, "_cpu_bf16x3_precision", gated_getter)
-    cpu_features.has_cpu_bf16x3_precision.cache_clear()
+    # The capability is a process constant published as a module global;
+    # monkeypatch resets it for this probe and restores it afterwards.
+    monkeypatch.setattr(cpu_features, "_CPU_BF16X3_PRECISION", None)
 
     def probe():
         try:
@@ -338,7 +340,6 @@ def test_cpu_bf16x3_capability_probe_respects_an_active_scope(monkeypatch):
         forward_thread.join(timeout=10)
     finally:
         release_probe.set()
-        cpu_features.has_cpu_bf16x3_precision.cache_clear()
 
     assert not probe_thread.is_alive()
     assert not forward_thread.is_alive()
