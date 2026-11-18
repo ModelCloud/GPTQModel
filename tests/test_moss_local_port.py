@@ -332,7 +332,7 @@ def test_moss_public_model_and_tokenizer_ignore_hostile_maps(tmp_path, monkeypat
 
 @pytest.mark.parametrize("rotary", [4, 8])
 @pytest.mark.parametrize("offload", [False, True])
-def test_moss_public_plain_awq_all_linears_two_roundtrips(tmp_path, rotary, offload):
+def test_moss_public_awq_all_linears_two_roundtrips(tmp_path, rotary, offload):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
@@ -341,13 +341,22 @@ def test_moss_public_plain_awq_all_linears_two_roundtrips(tmp_path, rotary, offl
     _write_tokenizer(tmp_path)
     qcfg = AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=offload)
     wrapper = GPTQModel.load(str(tmp_path), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
-    assert wrapper.awq_get_modules_for_scaling(wrapper.model.transformer.h[0], {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[3, 4, 5, 6, 7, 8, 9, 10]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
+    planner, emitted = wrapper.awq_get_modules_for_scaling, []
+
+    def record_groups(layer, input_feat, module_kwargs):
+        nodes = planner(layer, input_feat, module_kwargs)
+        emitted.append([(layer.ln_1 is node["prev_op"], len(node["layers"])) for node in nodes])
+        return nodes
+
+    wrapper.awq_get_modules_for_scaling = record_groups
     wrapper.quantize(
         CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
         backend=BACKEND.TORCH,
     )
+    # Every layer searched the shared `ln_1 -> qkv_proj + fc_in` scale.
+    assert len(emitted) == 2 and all((True, 2) in groups for groups in emitted)
     linears = {name for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert linears == {f"transformer.h.{i}.{leaf}" for i in range(2)
                        for leaf in ("attn.qkv_proj", "attn.out_proj", "mlp.fc_in", "mlp.fc_out")}
@@ -356,8 +365,10 @@ def test_moss_public_plain_awq_all_linears_two_roundtrips(tmp_path, rotary, offl
         logits = wrapper.model(ids, use_cache=False).logits
     assert torch.isfinite(logits).all()
     # Independently retained dense owners must survive LazyTurtle and packing.
+    # `ln_1` absorbs the AWQ input scale of its parallel attention/MLP readers.
+    folded = {f"transformer.h.{i}.ln_1" for i in range(2)}
     for key, tensor in wrapper.model.state_dict().items():
-        if key in model.state_dict() and not any(key.startswith(path + ".") for path in linears):
+        if key in model.state_dict() and not any(key.startswith(path + ".") for path in linears | folded):
             assert torch.equal(tensor, model.state_dict()[key].to(tensor.dtype)), key
     packed_state = {key: tensor.detach().clone() for key, tensor in wrapper.model.state_dict().items()}
     for cycle in range(2):

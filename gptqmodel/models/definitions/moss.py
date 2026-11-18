@@ -22,13 +22,11 @@ class MossQModel(BaseQModel):
         "h",
         "#",
         {
-            "ln_1": ("ln_1:!:nosrc",),
-            "attn:!": ("qkv_proj:0", "out_proj:1:nosrc"),
-            "mlp": ("fc_in:0:nosrc", "fc_out:1"),
+            # One LayerNorm feeds attention and the MLP in parallel. The shared
+            # `:in=` tag folds it once into both readers.
+            "ln_1": ("ln_1:!",),
+            "attn:!": ("qkv_proj:0:in=x", "out_proj:1:nosrc"),
+            # GELU between fc_in and fc_out is not positively homogeneous.
+            "mlp": ("fc_in:0:in=x:nosrc", "fc_out:1"),
         }
     ]
-
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # The shared norm feeds attention AND GELU MLP. Packed Q/V/K and
-        # softmax/rotary are not sequential affine boundaries. Plain AWQ only.
-        return []

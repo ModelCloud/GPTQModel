@@ -129,7 +129,7 @@ def test_real_model_weight_owners_are_declared(case):
 
 
 @pytest.mark.parametrize("family,paths", [
-    ("moss", ["ln_1", "attn.out_proj", "mlp.fc_in"]),
+    ("moss", ["attn.out_proj", "mlp.fc_in"]),
     ("gemma3n", ["input_layernorm", "self_attn.v_proj", "post_feedforward_layernorm", "per_layer_input_gate"]),
     ("gemma3n_text", ["input_layernorm", "self_attn.v_proj", "post_feedforward_layernorm", "per_layer_input_gate"]),
     ("axk2", ["self_attn.indexer.weights_proj", "self_attn.q_a_proj", "self_attn.kv_b_proj"]),
