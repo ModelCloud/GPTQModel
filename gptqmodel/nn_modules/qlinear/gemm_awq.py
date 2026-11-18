@@ -159,10 +159,16 @@ class AwqGemmFn(torch.autograd.Function):
             # `reshape` would still hand autograd a view created inside this
             # Function, and an in-place update on it is forbidden (#4974).
             return out
-        # A batched result needs the leading dimensions back, and the reshape
-        # view of this Function's own output must be materialized for the same
-        # reason.
-        return out.reshape(out_shape).clone()
+        # A batched result needs the leading dimensions back. The reshape is a
+        # view created inside this Function, so materialize it only when the
+        # output is autograd-tracked: an untracked result (inference mode or a
+        # forward with no grad-requiring input) accepts an in-place update on
+        # the view, and copying it would add a full-output kernel to every
+        # batched forward (#5086).
+        out = out.reshape(out_shape)
+        if any(ctx.needs_input_grad):
+            out = out.clone()
+        return out
 
     @staticmethod
     def backward(ctx, grad_output):

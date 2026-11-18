@@ -20,6 +20,7 @@ from gptqmodel.nn_modules.qlinear.paro import ParoLinear
 from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
 from gptqmodel.nn_modules.qlinear.swordfish import AwqSwordfishLinear, SwordfishLinear
+from gptqmodel.utils.awq import awq_runtime_available
 from gptqmodel.utils.kernel import KernelConfig
 
 
@@ -183,6 +184,132 @@ def test_awq_jit_heuristic_respects_fp32_accum_opt_out(
         "dequant": int(expect_dequant),
         "gemm": int(not expect_dequant),
     }
+
+
+@pytest.mark.parametrize("backend", ["jit", "triton"])
+@pytest.mark.parametrize("shape", [(2, 3, 32), (2, 3, 4, 32)])
+def test_awq_gemm_inference_does_not_clone_batched_output(monkeypatch, backend, shape):
+    """An untracked batched forward must not copy the full output (#5086).
+
+    #5001 materialized the leading-dimension reshape unconditionally, so every
+    batched inference forward paid for one extra output copy even though
+    ``inference_mode`` never tracks the result. Only a grad-tracked result has
+    to be materialized (#4974).
+    """
+
+    calls = {"dequant": 0, "gemm": 0}
+    fn = _patch_backend(monkeypatch, backend, calls)
+    qweight, scales, qzeros = _fake_quant_tensors()
+
+    original = torch.Tensor.clone
+    clones = {"n": 0}
+
+    def counting_clone(self, *args, **kwargs):
+        clones["n"] += 1
+        return original(self, *args, **kwargs)
+
+    torch.Tensor.clone = counting_clone
+    try:
+        with torch.inference_mode():
+            x = torch.ones(shape, dtype=torch.float16)
+            out = fn.apply(x, qweight, qzeros, scales, 4, 32, None, 8)
+    finally:
+        torch.Tensor.clone = original
+
+    assert out.shape == shape[:-1] + (8,)
+    assert clones["n"] == 0
+
+
+@pytest.mark.parametrize("backend", ["jit", "triton"])
+def test_awq_gemm_tracked_batched_output_is_owned(monkeypatch, backend):
+    """The #4974 guarantee: a tracked batched output must not be a view."""
+
+    calls = {"dequant": 0, "gemm": 0}
+    fn = _patch_backend(monkeypatch, backend, calls)
+    qweight, scales, qzeros = _fake_quant_tensors()
+    x = torch.ones((2, 3, 32), dtype=torch.float16, requires_grad=True)
+
+    out = fn.apply(x, qweight, qzeros, scales, 4, 32, None, 8)
+
+    assert out.shape == (2, 3, 8)
+    assert not out._is_view()
+    out += 1.0
+    out.sum().backward()
+    assert x.grad is not None and x.grad.shape == x.shape
+
+
+def _awq_gemm_module(monkeypatch, backend):
+    calls = {"dequant": 0, "gemm": 0}
+    _patch_backend(monkeypatch, backend, calls)
+    if backend == "triton":
+        # Keep the module on the portable dequantise-then-GEMM branch so the
+        # test exercises the shared Function epilogue without a native device.
+        monkeypatch.setattr(
+            gemm_awq_triton,
+            "select_awq_triton_plan",
+            lambda **kwargs: SimpleNamespace(fused=False),
+        )
+        monkeypatch.setattr(
+            gemm_awq_triton, "mark_awq_triton_plan_warmed", lambda *args, **kwargs: None
+        )
+        cls = AwqGEMMTritonLinear
+    else:
+        cls = AwqGEMMLinear
+    in_features, out_features, group_size = 128, 64, 32
+    module = cls(
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        register_buffers=True,
+    )
+    module.qweight.copy_(
+        torch.ones((in_features, out_features // 8), dtype=torch.int32)
+    )
+    module.qzeros.copy_(
+        torch.zeros(
+            (in_features // group_size, out_features // 8), dtype=torch.int32
+        )
+    )
+    module.scales.copy_(
+        torch.ones((in_features // group_size, out_features), dtype=torch.float16)
+    )
+    module.post_init()
+    return module.eval()
+
+
+@pytest.mark.parametrize("backend", ["jit", "triton"])
+def test_awq_gemm_module_inference_does_not_clone_batched_output(
+    monkeypatch, backend
+):
+    """The user-visible path: ``AwqGEMM*Linear`` under ``inference_mode``."""
+
+    if backend == "jit" and (
+        not torch.cuda.is_available() or not awq_runtime_available()
+    ):
+        pytest.skip("AwqGEMMLinear needs the native CUDA AWQ extension")
+    module = _awq_gemm_module(monkeypatch, backend)
+
+    original = torch.Tensor.clone
+    clones = {"n": 0}
+
+    def counting_clone(self, *args, **kwargs):
+        clones["n"] += 1
+        return original(self, *args, **kwargs)
+
+    torch.Tensor.clone = counting_clone
+    try:
+        with torch.inference_mode():
+            x = torch.ones((2, 3, 128), dtype=torch.float16)
+            out = module(x)
+    finally:
+        torch.Tensor.clone = original
+
+    assert out.shape == (2, 3, 64)
+    assert clones["n"] == 0
 
 
 def test_awq_triton_rejects_declared_group_mismatching_buffers(monkeypatch):
