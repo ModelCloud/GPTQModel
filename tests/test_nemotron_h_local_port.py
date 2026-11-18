@@ -8,12 +8,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 from torch.nn import functional as F
-from transformers import AutoModelForCausalLM, NemotronHConfig, NemotronHForCausalLM
 
 from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.nemotron_h import NemotronHQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.local import LocalModelLoader
+from gptqmodel.models.ports.nemotron_h import NemotronHConfig, NemotronHForCausalLM
 
 
 def config(**overrides):
@@ -84,7 +84,8 @@ def test_native_binding_is_definition_owned_and_not_inherited_by_other_architect
     from gptqmodel.models.definitions.nemotron_h_puzzle import NemotronHPuzzleQModel
     from gptqmodel.models.definitions.nemotron_omni import NemotronOmniQModel
 
-    assert AutoModelForCausalLM._model_mapping[NemotronHConfig] is NemotronHForCausalLM
+    assert NemotronHForCausalLM.__module__ == "gptqmodel.models.ports.native.nemotron_h.modeling_nemotron_h"
+    assert NemotronHForCausalLM.is_custom_code() is False
     assert NemotronHQModel.require_trust_remote_code is False
     assert NemotronHQModel.require_monkeypatch is False
     assert isinstance(NemotronHQModel.loader, LocalModelLoader)
@@ -99,6 +100,27 @@ def test_native_binding_is_definition_owned_and_not_inherited_by_other_architect
         assert sibling.loader.model_class.startswith(f"gptqmodel.models.ports.{package}.")
         assert sibling.require_trust_remote_code is False
         assert sibling.require_monkeypatch is False
+
+
+@pytest.mark.parametrize("latent", [None, 16])
+def test_transformers_checkpoint_loads_bit_exactly_into_vendored_class(tmp_path, latent):
+    # Transformers 5.23 is the numerical oracle; its own save layout must load unchanged.
+    from transformers import NemotronHConfig as OracleConfig
+    from transformers import NemotronHForCausalLM as OracleModel
+
+    torch.manual_seed(2301)
+    oracle_config = OracleConfig(**config(moe_latent_size=latent).to_dict(), attn_implementation="eager")
+    oracle = OracleModel(oracle_config).eval()
+    actual = native(moe_latent_size=latent)
+    ids = torch.tensor([[1, 5, 8, 9, 12]])
+    with torch.inference_mode():
+        expected = oracle(ids).logits
+        torch.testing.assert_close(actual(ids).logits, expected, atol=0, rtol=0)
+        oracle.save_pretrained(tmp_path, safe_serialization=True)
+        loaded = NemotronHQModel.loader.from_pretrained(tmp_path, attn_implementation="eager").eval()
+        assert type(loaded) is NemotronHForCausalLM
+        torch.testing.assert_close(loaded(ids).logits, expected, atol=0, rtol=0)
+        assert oracle.state_dict().keys() == loaded.state_dict().keys()
 
 
 def test_native_hook_never_overwrites_legacy_shaped_mixers():
