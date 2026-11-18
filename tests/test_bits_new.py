@@ -94,16 +94,14 @@ class Test(ModelTest):
 
     @parameterized.expand([(2,), (3,), (4,), (8,)])
     def test_quant_and_eora(self, bits):
-        # A local checkpoint keeps this runnable without exported env state; an
-        # explicit NATIVE_MODEL_ID still wins. Skip instead of raising KeyError
-        # when the host has neither (#4769).
-        model_id = os.environ.get(
-            "NATIVE_MODEL_ID", "/monster/data/model/Llama-3.2-1B-Instruct"
-        )
-        if not Path(model_id).exists():
+        # A local checkpoint keeps this runnable without exported env state
+        # (#4769). An explicit NATIVE_MODEL_ID is honoured verbatim -- it may be
+        # a hub repo id -- so only an absolute path that is absent skips.
+        model_id = os.environ.get("NATIVE_MODEL_ID") or "/monster/data/model/Llama-3.2-1B-Instruct"
+        if os.path.isabs(model_id) and not Path(model_id).exists():
             pytest.skip(
-                f"model path {model_id} does not exist; "
-                "set NATIVE_MODEL_ID to a local checkpoint"
+                f"local checkpoint {model_id} does not exist; "
+                "set NATIVE_MODEL_ID to a local checkpoint or a hub repo id"
             )
         self.NATIVE_MODEL_ID = model_id
 
