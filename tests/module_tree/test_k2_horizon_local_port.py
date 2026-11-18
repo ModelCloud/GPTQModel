@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.loop_processor import CalibrationConfig
@@ -20,8 +21,6 @@ from gptqmodel.models.definitions.k2_horizon import K2HorizonGPTQ, K2HorizonQMod
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.ports.k2_horizon import K2HorizonConfig, K2HorizonForCausalLM
 from gptqmodel.quantization.config import AWQConfig
-from awq_neutrality import assert_awq_folds_neutral
-
 from tests.test_k2_horizon_local_port import variant_config
 
 

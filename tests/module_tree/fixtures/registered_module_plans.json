@@ -2007,9 +2007,9 @@
       "layers": ["language_model.model.layers"],
       "blocks": [
         ["norm:!"],
-        ["mixer.q_proj", "mixer.k_proj", "mixer.v_proj", "mixer.A_log:!", "mixer.D:!", "mixer.dt_bias:!"],
+        ["mixer.q_proj", "mixer.k_proj", "mixer.v_proj"],
         ["mixer.o_proj"],
-        ["mixer.in_proj"],
+        ["mixer.in_proj", "mixer.A_log:!", "mixer.D:!", "mixer.dt_bias:!"],
         ["mixer.out_proj", "mixer.gate_proj", "mixer.up_proj"],
         ["mixer.down_proj"],
         ["mixer.conv1d:!"],

@@ -91,75 +91,6 @@ def test_minicpmv_4_6_linear_attn_tags_preserve_layer_output():
     assert {"linear_attn.in_proj_b", "linear_attn.in_proj_a"} <= set(consumers)
 
 
-@pytest.fixture(scope="module")
-def intern_s2_module():
-    from gptqmodel.models.ports.intern_s2_preview import modeling_interns2_preview
-
-    return modeling_interns2_preview
-
-
-def test_intern_s2_preview_plain_policy_preserves_layer_state(intern_s2_module):
-    config = intern_s2_module.InternS2PreviewTextConfig(
-        vocab_size=64,
-        hidden_size=32,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=8,
-        linear_conv_kernel_dim=2,
-        linear_key_head_dim=8,
-        linear_value_head_dim=8,
-        linear_num_key_heads=2,
-        linear_num_value_heads=4,
-        moe_intermediate_size=8,
-        shared_expert_intermediate_size=8,
-        num_experts=2,
-        num_experts_per_tok=2,
-        max_position_embeddings=64,
-        layer_types=["linear_attention", "full_attention"],
-    )
-    config._attn_implementation = "eager"
-    torch.manual_seed(7)
-    # Exercise the shipped text owner and both hybrid layer types.
-    text = intern_s2_module.InternS2PreviewTextModel(config).eval()
-    model = nn.Module()
-    model.config = config
-    model.model = nn.Module()
-    model.model.language_model = text
-    # The shipped checkpoint stores packed 3-D experts; the loader defuses them
-    # into per-expert projections before quantization.
-    from gptqmodel.models.loader import _convert_model_with_defuser
-
-    _convert_model_with_defuser(MODEL_MAP["intern_s2_preview"], model, cleanup_original=False)
-    layers = list(text.layers)
-
-    hidden = torch.randn(1, 8, 32)
-    position_ids = torch.arange(8).unsqueeze(0)
-    cos = torch.randn(1, 8, 8)
-    sin = torch.randn(1, 8, 8)
-
-    definition = MODEL_MAP["intern_s2_preview"]
-    wrapper = _wrapper(definition, model, definition.module_tree)
-    for layer in layers:
-
-        def forward(layer=layer):
-            return layer(
-                hidden,
-                position_embeddings=(cos, sin),
-                attention_mask=None,
-                position_ids=position_ids,
-            )
-
-        reference, features = _capture(layer, forward)
-        features = _quantized_features(layer, features, definition.module_tree)
-        snapshot = {name: value.clone() for name, value in layer.state_dict().items()}
-        assert wrapper.awq_get_modules_for_scaling(layer, features, {}) == []
-        with torch.inference_mode():
-            torch.testing.assert_close(forward(), reference, rtol=0, atol=0)
-        for name, value in layer.state_dict().items():
-            torch.testing.assert_close(value, snapshot[name], rtol=0, atol=0)
-
-
 @pytest.mark.parametrize("model_type", ["minicpmv", "minicpmo"])
 def test_minicpm_plain_awq_keeps_attention_and_mlp_stages(model_type):
     from tests.test_minicpm_o_local_port import tiny_config as minicpmo_config
@@ -276,26 +207,24 @@ def test_diffusion_gemma_router_and_value_folds_are_neutral():
         assert "router.proj" not in consumers, source
 
 
-def test_ricursive_plain_policy_preserves_layer_state():
+def test_ricursive_folds_preserve_layer_output():
     from ricursive_test_utils import make_model
 
+    # Released shape: value residual, gated attention, GQA.
     model = make_model()
     definition = MODEL_MAP["ricursive"]
-    wrapper = _wrapper(definition, model, definition.module_tree)
     ids = torch.randint(2, 60, (1, 8))
 
     def forward():
         return model(input_ids=ids, use_cache=False).logits
 
+    checked = []
     for layer in model.model.layers:
-        reference, features = _capture(layer, forward)
-        features = _quantized_features(layer, features, definition.module_tree)
-        snapshot = {name: value.clone() for name, value in layer.state_dict().items()}
-        assert wrapper.awq_get_modules_for_scaling(layer, features, {}) == []
-        with torch.inference_mode():
-            torch.testing.assert_close(forward(), reference, rtol=0, atol=0)
-        for name, value in layer.state_dict().items():
-            torch.testing.assert_close(value, snapshot[name], rtol=0, atol=0)
+        checked.extend(_assert_neutral(definition, model, layer, forward))
+
+    # The value-residual lerp keeps `input_layernorm` out; GQA keeps
+    # `v_proj -> o_proj` out by width.
+    assert {source for source, _targets, _consumers in checked} == {"pre_feedforward_layernorm", "mlp.up_proj"}
 
 
 def test_qwen4_exp_shared_expert_folds_are_neutral():

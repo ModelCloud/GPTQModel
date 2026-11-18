@@ -1003,6 +1003,9 @@ class BaseQModel(nn.Module):
     # an instance are wrapped in ``__getattribute__`` below so they resolve
     # against that instance's immutable effective tree.
     _MODULE_TREE_RUNTIME_METHODS = frozenset({
+        # MoE roots that exist only in an effective tree must still capture
+        # their shared pre-router input for the gate/up AWQ group.
+        "awq_input_feature_aggregation",
         "extract_layers_node",
         "_iter_module_tree_variants",
         "_expand_module_tree_prefixes",

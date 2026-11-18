@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 
 from gptqmodel.models.definitions.spark2_5 import Spark2_5QModel
@@ -15,8 +16,6 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.spark2_5.configuration_spark import Spark2_5Config
 from gptqmodel.models.ports.spark2_5.modeling_spark import Spark2_5ForCausalLM
-from awq_neutrality import assert_awq_folds_neutral
-
 from tests.port_assets import DATA
 from tests.test_spark2_5_local_port import tiny_config, tiny_model
 

@@ -5,14 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 
 from gptqmodel.models.definitions.llada2 import LLaDA2MoeQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.llada2.modeling_llada2_moe import LLaDA2MoeModelLM
-from awq_neutrality import assert_awq_folds_neutral
-
 from tests.test_llada2_local_port import VERSIONS, tiny_config, tiny_model
 
 

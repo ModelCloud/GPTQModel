@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
@@ -16,8 +17,6 @@ from gptqmodel.models.definitions.nemotron_h_puzzle import NemotronHPuzzleQModel
 from gptqmodel.models.fusable import require_fusable_config
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.nemotron_h_puzzle import NemotronHPuzzleConfig, NemotronHPuzzleForCausalLM
-from awq_neutrality import assert_awq_folds_neutral
-
 from tests.port_assets import read_port_json
 from tests.test_nemotron_h_puzzle_local_port import TOKENS, tiny_config, varied_model
 

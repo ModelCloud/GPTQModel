@@ -444,10 +444,10 @@ def _worst_relative_change(hf_model, ids, layer, groups):
         consumers = node.get("_scale_consumers") or []
         consumer_map = {prev_name: consumers} if consumers else None
         with torch.no_grad():
-            before = hf_model(ids).logits.clone()
+            before = hf_model(input_ids=ids).logits.clone()
         apply_scale(layer, [(prev_name, layer_names, scales, None)], consumer_map=consumer_map)
         with torch.no_grad():
-            after = hf_model(ids).logits
+            after = hf_model(input_ids=ids).logits
         worst = max(worst, float((after - before).norm() / before.norm()))
         apply_scale(layer, [(prev_name, layer_names, 1.0 / scales, None)], consumer_map=consumer_map)
     return worst
@@ -455,9 +455,7 @@ def _worst_relative_change(hf_model, ids, layer, groups):
 
 # Families whose decoder layer has no foldable AWQ group and is quantized plainly.
 PLAIN_QUANTIZATION_FAMILIES = {
-    "exaone", "falcon", "gpt_pangu", "grinmoe", "hymba", "internlm2", "internvl_chat", "k2_horizon",
-    "afmoe", "agnes", "apertus", "codegen", "deepseek_v3", "deepseek_v4",
-    "deepseek_vl_v2", "exaone4", "gpt2", "instella", "minimax", "minimax_m2", "nemotron_h",
+    "gpt_pangu", "codegen", "deepseek_v3", "deepseek_v4", "deepseek_vl_v2", "gpt2", "minimax", "minimax_m2", "nemotron_h",
 }
 
 # Hybrid SSM families whose decoder forward resolves Mamba-2 scan kernels through
@@ -667,8 +665,9 @@ def test_excluded_projection_is_never_a_fold_source(family):
                 f"layers={[get_op_name(layer, m) for m in node['layers']]}"
             )
     # `falcon_mamba` declares every projection `:nosrc`, so it has no Linear
-    # source at all and is quantized plainly.
-    assert checked or family in PLAIN_QUANTIZATION_FAMILIES or family == "falcon_mamba", family
+    # source at all and is quantized plainly. Apertus folds only into its two
+    # norms: GQA blocks v_proj -> o_proj and xIELU makes up_proj `:nosrc`.
+    assert checked or family in PLAIN_QUANTIZATION_FAMILIES or family in {"falcon_mamba", "apertus"}, family
 
 
 # Jamba's Mamba-2 mixer resolves its scan/conv kernels through
@@ -741,7 +740,7 @@ def test_jamba_never_folds_x_proj_scale_into_excluded_dt_proj(jamba_torch_mixer)
         apply_scale(layer, [(source, targets, scales, None)])
         try:
             with torch.no_grad():
-                after = hf_model(ids).logits
+                after = hf_model(input_ids=ids).logits
             relative = float((after - before).norm() / before.norm())
             assert relative < 1e-5, f"jamba: folding {source} -> {targets} changed the logits by {relative:.3e}"
             assert torch.equal(layer.mamba.dt_proj.weight, dt_proj_before), (

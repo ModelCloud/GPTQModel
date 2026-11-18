@@ -81,6 +81,8 @@ MLP = ("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"])
 DOWN = ("mlp.up_proj", ["mlp.down_proj"])
 MOE = ("post_attention_layernorm",
        ["mlp.experts.0.gate_proj", "mlp.experts.0.up_proj", "mlp.experts.1.gate_proj", "mlp.experts.1.up_proj"])
+# Each routed expert also folds its own up_proj -> down_proj.
+EXPERT_DOWN = [(f"mlp.experts.{index}.up_proj", [f"mlp.experts.{index}.down_proj"]) for index in range(2)]
 EXPECTED_AWQ_GROUPS = {
     # kv=1 is GQA (v_proj narrower than o_proj); kv=2 is MHA, where v_proj -> o_proj is exact.
     ("LlamaForCausalLM", 1): [ATTENTION, MLP, DOWN],
@@ -91,8 +93,8 @@ EXPECTED_AWQ_GROUPS = {
     ("Qwen3ForCausalLM", 1): [ATTENTION, MLP, DOWN],
     ("Qwen3ForCausalLM", 2): [ATTENTION, VALUE, MLP, DOWN],
     # The router reads the same normed input and is compensated as a scale consumer.
-    ("Qwen3MoeForCausalLM", 1): [ATTENTION, MOE],
-    ("Qwen3MoeForCausalLM", 2): [ATTENTION, VALUE, MOE],
+    ("Qwen3MoeForCausalLM", 1): [ATTENTION, MOE, *EXPERT_DOWN],
+    ("Qwen3MoeForCausalLM", 2): [ATTENTION, VALUE, MOE, *EXPERT_DOWN],
     # Fused/interleaved QKV never sources o_proj/wo: its output is not o_proj's input.
     ("Phi3ForCausalLM", 1): [("input_layernorm", ["self_attn.qkv_proj"]), MLP, DOWN],
     ("Phi3ForCausalLM", 2): [("input_layernorm", ["self_attn.qkv_proj"]), MLP, DOWN],

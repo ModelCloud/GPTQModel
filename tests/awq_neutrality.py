@@ -26,6 +26,8 @@ def _wrapper(definition, model, tree):
     wrapper.__dict__["model"] = model
     wrapper.__dict__["effective_module_tree"] = tree
     wrapper.__dict__["module_tree"] = tree
+    # Plan from the effective tree, as a loaded model does, not the class tree.
+    wrapper.__dict__["_module_plan"] = ModulePlan.from_tree(tree)
     return wrapper
 
 
