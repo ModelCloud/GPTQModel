@@ -484,7 +484,7 @@ class MageVLVideoProcessor:
     def image_processor(self):
         """Lazy-build the underlying `Qwen2VLImageProcessor`."""
         if self._image_processor is None:
-            from transformers import Qwen2VLImageProcessor
+            from ..native.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
 
             self._image_processor = Qwen2VLImageProcessor(
                 min_pixels=self.min_pixels,

@@ -115,9 +115,10 @@ class MageVLProcessor:
     def from_pretrained(cls, pretrained_model_name_or_path: str, **kwargs):
         import json
 
-        from transformers import Qwen2Tokenizer, Qwen2VLImageProcessorPil
         from transformers.utils.hub import cached_file
 
+        from ..native.qwen2.tokenization_qwen2 import Qwen2Tokenizer
+        from ..native.qwen2_vl.image_processing_pil_qwen2_vl import Qwen2VLImageProcessorPil
         from .video_processing_mage_vl import MageVLVideoProcessor
 
         kwargs.pop("_from_auto", None)
