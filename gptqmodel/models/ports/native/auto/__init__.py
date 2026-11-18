@@ -12,8 +12,8 @@ never registers anything with Transformers.
 from importlib import import_module
 
 from transformers.configuration_utils import PreTrainedConfig
-from transformers.modeling_utils import PreTrainedModel
 from transformers.configuration_utils import SubConfigSpec as _FrameworkSubConfigSpec
+from transformers.modeling_utils import PreTrainedModel
 
 from . import _registry
 
