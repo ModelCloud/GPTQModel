@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 import json
+from importlib.util import find_spec
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +23,7 @@ from gptqmodel.models.ports.minicpm_o.tokenization_minicpmo_fast import MiniCPMO
 
 
 PORT = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/minicpm_o"
+LEGACY_TTS_AVAILABLE = find_spec("vector_quantize_pytorch") is not None
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -375,8 +377,8 @@ def test_real_media_conditioning_generation_and_safetensors(tmp_path, version, m
 def test_tts_native_llama_state_cache_and_safetensors(tmp_path, version):
     from transformers import LlamaModel
 
-    if version == "2.6":
-        pytest.importorskip("vector_quantize_pytorch", exc_type=ModuleNotFoundError)
+    if version == "2.6" and not LEGACY_TTS_AVAILABLE:
+        pytest.skip("MiniCPM-o 2.6 TTS requires gptqmodel[minicpm-o]")
     model = tiny_model(version=version, tts=True)
     reference = LlamaModel(model.tts.model.config).eval()
     reference.load_state_dict(model.tts.model.state_dict(), strict=True)
@@ -467,8 +469,8 @@ def test_actual_public_plain_awq_image_capture_pack_infer_and_two_reloads(tmp_pa
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
 
-    if version == "2.6":
-        pytest.importorskip("vector_quantize_pytorch", exc_type=ModuleNotFoundError)
+    if version == "2.6" and not LEGACY_TTS_AVAILABLE:
+        pytest.skip("MiniCPM-o 2.6 TTS requires gptqmodel[minicpm-o]")
     source = tiny_model(version=version, dtype=torch.float16, tts=True)
     write_checkpoint(tmp_path, source)
     config = AWQConfig(

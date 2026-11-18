@@ -13,7 +13,7 @@ from gptqmodel.models.definitions.minicpm_o import MiniCPMOQModel
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.minicpm_o.configuration_minicpmo import MiniCPMOConfig
 from gptqmodel.models.ports.minicpm_o.modeling_minicpmo import MiniCPMO
-from tests.test_minicpm_o_local_port import PORT, tiny_config
+from tests.test_minicpm_o_local_port import LEGACY_TTS_AVAILABLE, PORT, tiny_config
 
 
 EXPECTED_PLAN = {
@@ -76,8 +76,8 @@ def test_actual_cpu_meta_owners_and_plain_policy(version, kv_heads, bias):
 
 @pytest.mark.parametrize("version,keys", [("4_5", 1414), ("2_6", 1599)])
 def test_every_real_pinned_checkpoint_key_and_header_shape(version, keys):
-    if version == "2_6":
-        pytest.importorskip("vector_quantize_pytorch", exc_type=ModuleNotFoundError)
+    if version == "2_6" and not LEGACY_TTS_AVAILABLE:
+        pytest.skip("MiniCPM-o 2.6 TTS requires gptqmodel[minicpm-o]")
     config = MiniCPMOConfig(**json.loads((PORT / f"checkpoint-{version}-config.json").read_text()))
     with torch.device("meta"):
         model = MiniCPMO(config)

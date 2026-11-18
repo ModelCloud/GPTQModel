@@ -138,8 +138,8 @@ Those large tokenizer assets are not committed.
 From the repository root:
 
 ```sh
-PATH=/home/ubuntu/.venvs/gptqmodel-tf5/bin:$PATH ./format/check.sh
-/home/ubuntu/.venvs/gptqmodel-tf5/bin/python -m compileall -q \
+./format/check.sh
+python -m compileall -q \
   gptqmodel/models/ports/minicpm_o \
   gptqmodel/models/definitions/minicpm_o.py \
   tests/test_minicpm_o_local_port.py \
@@ -147,48 +147,21 @@ PATH=/home/ubuntu/.venvs/gptqmodel-tf5/bin:$PATH ./format/check.sh
 git diff --check
 ```
 
-From `tests/`:
+With the `minicpm-o` and `test` extras installed:
 
 ```sh
-PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -m pytest \
-  test_minicpm_o_local_port.py module_tree/test_minicpm_o_local_port.py \
-  -xq --disable-warnings
+PYTHON_GIL=0 python -m pytest -q -o addopts= -o log_cli=false -ra \
+  tests/test_minicpm_o_local_port.py tests/module_tree/test_minicpm_o_local_port.py
 ```
 
-To reproduce the combined run without editing parent-owned fixtures,
-also from `tests/`:
+Run the shared baseline against the registered fixtures:
 
 ```sh
-PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python - <<'PY'
-import json
-import sys
-from pathlib import Path
-import pytest
-
-sys.path.insert(0, str(Path("..").resolve()))
-import tests.conftest
-from tests.module_tree import test_registered_module_plans as plans
-from tests.module_tree import test_fusable_models as fusion
-
-proposal = json.loads(Path(
-    "../gptqmodel/models/ports/minicpm_o/central_fixture_proposals.json"
-).read_text())
-plans.INVENTORY["cases"].update(proposal["registered_module_plans"]["cases"])
-fusion.INVENTORY.update(proposal["fusable_models"]["models"])
-sys.exit(pytest.main([
-    "test_minicpm_o_local_port.py",
-    "module_tree/test_minicpm_o_local_port.py",
-    "test_local_model_loading.py",
-    "test_local_processor_loading.py",
-    "test_local_tokenizer_loading.py",
-    "test_trust_remote_code_isolation.py",
-    "test_internlm_local_port.py",
-    "module_tree/test_registered_module_plans.py",
-    "module_tree/test_fusable_models.py",
-    "test_awq_scaling_groups.py",
-    "-xq", "-rs", "--disable-warnings",
-]))
-PY
+PYTHON_GIL=0 python -m pytest -q -o addopts= -o log_cli=false -ra \
+  tests/module_tree/test_registered_module_plans.py \
+  tests/module_tree/test_fusable_models.py \
+  tests/test_local_model_loading.py tests/test_local_processor_loading.py \
+  tests/test_local_tokenizer_loading.py tests/test_awq_scale_search_safety.py
 ```
 
 Full Ruff 0.14.2, compileall and diff checks pass.
