@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from test_mimo_local_port import ASSETS, tiny_config, tiny_model
 
 from gptqmodel.models.auto import MODEL_MAP
@@ -111,9 +112,23 @@ def test_live_decoder_plan_roles_external_mtp_and_exact_shapes(kv, mtp):
     assert MimoQModel.fusable is None
 
 
-def test_plain_awq_policy_is_definition_owned():
-    model = tiny_model()
-    wrapper = MimoQModel.__new__(MimoQModel)
-    torch.nn.Module.__init__(wrapper)
-    wrapper.__dict__["model"] = model
-    assert wrapper.awq_get_modules_for_scaling(model.model.layers[0], {}, {}) == []
+@pytest.mark.parametrize("kv", [2, 4])
+def test_awq_scale_folds_preserve_real_decoder_output(kv):
+    model = tiny_model(num_key_value_heads=kv)
+    ids = torch.tensor([[1, 4, 7, 8, 9, 5, 3, 6, 10, 11]])
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(MimoQModel, model, layer, forward)
+        groups = {source: targets for source, targets, _ in checked}
+        expected = {
+            "input_layernorm": ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+            "post_attention_layernorm": ["mlp.gate_proj", "mlp.up_proj"],
+            "mlp.up_proj": ["mlp.down_proj"],
+        }
+        # GQA makes v_proj narrower than o_proj's input, so that fold only exists for MHA.
+        if kv == model.config.num_attention_heads:
+            expected["self_attn.v_proj"] = ["self_attn.o_proj"]
+        assert groups == expected

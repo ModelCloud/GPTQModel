@@ -294,17 +294,21 @@ def test_twenty_b_head_group_ratio_and_explicit_positions():
 
 @pytest.mark.cpu
 @pytest.mark.parametrize("heads,bias", [(1, False), (2, True)], ids=["mqa", "gqa-bias"])
-def test_public_plain_awq_quantizes_packs_and_reloads(tmp_path, heads, bias):
+def test_public_awq_scales_quantizes_packs_and_reloads(tmp_path, heads, bias):
     from gptqmodel import BACKEND
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
 
     original = InternLM2ForCausalLM(tiny_config(num_key_value_heads=heads, bias=bias)).eval()
+    with torch.no_grad():
+        for name, value in original.named_parameters():
+            if "norm" in name:
+                value.uniform_(0.6, 1.4)
     original.save_pretrained(tmp_path)
+    norms = {k: v.half() for k, v in original.state_dict().items() if k.startswith("model.layers.") and "norm" in k}
     write_tokenizer(tmp_path)
     config = AWQConfig(device="cpu", group_size=16, fallback=None)
     wrapper = GPTQModel.load(str(tmp_path), quantize_config=config, backend=BACKEND.TORCH, dtype=torch.float16)
-    assert wrapper.awq_get_modules_for_scaling(wrapper.model.model.layers[0], {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[4, 5, 6, 7, 8, 9, 10, 11]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
     wrapper.quantize(
@@ -312,6 +316,9 @@ def test_public_plain_awq_quantizes_packs_and_reloads(tmp_path, heads, bias):
         backend=BACKEND.TORCH,
     )
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 10
+    # Scale search ran: every decoder norm absorbed its group's AWQ scale.
+    assert len(norms) == 4
+    assert all(not torch.equal(wrapper.model.state_dict()[key], value) for key, value in norms.items())
     with torch.inference_mode():
         expected = wrapper.model(**calibration[0], use_cache=False).logits
     assert torch.isfinite(expected).all()

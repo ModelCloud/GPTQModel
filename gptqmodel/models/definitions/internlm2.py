@@ -17,10 +17,6 @@ class InternLM2QModel(BaseQModel):
     lm_head = "output"
     pre_lm_head_norm_module = "model.norm"
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Packed, KV-group-interleaved QKV has no qualified AWQ fold/search/replay contract.
-        return []
-
     module_tree = [
         "model",
         "layers",

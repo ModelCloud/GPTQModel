@@ -347,8 +347,8 @@ def test_no_exact_native_grinmoe_or_global_registration():
     assert "grinmoe" not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 
 
-@pytest.mark.parametrize("fallback", [None, "quantize"])
-def test_plain_awq_quantizes_and_packs_every_projection_without_norm_folds(tmp_path, fallback):
+@pytest.mark.parametrize("fallback", [None, {}])
+def test_awq_scales_quantizes_and_packs_every_projection_with_router_compensation(tmp_path, fallback):
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
     from gptqmodel.utils.backend import BACKEND
@@ -357,8 +357,10 @@ def test_plain_awq_quantizes_and_packs_every_projection_without_norm_folds(tmp_p
     qcfg = AWQConfig(device="cpu", group_size=16, fallback=fallback, offload_to_disk=False)
     wrapper = GPTQModel.load(str(tmp_path), quantize_config=qcfg, backend=BACKEND.TORCH,
                              dtype=torch.float16, trust_remote_code=False)
-    norms = {key: value.clone() for key, value in wrapper.model.state_dict().items() if "norm" in key}
-    router = wrapper.model.model.layers[0].block_sparse_moe.gate.weight.clone()
+    norm = wrapper.model.model.layers[0].post_attention_layernorm
+    norm_weight, norm_bias = norm.weight.detach().float().clone(), norm.bias.detach().float().clone()
+    attn_norm_weight = wrapper.model.model.layers[0].input_layernorm.weight.detach().clone()
+    router = wrapper.model.model.layers[0].block_sparse_moe.gate.weight.detach().float().clone()
     calibration = [
         {"input_ids": torch.tensor([[1, 4, 7, 8, 9, 5, 3, 6]]),
          "attention_mask": torch.ones(1, 8, dtype=torch.long)},
@@ -375,9 +377,14 @@ def test_plain_awq_quantizes_and_packs_every_projection_without_norm_folds(tmp_p
     packed = {name for name, module in layer.named_modules() if isinstance(module, AwqTorchLinear)}
     assert packed == expected
     assert all(module.qweight.dtype == torch.int32 for module in layer.modules() if isinstance(module, AwqTorchLinear))
-    for key, value in norms.items():
-        torch.testing.assert_close(wrapper.model.state_dict()[key], value, atol=0, rtol=0)
-    torch.testing.assert_close(layer.block_sparse_moe.gate.weight, router, atol=0, rtol=0)
+    # Scale search ran: both LayerNorms absorbed a non-unit scale. The router
+    # reads the post-attention norm output, so its input columns carry the
+    # inverse scale and the routing logits are unchanged.
+    assert not torch.equal(layer.input_layernorm.weight, attn_norm_weight)
+    scale = norm_weight / layer.post_attention_layernorm.weight.detach().float()
+    assert not torch.allclose(scale, torch.ones_like(scale))
+    torch.testing.assert_close(layer.post_attention_layernorm.bias.float() * scale, norm_bias, atol=2e-3, rtol=2e-3)
+    torch.testing.assert_close(layer.block_sparse_moe.gate.weight.float(), router * scale, atol=2e-3, rtol=2e-3)
     with torch.inference_mode():
         logits = wrapper.model(**calibration[0], use_cache=False).logits
     assert torch.isfinite(logits).all()

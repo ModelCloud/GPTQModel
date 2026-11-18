@@ -302,14 +302,15 @@ def test_mtp_equations_rotary_api_and_separate_cache(kv):
 
 
 @pytest.mark.parametrize("kv,fallback", [(1, None), (4, {})])
-def test_public_plain_awq_packs_every_decoder_and_preserves_dense_mtp(tmp_path, kv, fallback):
+def test_public_awq_scales_packs_every_decoder_and_preserves_dense_mtp(tmp_path, kv, fallback):
     source = tmp_path / "source"
     expected, marker = checkpoint(source, num_key_value_heads=kv)
     qcfg = AWQConfig(device="cpu", group_size=16, fallback=fallback, offload_to_disk=False)
     model = GPTQModel.load(str(source), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
-    assert model.awq_get_modules_for_scaling(model.model.model.layers[0], {}, {}) == []
-    dense = {k: v.clone() for k, v in model.model.state_dict().items()
-             if not k.startswith("model.layers.") or "layernorm" in k}
+    # MTP, embeddings, the final norm and lm_head stay outside the decoder loop.
+    dense = {k: v.clone() for k, v in model.model.state_dict().items() if not k.startswith("model.layers.")}
+    decoder_norms = {k: v.clone() for k, v in model.model.state_dict().items()
+                     if k.startswith("model.layers.") and "layernorm" in k}
     original_weights = {k: v.clone() for k, v in model.model.state_dict().items() if k.endswith(".weight")}
     calibration = [
         {"input_ids": torch.tensor([[4, 5, 6, 7, 4, 5, 6, 7]]),
@@ -331,6 +332,9 @@ def test_public_plain_awq_packs_every_decoder_and_preserves_dense_mtp(tmp_path, 
                if isinstance(module, AwqTorchLinear))
     for key, value in dense.items():
         torch.testing.assert_close(model.model.state_dict()[key], value, rtol=0, atol=0)
+    # Scale search ran: each decoder norm absorbed the scale of its q/k/v or gate/up group.
+    assert len(decoder_norms) == 4
+    assert all(not torch.equal(model.model.state_dict()[key], value) for key, value in decoder_norms.items())
     assert any(key + ".qweight" in model.model.state_dict() for key in packed)
     assert all(name + ".weight" not in model.model.state_dict() for name in packed)
     # Every original decoder weight became packed integer state; the original

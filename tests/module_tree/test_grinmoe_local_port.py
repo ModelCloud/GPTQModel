@@ -5,6 +5,7 @@ import hashlib
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.models.auto import MODEL_MAP
@@ -12,7 +13,7 @@ from gptqmodel.models.definitions.grinmoe import GrinMoeQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.ports.grinmoe.configuration_grinmoe import GRINMoEConfig
 from gptqmodel.quantization import QuantizeConfig
-from tests.test_grinmoe_local_port import tiny_config
+from tests.test_grinmoe_local_port import tiny_config, tiny_model
 
 
 @pytest.mark.parametrize("device", ["cpu", "meta"])
@@ -65,7 +66,34 @@ def test_actual_checkpoint_owners_plan_roles_lifecycle_and_looper(device, bias, 
     looper.gptq_model = wrapper
     assert looper._extract_moe_group_key("block_sparse_moe.experts.0.w1") == "block_sparse_moe.experts.0"
     assert looper._extract_moe_group_key("self_attn.q_proj") is None
-    assert wrapper.awq_get_modules_for_scaling(model.model.layers[0], {}, {}) == []
+
+
+@pytest.mark.parametrize("kv_heads", [2, 4])
+def test_awq_scale_folds_preserve_real_layer_output(kv_heads):
+    # The SparseMixer router reads the post-attention norm output; the fold
+    # rescales its input columns, so routing logits and the output are unchanged.
+    model = tiny_model(hidden_size=32, intermediate_size=64, num_key_value_heads=kv_heads)
+    ids = torch.tensor([[1, 4, 7, 8, 9, 5, 3, 6]])
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    experts = model.config.num_local_experts
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(GrinMoeQModel, model, layer, forward)
+        groups = {source: (targets, consumers) for source, targets, consumers in checked}
+        assert groups["input_layernorm"][0] == ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]
+        assert groups["post_attention_layernorm"] == (
+            [f"block_sparse_moe.experts.{i}.{name}" for i in range(experts) for name in ("w1", "w3")],
+            ["block_sparse_moe.gate"],
+        )
+        for i in range(experts):
+            assert groups[f"block_sparse_moe.experts.{i}.w3"][0] == [f"block_sparse_moe.experts.{i}.w2"]
+        # GQA makes v_proj narrower than o_proj's input, so that fold only exists for MHA.
+        assert ("self_attn.v_proj" in groups) == (kv_heads == model.config.num_attention_heads)
+        if kv_heads == model.config.num_attention_heads:
+            assert groups["self_attn.v_proj"][0] == ["self_attn.o_proj"]
+        assert len(groups) == 2 + experts + int(kv_heads == model.config.num_attention_heads)
 
 
 def test_exact_published_checkpoint_key_inventory_on_real_meta_model():

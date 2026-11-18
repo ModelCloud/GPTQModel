@@ -540,7 +540,7 @@ def test_real_serialized_tokenizer_ids_and_two_exact_reloads(tmp_path, family):
 
 @pytest.mark.parametrize("moe,shared,kv", [(0, None, 4), (4, None, 2), (4, 2, 1)])
 @pytest.mark.parametrize("offload", [False, True])
-def test_real_public_plain_awq_all_linears_dense_exclusions_and_two_exact_reloads(tmp_path, moe, shared, kv, offload):
+def test_real_public_awq_scales_all_linears_dense_exclusions_and_two_exact_reloads(tmp_path, moe, shared, kv, offload):
     source = tmp_path / "source"
     family = "XVERSE-Ent-A5.7B" if shared else "XVERSE-MoE-A4.2B" if moe else "XVERSE-7B-Chat"
     expected, marker = source_checkpoint(
@@ -548,7 +548,6 @@ def test_real_public_plain_awq_all_linears_dense_exclusions_and_two_exact_reload
     )
     qcfg = AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=offload)
     wrapper = GPTQModel.load(str(source), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
-    assert wrapper.awq_get_modules_for_scaling(wrapper.model.model.layers[0], {}, {}) == []
     expected_packed = {
         name
         for name, module in expected.named_modules()
@@ -590,7 +589,23 @@ def test_real_public_plain_awq_all_linears_dense_exclusions_and_two_exact_reload
         if name.removesuffix(".weight") not in packed:
             wanted_dtype = torch.float32 if "router" in name or "inv_freq" in name else torch.float16
             assert state[name].dtype == wanted_dtype
+            if name.startswith("model.layers.") and ("layernorm" in name or "router" in name):
+                continue
             torch.testing.assert_close(state[name], value.to(wanted_dtype), rtol=0, atol=0)
+    for index in range(expected.config.num_hidden_layers):
+        prefix = f"model.layers.{index}."
+        # Scale search ran: both decoder norms absorbed their group's AWQ scale.
+        for norm in ("input_layernorm", "post_attention_layernorm"):
+            assert not torch.equal(state[prefix + norm + ".weight"], original[prefix + norm + ".weight"].half())
+        if moe:
+            # The router reads the post-attention norm output; its input columns
+            # carry the inverse scale, so the routing logits are unchanged.
+            norm = prefix + "post_attention_layernorm.weight"
+            scale = original[norm].half().float() / state[norm].float()
+            torch.testing.assert_close(
+                state[prefix + "mlp.router.weight"], original[prefix + "mlp.router.weight"] * scale,
+                rtol=2e-3, atol=2e-3,
+            )
     assert all(name + ".weight" not in state and state[name + ".qweight"].dtype == torch.int32 for name in packed)
     with torch.inference_mode():
         logits = wrapper.model(**samples[0], use_cache=False).logits
