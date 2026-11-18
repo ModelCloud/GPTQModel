@@ -13,6 +13,7 @@ when a path is unavailable.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -20,11 +21,6 @@ import torch
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 from transformers import AutoConfig, PreTrainedTokenizerFast
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
-
-from gptqmodel.utils.hf import (
-    _normalize_legacy_tied_weights_keys,
-    _patch_transformers_remote_code_compat,
-)
 
 
 # Old remote model files import optional runtime kernels at module import time.
@@ -80,6 +76,32 @@ def _copy_remote_code(source: Path, target: Path) -> None:
         (target / path.name).write_text(_REMOTE_IMPORT_PRELUDE + text, encoding="utf-8")
 
 
+def _build_tiny_ported_model(
+    source: Path,
+    target: Path,
+    overrides: Mapping[str, Any],
+    *,
+    dtype: torch.dtype,
+) -> Optional[Path]:
+    from gptqmodel.models.local import _local_class, local_model_loader_for_config
+
+    payload = json.loads((source / "config.json").read_text(encoding="utf-8"))
+    loader = local_model_loader_for_config(payload)
+    if loader is None:
+        return None
+
+    payload.update(overrides)
+    payload.pop("auto_map", None)
+    payload.pop("torch_dtype", None)
+    payload["dtype"] = str(dtype).removeprefix("torch.")
+    config = _local_class(loader.config_class).from_dict(payload)
+    config._attn_implementation = "eager"
+    model = loader.from_config(config).to(dtype=dtype).eval()
+    model.save_pretrained(target)
+    build_wordlevel_tokenizer(int(getattr(config, "vocab_size", 128))).save_pretrained(target)
+    return target
+
+
 def build_tiny_remote_model(
     source: str | Path,
     target: str | Path,
@@ -89,12 +111,21 @@ def build_tiny_remote_model(
     architecture: Optional[str] = None,
     dtype: torch.dtype = torch.float32,
 ) -> Path:
-    """Materialize a tiny checkpoint of a remote-code family under ``target``."""
+    """Materialize a tiny checkpoint of a remote-code family under ``target``.
 
-    _patch_transformers_remote_code_compat()
+    Families with a package-owned port are built from that port and saved
+    without checkpoint Python: GPT-QModel no longer patches Transformers so
+    Transformers-4-era remote code can run.
+    """
+
     source = Path(source)
     target = Path(target)
     target.mkdir(parents=True, exist_ok=True)
+
+    ported = _build_tiny_ported_model(source, target, overrides, dtype=dtype)
+    if ported is not None:
+        return ported
+
     _copy_remote_code(source, target)
 
     config = AutoConfig.from_pretrained(
@@ -119,10 +150,6 @@ def build_tiny_remote_model(
 
     model = model_cls(config)
     model = model.to(dtype=dtype).eval()
-    # Older remote classes declare `_tied_weights_keys` as a list, which
-    # transformers 5's `save_pretrained` rejects. Normalize the fixture copy;
-    # the loader-side fix is tracked separately.
-    _normalize_legacy_tied_weights_keys(model)
     model.save_pretrained(target)
     build_wordlevel_tokenizer(int(getattr(config, "vocab_size", 128))).save_pretrained(target)
     return target

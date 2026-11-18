@@ -405,66 +405,6 @@ def _patch_openvino_gptqmodel_compat():
         ov_gptq._gptqmodel_torch_quant_compat = True
 
 
-def _patch_transformers_causal_conv1d_hub_kernel_compat():
-    """Prioritize local kernel ports before falling back to Transformers hub kernels."""
-    try:
-        import importlib
-        from pathlib import Path
-
-        import transformers.integrations as hf_integrations
-        from transformers.integrations import hub_kernels
-    except ImportError:
-        log.warning(
-            "causal-conv1d hub-kernel compat is inactive: transformers integrations API changed",
-            exc_info=True,
-        )
-        return
-    except Exception:
-        log.warning("causal-conv1d hub-kernel compat probe failed", exc_info=True)
-        return
-
-    with _MONKEY_PATCH_LOCK:
-        if not hasattr(hf_integrations, "lazy_load_kernel"):
-            return
-
-        if getattr(hub_kernels, "_gptqmodel_local_causal_conv1d_kernel", False):
-            hf_integrations.lazy_load_kernel = hub_kernels.lazy_load_kernel
-            return
-
-        original_lazy_load_kernel = hub_kernels.lazy_load_kernel
-        project_root = Path(__file__).resolve().parent.parent
-
-        def _resolve_local_kernel_module(kernel_name):
-            module_name = kernel_name.replace("-", "_")
-            namespaced_module = f"gptqmodel.hf_kernels.{module_name}"
-            if (project_root / "gptqmodel" / "hf_kernels" / module_name / "__init__.py").exists() or (
-                project_root / "gptqmodel" / "hf_kernels" / f"{module_name}.py"
-            ).exists():
-                return importlib.import_module(namespaced_module)
-            package_path = project_root / module_name / "__init__.py"
-            module_path = project_root / f"{module_name}.py"
-            if not package_path.exists() and not module_path.exists():
-                return None
-            return importlib.import_module(module_name)
-
-        def _lazy_load_kernel_with_local_causal_conv1d(kernel_name, mapping=hub_kernels._KERNEL_MODULE_MAPPING):
-            local_kernel = _resolve_local_kernel_module(kernel_name)
-            if local_kernel is not None:
-                mapping[kernel_name] = local_kernel
-                return local_kernel
-            return original_lazy_load_kernel(kernel_name, mapping)
-
-        hub_kernels.lazy_load_kernel = _lazy_load_kernel_with_local_causal_conv1d
-        local_causal_conv1d = _resolve_local_kernel_module("causal-conv1d")
-        if local_causal_conv1d is not None:
-            hub_kernels._KERNEL_MODULE_MAPPING["causal-conv1d"] = local_causal_conv1d
-            # Keep legacy imports working after moving the local port under gptqmodel.hf_kernels.
-            sys.modules.setdefault("causal_conv1d", local_causal_conv1d)
-        if hasattr(hf_integrations, "lazy_load_kernel"):
-            hf_integrations.lazy_load_kernel = _lazy_load_kernel_with_local_causal_conv1d
-        hub_kernels._gptqmodel_local_causal_conv1d_kernel = True
-
-
 def _hf_quantizer_backend(quantizer):
     """Return the caller's backend from an HF quantizer, wherever it lives.
 
@@ -1016,7 +956,6 @@ _patch_transformers_gptqmodel_gguf_quantizer_compat()
 _patch_transformers_refusing_quantizers()
 _patch_transformers_save_pretrained_runtime_layout_guard()
 _patch_openvino_gptqmodel_compat()
-_patch_transformers_causal_conv1d_hub_kernel_compat()
 
 
 def exllama_set_max_input_length(model, max_input_length: int):

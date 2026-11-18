@@ -16,7 +16,7 @@ from gptqmodel.models.auto import check_and_get_model_definition
 from gptqmodel.models.definitions.grinmoe import GrinMoeQModel
 from gptqmodel.models.ports.grinmoe.configuration_grinmoe import GRINMoEConfig
 from gptqmodel.models.ports.grinmoe.modeling_grinmoe import GRINMoEForCausalLM, sparsemixer
-from gptqmodel.utils.hf import load_model_config, prepare_remote_model_init_compat, resolve_trust_remote_code
+from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 from gptqmodel.utils.security import BYPASS_ENV
 
 
@@ -68,7 +68,6 @@ def test_definition_owned_selection_ignores_checkpoint_code(tmp_path, monkeypatc
     assert type(config) is GRINMoEConfig
     assert check_and_get_model_definition(str(tmp_path), trust_remote_code=trust) is GrinMoeQModel
     assert resolve_trust_remote_code(tmp_path, trust_remote_code=trust) is False
-    prepare_remote_model_init_compat(tmp_path, config, trust_remote_code=trust)
     loaded = GrinMoeQModel.loader.from_pretrained(tmp_path, trust_remote_code=trust, code_revision="ignored")
     assert type(loaded) is GRINMoEForCausalLM
     assert not marker.exists()

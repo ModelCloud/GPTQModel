@@ -166,32 +166,6 @@ def test_triton_patch_failure_is_reported_by_import_guard(monkeypatch):
     ), "the TritonPatch.apply() warning must pass exc_info=True"
 
 
-def test_causal_conv1d_compat_reports_upstream_api_change(monkeypatch):
-    """A renamed transformers integration must not fail silently."""
-    real_import = __import__
-
-    def renamed_integration_import(name, globals=None, locals=None, fromlist=(), level=0):
-        # Break only the shim's own `from transformers.integrations import
-        # hub_kernels`; every other import must keep working.
-        if name == "transformers.integrations" and fromlist and "hub_kernels" in fromlist:
-            raise ImportError("cannot import name 'hub_kernels' from 'transformers.integrations'")
-        return real_import(name, globals, locals, fromlist, level)
-
-    recording = _RecordingLogger()
-    monkeypatch.setattr(gptqmodel, "log", recording)
-    monkeypatch.setattr("builtins.__import__", renamed_integration_import)
-
-    gptqmodel._patch_transformers_causal_conv1d_hub_kernel_compat()
-
-    assert recording.warning_calls, "a broken causal-conv1d shim was silently ignored"
-    msg, exc_info = recording.warning_calls[0]
-    assert "causal-conv1d" in msg
-    assert "inactive" in msg, (
-        f"the shim must report that it is inert, not a generic probe failure: {msg!r}"
-    )
-    assert exc_info is True
-
-
 # ---------------------------------------------------------------------------
 # 2. KeyboardInterrupt / SystemExit must survive fallbacks
 # ---------------------------------------------------------------------------

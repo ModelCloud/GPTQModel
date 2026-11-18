@@ -135,11 +135,6 @@ def test_agnes_no_longer_monkey_patches_transformers_registries(monkeypatch):
     monkeypatch.delattr(cache_utils, "LAYER_TYPE_CACHE_MAPPING", raising=False)
     monkeypatch.delattr(video_processing_utils, "BASE_VIDEO_PROCESSOR_DOCSTRING", raising=False)
 
-    # The generic remote-code compatibility path must not restore Agnes-only
-    # symbols for unrelated models.
-    from gptqmodel.utils import hf as hf_utils
-
-    hf_utils._patch_transformers_remote_code_compat()
     assert not hasattr(cache_utils, "LAYER_TYPE_CACHE_MAPPING")
     assert not hasattr(video_processing_utils, "BASE_VIDEO_PROCESSOR_DOCSTRING")
 

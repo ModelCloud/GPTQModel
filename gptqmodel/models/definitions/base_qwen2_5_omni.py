@@ -34,60 +34,9 @@ _THINKER_LAYER_MODULES = {
 }
 
 
-def _patch_qwen2_5_omni_talker_prepare_inputs_for_generation(talker_cls):
-    original = getattr(talker_cls, "prepare_inputs_for_generation", None)
-    if original is None or getattr(original, "_gptqmodel_qwen2_5_omni_compat", False):
-        return
-
-    def prepare_inputs_for_generation(
-        self,
-        input_ids,
-        input_text_ids,
-        past_key_values=None,
-        attention_mask=None,
-        inputs_embeds=None,
-        thinker_reply_part=None,
-        cache_position=None,
-        position_ids=None,
-        use_cache=True,
-        pixel_values=None,
-        pixel_values_videos=None,
-        image_grid_thw=None,
-        video_grid_thw=None,
-        input_audio_features=None,
-        audio_feature_attention_mask=None,
-        audio_feature_lengths=None,
-        use_audio_in_video=False,
-        video_second_per_grid=None,
-        **kwargs,
-    ):
-        model_inputs = super(talker_cls, self).prepare_inputs_for_generation(
-            input_ids,
-            past_key_values=past_key_values,
-            attention_mask=attention_mask,
-            inputs_embeds=inputs_embeds,
-            cache_position=cache_position,
-            use_cache=use_cache,
-            thinker_reply_part=thinker_reply_part,
-            input_text_ids=input_text_ids,
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
-            use_audio_in_video=use_audio_in_video,
-            audio_feature_lengths=audio_feature_lengths,
-            video_second_per_grid=video_second_per_grid,
-            **kwargs,
-        )
-        model_inputs["position_ids"] = None
-        return model_inputs
-
-    prepare_inputs_for_generation._gptqmodel_qwen2_5_omni_compat = True
-    talker_cls.prepare_inputs_for_generation = prepare_inputs_for_generation
-
-
 class BaseQwen2_5_OmniGPTQ(OmniThinkerCheckpointLayoutMixin, ThinkerEmbeddingsMixin, BaseQModel):
     ATTENTION_MASKS_REQUIRED_FOR_INPUT = True
     ATTENTION_MASKS_DTYPE = torch.long
-    require_monkeypatch = True
 
     HF_WRAPPER_CLASS_NAME = "Qwen2_5OmniForConditionalGeneration"
 
@@ -124,16 +73,6 @@ class BaseQwen2_5_OmniGPTQ(OmniThinkerCheckpointLayoutMixin, ThinkerEmbeddingsMi
         # Calibration only needs the thinker's forward pass. The speech
         # generation wrapper requires a talker even for text-only checkpoints.
         return self.model.thinker(**example, use_cache=use_cache)
-
-    def monkey_patch(self):
-        talker = getattr(getattr(self, "model", None), "talker", None)
-        if talker is None:
-            return
-
-        if not getattr(type(talker), "__module__", "").startswith("transformers.models.qwen2_5_omni."):
-            return
-
-        _patch_qwen2_5_omni_talker_prepare_inputs_for_generation(type(talker))
 
     def pre_quantize_generate_hook_start(self):
         # load speaker

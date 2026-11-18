@@ -52,7 +52,6 @@ def fake_load(monkeypatch, tmp_path):
 
     monkeypatch.setattr(auto, "check_and_get_model_definition", lambda *args, **kwargs: _Definition)
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda *args, **kwargs: False)
-    monkeypatch.setattr(auto, "patch_remote_code_before_config_load", lambda *args, **kwargs: None)
     monkeypatch.setattr(auto, "native_floatx_source_format", lambda *args, **kwargs: None)
     monkeypatch.setattr(auto, "_kick_quantize_prewarms", lambda *args, **kwargs: None)
     monkeypatch.setattr(auto, "_prebuild_device_thread_pool", lambda *args, **kwargs: None)

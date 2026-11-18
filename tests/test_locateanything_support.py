@@ -9,7 +9,7 @@ from gptqmodel.models.definitions.locateanything import LocateAnythingQModel
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.ports.locateanything.configuration_locateanything import LocateAnythingConfig
 from gptqmodel.quantization import QuantizeConfig
-from gptqmodel.utils.hf import load_model_config, normalize_hf_config_compat, prepare_remote_model_init_compat
+from gptqmodel.utils.hf import load_model_config
 from gptqmodel.utils.model import MODALITY
 
 
@@ -71,16 +71,13 @@ def test_locateanything_definition_contract():
     ]
 
 
-@pytest.mark.parametrize("trust_remote_code", [False, True])
 @pytest.mark.parametrize("implementation", ["eager", "sdpa", "magi"])
-def test_locateanything_config_owns_rope_and_attention_policy(trust_remote_code, implementation):
+def test_locateanything_config_owns_rope_and_attention_policy(implementation):
     config = LocateAnythingConfig(
         text_config={"rope_parameters": {"rope_type": "default", "rope_theta": 1_000_000.0}},
         rope_parameters={"rope_type": "default", "rope_theta": 10_000.0},
         attn_implementation=implementation,
     )
-
-    normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
     assert config.text_config.rope_parameters["rope_theta"] == 1_000_000.0
     expected = "sdpa" if implementation == "magi" else implementation
@@ -102,16 +99,11 @@ def test_locateanything_remote_compat_cannot_override_owned_config(
         "transformers.dynamic_module_utils.get_class_from_dynamic_module",
         lambda *_args, **_kwargs: pytest.fail("Package-owned config imported checkpoint Python"),
     )
-    monkeypatch.setattr(
-        "gptqmodel.utils.hf._patch_transformers_remote_code_compat",
-        lambda *_args, **_kwargs: pytest.fail("Package-owned config installed remote compatibility shims"),
-    )
     config = load_model_config(
         owned_config_dir, trust_remote_code=trust_remote_code,
         local_files_only=True, attn_implementation="eager",
     )
     assert config._attn_implementation == "eager"
-    prepare_remote_model_init_compat(owned_config_dir, config, trust_remote_code=trust_remote_code)
 
     assert type(config) is LocateAnythingConfig
     assert config._attn_implementation == "eager"

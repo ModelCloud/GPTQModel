@@ -24,7 +24,7 @@ from gptqmodel.models.ports.brumby.modeling_brumby import (
 )
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.config import AWQConfig
-from gptqmodel.utils.hf import load_model_config, normalize_hf_config_compat, resolve_trust_remote_code
+from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 from gptqmodel.utils.security import BYPASS_ENV
 
 
@@ -93,7 +93,7 @@ def test_definition_owned_loading_ignores_checkpoint_python(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize("rope_type", ["default", "linear", "dynamic"])
-def test_normalization_keeps_local_rope_configuration(rope_type):
+def test_local_rope_configuration_builds_rotary(rope_type):
     config = tiny_config(
         rope_parameters={
             "rope_type": rope_type,
@@ -101,9 +101,6 @@ def test_normalization_keeps_local_rope_configuration(rope_type):
             **({"factor": 2.0} if rope_type != "default" else {}),
         }
     )
-    before = copy.deepcopy(config.rope_parameters)
-    normalize_hf_config_compat(config)
-    assert config.rope_parameters == before
     with torch.device("meta"):
         model = BrumbyForCausalLM(config)
     assert model.model.rotary_emb.inv_freq.shape == (4,)

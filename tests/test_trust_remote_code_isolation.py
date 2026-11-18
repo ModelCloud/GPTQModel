@@ -176,24 +176,6 @@ def test_dequantize_does_not_import_auto_map_config_without_trust(
 
 
 @pytest.mark.parametrize("bypass", [False, True])
-def test_native_model_init_ignores_remote_opt_in(tmp_path, monkeypatch, bypass):
-    if bypass:
-        monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
-    else:
-        monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
-    checkpoint, marker = _write_checkpoint(tmp_path)
-    config = AutoConfig.from_pretrained(str(checkpoint), trust_remote_code=False)
-
-    from gptqmodel.utils.hf import prepare_remote_model_init_compat
-
-    prepare_remote_model_init_compat(
-        str(checkpoint), config, trust_remote_code=True
-    )
-
-    assert not marker.exists(), "native model selection must ignore checkpoint Python"
-
-
-@pytest.mark.parametrize("bypass", [False, True])
 def test_native_dequantize_ignores_remote_opt_in(tmp_path, monkeypatch, bypass):
     if bypass:
         monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")

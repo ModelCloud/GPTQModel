@@ -28,7 +28,6 @@ def test_refinedweb_model_type_resolves_case_insensitively(monkeypatch, model_ty
         "resolve_trust_remote_code",
         lambda path, trust_remote_code=False: trust_remote_code,
     )
-    monkeypatch.setattr(auto, "patch_remote_code_before_config_load", lambda path: None)
     monkeypatch.setattr(
         auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config
     )

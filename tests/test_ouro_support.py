@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.ouro import OuroQModel
 from gptqmodel.models.ports.ouro.configuration_ouro import OuroConfig
-from gptqmodel.utils.hf import normalize_hf_config_compat
 
 
 def test_ouro_model_type_selects_definition(monkeypatch):
@@ -55,19 +54,6 @@ def test_ouro_module_tree_matches_decoder_forward_boundaries():
         "post_attention_layernorm_2:!",
     } <= full_modules
     assert "early_exit_gate" not in full_modules
-
-
-def test_ouro_owned_config_does_not_receive_remote_compat_rewrites():
-    config = SimpleNamespace(
-        model_type="ouro",
-        auto_map={"AutoModelForCausalLM": "modeling_ouro.OuroForCausalLM"},
-        eos_token_id=0,
-        pad_token_id=None,
-    )
-
-    normalize_hf_config_compat(config, trust_remote_code=True)
-
-    assert config.pad_token_id is None
 
 
 def test_ouro_declared_loader_constructs_owned_config_without_remote_class_lookup(tmp_path, monkeypatch):

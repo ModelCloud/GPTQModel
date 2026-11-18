@@ -132,7 +132,6 @@ def test_jamba_registry_selects_definition(monkeypatch):
     fake_config = SimpleNamespace(model_type="jamba")
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto, "patch_remote_code_before_config_load", lambda path: None)
     monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
 
     assert auto.MODEL_MAP["jamba"] is JambaQModel

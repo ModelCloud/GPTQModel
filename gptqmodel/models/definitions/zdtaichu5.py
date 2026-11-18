@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
-from inspect import signature
 from typing import Any, Dict
 
 import torch
@@ -204,34 +203,15 @@ class ZDTaichu5QModel(Qwen3_5TextQModel):
 
     @staticmethod
     def _recurrent_attention_mask(mask_kwargs):
-        try:
-            from transformers.masking_utils import create_recurrent_attention_mask
-        except ImportError:
-            # Transformers versions that first exposed Qwen3.5 may not yet
-            # expose the generic builder. Linear attention consumes the raw
-            # [batch, sequence] keep-mask in that compatibility path. An
-            # all-ones mask is equivalent to ``None`` for the decoder.
-            mask = mask_kwargs["attention_mask"]
-            if torch.is_tensor(mask) and torch.all(mask):
-                return None
-            return mask
+        from transformers.masking_utils import create_recurrent_attention_mask
+
         return create_recurrent_attention_mask(**mask_kwargs)
 
     @staticmethod
-    def _causal_attention_mask(mask_kwargs, cache_position=None):
+    def _causal_attention_mask(mask_kwargs):
         from transformers.masking_utils import create_causal_mask
 
-        kwargs = dict(mask_kwargs)
-        parameters = signature(create_causal_mask).parameters
-        if "cache_position" in parameters:
-            if cache_position is None:
-                inputs_embeds = kwargs["inputs_embeds"]
-                cache_position = torch.arange(
-                    inputs_embeds.shape[1],
-                    device=inputs_embeds.device,
-                )
-            kwargs["cache_position"] = cache_position
-        return create_causal_mask(**kwargs)
+        return create_causal_mask(**mask_kwargs)
 
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
         """Rebuild the mask for each Qwen3.5 linear/full attention block."""
@@ -273,25 +253,9 @@ class ZDTaichu5QModel(Qwen3_5TextQModel):
         block_type = getattr(layer, "block_type", None) or getattr(layer, "layer_type", None)
         linear_attn = getattr(layer, "linear_attn", None)
         if block_type == "linear_attention" or linear_attn is not None:
-            update_mask = getattr(language_model, "_update_linear_attn_mask", None)
-            if callable(update_mask):
-                cache_position = additional_inputs.get("cache_position")
-                if cache_position is None:
-                    cache_position = torch.arange(
-                        hidden_states.shape[1],
-                        device=hidden_states.device,
-                    )
-                additional_inputs["attention_mask"] = update_mask(
-                    padding_mask,
-                    cache_position,
-                )
-                return additional_inputs
             additional_inputs["attention_mask"] = self._recurrent_attention_mask(mask_kwargs)
         elif block_type == "full_attention" or getattr(layer, "self_attn", None) is not None:
-            additional_inputs["attention_mask"] = self._causal_attention_mask(
-                mask_kwargs,
-                cache_position=additional_inputs.get("cache_position"),
-            )
+            additional_inputs["attention_mask"] = self._causal_attention_mask(mask_kwargs)
         return additional_inputs
 
     @staticmethod

@@ -99,7 +99,6 @@ from ..utils.device_telemetry import emit_device_telemetry, with_quantization_de
 from ..utils.hf import (
     autofix_hf_model_config,
     get_config_selection_kwargs,
-    install_legacy_generation_compat,
     load_model_config,
     resolve_trust_remote_code,
 )
@@ -1265,16 +1264,6 @@ class BaseQModel(nn.Module):
             log.debug(
                 "Model: restored %d init-owned rotary buffer(s) for `%s`.",
                 restored_rotary_buffers,
-                type(self.model).__name__,
-            )
-        # transformers 5 always hands `generate()`'s cache to the remote
-        # `prepare_inputs_for_generation`, even before the first prefill, and
-        # replaced the tuple/attribute cache interface those implementations
-        # were written against. Install the shared legacy adapter here so every
-        # load path (native eval, quantization, quantized reload) gets it.
-        if install_legacy_generation_compat(self.model):
-            log.debug(
-                "Model: installed legacy generate() adapter for `%s`.",
                 type(self.model).__name__,
             )
         hooks = getattr(self, "moe_lifecycle_hooks", None)

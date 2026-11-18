@@ -101,10 +101,6 @@ def test_dequant_from_config_enters_model_load_lock(monkeypatch):
     lock = _TrackingLock()
     monkeypatch.setattr(loader_module, "_MODEL_LOAD_LOCK", lock)
     monkeypatch.setattr(
-        "gptqmodel.utils.hf.normalize_hf_config_compat",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
         "gptqmodel.utils.hf.load_model_config",
         lambda *_args, **_kwargs: SimpleNamespace(model_type="lock_fixture"),
     )

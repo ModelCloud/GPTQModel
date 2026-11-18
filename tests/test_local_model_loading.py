@@ -18,8 +18,6 @@ from gptqmodel.utils.hf import (
     has_native_transformers_model_support,
     load_hf_tokenizer,
     load_model_config,
-    normalize_hf_config_compat,
-    prepare_remote_model_init_compat,
     resolve_trust_remote_code,
 )
 from gptqmodel.utils.security import BYPASS_ENV, RemoteCodeSecurityError
@@ -160,7 +158,6 @@ def test_native_model_ignores_checkpoint_model_code(tmp_path, monkeypatch, bypas
         monkeypatch.setenv(BYPASS_ENV, "1")
     config = load_model_config(path, trust_remote_code=True)
     assert type(config).__module__.startswith("transformers.models.llama")
-    prepare_remote_model_init_compat(path, config, trust_remote_code=True)
     assert not marker.exists()
 
 
@@ -206,8 +203,6 @@ def test_local_config_and_loader_win_over_auto_map_even_with_bypass(tmp_path, mo
     config = load_model_config(path, trust_remote_code=True, use_mtp=False, num_mtp_modules=0,
                                num_local_experts=2, num_experts_per_tok=1, head_dim=8, rotary_dim=8)
     assert type(config).__module__.startswith("gptqmodel.")
-    prepare_remote_model_init_compat(path, config, trust_remote_code=True)
-    normalize_hf_config_compat(config)
     with torch.device("meta"):
         model = loader.from_config(config, trust_remote_code=True)
     assert type(model).__module__.startswith("gptqmodel.")
@@ -312,18 +307,6 @@ def test_native_multimodal_support_uses_definition_auto_class(tmp_path):
     marker = checkpoint(path, "qwen2_vl")
     assert has_native_transformers_model_support(path, AutoModelForImageTextToText, proxies={})
     assert not marker.exists()
-
-
-def test_remote_model_import_requires_both_permissions(tmp_path, monkeypatch):
-    path = tmp_path / "remote"
-    marker = checkpoint(path)
-    config = SimpleNamespace(model_type="unported_fixture", auto_map={"AutoModelForCausalLM": "remote_model.RemoteModel"})
-    with pytest.raises(RemoteCodeSecurityError):
-        prepare_remote_model_init_compat(path, config, trust_remote_code=True)
-    assert not marker.exists()
-    monkeypatch.setenv(BYPASS_ENV, "1")
-    prepare_remote_model_init_compat(path, config, trust_remote_code=True)
-    assert marker.read_text() == "model"
 
 
 @pytest.mark.parametrize("backend", ["sglang", "vllm"])

@@ -13,7 +13,7 @@ from transformers.cache_utils import DynamicCache, StaticCache
 from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.internlm2 import InternLM2QModel
 from gptqmodel.models.ports.internlm2 import InternLM2Config, InternLM2ForCausalLM
-from gptqmodel.utils.hf import load_model_config, prepare_remote_model_init_compat
+from gptqmodel.utils.hf import load_model_config
 from gptqmodel.utils.security import BYPASS_ENV
 
 
@@ -64,7 +64,6 @@ def test_definition_loader_ignores_hostile_checkpoint_and_retry(tmp_path, monkey
     except (ValueError, RuntimeError):
         pass
     assert isinstance(loaded, InternLM2Config), "InternLM2 must select package config without checkpoint code"
-    prepare_remote_model_init_compat(tmp_path, loaded, trust_remote_code=trust)
     loader = InternLM2QModel.loader
     with pytest.raises(OSError):
         loader.from_pretrained(tmp_path, trust_remote_code=trust, local_files_only=True)

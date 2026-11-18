@@ -84,6 +84,10 @@ class MiniCPMO26(MiniCPMO):
         # for stream api
         self.reset_session()
 
+        # Transformers 5 derives `all_tied_weights_keys` and the other
+        # load-time static properties here.
+        self.post_init()
+
     def reset_session(self):
         self.session_id = None
         self.new_user_msg = True
