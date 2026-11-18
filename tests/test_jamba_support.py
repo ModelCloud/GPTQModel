@@ -13,6 +13,7 @@ import copy
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
@@ -306,6 +307,11 @@ def test_jamba_replay_mask_is_causal_not_bidirectional():
 
 
 def test_tiny_jamba_gptq_quantization_smoke(tmp_path: Path, monkeypatch):
+    # GPTQModel.load() validates the definition's `mamba-ssm` requirement and
+    # raises PackageNotFoundError when its metadata is absent. Only this smoke
+    # run loads a model; the CPU contract tests above do not need the package.
+    pytest.importorskip("mamba_ssm")
+
     _use_torch_reference_kernels(monkeypatch)
 
     model_dir = tmp_path / "native"
