@@ -9,12 +9,12 @@ passes a Tensor to torch.cat. Encode and prune once, before LM generation.
 
 import torch
 from transformers.modeling_outputs import BaseModelOutputWithPooling
-from transformers.models.nemotron_h_omni.modeling_nemotron_h_omni import (
-    NemotronH_Omni_Reasoning_V3 as NativeOmni,
-)
-from transformers.models.nemotron_h_omni.modeling_nemotron_h_omni import compute_retention_mask
 from transformers.utils import can_return_tuple
 
+from ..native.nemotron_h_omni.modeling_nemotron_h_omni import (
+    NemotronH_Omni_Reasoning_V3 as NativeOmni,
+)
+from ..native.nemotron_h_omni.modeling_nemotron_h_omni import compute_retention_mask
 from .configuration import NemotronOmniConfig
 
 
@@ -32,11 +32,6 @@ class NemotronH_Omni_Reasoning_V3(NativeOmni):
             for layer in self.vision_model.encoder.layer:
                 layer.layer_scale1 = torch.nn.Identity()
                 layer.layer_scale2 = torch.nn.Identity()
-
-    @classmethod
-    def is_custom_code(cls):
-        # Native HF checkpoint conversions also apply to this metadata adapter.
-        return False
 
     def pixel_shuffle(self, vision_features, scale_factor=0.5):
         shuffled = super().pixel_shuffle(vision_features, scale_factor)

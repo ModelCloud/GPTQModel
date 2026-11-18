@@ -2,17 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Bind native components directly; metadata never selects processor code."""
 
-from transformers import ParakeetFeatureExtractor, TokenizersBackend
-from transformers.models.nemotron_h_omni.image_processing_nemotron_h_omni import (
+from transformers import TokenizersBackend
+
+from ..native.nemotron_h_omni.image_processing_nemotron_h_omni import (
     NemotronH_Omni_Reasoning_V3ImageProcessor,
 )
-from transformers.models.nemotron_h_omni.processing_nemotron_h_omni import (
+from ..native.nemotron_h_omni.processing_nemotron_h_omni import (
     NemotronH_Omni_Reasoning_V3Processor as NativeProcessor,
 )
-from transformers.models.nemotron_h_omni.video_processing_nemotron_h_omni import (
+from ..native.nemotron_h_omni.video_processing_nemotron_h_omni import (
     NemotronH_Omni_Reasoning_V3VideoProcessor,
 )
-
+from ..native.parakeet.feature_extraction_parakeet import ParakeetFeatureExtractor
 from .configuration import NemotronOmniConfig
 
 
