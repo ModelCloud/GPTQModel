@@ -40,6 +40,7 @@ from transformers.modeling_outputs import (
     Seq2SeqSequenceClassifierOutput,
 )
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import (
     TransformersKwargs,
@@ -417,7 +418,7 @@ class BartClassificationHead(nn.Module):
 
 
 @auto_docstring
-class BartPreTrainedModel(PreTrainedModel):
+class BartPreTrainedModel(NativePreTrainedModel):
     config: BartConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True

@@ -9,6 +9,7 @@ must use an explicit layer boundary with both prefix_sum and block_residual.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import torch
@@ -111,13 +112,18 @@ class KimiK3Source:
         return block.eval()
 
 
+def attn_res_function(block):
+    """The decoder module's own ``_apply_attn_res``, independent of forward wrappers."""
+    return getattr(sys.modules[type(block).__module__], "_apply_attn_res")
+
+
 @torch.no_grad()
 def prepare_moe(block, prefix_sum, block_residual):
     """Exactly the reference decoder's attention half, before routed MoE."""
     hidden = prefix_sum
     b, length, width = hidden.shape
     if block_residual.shape[1]:
-        hidden = block.forward.__globals__["_apply_attn_res"](
+        hidden = attn_res_function(block)(
             prefix_sum.view(-1, width), block_residual,
             block.self_attention_res_proj, block.self_attention_res_norm).view(b, length, width)
     if block.layer_idx % block.attn_res_block_size == 0:
@@ -126,7 +132,7 @@ def prepare_moe(block, prefix_sum, block_residual):
     hidden = block.input_layernorm(hidden)
     attention = block.self_attn(hidden_states=hidden, attention_mask=None, use_cache=False)
     prefix_sum = attention if prefix_sum is None else prefix_sum + attention
-    hidden = block.forward.__globals__["_apply_attn_res"](
+    hidden = attn_res_function(block)(
         prefix_sum.view(-1, width), block_residual,
         block.mlp_res_proj, block.mlp_res_norm).view(b, length, width)
     hidden = block.post_attention_layernorm(hidden)
