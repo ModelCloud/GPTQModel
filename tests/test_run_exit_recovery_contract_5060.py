@@ -20,6 +20,10 @@ contract in ``docs/cancelled-run-contract.md``:
 The file is new rather than extending ``tests/test_cancelled_quantize_*``
 because those files pin one looper each; this fixture is the shared
 conformance matrix the issue asks for.
+
+The two materialization-interrupt nodes at the end cover #5088: a Ctrl-C
+between allocating a lazy parameter's storage and copying the checkpoint
+values into it must not publish ``torch.empty`` weights.
 """
 
 from __future__ import annotations
@@ -30,13 +34,16 @@ from typing import List
 
 import pytest
 import torch
+from safetensors.torch import load_file
 
 from gptqmodel import GPTQModel
 from gptqmodel.looper.module_looper import ModuleLooper, StopMainLoop
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
+from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization import CalibrationConfig, GPTQConfig, RTNConfig
 from gptqmodel.quantization.config import AutoDtypeCast
 from gptqmodel.utils.offload import has_disk_offloaded_modules, is_meta_module
+from gptqmodel.utils.structure import LazyTurtle
 from tests.tiny_remote_models import build_wordlevel_tokenizer
 
 
@@ -280,6 +287,155 @@ def _assert_disk_shells_retain_backing(model: GPTQModel) -> None:
         assert (Path(run_root) / name / "module.safetensors").is_file(), (
             f"offload bundle for `{name}` was removed while its shell is live"
         )
+
+
+def _checkpoint_tensors(model_dir: str) -> dict:
+    shard = next(Path(model_dir).glob("*.safetensors"))
+    return load_file(str(shard))
+
+
+def _assert_param_matches_checkpoint(param: torch.Tensor, checkpoint: torch.Tensor) -> None:
+    expected = checkpoint.to(dtype=param.dtype, device="cpu")
+    assert torch.equal(param.detach().cpu(), expected), (
+        "recovered parameter does not match the checkpoint tensor"
+    )
+
+
+def _interrupt_first_materialization_copy(monkeypatch):
+    """Arm a KeyboardInterrupt at the first copy inside checkpoint materialization.
+
+    The defect is not the interrupt itself: it is publishing freshly allocated
+    storage on the module before the checkpoint values are copied into it. The
+    hook therefore fires only inside ``_copy_checkpoint_tensors_*`` so the test
+    lands in the materialization window rather than on an unrelated copy.
+    """
+
+    state = {"armed": False, "materializing": False, "fired": False}
+    original_copy = torch.Tensor.copy_
+    original_materialize = LazyTurtle._copy_checkpoint_tensors_into_submodule
+
+    def copy_(self, *args, **kwargs):
+        if state["materializing"]:
+            state["materializing"] = False
+            state["fired"] = True
+            raise KeyboardInterrupt()
+        return original_copy(self, *args, **kwargs)
+
+    def materialize(self, **kwargs):
+        if state["armed"]:
+            state["armed"] = False
+            state["materializing"] = True
+        try:
+            return original_materialize(self, **kwargs)
+        finally:
+            state["materializing"] = False
+
+    monkeypatch.setattr(torch.Tensor, "copy_", copy_)
+    monkeypatch.setattr(
+        LazyTurtle, "_copy_checkpoint_tensors_into_submodule", materialize
+    )
+    return state
+
+
+def _assert_no_meta_or_nonfinite_weights(model: GPTQModel) -> None:
+    meta = [name for name, param in model.model.named_parameters() if param.is_meta]
+    assert meta == [], f"parameters still on meta after recovery: {meta}"
+    nonfinite = [
+        name
+        for name, param in model.model.named_parameters()
+        if param.is_floating_point() and not torch.isfinite(param).all()
+    ]
+    assert nonfinite == [], f"non-finite parameters after recovery: {nonfinite}"
+
+
+def _assert_checkpoint_params_match(model: GPTQModel, checkpoint: dict) -> None:
+    mismatched = [
+        name
+        for name, param in model.model.named_parameters()
+        if name in checkpoint
+        and not torch.equal(
+            param.detach().cpu(),
+            checkpoint[name].to(dtype=param.dtype, device="cpu"),
+        )
+    ]
+    assert mismatched == [], (
+        f"recovered parameters do not match the checkpoint: {mismatched}"
+    )
+
+
+def test_tail_materialization_interrupt_does_not_publish_empty_weights(
+    tiny_model_dir, monkeypatch
+):
+    """A Ctrl-C in the post-loop tail must not leave torch.empty base weights (#5088).
+
+    The weight-only loop finishes every layer before the success tail fills the
+    base modules. Interrupting the first checkpoint copy there used to install
+    uninitialized storage that run-exit recovery treated as loaded because it
+    only tests ``is_meta``.
+    """
+
+    model = _load(tiny_model_dir, "rtn", offload=True)
+    state = _interrupt_first_materialization_copy(monkeypatch)
+    original_impl = WeightOnlyLooper._loop_impl
+
+    def arm_after_body(self, **kwargs):
+        result = original_impl(self, **kwargs)
+        state["armed"] = True
+        return result
+
+    monkeypatch.setattr(WeightOnlyLooper, "_loop_impl", arm_after_body)
+
+    with pytest.raises(KeyboardInterrupt):
+        _quantize(model)
+
+    assert state["fired"], "the injected materialization interrupt did not fire"
+    _assert_no_meta_or_nonfinite_weights(model)
+
+    # Every layer was quantized before the tail, so recovery only had to fill
+    # the base modules; they must hold the checkpoint values, not torch.empty.
+    checkpoint = _checkpoint_tensors(tiny_model_dir)
+    _assert_param_matches_checkpoint(
+        model.model.model.embed_tokens.weight, checkpoint["model.embed_tokens.weight"]
+    )
+    _assert_param_matches_checkpoint(
+        model.model.model.norm.weight, checkpoint["model.norm.weight"]
+    )
+    _assert_grad_forward(model)
+
+
+def test_capture_materialization_interrupt_does_not_publish_empty_weights(
+    tiny_model_dir, monkeypatch
+):
+    """A Ctrl-C while materializing the first capture layer must not leave garbage (#5088).
+
+    GPTQ materializes the first traversed layer before its early-stop hook.
+    Interrupting the first checkpoint copy there left a partially materialized
+    dense layer whose ``torch.empty`` weights the recovery considered loaded.
+    The run stops before any layer is quantized, so every weight must still
+    match the checkpoint afterwards.
+    """
+
+    model = _load(tiny_model_dir, "gptq", offload=True)
+    state = _interrupt_first_materialization_copy(monkeypatch)
+    original_prepare = BaseQModel.prepare_input_capture_layer
+
+    def arm_before_capture(self, layer, **kwargs):
+        state["armed"] = True
+        return original_prepare(self, layer, **kwargs)
+
+    monkeypatch.setattr(BaseQModel, "prepare_input_capture_layer", arm_before_capture)
+
+    with pytest.raises(KeyboardInterrupt):
+        _quantize(model)
+
+    assert state["fired"], "the injected materialization interrupt did not fire"
+    _assert_no_meta_or_nonfinite_weights(model)
+    checkpoint = _checkpoint_tensors(tiny_model_dir)
+    # No layer was quantized before the capture interrupt, so the recovered
+    # model must be the untouched base model: every checkpoint-owned weight
+    # (including the interrupted ``q_proj``) still matches the source file.
+    _assert_checkpoint_params_match(model, checkpoint)
+    _assert_grad_forward(model)
 
 
 @pytest.fixture(params=["gptq", "rtn"])

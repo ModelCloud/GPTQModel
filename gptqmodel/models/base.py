@@ -2893,7 +2893,10 @@ class BaseQModel(nn.Module):
         if embed_quant_config is not None:
             if not isinstance(embed_quant_config, QuantizeEmbedConfig):
                 raise TypeError("`embed_quant_config` must be a `QuantizeEmbedConfig` or `QuantizeEmbed` instance.")
-            return embed_quant_config
+            # Re-validate: the caller may have mutated the instance after
+            # construction. A bad mode/`embed_only` must fail here, before the
+            # layer replay starts, not silently quantize nothing (#5124).
+            return embed_quant_config.validate()
         if embed_quant_mode is not None:
             if not isinstance(embed_quant_mode, QuantizeEmbed):
                 raise TypeError("`embed_quant_mode` must be a `QuantizeEmbed` instance.")

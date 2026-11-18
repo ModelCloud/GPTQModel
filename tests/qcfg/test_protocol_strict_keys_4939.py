@@ -18,7 +18,7 @@ one of these paths used to "succeed" with a config that differed from the plan.
 
 import pytest
 
-from gptqmodel.quantization.config import FORMAT, GPTQConfig, SmoothMAD
+from gptqmodel.quantization.config import FORMAT, GGUFConfig, GPTQConfig, SmoothMAD
 from gptqmodel.quantization.protocol import (
     Rule,
     TargetSpec,
@@ -313,6 +313,39 @@ stages:
         compile_protocol_yaml_to_quantize_config(protocol)
 
     assert "pack_dtype" in str(excinfo.value)
+
+
+def _gguf_export_protocol(*, bits: str, variant: str) -> str:
+    return (
+        "version: 2\n"
+        "stages:\n"
+        "  - name: weight_only\n"
+        "    rules:\n"
+        '      - match: "*"\n'
+        "        weight:\n"
+        f"          quantize: {{method: gguf, bits: {bits}}}\n"
+        f"          export: {{format: gguf, variant: {variant}}}\n"
+    )
+
+
+def test_gguf_variant_conflicting_with_bits_is_rejected():
+    with pytest.raises(ValueError, match="incompatible bits/export variant") as excinfo:
+        compile_protocol_yaml_to_quantize_config(
+            _gguf_export_protocol(bits="4", variant="q8_0")
+        )
+
+    message = str(excinfo.value)
+    assert "bits=4" in message
+    assert "export.variant=q8_0" in message
+
+
+def test_documented_gguf_variant_q4_k_m_is_accepted():
+    cfg = compile_protocol_yaml_to_quantize_config(
+        _gguf_export_protocol(bits="q4_k_m", variant="q4_k_m")
+    )
+
+    assert isinstance(cfg, GGUFConfig)
+    assert cfg.runtime_bits.to_string() == "q4_k_m"
 
 
 def test_export_options_survive_plan_compilation_only():
