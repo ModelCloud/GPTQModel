@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Load released media_proc_cfg data with fixed native image/video classes."""
 
-from transformers.models.kimi_k25.image_processing_kimi_k25 import Kimi_K25ImageProcessor
-from transformers.models.kimi_k25.processing_kimi_k25 import Kimi_K25Processor as NativeKimiProcessor
-from transformers.models.kimi_k25.video_processing_kimi_k25 import Kimi_K25VideoProcessor
+from ..native.kimi_k25.image_processing_kimi_k25 import Kimi_K25ImageProcessor
+from ..native.kimi_k25.processing_kimi_k25 import Kimi_K25Processor as NativeKimiProcessor
+from ..native.kimi_k25.video_processing_kimi_k25 import Kimi_K25VideoProcessor
 
 
 def _legacy_media_options(data):

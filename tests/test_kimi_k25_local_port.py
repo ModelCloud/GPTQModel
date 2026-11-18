@@ -12,14 +12,9 @@ import torch
 from safetensors.torch import save_file
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
-from transformers import (
-    Kimi_K25Config,
-    Kimi_K25ForConditionalGeneration,
-    Kimi_K25ImageProcessor,
-    Kimi_K25Processor,
-    Kimi_K25VideoProcessor,
-    PreTrainedTokenizerFast,
-)
+from transformers import Kimi_K25Config as OracleConfig
+from transformers import Kimi_K25ForConditionalGeneration as OracleKimi
+from transformers import PreTrainedTokenizerFast
 
 from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.auto import MODEL_MAP, check_and_get_model_definition
@@ -28,6 +23,11 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.ports.kimi_k25.native import Kimi_K25ForConditionalGeneration as PackagedKimi
 from gptqmodel.models.ports.kimi_k25.processing_kimi_k25 import Kimi_K25Processor as PackagedProcessor
 from gptqmodel.models.ports.kimi_k25.tokenization_kimi import TikTokenTokenizer
+from gptqmodel.models.ports.native.kimi_k25.configuration_kimi_k25 import Kimi_K25Config
+from gptqmodel.models.ports.native.kimi_k25.image_processing_kimi_k25 import Kimi_K25ImageProcessor
+from gptqmodel.models.ports.native.kimi_k25.modeling_kimi_k25 import Kimi_K25ForConditionalGeneration
+from gptqmodel.models.ports.native.kimi_k25.processing_kimi_k25 import Kimi_K25Processor
+from gptqmodel.models.ports.native.kimi_k25.video_processing_kimi_k25 import Kimi_K25VideoProcessor
 from gptqmodel.utils.hf import load_hf_tokenizer, load_model_config, resolve_trust_remote_code
 from gptqmodel.utils.security import BYPASS_ENV
 
@@ -91,6 +91,13 @@ def tiny_config(q_lora_rank=8, first_k_dense_replace=1, image_token_id=30, video
         vision_start_token_id=28, vision_end_token_id=29, tie_word_embeddings=False,
         pad_token_id=text["pad_token_id"], bos_token_id=text["bos_token_id"], eos_token_id=text["eos_token_id"],
     )
+    config._attn_implementation = "eager"
+    return config
+
+
+def oracle_config(**overrides):
+    # Transformers 5.23 itself is the numerical oracle for checkpoints.
+    config = OracleConfig.from_dict(tiny_config(**overrides).to_dict())
     config._attn_implementation = "eager"
     return config
 
@@ -188,7 +195,7 @@ def released_state(model):
 
 def write_checkpoint(path, *, released=False, routing_bias=(.1, -.2, .3, -.4), **overrides):
     torch.manual_seed(76)
-    reference = Kimi_K25ForConditionalGeneration(tiny_config(**overrides)).eval()
+    reference = OracleKimi(oracle_config(**overrides)).eval()
     with torch.no_grad():
         for layer in reference.model.language_model.layers:
             if hasattr(layer.mlp, "gate"):
@@ -252,7 +259,7 @@ def test_public_load_ignores_checkpoint_python(tmp_path, monkeypatch, trust, byp
 
 
 def test_shared_tokenizer_survives_failed_processor_and_two_live_consumers(tmp_path, monkeypatch):
-    from transformers.models.kimi_k25.processing_kimi_k25 import Kimi_K25Processor as NativeProcessor
+    from gptqmodel.models.ports.native.kimi_k25.processing_kimi_k25 import Kimi_K25Processor as NativeProcessor
 
     _, marker = write_checkpoint(
         tmp_path, vocab_size=163840, pad_token_id=163839, bos_token_id=163584, eos_token_id=163585,
