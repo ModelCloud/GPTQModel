@@ -12,7 +12,6 @@ from model_test import ModelTest
 
 from gptqmodel import GPTQModel
 from gptqmodel.models.definitions.chatglm import ChatGLMQModel
-from gptqmodel.models.ports.chatglm import __file__ as chatglm_package
 from gptqmodel.models.ports.chatglm.configuration_chatglm import ChatGLMConfig
 
 
@@ -74,7 +73,7 @@ class TestChatGlm(ModelTest):
 
     @staticmethod
     def _checkpoint_config():
-        contracts = json.loads(Path(chatglm_package).with_name("checkpoint_contracts.json").read_text())
+        contracts = json.loads((Path(__file__).parents[1] / "fixtures/ports/chatglm/checkpoint_contracts.json").read_text())
         return ChatGLMConfig.from_dict(contracts["THUDM/chatglm3-6b"]["config"])
 
     @staticmethod

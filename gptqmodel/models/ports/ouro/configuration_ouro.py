@@ -2,7 +2,7 @@
 # Copyright 2025 ByteDance and the Ouro authors.
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Ouro metadata adapted from the pinned Apache-2.0 release (see README.md)."""
+"""Ouro config adapted from the Apache-2.0 ByteDance release."""
 
 from transformers import Qwen2Config
 

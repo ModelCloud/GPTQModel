@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Independent checkpoint inventory and effective plan coverage for physical Ouro layers."""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -12,10 +13,8 @@ from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.ouro import OuroQModel
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.ouro import OuroConfig, OuroForCausalLM
-from tests.port_assets import read_port_json
 
 
-PORT = Path(__file__).resolve().parents[2] / "gptqmodel/models/ports/ouro"
 EXPECTED_BLOCKS = [
     ["input_layernorm:!"],
     ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
@@ -28,19 +27,28 @@ EXPECTED_BLOCKS = [
 ]
 
 
-@pytest.mark.parametrize("release", ["Ouro-1.4B", "Ouro-2.6B", "Ouro-1.4B-Thinking", "Ouro-2.6B-Thinking"])
+# sha256 over sorted "key:(shape)" lines of the pinned released safetensors
+# inventories. The -Thinking releases share these exact inventories.
+RELEASES = {
+    "Ouro-1.4B": (24, 269, "2d8dceb723a4ab706091eaae135957978ce61305d14bf94bbc87f19797232189"),
+    "Ouro-2.6B": (48, 533, "3a75dad1ff92fbb0042500a865ffa91853c9d2b0d0f78f05f184e91b91791e2b"),
+}
+
+
+@pytest.mark.parametrize("release", sorted(RELEASES))
 def test_every_pinned_released_key_and_shape_matches_meta(release):
-    fixture = read_port_json(PORT / "checkpoint_inventory.json")[release]
-    config = OuroConfig(**fixture["config"])
+    layers, count, digest = RELEASES[release]
+    config = OuroConfig(
+        vocab_size=49152, hidden_size=2048, intermediate_size=5632, num_hidden_layers=layers,
+        num_attention_heads=16, num_key_value_heads=16, head_dim=128, max_position_embeddings=65536,
+        max_window_layers=layers, rope_theta=1000000.0, total_ut_steps=4, bos_token_id=1, eos_token_id=2,
+    )
     with torch.device("meta"):
         model = OuroForCausalLM(config)
-    actual = {k: list(v.shape) for k, v in model.state_dict().items()}
-    assert actual == fixture["shapes"]
-    assert len(actual) == (533 if "2.6B" in release else 269)
+    inventory = sorted(f"{k}:{tuple(v.shape)}" for k, v in model.state_dict().items())
+    assert len(inventory) == count
+    assert hashlib.sha256("\n".join(inventory).encode()).hexdigest() == digest
     assert model.model.early_exit_gate.weight.shape == (1, 2048)
-    assert len(model.model.layers) == config.num_hidden_layers
-    assert len(model.model.layers) in (24, 48)
-    del model
 
 
 @pytest.mark.parametrize("kv_heads", [1, 2, 4])

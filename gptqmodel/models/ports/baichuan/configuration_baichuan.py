@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Licensed under the Apache License, Version 2.0; see the repository LICENSE.
-"""Baichuan 1/2 config, adapted to Transformers 5 (see PROVENANCE.md)."""
+"""Baichuan 1/2 config, adapted to Transformers 5."""
 
 from transformers import PretrainedConfig
 

@@ -35,12 +35,6 @@ logger = logging.get_logger(__name__)
 
 VOCAB_FILES_NAMES = {"vocab_file": "tokenizer.model"}
 
-PRETRAINED_VOCAB_FILES_MAP = {
-    "vocab_file": {},
-    "tokenizer_file": {},
-}
-PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {}
-
 
 class BaichuanTokenizer(PreTrainedTokenizer):
     """
@@ -52,8 +46,6 @@ class BaichuanTokenizer(PreTrainedTokenizer):
     """
 
     vocab_files_names = VOCAB_FILES_NAMES
-    pretrained_vocab_files_map = PRETRAINED_VOCAB_FILES_MAP
-    max_model_input_sizes = PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES
     model_input_names = ["input_ids", "attention_mask"]
 
     def __init__(

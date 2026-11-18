@@ -2,8 +2,6 @@ Baichuan local modeling and tokenizer for GPT-QModel
 
 Derived and adapted from Baichuan Inc.'s configuration_baichuan.py,
 modeling_baichuan.py and Apache-licensed tokenization_baichuan.py.
-The pinned sources and modifications are recorded in
-PROVENANCE.md in this directory.
 
 Copyright 2023 Baichuan Inc. All Rights Reserved.
 Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.

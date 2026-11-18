@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2023 THUDM
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# Adapted from pinned upstream tokenizer source; see PROVENANCE.md.
+# Adapted from the upstream ChatGLM tokenizer source.
 import os
 from typing import Dict, List, Optional, Union
 

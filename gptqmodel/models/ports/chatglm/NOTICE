@@ -4,12 +4,10 @@ ChatGLM2/3 source: THUDM / Tsinghua University, 2023.
 GLM-4 source: Zhipu AI, 2024.
 Adaptations for GPT-QModel / Transformers 5: ModelCloud.ai, 2026.
 
-Code is distributed under the Apache License 2.0, retained in LICENSE and
-LICENSE.glm4. The model rotary helper also retains the labml.ai MIT notice in
+Code is distributed under the Apache License 2.0 (see the repository root
+LICENSE). The model rotary helper also retains the labml.ai MIT notice in
 LICENSE.rope. No trained model weights are included; checkpoint weight licenses
-remain separate. Immutable model/tokenizer revisions, source hashes, tokenizer
-asset hashes and adaptation details are recorded in PROVENANCE.md,
-checkpoint_contracts.json and tokenizer_contracts.json.
+remain separate.
 
 SentencePiece and TikToken are separately installed dependencies, not vendored
 here. Tests fetch only the hash-pinned tokenizer data assets; runtime never
