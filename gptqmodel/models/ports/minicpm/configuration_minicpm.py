@@ -1,7 +1,7 @@
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 # Copyright 2024 OpenBMB. Adapted for Transformers 5 by ModelCloud.ai, 2026.
 # SPDX-License-Identifier: Apache-2.0
-"""Original MiniCPM configuration; source revisions and attribution in README.md."""
+"""Original MiniCPM configuration; source revisions and attribution in NOTICE."""
 
 import math
 

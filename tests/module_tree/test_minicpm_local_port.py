@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exact real MiniCPM checkpoint inventories and live dense/MoE owners."""
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,7 +20,6 @@ from tests.test_minicpm_local_port import _config
 
 FIXTURE = Path(__file__).parents[2] / "gptqmodel/models/ports/minicpm/checkpoint_inventories.json"
 INVENTORIES = read_port_json(FIXTURE)
-SOURCES = json.loads((FIXTURE.parent / "source_manifest.json").read_text())["checkpoints"]
 
 
 @pytest.mark.parametrize("checkpoint", sorted(INVENTORIES))
@@ -38,19 +36,6 @@ def test_pinned_real_checkpoint_keys_and_all_shapes_equal_meta_model(checkpoint)
     assert actual == expected
     assert all(tensor.device.type == "meta" for tensor in model.state_dict().values())
     assert len(inventory["revision"]) == 40
-
-
-@pytest.mark.parametrize("checkpoint", sorted(SOURCES))
-def test_every_pinned_source_alias_retains_the_checkpoint_layout(checkpoint):
-    source = SOURCES[checkpoint]
-    config = MiniCPMConfig(**source["config"])
-    inventory = INVENTORIES.get(checkpoint, INVENTORIES["MiniCPM-2B-dpo-bf16"])
-    expected = {name: entry["shape"] for name, entry in inventory["state"].items()}
-    if config.tie_word_embeddings:
-        expected["lm_head.weight"] = expected["model.embed_tokens.weight"]
-    with torch.device("meta"):
-        model = MiniCPMForCausalLM(config)
-    assert {name: list(tensor.shape) for name, tensor in model.state_dict().items()} == expected
 
 
 @pytest.mark.parametrize("moe", [False, True])

@@ -79,7 +79,7 @@ def _checkpoint(path, **kwargs):
 def _oracle(weights, c, ids, positions, padding=None, past=None, sdpa=False):
     """Functional OpenBMB equations, not port layers, RoPE, masks or cache helpers.
 
-    Sources: 6011acb (dense/128k) and 7495286 (MoE); full pins in port README.
+    Sources: 6011acb (dense/128k) and 7495286 (MoE); full pins in port NOTICE.
     The cache contains ROTATED keys; unlike InternLM1 it does not re-rotate history.
     """
     batch, length = ids.shape
@@ -366,7 +366,24 @@ def test_legacy_pretraining_tp_keeps_its_distinct_head_scaling(tp):
     ids = torch.tensor([[2, 4, 7, 5]])
     with torch.no_grad():
         expected, _ = _oracle(model.state_dict(), model.config, ids, torch.arange(4)[None])
-        torch.testing.assert_close(model(ids).logits, expected, atol=3e-7, rtol=2e-5)
+        # tp=4 sums four FP32 partial products in a different order than the oracle.
+        torch.testing.assert_close(model(ids).logits, expected, atol=1e-6, rtol=2e-5)
+
+
+def test_sdpa_model_returning_attentions_keeps_the_causal_padding_mask():
+    model = _model(attn_implementation="sdpa")
+    ids = torch.tensor([[2, 4, 7, 5], [0, 2, 6, 4]])
+    mask = torch.tensor([[1, 1, 1, 1], [0, 1, 1, 1]])
+    with torch.no_grad():
+        plain = model(ids, attention_mask=mask).logits
+        traced = model(ids, attention_mask=mask, output_attentions=True)
+    # Fully padded query rows are undefined; compare every attended position.
+    torch.testing.assert_close(traced.logits[mask.bool()], plain[mask.bool()], atol=2e-6, rtol=1e-5)
+    for weights in traced.attentions:
+        future = torch.ones(4, 4, dtype=torch.bool).triu(1)
+        assert torch.all(weights[0][:, future] == 0)
+        assert torch.all(weights[1, :, 1:][:, future[1:]] == 0)
+        assert torch.all(weights[1, :, 1:, 0] == 0)
 
 
 def test_inputs_embeds_are_already_scaled_and_loss_tuple_contract():
@@ -411,7 +428,10 @@ def test_tied_checkpoint_public_load_and_save_keep_one_exact_owner(tmp_path, moe
         for name, value in loaded.model.state_dict().items():
             torch.testing.assert_close(value, source.state_dict()[name], atol=0, rtol=0)
         with torch.no_grad():
-            torch.testing.assert_close(loaded.model(ids).logits, source(ids).logits, atol=0, rtol=0)
+            # Weights are bit-identical above; safetensors-mapped storage may
+            # select a different CPU GEMM path and move FP32 logits by one ulp.
+            tolerance = 1e-6 if dtype == torch.float32 else 0
+            torch.testing.assert_close(loaded.model(ids).logits, source(ids).logits, atol=tolerance, rtol=tolerance)
         source = loaded.model
     assert not marker.exists()
 
