@@ -21,20 +21,24 @@ from __future__ import annotations
 
 import copy
 import math
-from typing import Any, ClassVar
+from typing import ClassVar, Unpack
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import initialization as init
+from transformers.cache_utils import Cache, DynamicLayer, LinearAttentionLayer
 from transformers.generation import GenerationMixin
 from transformers.masking_utils import create_causal_mask
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
 )
-from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import logging
+from transformers.modeling_utils import PreTrainedModel, slice_logits_to_keep
+from transformers.utils import TransformersKwargs, can_return_tuple, logging
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import OutputRecorder, capture_outputs
 
 from .configuration_raon1_mini import Raon1MiniConfig
 
@@ -270,7 +274,10 @@ class Raon1MiniRDA(nn.Module):
         rda_delta = self.rda_w_proj(hidden)
         decay_raw = self.f_b_proj(self.f_a_proj(hidden))
 
-        conv_state = cache.conv_states[layer_idx] if cache is not None else None
+        conv_state = recurrent_state = None
+        if cache is not None:
+            conv_state = cache.get_conv_state(layer_idx)
+            recurrent_state = cache.get_recurrent_state(layer_idx)
         q_hist = k_hist = v_hist = None
         if conv_state is not None:
             q_hist, k_hist, v_hist = conv_state.split(self.proj_size, dim=1)
@@ -278,7 +285,7 @@ class Raon1MiniRDA(nn.Module):
         k, k_hist = self.k_conv1d(k, k_hist)
         v, v_hist = self.v_conv1d(v, v_hist)
         if cache is not None:
-            cache.conv_states[layer_idx] = torch.cat([q_hist, k_hist, v_hist], dim=1)
+            cache.update_conv_state(torch.cat([q_hist, k_hist, v_hist], dim=1), layer_idx, num_new_tokens=seq)
 
         q = q.reshape(batch, seq, self.num_heads, self.head_dim)
         k = k.reshape(batch, seq, self.num_heads, self.head_dim)
@@ -299,10 +306,9 @@ class Raon1MiniRDA(nn.Module):
         ratio = torch.exp(F.logsigmoid(beta_raw.float() + rda_delta.float()) - F.logsigmoid(beta_raw.float()))
         v = (v.float() * ratio.unsqueeze(-1)).to(dtype)
 
-        recurrent_state = cache.recurrent_states[layer_idx] if cache is not None else None
         out, final_state = self._core(q, k, v, log_alpha.contiguous(), beta, recurrent_state)
         if cache is not None:
-            cache.recurrent_states[layer_idx] = final_state
+            cache.update_recurrent_state(final_state, layer_idx)
         # Per-head RMSNorm then sigmoid output gate, both in fp32, one rounding.
         normed = self.o_norm(out.reshape(-1, self.head_dim), keep_fp32=True)
         gated = (normed * torch.sigmoid(gate.float().reshape(-1, self.head_dim))).to(dtype)
@@ -564,7 +570,7 @@ class Raon1MiniMoE(nn.Module):
 # ---------------------------------------------------------------------------------------------
 # decoder layer
 # ---------------------------------------------------------------------------------------------
-class Raon1MiniDecoderLayer(nn.Module):
+class Raon1MiniDecoderLayer(GradientCheckpointingLayer):
     """One Raon_mHC-wired layer: attention site then MLP site, each with its own selector."""
 
     def __init__(self, config: Raon1MiniConfig, layer_idx: int) -> None:
@@ -615,79 +621,85 @@ class Raon1MiniDecoderLayer(nn.Module):
 # ---------------------------------------------------------------------------------------------
 # cache
 # ---------------------------------------------------------------------------------------------
-class Raon1MiniDynamicCache:
-    """Hybrid cache: RDA conv windows + fp32 recurrent states, MLA key/value tensors.
+class Raon1MiniRDACacheLayer(LinearAttentionLayer):
+    """RDA layer cache: raw (pre-conv) q|k|v window ``[B, 3*proj, K-1]`` and fp32 recurrent state ``[B, H, V, K]``.
 
-    Per layer: ``conv_states[i]`` is ``[B, 3*proj, K-1]`` of RAW (pre-conv) q|k|v rows,
-    ``recurrent_states[i]`` is ``[B, H, V, K]`` fp32; ``key_cache[i]`` / ``value_cache[i]`` are
-    ``[B, H, T, 192]`` / ``[B, H, T, 128]``. Implements the hybrid-cache interface ``generate`` uses.
+    ``Raon1MiniShortConv`` already returns the exact ``K-1`` window (zero-padded on prefill, zero-width for
+    ``K == 1``), so the conv state is stored as given rather than re-padded. The layer counts the tokens it has
+    consumed (like ``DynamicSlidingWindowLayer.cumulative_length``) so RDA-only layouts can report a sequence length.
     """
 
+    # States are replaced, not copied into static buffers: beam reordering may change the batch size.
     is_compileable = False
 
-    def __init__(self, config: Raon1MiniConfig) -> None:
-        self.layer_types = config.layer_types
-        self.transformer_layers = [i for i, t in enumerate(self.layer_types) if t == "full_attention"]
-        linear_layers = [i for i, kind in enumerate(self.layer_types) if kind == "linear_attention"]
-        self.last_linear_layer = linear_layers[-1] if linear_layers else None
-        self._seen_tokens = 0
-        num = config.num_hidden_layers
-        self.conv_states: list[torch.Tensor | None] = [None] * num
-        self.recurrent_states: list[torch.Tensor | None] = [None] * num
-        self.key_cache: list[torch.Tensor | None] = [None] * num
-        self.value_cache: list[torch.Tensor | None] = [None] * num
+    def __init__(self, **kwargs) -> None:
+        super().__init__(number_of_states=1)
+        self.cumulative_length = 0
 
-    def __len__(self) -> int:
-        return len(self.layer_types)
+    def update_conv_state(self, conv_states: torch.Tensor, state_idx: int = 0, num_new_tokens: int = 0, **kwargs):
+        if self.device is None:
+            self.dtype, self.device = conv_states.dtype, conv_states.device
+        self.conv_states[state_idx] = conv_states
+        self.conv_kernel_size[state_idx] = conv_states.shape[-1]
+        self.is_conv_states_initialized[state_idx] = True
+        self.has_previous_state[state_idx] = True
+        self.cumulative_length += num_new_tokens
+        return conv_states
 
-    def update(
-        self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        layer_idx: int,
-        cache_kwargs: dict | None = None,
-    ):
-        if self.key_cache[layer_idx] is None:
-            self.key_cache[layer_idx] = key_states
-            self.value_cache[layer_idx] = value_states
-        else:
-            self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_states], dim=2)
-            self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=2)
-        return self.key_cache[layer_idx], self.value_cache[layer_idx]
+    def update_recurrent_state(self, recurrent_states: torch.Tensor, state_idx: int = 0, **kwargs):
+        self.recurrent_states[state_idx] = recurrent_states
+        self.is_recurrent_states_initialized[state_idx] = True
+        return recurrent_states
 
-    def reorder_cache(self, beam_idx: torch.LongTensor) -> None:
-        for i in range(len(self.layer_types)):
-            for store in (
-                self.key_cache,
-                self.value_cache,
-                self.conv_states,
-                self.recurrent_states,
-            ):
-                if store[i] is not None:
-                    store[i] = store[i].index_select(0, beam_idx.to(store[i].device))
+    def get_seq_length(self) -> int:
+        return self.cumulative_length
 
-    def get_seq_length(self, layer_idx: int | None = 0) -> int:
-        return self._seen_tokens
+    def get_mask_sizes(self, query_length: int) -> tuple[int, int]:
+        return query_length + self.cumulative_length, 0
 
     def reset(self) -> None:
-        for store in (self.key_cache, self.value_cache, self.conv_states, self.recurrent_states):
-            store[:] = [None] * len(self.layer_types)
-        self._seen_tokens = 0
+        super().reset()
+        self.cumulative_length = 0
+
+
+class Raon1MiniDynamicCache(Cache):
+    """Hybrid cache: ``Raon1MiniRDACacheLayer`` for ``linear_attention`` layers, ``DynamicLayer`` for MLA layers.
+
+    MLA layers store ``[B, H, T, 192]`` keys and ``[B, H, T, 128]`` values.
+    """
+
+    def __init__(self, config: Raon1MiniConfig) -> None:
+        layers = [
+            Raon1MiniRDACacheLayer() if kind == "linear_attention" else DynamicLayer() for kind in config.layer_types
+        ]
+        super().__init__(layers=layers)
+
+    # RDA-only layouts have no attention layer to read the length from; every RDA layer counts its tokens.
+    def get_seq_length(self, layer_idx: int = 0) -> int:
+        if all(self.is_linear):
+            return self.layers[layer_idx].get_seq_length()
+        return super().get_seq_length(layer_idx)
 
     def get_mask_sizes(self, query_length: int, layer_idx: int) -> tuple[int, int]:
-        return query_length + self.get_seq_length(layer_idx), 0
-
-    def get_query_offset(self, layer_idx: int = 0) -> int:
-        return self.get_seq_length(layer_idx)
-
-    @property
-    def has_previous_state(self) -> bool:
-        return self._seen_tokens > 0
+        if all(self.is_linear):
+            return self.layers[layer_idx].get_mask_sizes(query_length)
+        return super().get_mask_sizes(query_length, layer_idx)
 
 
 # ---------------------------------------------------------------------------------------------
 # models
 # ---------------------------------------------------------------------------------------------
+class Raon1MiniStreamReadout(nn.Module):
+    """Parameter-free reduction of the Raon_mHC streams ``[B, T, n, D]`` to ``[B, T, D]`` (fp32 mean).
+
+    The model output is ``norm(readout(final streams))``; ``hidden_states`` records every readout call, i.e. the
+    reduced streams entering each layer, with the last entry tied to the final-normalized output.
+    """
+
+    def forward(self, stream: torch.Tensor) -> torch.Tensor:
+        return stream.float().mean(2).to(stream.dtype)
+
+
 class Raon1MiniPreTrainedModel(PreTrainedModel):
     config: Raon1MiniConfig
     config_class = Raon1MiniConfig
@@ -698,6 +710,9 @@ class Raon1MiniPreTrainedModel(PreTrainedModel):
     _supports_sdpa = True
     _supports_flash_attn = False
     _is_stateful = True
+    _can_record_outputs: ClassVar[dict] = {
+        "hidden_states": OutputRecorder(Raon1MiniStreamReadout, capture_initial_hidden_state=False),
+    }
     # The checkpoint stores these in fp32 and the math reads them in fp32; never downcast them on load.
     _keep_in_fp32_modules: ClassVar[list[str]] = [
         "A_log",
@@ -754,6 +769,7 @@ class Raon1MiniModel(Raon1MiniPreTrainedModel):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
         self.layers = nn.ModuleList([Raon1MiniDecoderLayer(config, i) for i in range(config.num_hidden_layers)])
         self.norm = Raon1MiniRMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.stream_readout = Raon1MiniStreamReadout()
         self.post_init()
 
     def get_input_embeddings(self) -> nn.Embedding:
@@ -762,6 +778,8 @@ class Raon1MiniModel(Raon1MiniPreTrainedModel):
     def set_input_embeddings(self, value: nn.Embedding) -> None:
         self.embed_tokens = value
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -770,15 +788,8 @@ class Raon1MiniModel(Raon1MiniPreTrainedModel):
         past_key_values: Raon1MiniDynamicCache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        **kwargs: Any,
-    ) -> BaseModelOutputWithPast | tuple:
-        use_cache = self.config.use_cache if use_cache is None else use_cache
-        output_hidden_states = (
-            self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
-        )
-        return_dict = self.config.return_dict if return_dict is None else return_dict
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> BaseModelOutputWithPast:
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Pass exactly one of input_ids or inputs_embeds.")
         if inputs_embeds is None:
@@ -808,29 +819,20 @@ class Raon1MiniModel(Raon1MiniPreTrainedModel):
 
         n = self.config.raon_mhc_streams
         stream = inputs_embeds.unsqueeze(2).expand(-1, -1, n, -1).contiguous()
-        all_hidden_states = () if output_hidden_states else None
         for layer in self.layers:
-            if output_hidden_states:
-                # Expose [batch, tokens, hidden] representations by reducing the Raon_mHC streams,
-                # as at the model output. Intermediate states are not final-normalized.
-                all_hidden_states += (stream.float().mean(2).to(inputs_embeds.dtype),)
+            # Recorded as a hidden state: the streams reduced to [batch, tokens, hidden] before each layer.
+            self.stream_readout(stream)
             stream = layer(
                 stream,
                 attention_mask=causal_mask,
                 token_mask=token_mask,
                 cache=past_key_values,
             )
-        if past_key_values is not None:
-            past_key_values._seen_tokens += length
-        hidden = self.norm(stream.float().mean(2).to(inputs_embeds.dtype))
-        if output_hidden_states:
-            all_hidden_states += (hidden,)
-        output = BaseModelOutputWithPast(
+        hidden = self.norm(self.stream_readout(stream))
+        return BaseModelOutputWithPast(
             last_hidden_state=hidden,
             past_key_values=past_key_values if use_cache else None,
-            hidden_states=all_hidden_states,
         )
-        return output if return_dict else output.to_tuple()
 
 
 class Raon1MiniPresencePenaltyLogitsProcessor:
@@ -898,6 +900,7 @@ class Raon1MiniForCausalLM(Raon1MiniPreTrainedModel, GenerationMixin):
     def set_output_embeddings(self, value: nn.Linear) -> None:
         self.lm_head = value
 
+    @can_return_tuple
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -908,11 +911,8 @@ class Raon1MiniForCausalLM(Raon1MiniPreTrainedModel, GenerationMixin):
         labels: torch.LongTensor | None = None,
         use_cache: bool | None = None,
         logits_to_keep: int | torch.Tensor = 0,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        **kwargs: Any,
-    ) -> CausalLMOutputWithPast | tuple:
-        return_dict = self.config.return_dict if return_dict is None else return_dict
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> CausalLMOutputWithPast:
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -920,13 +920,9 @@ class Raon1MiniForCausalLM(Raon1MiniPreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
             **kwargs,
         )
-        hidden = outputs.last_hidden_state
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden[:, slice_indices, :])
+        logits = self.lm_head(slice_logits_to_keep(outputs.last_hidden_state, logits_to_keep))
         loss = None
         if labels is not None:
             loss = self.loss_function(
@@ -935,13 +931,12 @@ class Raon1MiniForCausalLM(Raon1MiniPreTrainedModel, GenerationMixin):
                 vocab_size=self.config.vocab_size,
                 **kwargs,
             )
-        output = CausalLMOutputWithPast(
+        return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
         )
-        return output if return_dict else output.to_tuple()
 
 
 __all__ = [

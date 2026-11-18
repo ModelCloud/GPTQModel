@@ -250,9 +250,9 @@ def test_cache_chunks_causality_padding_and_greedy_beam(layout, dtype, implement
             cache = actual.past_key_values
             assert cache.get_seq_length() == end
             torch.testing.assert_close(actual.logits, expected[:, start:end], atol=tol, rtol=tol)
-            for state in cache.recurrent_states:
-                if state is not None:
-                    assert state.dtype == torch.float32
+            for layer_idx, is_linear in enumerate(cache.is_linear):
+                if is_linear:
+                    assert cache.get_recurrent_state(layer_idx).dtype == torch.float32
         changed = tokens.clone()
         changed[:, -1] = 16
         torch.testing.assert_close(model(changed).logits[:, :-1], expected[:, :-1], atol=tol, rtol=tol)
@@ -305,6 +305,16 @@ def test_dense_two_safetensors_cycles_preserve_every_tensor_and_fp32_policy(tmp_
         torch.testing.assert_close(destination(ids).logits, expected)
 
 
+def _cache_tensors(cache):
+    tensors = []
+    for layer_idx, layer in enumerate(cache.layers):
+        if cache.is_linear[layer_idx]:
+            tensors += [cache.get_conv_state(layer_idx), cache.get_recurrent_state(layer_idx)]
+        else:
+            tensors += [layer.keys, layer.values]
+    return tensors
+
+
 def test_invalid_mask_and_foreign_cache_fail_before_mutation_then_retry():
     from transformers.cache_utils import DynamicCache
 
@@ -316,10 +326,8 @@ def test_invalid_mask_and_foreign_cache_fail_before_mutation_then_retry():
         with pytest.raises(ValueError, match="complete cached key sequence"):
             model(ids[:, 2:], past_key_values=cache, attention_mask=torch.ones(1, 1))
         assert cache.get_seq_length() == 2
-        for field in ("recurrent_states", "conv_states", "key_cache", "value_cache"):
-            for a, b in zip(getattr(cache, field), getattr(before, field)):
-                if a is not None:
-                    assert torch.equal(a, b)
+        for a, b in zip(_cache_tensors(cache), _cache_tensors(before), strict=True):
+            assert torch.equal(a, b)
         with pytest.raises(TypeError, match="hybrid"):
             model(ids, past_key_values=DynamicCache())
         readonly = model(ids[:, 2:], past_key_values=cache, use_cache=False)
@@ -336,7 +344,7 @@ def test_kernel_one_recurrent_only_layout_has_empty_conv_history():
     ids = torch.tensor([[1, 7, 5]])
     with torch.no_grad():
         prefix = model(ids[:, :1])
-        assert prefix.past_key_values.conv_states[0].shape[-1] == 0
+        assert prefix.past_key_values.get_conv_state(0).shape[-1] == 0
         actual = model(ids[:, 1:], past_key_values=prefix.past_key_values)
         torch.testing.assert_close(actual.logits, model(ids).logits[:, 1:], atol=3e-6, rtol=1e-5)
 
@@ -680,9 +688,13 @@ def test_cache_reorder_and_reset_are_equivalent_to_fresh_sequences(layout):
         expected = model(ids[indices])
         torch.testing.assert_close(actual.logits, expected.logits[:, 2:], atol=3e-6, rtol=1e-5)
         cache.reset()
-        assert not cache.has_previous_state and cache.get_seq_length() == 0
-        for store in (cache.key_cache, cache.value_cache, cache.recurrent_states, cache.conv_states):
-            assert all(value is None for value in store)
+        assert cache.get_seq_length() == 0
+        for layer_idx, layer in enumerate(cache.layers):
+            if cache.is_linear[layer_idx]:
+                assert not cache.has_previous_state(layer_idx)
+                assert cache.get_conv_state(layer_idx) is None and cache.get_recurrent_state(layer_idx) is None
+            else:
+                assert layer.get_seq_length() == 0
         torch.testing.assert_close(model(ids, past_key_values=cache).logits, model(ids).logits)
 
 
@@ -793,3 +805,28 @@ def test_pinned_actual_release_tokenizer_ids_chat_security_and_reload(tmp_path, 
         for row in reference["cases"]:
             assert tok.encode(row["text"], add_special_tokens=False) == row["ids"]
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("layout", ["hybrid", "rda", "mla"])
+def test_cache_is_native_cache_and_incremental_greedy_matches_full_forward(layout):
+    from transformers.cache_utils import Cache
+
+    from gptqmodel.models.ports.raon1_mini.modeling_raon1_mini import Raon1MiniDynamicCache
+
+    model = _model(layout=layout)
+    ids = torch.tensor([[1, 7, 5, 9]])
+    with torch.no_grad():
+        out = model(ids, output_hidden_states=True)
+        cache = out.past_key_values
+        assert isinstance(cache, Raon1MiniDynamicCache) and isinstance(cache, Cache)
+        assert cache.get_seq_length() == ids.shape[1]
+        assert not hasattr(cache, "_seen_tokens")
+        # hidden_states: stream mean entering each layer, last tied to the final-normed output.
+        assert len(out.hidden_states) == model.config.num_hidden_layers + 1
+        torch.testing.assert_close(out.hidden_states[0], model.get_input_embeddings()(ids))
+        cached = model.generate(ids, max_new_tokens=4, do_sample=False, eos_token_id=None)
+        sequence = ids
+        for _ in range(4):
+            logits = model(sequence, use_cache=False).logits[:, -1]
+            sequence = torch.cat([sequence, logits.argmax(-1, keepdim=True)], dim=-1)
+        assert torch.equal(cached, sequence)
