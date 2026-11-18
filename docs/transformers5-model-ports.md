@@ -1,14 +1,37 @@
 # GPT-QModel Transformers 5 model ports
 
-GPT-QModel requires `transformers>=5.23.0,<6` and Python 3.11+.
+GPT-QModel requires `transformers>=5.23.0,<6` and Python 3.11+, and it
+quantizes, runs inference and trains **only** on the Transformers 5.23 ABI.
 
-Definitions select their implementation through `LocalModelLoader`
-(`gptqmodel/models/local.py`): either an exact native Transformers 5 class or a
-package-owned port under `gptqmodel/models/ports/`. Checkpoint `auto_map`,
-`trust_remote_code` and the safety bypass cannot replace a definition-owned
-loader. Checkpoint Python for unsupported models requires both
-`trust_remote_code=True` and `GPTQ_BYPASS_SAFETY_CHECKS=1`. See
-[implementation selection](trust-remote-code-isolation.md) for the full flow.
+## Porting policy
+
+- **Every supported model is ported.** Each `MODEL_MAP` definition selects its
+  implementation through a `LocalModelLoader` (`gptqmodel/models/local.py`)
+  whose config and modeling code live in `gptqmodel/models/ports/<port>/`.
+  This includes models that Transformers implements natively: GPT-QModel
+  carries its own copy so a Transformers upgrade cannot change its math,
+  module names or checkpoint keys.
+- **Framework infrastructure only.** Ports may import Transformers' framework
+  layer (`PreTrainedModel`, configs, `cache_utils`, `masking_utils`, the
+  attention-function registry, RoPE utilities, `GradientCheckpointingLayer`,
+  `GenerationMixin`, outputs, initialization, processing/tokenization base
+  classes, utils). They never import `transformers.models.*`.
+- **No backward compatibility.** Ports are written to the 5.23 conventions:
+  no `cache_position`, no tuple or legacy caches, no `rope_scaling` reads, no
+  `return_dict` tuple plumbing, no version checks or import fallbacks for
+  Transformers symbols. Released configs with old field names are converted
+  once at config-parse time.
+- **No global changes.** GPT-QModel never monkeypatches Transformers or
+  registers classes with `AutoConfig`/`AutoModel`. Checkpoint `auto_map`,
+  `trust_remote_code` and the safety bypass cannot replace a definition-owned
+  loader. Checkpoint Python for an unsupported model still needs both
+  `trust_remote_code=True` and `GPTQ_BYPASS_SAFETY_CHECKS=1`, and runs on
+  unmodified Transformers 5.23 without compatibility shims. See
+  [implementation selection](trust-remote-code-isolation.md).
+- **Enforced.** `tests/test_model_port_policy.py` fails on a definition
+  without a `LocalModelLoader`, a `transformers.models.*` import in a port, or
+  a stale pre-5.23 pattern. The porting procedure is in the
+  [model-porting skill](../.agents/skills/gptqmodel-model-porting/SKILL.md).
 
 Ports keep the copyright headers of the sources they derive from. Port
 directories carry `NOTICE` files and any license text that differs from the
