@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 
 from gptqmodel.models.auto import MODEL_MAP
@@ -17,7 +18,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.ovis2_5.configuration_ovis2_5 import Ovis2_5_Config
 from gptqmodel.models.ports.ovis2_5.modeling_ovis2_5 import Ovis2_5
-from tests.test_ovis2_5_local_port import _config
+from tests.test_ovis2_5_local_port import _config, _inputs, _model
 
 
 EXPECTED_PLAN = {
@@ -96,11 +97,34 @@ def test_all_decoder_weight_owners_and_native_head_variants(kv, bias, device):
             assert plan.find(name + ".foreign") is None
     assert model.get_submodule(wrapper.pre_lm_head_norm_module) is model.llm.model.norm
     assert model.get_submodule(wrapper.lm_head) is model.llm.lm_head
-    assert wrapper.awq_get_modules_for_scaling(model.llm.model.layers[0], {}, {}) == []
     assert wrapper.build_layer_modules(wrapper.module_tree, include_capture_only=True) == EXPECTED_PLAN["blocks"]
     assert wrapper.extract_layers_node() == EXPECTED_PLAN["layers"]
     assert {key for key, value in MODEL_MAP.items() if value is Ovis2_5QModel} == {"ovis2_5"}
     assert Ovis2_5QModel.fusable is None
+
+
+@pytest.mark.parametrize("kv,bias", [(4, False), (2, True), (1, False)])
+def test_awq_scale_folds_preserve_image_decoder_output(kv, bias):
+    model = _model(text={"num_key_value_heads": kv, "attention_bias": bias})
+    # An image prompt: the decoder runs on mixed visual/text embeddings.
+    inputs = _inputs()
+
+    def forward():
+        return model(**inputs, use_cache=False).logits
+
+    expected = [
+        ("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]),
+        ("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"]),
+        ("mlp.up_proj", ["mlp.down_proj"]),
+    ]
+    if kv == 4:
+        # v_proj feeds o_proj only without GQA; per-head q/k RMSNorm sits
+        # after q/k_proj and never reads a folded tensor.
+        expected.insert(1, ("self_attn.v_proj", ["self_attn.o_proj"]))
+    for layer in model.llm.model.layers:
+        checked = assert_awq_folds_neutral(Ovis2_5QModel, model, layer, forward)
+        assert [(source, targets) for source, targets, _ in checked] == expected
+        assert all(not consumers for _, _, consumers in checked)
 
 
 def test_meta_shell_vision_rotary_buffer_is_rebuilt_by_nested_vit_init():
