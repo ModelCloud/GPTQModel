@@ -67,8 +67,29 @@ class Raon1MiniQModel(BaseQModel):
     ]
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # mHC selectors, delta recurrence and SiTU branches have no qualified affine fold.
-        return []
+        # Only the two decoder norms are fold sources. SiTU-GLU bounds `up_proj`
+        # with tanh, so `up_proj -> down_proj` is not neutral, and `o_proj` reads
+        # the gated o_norm (RDA) or gated attention context (MLA), never the
+        # input norm the generic planner falls back to.
+        sources = (module.input_layernorm, module.post_attention_layernorm)
+        o_proj = module.self_attn.o_proj
+        nodes = []
+        for node in super().awq_get_modules_for_scaling(module, input_feat, module_kwargs):
+            if not any(node["prev_op"] is source for source in sources):
+                continue
+            layers = [layer for layer in node["layers"] if layer is not o_proj]
+            if layers:
+                nodes.append({**node, "layers": layers})
+        return nodes
+
+    def awq_module_replay_inputs(self, module, x, module_kwargs):
+        x, module_kwargs = super().awq_module_replay_inputs(module, x, module_kwargs)
+        # RDA/MLA take the decoder's `cache` and `layer_idx` positionally; the
+        # layer capture records neither. Replay runs without a cache.
+        for index, layer in enumerate(self.model.model.layers):
+            if module is getattr(layer, "self_attn", None):
+                return x, {**module_kwargs, "cache": None, "layer_idx": index}
+        return x, module_kwargs
 
     def quantize(self, *args, **kwargs):
         if self.model.config.raon_mxfp8_config:
