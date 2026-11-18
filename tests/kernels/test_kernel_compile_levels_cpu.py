@@ -9,9 +9,10 @@ declares one, otherwise from ``SUPPORTS_COMPILE_LEVEL``.
 
 ``fullgraph=True`` is the "graph safe" bar here: reaching ``DYNAMO`` or above
 means dynamo traced the whole forward with zero graph breaks. A kernel whose
-CPU forward is documented as ``EAGER`` (``NF12Linear``, ``ParoLinear``,
-``QQQTorchLinear``, ``GGUFCppKernel``) only has to run eagerly; the technical
-reason is recorded next to its declaration.
+CPU forward is documented as ``EAGER`` (``GGUFCppKernel``) only has to run
+eagerly; the technical reason is recorded next to its declaration. A biased
+FP16/BF16 AWQ/Paro layer is the documented #4068 exception and is exercised
+bias-free here.
 
 Kernels whose optional runtime is absent on this host are skipped with that
 reason, not silently counted as passing.
@@ -118,6 +119,35 @@ def _pack_int8():
             dst.data.copy_(src)
     module.post_init()
     return module.eval()
+
+
+def _pack_cpu_avx512():
+    """Build the BF16 AVX512-BF16 fused kernel and run its one-time transform."""
+
+    torch.manual_seed(0)
+    dense = torch.nn.Linear(IN_FEATURES, OUT_FEATURES, bias=False, dtype=torch.bfloat16)
+    module = TorchCpuAvx512Linear(
+        bits=4,
+        group_size=GROUP_SIZE,
+        sym=True,
+        desc_act=False,
+        in_features=IN_FEATURES,
+        out_features=OUT_FEATURES,
+        bias=False,
+        format=FORMAT.GPTQ_V2,
+        dtype=torch.bfloat16,
+    )
+    groups = IN_FEATURES // GROUP_SIZE
+    module.pack(
+        dense,
+        torch.full((OUT_FEATURES, groups), 1 / 128, dtype=torch.bfloat16),
+        torch.full((OUT_FEATURES, groups), 1 << 3, dtype=torch.int32),
+        torch.arange(IN_FEATURES, dtype=torch.int32) // GROUP_SIZE,
+    )
+    module = module.to("cpu").eval()
+    module.post_init()
+    module.transform_cpu()
+    return module
 
 
 def _awq_new(klass, *, bits: int = 4, bias: bool = True):
@@ -248,6 +278,7 @@ class Case:
     cls: type
     build: Optional[Callable[[], torch.nn.Module]]
     unavailable: Callable[[], Optional[str]] = lambda: None
+    dtype: torch.dtype = DTYPE
 
 
 CASES = [
@@ -255,7 +286,8 @@ CASES = [
     Case(TorchFusedLinear, lambda: _pack_gptq(TorchFusedLinear)),
     Case(TorchInt8Linear, _pack_int8),
     Case(TorchAtenLinear, lambda: _pack_gptq(TorchAtenLinear)),
-    Case(TorchCpuAvx512Linear, lambda: _pack_gptq(TorchCpuAvx512Linear)),
+    # BF16 takes the AVX512-BF16 fused extension GEMM, not the dense fallback.
+    Case(TorchCpuAvx512Linear, _pack_cpu_avx512, dtype=torch.bfloat16),
     Case(AwqTorchLinear, lambda: _pack_awq(AwqTorchLinear, bias=True)),
     # A biased FP16/BF16 AWQ layer asks for an FP32 product so the pre-bias sum
     # cannot overflow; inductor cannot lower the int4 op when that cast fuses
@@ -264,7 +296,11 @@ CASES = [
     # ``torch_fused._cpu_int4pack_mm_cast``.
     Case(TorchFusedAwqLinear, lambda: _pack_awq(TorchFusedAwqLinear, bias=False)),
     Case(TorchAtenAwqLinear, lambda: _pack_awq(TorchAtenAwqLinear, bias=False)),
-    Case(TorchCpuAvx512AwqLinear, lambda: _pack_awq(TorchCpuAvx512AwqLinear, bias=True)),
+    Case(
+        TorchCpuAvx512AwqLinear,
+        lambda: _pack_awq(TorchCpuAvx512AwqLinear, bias=True).to(torch.bfloat16),
+        dtype=torch.bfloat16,
+    ),
     Case(AwqGEMVTorchLinear, lambda: _pack_awq(AwqGEMVTorchLinear, bias=True)),
     Case(LLMAwqTorchLinear, lambda: _pack_awq(LLMAwqTorchLinear, bias=True)),
     Case(AwqGEMVFastTorchLinear, lambda: _pack_awq(AwqGEMVFastTorchLinear, bias=True)),
@@ -276,7 +312,13 @@ CASES = [
         lambda: _pack_original(BitsAndBytesLinear, group_size=GROUP_SIZE, none_scales=True),
     ),
     Case(NF12Linear, lambda: _pack_original(NF12Linear, bits=12)),
-    Case(ParoLinear, lambda: _pack_awq(ParoLinear, bias=True)),
+    # BF16 selects Paro's AVX512-BF16 fused path (bias included); FP16 is the
+    # ATen int4pack path, where a bias needs the documented #4068 FP32 cast.
+    Case(
+        ParoLinear,
+        lambda: _pack_awq(ParoLinear, bias=True).to(torch.bfloat16),
+        dtype=torch.bfloat16,
+    ),
     Case(QQQTorchLinear, _pack_qqq),
     Case(VPTQLinear, _pack_vptq),
     Case(GGUFCppKernel, None, lambda: _unavailable(GGUFCppKernel)),
@@ -301,7 +343,7 @@ def test_cpu_kernel_reaches_declared_cpu_level(case):
             f"{type(error).__name__}: {str(error)[:200]}"
         )
 
-    x = torch.randn(ROWS, IN_FEATURES, dtype=DTYPE)
+    x = torch.randn(ROWS, IN_FEATURES, dtype=case.dtype)
     result = probe(module, (x,), check_cuda_graph=False)
     declared = compile_level(case.cls, device_type="cpu")
 
@@ -322,3 +364,42 @@ def test_cpu_kernel_reaches_declared_cpu_level(case):
         assert result.output_close.get("inductor", True), (
             f"{case.cls.__name__}: inductor output does not match eager on CPU"
         )
+
+
+def _compile_first(build, *, dtype: torch.dtype = DTYPE):
+    """Compile before any eager forward, then compare the compiled output."""
+
+    module = build()
+    x = torch.randn(ROWS, IN_FEATURES, dtype=dtype)
+    torch._dynamo.reset()
+    compiled = torch.compile(module.forward, fullgraph=True, backend="inductor")
+    with torch.inference_mode():
+        out = compiled(x)
+    with torch.inference_mode():
+        ref = module.forward(x)
+    assert torch.allclose(out.float(), ref.float(), atol=2e-2, rtol=1e-2), (
+        "a compile-before-eager forward differs from the eager reference"
+    )
+
+
+def test_qqq_cpu_compiles_before_the_first_eager_call():
+    """Without a warmup the packed cache is absent; the int8 fallback traces."""
+
+    _compile_first(_pack_qqq)
+
+
+def test_paro_biased_fp16_compiles_before_the_first_eager_call():
+    """A biased FP16 layer takes the traceable dense reference before a layout exists."""
+
+    _compile_first(lambda: _pack_awq(ParoLinear, bias=True))
+
+
+def test_nf12_cpu_compiles_after_post_init_without_an_eager_call():
+    """``post_init`` resolves the exponent base, so a cold trace has no host read."""
+
+    def build():
+        module = _pack_original(NF12Linear, bits=12)
+        module.post_init()
+        return module
+
+    _compile_first(build)

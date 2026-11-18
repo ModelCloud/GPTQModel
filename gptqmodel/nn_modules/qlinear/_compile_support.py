@@ -229,8 +229,18 @@ def compile_policy_reason(kernel: Any) -> Optional[str]:
     Returns ``None`` when the kernel records no reason. A reason must be a
     non-empty ``str``: the point is to publish *why* a traceable kernel keeps
     the static-cache auto-compile off, not to have a boolean placeholder.
+
+    A ``NOT_APPLICABLE`` kernel (never a torch module) reports no reason: an
+    MLX subclass of a torch kernel must not print the torch parent's CPU reason
+    in the matrix.
     """
 
+    owner = kernel if isinstance(kernel, type) else type(kernel)
+    level = _coerce_level(
+        kernel, getattr(owner, "SUPPORTS_COMPILE_LEVEL", COMPILE_LEVEL.EAGER)
+    )
+    if level is COMPILE_LEVEL.NOT_APPLICABLE:
+        return None
     reason = getattr(kernel, "SUPPORTS_COMPILE_EAGER_REASON", "")
     if reason is None or reason == "":
         return None

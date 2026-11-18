@@ -97,15 +97,24 @@ QQQ_ROCM_UNSUPPORTED = (
 )
 
 
+def _fake_qqq_int4(input, weight, scales, group_size):
+    """FakeTensor shape for the packed QQQ CPU kernel (see ``extension.register_fake``)."""
+
+    return input.new_empty((input.shape[0], weight.shape[0]), dtype=torch.float32)
+
+
 @lru_cache(maxsize=1)
 def _qqq_cpu_kernel():
     from ...extension import op as extension_op
+    from ...extension import register_fake
     from ...utils.cpu_features import has_avx512_bf16
 
     if not has_avx512_bf16():
         return None
     try:
-        return extension_op("int4_qzero_group_scaled_cpu", "qqq_int4")
+        kernel = extension_op("int4_qzero_group_scaled_cpu", "qqq_int4")
+        register_fake("int4_qzero_group_scaled_cpu", "qqq_int4", _fake_qqq_int4)
+        return kernel
     except (RuntimeError, ImportError, OSError) as exc:
         log.warning("QQQ packed CPU kernel unavailable: %s", exc)
         return None
@@ -693,12 +702,14 @@ class QQQTorchLinear(QQQLinear):
     # inductor and reduce-overhead all pass. Explicit torch.cuda.graph capture
     # fails: forward copies the CPU `_scale_perm_single_i` table to the device.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
-    # CPU, torch 2.16.0.dev20261021+cpu: EAGER. The portable FP32 path lazily
-    # imports the packing helper (`importlib.import_module`, a dynamo-skipped
-    # call) and its first forward builds the packed CPU cache; the QQQ custom
-    # op has no fake/meta implementation, so the graph cannot be traced
-    # through it. Documented rather than silently lowered.
-    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.EAGER}
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all pass. The packed CPU kernel
+    # (`qqq_int4`) now has a FakeTensor impl, and the traced forward reads the
+    # kernel handle and packed cache the eager warmup published instead of
+    # calling `_qqq_cpu_kernel()` (importlib) and `_packed_weight_for_cpu()`
+    # (RLock + checkpoint rewrite). A compile before any eager call takes the
+    # traceable `torch._int_mm` path instead.
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
     SUPPORTS_GRAPH_CAPTURE = False
     # ... and the static-cache `generate()` is still a loss: the QQQ decode
     # recompiles per step (172 graphs, 24-115 breaks) and measures 1.3-8x
@@ -738,6 +749,10 @@ class QQQTorchLinear(QQQLinear):
     _torch_packed_cache = None
     _torch_packed_cache_key = None
     _torch_dropped_checkpoint = None
+    #: Resolved packed-CPU kernel handle, published by the eager warmup so a
+    #: traced forward never calls ``_qqq_cpu_kernel()`` (importlib is skipped by
+    #: dynamo). ``None`` means the AVX512 kernel is unavailable.
+    _torch_cpu_kernel = None
     # ``None`` means "no failed shape recorded yet": a shared class-level ``set``
     # would leak one module's failures into every other module.
     _torch_int_mm_failed_shapes = None
@@ -762,6 +777,7 @@ class QQQTorchLinear(QQQLinear):
         module._torch_packed_cache = None
         module._torch_packed_cache_key = None
         module._torch_dropped_checkpoint = None
+        module._torch_cpu_kernel = None
         module._torch_int_mm_failed_shapes = set()
 
     def __init__(self, *args, **kwargs):
@@ -1112,7 +1128,23 @@ class QQQTorchLinear(QQQLinear):
             or self.in_features > INT8_INT32_MAX_REDUCTION
         ):
             return None
+        if torch.compiler.is_compiling():
+            # ``_qqq_cpu_kernel()`` resolves the extension through
+            # ``importlib`` (a dynamo-skipped call) and
+            # ``_packed_weight_for_cpu()`` takes the transform lock and may drop
+            # the checkpoint tensors. The eager warmup publishes both, so a
+            # traced graph only reads them; without a warmup it falls through
+            # to the traceable ``_int8_matmul`` path.
+            kernel = getattr(self, "_torch_cpu_kernel", None)
+            cached = getattr(self, "_torch_packed_cache", None)
+            if kernel is None or cached is None:
+                return None
+            packed, s_group, s_channel = cached
+            if s_group.dtype != torch.float32:
+                s_group = s_group.to(torch.float32)
+            return kernel(quant_A.contiguous(), packed, s_group, self.group_size), s_channel
         kernel = _qqq_cpu_kernel()
+        self._torch_cpu_kernel = kernel
         if kernel is None:
             return None
         packed, s_group, s_channel = self._packed_weight_for_cpu()

@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 import torch
 
 from ...extension import op as extension_op
+from ...extension import register_fake
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
@@ -20,6 +21,12 @@ from .torch_aten_kernel import TorchAtenLinear
 
 
 log = setup_logger()
+
+
+def _fake_gemm_int4_qzero_group_scaled(input, weight, zeros, absmax, blocksize, bias=None):
+    """FakeTensor shape for the AVX512 int4 GEMM (see ``extension.register_fake``)."""
+
+    return input.new_empty((input.shape[0], weight.shape[0]))
 
 
 def pack_hf_int4(codes: torch.Tensor) -> torch.Tensor:
@@ -173,9 +180,11 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
     REQUIRES_FORMAT_V2 = True
 
     # Measured on an x86-64 AVX512-BF16 host, torch 2.16.0.dev20261021+cpu:
-    # eager=True, graph_breaks=0, dynamo/aot_eager/inductor all reach it. It
-    # inherits TorchAtenLinear's forward, whose RLock-guarded one-time transform
-    # is now skipped while tracing. CPU-only, so no CUDA-graph capture applies.
+    # eager=True, graph_breaks=0, dynamo/aot_eager/inductor all reach it for the
+    # BF16 fused path itself: the AVX512 extension GEMM has a registered
+    # FakeTensor impl, and the RLock-guarded one-time transform inherited from
+    # TorchAtenLinear is skipped while tracing. CPU-only, so no CUDA-graph
+    # capture applies.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
     SUPPORTS_COMPILE_EAGER_REASON = (
         "static-cache generate() auto-compile stays off: no CPU win was measured "
@@ -214,6 +223,11 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         try:
             cls.gemm_int4_qzero_group_scaled_cpu_kernel = extension_op(
                 "int4_qzero_group_scaled_cpu", "gemm_int4_qzero_group_scaled_cpu_forward"
+            )
+            register_fake(
+                "int4_qzero_group_scaled_cpu",
+                "gemm_int4_qzero_group_scaled_cpu_forward",
+                _fake_gemm_int4_qzero_group_scaled,
             )
             cls.pack_gptq_int4_kernel = extension_op(
                 "int4_qzero_group_scaled_cpu", "pack_gptq_int4"
