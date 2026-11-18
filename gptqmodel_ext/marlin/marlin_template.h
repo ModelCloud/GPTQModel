@@ -898,14 +898,21 @@ __global__ void Marlin(
         }
       } else if constexpr (group_blocks != -1) {
         if constexpr (group_blocks >= thread_k_blocks) {
-          if (k % b_sh_wr_iters == 0) {
-            int4* sh_s_stage =
-                sh_s + s_sh_stage * ((group_blocks / thread_k_blocks) *
-                                     (pipe / (group_blocks / thread_k_blocks)));
-            reinterpret_cast<int4*>(&frag_s[k % 2])[0] = sh_s_stage[s_sh_rd];
-          } else {
-            reinterpret_cast<int4*>(&frag_s[1])[0] =
-                reinterpret_cast<int4*>(&frag_s[0])[0];
+          // A group spans g = group_blocks / thread_k_blocks pipeline stages, but
+          // its scales live only in the slot of the group's first stage. That
+          // slot is refilled (stage + stages) by fetch_to_shared() *before* the
+          // next wait_for_stage() barrier, so a later stage of the group must
+          // not re-read it: a lagging warp would pick up the scales of group
+          // g + stages / g (#4913). Later stages reuse the registers instead.
+          constexpr int g = group_blocks / thread_k_blocks;
+          if (pipe % g == 0) {
+            if (k % b_sh_wr_iters == 0) {
+              int4* sh_s_stage = sh_s + s_sh_stage * pipe;
+              reinterpret_cast<int4*>(&frag_s[k % 2])[0] = sh_s_stage[s_sh_rd];
+            } else {
+              reinterpret_cast<int4*>(&frag_s[1])[0] =
+                  reinterpret_cast<int4*>(&frag_s[0])[0];
+            }
           }
         } else {
           auto warp_id = threadIdx.x / 32;
@@ -1028,10 +1035,11 @@ __global__ void Marlin(
         }
 
       } else if constexpr (group_blocks >= thread_k_blocks) {
-        if (k % b_sh_wr_iters == 0) {
-          int4* sh_zp_stage =
-              sh_zp + zp_sh_stage * ((group_blocks / thread_k_blocks) *
-                                     (pipe / (group_blocks / thread_k_blocks)));
+        // Same slot-reuse race as the scales above (#4913): only the group's
+        // first stage reads shared memory, later stages keep frag_qzp.
+        constexpr int g = group_blocks / thread_k_blocks;
+        if (pipe % g == 0 && k % b_sh_wr_iters == 0) {
+          int4* sh_zp_stage = sh_zp + zp_sh_stage * pipe;
   #pragma unroll
           for (int i = 0; i < num_ints_per_thread; i++) {
             frag_qzp[k % 2][i] =
@@ -1073,11 +1081,10 @@ __global__ void Marlin(
 
       if constexpr (group_blocks != -1) {
         if constexpr (group_blocks >= thread_k_blocks) {
-          if (k % b_sh_wr_iters == 0) {
-            int4* sh_zp_stage =
-                sh_zp +
-                zp_sh_stage * ((group_blocks / thread_k_blocks) *
-                               (pipe / (group_blocks / thread_k_blocks)));
+          // Same slot-reuse race as the scales above (#4913).
+          constexpr int g = group_blocks / thread_k_blocks;
+          if (pipe % g == 0 && k % b_sh_wr_iters == 0) {
+            int4* sh_zp_stage = sh_zp + zp_sh_stage * pipe;
             reinterpret_cast<int4*>(&frag_zpf[k % 2])[0] =
                 sh_zp_stage[zp_sh_rd];
           }
