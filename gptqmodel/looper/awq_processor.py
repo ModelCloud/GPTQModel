@@ -4880,6 +4880,32 @@ class AWQProcessor(LoopProcessor):
             return 0
         return max(int(self._quant_batch_size or 1), budget_rows)
 
+    def _invoke_replay_module(
+            self,
+            module: torch.nn.Module,
+            x: torch.Tensor,
+            module_kwargs: Dict,
+    ):
+        """Runs one module replay and reports its failures as scale-group errors.
+
+        A replayed block can reject the captured context with a bare
+        ``AssertionError`` instead of a tensor-geometry ``RuntimeError``. Hymba's
+        ``reuse_kv`` mixer asserts ``kv_last_layer is not None``: the producer's
+        K/V is threaded between layers by the forward executor and is not part of
+        the per-linear capture, so no replay boundary that needs it can be scored
+        (#5098). Convert only a failure raised by the module itself; the
+        processor's own assertions keep propagating, and the configured
+        plain-quantization fallback still handles a group that cannot be scored.
+        """
+
+        try:
+            return module(x, **module_kwargs)
+        except AssertionError as exc:
+            raise _AWQScaleGroupError(
+                f"AWQ: replaying {type(module).__name__} with the packed token "
+                f"rows failed: {exc!r}"
+            ) from exc
+
     @torch.inference_mode()
     def _iter_prepared_forward_outputs(
             self,
@@ -4907,7 +4933,7 @@ class AWQProcessor(LoopProcessor):
             or x.dim() == 0
             or x.shape[0] <= effective_quant_batch_size
         ):
-            module_output = module(x, **module_kwargs)
+            module_output = self._invoke_replay_module(module, x, module_kwargs)
             if isinstance(module_output, tuple):
                 module_output = module_output[0]
             yield module_output
@@ -4948,7 +4974,7 @@ class AWQProcessor(LoopProcessor):
                     full_batch_size=full_batch_size,
                 ))
                 partial_kwargs.update(overrides)
-            partial_output = module(x_partial, **partial_kwargs)
+            partial_output = self._invoke_replay_module(module, x_partial, partial_kwargs)
             if isinstance(partial_output, tuple):
                 partial_output = partial_output[0]
             yield partial_output

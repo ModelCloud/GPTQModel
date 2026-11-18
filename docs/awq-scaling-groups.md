@@ -588,6 +588,84 @@ implementation returns `(x, module_kwargs)` unchanged, and TeleChat2 promotes
 the 2-D capture to 3-D, passes the block input as `residual` (an additive
 constant shared by reference and candidate), and builds a causal bool mask.
 
+### Module replay failures and the scale-group fallback
+
+A replay can fail for reasons the processor cannot pre-check. Two contracts keep
+such a failure from aborting `quantize()`:
+
+1. A tensor-geometry `RuntimeError` from the replayed module is converted to
+   `_AWQScaleGroupError` (`_is_replay_geometry_error`), so the configured
+   fallback quantizes the consumer plainly (#5085).
+2. A bare `AssertionError` raised **by the replayed module** is converted the
+   same way (`AWQProcessor._invoke_replay_module`). Hymba's `reuse_kv` mixer
+   asserts `kv_last_layer is not None`; that value is threaded between layers by
+   the forward executor, is not part of the per-linear capture, and cannot be
+   reconstructed from the retained token rows (#5098).
+
+The conversion is scoped to the replay call: the processor's own assertions and
+non-`AssertionError` exceptions still propagate, so a numerical or logical
+failure is never silently downgraded to plain quantization.
+
+```mermaid
+flowchart TD
+    A["AWQProcessor._search_best_scale"] --> B["replay boundary forward<br/>_iter_prepared_forward_outputs"]
+    B --> C{"module forward raised?"}
+    C -- "no" --> D["score candidates"]
+    C -- "RuntimeError naming<br/>broadcast or matmul shapes" --> E["_AWQScaleGroupError"]
+    C -- "AssertionError from the module" --> E
+    C -- "any other exception" --> F["propagate; abort quantize()"]
+    E --> G{"AWQConfig.fallback set?"}
+    G -- "yes" --> H["plain quantization for the group<br/>log the configured fallback"]
+    G -- "no" --> I["raise; no unsafe fold"]
+    style F fill:#f8d7da,stroke:#842029,stroke-width:2px
+    style I fill:#f8d7da,stroke:#842029,stroke-width:2px
+    style H fill:#fff3cd,stroke:#997404,stroke-width:2px
+```
+
+### `hymba`: KV-reuse layers
+
+Every Hymba checkpoint shares KV across layers (`kv_reuse_group`, 15 consumer
+layers of 32 on `nvidia/Hymba-1.5B-Base`). A consumer's `HymbaBlock` projects no
+K/V of its own: it reads the producer layer's `kv_last_layer`, which
+`ForwardExecutor` injects for the real forward only
+(`looper/forward_executor.py`, enabled by `HymbaQModel.write_shared_kv_cache`).
+
+`input_layernorm -> mamba.in_proj` is a single-member group whose declared
+inspection module was the whole mixer, so the scale search replayed
+`HymbaBlock(x, **captured_kwargs)` without that value and asserted. Block replay
+was also the wrong objective: the group has one Linear member, and the
+projection's own reconstruction error is exactly what the search ranks.
+
+`HymbaQModel.awq_get_modules_for_scaling` re-anchors that group's
+`module2inspect` onto the `mamba.in_proj` `nn.Linear`. The fold itself is
+unchanged: `input_layernorm` is still divided and `in_proj`'s input rows are
+still scaled (`tests/test_hymba_awq_4891.py` pins that folding the resulting
+groups still reproduces the logits).
+
+```mermaid
+flowchart LR
+    subgraph OLD["before: boundary is the mixer"]
+        N1["input_layernorm"] --> M1["HymbaBlock.forward"]
+        M1 --> R1["needs kv_last_layer<br/>and packed causal mask"]
+        R1 --> X1["AssertionError<br/>aborts quantize()"]
+    end
+    subgraph NEW["after: boundary is the projection"]
+        N2["input_layernorm"] --> P2["mamba.in_proj Linear"]
+        P2 --> S2["score scale on the projection"]
+        S2 --> F2["fold the norm; consumer stays quantized"]
+    end
+    style X1 fill:#f8d7da,stroke:#842029,stroke-width:2px
+    style F2 fill:#d1e7dd,stroke:#0f5132,stroke-width:2px
+```
+
+| Situation | Before | After |
+| --- | --- | --- |
+| `input_layernorm -> mamba.in_proj` on a KV-reuse layer | replayed `HymbaBlock`; `assert kv_last_layer is not None` aborted `quantize()` | replayed `mamba.in_proj`; the projection is the whole group and owns no cross-layer state |
+| `input_layernorm -> mamba.in_proj` on a producer layer | replayed `HymbaBlock`; group scored through the mixer | same re-anchor: one Linear member, so the projection alone is the objective |
+| Replay raises `AssertionError` in the module | propagated and aborted the run | `_AWQScaleGroupError`; configured fallback or a raise when `fallback=None` |
+| Processor-side assertion or non-assertion failure | propagated | unchanged: still propagates |
+| Multi-consumer norm or non-Linear target | replayed the block | unchanged: the mixed replay is kept so the existing validation decides |
+
 ## Looped decoder calibration
 
 HRM-Text, Ouro (`total_ut_steps=4`), Nanbeige 4.2 (`num_loops=2`) and
