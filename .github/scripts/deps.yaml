@@ -106,6 +106,9 @@ tests:
   test_local_model_paths.py:
     - gguf
 
+  test_packing_numeric_boundaries.py:
+    - gguf
+
 tests/models:
   test_chatglm:
     - sentencepiece
