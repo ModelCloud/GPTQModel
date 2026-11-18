@@ -15,7 +15,6 @@
 
 """Package-owned GRIN-MoE decoder (PhiMoE-style SparseMixer routing with LayerNorm)."""
 
-import math
 from typing import Optional
 
 import torch
@@ -24,8 +23,12 @@ from torch import nn
 from transformers.activations import ACT2FN
 from transformers.cache_utils import DynamicCache
 from transformers.generation import GenerationMixin
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast, MoeModelOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.utils import can_return_tuple
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import OutputRecorder, capture_outputs
 
 from .configuration_grinmoe import GRINMoEConfig
 
@@ -364,6 +367,25 @@ def rotate_half(x):
     return torch.cat((-second, first), dim=-1)
 
 
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    batch, num_key_value_heads, length, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, length, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, length, head_dim)
+
+
+def eager_attention_forward(module, query, key, value, attention_mask, scaling, dropout=0.0, **kwargs):
+    key = repeat_kv(key, module.num_key_value_groups)
+    value = repeat_kv(value, module.num_key_value_groups)
+    weights = torch.matmul(query, key.transpose(2, 3)) * scaling
+    if attention_mask is not None:
+        weights = weights + attention_mask
+    weights = F.softmax(weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    weights = F.dropout(weights, p=dropout, training=module.training)
+    return torch.matmul(weights, value).transpose(1, 2).contiguous(), weights
+
+
 class GRINMoEAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -371,7 +393,10 @@ class GRINMoEAttention(nn.Module):
         self.layer_idx = layer_idx
         self.num_heads = config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.head_dim = config.hidden_size // self.num_heads
+        self.scaling = self.head_dim**-0.5
+        self.is_causal = True
         self.q_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
         self.k_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim,
                                 bias=config.attention_bias)
@@ -380,8 +405,7 @@ class GRINMoEAttention(nn.Module):
         self.o_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
         self.rotary_emb = GRINMoERotaryEmbedding(config)
 
-    def forward(self, hidden_states, attention_mask, position_ids, past_key_value=None,
-                output_attentions=False, **kwargs):
+    def forward(self, hidden_states, attention_mask, position_ids, past_key_values=None, **kwargs):
         batch, length, _ = hidden_states.shape
         query = self.q_proj(hidden_states).view(batch, length, self.num_heads, self.head_dim).transpose(1, 2)
         key = self.k_proj(hidden_states).view(batch, length, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -389,27 +413,19 @@ class GRINMoEAttention(nn.Module):
         cos, sin = self.rotary_emb(value, position_ids)
         query = query * cos + rotate_half(query) * sin
         key = key * cos + rotate_half(key) * sin
-        if past_key_value is not None:
-            key, value = past_key_value.update(key, value, self.layer_idx)
-        groups = self.num_heads // self.num_key_value_heads
-        key = key.repeat_interleave(groups, dim=1)
-        value = value.repeat_interleave(groups, dim=1)
-        weights = None
-        if self.config._attn_implementation == "sdpa" and not output_attentions:
-            output = F.scaled_dot_product_attention(
-                query, key, value, attn_mask=attention_mask,
-                dropout_p=self.config.attention_dropout if self.training else 0.0,
-            )
-        else:
-            weights = torch.matmul(query, key.transpose(2, 3)) / math.sqrt(self.head_dim)
-            weights = F.softmax(weights + attention_mask, dim=-1, dtype=torch.float32).to(query.dtype)
-            weights = F.dropout(weights, p=self.config.attention_dropout, training=self.training)
-            output = torch.matmul(weights, value)
-        output = output.transpose(1, 2).contiguous().reshape(batch, length, -1)
-        return self.o_proj(output), weights if output_attentions else None
+        if past_key_values is not None:
+            key, value = past_key_values.update(key, value, self.layer_idx)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
+        output, weights = attention_interface(
+            self, query, key, value, attention_mask,
+            dropout=self.config.attention_dropout if self.training else 0.0, scaling=self.scaling, **kwargs,
+        )
+        return self.o_proj(output.reshape(batch, length, -1).contiguous()), weights
 
 
-class GRINMoEDecoderLayer(nn.Module):
+class GRINMoEDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.self_attn = GRINMoEAttention(config, layer_idx)
@@ -417,24 +433,17 @@ class GRINMoEDecoderLayer(nn.Module):
         self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_value=None,
-                output_attentions=False, output_router_logits=False, use_cache=False, **kwargs):
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_values=None,
+                use_cache=False, **kwargs):
         residual = hidden_states
-        hidden_states, attention = self.self_attn(
+        hidden_states, _ = self.self_attn(
             self.input_layernorm(hidden_states), attention_mask, position_ids,
-            past_key_value=past_key_value, output_attentions=output_attentions,
+            past_key_values=past_key_values, **kwargs,
         )
         hidden_states = residual + hidden_states
         residual = hidden_states
-        hidden_states, router_logits = self.block_sparse_moe(self.post_attention_layernorm(hidden_states))
-        outputs = (residual + hidden_states,)
-        if output_attentions:
-            outputs += (attention,)
-        if use_cache:
-            outputs += (past_key_value,)
-        if output_router_logits:
-            outputs += (router_logits,)
-        return outputs
+        hidden_states, _ = self.block_sparse_moe(self.post_attention_layernorm(hidden_states))
+        return residual + hidden_states
 
 
 class GRINMoEPreTrainedModel(PreTrainedModel):
@@ -443,6 +452,12 @@ class GRINMoEPreTrainedModel(PreTrainedModel):
     _no_split_modules = ["GRINMoEDecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
     _supports_sdpa = True
+    _supports_attention_backend = True
+    _can_record_outputs = {
+        "router_logits": OutputRecorder(GRINMoESparseMoeBlock, index=1),
+        "hidden_states": GRINMoEDecoderLayer,
+        "attentions": GRINMoEAttention,
+    }
 
     def _init_weights(self, module):
         super()._init_weights(module)
@@ -456,6 +471,7 @@ class GRINMoEModel(GRINMoEPreTrainedModel):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
         self.layers = nn.ModuleList([GRINMoEDecoderLayer(config, i) for i in range(config.num_hidden_layers)])
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.gradient_checkpointing = False
         self.post_init()
 
     def get_input_embeddings(self):
@@ -464,18 +480,14 @@ class GRINMoEModel(GRINMoEPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-                inputs_embeds=None, use_cache=None, output_attentions=None, output_hidden_states=None,
-                output_router_logits=None, return_dict=None, **kwargs):
+                inputs_embeds=None, use_cache=None, **kwargs) -> MoeModelOutputWithPast:
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Specify exactly one of input_ids or inputs_embeds")
         if past_key_values is not None and not isinstance(past_key_values, DynamicCache):
             raise ValueError("GRIN-MoE supports Transformers DynamicCache, not legacy tuples or static caches")
-        use_cache = self.config.use_cache if use_cache is None else use_cache
-        output_attentions = self.config.output_attentions if output_attentions is None else output_attentions
-        output_hidden_states = self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
-        output_router_logits = self.config.output_router_logits if output_router_logits is None else output_router_logits
-        return_dict = self.config.return_dict if return_dict is None else return_dict
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         batch, length, _ = inputs_embeds.shape
@@ -497,10 +509,9 @@ class GRINMoEModel(GRINMoEPreTrainedModel):
             queries = torch.arange(past_length, kv_length, device=inputs_embeds.device)[:, None]
             keys = torch.arange(kv_length, device=inputs_embeds.device)[None, :]
             allowed = keys <= queries
-            # Preserve upstream's distinct eager/windowed and SDPA/full-context semantics.
-            if self.config.sliding_window is not None and (
-                self.config._attn_implementation == "eager" or output_attentions
-            ):
+            # Model-specific: upstream windows only its eager path (window includes the query and
+            # ``sliding_window`` preceding keys); SDPA/other kernels attend to the full context.
+            if self.config.sliding_window is not None and self.config._attn_implementation == "eager":
                 allowed = allowed & (keys >= queries - self.config.sliding_window)
             allowed = allowed[None, None].expand(batch, 1, length, kv_length)
             if attention_mask is not None:
@@ -508,32 +519,17 @@ class GRINMoEModel(GRINMoEPreTrainedModel):
             causal_mask = torch.zeros(allowed.shape, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
             causal_mask.masked_fill_(~allowed, torch.finfo(inputs_embeds.dtype).min)
         if use_cache and past_key_values is None:
-            past_key_values = DynamicCache()
+            past_key_values = DynamicCache(config=self.config)
         hidden_states = inputs_embeds
-        all_hidden = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
-        all_routers = () if output_router_logits else None
         for layer in self.layers:
-            if output_hidden_states:
-                all_hidden += (hidden_states,)
-            outputs = layer(
+            hidden_states = layer(
                 hidden_states, attention_mask=causal_mask, position_ids=position_ids,
-                past_key_value=past_key_values, output_attentions=output_attentions,
-                output_router_logits=output_router_logits, use_cache=use_cache,
+                past_key_values=past_key_values, use_cache=use_cache, **kwargs,
             )
-            hidden_states = outputs[0]
-            if output_attentions:
-                all_attentions += (outputs[1],)
-            if output_router_logits:
-                all_routers += (outputs[-1],)
         hidden_states = self.norm(hidden_states)
-        if output_hidden_states:
-            all_hidden += (hidden_states,)
-        result = MoeModelOutputWithPast(
+        return MoeModelOutputWithPast(
             last_hidden_state=hidden_states, past_key_values=past_key_values if use_cache else None,
-            hidden_states=all_hidden, attentions=all_attentions, router_logits=all_routers,
         )
-        return result if return_dict else result.to_tuple()
 
 
 class GRINMoEForCausalLM(GRINMoEPreTrainedModel, GenerationMixin):
@@ -564,17 +560,15 @@ class GRINMoEForCausalLM(GRINMoEPreTrainedModel, GenerationMixin):
     def set_decoder(self, decoder):
         self.model = decoder
 
+    @can_return_tuple
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-                inputs_embeds=None, labels=None, use_cache=None, output_attentions=None,
-                output_hidden_states=None, output_router_logits=None, return_dict=None,
-                logits_to_keep=0, **kwargs):
-        return_dict = self.config.return_dict if return_dict is None else return_dict
+                inputs_embeds=None, labels=None, use_cache=None, output_router_logits=None,
+                logits_to_keep=0, **kwargs) -> MoeCausalLMOutputWithPast:
         output_router_logits = self.config.output_router_logits if output_router_logits is None else output_router_logits
         outputs = self.model(
             input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
             past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache,
-            output_attentions=output_attentions, output_hidden_states=output_hidden_states,
-            output_router_logits=output_router_logits, return_dict=True, **kwargs,
+            output_router_logits=output_router_logits, **kwargs,
         )
         indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(outputs.last_hidden_state[:, indices]).float()
@@ -588,8 +582,7 @@ class GRINMoEForCausalLM(GRINMoEPreTrainedModel, GenerationMixin):
             )
             if loss is not None:
                 loss = loss + self.config.router_aux_loss_coef * aux_loss.to(loss.device)
-        result = MoeCausalLMOutputWithPast(
+        return MoeCausalLMOutputWithPast(
             loss=loss, aux_loss=aux_loss, logits=logits, past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states, attentions=outputs.attentions, router_logits=outputs.router_logits,
         )
-        return result if return_dict else result.to_tuple()
