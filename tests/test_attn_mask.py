@@ -30,6 +30,95 @@ def test_normalize_seq_mask_additive_zero_keep():
     assert torch.equal(filtered, torch.tensor([[0.0, 1.0], [4.0, 5.0]]))
 
 
+def test_normalize_seq_mask_all_zero_extended_mask_keeps_every_token():
+    """An all-zero extended/additive mask is unpadded, not all-padding (#5134).
+
+    PanGu-alpha passes ``(1.0 - mask[:, None, None, :]) * -10000.0`` to every
+    decoder block. For a row without padding that mask is all zeros, which the
+    old "any negative means additive" inference read as a 0/1 mask and dropped
+    every token from the layer Hessian.
+    """
+
+    mask = torch.zeros(1, 1, 1, 5)
+
+    keep = normalize_seq_mask(mask)
+
+    assert keep.dtype is torch.bool
+    assert keep.tolist() == [[True] * 5]
+
+    # The exact PanGu-alpha form, including a padded row as a control.
+    pangu = (1.0 - torch.tensor([[1.0, 1.0, 1.0, 0.0, 0.0]])[:, None, None, :]) * -10000.0
+    assert normalize_seq_mask(pangu).tolist() == [[True, True, True, False, False]]
+
+
+def test_normalize_seq_mask_partially_padded_additive_mask_keeps_real_tokens():
+    """A padded additive mask still drops only the negative (masked) keys."""
+
+    mask = torch.tensor([[[[0.0, 0.0, -10000.0, -10000.0]]]])
+
+    keep = normalize_seq_mask(mask)
+
+    assert keep.tolist() == [[True, True, False, False]]
+
+
+def test_normalize_seq_mask_all_negative_mask_drops_every_token():
+    """A fully masked additive mask stays all-drop; zero is not "masked"."""
+
+    mask = torch.full((1, 1, 1, 5), -10000.0)
+
+    keep = normalize_seq_mask(mask)
+
+    assert keep.tolist() == [[False] * 5]
+
+
+def test_normalize_seq_mask_2d_integer_all_zero_row_is_all_padding():
+    """The unpadded rule must not change a 2-D integer 0/1 mask's meaning."""
+
+    mask = torch.zeros(1, 5, dtype=torch.long)
+
+    keep = normalize_seq_mask(mask)
+
+    assert keep.tolist() == [[False] * 5]
+
+
+def test_normalize_seq_mask_all_zero_float_2d_is_fully_attended():
+    """A floating 2-D mask is additive by convention, so all-zero means keep.
+
+    This matches the calibration path's pre-existing rule; only integer 2-D
+    masks carry the 0/1 all-padding meaning.
+    """
+
+    mask = torch.zeros(1, 5)
+
+    keep = normalize_seq_mask(mask)
+
+    assert keep.tolist() == [[True] * 5]
+
+
+def test_normalize_seq_mask_all_zero_rank3_integer_is_fully_attended():
+    """Rank >= 3 is the extended/causal form: all-zero is unpadded, not masked.
+
+    An all-zero integer 0/1 causal grid is ambiguous. We follow the additive
+    convention used by the extended HF masks, because a genuinely all-masked
+    calibration row carries no signal and would only trigger RTN fallback.
+    """
+
+    mask = torch.zeros(1, 5, 5, dtype=torch.long)
+
+    keep = normalize_seq_mask(mask)
+
+    assert keep.tolist() == [[True] * 5]
+
+
+def test_normalize_seq_mask_bool_mask_is_unchanged():
+    mask = torch.tensor([[True, False, True, False, True]])
+
+    keep = normalize_seq_mask(mask)
+
+    assert keep.dtype is torch.bool
+    assert keep.tolist() == [[True, False, True, False, True]]
+
+
 def test_normalize_seq_mask_accepts_multirow_2d():
     mask = torch.tensor([[1, 0, 1], [0, 0, 1]])
 
