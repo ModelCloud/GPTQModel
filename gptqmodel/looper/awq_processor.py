@@ -1275,7 +1275,12 @@ class AWQProcessor(LoopProcessor):
                         return
                     seen_batch_indices.add(batch_index)
 
-                entry.setdefault("batch_row_counts", []).append(length)
+                # Provenance rows name the capture slot, not the calibration
+                # batch id: captures can complete out of batch order and
+                # ``_layer_input_features`` replays them in batch order, so the
+                # slot index is what the replay kwargs index by.
+                source_index = len(entry.setdefault("batch_row_counts", []))
+                entry["batch_row_counts"].append(length)
                 entry["raw_tokens"] = entry.get("raw_tokens", 0) + length
                 entry["max_tokens"] = plan.max_tokens
                 entry.setdefault("batch_indices", []).append(batch_index)
@@ -1283,7 +1288,7 @@ class AWQProcessor(LoopProcessor):
                 entry.setdefault("inputs", []).append(sampled)
                 if quota > 0 and local_idx is not None and len(local_idx) > 0:
                     prov_rows = range(length) if quota == length else local_idx.tolist()
-                    entry.setdefault("provenance", []).extend((batch_index, int(r)) for r in prov_rows)
+                    entry.setdefault("provenance", []).extend((source_index, int(r)) for r in prov_rows)
             return
 
         # Dynamic / streaming reservoir: routed MoE experts or cache-less runs
@@ -1327,11 +1332,14 @@ class AWQProcessor(LoopProcessor):
                 all_prov = current_prov + candidate_prov
                 total_cand = combined.shape[0]
                 M = min(total_cand, budget_cap)
-                indices = (
-                    torch.arange(M, dtype=torch.int64)
-                    * (total_cand - 1)
-                    // (M - 1)
-                )
+                if M <= 1:
+                    indices = torch.zeros(1, dtype=torch.int64)
+                else:
+                    indices = (
+                        torch.arange(M, dtype=torch.int64)
+                        * (total_cand - 1)
+                        // (M - 1)
+                    )
                 sampled_tensor = combined.index_select(0, indices).unsqueeze(0)
                 entry["inputs"] = [sampled_tensor]
                 entry["provenance"] = [all_prov[int(i)] for i in indices.tolist()]
@@ -1538,6 +1546,19 @@ class AWQProcessor(LoopProcessor):
         layer_inputs = getattr(cache, "layer_inputs", None)
         if not layer_inputs:
             return None
+        # ``_record_input_feature`` asks for this once per captured module per
+        # batch, so recomputing the full batch scan each time is quadratic in
+        # the calibration batch count. The layer's input list is replaced as a
+        # whole when the looper advances, so memoize on its identity and keep a
+        # strong reference to rule out ``id`` reuse.
+        memo = getattr(self, "_token_row_lengths_cache", None)
+        if memo is None:
+            memo = {}
+            self._token_row_lengths_cache = memo
+        memo_key = id(layer_inputs)
+        cached = memo.get(memo_key)
+        if cached is not None and cached[0] is layer_inputs:
+            return cached[1]
         masks = getattr(cache, "attention_masks", None) or []
         exclude_sinks = bool(
             getattr(getattr(self, "calibration", None), "exclude_attention_sinks", False)
@@ -1578,6 +1599,9 @@ class AWQProcessor(LoopProcessor):
                 lengths.append(raw_len)
             else:
                 lengths.append(0)
+        with self.lock:
+            memo.clear()
+            memo[memo_key] = (layer_inputs, lengths)
         return lengths
 
     def _token_row_plan_for_module(
@@ -1741,6 +1765,37 @@ class AWQProcessor(LoopProcessor):
                 )
 
         return quotas, local_indices
+
+    @staticmethod
+    def _reorder_token_row_capture(entry: Dict[str, Any], order: List[int]) -> None:
+        """Follow the capture permutation for token-row provenance metadata.
+
+        ``entry["inputs"]`` is replayed in calibration-batch order, but captures
+        can complete out of order. ``batch_row_counts`` and ``provenance`` are
+        recorded in arrival order, so both must be permuted with the tensors;
+        otherwise the rebuilt mask and position ids describe a different batch
+        than the rows they accompany.
+        """
+
+        counts = entry.get("batch_row_counts")
+        provenance = entry.get("provenance")
+        if not counts and not provenance:
+            return
+        if counts and len(counts) == len(order):
+            entry["batch_row_counts"] = [counts[index] for index in order]
+        if provenance:
+            # Provenance rows are stored in capture order, which is the row
+            # order of the unreordered ``inputs`` list. Re-emit whole source
+            # groups in the new tensor order and renumber each group's source
+            # slot so packed rows and rebuilt kwargs stay aligned.
+            grouped: Dict[int, List[int]] = {}
+            for source, row in provenance:
+                grouped.setdefault(int(source), []).append(int(row))
+            entry["provenance"] = [
+                (new_source, row)
+                for new_source, old_source in enumerate(order)
+                for row in grouped.get(int(old_source), [])
+            ]
 
     @staticmethod
     def _pack_token_rows(
@@ -2690,12 +2745,10 @@ class AWQProcessor(LoopProcessor):
                 len(batch_indices) == len(tensors)
                 and all(index is not None and index >= 0 for index in batch_indices)
             ):
-                ordered = sorted(
-                    zip(batch_indices, tensors),
-                    key=lambda item: int(item[0]),
-                )
-                batch_indices = [item[0] for item in ordered]
-                tensors = [item[1] for item in ordered]
+                order = sorted(range(len(tensors)), key=lambda index: int(batch_indices[index]))
+                batch_indices = [batch_indices[index] for index in order]
+                tensors = [tensors[index] for index in order]
+                self._reorder_token_row_capture(entry, order)
 
             policy = self._feature_aggregation_policy(name)
             aggregation_mode = (policy or {}).get("mode")
@@ -2883,6 +2936,8 @@ class AWQProcessor(LoopProcessor):
                 self._capture_sampled_cache.clear()
             if hasattr(self, "_token_row_plans"):
                 self._token_row_plans.clear()
+            if hasattr(self, "_token_row_lengths_cache"):
+                self._token_row_lengths_cache.clear()
             self._capture_host_batch = None
 
         if hasattr(self._scale_context, "layer_index"):

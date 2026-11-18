@@ -234,3 +234,122 @@ def test_paro_bounded_capture_and_layer_aggregation():
     features = processor._layer_input_features(state)
     # Output must be downsampled to exactly target_rows (24)
     assert features[module_name].shape[-2] == 24
+
+
+def test_awq_token_rows_out_of_order_capture_keeps_provenance_aligned():
+    """Out-of-order captures must replay rows with their own batch's positions.
+
+    Capture hooks can run in device/runtime order rather than calibration-batch
+    order. ``_layer_input_features`` reorders the per-batch tensors by batch
+    index, so the recorded provenance and per-batch row counts must follow the
+    same permutation. Otherwise the rebuilt position ids (and block-diagonal
+    mask) describe a different calibration batch than the rows they accompany.
+    """
+
+    lengths = [4, 6]
+    hidden = 8
+    cache = _create_mock_cache(lengths, hidden=hidden)
+
+    processor = _create_awq_processor(cache, policy_mode="token_rows", max_tokens=10)
+    module_name = "self_attn.q_proj"
+
+    batch0 = torch.arange(lengths[0] * hidden, dtype=torch.float32).reshape(1, lengths[0], hidden)
+    batch1 = (
+        torch.arange(lengths[1] * hidden, dtype=torch.float32).reshape(1, lengths[1], hidden)
+        + 1000.0
+    )
+
+    # Batch 1 arrives before batch 0.
+    processor._set_current_batch_index(1)
+    processor._record_input_feature(module_name, batch1)
+    processor._set_current_batch_index(0)
+    processor._record_input_feature(module_name, batch0)
+
+    state = _AWQLayerState(modules={module_name: nn.Linear(hidden, hidden)})
+    features = processor._layer_input_features(state)
+    replayed = features[module_name]
+
+    # Rows are concatenated in calibration-batch order: batch 0 (4) then batch 1 (6).
+    assert replayed.shape == (1, 10, hidden)
+    assert torch.equal(replayed[0, : lengths[0]], batch0[0])
+    assert torch.equal(replayed[0, lengths[0] :], batch1[0])
+
+    position_ids = processor._awq_feature_kwargs[module_name]["position_ids"]
+    assert position_ids.tolist() == [[0, 1, 2, 3, 0, 1, 2, 3, 4, 5]]
+
+
+def test_awq_token_rows_streaming_reservoir_single_row_budget():
+    """A one-row sampling budget must not divide by ``M - 1`` in the reservoir."""
+
+    hidden = 8
+    cache = SimpleNamespace()
+    cache.layer_inputs = None
+    cache.attention_masks = []
+    cache.position_ids = []
+    cache.layer_input_kwargs = []
+
+    processor = _create_awq_processor(cache, policy_mode="token_rows", max_tokens=1)
+    module_name = "mlp.experts.0.gate_proj"
+
+    for b in range(4):
+        processor._set_current_batch_index(b)
+        processor._record_input_feature(module_name, torch.randn(1, 3, hidden))
+
+    entry = processor.tasks[module_name]
+    assert sum(t.shape[-2] for t in entry["inputs"]) == 1
+
+    state = _AWQLayerState(modules={module_name: nn.Linear(hidden, hidden)})
+    features = processor._layer_input_features(state)
+    assert features[module_name].shape == (1, 1, hidden)
+
+
+def test_awq_token_row_lengths_memo_tracks_layer_inputs_identity():
+    """Cached batch lengths must refresh when the looper installs new layer inputs."""
+
+    cache = _create_mock_cache([4, 6], hidden=8)
+    processor = _create_awq_processor(cache, policy_mode="token_rows", max_tokens=10)
+
+    first = processor._extract_cache_batch_lengths()
+    assert first == [4, 6]
+    assert processor._extract_cache_batch_lengths() is first
+
+    next_cache = _create_mock_cache([3], hidden=8)
+    cache.layer_inputs = next_cache.layer_inputs
+    cache.attention_masks = next_cache.attention_masks
+    cache.position_ids = next_cache.position_ids
+
+    assert processor._extract_cache_batch_lengths() == [3]
+
+
+def test_awq_token_rows_out_of_order_sampled_rows_keep_provenance_aligned():
+    """Sampled (quota < length) out-of-order captures keep rows and positions paired."""
+
+    lengths = [4, 6]
+    hidden = 8
+    cache = _create_mock_cache(lengths, hidden=hidden)
+
+    processor = _create_awq_processor(cache, policy_mode="token_rows", max_tokens=6)
+    module_name = "self_attn.q_proj"
+
+    batch0 = torch.arange(lengths[0] * hidden, dtype=torch.float32).reshape(1, lengths[0], hidden)
+    batch1 = (
+        torch.arange(lengths[1] * hidden, dtype=torch.float32).reshape(1, lengths[1], hidden)
+        + 1000.0
+    )
+
+    # Batch 1 arrives before batch 0; each batch keeps an evenly sampled 3 rows.
+    processor._set_current_batch_index(1)
+    processor._record_input_feature(module_name, batch1)
+    processor._set_current_batch_index(0)
+    processor._record_input_feature(module_name, batch0)
+
+    state = _AWQLayerState(modules={module_name: nn.Linear(hidden, hidden)})
+    features = processor._layer_input_features(state)
+    replayed = features[module_name]
+
+    # Batch 0 keeps rows [0, 1, 3]; batch 1 keeps rows [0, 2, 5].
+    expected_rows = [0, 8, 24, 1000, 1016, 1040]
+    assert [int(value) for value in replayed[0, :, 0].tolist()] == expected_rows
+
+    position_ids = processor._awq_feature_kwargs[module_name]["position_ids"]
+    assert position_ids.tolist() == [[0, 1, 3, 0, 2, 5]]
