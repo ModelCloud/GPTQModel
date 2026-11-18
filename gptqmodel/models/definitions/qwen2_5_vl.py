@@ -62,7 +62,9 @@ class Qwen2_5_VLQModel(BaseQwen2VLGPTQ):
             super().pre_quantize_generate_hook_end()
 
     def prepare_dataset(self, calibration_dataset, batch_size=1, **kwargs):
-        if self._is_text_model(self.model):
+        # A wrapper built without its model (calibration contract tests) is
+        # the composite VLM; only a loaded headless text model skips the processor.
+        if self._is_text_model(getattr(self, "model", None)):
             return BaseQModel.prepare_dataset(self, calibration_dataset, batch_size=batch_size, **kwargs)
         return super().prepare_dataset(calibration_dataset, batch_size=batch_size, **kwargs)
 

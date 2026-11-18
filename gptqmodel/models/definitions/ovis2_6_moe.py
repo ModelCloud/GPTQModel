@@ -10,6 +10,7 @@ from ...utils.torch import as_torch_device
 from ..base import BaseQModel
 from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .ovis2_5 import Ovis2_5QModel
 
 
@@ -98,10 +99,17 @@ class Ovis2_6_MoeQModel(Ovis2_5QModel):
         return BaseQModel.awq_get_modules_for_scaling(self, module, input_feat, module_kwargs)
 
     def prepare_dataset(self, calibration_dataset, batch_size=1, **kwargs):
-        samples = list(calibration_dataset)
-        if samples and all(isinstance(sample, dict) and "input_ids" in sample for sample in samples):
-            return samples
-        return super().prepare_dataset(samples, batch_size=batch_size, **kwargs)
+        # Rows the Ovis2.6 processor already built (token ids plus
+        # pixel_values/grid_thws) are ready batches; everything else keeps the
+        # shared VLM contract.
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=lambda rows: self._prepare_calibration_batches(rows, batch_size),
+            accept_processor_rows=True,
+        )
 
     @staticmethod
     def _sanitize_input_ids_for_embeddings(input_ids, **kwargs):
