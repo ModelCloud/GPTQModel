@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 
 from gptqmodel.models.definitions.phi4 import Phi4MMGPTQ
@@ -16,7 +17,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.phi4.configuration_phi4 import Phi4MMConfig
 from gptqmodel.models.ports.phi4.modeling_phi4 import Phi4MMForCausalLM
-from tests.test_phi4_local_port import _config
+from tests.test_phi4_local_port import _config, _model
 
 
 PROJECTIONS = ("self_attn.qkv_proj", "self_attn.o_proj", "mlp.gate_up_proj", "mlp.down_proj")
@@ -71,7 +72,30 @@ def test_real_legacy_decoder_plan_and_excluded_adapters(kv, device):
             assert plan.find(name + ".undeclared") is None
             if name in declared:
                 assert isinstance(layer.get_submodule(name), nn.Linear)
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {"input_mode": 3}) == []
+
+
+@pytest.mark.parametrize("mode", [0, 1, 2, 3])
+def test_awq_norm_folds_compensate_modality_loras(mode):
+    # `_model` gives every lora_B a nonzero weight, so vision/speech modes
+    # really add the adapter branch that reads the folded norm output.
+    model = _model()
+    _convert_model_with_defuser(Phi4MMGPTQ, model, cleanup_original=False)
+    ids = torch.randint(3, 50, (1, 8), generator=torch.Generator().manual_seed(5))
+
+    def forward():
+        return model(input_ids=ids, input_mode=mode).logits
+
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(Phi4MMGPTQ, model, layer, forward)
+        # Each norm folds into the base projection and both input-side adapters
+        # of that projection; the previous projection's adapters are not
+        # consumers. Fused qkv/gate_up outputs cannot feed o_proj/down_proj.
+        assert checked == [
+            ("input_layernorm", ["self_attn.qkv_proj.base_layer"],
+             ["self_attn.qkv_proj.lora_A.vision", "self_attn.qkv_proj.lora_A.speech"]),
+            ("post_attention_layernorm", ["mlp.gate_up_proj.base_layer"],
+             ["mlp.gate_up_proj.lora_A.vision", "mlp.gate_up_proj.lora_A.speech"]),
+        ]
 
 
 # sha256 of the sorted (name, shape) inventory of all three microsoft/Phi-4-multimodal-instruct

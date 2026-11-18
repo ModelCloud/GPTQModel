@@ -543,8 +543,11 @@ def test_media_generation_cache_and_two_safetensors_cycles(tmp_path, mode, dtype
 
 @pytest.mark.parametrize("offload", [False, True])
 @pytest.mark.parametrize("mode", [1, 2, 3])
-def test_public_plain_awq_pack_infer_two_reloads_preserve_loras_and_media(tmp_path, offload, mode):
+def test_public_awq_scale_search_pack_infer_two_reloads_preserve_loras_and_media(
+    tmp_path, offload, mode, monkeypatch
+):
     from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel.looper import awq_processor
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
 
@@ -631,6 +634,14 @@ def test_public_plain_awq_pack_infer_two_reloads_preserve_loras_and_media(tmp_pa
     with torch.inference_mode():
         source(**inputs, logits_to_keep=1)
     handle.remove()
+    applied = []
+    original_apply_scale = awq_processor.apply_scale
+
+    def record_apply_scale(module, scales_list, *args, **kwargs):
+        applied.extend((source, tuple(targets)) for source, targets, _scales, _loss in scales_list)
+        return original_apply_scale(module, scales_list, *args, **kwargs)
+
+    monkeypatch.setattr(awq_processor, "apply_scale", record_apply_scale)
     handle = model.model.model.layers[0].register_forward_pre_hook(record(captured), with_kwargs=True)
     model.quantize(
         CalibrationConfig(dataset=[dict(inputs), dict(inputs)], batch_size=1, min_length=1),
@@ -644,8 +655,30 @@ def test_public_plain_awq_pack_infer_two_reloads_preserve_loras_and_media(tmp_pa
     model.pre_quantize_generate_hook_start()
     model.shell_module_materialize(model.model.model.norm, "cpu")
     model.shell_module_materialize(model.model.lm_head, "cpu")
+    # Both decoder layers searched and folded the two norm groups.
+    assert applied == 2 * [
+        ("input_layernorm", ("self_attn.qkv_proj.base_layer",)),
+        ("post_attention_layernorm", ("mlp.gate_up_proj.base_layer",)),
+    ]
+    # A norm fold divides the norm gain and multiplies the input columns of the
+    # adapters that read it; their product is what the forward uses. Every
+    # other dense tensor (output-side adapters, media towers) is untouched.
+    folded = {}
+    for i in range(2):
+        for norm, projection in (("input_layernorm", "self_attn.qkv_proj"),
+                                 ("post_attention_layernorm", "mlp.gate_up_proj")):
+            norm_name = f"model.layers.{i}.{norm}.weight"
+            folded[norm_name] = norm_name
+            for adapter in ("vision", "speech"):
+                folded[f"model.layers.{i}.{projection}.lora_A.{adapter}.weight"] = norm_name
+    state = model.model.state_dict()
     for name, value in dense.items():
-        torch.testing.assert_close(model.model.state_dict()[name], value, atol=0, rtol=0, msg=name)
+        if name not in folded:
+            torch.testing.assert_close(state[name], value, atol=0, rtol=0, msg=name)
+        elif name != folded[name]:
+            norm = folded[name]
+            torch.testing.assert_close((state[name] * state[norm]).float(), (value * dense[norm]).float(),
+                                       atol=1e-3, rtol=1e-2, msg=name)
     with torch.inference_mode():
         logits = model.model(**inputs, logits_to_keep=1).logits
         generated = model.model.generate(**inputs, max_new_tokens=2)
