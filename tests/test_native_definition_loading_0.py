@@ -82,6 +82,10 @@ CASES = {
     "zamba": (lambda: _fixture_config("zamba"), "AutoModelForCausalLM"),
 }
 
+# Defuser's own runtime patch breaks the forward of the *native* class here
+# (DbrxExperts with ffn_hidden_size != hidden_size); only the layout is compared.
+DEFUSED_FORWARD_BROKEN_UPSTREAM = {"dbrx"}
+
 PROCESSOR_MODEL_TYPES = {"gemma3", "hunyuan_vl", "lfm2_vl", "smolvlm"}
 
 
@@ -138,13 +142,17 @@ def test_definition_loader_builds_vendored_classes(model_type, tmp_path):
     payload = factory()
     config_class = CONFIG_MAPPING[model_type]
     assert config_class.__module__.startswith("gptqmodel.models.ports.native.")
-    config = config_class.from_dict(payload)
-    config._attn_implementation = "eager"
+    # The vendored config class builds the same composite tree through the loader.
+    assert type(loader.from_config(config_class.from_dict(payload))).__module__.startswith(
+        "gptqmodel.models.ports.native."
+    )
 
+    # Save the checkpoint with the native Transformers class so loading runs
+    # Transformers' checkpoint conversion mappings (key renames, expert fusion).
+    native_config = transformers.CONFIG_MAPPING[model_type].from_dict(payload)
+    native_config._attn_implementation = "eager"
     torch.manual_seed(0)
-    built = loader.from_config(config).eval()
-    built.save_pretrained(tmp_path)
-    del built
+    getattr(transformers, native_auto).from_config(native_config).save_pretrained(tmp_path)
 
     loaded_config = loader.load_config(tmp_path)
     # dots3_note's causal-LM shell is the text-only model, which saves its text config.
@@ -170,6 +178,22 @@ def test_definition_loader_builds_vendored_classes(model_type, tmp_path):
         expected = native(input_ids=input_ids).logits
         actual = model(input_ids=input_ids).logits
     assert torch.equal(actual, expected)
+
+    # Defuser selects runtime patches by `transformers.models` class path; the
+    # definition must leave the vendored model in the same defused layout.
+    from gptqmodel.models.loader import _convert_model_with_defuser
+
+    definition = MODEL_MAP[model_type]
+    _convert_model_with_defuser(definition, native, cleanup_original=True)
+    _convert_model_with_defuser(definition, model, cleanup_original=True)
+    assert [(n, type(m).__name__) for n, m in model.named_modules()] == [
+        (n, type(m).__name__) for n, m in native.named_modules()
+    ]
+    assert [(n, p.shape) for n, p in model.named_parameters()] == [(n, p.shape) for n, p in native.named_parameters()]
+    if model_type in DEFUSED_FORWARD_BROKEN_UPSTREAM:
+        return
+    with torch.no_grad():
+        assert torch.equal(model(input_ids=input_ids).logits, native(input_ids=input_ids).logits)
 
 
 @pytest.mark.parametrize("model_type", sorted(PROCESSOR_MODEL_TYPES))
