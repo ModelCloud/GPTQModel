@@ -43,6 +43,16 @@ def tokenizer_asset_dir(architecture):
 
 
 @lru_cache(maxsize=None)
+def expected_tokenizer_module(architecture):
+    if architecture == "InternLM2ForCausalLM":
+        return "gptqmodel.models.ports.internlm2"
+    if architecture in {"LlamaForCausalLM", "Phi3ForCausalLM"}:
+        # Kept on Transformers' LlamaTokenizer: Tokenicer's SentencePiece
+        # normalization identifies that exact class.
+        return "transformers."
+    return "gptqmodel.models.ports.native.qwen2."
+
+
 def source_token_ids(architecture, text):
     """Independent source SentencePiece or Qwen byte-BPE equations."""
     path = tokenizer_asset_dir(architecture)
@@ -133,7 +143,7 @@ def test_pinned_real_tokenizer_source_ids_and_roundtrip(architecture, text, tmp_
     tokenizer = load_hf_tokenizer(str(assets), model_config=config, local_files_only=True)
     expected = source_token_ids(architecture, text)
     assert tokenizer(text)["input_ids"] == expected
-    assert tokenizer.__class__.__module__.startswith("gptqmodel.models.ports.internlm2" if architecture == "InternLM2ForCausalLM" else "transformers.")
+    assert tokenizer.__class__.__module__.startswith(expected_tokenizer_module(architecture))
     metadata = json.loads((assets / "tokenizer_config.json").read_text())
     chat_specials = ("<|user|>", "<|end|>") if architecture == "Phi3ForCausalLM" else ("<|im_start|>", "<|im_end|>")
     for name in ("<img>", "</img>", "<IMG_CONTEXT>", *chat_specials):
@@ -326,7 +336,7 @@ def test_real_tokenizer_public_selected_subfolder_and_root_decoy(architecture, t
     (tmp_path / "tokenizer_config.json").write_text(json.dumps({"tokenizer_class": "ForeignTokenizer"}))
     wrapper = GPTQModel.load(str(tmp_path), subfolder="selected", local_files_only=True, device="cpu", dtype=torch.float32)
     assert wrapper.model.config.llm_config.architectures == [architecture]
-    expected_module = "gptqmodel.models.ports.internlm2" if architecture == "InternLM2ForCausalLM" else "transformers."
+    expected_module = expected_tokenizer_module(architecture)
     assert wrapper.tokenizer.tokenizer.__class__.__module__.startswith(expected_module)
     text = "  spaces\n中文 café 🐍 123"
     assert wrapper.tokenizer(text)["input_ids"] == source_token_ids(architecture, text)
