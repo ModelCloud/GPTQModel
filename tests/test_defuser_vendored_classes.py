@@ -13,6 +13,7 @@ must be back on its vendored class. The oracle may import
 """
 
 import importlib
+import io
 import json
 from pathlib import Path
 
@@ -54,6 +55,59 @@ def _build(family, root):
     config = config_class.from_dict(dict(spec["config"]))
     torch.manual_seed(0)
     return model_class(config).eval()
+
+
+def _pickle_round_trip(model):
+    archive = io.BytesIO()
+    torch.save(model, archive)
+    archive.seek(0)
+    return torch.load(archive, weights_only=False)
+
+
+@pytest.mark.parametrize("family", [*FAMILIES, "glm4v"])
+def test_defused_vendored_model_pickle_round_trip(family):
+    model = _build(family, "gptqmodel.models.ports.native")
+    _convert_model_with_defuser(_Definition, model, cleanup_original=True)
+
+    restored = _pickle_round_trip(model)
+    torch.testing.assert_close(restored.state_dict(), model.state_dict(), rtol=0, atol=0)
+    for name, module in model.named_modules():
+        other = restored.get_submodule(name)
+        if getattr(type(module), "_compact_expert_repr_installed", False):
+            assert len(other) == len(module)
+            assert other[0] is other._modules["0"]
+        if "forward" in vars(module):
+            assert other.forward.__func__ is module.forward.__func__
+
+    if family == "glm4v":
+        mlp, restored_mlp = model.model.language_model.layers[0].mlp, restored.model.language_model.layers[0].mlp
+        hidden = torch.ones(2, 3, model.config.text_config.hidden_size)
+        with torch.no_grad():
+            torch.testing.assert_close(restored_mlp(hidden), mlp(hidden), rtol=0, atol=0)
+        return
+    if family in FORWARD_UNAVAILABLE:
+        return
+    vocab = model.config.get_text_config().vocab_size
+    ids = torch.randint(1, min(vocab, 64), (2, 7), generator=torch.Generator().manual_seed(0))
+    with torch.no_grad():
+        torch.testing.assert_close(restored(input_ids=ids).logits, model(input_ids=ids).logits, rtol=0, atol=0)
+
+
+def test_defused_qwen3_omni_pickle_round_trip_preserves_text_runtime():
+    from gptqmodel.models.ports.native.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeConfig
+    from gptqmodel.models.ports.native.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+        Qwen3OmniMoeForConditionalGeneration,
+    )
+
+    thinker = _build("qwen3_omni_moe", "gptqmodel.models.ports.native")
+    config = Qwen3OmniMoeConfig(thinker_config=thinker.config, enable_audio_output=False)
+    model = Qwen3OmniMoeForConditionalGeneration(config).eval()
+    assert _convert_model_with_defuser(_Definition, model, cleanup_original=True)
+    restored = _pickle_round_trip(model)
+    ids = torch.tensor([[2, 3, 4]])
+    with torch.no_grad():
+        torch.testing.assert_close(restored(input_ids=ids).logits, model(input_ids=ids).logits, rtol=0, atol=0)
+        assert torch.equal(restored.generate(input_ids=ids, max_new_tokens=1), model.generate(input_ids=ids, max_new_tokens=1))
 
 
 @pytest.mark.parametrize("family", FAMILIES)

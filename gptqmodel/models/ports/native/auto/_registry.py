@@ -2728,6 +2728,10 @@ PROCESSOR = {
         "gptqmodel.models.ports.native.glmasr.processing_glmasr",
         "GlmAsrProcessor"
     ],
+    "glm_ocr": [
+        "gptqmodel.models.ports.native.glm46v.processing_glm46v",
+        "Glm46VProcessor"
+    ],
     "got_ocr2": [
         "gptqmodel.models.ports.native.got_ocr2.processing_got_ocr2",
         "GotOcr2Processor"
@@ -3292,6 +3296,10 @@ IMAGE_PROCESSOR = {
         "gptqmodel.models.ports.native.glm5_next.image_processing_glm5_next",
         "Glm5NextImageProcessor"
     ],
+    "glm_ocr": [
+        "gptqmodel.models.ports.native.glm46v.image_processing_glm46v",
+        "Glm46VImageProcessor"
+    ],
     "got_ocr2": [
         "gptqmodel.models.ports.native.got_ocr2.image_processing_got_ocr2",
         "GotOcr2ImageProcessor"
@@ -3457,6 +3465,10 @@ VIDEO_PROCESSOR = {
     "glm5_next": [
         "gptqmodel.models.ports.native.glm5_next.video_processing_glm5_next",
         "Glm5NextVideoProcessor"
+    ],
+    "glm_ocr": [
+        "gptqmodel.models.ports.native.glm46v.video_processing_glm46v",
+        "Glm46VVideoProcessor"
     ],
     "internvl": [
         "gptqmodel.models.ports.native.internvl.video_processing_internvl",

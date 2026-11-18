@@ -300,6 +300,25 @@ meta construction, native multimodal mappings and subfolder selection.
 They establish dispatch and security behavior, not numerical qualification of
 the separate model ports.
 
+GLM-OCR and composite Qwen2.5-VL declare `NativeProcessor` in their
+`LocalModelLoader`. GLM-OCR uses the vendored GLM-4.6V processor, image
+processor and video processor. Qwen2.5-VL uses its vendored processor and
+continues to skip processor construction for text-only loads.
+
+| Boundary | Before | After |
+| --- | --- | --- |
+| GLM-OCR and composite Qwen2.5-VL | `BaseQModel` delegated processor selection to Transformers `AutoProcessor` | The definition selects the vendored processor resolver |
+| Processor components | Transformers resolves processor classes | `NativeProcessor` loads package-owned media components and uses the tokenizer already chosen by GPT-QModel |
+
+```mermaid
+flowchart TD
+    A["Initialize GLM-OCR or Qwen2.5-VL wrapper"] --> B{"Processor required by the definition?"}
+    B -- no --> C["Finish text-only setup"]
+    B -- yes --> D["LocalModelLoader.load_processor"]
+    D --> E["NativeProcessor resolves classes in the package registry"]
+    E --> F["Read processor assets and reuse loaded tokenizer"]
+```
+
 Automatic processor initialization preserves the model/tokenizer asset selection,
 including `subfolder`, `revision`, cache and authentication options. Both package
 and native processors receive `get_config_selection_kwargs`; checkpoint code

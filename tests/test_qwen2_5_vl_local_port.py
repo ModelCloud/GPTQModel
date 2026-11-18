@@ -244,6 +244,10 @@ def test_public_hostile_auto_map_ignores_remote_code(tmp_path, monkeypatch, bypa
             tokenizer=PreTrainedTokenizerFast.from_pretrained(tmp_path),
             video_processor=Qwen2VLVideoProcessor(patch_size=2, temporal_patch_size=2, merge_size=2),
         ).save_pretrained(tmp_path)
+        processor_path = tmp_path / "processor_config.json"
+        processor_data = json.loads(processor_path.read_text())
+        processor_data["auto_map"] = {"AutoProcessor": "evil.Evil"}
+        processor_path.write_text(json.dumps(processor_data))
     marker = tmp_path / "EXECUTED"
     (tmp_path / "evil.py").write_text(
         f"from pathlib import Path\nPath({str(marker)!r}).touch()\nraise RuntimeError('evil')\n"
@@ -264,6 +268,10 @@ def test_public_hostile_auto_map_ignores_remote_code(tmp_path, monkeypatch, bypa
     assert loaded.trust_remote_code is False
     assert type(loaded.model) is (Qwen2_5_VLTextModel if text_only else Qwen2_5_VLForConditionalGeneration)
     assert loaded.require_load_processor is (not text_only)
+    if not text_only:
+        from gptqmodel.models.ports.native.qwen2_5_vl.processing_qwen2_5_vl import Qwen2_5_VLProcessor as PortProcessor
+
+        assert type(loaded.processor) is PortProcessor
     ids = torch.tensor([[1, 4, 7, 5]])
     with torch.inference_mode():
         if text_only:

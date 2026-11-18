@@ -16,9 +16,10 @@ import shutil
 import threading
 import time
 import weakref
-from functools import partial, wraps
+from functools import lru_cache, partial, wraps
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
+from types import MethodType
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 
 import torch
@@ -196,7 +197,7 @@ def _runtime_checkpoint_names(model) -> frozenset[str]:
 
 
 def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
-    """Return the key converter the quantized loader should apply.
+    r"""Return the key converter the quantized loader should apply.
 
     A definition may declare an explicit ``checkpoint_key_for_load`` /
     ``checkpoint_key_for_save``. Every other family falls back to its
@@ -1211,6 +1212,74 @@ def _defuser_module_path(module_class) -> Optional[str]:
     return _DEFUSER_CLASS_PREFIX + module_path[len(_VENDORED_CLASS_PREFIX):]
 
 
+def _new_defuser_alias(original):
+    alias = type(original.__name__, (original,), {
+        "__module__": _defuser_module_path(original),
+        "__qualname__": original.__qualname__,
+    })
+    # GradientCheckpointingLayer wraps forward on every subclass. Inherit the
+    # vendored forward until Defuser decides whether to replace it.
+    if "forward" in vars(alias):
+        delattr(alias, "forward")
+    return alias
+
+
+def _defuser_bound_forwards(module, state):
+    return {
+        name: method.__func__
+        for name in ("forward", "_old_forward")
+        if isinstance(method := state.get(name), MethodType)
+        and method.__self__ is module
+        and method.__func__.__module__.startswith("defuser.")
+    }
+
+
+def _reduce_defused_module(module, protocol):
+    alias = type(module)
+    original = alias.__bases__[0]
+    state = module.__getstate__().copy()
+    forwards = _defuser_bound_forwards(module, state)
+    for name in forwards:
+        del state[name]
+    # Pickle resolves a bound method by attribute name on its owner. Defuser
+    # binds its functions as "forward", so persist the importable functions
+    # and bind them again after the module's state has been loaded.
+    compact_experts = "_compact_expert_repr_installed" in vars(alias)
+    omni = getattr(getattr(alias, "generate", None), "_defuser_qwen3_omni_text_runtime", False)
+    return _new_defused_module, (original, compact_experts, omni), (state, forwards)
+
+
+def _new_defused_module(original, compact_experts, omni):
+    return object.__new__(_restored_defuser_alias(original, compact_experts, omni))
+
+
+@lru_cache(maxsize=128)
+def _restored_defuser_alias(original, compact_experts, omni):
+    # Rebuild the private subclass in a fresh process without inserting it
+    # into a vendored or Transformers module under a synthetic global name.
+    alias = _new_defuser_alias(original)
+    module = object.__new__(alias)
+    if compact_experts:
+        from defuser.modeling.moe_experts_interface import _install_compact_expert_repr
+
+        _install_compact_expert_repr(module)
+    if omni:
+        from defuser.modeling.model_patches import patch_qwen3_omni_text_runtime
+
+        patch_qwen3_omni_text_runtime(module)
+    alias.__module__ = original.__module__
+    alias.__reduce_ex__ = _reduce_defused_module
+    alias.__setstate__ = _set_defused_module_state
+    return alias
+
+
+def _set_defused_module_state(module, state_and_forwards):
+    state, forwards = state_and_forwards
+    type(module).__bases__[0].__setstate__(module, state)
+    for name, forward in forwards.items():
+        setattr(module, name, MethodType(forward, module))
+
+
 class _DefuserClassPathAliases:
     """Present vendored module classes to Defuser under their Transformers class path.
 
@@ -1218,11 +1287,8 @@ class _DefuserClassPathAliases:
     difference is ``__module__`` (``transformers.models.<family>.<module>``),
     so every Defuser lookup by class path or class name matches exactly as it
     does for the Transformers class. On exit an instance whose alias Defuser
-    left untouched gets its vendored class back. When Defuser extended the
-    class itself (for example ``__getitem__``/``__len__`` on split experts, or
-    a wrapped ``generate``), the instance keeps that subclass, renamed back to
-    the vendored module: it then behaves exactly like the extended Transformers
-    class while neither Transformers nor the vendored class is modified.
+    left untouched gets its vendored class back. Instances with Defuser
+    behavior retain a subclass with a pickle reconstruction recipe.
     """
 
     def __init__(self, model):
@@ -1237,15 +1303,7 @@ class _DefuserClassPathAliases:
     def _alias(self, module_class):
         alias = self.aliases.get(module_class)
         if alias is None:
-            namespace = {
-                "__module__": _defuser_module_path(module_class),
-                "__qualname__": module_class.__qualname__,
-            }
-            alias = type(module_class.__name__, (module_class,), namespace)
-            # ``GradientCheckpointingLayer.__init_subclass__`` wraps ``forward``
-            # on every subclass; drop that so the alias inherits the vendored one.
-            if "forward" in vars(alias):
-                delattr(alias, "forward")
+            alias = _new_defuser_alias(module_class)
             self.aliases[module_class] = alias
             self.alias_names[alias] = (module_class, set(vars(alias)))
         return alias
@@ -1253,22 +1311,32 @@ class _DefuserClassPathAliases:
     def __enter__(self):
         for module in self._modules():
             module_class = type(module)
-            if _defuser_module_path(module_class) is None:
+            if (
+                _defuser_module_path(module_class) is None
+                or module_class.__reduce_ex__ is _reduce_defused_module
+            ):
                 continue
             module.__class__ = self._alias(module_class)
         return self
 
     def __exit__(self, *exc):
-        extended = {}
-        for alias, (original, names) in self.alias_names.items():
-            if set(vars(alias)) - names:
-                alias.__module__ = original.__module__
-                extended[alias] = True
+        extended = {
+            alias for alias, (_, names) in self.alias_names.items() if set(vars(alias)) - names
+        }
+        retained = set()
         for module in self._modules():
             alias = type(module)
             entry = self.alias_names.get(alias)
-            if entry is not None and alias not in extended:
+            if entry is None:
+                continue
+            if alias in extended or _defuser_bound_forwards(module, vars(module)):
+                retained.add(alias)
+            else:
                 module.__class__ = entry[0]
+        for alias in retained:
+            alias.__module__ = self.alias_names[alias][0].__module__
+            alias.__reduce_ex__ = _reduce_defused_module
+            alias.__setstate__ = _set_defused_module_state
         return False
 
 
@@ -1314,7 +1382,12 @@ def _apply_vendored_construction_replacements(model) -> None:
     model_type = getattr(getattr(model, "config", None), "model_type", None)
     if not callable(getattr(model, "modules", None)):
         return
-    replaced = {orig for orig, _ in MODEL_CONFIG.get(model_type, {}).get(PATCH.REPLACE_MODULE, ())}
+    # Defuser 0.0.31's replace_fused_blocks consumes pairs of dotted class paths.
+    replaced = set()
+    for original, replacement in MODEL_CONFIG.get(model_type, {}).get(PATCH.REPLACE_MODULE, ()):
+        if not isinstance(original, str) or not isinstance(replacement, str):
+            raise TypeError(f"Defuser replacement entries for {model_type!r} must be pairs of dotted class paths.")
+        replaced.add(original)
     if not replaced:
         return
     for module in list(model.modules()):

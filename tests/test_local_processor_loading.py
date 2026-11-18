@@ -22,6 +22,47 @@ from gptqmodel.models.ports.internlm.modeling_internlm import InternLMForCausalL
 from gptqmodel.utils.security import BYPASS_ENV
 
 
+def test_glm_ocr_uses_vendored_glm46v_processor(tmp_path, monkeypatch):
+    pytest.importorskip("torchvision")
+    import transformers
+    from PIL import Image
+
+    from gptqmodel.models.ports.native.glm46v.processing_glm46v import Glm46VProcessor
+    from tests.test_defuser_vendored_classes import _build
+
+    _build("glm_ocr", "gptqmodel.models.ports.native").save_pretrained(tmp_path)
+    assets = {"<pad>": 0, "hello": 1, "<|video|>": 2, "<|image|>": 7}
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(WordLevel(assets, unk_token="<pad>")),
+        pad_token="<pad>", unk_token="<pad>",
+        additional_special_tokens=["<|image|>", "<|video|>"],
+    )
+    transformers.Glm46VProcessor(
+        image_processor=transformers.Glm46VImageProcessor(),
+        video_processor=transformers.Glm46VVideoProcessor(),
+        tokenizer=tokenizer,
+    ).save_pretrained(tmp_path)
+    processor_path = tmp_path / "processor_config.json"
+    payload = json.loads(processor_path.read_text())
+    payload["auto_map"] = {"AutoProcessor": "checkpoint_processor.Unregistered"}
+    processor_path.write_text(json.dumps(payload))
+    monkeypatch.setenv(BYPASS_ENV, "1")
+
+    loaded = GPTQModel.load(
+        str(tmp_path), device="cpu", dtype=torch.float32, trust_remote_code=True,
+        attn_implementation="eager",
+    )
+    assert type(loaded.processor) is Glm46VProcessor
+    assert loaded.processor.tokenizer is loaded.tokenizer.tokenizer
+    batch = loaded.processor(
+        text="<|image|>", images=Image.new("RGB", (112, 112)),
+        return_tensors="pt",
+    )
+    assert batch["pixel_values"].numel()
+    assert (batch["mm_token_type_ids"] == 1).sum() > 0
+    assert torch.equal(batch["mm_token_type_ids"] == 1, batch["input_ids"] == 7)
+
+
 @pytest.mark.parametrize("field", ["config_class", "model_class", "processor_class"])
 def test_local_processor_metadata_rejects_external_classes(field):
     paths = {

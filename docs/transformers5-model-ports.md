@@ -57,6 +57,30 @@ repository's Apache-2.0 `LICENSE`.
 Text-only loading never imports these backends. Using a component without its
 backend raises `ImportError` naming the extra.
 
+## Defuser-converted models in Python
+
+Defuser identifies vendored classes by their original Transformers class paths
+during conversion. GPT-QModel presents those paths on private subclasses.
+Unmodified modules return to their vendored class after conversion. Modules
+with Defuser behavior keep a private subclass and its serialization recipe.
+
+| Boundary | Before | After |
+| --- | --- | --- |
+| Serialize a retained subclass | Pickle tried to look up the generated subclass as a global vendored class | The recipe records the original vendored class and the Defuser runtime behavior |
+| Restore bound forwards | Pickle resolved methods by a name the module did not expose | Importable Defuser functions are rebound after restoring module state |
+
+```mermaid
+flowchart TD
+    A["Defuser finishes conversion on a private subclass"] --> B{"Defuser behavior added?"}
+    B -- no --> C["Restore vendored class"]
+    B -- yes --> D["Keep subclass and attach serialization recipe"]
+    D --> E["Serialize vendored class, module state and Defuser functions"]
+    E --> F["Rebuild subclass and rebind forwards on reload"]
+```
+
+This supports in-memory model interoperability with `torch.save(model)`.
+Published checkpoints continue to use safetensors.
+
 ## Integrated definitions
 
 | Definition / model type | Implementation | Limits |

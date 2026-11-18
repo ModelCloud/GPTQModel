@@ -14,6 +14,7 @@ class Qwen2_5_VLQModel(BaseQwen2VLGPTQ):
     loader = LocalModelLoader(
         config_class="gptqmodel.models.ports.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLConfigLoader",
         model_class="gptqmodel.models.ports.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLModelLoader",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
     )
     fusable = FusableConfig("qwen2_5_vl").merge(LlamaFusableConfig())
 

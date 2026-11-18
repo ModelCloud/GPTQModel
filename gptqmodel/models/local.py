@@ -8,6 +8,8 @@ from importlib import import_module
 
 _OPTIONAL_MODULE_EXTRAS = {
     "torchvision": "vision",
+    "timm": "vision",
+    "einops": "vision",
     "cv2": "video",
     "qwen_vl_utils": "video",
     "soundfile": "audio",

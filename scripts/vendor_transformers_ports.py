@@ -206,6 +206,9 @@ def registry(families):
                 result[model_type] = [home[1], cls_name]
             elif home[1] in vendored:
                 result[model_type] = [f"gptqmodel.models.ports.native.{home[1]}.{home[2]}", cls_name]
+        # zai-org/GLM-OCR declares GLM-4.6V's processor in processor_config.json.
+        if key in {"PROCESSOR", "IMAGE_PROCESSOR", "VIDEO_PROCESSOR"} and "glm_ocr" in vendored and "glm46v" in result:
+            result["glm_ocr"] = result["glm46v"]
         tables[key] = result
     return tables
 

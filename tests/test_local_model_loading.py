@@ -23,6 +23,24 @@ from gptqmodel.utils.hf import (
 from gptqmodel.utils.security import BYPASS_ENV, RemoteCodeSecurityError
 
 
+@pytest.mark.parametrize("dependency", ["einops", "timm"])
+def test_deepseek_vl_v2_optional_dependency_points_to_vision_extra(monkeypatch, dependency):
+    from gptqmodel.models import local
+
+    loader = MODEL_MAP_CASEFOLD["deepseek_vl_v2"].loader
+    module_path = loader.model_class.rpartition(".")[0]
+    original = local.import_module
+
+    def import_without_optional_dep(path):
+        if path == module_path:
+            raise ModuleNotFoundError(name=dependency)
+        return original(path)
+
+    monkeypatch.setattr(local, "import_module", import_without_optional_dep)
+    with pytest.raises(ImportError, match=rf"{dependency}.*gptqmodel\[vision\]"):
+        loader.from_config(SimpleNamespace())
+
+
 @pytest.mark.parametrize("model_type", ["llama", "internlm"])
 def test_disabled_trust_defers_config_errors_and_allows_repair(tmp_path, model_type):
     path = tmp_path / "repair"

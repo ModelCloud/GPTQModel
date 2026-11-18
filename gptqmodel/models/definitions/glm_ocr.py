@@ -12,6 +12,7 @@ class GlmOCRGPTQ(BaseQwen3VLGPTQ):
     loader = LocalModelLoader(
         config_class="gptqmodel.models.ports.native.auto.NativeConfig",
         model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
     )
 
     # GLM-OCR computes multimodal RoPE from `mm_token_type_ids`, so the
