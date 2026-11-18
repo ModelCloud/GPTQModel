@@ -86,7 +86,7 @@ CONTRACT_REFS = (
     ("docs/openai-server-exposure.md", "gptqmodel/utils/openai_server.py",
      "BodySizeLimitMiddleware", None),
     ("docs/quantize-run-summary.md", "gptqmodel/models/base.py",
-     "_quantize_summary_counts", 355),
+     "_quantize_summary_counts", 359),
     ("docs/quantize-run-summary.md", "gptqmodel/models/base.py",
      "_log_quantize_summary", None),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
@@ -105,7 +105,7 @@ CONTRACT_REFS = (
     # `base.py` keeps growing, so the shipped branch is cited by symbol; the
     # removed branch keeps a line citation because it no longer exists to name.
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/models/base.py",
-     "generate", 3902),
+     "generate", 3939),
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/models/base.py",
      "generate", SYMBOL_CITATION),
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/utils/model.py",

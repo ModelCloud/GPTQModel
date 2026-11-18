@@ -47,6 +47,11 @@ take the same object. `quantize()` keeps `tokenizer=`, `backend=`, `adapter=`,
 `embed_quant_config=`, `embed_quant_mode=`, `checkpoint=` and `fuse=` as
 keyword-only arguments: none of them describes calibration data.
 
+* `embed_quant_config=` / `embed_quant_mode=` select endpoint quantization and
+  are only accepted by `requantize()` on a loaded quantized checkpoint. A fresh
+  `quantize()` refuses `INPUT`/`BOTH` and refuses `OUTPUT`/`BOTH` on a tied
+  head before calibration; `OUTPUT` on an untied head still works. See
+  [embed-endpoint-quantize.md](embed-endpoint-quantize.md).
 * `tokenizer=` is not a calibration field. It replaces the model's tokenizer
   (`self.tokenizer`), which tokenizes the calibration text but is also what
   `save()` writes next to the checkpoint and what `generate()` uses.
@@ -120,6 +125,10 @@ to the bound preparer itself, so the minimum length no longer travels through a
   dataset preparation.
 * `adapter_dataset` without a `Lora` adapter raises `ValueError` before any
   layer is quantized (previously the samples were silently ignored).
+* `quantize(embed_quant_mode=QuantizeEmbed.INPUT)` (or `BOTH`) raises
+  `NotImplementedError` before calibration; `quantize(embed_quant_mode=QuantizeEmbed.OUTPUT)`
+  (or `BOTH`) on a tied head raises the tied-head `NotImplementedError`.
+  `requantize()` is unaffected.
 * Norm tuning (`requantize(norm=...)`) and post-quantization EoRA generation
   reject `exclude_attention_sinks` and `adapter_dataset`, which they cannot
   apply.
