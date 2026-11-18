@@ -337,11 +337,12 @@ def test_invalid_scaling_rejected_then_valid_config():
 
 
 @pytest.mark.parametrize("fallback", [None, {}])
-def test_plain_awq_quantizes_and_packs_every_linear(monkeypatch, fallback):
+def test_awq_scale_search_quantizes_and_packs_every_linear(monkeypatch, fallback):
     from types import SimpleNamespace
 
     from torch import nn
 
+    from gptqmodel.looper import awq_processor
     from gptqmodel.looper.awq_processor import AWQProcessor
     from gptqmodel.looper.loop_processor import CalibrationConfig
     from gptqmodel.looper.named_module import NamedModule
@@ -351,7 +352,6 @@ def test_plain_awq_quantizes_and_packs_every_linear(monkeypatch, fallback):
     model = tiny_model(attention_bias=True).half()
     wrapper = InstellaQModel(model=model, quantized=False, quantize_config=None)
     layer = model.model.layers[0]
-    assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     qcfg = AWQConfig(device="cpu", bits=4, group_size=16, fallback=fallback)
     processor = AWQProcessor(
         tokenizer=None, qcfg=qcfg, calibration=CalibrationConfig(),
@@ -375,9 +375,26 @@ def test_plain_awq_quantizes_and_packs_every_linear(monkeypatch, fallback):
     monkeypatch.setattr(processor, "_layer_input_features", lambda _: features)
     norms = {name: tensor.clone() for name, tensor in layer.state_dict().items() if "norm" in name}
     original = {name: named.module.weight.clone() for name, named in state.modules.items()}
+    applied = []
+    original_apply_scale = awq_processor.apply_scale
+
+    def record_apply_scale(module, scales_list, *args, **kwargs):
+        applied.extend((source, tuple(targets)) for source, targets, _scales, _loss in scales_list)
+        return original_apply_scale(module, scales_list, *args, **kwargs)
+
+    monkeypatch.setattr(awq_processor, "apply_scale", record_apply_scale)
     processor._quantize_layer(0, state)
     assert state.quantized
-    assert all(torch.equal(layer.state_dict()[name], weight) for name, weight in norms.items())
+    # GQA leaves v_proj -> o_proj width-ineligible; the other folds are searched.
+    assert applied == [
+        ("pre_attention_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),
+        ("pre_feedforward_layernorm", ("mlp.gate_proj", "mlp.up_proj")),
+        ("mlp.up_proj", ("mlp.down_proj",)),
+    ]
+    # Decoder norms absorb the scales; the full-width Q/K norms read the
+    # unchanged q/k projections and must stay untouched.
+    for name, weight in norms.items():
+        assert torch.equal(layer.state_dict()[name], weight) is ("self_attn." in name), name
     ids = torch.tensor([[2, 4, 8, 6]])
     before_pack = model(ids, use_cache=False).logits
     for name, named in state.modules.items():

@@ -28,8 +28,3 @@ class InternLMQModel(LlamaQModel):
             "mlp": ("gate_proj:0:gate:in=x", "up_proj:0:up:in=x", "down_proj:1:down"),
         },
     ]
-
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # The port is not AWQ-scale-qualified. Keep every declared linear in
-        # ordinary quantization, without inheriting guessed Llama folds.
-        return []

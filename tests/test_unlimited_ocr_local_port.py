@@ -398,11 +398,12 @@ def test_independent_source_decoder_oracle(kv_heads, implementation, bias, layou
 
 @pytest.mark.parametrize("layout", ["dense", "mixed", "sparse"])
 @pytest.mark.parametrize("offload", [False, True])
-def test_public_image_plain_awq_pack_infer_two_reloads(tmp_path, layout, offload):
+def test_public_image_awq_scale_search_pack_infer_two_reloads(tmp_path, monkeypatch, layout, offload):
     from defuser.modeling.update_module import update_module
     from PIL import Image
 
     from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel.looper import awq_processor
     from gptqmodel.looper.loop_processor import CalibrationConfig
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
@@ -414,8 +415,22 @@ def test_public_image_plain_awq_pack_infer_two_reloads(tmp_path, layout, offload
     update_module(source, cleanup_original=False)
     expected_count = {"dense": 14, "mixed": 26, "sparse": 38}[layout]
     projections = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
+    # Scale search folds into the decoder norms and compensates the router;
+    # the vision tower, projector, embeddings and final norm stay exact.
+    folded = ("input_layernorm.weight", "post_attention_layernorm.weight", "mlp.gate.weight")
     dense = {key: value.to(torch.float16).clone() for key, value in source.state_dict().items()
-             if not (key.startswith("model.language_model.layers.") and any(f".{p}." in key for p in projections))}
+             if not (key.startswith("model.language_model.layers.")
+                     and (any(f".{p}." in key for p in projections) or key.endswith(folded)))}
+    layer_index = {id(layer): index for index, layer in enumerate(loaded.model.model.language_model.layers)}
+    applied = {index: {} for index in layer_index.values()}
+    original_apply_scale = awq_processor.apply_scale
+
+    def record_apply_scale(module, scales_list, *args, **kwargs):
+        applied[layer_index[id(module)]].update(
+            (source_name, tuple(names)) for source_name, names, _scales, _loss in scales_list)
+        return original_apply_scale(module, scales_list, *args, **kwargs)
+
+    monkeypatch.setattr(awq_processor, "apply_scale", record_apply_scale)
     image = Image.fromarray(torch.arange(32 * 32 * 3).remainder(256).byte().reshape(32, 32, 3).numpy())
     rows = [loaded.prepare_dataset([{"image": image, "text": "<image>\nFree OCR."}])[0]]
     assert (rows[0]["input_ids"] == 128815).sum() == 7
@@ -439,6 +454,13 @@ def test_public_image_plain_awq_pack_infer_two_reloads(tmp_path, layout, offload
     assert observed
     torch.testing.assert_close(observed[0], captured[0], rtol=0, atol=0)
     assert sum(isinstance(module, AwqTorchLinear) for module in loaded.model.modules()) == expected_count
+    for index, layer_types in enumerate(source.config.text_config.mlp_layer_types):
+        groups = applied[index]
+        assert groups["input_layernorm"] == ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")
+        assert groups["self_attn.v_proj"] == ("self_attn.o_proj",)
+        mlp = "mlp.shared_experts" if layer_types == "sparse" else "mlp"
+        assert {f"{mlp}.gate_proj", f"{mlp}.up_proj"} <= set(groups["post_attention_layernorm"])
+        assert groups[f"{mlp}.up_proj"] == (f"{mlp}.down_proj",)
     for key, value in dense.items():
         torch.testing.assert_close(loaded.model.state_dict()[key], value, rtol=0, atol=0)
     packed = {key: value.detach().clone() for key, value in loaded.model.state_dict().items()}

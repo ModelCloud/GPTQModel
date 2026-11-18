@@ -468,8 +468,9 @@ def test_owned_processor_image_chat_ids_pixels_and_save_reload(tmp_path, aspect)
 
 @pytest.mark.parametrize("tower", ["mobileclip", "clip"])
 @pytest.mark.parametrize("merge", ["flat", "spatial_unpad"])
-def test_public_plain_awq_image_calibration_pack_infer_and_safetensors_reload(tmp_path, tower, merge):
+def test_public_awq_image_calibration_pack_infer_and_safetensors_reload(tmp_path, tower, merge, monkeypatch):
     from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel.looper import awq_processor
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
     size = 128 if tower == "mobileclip" else 16
@@ -485,7 +486,14 @@ def test_public_plain_awq_image_calibration_pack_infer_and_safetensors_reload(tm
                                                  {"type": "text", "text": "4 8 11"}]}]
     batch = wrapper.processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=True,
                                                    return_dict=True)
-    assert wrapper.awq_get_modules_for_scaling(wrapper.model.model.layers[0], {}, {}) == []
+    applied = []
+    original_apply_scale = awq_processor.apply_scale
+
+    def record_apply_scale(module, scales_list, *args, **kwargs):
+        applied.extend((source, tuple(targets)) for source, targets, _scales, _loss in scales_list)
+        return original_apply_scale(module, scales_list, *args, **kwargs)
+
+    monkeypatch.setattr(awq_processor, "apply_scale", record_apply_scale)
     lengths = []
     handle = wrapper.model.model.layers[0].register_forward_pre_hook(
         lambda module, args, kwargs: lengths.append((kwargs["hidden_states"] if "hidden_states" in kwargs else args[0]).shape[1]),
@@ -504,6 +512,13 @@ def test_public_plain_awq_image_calibration_pack_infer_and_safetensors_reload(tm
                       ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
                        "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")}
     assert names == expected_names
+    # Scale search ran on image-expanded calibration for every decoder layer
+    # (the tiny config is GQA, so v_proj -> o_proj is width-ineligible).
+    assert applied == 2 * [
+        ("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),
+        ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj")),
+        ("mlp.up_proj", ("mlp.down_proj",)),
+    ]
     with torch.inference_mode():
         expected = wrapper.model(**batch, use_cache=False).logits
     assert torch.isfinite(expected).all()

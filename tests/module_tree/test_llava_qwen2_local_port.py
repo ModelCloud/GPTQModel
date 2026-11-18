@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 
 from gptqmodel.models.auto import MODEL_MAP
@@ -16,7 +17,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.llava_qwen2.configuration_llava_qwen2 import LlavaConfig
 from gptqmodel.models.ports.llava_qwen2.modeling_llava_qwen2 import LlavaQwen2ForCausalLM
-from tests.test_llava_qwen2_local_port import _config
+from tests.test_llava_qwen2_local_port import _config, _model
 
 
 # Released apple/FastVLM config.json fields that differ between sizes; the rest are shared.
@@ -110,7 +111,6 @@ def test_live_tiny_plan_excludes_vision_projector_norms_and_preserves_all_seven_
     assert wrapper.simple_layer_modules(config, SimpleNamespace(dynamic=None)) == [
         [name for name in group if not name.endswith(":!")] for group in EXPECTED_PLAN["blocks"]
         if not all(name.endswith(":!") for name in group)]
-    assert wrapper.awq_get_modules_for_scaling(model.model.layers[0], {}, {}) == []
     assert wrapper.pre_lm_head_norm_module == "model.norm"
     assert wrapper.rotary_embedding == "model.rotary_emb"
     assert ("model.image_newline" in model.state_dict()) == (merge == "spatial_unpad")
@@ -119,3 +119,22 @@ def test_live_tiny_plan_excludes_vision_projector_norms_and_preserves_all_seven_
 def test_central_registered_plan_is_unchanged():
     fixtures = Path(__file__).parent / "fixtures/registered_module_plans.json"
     assert json.loads(fixtures.read_text())["cases"]["LlavaQwen2QModel/gptq"] == EXPECTED_PLAN
+
+
+# FastVLM ships GQA (v_proj is narrower than o_proj, so that fold is not
+# emitted); equal KV heads additionally qualify the v_proj -> o_proj fold.
+@pytest.mark.parametrize("kv_heads", [2, 4])
+def test_awq_scale_folds_preserve_text_decoder_output(kv_heads):
+    model = _model(num_key_value_heads=kv_heads)
+    ids = torch.tensor([[1, 7, 9, 4, 12, 11, 5, 3]])
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    expected = [("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"])]
+    if kv_heads == 4:
+        expected.append(("self_attn.v_proj", ["self_attn.o_proj"]))
+    expected += [("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"]), ("mlp.up_proj", ["mlp.down_proj"])]
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(LlavaQwen2QModel, model, layer, forward)
+        assert [(source, targets) for source, targets, _ in checked] == expected

@@ -55,8 +55,3 @@ class AfMoeQModel(BaseQModel):
             "post_mlp_layernorm": ("post_mlp_layernorm:!:postnorm",),
         }
     ]
-
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Gated attention and shared/routed MoE consumers are not qualified
-        # together for folding/search. Keep every linear on plain quantization.
-        return []

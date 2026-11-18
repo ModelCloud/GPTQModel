@@ -51,11 +51,6 @@ class Ovis2_5QModel(BaseQModel):
         self.model.processor = self.processor
         self.model.visual_tokenizer.image_processor = self.processor.image_processor
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Decoder projections quantize, but native Q/K normalization and multimodal
-        # replay/fold/search have not been qualified as a complete scale objective.
-        return []
-
     def _sanitize_input_ids_for_embeddings(self, input_ids):
         # These negative values are source-defined multimodal embeddings, not
         # invalid text IDs. The model validates both the values and patch counts.

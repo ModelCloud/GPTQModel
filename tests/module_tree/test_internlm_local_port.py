@@ -6,13 +6,14 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 
 from gptqmodel.models.definitions.internlm import InternLMQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.internlm.modeling_internlm import InternLMForCausalLM
-from tests.test_internlm_local_port import _config
+from tests.test_internlm_local_port import _config, _model
 
 
 @pytest.mark.parametrize("bias", [False, True])
@@ -49,4 +50,21 @@ def test_internlm_real_meta_model_owns_every_declared_decoder_weight(bias):
         for name in declared:
             assert isinstance(layer.get_submodule(name), nn.Linear)
             assert plan.find(name + ".undeclared") is None
-    assert wrapper.awq_get_modules_for_scaling(model.model.layers[0], {}, {}) == []
+
+
+@pytest.mark.parametrize("bias", [False, True])
+def test_internlm_awq_scale_folds_preserve_layer_output(bias):
+    model = _model(bias=bias)
+    ids = torch.tensor([[1, 7, 9, 4, 2, 11, 5, 3]])
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(InternLMQModel, model, layer, forward)
+        assert [(source, targets) for source, targets, _ in checked] == [
+            ("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]),
+            ("self_attn.v_proj", ["self_attn.o_proj"]),
+            ("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"]),
+            ("mlp.up_proj", ["mlp.down_proj"]),
+        ]

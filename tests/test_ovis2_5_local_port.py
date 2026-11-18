@@ -391,8 +391,9 @@ def test_saved_generation_policy_reaches_native_decoder_and_two_reloads(tmp_path
 
 @pytest.mark.parametrize("kv,bias", [(4, False), (2, True), (1, False)])
 @pytest.mark.parametrize("offload", [False, True])
-def test_public_image_awq_capture_all_linears_and_two_exact_roundtrips(tmp_path, kv, bias, offload):
+def test_public_image_awq_capture_all_linears_and_two_exact_roundtrips(tmp_path, kv, bias, offload, monkeypatch):
     from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel.looper import awq_processor
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
 
@@ -421,6 +422,14 @@ def test_public_image_awq_capture_all_linears_and_two_exact_roundtrips(tmp_path,
     def capture(module, args, kwargs):
         captured.append((args[0] if args else kwargs["hidden_states"]).detach().clone())
 
+    applied = []
+    original_apply_scale = awq_processor.apply_scale
+
+    def record_apply_scale(module, scales_list, *args, **kwargs):
+        applied.extend((source, tuple(targets)) for source, targets, _scales, _loss in scales_list)
+        return original_apply_scale(module, scales_list, *args, **kwargs)
+
+    monkeypatch.setattr(awq_processor, "apply_scale", record_apply_scale)
     handle = wrapper.model.llm.model.layers[0].register_forward_pre_hook(capture, with_kwargs=True)
     try:
         wrapper.quantize(
@@ -433,8 +442,22 @@ def test_public_image_awq_capture_all_linears_and_two_exact_roundtrips(tmp_path,
     for actual in captured[:2]:
         torch.testing.assert_close(actual, expected_capture, atol=.002, rtol=.002)
     assert sum(isinstance(m, AwqTorchLinear) for m in wrapper.model.modules()) == 14
+    groups = [
+        ("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),
+        ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj")),
+        ("mlp.up_proj", ("mlp.down_proj",)),
+    ]
+    if kv == 4:
+        groups.insert(1, ("self_attn.v_proj", ("self_attn.o_proj",)))
+    # Every decoder layer searched and folded its scale groups.
+    assert applied == 2 * groups
+    # Folding divides the two decoder norm gains; every other dense tensor
+    # (vision tower, visual vocabulary, embeddings, Q/K norms) is untouched.
+    folded = {f"llm.model.layers.{i}.{norm}.weight" for i in range(2)
+              for norm in ("input_layernorm", "post_attention_layernorm")}
     for key, value in dense.items():
-        assert torch.equal(wrapper.model.state_dict()[key], value), key
+        if key not in folded:
+            assert torch.equal(wrapper.model.state_dict()[key], value), key
     inputs = _inputs(dtype=torch.float16, video=True)
     with torch.no_grad():
         expected = wrapper.model(**inputs, use_cache=False).logits

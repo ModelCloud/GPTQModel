@@ -6,6 +6,9 @@
 
 from collections.abc import Mapping
 
+from torch import nn
+
+from ...quantization.awq.utils.module import get_op_name
 from ..base import BaseQModel
 from ..local import LocalModelLoader
 
@@ -56,7 +59,36 @@ class Phi4MMGPTQ(BaseQModel):
     ]
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        return []
+        # Every projection is a `ModalityLinear`: `base_layer(x)` plus, in vision
+        # or speech mode, `lora_B(lora_A(x))`. A norm fold into `base_layer` is
+        # exact only when both `lora_A` adapters, which read the same `x`, are
+        # compensated. The generic run-based consumer scan cannot see them
+        # (they are declared after the base layer) and instead picks the
+        # previous projection's `lora_A`, so replace the consumers. A fold into
+        # a projection output would also have to scale its `lora_B` rows;
+        # keep only norm-sourced groups.
+        nodes = []
+        for node in super().awq_get_modules_for_scaling(module, input_feat, module_kwargs):
+            if isinstance(node.get("prev_op"), nn.Linear):
+                continue
+            consumers = []
+            for target in node["layers"]:
+                name = get_op_name(module, target)
+                owner_name = name.removesuffix(".base_layer")
+                adapters = getattr(module.get_submodule(owner_name), "lora_A", None) if owner_name != name else None
+                if adapters is None:
+                    break
+                consumers.extend(f"{owner_name}.lora_A.{adapter}" for adapter in adapters)
+            else:
+                node["_scale_consumers"] = consumers
+                # The adapters only run in vision/speech mode, and the AWQ
+                # replay of `self_attn`/`mlp` runs outside the decoder layer's
+                # mode context, so they never execute there. Score the base
+                # projection (its quantization error does not depend on the
+                # additive adapter delta) and still fold into the adapters.
+                node["_awq_allow_partial_replay"] = True
+                nodes.append(node)
+        return nodes
 
     def prepare_dataset(self, calibration_dataset, batch_size=1, **kwargs):
         from ._vlm_calibration import finalize_conversation_batches, pop_conversation_calibration_options
