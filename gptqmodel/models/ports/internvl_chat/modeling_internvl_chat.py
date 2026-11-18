@@ -39,6 +39,7 @@ class InternVLChatModel(PreTrainedModel, GenerationMixin):
     config_class = InternVLChatConfig
     main_input_name = "input_ids"
     base_model_prefix = ""
+    supports_gradient_checkpointing = True
     _no_split_modules = ["InternVisionEncoderLayer"]
     _tied_weights_keys = {"language_model.lm_head.weight": "language_model.model.embed_tokens.weight"}
 

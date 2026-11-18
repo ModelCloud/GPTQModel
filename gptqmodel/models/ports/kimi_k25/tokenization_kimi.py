@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Moonshot AI
 # SPDX-License-Identifier: LicenseRef-Kimi-K2.5
-# Adapted from pinned Kimi-K2.5; see README.md and LICENSE.
+# Adapted from pinned Kimi-K2.5; see NOTICE and LICENSE.
 import os
 from collections import OrderedDict
 from hashlib import sha256
@@ -12,9 +12,9 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple, Union, cast
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
 from tokenizers import AddedToken
+from transformers.convert_slow_tokenizer import bytes_to_unicode
 from transformers.tokenization_python import PythonBackend as PreTrainedTokenizer
 
-from .tokenization_utils import bytes_to_unicode
 from .tool_declaration_ts import encode_tools_to_typescript_style
 
 

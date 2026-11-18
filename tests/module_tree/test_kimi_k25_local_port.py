@@ -26,9 +26,7 @@ from tests.test_kimi_k25_local_port import released_state, save_processor, split
 
 
 def test_pinned_checkpoint_inventory_matches_real_released_layout(tmp_path):
-    import gptqmodel.models.ports.kimi_k25 as port
-
-    directory = Path(port.__file__).parent
+    directory = Path(__file__).resolve().parents[1] / "fixtures/kimi_k25"
     fixture = json.loads((directory / "checkpoint_ownership.json").read_text())
     upstream = directory / "upstream_config.json"
     # The Hub source has no terminal newline; the repository text file does.
@@ -63,11 +61,22 @@ def test_pinned_checkpoint_inventory_matches_real_released_layout(tmp_path):
 
 
 def test_explicit_central_registry_case_for_integrator():
-    import gptqmodel.models.ports.kimi_k25 as port
-
-    case = json.loads((Path(port.__file__).parent / "registry_plan.json").read_text())
-    assert KimiK25QModel.extract_layers_node() == case["layers"]
-    assert KimiK25QModel.build_layer_modules(KimiK25QModel.module_tree, include_capture_only=True) == case["blocks"]
+    assert KimiK25QModel.extract_layers_node() == ["model.language_model.layers"]
+    assert KimiK25QModel.build_layer_modules(KimiK25QModel.module_tree, include_capture_only=True) == [
+        ["input_layernorm:!"],
+        ["self_attn.q_a_layernorm:!", "self_attn.kv_a_layernorm:!", "self_attn.q_proj", "self_attn.q_a_proj",
+         "self_attn.kv_a_proj_with_mqa"],
+        ["self_attn.q_b_proj", "self_attn.kv_b_proj"],
+        ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp.gate_proj", "mlp.up_proj"],
+        ["mlp.down_proj"],
+        ["mlp.gate:!"],
+        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        ["mlp.experts.{expert_index}.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
+    ]
     assert KimiK25QModel.fusable is None
 
 

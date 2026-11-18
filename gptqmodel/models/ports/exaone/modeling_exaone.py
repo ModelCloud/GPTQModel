@@ -3,7 +3,7 @@
 # Copyright 2026 The LG AI Research and HuggingFace Inc. team. All rights reserved.
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# Based on the GPT-NeoX and OPT implementations; see PROVENANCE.md and NOTICE.
+# Based on the GPT-NeoX and OPT implementations; see NOTICE.
 """EXAONE 3.0/3.5 decoder with package-owned modeling and Transformers 5 caches."""
 
 import math

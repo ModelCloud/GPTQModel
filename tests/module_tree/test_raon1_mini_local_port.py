@@ -15,21 +15,11 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.raon1_mini.configuration_raon1_mini import Raon1MiniConfig
 from gptqmodel.models.ports.raon1_mini.modeling_raon1_mini import Raon1MiniForCausalLM
-from tests.port_assets import read_port_json
+from tests.port_assets import read_port_asset, read_port_json
 from tests.test_raon1_mini_local_port import _config
 
 
 PORT = Path(__file__).parents[2] / "gptqmodel/models/ports/raon1_mini"
-
-
-def test_reviewed_independent_registry_proposal_pins_rda_mla_and_moe_controls():
-    proposal = json.loads((PORT / "central_fixture_proposals.json").read_text())
-    expected = proposal["registered_module_plans.cases"]["Raon1MiniQModel/gptq"]
-    assert Raon1MiniQModel.extract_layers_node() == expected["layers"]
-    assert (
-        Raon1MiniQModel.build_layer_modules(Raon1MiniQModel.module_tree, include_capture_only=True)
-        == expected["blocks"]
-    )
 
 
 @pytest.mark.parametrize("layout", ["hybrid", "reverse", "rda", "mla"])
@@ -72,7 +62,7 @@ def test_live_raon_module_plan_owns_every_decoder_tensor(layout, settings, devic
 
 
 def test_all_19434_released_tensor_shapes_and_storage_dtypes_match_exact_meta_owners():
-    config = Raon1MiniConfig(**json.loads((PORT / "released_config.json").read_text()))
+    config = Raon1MiniConfig(**json.loads(read_port_asset(PORT / "released_config.json")))
     expected = read_port_json(PORT / "released_tensors.json")
     assert len(expected) == 19434
     with torch.device("meta"):

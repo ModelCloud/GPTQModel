@@ -9,4 +9,6 @@ Scientific tokenizer:
 Copyright 2025 The Intern team and Shanghai AI Lab team.
 
 Adaptations: ModelCloud.ai, 2026.
-Licensed under the Apache License, Version 2.0. See LICENSE and PROVENANCE.md.
+Licensed under the Apache License, Version 2.0 (repository root LICENSE).
+The text decoder, hybrid cache and shared vision layers are imported from
+Hugging Face Transformers (models/qwen3_5_moe), not copied.

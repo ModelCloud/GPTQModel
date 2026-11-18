@@ -1,5 +1,5 @@
 # Adapted for package-owned Transformers 5 loading by ModelCloud.ai, 2026.
-# Pinned upstream and changes: see PROVENANCE.md.
+# Pinned upstream: see NOTICE.
 # Copyright 2025 The Qwen Team and The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

@@ -1,8 +1,9 @@
 EXAONE local modeling for GPT-QModel
 
 Derived and adapted from the Apache-2.0-licensed configuration_exaone.py and
-modeling_exaone.py distributed by LG AI Research. Pinned source snapshots,
-verified source hashes and implementation changes are in PROVENANCE.md.
+modeling_exaone.py distributed by LG AI Research, inspected at
+LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct@7f15baed and
+LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct@ccce25bd.
 
 Copyright 2021 The LG AI Research EXAONE Lab. All rights reserved.
 Copyright (c) 2018, NVIDIA CORPORATION. All rights reserved.

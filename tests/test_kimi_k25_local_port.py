@@ -32,7 +32,6 @@ from gptqmodel.utils.hf import load_hf_tokenizer, load_model_config, resolve_tru
 from gptqmodel.utils.security import BYPASS_ENV
 
 
-PORT = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/kimi_k25"
 TOKENIZER_FIXTURES = Path(__file__).resolve().parent / "fixtures/kimi_k25"
 
 
@@ -44,23 +43,6 @@ def save_real_tokenizer(path):
     data["auto_map"] = {"AutoTokenizer": ["hostile.Tokenizer", None]}
     data["tokenizer_class"] = "HostileTokenizer"
     (path / "tokenizer_config.json").write_text(json.dumps(data))
-
-
-def test_tokenizer_qualification_assets_are_pinned_test_only_data():
-    expected = {
-        "tiktoken.model": "b6c497a7469b33ced9c38afb1ad6e47f03f5e5dc05f15930799210ec050c5103",
-        "chat_template.jinja": "7c91e4b3578b518bfb388d2e3dc645daf0fbf843656e887db75d12891e0030ff",
-        "tokenizer_config.json": "12fcab43d2b6068f46769f5ff373960bf7c17a94d7abbc50e2491306b2f6cf58",
-        "LICENSE": "c524b41658421b8b143c5b50637ef008909da56013ad12ccaba0536139ee35b0",
-    }
-    for filename, digest in expected.items():
-        assert hashlib.sha256((TOKENIZER_FIXTURES / filename).read_bytes()).hexdigest() == digest
-    assert (TOKENIZER_FIXTURES / "LICENSE").read_bytes() == (PORT / "LICENSE").read_bytes()
-    assert not (PORT / "qualification_assets").exists()
-    assert not (PORT / "tiktoken.model").exists()
-    assert hashlib.sha256((PORT / "LICENSE-APACHE-2.0").read_bytes()).hexdigest() == (
-        "77fd4710def9ec3c0f6225800e0235f15a425abd4a8b03559127fcd782612049"
-    )
 
 
 def assert_shared_tokenizer_contract(tokenizer, reference):
@@ -423,7 +405,7 @@ def test_legacy_media_metadata_owns_native_components_and_overrides(tmp_path, pa
     save_real_tokenizer(tmp_path)
     config = tiny_config(vocab_size=163840, pad_token_id=163839, bos_token_id=163584, eos_token_id=163585)
     config.save_pretrained(tmp_path)
-    legacy = json.loads((PORT / "upstream_preprocessor.json").read_text())
+    legacy = json.loads((TOKENIZER_FIXTURES / "upstream_preprocessor.json").read_text())
     legacy["media_proc_cfg"]["patch_size"] = patch_size
     (tmp_path / "preprocessor_config.json").write_text(json.dumps(legacy))
     processor = KimiK25QModel.loader.load_processor(tmp_path, config=config)
@@ -465,7 +447,7 @@ def test_real_released_media_tokenizer_to_native_generation(tmp_path, media):
     )
     save_real_tokenizer(tmp_path)
     (tmp_path / "processor_config.json").unlink()
-    (tmp_path / "preprocessor_config.json").write_bytes((PORT / "upstream_preprocessor.json").read_bytes())
+    (tmp_path / "preprocessor_config.json").write_bytes((TOKENIZER_FIXTURES / "upstream_preprocessor.json").read_bytes())
     loaded = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, trust_remote_code=False)
     pixels = torch.arange(3 * 28 * 28, dtype=torch.uint8).reshape(3, 28, 28)
     kwargs = {}
@@ -548,7 +530,7 @@ def test_unsupported_legacy_media_policy_fails_closed_then_retries(tmp_path, fie
     save_real_tokenizer(tmp_path)
     config = tiny_config(vocab_size=163840, pad_token_id=163839, bos_token_id=163584, eos_token_id=163585)
     config.save_pretrained(tmp_path)
-    original = (PORT / "upstream_preprocessor.json").read_bytes()
+    original = (TOKENIZER_FIXTURES / "upstream_preprocessor.json").read_bytes()
     payload = json.loads(original)
     payload["media_proc_cfg"][field] = value
     (tmp_path / "preprocessor_config.json").write_text(json.dumps(payload))

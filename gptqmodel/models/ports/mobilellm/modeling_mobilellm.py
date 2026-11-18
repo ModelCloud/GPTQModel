@@ -5,7 +5,7 @@
 # Derived from facebookresearch/MobileLLM utils/modeling_llama.py.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 # The upstream implementation also includes Apache-2.0 licensed Transformers
-# code; see LICENSE-APACHE-2.0 and NOTICE for the preserved attribution.
+# code; see the repository root LICENSE (Apache-2.0) and NOTICE.
 
 import math
 from contextlib import contextmanager
@@ -15,6 +15,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from transformers import PreTrainedModel
+from transformers import initialization as init
 from transformers.activations import ACT2FN
 from transformers.cache_utils import DynamicCache
 from transformers.generation.utils import GenerationMixin
@@ -193,18 +194,14 @@ class MobileLLMPreTrainedModel(PreTrainedModel):
     _supports_sdpa = True
     _keep_in_fp32_modules_strict = ["inv_freq"]
 
+    @torch.no_grad()
     def _init_weights(self, module):
-        if isinstance(module, (nn.Linear, nn.Embedding)):
-            module.weight.data.normal_(mean=0, std=self.config.initializer_range)
-            if isinstance(module, nn.Linear) and module.bias is not None:
-                module.bias.data.zero_()
-            if isinstance(module, nn.Embedding) and module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
-        elif isinstance(module, MobileLLMRMSNorm):
-            module.weight.data.fill_(1)
-        elif isinstance(module, MobileLLMRotaryEmbedding):
+        # transformers.initialization skips tensors already loaded from a
+        # checkpoint (`_is_hf_initialized`); raw `.data` writes would not.
+        super()._init_weights(module)
+        if isinstance(module, MobileLLMRotaryEmbedding):
             config = module.config
-            module.inv_freq.copy_(1 / config.rope_theta ** (
+            init.copy_(module.inv_freq, 1 / config.rope_theta ** (
                 torch.arange(0, config.head_dim, 2, device=module.inv_freq.device, dtype=torch.float32) / config.head_dim))
 
 

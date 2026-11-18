@@ -7,6 +7,8 @@ https://huggingface.co/Nanbeige/Nanbeige4.2-3B/tree/b82e54bd609793562a75cbf93379
 The upstream files contain the Apache license notice without a named copyright
 holder. Their notices are retained in the adapted files. This package adds
 ModelCloud.ai modifications for Transformers 5 cache, masking, generation,
-checkpoint construction, precision and package-owned loading. Source identities,
-SHA-256 digests and coverage limits are recorded in checkpoint_contract.json
-and README.md. No trained model weights or tokenizer assets are included.
+checkpoint construction, precision and package-owned loading. Upstream source
+SHA-256 digests at that revision:
+  modeling_nanbeige.py       e4f2ef33b3fc5f0f1cb8cb0dfcf9ae1e1c8bdbc52d590f0a3849283d3109ff45
+  configuration_nanbeige.py  b9a68ef0f8e477638c3eac979904ac2ab5d210f654bafd52e12f7cbbd030a743
+No trained model weights or tokenizer assets are included.

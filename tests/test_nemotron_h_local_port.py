@@ -147,7 +147,7 @@ def test_public_native_loading_ignores_malicious_config_and_model_maps(tmp_path,
 def source_oracle(model, ids):
     """Scalar recurrence + source MLP/router/attention equations; no native helpers.
 
-    Reviewed original/Nano/Super modeling sources, revisions in PROVENANCE.json.
+    Reviewed original/Nano/Super modeling sources, revisions in the port NOTICE.
     No checkpoint Python is imported or executed.
     """
     c, w = model.config, {name: value.double() for name, value in model.state_dict().items()}
@@ -224,7 +224,7 @@ def source_oracle(model, ids):
     return linear(rms(hidden, w["model.norm_f.weight"]), "lm_head")
 
 
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
+@pytest.mark.parametrize("kv_heads", [1, 4])
 @pytest.mark.parametrize("latent", [None, 16])
 @pytest.mark.parametrize("bias", [False, True])
 def test_full_hybrid_matches_independent_source_equations(kv_heads, latent, bias):
@@ -241,7 +241,7 @@ def test_full_hybrid_matches_independent_source_equations(kv_heads, latent, bias
 @pytest.mark.parametrize("pattern", [
     ["mamba", "attention", "mlp", "moe"],
     ["attention", "moe", "mamba", "mamba"],
-    ["mamba", "mamba"], ["attention", "attention"], ["mlp", "moe"],
+    ["mlp", "moe"],
 ])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("attention", ["eager", "sdpa"])

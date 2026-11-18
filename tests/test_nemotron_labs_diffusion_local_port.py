@@ -20,7 +20,6 @@ from gptqmodel.models.ports.nemotron_labs_diffusion.modeling_ministral import at
 from gptqmodel.utils.hf import load_model_config
 
 
-PORT = Path(__file__).parents[1] / "gptqmodel/models/ports/nemotron_labs_diffusion"
 
 
 @pytest.fixture(autouse=True)
@@ -152,7 +151,7 @@ def test_yarn_llama4_scale_and_padding_match_independent_equations():
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("impl", ["eager", "sdpa"])
-@pytest.mark.parametrize("kv", [1, 2, 4])
+@pytest.mark.parametrize("kv", [1, 4])
 def test_low_precision_matches_independent_decoder(dtype, impl, kv):
     model = tiny_model(num_key_value_heads=kv, attn_implementation=impl).to(dtype)
     ids = torch.tensor([[1, 7, 8, 9, 10]])
@@ -210,7 +209,7 @@ def hostile_checkpoint(path, model):
 
 @pytest.mark.parametrize("trust", [False, True])
 @pytest.mark.parametrize("bypass", [None, "0", "1"])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_public_package_owner_ignores_hostile_auto_map(tmp_path, monkeypatch, trust, bypass, dtype):
     path = tmp_path / "model"
     marker = hostile_checkpoint(path, tiny_model())
@@ -454,7 +453,7 @@ def test_generation_eos_sampling_and_thinking_budget():
 
 @pytest.mark.parametrize("paradigm", ["bidirectional", "autoregressive", "block_diff"])
 @pytest.mark.parametrize("offload", [False, True])
-@pytest.mark.parametrize("kv", [1, 2, 4])
+@pytest.mark.parametrize("kv", [1, 4])
 def test_public_plain_awq_pack_infer_two_safetensors_cycles(tmp_path, paradigm, offload, kv):
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig

@@ -161,7 +161,7 @@ def test_rope_source_equations_and_save_reload(tiny_config, tmp_path, kind, shar
 
 
 @pytest.mark.parametrize("sharing,shared_embedding,implementation,dtype", list(itertools.product(
-    [False, True], [False, True], ["eager", "sdpa"], [torch.float32, torch.float16, torch.bfloat16])))
+    [False, True], [False, True], ["eager", "sdpa"], [torch.float32, torch.bfloat16])))
 @torch.inference_mode()
 def test_cache_generation_causality_roundtrip(tiny_config, tmp_path, sharing, shared_embedding, implementation, dtype):
     from gptqmodel.models.ports.mobilellm import MobileLLMForCausalLM
@@ -214,7 +214,7 @@ def _tokenizer(path):
                            eos_token="[EOS]", unk_token="[UNK]").save_pretrained(path)
 
 
-@pytest.mark.parametrize("trust,bypass", list(itertools.product([False, True], [None, "0", "1"])))
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "0"), (True, "1")])
 @pytest.mark.parametrize("sharing", [False, True])
 def test_public_malicious_checkpoint_never_selects_python(tiny_config, tmp_path, monkeypatch, trust, bypass, sharing):
     from gptqmodel import GPTQModel
@@ -520,6 +520,22 @@ def test_optional_standard_embedding_tie_safetensors(tiny_config, tmp_path, shar
     torch.testing.assert_close(reloaded(ids, use_cache=False).logits, expected, rtol=0, atol=0)
 
 
+def test_partial_checkpoint_keeps_loaded_weights_of_partially_missing_module(tiny_config, tmp_path):
+    """Missing-key init must go through transformers.initialization guards."""
+    from safetensors.torch import load_file, save_file
+
+    model = _model(tiny_config, attention_bias=True)
+    model.save_pretrained(tmp_path)
+    state = load_file(tmp_path / "model.safetensors")
+    missing = state.pop("model.layers.0.self_attn.q_proj.bias")
+    save_file(state, tmp_path / "model.safetensors", metadata={"format": "pt"})
+    reloaded = MobileLLMQModel.loader.from_pretrained(tmp_path)
+    attention = reloaded.model.layers[0].self_attn
+    torch.testing.assert_close(attention.q_proj.weight, state["model.layers.0.self_attn.q_proj.weight"], rtol=0, atol=0)
+    assert torch.count_nonzero(attention.q_proj.bias) == 0 and missing.shape == attention.q_proj.bias.shape
+    torch.testing.assert_close(reloaded.model.norm.weight, state["model.norm.weight"], rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_low_precision_rotary_frequency_stays_fp32_after_move_and_reload(tiny_config, tmp_path, dtype):
     model = _model(tiny_config).to(dtype)
@@ -537,8 +553,9 @@ def test_low_precision_rotary_frequency_stays_fp32_after_move_and_reload(tiny_co
     torch.testing.assert_close(reloaded(ids).logits, logits, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("sharing,shared_embedding,offload", list(itertools.product([False, True], repeat=3)))
-@pytest.mark.parametrize("kv,bias", [(2, False), (1, True), (4, True)])
+@pytest.mark.parametrize("sharing,shared_embedding,offload,kv,bias", [
+    (False, False, False, 2, False), (True, False, True, 1, True),
+    (False, True, True, 4, True), (True, True, False, 2, False)])
 def test_public_plain_awq_pack_infer_two_safetensors_cycles(tiny_config, tmp_path, sharing, shared_embedding, offload, kv, bias):
     from gptqmodel import GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear

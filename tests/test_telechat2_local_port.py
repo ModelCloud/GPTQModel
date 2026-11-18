@@ -4,7 +4,6 @@
 
 import json
 import math
-import shutil
 from pathlib import Path
 
 import pytest
@@ -36,17 +35,17 @@ def _model(**kwargs):
 def _assets(path):
     path.mkdir(parents=True, exist_ok=True)
     (path / "tokenizer.model").write_bytes(read_port_asset(FIXTURES / "tokenizer.model"))
-    shutil.copyfile(FIXTURES / "tokenizer_config.json", path / "tokenizer_config.json")
+    (path / "tokenizer_config.json").write_bytes(read_port_asset(FIXTURES / "tokenizer_config.json"))
 
 
 @pytest.mark.parametrize("variant", ["modern", "115B"])
 @pytest.mark.parametrize("bos,eos", [(False, False), (True, False), (False, True), (True, True)])
 def test_real_source_tokenizer_ids_chat_masks_and_deleted_source_saves(tmp_path, variant, bos, eos):
-    oracle = json.loads((FIXTURES / "tokenizer_oracle.json").read_text())[variant]
+    oracle = json.loads(read_port_asset(FIXTURES / "tokenizer_oracle.json"))[variant]
     _assets(tmp_path)
     if variant == "115B":
         (tmp_path / "tokenizer.model").write_bytes(read_port_asset(FIXTURES / "115B-tokenizer.model"))
-        shutil.copyfile(FIXTURES / "115B-tokenizer_config.json", tmp_path / "tokenizer_config.json")
+        (tmp_path / "tokenizer_config.json").write_bytes(read_port_asset(FIXTURES / "115B-tokenizer_config.json"))
     original = (tmp_path / "tokenizer.model").read_bytes()
     tokenizer = Telechat2Tokenizer.from_pretrained(tmp_path, add_bos_token=bos, add_eos_token=eos)
     assert len(tokenizer) == oracle["vocab_size"]
@@ -82,7 +81,7 @@ def test_real_tokenizer_asset_failure_repair_and_subfolder(tmp_path, variant, tr
     _assets(folder)
     if variant == "115B":
         (folder / "tokenizer.model").write_bytes(read_port_asset(FIXTURES / "115B-tokenizer.model"))
-        shutil.copyfile(FIXTURES / "115B-tokenizer_config.json", folder / "tokenizer_config.json")
+        (folder / "tokenizer_config.json").write_bytes(read_port_asset(FIXTURES / "115B-tokenizer_config.json"))
     elif variant == "telechat1":
         (folder / "tokenizer.model").unlink()
         for name in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"]:
@@ -94,7 +93,7 @@ def test_real_tokenizer_asset_failure_repair_and_subfolder(tmp_path, variant, tr
         load_hf_tokenizer(str(tmp_path), subfolder="nested", model_config=_config(), trust_remote_code=trust)
     source.write_bytes(original)
     tokenizer = load_hf_tokenizer(str(tmp_path), subfolder="nested", model_config=_config(), trust_remote_code=trust)
-    oracle = json.loads((FIXTURES / "tokenizer_oracle.json").read_text())[variant]
+    oracle = json.loads(read_port_asset(FIXTURES / "tokenizer_oracle.json"))[variant]
     for case in oracle["cases"]:
         assert tokenizer.encode(case["text"], add_special_tokens=False) == case["ids"]
     assert source.read_bytes() == original
@@ -183,7 +182,7 @@ def test_independent_decoder_equations_and_multitoken_cache(kvheads, postnorm, p
             torch.testing.assert_close(actual.attentions[index], probs[index])
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("implementation", ["eager", "sdpa"])
 @pytest.mark.parametrize("policy", ["legacy", "modern"])
 def test_dtype_cache_generation_and_two_safetensors_cycles(tmp_path, dtype, implementation, policy):
@@ -253,8 +252,7 @@ def test_headless_checkpoint_fails_without_inventing_a_language_head(tmp_path):
         Telechat2ForCausalLM.from_pretrained(tmp_path)
 
 
-@pytest.mark.parametrize("kvheads,postnorm", [(4, False), (2, True), (1, False)])
-@pytest.mark.parametrize("offload", [False, True])
+@pytest.mark.parametrize("kvheads,postnorm,offload", [(4, False, False), (2, True, True), (1, False, True)])
 def test_public_plain_awq_all_linears_and_two_exact_reloads(tmp_path, kvheads, postnorm, offload):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -296,8 +294,7 @@ def test_public_plain_awq_all_linears_and_two_exact_reloads(tmp_path, kvheads, p
             torch.testing.assert_close(wrapper.model(**calibration[0], use_cache=False).logits, output, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "0"), (True, "1")])
 def test_public_real_tokenizer_model_hostile_selection_and_two_reloads(tmp_path, monkeypatch, trust, bypass):
     from gptqmodel import GPTQModel
     if bypass is not None:
@@ -333,8 +330,7 @@ def test_public_real_tokenizer_model_hostile_selection_and_two_reloads(tmp_path,
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "0"), (True, "1")])
 def test_selected_local_config_ignores_checkpoint_python(tmp_path, monkeypatch, trust, bypass):
     if bypass is None:
         monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)

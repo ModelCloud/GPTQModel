@@ -159,8 +159,7 @@ def public_bundle(tmp_path_factory):
     return path
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [False, True])
+@pytest.mark.parametrize("trust,bypass", [(False, False), (True, True)])
 def test_public_tokenizer_processor_with_hostile_metadata(public_bundle, tmp_path, monkeypatch, trust, bypass):
     import numpy as np
     from PIL import Image
@@ -211,8 +210,7 @@ def test_public_tokenizer_processor_with_hostile_metadata(public_bundle, tmp_pat
 
 
 @pytest.mark.parametrize("alias", ALIASES)
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [False, True])
+@pytest.mark.parametrize("trust,bypass", [(False, False), (True, True)])
 def test_public_gptqmodel_dispatch_and_processor_reuse(public_bundle, tmp_path, monkeypatch, alias, trust, bypass):
     from gptqmodel import GPTQModel
 

@@ -224,6 +224,9 @@ def test_text_matches_exact_native_apertus_oracle(attention_bias, hidden_act):
     native = tiny_model("apertus", attention_bias=attention_bias, hidden_act=hidden_act)
     port = tiny_model("apertus1p5_text", attention_bias=attention_bias, hidden_act=hidden_act)
     port.load_state_dict(native.state_dict(), strict=True)
+    # The 1.5 text backbone reuses the native decoder classes rather than a copy.
+    assert type(port.model.layers[0]) is type(native.model.layers[0])
+    assert type(port.model.rotary_emb) is type(native.model.rotary_emb)
     ids = torch.tensor([[1, 20, 21, 22], [3, 1, 13, 24]])
     mask = ids.ne(3).long()
     with torch.inference_mode():

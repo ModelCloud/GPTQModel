@@ -15,40 +15,42 @@ from gptqmodel import CalibrationConfig
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.exaone import ExaOneQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
-from gptqmodel.models.ports.exaone import configuration_exaone
 from gptqmodel.models.ports.exaone.configuration_exaone import ExaoneConfig
 from gptqmodel.models.ports.exaone.modeling_exaone import ExaoneForCausalLM
 from tests.test_exaone_local_port import ROPE, tiny_config, tiny_model, write_tokenizer
 
 
-PORT = Path(configuration_exaone.__file__).parent
-CONTRACTS = json.loads((PORT / "checkpoint_contracts.json").read_text())
+# Geometry of each released config.json and the sha256/count of the sorted tensor
+# names in its safetensors index (lm_head is absent from the tied 2.4B release).
+RELEASES = {
+    "exaone30": ((4096, 32, 32, 8, 14336, False), 291,
+                 "7bd5647098a7a6eb57a2324a2ea49c59a28adab511cdf6a689919746755f542a"),
+    "exaone35_2b": ((2560, 30, 32, 8, 7168, True), 272,
+                    "e877c569323322a6e51e5b9ac7d2cd1d75086db12b144383d0b292947ca83b93"),
+    "exaone35_7b": ((4096, 32, 32, 8, 14336, False), 291,
+                    "7bd5647098a7a6eb57a2324a2ea49c59a28adab511cdf6a689919746755f542a"),
+    "exaone35_32b": ((5120, 64, 40, 8, 27392, False), 579,
+                     "f19c86853c665d8b7d48b455cb5c05f062c3c8951e53b627827605faaedb9ea8"),
+}
 QUANTIZED = {"attn.attention.q_proj", "attn.attention.k_proj", "attn.attention.v_proj",
              "attn.attention.out_proj", "mlp.c_fc_0", "mlp.c_fc_1", "mlp.c_proj"}
 BLOCKS = [["ln_1:!"], ["attn.attention.q_proj", "attn.attention.k_proj", "attn.attention.v_proj"],
           ["attn.attention.out_proj"], ["ln_2:!"], ["mlp.c_fc_0", "mlp.c_fc_1"], ["mlp.c_proj"]]
 
 
-@pytest.mark.parametrize("release", CONTRACTS)
+@pytest.mark.parametrize("release", RELEASES)
 def test_actual_released_checkpoint_exact_meta_ownership(release):
-    contract = CONTRACTS[release]
-    config = ExaoneConfig(**contract["config"])
+    (hidden, layers, heads, kv_heads, intermediate, tied), count, keys_sha256 = RELEASES[release]
+    config = ExaoneConfig(vocab_size=102400, hidden_size=hidden, num_layers=layers, num_attention_heads=heads,
+                          num_key_value_heads=kv_heads, intermediate_size=intermediate, tie_word_embeddings=tied)
     with torch.device("meta"):
         model = ExaoneForCausalLM(config)
     actual = set(model.state_dict())
-    checkpoint = set()
-    for key in contract["normalized_checkpoint_keys"]:
-        if ".#." in key:
-            checkpoint.update(key.replace(".#.", f".{i}.") for i in range(config.num_layers))
-        else:
-            checkpoint.add(key)
-    assert hashlib.sha256("\n".join(sorted(checkpoint)).encode()).hexdigest() == contract["checkpoint_keys_sha256"]
-    assert len(checkpoint) == contract["checkpoint_tensor_count"]
-    if config.tie_word_embeddings:
-        assert "lm_head.weight" not in checkpoint
+    checkpoint = actual - {"lm_head.weight"} if tied else actual
+    if tied:
         assert model.lm_head.weight is model.transformer.wte.weight
-        checkpoint.add("lm_head.weight")
-    assert actual == checkpoint
+    assert len(checkpoint) == count
+    assert hashlib.sha256("\n".join(sorted(checkpoint)).encode()).hexdigest() == keys_sha256
     assert model.transformer.h[0].attn.attention.k_proj.weight.shape == (
         config.num_key_value_heads * config.head_dim, config.hidden_size)
     assert len(model.transformer.h) == config.num_layers

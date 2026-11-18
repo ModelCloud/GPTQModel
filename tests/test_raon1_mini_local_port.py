@@ -751,12 +751,12 @@ def test_pinned_actual_release_tokenizer_ids_chat_security_and_reload(tmp_path, 
     from gptqmodel.utils.hf import load_hf_tokenizer
 
     port = Path(__file__).parents[1] / "gptqmodel/models/ports/raon1_mini"
-    reference = json.loads((port / "tokenizer_reference.json").read_text())
+    reference = json.loads(read_port_asset(port / "tokenizer_reference.json"))
     raw = read_port_asset(port / "tokenizer.json")
     assert hashlib.sha256(raw).hexdigest() == reference["tokenizer_sha256"]
     (tmp_path / "tokenizer.json").write_bytes(raw)
-    (tmp_path / "tokenizer_config.json").write_bytes((port / "released_tokenizer_config.json").read_bytes())
-    (tmp_path / "chat_template.jinja").write_bytes((port / "released_chat_template.jinja").read_bytes())
+    (tmp_path / "tokenizer_config.json").write_bytes(read_port_asset(port / "released_tokenizer_config.json"))
+    (tmp_path / "chat_template.jinja").write_bytes(read_port_asset(port / "released_chat_template.jinja"))
     config = _config(vocab_size=259840, pad_token_id=259200, eos_token_id=[259202, 259200])
     config.save_pretrained(tmp_path)
     marker = _hostile(tmp_path)

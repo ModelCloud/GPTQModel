@@ -12,8 +12,10 @@ Copyright 2024 AI21 Labs Ltd. and the HuggingFace Inc. team. All rights reserved
 Native/Super configuration: Copyright 2024-2025 NVIDIA Corporation and
 The HuggingFace Inc. team. All rights reserved.
 The inspected original, Nano and Super checkpoint modeling/configuration
-sources carry those Apache-2.0 notices. Their exact revisions and SHA-256
-digests are recorded in PROVENANCE.json. LICENSE contains Apache-2.0.
+sources carry those Apache-2.0 notices. Inspected revisions:
+nvidia/Nemotron-H-8B-Base-8K@94ea861e008c2dfced3e8e1302094024077aa04e,
+nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16@bf77c3174f68ad409e1c2aa60daeb46e32d1c606,
+nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16@2dc98e2afe4face0e4ce40972a915c45368bd34a.
 
 The shape-only checkpoint fixture contains no tensor payloads. Architecture
 code licensing does not grant a license to model weights: the original 8B

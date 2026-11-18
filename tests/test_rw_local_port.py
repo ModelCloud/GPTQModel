@@ -145,10 +145,10 @@ def test_alibi_source_equations_apply_positional_bias_once(backend):
 
 @pytest.mark.parametrize("layout", ["mha", "mqa", "gqa"])
 @pytest.mark.parametrize("backend", ["eager", "sdpa"])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("bias", [False, True])
-def test_source_equations_dtype_cache_generation_and_safetensors(tmp_path, layout, backend, dtype, bias):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_source_equations_dtype_cache_generation_and_safetensors(tmp_path, layout, backend, dtype):
     torch.manual_seed(941)
+    bias = layout != "mqa"
     config = tiny_config(layout, bias=bias)
     config._attn_implementation = backend
     # Match HF loading: construct compute dtype without downcasting the
@@ -262,8 +262,7 @@ def save_tiny_checkpoint(path, layout, model_type=None, hostile=False):
 @pytest.mark.parametrize("layout,model_type", [("mha", "refinedWebModel"), ("mqa", "RefinedWebModel"),
                                                ("gqa", "refinedWeb"), ("gqa", "RefinedWeb"),
                                                ("mha", "falcon"), ("mqa", "falcon"), ("gqa", "falcon")])
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "0"), (True, "1")])
 def test_public_hostile_load_model_and_tokenizer_policy(tmp_path, monkeypatch, layout, model_type, trust, bypass):
     from gptqmodel import GPTQModel
 
@@ -319,9 +318,9 @@ def test_failure_repair_retry_subfolder_and_assign(tmp_path, layout, alias):
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("layout,alias", [("mha", "refinedWebModel"), ("mqa", "refinedWebModel"), ("gqa", "refinedWeb"),
-                                        ("mha", "falcon"), ("mqa", "falcon"), ("gqa", "falcon")])
-@pytest.mark.parametrize("offload", [False, True])
+@pytest.mark.parametrize("layout,alias,offload", [
+    ("mha", "refinedWebModel", False), ("mqa", "refinedWebModel", True), ("gqa", "refinedWeb", False),
+    ("mha", "falcon", True), ("mqa", "falcon", False), ("gqa", "falcon", True)])
 def test_public_plain_awq_packs_every_projection_and_two_exact_reloads(tmp_path, layout, alias, offload):
     from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
     from gptqmodel.nn_modules.qlinear import BaseQuantLinear

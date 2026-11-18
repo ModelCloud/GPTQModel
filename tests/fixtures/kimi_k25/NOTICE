@@ -6,7 +6,7 @@ copies from moonshotai/Kimi-K2.5 at revision
 Source: https://huggingface.co/moonshotai/Kimi-K2.5/tree/4d01dfe0332d63057c186e0b262165819efb6611
 
 These files retain the accompanying Modified MIT License, including its
-commercial display requirement. See LICENSE and README.md for exact hashes.
+commercial display requirement. See LICENSE; tests pin the exact hashes.
 The fixture metadata and whitespace attributes were added by ModelCloud.ai.
 No trained tensor payloads are included. This directory is test-only and is
 excluded from the GPT-QModel wheel and source distribution by MANIFEST.in.

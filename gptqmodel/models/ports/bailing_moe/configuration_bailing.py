@@ -51,6 +51,10 @@ class BailingConfig(PretrainedConfig):
         values.pop("self")
         values.pop("kwargs")
         values.pop("__class__", None)
+        # Transformers 5 owns RoPE metadata as standardized `rope_parameters`;
+        # `rope_scaling` is only a deprecated alias of it.
+        values.pop("rope_scaling")
+        self.rope_parameters = kwargs.pop("rope_parameters", None)
         for key, value in values.items():
             setattr(self, key, value)
         self.head_dim = head_dim or hidden_size // num_attention_heads
@@ -62,8 +66,9 @@ class BailingConfig(PretrainedConfig):
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         super().__init__(
             pad_token_id=pad_token_id, eos_token_id=eos_token_id,
-            tie_word_embeddings=tie_word_embeddings, **kwargs,
+            tie_word_embeddings=tie_word_embeddings, rope_scaling=rope_scaling, **kwargs,
         )
+        self.rope_theta = self.rope_parameters["rope_theta"]
         if model_type not in ("bailing_moe", "bailing_hybrid"):
             raise ValueError(f"Unsupported Bailing model_type: {model_type}")
         if min(num_attention_heads, num_key_value_heads) < 1 or num_attention_heads % num_key_value_heads:

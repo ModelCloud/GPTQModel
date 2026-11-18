@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import warnings
+
 import pytest
 import torch
 from safetensors.torch import load_file
@@ -12,6 +14,7 @@ from gptqmodel.models.ports.bailing_moe.modeling_bailing import (
     BailingCache,
     BailingForCausalLM,
     LinearAttention,
+    RotaryEmbedding,
 )
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 
@@ -306,6 +309,29 @@ def test_scaled_rope_survives_safetensors_reload(rope_type, tmp_path):
         model.save_pretrained(tmp_path)
         restored = BailingMoeQModel.loader.from_pretrained(tmp_path).eval()
         torch.testing.assert_close(restored(ids, use_cache=False).logits, reference)
+
+
+def test_yarn_rope_uses_standardized_parameters_and_partial_dim_once():
+    """`rope_scaling` is a TF5 alias of `rope_parameters`; YaRN must not reapply partial rotary."""
+    from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+    from transformers.models.llama.configuration_llama import LlamaConfig
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        config = tiny_config("hybrid", rope_theta=1000.0, max_position_embeddings=64,
+                             rope_scaling={"type": "yarn", "factor": 4.0, "original_max_position_embeddings": 16})
+    assert config.rope_parameters["rope_type"] == "yarn" and config.rope_theta == 1000.0
+    for mla in (False, True):
+        rotary = RotaryEmbedding(config, mla=mla)
+        dim = config.qk_rope_head_dim if mla else int(config.head_dim * config.partial_rotary_factor)
+        reference = LlamaConfig(head_dim=dim, hidden_size=16, num_attention_heads=2, max_position_embeddings=64,
+                                rope_parameters={"rope_type": "yarn", "rope_theta": 1000.0, "factor": 4.0,
+                                                 "original_max_position_embeddings": 16})
+        inv_freq, scale = ROPE_INIT_FUNCTIONS["yarn"](reference)
+        torch.testing.assert_close(rotary.inv_freq, inv_freq)
+        assert rotary.attention_scaling == scale
+    reloaded = BailingConfig.from_dict(config.to_dict())
+    assert reloaded.rope_parameters == config.rope_parameters and reloaded.rope_theta == 1000.0
 
 
 def _checkpoint_oracle(config, weights, ids, mask):
