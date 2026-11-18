@@ -239,10 +239,47 @@ class QuantizeEmbed(str, Enum):
     BOTH = "both"
 
 
+def _normalize_embed_quant_mode(value: Any) -> QuantizeEmbed:
+    """Coerce ``embed_quant_mode`` to ``QuantizeEmbed`` or reject it (#5124).
+
+    A misspelled mode matches none of the consumer branches in
+    ``module_looper``/``stage_layer``/``weight_only_looper``, so a run replays
+    every layer, quantizes nothing and still returns a normal result. ``None``
+    reaches the layer planner and fails there with an unrelated missing-module
+    error. Both are rejected here instead.
+    """
+
+    try:
+        return QuantizeEmbed(value)
+    except (TypeError, ValueError):
+        valid = ", ".join(repr(mode.value) for mode in QuantizeEmbed)
+        raise ValueError(
+            f"QuantizeEmbedConfig: `embed_quant_mode` must be one of {valid} "
+            f"(a QuantizeEmbed value), got {value!r}."
+        ) from None
+
+
 @dataclass
 class QuantizeEmbedConfig:
+    """Embedding endpoints ``quantize()``/``requantize()`` should quantize."""
+
     embed_quant_mode: QuantizeEmbed = QuantizeEmbed.OUTPUT
     embed_only: bool = True
+
+    def __post_init__(self):
+        # `QuantizeEmbed("inptu")` would raise only where it is consumed; the
+        # consumers instead compare with `in (QuantizeEmbed.INPUT, ...)`, so a
+        # misspelled value silently matched nothing. Coerce (and reject) here.
+        self.embed_quant_mode = _normalize_embed_quant_mode(self.embed_quant_mode)
+        # `embed_only="False"` is truthy and behaves as True; #4668 made that
+        # coercion an error for every QuantizeConfig bool field.
+        _require_bool_value(type(self).__name__, "embed_only", self.embed_only)
+
+    def validate(self) -> "QuantizeEmbedConfig":
+        """Re-validate a passed instance; entry points call this before any work."""
+
+        self.__post_init__()
+        return self
 
 
 CALIBRATION_SORT_ORDERS = ("asc", "desc", "shuffle")

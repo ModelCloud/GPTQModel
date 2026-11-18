@@ -97,6 +97,10 @@ Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kerne
 - **Choose where to spend precision.** Mix bit widths, keep sensitive modules
   unquantized, and use activation-quantization or preprocessing policies where
   supported. Quantization protocols let you organize multi-stage recipes.
+- **Select embedding endpoints explicitly.** `QuantizeEmbedConfig` rejects an
+  unknown `embed_quant_mode` or a non-`bool` `embed_only` before any layer
+  replay instead of silently quantizing nothing; see
+  [embedding quantization config validation](docs/embedding-quantization-config.md).
 - **Keep floating activation searches finite.** NVFP4 block-scale ranking
   normalizes candidate error by an exact power of two so large finite
   activations cannot overflow the comparison and silently return zeros; see
