@@ -28,6 +28,8 @@ import torch
 from safetensors.torch import load_file, save_file
 from torch import nn
 
+from tests.fp8_test_utils import write_fp8_checkpoint
+
 
 IN_FEATURES = 128
 OUT_FEATURES = 64
@@ -510,23 +512,33 @@ def _drop(checkpoint: Path, suffix: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("case_name", "config_factory", "required"),
+    ("case_name", "build_checkpoint", "required"),
     [
-        ("fp8", lambda: _fp8_config(), ("weight", "weight_scale_inv")),
-        ("nf12", lambda: _nf12_config(), ("nf12_packed", "nf12_escapes", "nf12_exp_base")),
+        # FP8 is load-only since #5242, so its checkpoint is written by the
+        # reference encoder instead of a quantize() run (#5271).
+        (
+            "fp8",
+            lambda source, checkpoint: write_fp8_checkpoint(source, checkpoint),
+            ("weight", "weight_scale_inv"),
+        ),
+        (
+            "nf12",
+            lambda source, checkpoint: _quantize_weight_only(source, checkpoint, _nf12_config()),
+            ("nf12_packed", "nf12_escapes", "nf12_exp_base"),
+        ),
     ],
 )
 def test_truncated_weight_only_checkpoint_fails_closed(
-    tmp_path, case_name, config_factory, required
+    tmp_path, case_name, build_checkpoint, required
 ):
-    """End-to-end: quantize, save, drop one tensor, and load the checkpoint."""
+    """End-to-end: build, drop one payload tensor, and load the checkpoint."""
 
     from gptqmodel import GPTQModel
 
     source = tmp_path / "source"
     checkpoint = tmp_path / "checkpoint"
     _tiny_qwen2(source)
-    _quantize_weight_only(source, checkpoint, config_factory())
+    build_checkpoint(source, checkpoint)
 
     model = GPTQModel.load(str(checkpoint), device="cpu")
     with torch.inference_mode():
@@ -541,12 +553,6 @@ def test_truncated_weight_only_checkpoint_fails_closed(
         with pytest.raises(ValueError, match="Missing required quantized weights") as exc:
             GPTQModel.load(str(truncated), device="cpu")
         assert f"model.layers.0.self_attn.q_proj.{suffix}" in str(exc.value)
-
-
-def _fp8_config():
-    from gptqmodel.quantization.config import FP8Config
-
-    return FP8Config(device="cpu")
 
 
 def _nf12_config():

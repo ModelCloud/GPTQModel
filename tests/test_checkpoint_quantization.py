@@ -500,10 +500,17 @@ def test_dynamic_quantized_tensors_equal_after_resume(tmp_path, monkeypatch):
     assert_identical_tensors(baseline, completed)
 
 
-def test_dynamic_weight_only_quantized_tensors_equal_after_resume(
-    tmp_path, monkeypatch
-):
-    from gptqmodel.quantization.config import FP8Config
+def test_dynamic_weight_only_fp8_settings_survive_load(tmp_path):
+    """A per-module FP8 override is honored on load, deterministically.
+
+    FP8 became load-only in #5242, so this covers the half of the old
+    quantize/resume test that still exists: the dynamic override a checkpoint
+    declares must reach the module, the rest of the model must keep the base
+    encoding, and loading the same checkpoint twice must produce identical
+    tensors (no per-load state leaks into the payload). #5271.
+    """
+
+    from tests.fp8_test_utils import write_fp8_checkpoint
 
     torch.manual_seed(1234)
     native = tmp_path / "native"
@@ -520,63 +527,40 @@ def test_dynamic_weight_only_quantized_tensors_equal_after_resume(
     }
     native_model = build_native_model("llama", config_args, moe_intermediate_size=32)
     native_model.save_pretrained(native)
-    tokenizer = _build_local_tokenizer(native)
-    calibration = _build_calibration_dataset(tokenizer)
+    _build_local_tokenizer(native)
 
-    def run(output, checkpoint):
-        torch.manual_seed(6789)
-        config = FP8Config(
-            weight_scale_method="row",
-            device="cpu",
-            offload_to_disk=True,
-            offload_to_disk_path=str(tmp_path / f"offload-{output}"),
-            dynamic={
-                r"+:^model\.layers\.0\.self_attn\.q_proj$": {
-                    "format": "float8_e5m2",
-                    "weight_scale_method": "block",
-                    "weight_block_size": [32, 32],
-                },
+    checkpoint = tmp_path / "fp8"
+    write_fp8_checkpoint(
+        native,
+        checkpoint,
+        dynamic={
+            r"+:^model\.layers\.0\.self_attn\.q_proj$": {
+                "format": "float8_e5m2",
+                "weight_scale_method": "block",
+                "weight_block_size": [32, 32],
             },
-        )
+        },
+    )
+
+    def load():
         model = GPTQModel.load(
-            str(native), quantize_config=config, backend=BACKEND.FP8_TORCH
+            str(checkpoint), device="cpu", backend=BACKEND.FP8_TORCH
         )
-        model.quantize(
-            CalibrationConfig(
-                dataset=calibration,
-                batch_size=1,
-            ),
-            backend=BACKEND.FP8_TORCH,
-            checkpoint=checkpoint,
-        )
-        model.save(tmp_path / output)
-        loaded = GPTQModel.load(
-            str(tmp_path / output), device="cpu", backend=BACKEND.FP8_TORCH
-        )
-        q_proj = loaded.model.model.layers[0].self_attn.q_proj
+        q_proj = model.model.model.layers[0].self_attn.q_proj
         assert q_proj.fp8_format == "float8_e5m2"
         assert q_proj.weight_scale_method == "block"
         assert q_proj.weight_block_size == (32, 32)
-        del loaded
-        return load_file(tmp_path / output / "model.safetensors")
+        # The override is per module: its sibling keeps the base encoding.
+        k_proj = model.model.model.layers[0].self_attn.k_proj
+        assert k_proj.fp8_format == "float8_e4m3fn"
+        assert k_proj.weight_scale_method == "row"
+        tensors = {name: value.detach().clone() for name, value in model.model.state_dict().items()}
+        del model
+        return tensors
 
-    baseline = run("weight-only-baseline", None)
-    original = CheckpointExtension.on_boundary
-
-    def stop(extension, boundary):
-        if boundary.step.index == 0:
-            signal.raise_signal(signal.SIGTERM)
-        original(extension, boundary)
-
-    checkpoint = CheckpointConfig(tmp_path / "weight-only-checkpoints")
-    with monkeypatch.context() as patch:
-        patch.setattr(CheckpointExtension, "on_boundary", stop)
-        with pytest.raises(CheckpointStopped):
-            run("weight-only-interrupted", checkpoint)
-
-    resumed = run("weight-only-resumed", checkpoint)
-
-    assert_identical_tensors(baseline, resumed)
+    baseline = load()
+    again = load()
+    assert_identical_tensors(baseline, again)
 
 
 def test_runtime_calibration_exclusions_survive_resume(tmp_path, monkeypatch):

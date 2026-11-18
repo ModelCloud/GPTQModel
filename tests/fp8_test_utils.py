@@ -146,3 +146,123 @@ def install_fp8_payload(module, linear: nn.Module, weight: torch.Tensor, scale_i
         scale_inv.detach().to(device="cpu").contiguous(),
         linear,
     )
+
+
+LINEAR_SUFFIXES = (
+    "self_attn.q_proj",
+    "self_attn.k_proj",
+    "self_attn.v_proj",
+    "self_attn.o_proj",
+    "mlp.gate_proj",
+    "mlp.up_proj",
+    "mlp.down_proj",
+)
+
+
+def _dynamic_override(dynamic, name: str):
+    """Return the per-module FP8 override that applies to ``name``, if any."""
+
+    if not dynamic:
+        return None
+    import re
+
+    for pattern, overrides in dynamic.items():
+        probe = pattern
+        if probe[:2] in {"+:", "-:"}:
+            probe = probe[2:]
+        try:
+            matched = re.search(probe, name) is not None
+        except re.error:
+            matched = False
+        if matched:
+            return dict(overrides or {})
+    return None
+
+
+def write_fp8_checkpoint(base, destination, *, config=None, dynamic=None, suffixes=LINEAR_SUFFIXES):
+    """Write a load-only FP8 checkpoint from a dense model directory.
+
+    GPT-QModel no longer quantizes FP8 (#5242), so a test that needs an FP8
+    checkpoint on disk builds one here: every dense projection named by
+    ``suffixes`` is replaced by a ``TorchFP8Linear`` holding a reference-encoded
+    payload, and the resulting ``quantization_config`` is what the loader reads.
+    ``dynamic`` mirrors ``FP8Config.dynamic`` and overrides the encoding of the
+    modules its regexes match.
+    """
+
+    from pathlib import Path
+
+    import torch as _torch
+    from safetensors.torch import save_file
+    from transformers import AutoModelForCausalLM
+
+    from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+    from gptqmodel.quantization.config import FP8Config
+
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    if config is None:
+        config = FP8Config(format="float8_e4m3fn", weight_scale_method="row")
+    if dynamic:
+        config = config.__class__(**{**config.to_dict(), "dynamic": dynamic})
+
+    model = AutoModelForCausalLM.from_pretrained(str(base), dtype=_torch.float32).eval()
+
+    def factory(name, dense):
+        overrides = _dynamic_override(dynamic, name) or {}
+        module = TorchFP8Linear(
+            bits=8,
+            group_size=-1,
+            sym=True,
+            desc_act=False,
+            in_features=dense.in_features,
+            out_features=dense.out_features,
+            bias=dense.bias is not None,
+            register_buffers=True,
+            format=overrides.get("format", config.format),
+            weight_scale_method=overrides.get("weight_scale_method", config.weight_scale_method),
+            weight_scale_semantics="inverse",
+            weight_block_size=overrides.get("weight_block_size"),
+        )
+        pack_fp8_module(module, dense)
+        return module
+
+    for layer in range(model.config.num_hidden_layers):
+        for suffix in suffixes:
+            name = f"model.layers.{layer}.{suffix}"
+            try:
+                dense = model.get_submodule(name)
+            except AttributeError:
+                continue
+            model.set_submodule(name, factory(name, dense))
+
+    tensors = {}
+    seen = {}
+    for name, value in model.state_dict().items():
+        # Tied weights (lm_head <- embed_tokens) share storage; safetensors
+        # refuses to write the same buffer twice, so keep the first name.
+        key = (value.data_ptr(), tuple(value.shape))
+        if key in seen:
+            continue
+        seen[key] = name
+        tensors[name] = value.contiguous()
+    save_file(tensors, str(destination / "model.safetensors"), metadata={"format": "pt"})
+    model.config.quantization_config = config.to_dict()
+    model.config.save_pretrained(destination)
+
+    # A load needs a tokenizer; carry over the base model's files when present.
+    import shutil as _shutil
+
+    base = Path(base)
+    for name in (
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "vocab.json",
+        "merges.txt",
+        "chat_template.jinja",
+    ):
+        source_file = base / name
+        if source_file.is_file():
+            _shutil.copyfile(source_file, destination / name)
+    return config
