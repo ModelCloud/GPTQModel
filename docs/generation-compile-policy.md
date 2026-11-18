@@ -166,6 +166,25 @@ still slower than eager, which is exactly why the static-cache auto-compile is
 off by default for those kernels. Compiling can also change the reduction order
 and therefore a greedy token, as documented for FP8/AWQ above.
 
+### Releasing the compiled model
+
+`optimize()` installs a `_CompiledModelForward` proxy that reaches the model
+through a weak reference, so the proxy itself never closes a
+`model -> forward -> model` cycle (#4937). Torch.compile adds a second, hidden
+holder: every frame dynamo traces builds `VariableTracker` objects, and a graph
+break leaves an `UnspecializedNNModuleVariable` -> `SideEffectsProxyDict` ->
+`DunderDictVariable` cycle that keeps the traced module reachable. Reference
+counting cannot reclaim those cycles, so before #5020 a compiled model kept its
+weights and VRAM after the caller dropped it until a full cyclic
+`gc.collect()` - the whole 0.43 GiB model on Qwen2.5-0.5B, for `GPTQ_TRITON`,
+`GPTQ_TORCH` and `MARLIN` alike.
+
+The proxy now calls `release_compile_trace_garbage()` whenever a compiled call
+traces a new frame (`dynamo_traced_frames()` grew): once per new frame, not per
+token. Only the unreachable cycles are collected, and dynamo's compiled-frame
+cache is left intact, so the next call still takes the compiled path. Dropping
+the model then frees it immediately, with cyclic GC disabled.
+
 ## What remains
 
 - A kernel can flip `SUPPORTS_COMPILE` to `True` after it gains a fake

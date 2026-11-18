@@ -13,7 +13,7 @@ from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.models.definitions.ricursive import RicursiveQModel
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
-from gptqmodel.quantization import GPTQConfig
+from gptqmodel.quantization import FORMAT, GPTQConfig
 from gptqmodel.quantization.rco import block_of, discover_blocks, discover_projections
 from tests.test_rco_paper import allocate, materialize
 
@@ -191,8 +191,12 @@ def write_arm(model, block, directory, width):
     packed = copy.deepcopy(model.get_submodule(block.path))
     for name in block.projections:
         source = packed.get_submodule(name)
+        # Staged GSQ writes GPTQ_V2 arms (see the rco_allocate config), so the
+        # fixture must too; a v1 arm is normalized to v2 on load, which changes
+        # the qzero words and the layout marker by design.
         linear = TorchLinear(bits=width, group_size=32, sym=True, desc_act=False,
-                             in_features=source.in_features, out_features=source.out_features, bias=False)
+                             in_features=source.in_features, out_features=source.out_features,
+                             bias=False, format=FORMAT.GPTQ_V2)
         linear.qweight.fill_(width)
         linear.scales.fill_(width)
         packed.set_submodule(name, linear)

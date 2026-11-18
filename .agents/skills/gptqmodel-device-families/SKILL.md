@@ -9,14 +9,10 @@ description: Keep NVIDIA and AMD support explicit when editing GPT-QModel device
 
 ## At a glance
 
-- **What:** keep the hardware family (`DEVICE.CUDA` = NVIDIA, `DEVICE.ROCM` = AMD) separate from PyTorch's runtime namespace (`cuda:N` on both).
-- **Why:** PyTorch's HIP build reports AMD GPUs as `cuda`. Treating that spelling as NVIDIA runs NVIDIA-only kernels on AMD, or hides ROCm support that exists.
-- **When:** editing device selection, placement, loading, accelerator checks, or a kernel's `SUPPORTS_*` declarations.
-- **Where:** `gptqmodel/models/_const.py` (`DEVICE`, `normalize_device`), `gptqmodel/utils/importer.py` (selectors), `gptqmodel/utils/torch.py` (`as_torch_device`), `tests/test_rocm_kernel_contracts.py`.
-- **How:** decide with families, place with concrete devices, declare support statically per kernel, validate architecture on every selected GPU.
-
-GPT-QModel's support-family enum is the hardware contract. PyTorch's device
-namespace is the execution API. Keep those concepts separate.
+Choose kernels using explicit hardware families, not Torch's spelling of a
+device. Preserve the concrete ordinal for placement. The family resolver is
+in `gptqmodel/models/_const.py`; use `gptqmodel/utils/importer.py` for
+selection and `gptqmodel/utils/torch.py` at the Torch boundary.
 
 | Context | NVIDIA | AMD ROCm |
 | --- | --- | --- |

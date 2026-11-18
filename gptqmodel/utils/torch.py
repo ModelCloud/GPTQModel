@@ -493,6 +493,44 @@ def _install_module_compile_fallback(module: torch.nn.Module, compiled, fullgrap
     return compiled
 
 
+def dynamo_traced_frames() -> int:
+    """Number of frames ``torch.compile`` has traced in this process.
+
+    Dynamo traces a frame lazily on its first call and traces another one for
+    every new shape or code path, so a change in this count means the compiled
+    call that just returned produced fresh trace state (#5020).
+    """
+
+    dynamo = sys.modules.get("torch._dynamo")
+    if dynamo is None:
+        return 0
+    counters = getattr(getattr(dynamo, "utils", None), "counters", None)
+    if counters is None:
+        return 0
+    try:
+        return int(counters["frames"]["total"])
+    except (KeyError, TypeError, ValueError):
+        return 0
+
+
+def release_compile_trace_garbage() -> int:
+    """Break the reference cycles that a compiled call leaves behind.
+
+    Every frame dynamo traces builds ``VariableTracker`` objects. A graph break
+    leaves an ``UnspecializedNNModuleVariable`` -> ``SideEffectsProxyDict`` ->
+    ``DunderDictVariable`` cycle that keeps the traced module reachable. The
+    cycle is unreachable garbage, but reference counting cannot reclaim it, so a
+    compiled model - with all of its weights and VRAM - survives the last user
+    reference until a full cyclic ``gc.collect()`` (#4937, #5020).
+
+    Only those cycles are collected. Dynamo's compiled-frame cache is left
+    intact, so the next call still takes the compiled path instead of
+    recompiling. Returns the number of unreachable objects reclaimed.
+    """
+
+    return GC.collect()
+
+
 def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="inductor", mode: str = None, fullgraph=False):
     # requires torch >2.8 for proper torch.compile + Python 3.13.3t (freethreading)
     if has_gil_disabled() and not gte_python_3_13_3():

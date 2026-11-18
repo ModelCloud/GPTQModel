@@ -9,21 +9,14 @@ description: End-to-end smoke test for GPT-QModel's lazy checkpoint load (LazyTu
 
 ## At a glance
 
-- **What:** an end-to-end CPU smoke test of the lazy checkpoint path: LazyTurtle load, first-layer materialization during input capture, GPTQ quantize, save, reload, and generate.
-- **Why:** lazy loading keeps layers on `meta` until needed. A wrong `module_path` or a missed materialization only shows up as `meta` tensors, NaNs, or `AttributeError` deep inside quantization.
-- **When:** changing lazy load, input capture, shell materialization, or module-path propagation; or when you need a seconds-long CPU GPTQ fixture.
-- **Where:** `gptqmodel/utils/structure.py` (LazyTurtle), `gptqmodel/looper/stage_inputs_capture.py`, `gptqmodel/looper/module_looper.py`, `gptqmodel/models/base.py`, `tests/test_stage_inputs_capture.py`.
-- **How:** build the tiny Llama fixture below, wrap `shell_module_materialize` to record calls, quantize, then assert on the path, devices, and output.
-
-This is a smoke test, not a regression test. A fix still needs a focused unit
-regression (see `gptqmodel-regression-test-design`); `tests/test_stage_inputs_capture.py`
-is the existing home for `module_path` resolution cases.
-
-## When to use
-
-- A PR touches `gptqmodel/looper/module_looper.py`, `gptqmodel/looper/stage_inputs_capture.py`, `gptqmodel/models/base.py`, or `gptqmodel/utils/structure.py`.
-- You need to verify that `shell_module_materialize` receives a dotted `module_path` such as `model.layers.0` instead of `None` or a class name.
-- You want to confirm that `LazyTurtle.materialize_submodule` loads real parameters/buffers (not `meta`) and that forward/generate runs without `AttributeError` or `NaN`.
+For changes to `gptqmodel/looper/{module_looper,stage_inputs_capture}.py`,
+`gptqmodel/models/base.py` or `gptqmodel/utils/structure.py`, run the snippets
+below in order from the repository root (no committed smoke script). The tiny
+CPU Llama must lazy-load, pass the dotted `model.layers.0` path to
+`shell_module_materialize`, materialize real parameters/buffers rather than
+`meta`, quantize, save, reload and generate without NaNs or `AttributeError`.
+This smoke test does not replace a [focused regression](../gptqmodel-regression-test-design/SKILL.md);
+extend `tests/test_stage_inputs_capture.py` for path-resolution bugs.
 
 ## Environment prerequisites
 
@@ -171,13 +164,6 @@ The assertions above, not log lines, are the pass criteria.
 
 ## Common issues
 
-- `Python.h: No such file or directory` during a JIT build: install the development headers for the running interpreter and rerun.
 - `torchao` extension load warnings (`_C_cutlass_90a.so`, `_C_mxfp8...so`) are non-fatal on CPU.
 - `Calibration dataset size should be more than 256` warnings are expected for tiny smoke fixtures.
 - If `module_path` is `None`, the new resolution logic in `stage_inputs_capture.py` was not reached or `layer_names` was not propagated from `module_looper.py`.
-
-## Regression test reference
-
-- `tests/test_stage_inputs_capture.py` covers the `module_path` resolution paths.
-- For end-to-end validation, run the snippets above in order as one script from
-  the repository root; there is no committed smoke script.
