@@ -1899,15 +1899,46 @@ from .hf_load import (  # noqa: E402,F401
 )
 
 
-def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
-    """Refresh the writable CPU snapshot after Marlin changes its packed layout."""
+def _cpu_offload_writable_storage(weights_map):
+    """Return ``(storage, prefix, disk_index)`` for a CPU-offloaded weights map.
+
+    Accelerate keeps offloaded tensors in a plain dict, in an
+    ``OffloadedWeightsLoader`` (in-memory ``state_dict`` plus an optional
+    disk-backed ``index``), or in a ``PrefixedDataset`` wrapping either. Only an
+    in-memory entry can be rewritten, so the loader's ``state_dict`` is the
+    writable storage and its ``index`` names the entries that are not.
+    """
+
+    from accelerate.utils import OffloadedWeightsLoader, PrefixedDataset
+
+    prefix = ""
+    dataset = weights_map
+    if isinstance(dataset, PrefixedDataset):
+        prefix = dataset.prefix
+        dataset = dataset.dataset
+    if isinstance(dataset, dict):
+        return dataset, prefix, None
+    if isinstance(dataset, OffloadedWeightsLoader):
+        return dataset.state_dict, prefix, dataset.index
+    raise RuntimeError(
+        "CPU-offloaded Marlin requires a writable in-memory weights map."
+    )
+
+
+def _post_init_cpu_offloaded_marlin(module) -> None:
+    """Refresh the writable CPU snapshot after Marlin changes its packed layout.
+
+    Shared by the GPTQ (`MarlinLinear`) and AWQ (`AwqMarlinLinear`) kernels: both
+    repack their checkpoint tensors into the Marlin layout during `post_init`,
+    so the CPU-offload snapshot Accelerate will replay must be rewritten with the
+    packed tensors (#5022).
+    """
     # Resident weights have no Accelerate snapshot to refresh.
     if not module.qweight.is_meta:
         module.post_init()
         return
 
     from accelerate.hooks import AlignDevicesHook, SequentialHook
-    from accelerate.utils import PrefixedDataset
 
     # An offload hook may be wrapped by other hooks, but it must own this layer.
     attached = getattr(module, "_hf_hook", None)
@@ -1921,17 +1952,10 @@ def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
         )
     hook = offload_hooks[0]
     # CPU offload can keep layer entries in a shared dictionary under a prefix.
-    weights_map = hook.weights_map
-    if isinstance(weights_map, PrefixedDataset) and isinstance(
-        weights_map.dataset, dict
-    ):
-        storage, prefix = weights_map.dataset, weights_map.prefix
-    elif isinstance(weights_map, dict):
-        storage, prefix = weights_map, ""
-    else:
-        raise RuntimeError(
-            "CPU-offloaded Marlin requires a writable in-memory weights map."
-        )
+    # Transformers' `dispatch_model` attaches
+    # `PrefixedDataset(OffloadedWeightsLoader(...))`, whose in-memory
+    # `state_dict` is writable (#5022).
+    storage, prefix, disk_index = _cpu_offload_writable_storage(hook.weights_map)
 
     # Save the original offloaded names before post_init changes tensor layouts.
     names = [
@@ -1946,6 +1970,18 @@ def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
     )
     missing = [name for name in names if f"{prefix}{name}" not in storage]
     if missing:
+        disk_backed = [
+            name
+            for name in missing
+            if disk_index is not None and f"{prefix}{name}" in disk_index
+        ]
+        if disk_backed:
+            raise RuntimeError(
+                "CPU-offloaded Marlin requires a writable in-memory weights map: "
+                f"{disk_backed} are disk-backed entries that `post_init` cannot "
+                "rewrite. Load with `offload_state_dict=False`, or let AUTO select "
+                "a kernel that declares `SUPPORTS_CPU_OFFLOAD`."
+            )
         raise RuntimeError(
             f"CPU-offloaded Marlin is missing weights map entries: {missing}."
         )
@@ -2085,12 +2121,14 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
                     "constructing the module."
                 )
 
+    from ..nn_modules.qlinear.marlin_awq import AwqMarlinLinear
+
     # The buffers need to have been initialized first before calling make_q4.
     for _, submodule in model.named_modules():
         if isinstance(submodule, (ExllamaV2Linear, AwqExllamaV2Linear)):
             device = submodule.qweight.device
             submodule.post_init(scratch_space=model.device_tensors[device])
-        elif isinstance(submodule, MarlinLinear):
+        elif isinstance(submodule, (MarlinLinear, AwqMarlinLinear)):
             _post_init_cpu_offloaded_marlin(submodule)
         elif isinstance(submodule, BaseQuantLinear):
             submodule.post_init()
