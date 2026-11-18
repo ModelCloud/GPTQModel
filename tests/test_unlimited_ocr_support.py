@@ -10,13 +10,13 @@ import torch
 from PIL import Image
 from test_unlimited_ocr_local_port import source_fixture, tiny_config
 from torch import nn
-from transformers import UnlimitedOcrConfig
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.models import auto
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.unlimited_ocr import UnlimitedOCRQModel
 from gptqmodel.models.local import LocalModelLoader
+from gptqmodel.models.ports.native.unlimited_ocr.configuration_unlimited_ocr import UnlimitedOcrConfig
 from gptqmodel.utils.model import MODALITY
 
 
