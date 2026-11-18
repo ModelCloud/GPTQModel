@@ -571,6 +571,41 @@ def _ensure_target_storage_on_device_(param: torch.nn.Parameter, device: torch.d
     return param
 
 
+def _publish_checkpoint_param_(
+    *,
+    target_submodule: torch.nn.Module,
+    rel_name: str,
+    target_param: torch.nn.Parameter,
+    source: torch.Tensor,
+    tensor_device: torch.device,
+    non_blocking: bool,
+) -> torch.nn.Parameter:
+    """Fill a materialized parameter before publishing it on the module.
+
+    A lazy shell owns meta parameters. Installing freshly allocated storage on
+    the module and copying the checkpoint values in a second step leaves
+    ``torch.empty`` memory behind when an interrupt lands between the two.
+    Run-exit recovery uses ``is_meta`` as its only "not loaded" test, so that
+    module is then treated as materialized and the in-session model forwards
+    with uninitialized weights (#5088).
+
+    Build and fill the replacement first; only then swap it onto the module.
+    An interrupt during the copy leaves the old meta parameter in place, which
+    the existing recovery already re-materializes.
+    """
+
+    replacement = _ensure_target_storage_on_device_(target_param, tensor_device)
+    if source.dtype != replacement.dtype:
+        source = source.to(dtype=replacement.dtype)
+    replacement.detach().copy_(
+        source, non_blocking=(non_blocking and source.is_pinned())
+    )
+    if replacement is not target_param:
+        t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
+        setattr(t_parent, leaf, replacement)
+    return replacement
+
+
 class _SplitDimWithInterleave(int):
     """Integer split dimension carrying a preceding HF Interleave operation.
 
@@ -3958,15 +3993,14 @@ class LazyTurtle:
                                     source_shape=tuple(tensor.shape),
                                 )
                             )
-                        target_param_new = _ensure_target_storage_on_device_(target_param, tensor_device)
-                        if target_param_new is not target_param:
-                            t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
-                            setattr(t_parent, leaf, target_param_new)
-                            target_param = target_param_new
-                        source = tensor.detach()
-                        if source.dtype != target_param.dtype:
-                            source = source.to(dtype=target_param.dtype)
-                        target_param.detach().copy_(source, non_blocking=(non_blocking and source.is_pinned()))
+                        _publish_checkpoint_param_(
+                            target_submodule=target_submodule,
+                            rel_name=rel_name,
+                            target_param=target_param,
+                            source=tensor.detach(),
+                            tensor_device=tensor_device,
+                            non_blocking=non_blocking,
+                        )
                     else:
                         target_buffer = t_bufs.get(rel_name)
                         t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
@@ -4072,15 +4106,14 @@ class LazyTurtle:
                                         split_index=split_index,
                                         split_dim=split_dim,
                                     ))
-                                target_param_new = _ensure_target_storage_on_device_(target_param, tensor_device)
-                                if target_param_new is not target_param:
-                                    t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
-                                    setattr(t_parent, leaf, target_param_new)
-                                    target_param = target_param_new
-                                source = tensor.detach()
-                                if source.dtype != target_param.dtype:
-                                    source = source.to(dtype=target_param.dtype)
-                                target_param.detach().copy_(source, non_blocking=(non_blocking and source.is_pinned()))
+                                _publish_checkpoint_param_(
+                                    target_submodule=target_submodule,
+                                    rel_name=rel_name,
+                                    target_param=target_param,
+                                    source=tensor.detach(),
+                                    tensor_device=tensor_device,
+                                    non_blocking=non_blocking,
+                                )
                             else:
                                 target_buffer = t_bufs.get(rel_name)
                                 t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
