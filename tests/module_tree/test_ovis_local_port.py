@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,8 +16,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.ovis.configuration_ovis import OvisConfig
 from gptqmodel.models.ports.ovis.modeling_ovis import Ovis
-from tests.port_assets import read_port_json
-from tests.test_ovis_local_port import LAYOUTS, PORT, tiny_config
+from tests.test_ovis_local_port import LAYOUTS, tiny_config
 
 
 EXPECTED_PLAN = {
@@ -25,7 +25,7 @@ EXPECTED_PLAN = {
                ["self_attn.o_proj"], ["post_attention_layernorm:!"], ["mlp.gate_proj", "mlp.up_proj"], ["mlp.down_proj"]],
 }
 LINEARS = {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"}
-INVENTORY = read_port_json(PORT / "release_inventory.json")
+INVENTORY = json.loads((Path(__file__).resolve().parents[1] / "fixtures/ports/ovis/release_inventory.json").read_text())
 
 
 def test_exact_native_ovis_absent_and_alias_registry_distinct_from_ovis2():
@@ -44,12 +44,15 @@ def test_complete_pinned_release_ownership_keys_and_available_header_shapes(rele
     with torch.device("meta"):
         model = Ovis(config)
     state = model.state_dict()
-    if config.tie_word_embeddings and "llm.lm_head.weight" not in entry["keys"]:
+    # Digests of the sorted released safetensors keys (and header shapes where pinned).
+    if config.tie_word_embeddings and len(state) != entry["tensors"]:
         assert model.llm.lm_head.weight is model.llm.model.embed_tokens.weight
         state.pop("llm.lm_head.weight")
-    assert set(state) == set(entry["keys"])
-    if entry["shapes"]:
-        assert {name: list(value.shape) for name, value in state.items()} == entry["shapes"]
+    assert len(state) == entry["tensors"]
+    assert hashlib.sha256("\n".join(sorted(state)).encode()).hexdigest() == entry["keys_sha256"]
+    if entry["shapes_sha256"]:
+        rows = sorted([name, list(value.shape)] for name, value in state.items())
+        assert hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest() == entry["shapes_sha256"]
     _convert_model_with_defuser(OvisQModel, model, cleanup_original=False)
     tree = OvisQModel._resolve_effective_module_tree(model, SimpleNamespace(method="gptq"))
     plan = ModulePlan.from_tree(tree)
