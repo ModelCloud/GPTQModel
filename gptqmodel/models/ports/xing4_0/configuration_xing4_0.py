@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 China Telecom AI Technology Co., Ltd.
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# Adapted from the pinned XingChen-AGI release; see README.md and NOTICE.
+# Adapted from the pinned XingChen-AGI release; see NOTICE.
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 

@@ -1,6 +1,0 @@
-{
-  "repository": "XingChen-AGI/Xing4.0-29B-A4B-FP8",
-  "revision": "8942dcf08bcf11895e3424f1e4312a9bea26a668",
-  "config_sha256": "bc37676f1caeea3d56139fea76bf0b06877b529bd8cbea07fc2fed0e3be04222",
-  "scope": "Metadata-only layout alias check. Native compressed FP8 payload is unqualified."
-}

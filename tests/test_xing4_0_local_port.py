@@ -173,7 +173,7 @@ def test_independent_full_decoder_equations_and_cache(qlora, bias, interleave, d
 def write_assets(path):
     path.mkdir(parents=True, exist_ok=True)
     for name in ["tokenizer_config.json", "chat_template.jinja", "generation_config.json"]:
-        shutil.copyfile(ASSETS / name, path / name)
+        (path / name).write_bytes(read_port_asset(ASSETS / name))
     (path / "tokenizer.model").write_bytes(read_port_asset(ASSETS / "tokenizer.model"))
 
 
@@ -218,7 +218,9 @@ def test_public_hostile_maps_real_tokenizer_generation_and_two_dense_cycles(tmp_
         assert loaded.model.generation_config.top_p == 0.95
         assert loaded.model.generation_config.eos_token_id == 2
         with torch.no_grad():
-            torch.testing.assert_close(loaded.model(ids, use_cache=False).logits, logits, rtol=0, atol=0)
+            # Weights are bit-identical; safetensors-mapped storage may select a
+            # different CPU GEMM path, which moves FP32 logits by about one ulp.
+            torch.testing.assert_close(loaded.model(ids, use_cache=False).logits, logits, rtol=1e-6, atol=1e-7)
         assert loaded.tokenizer.tokenizer.encode("Hello 世界", add_special_tokens=False) == [29864, 34912]
         destination = tmp_path / f"cycle-{index}"
         loaded.model.save_pretrained(destination, safe_serialization=True)
@@ -423,7 +425,7 @@ def test_multihead_multishared_hyperconnection_variants_and_left_padded_cache(he
 
 
 def test_release_yarn_rotary_at_large_positions_independent_scalar_equations():
-    rope = json.loads((ASSETS / "config.json").read_text())["rope_scaling"]
+    rope = json.loads(read_port_asset(ASSETS / "config.json"))["rope_scaling"]
     model = tiny_model(qk_rope_head_dim=64, rope_scaling=rope, max_position_embeddings=262144)
     positions = torch.tensor([[0, 4095, 4096, 65535, 262143]])
     cos, sin = model.model.rotary_emb(torch.zeros(1), positions)
@@ -476,13 +478,13 @@ def test_generation_greedy_and_beam_match_independent_full_prefix_oracle():
         assert torch.equal(model.generate(prompt, generation_config=policy), greedy[:, :4])
 
 
-def test_fp8_release_is_same_architecture_metadata_not_a_second_remote_alias():
-    import hashlib
-
-    raw = (ASSETS / "fp8_config.json").read_bytes()
-    manifest = json.loads((ASSETS / "fp8_source_manifest.json").read_text())
-    assert hashlib.sha256(raw).hexdigest() == manifest["config_sha256"]
-    config = Xing4_0Config.from_dict(json.loads(raw))
+def test_fp8_release_quantization_metadata_keeps_the_dense_architecture():
+    # XingChen-AGI/Xing4.0-29B-A4B-FP8@8942dcf differs from the BF16 config only
+    # by this quantization_config (modules_to_not_convert elided).
+    payload = json.loads(read_port_asset(ASSETS / "config.json"))
+    payload["quantization_config"] = {"activation_scheme": "dynamic", "fmt": "e4m3", "quant_method": "fp8",
+                                      "weight_block_size": [128, 128]}
+    config = Xing4_0Config.from_dict(payload)
     assert config.model_type == "xing4_0"
     assert config.quantization_config["quant_method"] == "fp8"
     assert config.rope_parameters["rope_type"] == "yarn"
@@ -492,6 +494,28 @@ def test_fp8_release_is_same_architecture_metadata_not_a_second_remote_alias():
     assert type(model) is Xing4_0ForCausalLM
     assert {key: list(value.shape) for key, value in model.state_dict().items()} == {
         key: value["shape"] for key, value in dense.items() if not key.startswith("model.layers.40.")}
+
+
+@pytest.mark.parametrize("groups,topk_group", [(1, 1), (2, 1), (2, 2), (4, 2)])
+def test_router_matches_native_group_limited_noaux_tc_equations(groups, topk_group):
+    config = tiny_config(n_routed_experts=8, num_experts_per_tok=2, n_group=groups, topk_group=topk_group,
+                         routed_scaling_factor=2.5)
+    torch.manual_seed(31)
+    router = Xing4_0ForCausalLM(config).model.layers[1].mlp.gate
+    with torch.no_grad():
+        router.weight.normal_()
+        router.e_score_correction_bias.copy_(torch.linspace(-0.3, 0.2, 8))
+    x = torch.randn(11, 16)
+    _, weights, indices = router(x)
+    scores = (x @ router.weight.T).sigmoid()
+    biased = scores + router.e_score_correction_bias
+    group_score = biased.view(11, groups, -1).topk(2, dim=-1).values.sum(-1)
+    allowed = torch.zeros_like(group_score).scatter_(1, group_score.topk(topk_group, dim=-1).indices, 1)
+    biased = biased.masked_fill(~allowed.repeat_interleave(8 // groups, dim=1).bool(), float("-inf"))
+    expected = biased.topk(2, dim=-1).indices
+    assert torch.equal(indices.sort(-1).values, expected.sort(-1).values)
+    chosen = scores.gather(1, indices)
+    torch.testing.assert_close(weights, chosen / chosen.sum(-1, keepdim=True) * 2.5)
 
 
 def test_no_native_mapping_and_public_actual_release_vocabulary_text_forward(tmp_path):
