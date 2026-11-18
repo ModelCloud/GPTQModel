@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Package-owned GRIN-MoE; see PROVENANCE.md for source and compatibility limits."""
+"""Package-owned GRIN-MoE decoder (PhiMoE-style SparseMixer routing with LayerNorm)."""
 
 import math
 from typing import Optional
