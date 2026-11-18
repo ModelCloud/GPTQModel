@@ -717,7 +717,7 @@ def test_vision_uses_tf5_attention_interface_and_config_return_dict(monkeypatch)
     model = build(*CASES[0], implementation="sdpa")
     vit = model.visual_tokenizer.vit
     assert all(isinstance(layer, GradientCheckpointingLayer) for layer in vit.vision_model.encoder.layers)
-    # `use_return_dict` is deprecated in TF5; the wrapper must read `return_dict`.
+    # `use_return_dict` is deprecated in TF5; tuple conversion is owned by `can_return_tuple`.
     monkeypatch.setattr(PretrainedConfig, "use_return_dict", property(lambda self: pytest.fail("use_return_dict")))
     calls = []
     sdpa = ALL_ATTENTION_FUNCTIONS["sdpa"]
@@ -725,6 +725,7 @@ def test_vision_uses_tf5_attention_interface_and_config_return_dict(monkeypatch)
     grids = torch.tensor([[1, 4, 4], [1, 2, 4]])
     output = vit(torch.randn(24, 12), grids)
     assert output.last_hidden_state.shape == (24, 16)
+    assert vit(torch.randn(24, 12), grids, return_dict=False)[0].shape == (24, 16)
     # One call per packed window/image (window_size=8 -> 2x2 merged patches per window).
     assert calls and all(shape[0] == 1 and shape[1] == 2 for shape in calls)
 

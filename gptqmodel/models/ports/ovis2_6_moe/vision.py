@@ -18,6 +18,7 @@ from transformers.modeling_outputs import BaseModelOutputWithNoAttention
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import apply_rotary_pos_emb_vision
 from transformers.models.siglip2.modeling_siglip2 import Siglip2MLP, eager_attention_forward
+from transformers.utils import can_return_tuple
 
 from .configuration_ovis2_6 import Siglip2NavitConfig
 
@@ -399,18 +400,11 @@ class Siglip2VisionTransformer(nn.Module):
         self.encoder = Siglip2Encoder(config)
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
-    def forward(self, pixel_values, grid_thws, output_hidden_states=True, return_dict=True):
-
+    def forward(self, pixel_values, grid_thws, output_hidden_states=True) -> BaseModelOutputWithNoAttention:
         hidden_states = self.embeddings(pixel_values, grid_thws)
 
         last_hidden_state, hidden_states = self.encoder(hidden_states, grid_thws, output_hidden_states)
         last_hidden_state = self.post_layernorm(last_hidden_state)
-
-        if not return_dict:
-            output = (last_hidden_state,)
-            output += (hidden_states,) if output_hidden_states else ()
-            return output
-
         return BaseModelOutputWithNoAttention(last_hidden_state=last_hidden_state, hidden_states=hidden_states)
 
 
@@ -448,17 +442,16 @@ class Siglip2NavitModel(Siglip2PreTrainedModel):
     def get_input_embeddings(self) -> nn.Module:
         return self.vision_model.embeddings.patch_embedding
 
-    def forward(self, pixel_values, grid_thws, output_hidden_states=None, return_dict=None):
+    @can_return_tuple
+    def forward(self, pixel_values, grid_thws, output_hidden_states=None, **kwargs) -> BaseModelOutputWithNoAttention:
+        # The packed encoder reorders windows back to raster order per layer, so hidden states are collected by the
+        # encoder itself rather than by output-capture hooks.
         if output_hidden_states is None:
             output_hidden_states = self.config.output_hidden_states
-        if return_dict is None:
-            return_dict = self.config.return_dict
-
         return self.vision_model(
             pixel_values=pixel_values,
             grid_thws=grid_thws,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
         )
 
 
@@ -491,7 +484,7 @@ class VisualTokenizer(torch.nn.Module):
         )
 
     def _encode(self, pixel_values, grid_thws):
-        output = self.vit(pixel_values, grid_thws, output_hidden_states=True, return_dict=True)
+        output = self.vit(pixel_values, grid_thws, output_hidden_states=True)
         features = output.hidden_states[-1]
         seq_len, _ = features.shape
         features = features.reshape(seq_len // (self.vit.config.hidden_stride**2), -1)
