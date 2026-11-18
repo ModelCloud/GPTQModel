@@ -1840,7 +1840,7 @@ __global__ void Marlin(
             // Same row offsets as the initial s_gl_rd / zp_gl_rd above.
             s_gl_rd += s_gl_stride *
                        ((thread_k_blocks * slice_row) / group_blocks) /
-                       (w_type == vllm::kFE2M1f ? 2 : 1);
+                       (is_8bit_scale ? 2 : 1);
             zp_gl_rd +=
                 zp_gl_stride * ((thread_k_blocks * slice_row) / group_blocks);
           }
