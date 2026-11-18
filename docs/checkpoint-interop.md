@@ -337,12 +337,12 @@ and float32. Only a checkpoint that declares none of them falls back to
 bfloat16. An fp16 GPTQ checkpoint therefore dequantizes to `dtype=float16` with F16
 tensors instead of being rewritten as bf16 (#4455).
 
-### The `GPTQModel.export()` API was removed
+### The `GPTQModel.export()` and MLX conversion APIs were removed
 
 `GPTQModel.export(model_id_or_path, target_path, format)` no longer exists. It
 was a static convenience wrapper that guessed a runtime backend from
 `quantization_config` and then either called `dequantize_model()` (`format="hf"`)
-or `GPTQModel.load()` + `convert_gptq_to_mlx_weights(stock_compatible=True)`
+or `GPTQModel.load()` + the MLX backend's internal conversion
 (`format="mlx"`). Both destinations are checkpoint-level operations that own
 their own arguments, so the wrapper only duplicated dispatch and could select a
 decoder that does not understand the stored layout.
@@ -350,7 +350,7 @@ decoder that does not understand the stored layout.
 | Need | Replacement |
 | --- | --- |
 | Dense Transformers checkpoint | `gptqmodel.utils.model_dequant.dequantize_model(source, target, target_dtype=None, device=None, resume=False, trust_remote_code=False)` |
-| MLX-LM weights and config | `GPTQModel.load(source, backend=...)`, then `gptqmodel.utils.mlx.convert_gptq_to_mlx_weights(path, model, quant_config, lm_head, stock_compatible=True)`, then `mlx_lm.utils.save_model` / `save_config` |
+| MLX-LM weights and config | No public replacement. MLX inference is `GPTQModel.load(source, backend=BACKEND.MLX)`; the conversion is an internal step of that backend (`gptqmodel.utils.mlx._convert_gptq_to_mlx_weights`). Producing stock MLX-LM weights for `mlx_lm.utils.save_model` is not a supported public operation. |
 | Hugging Face repo id instead of a local path | `gptqmodel.utils.hub.snapshot_download(repo_id=...)` first |
 
 ```mermaid
@@ -361,7 +361,7 @@ flowchart TD
         C --> D["dequantize_model()"]
         B -- mlx --> E["guess backend from quant_method"]
         E --> F["GPTQModel.load()"]
-        F --> G["convert_gptq_to_mlx_weights<br/>stock_compatible=True"]
+        F --> G["convert_gptq_to_mlx_weights<br/>stock_compatible=True (removed)"]
         B -- other --> X["ValueError"]
     end
     style X fill:#f8d7da,stroke:#b02a37
@@ -373,9 +373,9 @@ flowchart TD
     Q -- "dense Transformers" --> R["snapshot_download for repo ids"]
     R --> T["dequantize_model(source, target)"]
     T --> U["dense safetensors + config<br/>without quantization_config"]
-    Q -- "MLX-LM" --> V["GPTQModel.load(source, backend=...)"]
-    V --> W["convert_gptq_to_mlx_weights<br/>stock_compatible=True"]
-    W --> Y["mlx_lm.utils.save_model / save_config"]
+    Q -- "MLX-LM" --> V["GPTQModel.load(source, backend=BACKEND.MLX)"]
+    V --> W["internal conversion<br/>(no public entry point)"]
+    W --> Y["MLX model, ready for generate()"]
     style U fill:#d9f2d9,stroke:#2e7d32
     style Y fill:#d9f2d9,stroke:#2e7d32
 ```

@@ -148,7 +148,7 @@ def test_nf12_mlx_converts_a_llama_layer_end_to_end(tmp_path):
 
     from transformers import LlamaConfig, LlamaForCausalLM
 
-    from gptqmodel.utils.mlx import convert_gptq_to_mlx_weights
+    from gptqmodel.utils.mlx import _convert_gptq_to_mlx_weights
 
     torch.manual_seed(3)
     config = LlamaConfig(
@@ -162,7 +162,7 @@ def test_nf12_mlx_converts_a_llama_layer_end_to_end(tmp_path):
         model.model.layers[0].self_attn.q_proj = source
     (tmp_path / "config.json").write_text(json.dumps(model.config.to_dict()))
 
-    mlx_model, mlx_config = convert_gptq_to_mlx_weights(
+    mlx_model, mlx_config = _convert_gptq_to_mlx_weights(
         str(tmp_path), model,
         {"bits": 12, "group_size": -1, "desc_act": False, "sym": True,
          "format": "nf12", "method": "nf12", "dynamic": None},
