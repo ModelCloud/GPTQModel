@@ -11,6 +11,7 @@ coverage guard rejects the whole group, and every expert gate/up falls back to
 plain quantization.
 """
 
+import inspect
 import logging
 import os
 from pathlib import Path
@@ -19,9 +20,15 @@ from pathlib import Path
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 import pytest
+import torch
+from torch import nn
 
 from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
-from gptqmodel.looper.awq_processor import AWQProcessor, _AWQScaleGroupError
+from gptqmodel.looper.awq_processor import (
+    AWQProcessor,
+    _AWQScaleGroupError,
+    _forward_accepts_var_kwargs,
+)
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import ExpertsRoutingBypass, MoEConfig
 from tests.test_tiny_moe_quant_smoke import (
@@ -31,6 +38,133 @@ from tests.test_tiny_moe_quant_smoke import (
 
 
 pytestmark = [pytest.mark.cpu, pytest.mark.slow]
+
+
+class _BypassExpert(nn.Module):
+    def __init__(self, hidden_size: int = 8, intermediate_size: int = 16):
+        super().__init__()
+        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+
+    def forward(self, x):
+        return self.down_proj(
+            nn.functional.silu(self.gate_proj(x)) * self.up_proj(x)
+        )
+
+
+class _StandardMoeBlock(nn.Module):
+    """A standard MoE block whose forward accepts only ``hidden_states``.
+
+    This is the contract ``OlmoeSparseMoeBlock`` / ``LinearQwen3MoeSparseMoeBlock``
+    have, and the one AWQ's instance-level all-experts wrapper must not widen.
+    """
+
+    def __init__(self, hidden_size: int = 8, num_experts: int = 2):
+        super().__init__()
+        self.gate = nn.Linear(hidden_size, num_experts, bias=False)
+        self.experts = nn.ModuleList(
+            [_BypassExpert(hidden_size) for _ in range(num_experts)]
+        )
+        self.calls = 0
+        self.last_hidden_states = None
+
+    def forward(self, hidden_states):
+        self.calls += 1
+        self.last_hidden_states = hidden_states
+        probs = torch.softmax(self.gate(hidden_states), dim=-1)
+        routed = sum(
+            expert(hidden_states) * probs[..., index : index + 1]
+            for index, expert in enumerate(self.experts)
+        )
+        return routed
+
+
+class _BypassHooks:
+    gate_proj_name = "gate_proj"
+    up_proj_name = "up_proj"
+    down_proj_name = "down_proj"
+
+    @staticmethod
+    def apply_expert_activation(*, experts_module, expert, gate_out, up_out):
+        return nn.functional.silu(gate_out) * up_out
+
+
+def _bypass_processor():
+    processor = AWQProcessor.__new__(AWQProcessor)
+    processor.gptq_model = type("_Model", (), {})()
+    processor._get_root_rotary = lambda: None
+    return processor
+
+
+def _bypass_targets(block: _StandardMoeBlock):
+    targets = []
+    for index, expert in enumerate(block.experts):
+        for name in ("gate_proj", "up_proj", "down_proj"):
+            targets.append((f"experts.{index}.{name}", getattr(expert, name)))
+    return targets
+
+
+def test_bypass_wrapper_keeps_the_block_signature_and_filters_kwargs():
+    """#5095: the replay wrapper must not widen the original block's contract.
+
+    The wrapper has to stay callable with the decoder layer's kwargs, but the
+    block it replaces only declares ``hidden_states``. ``functools.wraps``
+    keeps that signature visible, and the wrapper forwards only accepted keys.
+    """
+
+    processor = _bypass_processor()
+    block = _StandardMoeBlock()
+    targets = _bypass_targets(block)
+    x = torch.randn(2, 5, 8)
+
+    with processor._all_experts_replay_forward(
+        _BypassHooks(), block, block.experts, targets
+    ):
+        # `inspect.signature` follows `__wrapped__`; the replay machinery must
+        # not mistake this wrapper for a real `**kwargs` block.
+        assert list(inspect.signature(block.forward).parameters) == ["hidden_states"]
+        assert not _forward_accepts_var_kwargs(block)
+
+        output = block(
+            x,
+            position_ids=torch.arange(5).unsqueeze(0),
+            attention_mask=torch.ones(1, 5),
+            position_embeddings=(torch.zeros(1, 5, 4), torch.zeros(1, 5, 4)),
+        )
+
+    assert block.calls == 1
+    assert output.shape == x.shape
+    # The all-experts replay must keep the block input's 3-D geometry; the
+    # wrapper flattens only its private expert calibration copy.
+    assert block.last_hidden_states.shape == x.shape
+
+
+def test_bypass_wrapper_is_not_a_var_keyword_block_for_kwarg_sanitizing():
+    """#5095: sanitizing and position promotion must see the real signature."""
+
+    processor = _bypass_processor()
+    block = _StandardMoeBlock()
+    targets = _bypass_targets(block)
+    layer_kwargs = {
+        "attention_mask": torch.ones(1, 6),
+        "position_ids": torch.arange(6).unsqueeze(0),
+    }
+
+    with processor._all_experts_replay_forward(
+        _BypassHooks(), block, block.experts, targets
+    ):
+        sanitized = processor._sanitize_kwargs(layer_kwargs, block)
+        prepared_x, prepared_kwargs = processor._prepare_module_forward(
+            torch.randn(6, 8), block, dict(sanitized)
+        )
+
+    assert sanitized == {}
+    assert prepared_kwargs == {}
+    # A 2-D replay stays 2-D: `position_ids` was never part of this block's
+    # contract, so promoting the activation is not required (and would crash
+    # the original forward).
+    assert prepared_x.shape == (6, 8)
 
 
 def test_awq_bypass_replay_scales_every_expert(tmp_path: Path, monkeypatch, caplog):
