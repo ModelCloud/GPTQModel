@@ -25,10 +25,7 @@ from gptqmodel.models.local import LocalModelLoader
 PORTS = Path(__file__).resolve().parents[1] / "gptqmodel" / "models" / "ports"
 
 PENDING_NATIVE_DEFINITIONS = frozenset({
-    "afmoe", "apertus", "cohere_compass", "deepseek_v32", "dots1", "exaone4_5", "gemma2", "gemma4_unified",
-    "gemma4_unified_text", "glm5_next", "gpt2", "gpt_oss", "granitemoe_swa", "hunyuan_v1_moe", "internvl",
-    "lfm2_moe", "longcat_flash", "minimax_m2", "mixtral", "mllama", "mllama_text_model", "olmo3", "ovis2",
-    "qwen2_audio", "qwen3_omni_moe", "voxtral",
+   
 })
 
 PENDING_MODEL_IMPORT_PORTS = frozenset({
