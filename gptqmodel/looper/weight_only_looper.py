@@ -986,6 +986,19 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
         try:
             result = self._loop_impl(**kwargs)
+            # The success tail turns the lazy offloaded shell back into a
+            # usable in-session model, and every step can fail (a Ctrl-C, an
+            # OOM, an I/O error). Keep it inside the guard so a failure here
+            # runs the same best-effort recovery instead of leaving
+            # `embed_tokens`/`norm`/`rotary_emb` on meta (#5023).
+            self._restore_offloaded_base_modules(strict=True)
+            self._restore_disk_offloaded_modules()
+            self._materialize_meta_base_modules(strict=True)
+            self._materialize_remaining_meta_modules()
+            # Unquantized layers keep the parameters `pre_quantize` materialized
+            # under inference mode, and `post_quantize`'s `param.data =` move
+            # leaves them without a version counter (issue #4572).
+            ensure_version_counters(self.gptq_model.model)
         except BaseException:
             # A failed run must not leave the base modules stranded on meta.
             try:
@@ -1037,14 +1050,6 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 else:
                     release_private_offload_root(self.gptq_model)
             raise
-        self._restore_offloaded_base_modules(strict=True)
-        self._restore_disk_offloaded_modules()
-        self._materialize_meta_base_modules(strict=True)
-        self._materialize_remaining_meta_modules()
-        # Unquantized layers keep the parameters `pre_quantize` materialized
-        # under inference mode, and `post_quantize`'s `param.data =` move
-        # leaves them without a version counter (issue #4572).
-        ensure_version_counters(self.gptq_model.model)
         return result
 
     def _loop_impl(self, **kwargs):
