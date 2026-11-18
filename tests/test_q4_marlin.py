@@ -10,6 +10,7 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
+import pytest  # noqa: E402
 import torch  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
@@ -17,6 +18,12 @@ from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear  # noqa: E402
+from tests.accelerator_gates import requires_nvidia_cuda  # noqa: E402
+
+
+pytestmark = pytest.mark.skipif(
+    not requires_nvidia_cuda(), reason="Marlin has no ROCm kernel"
+)
 
 
 class TestQ4Marlin(ModelTest):

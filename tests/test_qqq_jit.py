@@ -5,6 +5,7 @@ import pytest
 import torch
 
 import gptqmodel.nn_modules.qlinear.qqq as qqq_module
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 def _build_module() -> qqq_module.QQQLinear:
@@ -147,6 +148,9 @@ def test_qqq_torch_cpu_cache_invalidates_on_mutation_load_and_move():
     assert output.shape == (3, module.out_features)
 
 
+@pytest.mark.skipif(
+    not requires_nvidia_cuda(), reason="QQQ (BACKEND.QQQ) has no ROCm kernel"
+)
 def test_qqq_forward_uses_jit_kernel(monkeypatch):
     module = _build_module()
     calls = {}
@@ -194,6 +198,9 @@ def test_qqq_forward_uses_jit_kernel(monkeypatch):
     assert torch.allclose(out, torch.full_like(out, 3.0))
 
 
+@pytest.mark.skipif(
+    not requires_nvidia_cuda(), reason="QQQ (BACKEND.QQQ) has no ROCm kernel"
+)
 def test_qqq_forward_raises_runtime_error_when_jit_ops_missing(monkeypatch):
     module = _build_module()
 
@@ -239,7 +246,7 @@ def _build_grouped_parity_modules(
 
 
 @pytest.mark.cuda
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not requires_nvidia_cuda(), reason="CUDA required")
 def test_qqq_grouped_cuda_matches_torch_rounding_and_saturation():
     if torch.cuda.get_device_capability()[0] < 8:
         pytest.skip("QQQ CUDA requires compute capability >= 8.0")
@@ -272,7 +279,7 @@ def test_qqq_grouped_cuda_matches_torch_rounding_and_saturation():
 @pytest.mark.cuda
 @pytest.mark.parametrize("tokens", [1, 17])
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not requires_nvidia_cuda(), reason="CUDA required")
 def test_qqq_grouped_cuda_matches_torch_for_regular_values(tokens, dtype):
     if torch.cuda.get_device_capability()[0] < 8:
         pytest.skip("QQQ CUDA requires compute capability >= 8.0")
@@ -312,7 +319,7 @@ def test_qqq_grouped_cuda_matches_torch_for_regular_values(tokens, dtype):
 
 
 @pytest.mark.cuda
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not requires_nvidia_cuda(), reason="CUDA required")
 def test_qqq_grouped_cuda_rejects_bfloat16():
     """QQQLinear is FP16-only; BF16 callers must use BACKEND.QQQ_TORCH."""
 
@@ -327,7 +334,7 @@ def test_qqq_grouped_cuda_rejects_bfloat16():
 
 
 @pytest.mark.cuda
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not requires_nvidia_cuda(), reason="CUDA required")
 def test_qqq_cuda_kernel_uses_tensor_device_context():
     """A module on a non-current device must run in that device's context.
 
@@ -443,7 +450,7 @@ def _relative_error(output: torch.Tensor, expected: torch.Tensor) -> float:
 @pytest.mark.cuda
 @pytest.mark.parametrize("group_size", [128, -1])
 @pytest.mark.parametrize("tokens", [17, 32, 64, 128])
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not requires_nvidia_cuda(), reason="CUDA required")
 def test_qqq_large_batch_cuda_matches_torch_on_every_repeat(group_size, tokens):
     """`prob_m > 16` selects the 64x256 tile; every repeat must be exact.
 
@@ -477,7 +484,7 @@ def test_qqq_large_batch_cuda_matches_torch_on_every_repeat(group_size, tokens):
 
 
 @pytest.mark.cuda
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not requires_nvidia_cuda(), reason="CUDA required")
 def test_qqq_gemm_64x256_tile_matches_torch_on_every_repeat():
     """Pin the exact tile that `prob_m > 16` selects.
 

@@ -136,6 +136,20 @@ def test_nvidia_build_passes_the_family_gate(monkeypatch):
     assert accelerator_gates.cuda_only_skip_reason("Swordfish") is None
 
 
+def test_requires_nvidia_cuda_reads_both_the_build_and_the_device(monkeypatch):
+    """The shared CUDA-only predicate must not accept HIP's CUDA namespace."""
+    _set_family(monkeypatch, None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert accelerator_gates.requires_nvidia_cuda() is True
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert accelerator_gates.requires_nvidia_cuda() is False
+
+    _set_family(monkeypatch, "7.16.26385")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert accelerator_gates.requires_nvidia_cuda() is False
+
+
 def _fake_devices(monkeypatch, capabilities, supported):
     """Install ``capabilities`` per ordinal and a matching support probe."""
     import gptqmodel.utils.swordfish as swordfish

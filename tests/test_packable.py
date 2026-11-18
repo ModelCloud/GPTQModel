@@ -19,6 +19,7 @@ from gptqmodel.nn_modules.qlinear.torch import TorchLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear  # noqa: E402
 from gptqmodel.utils.model import convert_gptq_v2_to_v1_format, find_modules
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 log = LogBar.shared()
@@ -57,6 +58,8 @@ class TestPackable(unittest.TestCase):
         ]
     )
     def test_post_init(self, backend: BACKEND, equal: Dict[str, bool]):
+        if backend in (BACKEND.EXLLAMA_V2, BACKEND.TRITON, BACKEND.MARLIN) and not requires_nvidia_cuda():
+            self.skipTest(f"{backend.name} is CUDA-only")
         model = GPTQModel.load(self.model_id, backend=backend, device="cpu" if backend == BACKEND.TORCH_FUSED else "cuda")
         model = convert_gptq_v2_to_v1_format(model, model.quantize_config, self.QLINEAR_DICT[backend])
 

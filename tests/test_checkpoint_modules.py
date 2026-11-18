@@ -19,6 +19,7 @@ from gptqmodel.quantization.config import (
     QQQConfig,
     QuantizeConfig,
 )
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 def assert_schema_roundtrip(module, config):
@@ -268,6 +269,9 @@ def test_gguf_bits_schema(bits):
     assert restored.bits == module.bits
 
 
+@pytest.mark.skipif(
+    not requires_nvidia_cuda(), reason="QQQ (BACKEND.QQQ) has no ROCm kernel"
+)
 def test_qqq_optional_group_scales_schema():
     from gptqmodel.nn_modules.qlinear.qqq import QQQLinear
 

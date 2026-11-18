@@ -33,12 +33,15 @@ from gptqmodel.quantization.config import (  # noqa: E402  # noqa: E402
     HessianConfig,
     VramStrategy,
 )
+from tests.accelerator_gates import requires_nvidia_cuda  # noqa: E402
 
 
 class TestSerialization(unittest.TestCase):
     MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
     def test_marlin_local_serialization(self):
+        if not requires_nvidia_cuda():
+            self.skipTest("Marlin has no ROCm kernel")
         model = GPTQModel.load(self.MODEL_ID, device="cuda:0", backend=BACKEND.MARLIN)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -49,6 +52,8 @@ class TestSerialization(unittest.TestCase):
             model = GPTQModel.load(tmpdir, device="cuda:0", backend=BACKEND.MARLIN)
 
     def test_save_keeps_live_model_inference(self):
+        if not requires_nvidia_cuda():
+            self.skipTest("Marlin has no ROCm kernel")
         model = GPTQModel.load(self.MODEL_ID, device="cuda:0", backend=BACKEND.MARLIN)
         input_ids = torch.tensor([[1, 2, 3, 4, 5]], device="cuda:0")
 
@@ -67,6 +72,8 @@ class TestSerialization(unittest.TestCase):
         self.assertLess(relative_error, 1e-3)
 
     def test_gptq_v1_to_v2_runtime_convert(self):
+        if not requires_nvidia_cuda():
+            self.skipTest("ExLlamaV2 GPTQ is CUDA-only")
         model = GPTQModel.load(self.MODEL_ID, device="cuda:0", backend=BACKEND.EXLLAMA_V2)
         self.assertEqual(model.quantize_config.runtime_format, FORMAT.GPTQ_V2)
 
