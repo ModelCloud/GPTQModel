@@ -42,7 +42,3 @@ class Ernie4_5_MoeQModel(BaseQModel):
         }
     ]
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Routed/shared consumers and score-correction routing are not yet
-        # qualified for neutral folding/search/replay across every layout.
-        return []

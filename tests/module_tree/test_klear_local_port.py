@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
@@ -89,10 +90,44 @@ def test_real_state_owners_and_consumers(device, layout, kv, bias):
                 path = f"mlp.experts.{i}.gate_proj"
                 assert looper._extract_moe_group_key(path) == f"mlp.experts.{i}"
                 assert weight_only._extract_moe_group_key(path) == f"mlp.experts.{i}"
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     for path in ["mlp.coefficient_extra", "self_attn.q_norm.child", "mlp.experts.1.undeclared"]:
         assert plan.find(path) is None
     assert KlearQModel.fusable is None
+
+
+@pytest.mark.parametrize("layout", ["moe", "dense", "mixed", "periodic", "no-shared"])
+@pytest.mark.parametrize("kv,bias", [(1, False), (2, True), (4, False)])
+def test_awq_folds_are_neutral_on_dense_and_moe_layers(layout, kv, bias):
+    variants = {"moe": {}, "dense": {"num_experts": 0}, "mixed": {"mlp_only_layers": [0]},
+                "periodic": {"decoder_sparse_step": 2}, "no-shared": {"n_shared_experts": 0}}
+    torch.manual_seed(3)
+    config = tiny_config(num_key_value_heads=kv, attention_bias=bias, **variants[layout])
+    model = KlearQModel.loader.from_config(config).eval()
+    _convert_model_with_defuser(KlearQModel, model, cleanup_original=False)
+    ids = torch.tensor([[1, 7, 8, 9, 5, 6, 11, 3]])
+
+    def forward():
+        return model(ids).logits
+
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(KlearQModel, model, layer, forward)
+        groups = {(source, tuple(targets)): consumers for source, targets, consumers in checked}
+        assert groups[("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"))] == []
+        if hasattr(layer.mlp, "experts"):
+            experts = range(config.num_experts)
+            targets = [f"mlp.experts.{i}.{p}" for i in experts for p in ("gate_proj", "up_proj")]
+            targets += ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"]
+            # The fp32 sigmoid router and the shared/routed mixer both read the
+            # normed input, so both absorb the inverse scale. expert_bias is
+            # added after the sigmoid and is scale-free.
+            assert groups[("post_attention_layernorm", tuple(targets))] == ["mlp.gate", "mlp.coefficient"]
+            for index in experts:
+                assert (f"mlp.experts.{index}.up_proj", (f"mlp.experts.{index}.down_proj",)) in groups
+            shared = config.n_shared_experts > 0
+            assert (("mlp.shared_experts.up_proj", ("mlp.shared_experts.down_proj",)) in groups) == shared
+        else:
+            assert groups[("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj"))] == []
+            assert ("mlp.up_proj", ("mlp.down_proj",)) in groups
 
 
 def test_checkpoint_key_patterns_and_exact_plan():

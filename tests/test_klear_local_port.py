@@ -323,7 +323,7 @@ def test_left_padding_loss_tuple_and_logits_selection():
 
 
 @pytest.mark.parametrize("layout", ["moe", "dense", "mixed"])
-def test_public_awq_plain_quantize_pack_save_reload(tmp_path, layout):
+def test_public_awq_scaled_quantize_pack_save_reload(tmp_path, layout):
     from safetensors.torch import load_file, save_file
 
     from gptqmodel import BACKEND, GPTQModel
@@ -349,14 +349,21 @@ def test_public_awq_plain_quantize_pack_save_reload(tmp_path, layout):
     qcfg = AWQConfig(bits=4, group_size=16, device="cpu", offload_to_disk=False, fallback=None)
     model = GPTQModel.load(str(path), quantize_config=qcfg, backend=BACKEND.TORCH,
                           dtype=torch.float16, attn_implementation="eager", trust_remote_code=False)
+    # AWQ folds its scales into the two decoder norms and compensates the
+    # router/mixer inputs; every other dense tensor must stay bit-identical.
     unchanged = {name: value.clone() for name, value in model.model.state_dict().items()
                  if not name.endswith(("q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight",
-                                       "gate_proj.weight", "up_proj.weight", "down_proj.weight"))}
-    assert all(model.awq_get_modules_for_scaling(layer, {}, {}) == [] for layer in model.model.model.layers)
+                                       "gate_proj.weight", "up_proj.weight", "down_proj.weight",
+                                       "input_layernorm.weight", "post_attention_layernorm.weight",
+                                       "mlp.gate.weight", "mlp.coefficient.weight"))}
     model.quantize(
         CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
         backend=BACKEND.TORCH,
     )
+    searched = {(int(row["layer"]), str(row["module"])) for row in model.quant_log if row["loss"] != "not applicable"}
+    for index, layer in enumerate(source.model.layers):
+        first = "mlp.experts.0.gate_proj" if hasattr(layer.mlp, "experts") else "mlp.gate_proj"
+        assert {(index, "self_attn.q_proj"), (index, first)} <= searched, sorted(searched)
     packed = {name: module for name, module in model.model.named_modules() if isinstance(module, AwqTorchLinear)}
     expected = sum(4 + (3 * config.num_experts + 3 if hasattr(layer.mlp, "experts") else 3)
                    for layer in source.model.layers)
