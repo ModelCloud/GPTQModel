@@ -353,3 +353,16 @@ def test_awq_token_rows_out_of_order_sampled_rows_keep_provenance_aligned():
 
     position_ids = processor._awq_feature_kwargs[module_name]["position_ids"]
     assert position_ids.tolist() == [[0, 1, 3, 0, 2, 5]]
+
+
+def test_awq_token_row_quotas_skip_empty_batches():
+    """Empty batches must not consume sampling budget or select zero rows."""
+
+    quotas, local = AWQProcessor._compute_token_row_quotas([0, 7, 3], 1)
+    assert quotas == [0, 1, 0]
+    assert local[1].tolist() == [0]
+
+    quotas, local = AWQProcessor._compute_token_row_quotas([0, 7, 3], 4)
+    assert quotas == [0, 2, 2]
+    assert local[1].tolist() == [0, 6]
+    assert local[2].tolist() == [0, 2]

@@ -1700,14 +1700,21 @@ class AWQProcessor(LoopProcessor):
 
         Returns (quotas, local_indices_by_batch) where local_indices_by_batch[b]
         is a 1D int64 tensor of row indices within batch b to retain.
-        """
-        batch_count = len(lengths)
-        total_tokens = sum(lengths)
-        retained_tokens = min(total_tokens, max_tokens)
-        quotas = [0] * batch_count
-        local_indices: Dict[int, torch.Tensor] = {}
 
-        if retained_tokens <= 0 or total_tokens <= 0 or batch_count <= 0:
+        Empty batches are excluded from the quota allocation, matching
+        ``_pack_token_rows``: they contribute no rows, so counting them would
+        steal budget (or select a zero-row batch) and break equivalence.
+        """
+        quotas = [0] * len(lengths)
+        local_indices: Dict[int, torch.Tensor] = {}
+        active = [index for index, length in enumerate(lengths) if int(length) > 0]
+        if not active:
+            return quotas, local_indices
+        active_lengths = [int(lengths[index]) for index in active]
+        batch_count = len(active_lengths)
+        total_tokens = sum(active_lengths)
+        retained_tokens = min(total_tokens, max_tokens)
+        if retained_tokens <= 0:
             return quotas, local_indices
 
         if retained_tokens < batch_count:
@@ -1719,19 +1726,20 @@ class AWQProcessor(LoopProcessor):
                     for i in range(retained_tokens)
                 ]
             batch_ids = list(dict.fromkeys(batch_ids))
-            for b in batch_ids:
-                quotas[b] = 1
-                local_indices[b] = torch.zeros(1, dtype=torch.int64)
+            for active_index in batch_ids:
+                batch_index = active[active_index]
+                quotas[batch_index] = 1
+                local_indices[batch_index] = torch.zeros(1, dtype=torch.int64)
             return quotas, local_indices
 
-        quotas = [1] * batch_count
+        local_quotas = [1] * batch_count
         remaining = retained_tokens - batch_count
         if remaining > 0:
-            exact = [length * remaining / total_tokens for length in lengths]
+            exact = [length * remaining / total_tokens for length in active_lengths]
             floors = [int(share) for share in exact]
             for index, floor_share in enumerate(floors):
-                quotas[index] += floor_share
-            leftover = retained_tokens - sum(quotas)
+                local_quotas[index] += floor_share
+            leftover = retained_tokens - sum(local_quotas)
             order = sorted(
                 range(batch_count),
                 key=lambda index: (-(exact[index] - floors[index]), index),
@@ -1741,24 +1749,25 @@ class AWQProcessor(LoopProcessor):
                 for index in order:
                     if leftover <= 0:
                         break
-                    if quotas[index] < lengths[index]:
-                        quotas[index] += 1
+                    if local_quotas[index] < active_lengths[index]:
+                        local_quotas[index] += 1
                         leftover -= 1
                         distributed = True
                 if not distributed:
                     break
 
-        for b, (quota, length) in enumerate(zip(quotas, lengths)):
-            quota = min(quota, length)
-            quotas[b] = quota
+        for active_index, batch_index in enumerate(active):
+            length = active_lengths[active_index]
+            quota = min(local_quotas[active_index], length)
+            quotas[batch_index] = quota
             if quota <= 0:
                 continue
             if quota == length:
-                local_indices[b] = torch.arange(length, dtype=torch.int64)
+                local_indices[batch_index] = torch.arange(length, dtype=torch.int64)
             elif quota == 1:
-                local_indices[b] = torch.zeros(1, dtype=torch.int64)
+                local_indices[batch_index] = torch.zeros(1, dtype=torch.int64)
             else:
-                local_indices[b] = (
+                local_indices[batch_index] = (
                     torch.arange(quota, dtype=torch.int64)
                     * (length - 1)
                     // (quota - 1)
