@@ -2447,6 +2447,7 @@ def test_paro_kernel_mapping_uses_paro_backend():
 
 def test_paro_kernel_mapping_uses_paro_triton_backend():
     """Guard Triton backend dispatch for Paro-specific runtime modules."""
+    pytest.importorskip("triton")
     from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
 
     assert (
