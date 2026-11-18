@@ -296,8 +296,12 @@ def oracle_weighted_kmeans(data, num_centroids, weights, *, iters, tol, seed):
         counts = torch.zeros(
             num_centroids, dtype=data.dtype, device=data.device
         ).index_add_(0, assignment, weights)
-        updated = sums / counts.clamp_min(_ORACLE_EPS).unsqueeze(1)
+        # Independent reference for the weighted mean: divide by the bucket's
+        # real total weight, never an epsilon floor, and keep `inf`/`nan` out
+        # of the empty buckets, which retain their previous centroid.
         empty = counts <= 0
+        divisor = torch.where(empty, torch.ones_like(counts), counts)
+        updated = sums / divisor.unsqueeze(1)
         if bool(empty.any()):
             updated[empty] = centroids[empty]
         centroids = updated
@@ -1871,6 +1875,114 @@ def test_vptq_hessian_usability_rejects_zero_and_nonfinite():
     inf_hessian = torch.eye(4, dtype=torch.float64)
     inf_hessian[0, 1] = float("inf")
     assert not VPTQ._hessian_is_usable(inf_hessian)
+
+
+def test_vptq_weighted_kmeans_tiny_weights_keep_their_mean():
+    """A non-empty bucket must divide by its real total weight, not `_EPS`.
+
+    Scaling every sample weight by the same positive constant cannot change
+    the minimizer. Clamping the divisor to `_EPS` broke that: one sample per
+    bucket with weight `1e-14` became `1e-14 * x / 1e-12 = 0.01 * x` instead
+    of `x`.
+    """
+
+    data = torch.tensor([[1.0], [3.0]])
+    # seed 17 draws `permutation == [1, 0]`, so centroid 0 starts at `3.0`
+    # and keeps the sample `3.0`, while centroid 1 keeps `1.0`.
+    expected = [3.0, 1.0]
+
+    for scale in (1.0, 1e-9, 1e-14, 1e-20):
+        centroids, assignment = _weighted_kmeans(
+            data,
+            2,
+            torch.full((2,), scale),
+            iters=1,
+            tol=0.0,
+            seed=17,
+        )
+        assert assignment.tolist() == [1, 0]
+        assert centroids.flatten().tolist() == expected, f"weight scale {scale}"
+
+    # The same invariance must hold for buckets that mix several vectors.
+    generator = torch.Generator().manual_seed(7)
+    data = torch.randn(64, 4, generator=generator) * 10.0
+    weights = torch.rand(64, generator=generator) + 0.5
+    reference, reference_assignment = _weighted_kmeans(
+        data, 8, weights, iters=6, tol=0.0, seed=3
+    )
+    for scale in (1e-8, 1e-14, 1e-20):
+        scaled, scaled_assignment = _weighted_kmeans(
+            data, 8, weights * scale, iters=6, tol=0.0, seed=3
+        )
+        assert torch.equal(scaled_assignment, reference_assignment)
+        torch.testing.assert_close(scaled, reference, rtol=1e-5, atol=1e-5)
+
+
+def test_vptq_weighted_kmeans_keeps_empty_buckets_and_handles_subnormals():
+    """Zero-weight buckets keep their centroid; subnormal weights stay finite."""
+
+    data = torch.tensor([[1.0], [3.0]])
+
+    # All weights zero: every bucket is empty and must retain its initialized
+    # centroid instead of producing a NaN or collapsing to zero.
+    initialized, _ = _weighted_kmeans(data, 2, None, iters=1, tol=0.0, seed=17)
+    centroids, _ = _weighted_kmeans(
+        data, 2, torch.zeros(2), iters=4, tol=0.0, seed=17
+    )
+    assert torch.equal(centroids, initialized)
+    assert torch.isfinite(centroids).all()
+
+    # A subnormal total weight would underflow `w * x` before the division
+    # could cancel the scale; the bucket must still report its own samples.
+    subnormal = [3.0, 1.0]
+    for scale in (1e-40, 1e-44):
+        centroids, _ = _weighted_kmeans(
+            data, 2, torch.full((2,), scale), iters=1, tol=0.0, seed=17
+        )
+        assert torch.isfinite(centroids).all()
+        assert centroids.flatten().tolist() == subnormal, f"weight scale {scale}"
+
+
+def test_vptq_tiny_hessian_group_keeps_exact_vectors():
+    """The full quantizer must not shrink a group whose Hessian is tiny.
+
+    The global Hessian mean is normalized to one, so a group with a tiny but
+    positive diagonal keeps tiny k-means weights even though the layer as a
+    whole looks ordinary. With one vector per centroid the codebook must
+    reproduce the weight exactly and the loss must stay zero.
+    """
+
+    weight = torch.tensor([[1.0, 3.0, 5.0, 7.0]]).repeat(4, 1)
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 2],
+        num_res_centroids=[-1, -1],
+        group_size=2,
+        kmeans_mode="hessian",
+        enable_norm=False,
+        enable_perm=False,
+        kmeans_iters=1,
+        kmeans_tol=1e-9,
+        kmeans_seed=17,
+        block_size=4,
+        percdamp=0.01,
+    )
+
+    for diagonal in ([1.0, 1.0, 1.0, 1.0], [1e-14, 1e-14, 1.0, 1.0]):
+        hessian = torch.diag(torch.tensor(diagonal, dtype=torch.float64))
+        result, loss = build_quantizer(weight, qcfg).quantize_weight(weight, hessian)
+        assert result.stats["fallback"] is False
+        torch.testing.assert_close(result.quantized_weight, weight, rtol=1e-6, atol=1e-6)
+        assert loss == 0.0, f"diagonal {diagonal}"
+
+        # The tiny group's codebook must hold the samples themselves.
+        assert result.centroids[1] is not None
+        torch.testing.assert_close(
+            result.centroids[1].sort(dim=0).values,
+            torch.tensor([[1.0, 1.0, 1.0, 1.0], [3.0, 3.0, 3.0, 3.0]]),
+            rtol=1e-6,
+            atol=1e-6,
+        )
 
 
 def test_vptq_weighted_kmeans_defers_inertia_read_until_after_update():

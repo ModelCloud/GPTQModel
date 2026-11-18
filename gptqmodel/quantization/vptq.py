@@ -215,11 +215,35 @@ def _weighted_kmeans(
         assignment, residual = _chunked_assign(data, centroids)
         inertia = (residual.double() * weights.double()).sum()
 
-        weighted = data * weights.unsqueeze(1)
-        sums = _deterministic_segment_sum(num_centroids, assignment, weighted)
         counts = _deterministic_segment_sum(num_centroids, assignment, weights)
-        updated = sums / counts.clamp_min(_EPS).unsqueeze(1)
         empty = counts <= 0
+        # The centroid is the weighted mean `sum(w * x) / sum(w)`, so a
+        # non-empty bucket must divide by its own total weight even when that
+        # total is tiny. Clamping the divisor to `_EPS` kept the true weighted
+        # sum but inflated the denominator: a bucket holding one sample of
+        # weight `1e-14` became `1e-14 * x / 1e-12 = 0.01 * x`. Only a bucket
+        # with a non-positive total has no mean; it keeps its old centroid.
+        divisor = torch.where(empty, torch.ones_like(counts), counts)
+        # Subnormal weight totals would underflow `w * x` to zero before the
+        # division could cancel the scale. Rescale only those buckets, by the
+        # same factor on both the products and the divisor, so the mean is
+        # unchanged while the arithmetic stays in the normal range. The
+        # reciprocal is bounded by the dtype maximum so a subnormal total
+        # cannot produce `inf`. Every other bucket keeps factor 1, and
+        # multiplying by an exact 1.0 leaves its previous bits unchanged.
+        tiny = ~empty & (counts < torch.finfo(counts.dtype).tiny)
+        if bool(tiny.any()):
+            factor = torch.where(
+                tiny,
+                divisor.reciprocal().clamp(max=torch.finfo(counts.dtype).max),
+                torch.ones_like(counts),
+            )
+            weighted = data * (weights * factor[assignment]).unsqueeze(1)
+            divisor = divisor * factor
+        else:
+            weighted = data * weights.unsqueeze(1)
+        sums = _deterministic_segment_sum(num_centroids, assignment, weighted)
+        updated = sums / divisor.unsqueeze(1)
         centroids = torch.where(empty.unsqueeze(1), centroids, updated)
 
         # Enqueue the independent centroid update before waiting for inertia.
