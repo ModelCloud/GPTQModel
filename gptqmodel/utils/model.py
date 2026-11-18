@@ -4120,12 +4120,26 @@ def _load_key_converted_safetensors(
     return True
 
 
+def _load_dtype_is_half(dtype) -> bool:
+    """True for fp16/bf16 loads (dtype objects or their string spellings)."""
+
+    return dtype in (torch.float16, torch.bfloat16) or str(dtype) in {
+        "torch.float16",
+        "torch.bfloat16",
+        "float16",
+        "bfloat16",
+    }
+
+
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     checkpoint = kwargs.get("checkpoint")
     if checkpoint is None and args:
         checkpoint = args[0]
     key_converter = kwargs.pop("key_converter", None)
     fp32_bf16_buffer_names = set(kwargs.pop("fp32_bf16_buffer_names", ()))
+    keep_in_fp32_strict_modules = list(
+        kwargs.pop("keep_in_fp32_strict_modules", ()) or ()
+    )
     packed_fp8_buffer_dtypes = dict(kwargs.pop("packed_fp8_buffer_dtypes", {}))
     restore_checkpoint_buffer_dtypes = bool(
         kwargs.pop("restore_checkpoint_buffer_dtypes", False)
@@ -4234,6 +4248,16 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
                 for runtime, source in restore_name_map.items()
                 if source in checkpoint_dtypes
             }
+        # transformers pins `_keep_in_fp32_modules_strict` tensors to fp32 for
+        # every half dtype (5.x rule). Accelerate only honors
+        # `keep_in_fp32_modules` for fp16, so a bf16 reload narrowed the
+        # DeepSeek-V3 / GLM-4.x router bias and the ERNIE router weight,
+        # silently re-routing 11-36% of tokens per layer (#5151). Restore them
+        # from the checkpoint at their stored dtype.
+        if keep_in_fp32_strict_modules and _load_dtype_is_half(kwargs.get("dtype")):
+            for name in keep_in_fp32_strict_modules:
+                if checkpoint_dtypes.get(name) == torch.float32:
+                    restore_dtypes[name] = torch.float32
         for name, module in model.named_modules():
             model_dtype_buffers = getattr(module, "MODEL_DTYPE_BUFFERS", None)
             if model_dtype_buffers is None and not restore_checkpoint_buffer_dtypes:
