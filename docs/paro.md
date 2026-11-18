@@ -246,8 +246,11 @@ out_features`), or the activation itself passed `rows x in_features > 2^31`:
 640-row threshold. That threshold was tuned only on Qwen2.5-0.5B shapes
 (K/N = 896/4864 and 4864/896). Issue #5210 measured 7-8B projections and
 found the native kernel still faster up to roughly 1500-2500 rows, so the
-641-2000 row band regressed by 1.1-2.1x per layer. The dispatch is now
-shape-aware.
+641-2000 row band regressed by 1.1-2.1x per layer. Issue #5260 then found
+that the #5210 fit's 2048-row floor regressed the 1024-2047 row band of
+small wide projections (896x4864, 2048x8192, 1536x8960), where dequantize +
+cuBLAS wins from roughly 800-960 rows on SM 8.9. The dispatch is now
+shape-aware and size-aware.
 
 ```mermaid
 flowchart TD
@@ -278,7 +281,7 @@ flowchart LR
 
 | Mechanism | Previous behavior | Current behavior |
 | --- | --- | --- |
-| `ParoLinear` CUDA dispatch | Native split-K GEMM for every row count (`paro.py`), one FP32 slab per split, 3.6x the output size transient | Above a shape-aware crossover (2048-4096 rows), dequantize the packed grid and call cuBLAS with an FP32 reduction and one output cast |
+| `ParoLinear` CUDA dispatch | Native split-K GEMM for every row count (`paro.py`), one FP32 slab per split, 3.6x the output size transient | Above a shape- and size-aware crossover (768-4096 rows), dequantize the packed grid and call cuBLAS with an FP32 reduction and one output cast |
 | `paro_gemm_kernel` A offsets | `K * offsets_am` with an int32 row vector | `offsets_am` is int64, so `rows x in_features > 2^31` no longer wraps |
 | `paro_gemm_kernel` C offsets | `N * offs_cm` with an int32 row vector | `offs_cm` is int64, so `rows x out_features > 2^31` no longer wraps |
 | Storage | Dequantized weight retained? | The reconstructed weight exists only for the dispatched call; the module keeps the packed INT4 buffers |
@@ -286,40 +289,59 @@ flowchart LR
 ### Shape-aware crossover
 
 The dense route pays a dequantize cost proportional to
-`in_features * out_features`, plus a GEMM whose per-row cost is lower than
-the native split-K kernel's. The native route pays `split_k` FP32 partial
-slabs. Solving the two cost curves gives a row count that depends on the
-projection shape, not a global constant:
+`in_features * out_features` (the dequantized weight bytes), plus a GEMM
+whose per-row cost is lower than the native split-K kernel's. The native
+route pays `split_k` FP32 partial slabs. The measured crossover also depends
+on the output width: cuBLAS loses tile efficiency on narrow outputs, and the
+native kernel's relative advantage changes with the aspect ratio. The fit is
+anchored at 1342 rows for 4096x4096:
 
 ```
-rows = 2400 * (in_features / out_features) ** 0.15
-             * (max(1, 4096 / out_features)) ** 0.2
-       clamped to [2048, 4096]
+size = in_features * out_features / 4096**2
+aspect = in_features / out_features
+rows = 1342 * aspect**0.304
+            * (size**0.357 if size >= 1 else size**-0.098)
+            * max(1, 2048 / out_features)**0.219
+       clamped to [768, 4096]
 ```
 
-The 2048-row floor is the band #5210 measured as a regression; the 4096-row
-ceiling keeps #5096's wide-prefill escape for every shape, including the
-narrow 4864/896 projection that crosses over later. `paro_awq_dense_min_rows`
-is a host-side integer decision, so the same shape always selects the same
-path.
+The size term is a V-shape in log size. Below the 4096x4096 anchor, small
+layers pay a fixed cuBLAS small-M penalty, so the threshold grows as the
+layer shrinks; above it, the dequantize work grows with the weight bytes and
+the threshold grows with the layer size. The narrow-output term raises the
+threshold below 2048 output columns. The 768-row floor keeps #5210's
+641-row native choice for every shape, and the 4096-row ceiling keeps
+#5096's wide-prefill escape. `paro_awq_dense_min_rows` is a host-side
+integer decision, so the same shape always selects the same path.
 
-Measured crossovers on SM 12.0 (RTX 5090, torch 2.15.0+cu132, FP16/BF16,
-group_size 128, synthetic g128 layers) and the resulting threshold:
+Measured crossovers on SM 8.9 (RTX 4090, torch 2.15.0+cu132, FP16,
+group_size 128, synthetic g128 layers), both routes interleaved in one
+process, min of nine to forty-one blocks, and the resulting threshold:
 
 | K/N | Measured crossover (rows) | `paro_awq_dense_min_rows` |
 | --- | --- | --- |
-| 4096/4096 | ~2400 | 2400 |
-| 4096/14336 | ~2050 | 2048 |
-| 14336/4096 | ~2750-2900 | 2896 |
-| 896/4864 | ~1290 | 2048 (floor) |
-| 4864/896 | ~3900 | 4096 (ceiling) |
+| 896/4864 | ~800 | 916 |
+| 1536/8960 | ~870 | 800 |
+| 2048/8192 | ~960 | 880 |
+| 4096/14336 | ~1340 | 1434 |
+| 4096/4096 | ~1490 | 1342 |
+| 2048/2048 | ~1900 | 1537 |
+| 14336/4096 | ~2300 | 3072 |
+| 4864/896 | ~2300 | 3070 |
+| 8192/2048 | ~2000 | 2045 |
+| 8960/1536 | ~3100 | 2491 |
 
-The issue's SM 8.9 table puts the 7-8B crossovers about 20-30% lower
-(~1500-2300 rows). The SM 12.0 fit is conservative there: it delays the
-dense win slightly but never selects cuBLAS before the crossover. The
-896/4864 floor also delays the dense win on that small projection; the
-absolute cost is under 0.2 ms per layer and it keeps the 641-2000 band
-native, which is the contract #5210 asks for.
+The fit reproduces the wide and square projection crossovers within about
+10%. The narrow tall projections (4864/896, 8960/1536, 8192/2048) are noisier
+because cuBLAS switches kernels between adjacent row counts; their
+thresholds are conservative heuristics. The 896/4864 threshold (916) is
+about 115 rows above its measured crossover, so the 641-914 band stays
+native; the absolute cost is under 0.03 ms per layer and the 1024-2047 band
+that #5260 reported is on the dense route. On SM 8.9 the 7-8B shapes keep
+the native kernel at 641 rows and take the dense route at 4096 rows, which
+is the #5210 choice. The #5210 SM 12.0 table (~2400 rows for 4096x4096,
+~2050 for 4096x14336) is historical: the new fit is tuned on SM 8.9 and has
+not been re-measured on SM 12.0.
 
 ### Validation
 
@@ -343,7 +365,7 @@ allocator delta over the call.
 The #5210 per-layer table below is the same synthetic-layer harness on SM
 12.0 (RTX 5090, torch 2.15.0+cu132). Modes are interleaved round-robin,
 min of six blocks of ten calls, one process. `current` is the #5164
-`>640` behaviour; `new` is `paro_awq_dense_min_rows`. Ratios are against
+`>640` behaviour; `new` is the #5250 fit. Ratios are against
 the pre-#5164 always-native route; peak is the allocator delta.
 
 | dtype | K/N | M | native ms | current ms (x) | new ms (x) | native peak / new peak |
@@ -368,6 +390,74 @@ BF16 follows FP16 within 2% on every shape and M. The `down_proj` peak
 regression from #5164 is gone in the band: 14336/4096 at 641 rows is 50 MiB
 on both the old and new dispatch, against 154 MiB for `current`.
 
+Issue #5260 re-measured the per-layer crossover on the same synthetic harness
+on an SM 8.9 RTX 4090 (torch 2.15.0+cu132, FP16, group_size 128). The host
+was shared with other tenants, so both routes were timed in one process,
+interleaved round-robin, and the table reports the minimum over nine to
+forty-one blocks. `native` is the split-K GEMM; `dense` is dequantize +
+cuBLAS; `chosen` is the route `paro_awq_dense_min_rows` selects. Times are
+ms; peak is the allocator delta over the call.
+
+| K/N | M | native ms / peak | dense ms / peak | chosen |
+| --- | --- | --- | --- | --- |
+| 896/4864 | 641 | 0.102 / 59 MiB | 0.144 / 32 MiB | native |
+| 896/4864 | 1024 | 0.205 / 95 MiB | 0.164 / 46 MiB | dense |
+| 896/4864 | 1536 | 0.347 / 142 MiB | 0.202 / 65 MiB | dense |
+| 896/4864 | 2047 | 0.516 / 190 MiB | 0.274 / 84 MiB | dense |
+| 896/4864 | 2048 | 0.579 / 190 MiB | 0.303 / 84 MiB | dense |
+| 896/4864 | 3072 | 0.980 / 285 MiB | 0.499 / 122 MiB | dense |
+| 896/4864 | 4096 | 1.117 / 380 MiB | 0.560 / 160 MiB | dense |
+| 2048/8192 | 641 | 0.364 / 100 MiB | 0.485 / 72 MiB | native |
+| 2048/8192 | 1024 | 0.626 / 160 MiB | 0.518 / 96 MiB | dense |
+| 2048/8192 | 1536 | 1.058 / 240 MiB | 0.747 / 128 MiB | dense |
+| 2048/8192 | 2047 | 1.401 / 320 MiB | 0.946 / 160 MiB | dense |
+| 2048/8192 | 2048 | 1.448 / 320 MiB | 0.995 / 160 MiB | dense |
+| 2048/8192 | 3072 | 1.829 / 480 MiB | 1.149 / 224 MiB | dense |
+| 2048/8192 | 4096 | 2.446 / 640 MiB | 1.448 / 288 MiB | dense |
+| 1536/8960 | 641 | 0.310 / 110 MiB | 0.440 / 70 MiB | native |
+| 1536/8960 | 1024 | 0.538 / 175 MiB | 0.507 / 96 MiB | dense |
+| 1536/8960 | 1536 | 0.874 / 262 MiB | 0.692 / 131 MiB | dense |
+| 1536/8960 | 2047 | 1.196 / 350 MiB | 0.875 / 166 MiB | dense |
+| 1536/8960 | 2048 | 1.198 / 350 MiB | 0.875 / 166 MiB | dense |
+| 1536/8960 | 3072 | 1.835 / 525 MiB | 1.119 / 236 MiB | dense |
+| 1536/8960 | 4096 | 2.446 / 700 MiB | 1.396 / 306 MiB | dense |
+| 4096/4096 | 641 | 0.212 / 50 MiB | 0.435 / 52 MiB | native |
+| 4096/4096 | 1024 | 0.363 / 80 MiB | 0.477 / 64 MiB | native |
+| 4096/4096 | 1536 | 0.587 / 120 MiB | 0.559 / 80 MiB | dense |
+| 4096/4096 | 2047 | 0.883 / 160 MiB | 0.842 / 96 MiB | dense |
+| 4096/4096 | 2048 | 0.804 / 160 MiB | 0.807 / 96 MiB | dense |
+| 4096/4096 | 3072 | 1.266 / 240 MiB | 0.898 / 128 MiB | dense |
+| 4096/4096 | 4096 | 1.723 / 320 MiB | 1.137 / 160 MiB | dense |
+| 4096/14336 | 641 | 0.916 / 175 MiB | 1.484 / 182 MiB | native |
+| 4096/14336 | 1024 | 1.504 / 280 MiB | 1.689 / 224 MiB | native |
+| 4096/14336 | 1536 | 2.289 / 420 MiB | 2.174 / 280 MiB | dense |
+| 4096/14336 | 2047 | 3.114 / 560 MiB | 2.515 / 336 MiB | dense |
+| 4096/14336 | 2048 | 3.074 / 560 MiB | 2.493 / 336 MiB | dense |
+| 4096/14336 | 3072 | 4.601 / 840 MiB | 3.301 / 448 MiB | dense |
+| 4096/14336 | 4096 | 6.115 / 1120 MiB | 4.098 / 560 MiB | dense |
+| 14336/4096 | 641 | 0.873 / 50 MiB | 1.952 / 132 MiB | native |
+| 14336/4096 | 1024 | 1.233 / 80 MiB | 1.747 / 144 MiB | native |
+| 14336/4096 | 1536 | 2.453 / 120 MiB | 2.602 / 160 MiB | native |
+| 14336/4096 | 2047 | 2.773 / 160 MiB | 2.839 / 176 MiB | native |
+| 14336/4096 | 2048 | 2.575 / 160 MiB | 3.049 / 176 MiB | native |
+| 14336/4096 | 3072 | 4.054 / 240 MiB | 3.970 / 208 MiB | dense |
+| 14336/4096 | 4096 | 5.734 / 320 MiB | 5.026 / 240 MiB | dense |
+| 2048/2048 | 641 | 0.069 / 25 MiB | 0.121 / 21 MiB | native |
+| 2048/2048 | 1024 | 0.114 / 40 MiB | 0.125 / 24 MiB | native |
+| 2048/2048 | 1536 | 0.156 / 60 MiB | 0.161 / 32 MiB | native |
+| 2048/2048 | 2047 | 0.254 / 80 MiB | 0.195 / 40 MiB | dense |
+| 2048/2048 | 2048 | 0.249 / 80 MiB | 0.191 / 40 MiB | dense |
+| 2048/2048 | 3072 | 0.430 / 120 MiB | 0.245 / 56 MiB | dense |
+| 2048/2048 | 4096 | 0.638 / 160 MiB | 0.337 / 72 MiB | dense |
+
+The 1536/8960 row at 1024 is the #5260 regression case: the #5210 fit put
+the threshold at 1843, so it chose native and paid 0.538 ms against 0.507 ms.
+The new fit chooses dense. The 4096/14336 and 14336/4096 rows keep the
+#5210 choice at 641 and 4096 (native at 641, dense at 4096).
+The 2048/2048 1536-row entry is a 41-round re-measure: the nine-round sweep
+caught a contention burst in the native block (0.242 ms) while the dense
+block was clean, so the re-measured native/dense pair is 0.156/0.161 ms.
+
 A 16-layer, hidden-2048, intermediate-8192, GQA 32/8 x 64 stack of real
 `ParoLinear` layers (identity rotation, so rotation cost is constant across
 modes) gives the equivalent end-to-end check. One prefill through the stack,
@@ -385,8 +475,8 @@ FP16, modes interleaved, min of five blocks of five forwards:
 Regressions live in `tests/kernels/test_paro.py`: the Triton cases build
 `rows x out_features` and `rows x in_features` just above 2^31 with only the
 tail rows nonzero, the layer cases assert the dispatched route and oracle
-agreement, and the #5210 cases pin the shape-aware crossover and both sides
-of the 4096x4096 contract (641 and 2048 rows native, 2400 rows dense). The
+agreement, and the #5210/#5260 cases pin the shape-aware crossover, the 7-8B
+choice at 641 and 4096 rows, and the small-wide 1024-2047 band. The
 wide-prefill case now uses 4096 rows so it still exercises the dense route
 for its 896x4864 layer.
 
