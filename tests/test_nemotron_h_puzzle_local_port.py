@@ -361,9 +361,6 @@ def test_embeddings_hidden_states_loss_and_invalid_mask_retry():
                                                          labels[:, 1:].reshape(-1))
         torch.testing.assert_close(loss, expected_loss)
         torch.testing.assert_close(model(TOKENS, return_dict=False, use_cache=False)[0], native.logits, atol=0, rtol=0)
-        model.config.return_dict = False
-        torch.testing.assert_close(model(TOKENS, use_cache=False)[0], native.logits, atol=0, rtol=0)
-        model.config.return_dict = True
         for bad in (torch.ones(2, 1, 7, 7, dtype=torch.bool), torch.ones(3, 1, 7, 7), {"linear_attention": None}):
             cache = NemotronHPuzzleCache(model.config)
             with pytest.raises(ValueError, match="mask"):

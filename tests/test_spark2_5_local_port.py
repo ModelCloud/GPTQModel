@@ -215,13 +215,18 @@ def test_dtype_hybrid_cache_continuation_generation_and_causality(dtype, impleme
 
 
 @pytest.mark.parametrize("head_dim", [8, 256])
-def test_source_absolute_slot_partial_rope_near_released_context_boundary(head_dim):
+def test_source_absolute_slot_partial_rope_near_released_context_boundary(head_dim, monkeypatch):
+    from gptqmodel.models.ports.spark2_5 import modeling_spark
+
     model = tiny_model(head_dim=head_dim)
     ids = torch.tensor([[3, 4, 5]])
-    positions = torch.arange(1048570, 1048573)
     expected = source_oracle(model.state_dict(), model.config, ids, offset=1048570)
+    # Shift the absolute cache slots without materializing a 1M-token cache.
+    rope = modeling_spark.compute_rope_cos_sin
+    monkeypatch.setattr(modeling_spark, "compute_rope_cos_sin",
+                        lambda slots, *args, **kwargs: rope(slots + 1048570, *args, **kwargs))
     with torch.inference_mode():
-        output = model(ids, cache_position=positions, use_cache=False).logits
+        output = model(ids, use_cache=False).logits
     torch.testing.assert_close(output.double(), expected, atol=4e-6, rtol=3e-5)
 
 

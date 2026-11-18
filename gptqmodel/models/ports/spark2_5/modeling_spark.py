@@ -23,13 +23,16 @@ from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
 )
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, can_return_tuple, logging
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
 
 from .configuration_spark import Spark2_5Config
 
@@ -119,7 +122,7 @@ def eager_attention_forward(
     attn_weights = attn_weights - attn_weights.max(dim=-1, keepdim=True).values
     attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
     attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
-    attn_output = torch.matmul(attn_weights, value)
+    attn_output = torch.matmul(attn_weights, value).transpose(1, 2).contiguous()
     return attn_output, attn_weights
 
 
@@ -192,7 +195,6 @@ class Spark2_5Attention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: torch.Tensor | None = None,
         past_key_values: Cache | None = None,
-        cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_shape = hidden_states.shape[:-1]
@@ -208,39 +210,29 @@ class Spark2_5Attention(nn.Module):
         k = k.view(bsz, seq_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         v = v.view(bsz, seq_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         if gate_score is not None:
-            gate_score = gate_score.view(bsz, seq_len, self.num_heads, 1).transpose(1, 2)
+            gate_score = gate_score.view(bsz, seq_len, self.num_heads, 1)
 
         cos, sin = position_embeddings
         q = apply_rotary_pos_emb(q, cos, sin)
         k = apply_rotary_pos_emb(k, cos, sin)
 
         if past_key_values is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
+            k, v = past_key_values.update(k, v, self.layer_idx)
 
-        if self.config._attn_implementation == "sdpa":
-            keys = repeat_kv(k, self.num_key_value_groups)
-            values = repeat_kv(v, self.num_key_value_groups)
-            attn_output = F.scaled_dot_product_attention(
-                q,
-                keys,
-                values,
-                attn_mask=attention_mask,
-                dropout_p=self.attention_dropout if self.training else 0.0,
-                is_causal=attention_mask is None and q.shape[-2] > 1,
-                scale=self.scaling,
-            )
-            attn_weights = None
-        else:
-            attn_output, attn_weights = eager_attention_forward(
-                self,
-                q,
-                k,
-                v,
-                attention_mask=attention_mask,
-                scaling=self.scaling,
-                dropout=self.attention_dropout if self.training else 0.0,
-            )
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
+        attn_output, attn_weights = attention_interface(
+            self,
+            q,
+            k,
+            v,
+            attention_mask,
+            scaling=self.scaling,
+            dropout=self.attention_dropout if self.training else 0.0,
+            sliding_window=self.sliding_window,
+            **kwargs,
+        )
 
         if gate_score is not None:
             if self.gate_attn_act_mode == "sigmoid":
@@ -252,13 +244,13 @@ class Spark2_5Attention(nn.Module):
             gate = gate.to(attn_output.dtype)
             attn_output = attn_output * gate
 
-        attn_output = attn_output.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
+        attn_output = attn_output.reshape(bsz, seq_len, -1).contiguous()
         attn_output = self.out_proj(attn_output)
 
         return attn_output, attn_weights
 
 
-class Spark2_5DecoderLayer(nn.Module):
+class Spark2_5DecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: Spark2_5Config, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -281,8 +273,8 @@ class Spark2_5DecoderLayer(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: torch.Tensor | None = None,
         past_key_values: Cache | None = None,
-        cache_position: torch.LongTensor | None = None,
         position_ids: torch.LongTensor | None = None,
+        use_cache: bool | None = False,
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
 
@@ -297,8 +289,8 @@ class Spark2_5DecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
-            cache_position=cache_position,
             position_ids=position_ids,
+            **kwargs,
         )
         hidden_states = residual + hidden_states
 
@@ -321,6 +313,8 @@ class Spark2_5PreTrainedModel(PreTrainedModel):
     _supports_sdpa = True
     _no_split_modules = ["Spark2_5DecoderLayer"]  # noqa: RUF012
     _skip_keys_device_placement = ["past_key_values"]  # noqa: RUF012
+    _supports_attention_backend = True
+    _can_record_outputs = {"hidden_states": Spark2_5DecoderLayer, "attentions": Spark2_5Attention}  # noqa: RUF012
 
     def _init_weights(self, module):
         if isinstance(module, Spark2_5RMSNorm):
@@ -359,19 +353,19 @@ class Spark2_5Model(Spark2_5PreTrainedModel):
     def set_input_embeddings(self, value):
         self.embedding = value
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
-        past_key_values: Cache | list[torch.FloatTensor] | None = None,
+        past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
-        cache_position: torch.LongTensor | None = None,
         token_type_ids: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
         if past_key_values is not None and not isinstance(past_key_values, DynamicCache):
             raise TypeError("Spark2.5 supports native DynamicCache only")
         if past_key_values is not None and not use_cache:
@@ -381,26 +375,19 @@ class Spark2_5Model(Spark2_5PreTrainedModel):
                 "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
             )
 
-        if self.gradient_checkpointing and self.training and use_cache:
-            logger.warning_once(
-                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
-            )
-            use_cache = False
-
         if inputs_embeds is None:
             inputs_embeds = self.embedding(input_ids)
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
 
-        if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-            )
-
+        # Upstream rotates by absolute cache slots, not by (possibly padding-adjusted) position_ids.
+        past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+        cache_slots = torch.arange(
+            past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+        )
         if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
+            position_ids = cache_slots.unsqueeze(0)
 
         if not isinstance(attention_mask, dict):
             mask_kwargs = {
@@ -429,7 +416,7 @@ class Spark2_5Model(Spark2_5PreTrainedModel):
             rope_theta = self.config.get_rope_theta(lt)
             prf = self.config.get_partial_rotary_factor(lt)
             cos, sin = compute_rope_cos_sin(
-                cache_position, head_dim, rope_theta, partial_rotary_factor=prf, device=device
+                cache_slots, head_dim, rope_theta, partial_rotary_factor=prf, device=device
             )
             rope_cache[lt] = (cos, sin)
 
@@ -438,23 +425,15 @@ class Spark2_5Model(Spark2_5PreTrainedModel):
             position_embeddings = rope_cache.get(layer_type, rope_cache.get("full_attention"))
             layer_attention_mask = causal_mask_mapping.get(layer_type, causal_mask_mapping.get("full_attention"))
 
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
-                    hidden_states,
-                    position_embeddings,
-                    layer_attention_mask,
-                )
-                hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
-            else:
-                hidden_states = decoder_layer(
-                    hidden_states,
-                    position_embeddings=position_embeddings,
-                    attention_mask=layer_attention_mask,
-                    past_key_values=past_key_values,
-                    cache_position=cache_position,
-                    position_ids=position_ids,
-                )
+            hidden_states = decoder_layer(
+                hidden_states,
+                position_embeddings=position_embeddings,
+                attention_mask=layer_attention_mask,
+                past_key_values=past_key_values,
+                position_ids=position_ids,
+                use_cache=use_cache,
+                **kwargs,
+            )
 
         hidden_states = self.norm(hidden_states)
         hidden_states = hidden_states.to(dtype)
@@ -499,11 +478,10 @@ class Spark2_5ForCausalLM(Spark2_5PreTrainedModel, GenerationMixin):
         input_ids: torch.LongTensor = None,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
-        past_key_values: Cache | list[torch.FloatTensor] | None = None,
+        past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         labels: torch.LongTensor | None = None,
         use_cache: bool | None = None,
-        cache_position: torch.LongTensor | None = None,
         logits_to_keep: int = 0,
         token_type_ids: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
@@ -515,7 +493,7 @@ class Spark2_5ForCausalLM(Spark2_5PreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            cache_position=cache_position,
+            **kwargs,
         )
 
         hidden_states = outputs.last_hidden_state

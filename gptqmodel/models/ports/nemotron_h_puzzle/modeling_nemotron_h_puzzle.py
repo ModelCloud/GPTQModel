@@ -16,28 +16,40 @@ from torch.nn import functional as F
 from transformers.activations import ACT2FN
 from transformers.cache_utils import DynamicCache
 from transformers.generation.utils import GenerationMixin
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.nemotron_h.modeling_nemotron_h import (
     NemotronHMamba2Mixer,
     NemotronHPreTrainedModel,
     NemotronHRMSNorm,
 )
-from transformers.utils.generic import can_return_tuple
+from transformers.utils.generic import can_return_tuple, merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
 
 from .configuration_nemotron_h_puzzle import NemotronHPuzzleConfig
 
 
 class NemotronHPuzzleCache(DynamicCache):
+    """Hybrid attention/Mamba cache whose length is defined even for attention-free Puzzle stacks.
+
+    Recurrent (linear-attention) cache layers carry no sequence axis, and a Puzzle checkpoint may have no
+    attention block at all, so the model records how many tokens each successful forward appended.
+    """
+
     def __init__(self, config):
         super().__init__(config=config)
-        self._puzzle_seen_tokens = 0
+        self._processed_tokens = 0
 
     def get_seq_length(self, layer_idx=0):
-        return self._puzzle_seen_tokens
+        return self._processed_tokens
+
+    def advance(self, num_tokens):
+        self._processed_tokens += num_tokens
 
     def reset(self):
         super().reset()
-        self._puzzle_seen_tokens = 0
+        self._processed_tokens = 0
 
     def crop(self, tokens_to_remove):
         raise ValueError("Puzzle recurrent cache cannot be cropped for speculative decoding")
@@ -119,30 +131,50 @@ class NemotronHPuzzleAttention(nn.Module):
         self.config = config
         self.layer_idx = layer_idx
         self.head_dim = config.head_dim or config.hidden_size // config.num_attention_heads
+        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.scaling = self.head_dim**-0.5
+        self.is_causal = True
         self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias)
         self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias)
 
-    def forward(self, hidden_states, attention_mask=None, past_key_values=None):
+    def forward(self, hidden_states, attention_mask=None, past_key_values=None, **kwargs):
         batch, length, _ = hidden_states.shape
         q = self.q_proj(hidden_states).view(batch, length, -1, self.head_dim).transpose(1, 2)
         k = self.k_proj(hidden_states).view(batch, length, -1, self.head_dim).transpose(1, 2)
         v = self.v_proj(hidden_states).view(batch, length, -1, self.head_dim).transpose(1, 2)
         if past_key_values is not None:
             k, v = past_key_values.update(k, v, self.layer_idx)
-        repeats = self.config.num_attention_heads // self.config.num_key_value_heads
-        k, v = k.repeat_interleave(repeats, dim=1), v.repeat_interleave(repeats, dim=1)
         if attention_mask is None:
             attention_mask = _causal_mask(None, hidden_states, k.shape[-2] - length)
-        dropout = self.config.attention_dropout if self.training else 0.0
-        if self.config._attn_implementation == "sdpa":
-            output = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask, dropout_p=dropout)
-        else:
-            weights = (q @ k.transpose(-1, -2)) * self.head_dim ** -0.5 + attention_mask
-            weights = weights.float().softmax(-1).to(q.dtype)
-            output = F.dropout(weights, p=dropout, training=self.training) @ v
-        return self.o_proj(output.transpose(1, 2).reshape(batch, length, -1))
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
+        output, _ = attention_interface(
+            self, q, k, v, attention_mask,
+            dropout=self.config.attention_dropout if self.training else 0.0, scaling=self.scaling, **kwargs,
+        )
+        return self.o_proj(output.reshape(batch, length, -1).contiguous())
+
+
+def repeat_kv(hidden_states, n_rep):
+    batch, num_key_value_heads, length, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, length, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, length, head_dim)
+
+
+def eager_attention_forward(module, query, key, value, attention_mask, scaling, dropout=0.0, **kwargs):
+    key = repeat_kv(key, module.num_key_value_groups)
+    value = repeat_kv(value, module.num_key_value_groups)
+    weights = torch.matmul(query, key.transpose(2, 3)) * scaling
+    if attention_mask is not None:
+        weights = weights + attention_mask
+    weights = weights.float().softmax(-1).to(query.dtype)
+    weights = F.dropout(weights, p=dropout, training=module.training)
+    return torch.matmul(weights, value).transpose(1, 2).contiguous(), weights
 
 
 def _causal_mask(mask, hidden_states, past_length):
@@ -167,7 +199,7 @@ def _causal_mask(mask, hidden_states, past_length):
     )
 
 
-class NemotronHPuzzleBlock(nn.Module):
+class NemotronHPuzzleBlock(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.config = config.get_nemotron_h_config_for_layer(layer_idx)
@@ -200,7 +232,8 @@ class NemotronHPuzzlePreTrainedModel(NemotronHPreTrainedModel):
     _supports_flex_attn = False
     supports_gradient_checkpointing = False
     _can_compile_fullgraph = False
-    _can_record_outputs = {}
+    _supports_attention_backend = True
+    _can_record_outputs = {"hidden_states": NemotronHPuzzleBlock}
     _checkpoint_conversion_mapping = {}
     _keys_to_ignore_on_load_unexpected = [r"^mtp\."]
 
@@ -225,16 +258,16 @@ class NemotronHPuzzleModel(NemotronHPuzzlePreTrainedModel):
     def set_input_embeddings(self, value):
         self.embeddings = value
 
-    @can_return_tuple
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(self, input_ids=None, inputs_embeds=None, attention_mask=None, past_key_values=None,
-                use_cache=None, output_hidden_states=False, output_attentions=False, **kwargs):
+                use_cache=None, **kwargs):
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Specify exactly one of input_ids and inputs_embeds")
-        if output_attentions:
+        if kwargs.get("output_attentions"):
             raise ValueError("Puzzle attention weights are not exposed by this port")
         if inputs_embeds is None:
             inputs_embeds = self.embeddings(input_ids)
-        use_cache = self.config.use_cache if use_cache is None else use_cache
         if past_key_values is not None and not isinstance(past_key_values, NemotronHPuzzleCache):
             raise ValueError("Puzzle requires its own dynamic hybrid cache")
         if not use_cache and past_key_values is not None:
@@ -247,19 +280,13 @@ class NemotronHPuzzleModel(NemotronHPuzzlePreTrainedModel):
         if attention_mask is not None and attention_mask.ndim == 2:
             recurrent_mask = attention_mask[:, -inputs_embeds.shape[1]:].to(inputs_embeds.device)
         hidden_states = inputs_embeds
-        history = [] if output_hidden_states else None
         for layer in self.layers:
-            if history is not None:
-                history.append(hidden_states)
             layer_mask = causal if layer.block_type == "attention" else recurrent_mask
             hidden_states = layer(hidden_states, past_key_values=past_key_values, attention_mask=layer_mask)
         hidden_states = self.norm_f(hidden_states)
-        if history is not None:
-            history.append(hidden_states)
         if past_key_values is not None:
-            past_key_values._puzzle_seen_tokens += inputs_embeds.shape[1]
-        return BaseModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=past_key_values,
-                                       hidden_states=tuple(history) if history is not None else None)
+            past_key_values.advance(inputs_embeds.shape[1])
+        return BaseModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=past_key_values)
 
 
 class NemotronHPuzzleForCausalLM(NemotronHPuzzlePreTrainedModel, GenerationMixin):
@@ -288,7 +315,7 @@ class NemotronHPuzzleForCausalLM(NemotronHPuzzlePreTrainedModel, GenerationMixin
     def forward(self, input_ids=None, attention_mask=None, inputs_embeds=None, past_key_values=None,
                 labels=None, use_cache=None, logits_to_keep=0, **kwargs):
         outputs = self.model(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask,
-                             past_key_values=past_key_values, use_cache=use_cache, return_dict=True, **kwargs)
+                             past_key_values=past_key_values, use_cache=use_cache, **kwargs)
         hidden_states = outputs.last_hidden_state
         indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, indices].to(self.lm_head.weight.dtype)).float()

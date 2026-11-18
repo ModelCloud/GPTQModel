@@ -246,8 +246,8 @@ def test_prefill_cache_continuation_generation_and_causality(implementation, dty
     assert torch.equal(generated, uncached)
 
 
-def test_sdpa_attention_output_fallback_preserves_upstream_window_boundary():
-    model = tiny_model(attn_implementation="sdpa", sliding_window=2)
+def test_eager_window_boundary_and_sdpa_full_context():
+    model = tiny_model(attn_implementation="eager", sliding_window=2)
     ids = torch.tensor([[1, 4, 8, 3, 7, 9]])
     mask, positions = torch.ones_like(ids), torch.arange(ids.shape[1])[None]
     eager = model(ids, attention_mask=mask, output_attentions=True, use_cache=False)
@@ -255,6 +255,7 @@ def test_sdpa_attention_output_fallback_preserves_upstream_window_boundary():
     torch.testing.assert_close(eager.logits, expected, atol=1e-7, rtol=1e-5)
     # The upstream eager window includes the query and two preceding keys.
     assert torch.count_nonzero(eager.attentions[0][0, 0, -1]) == 3
+    model.set_attn_implementation("sdpa")
     sdpa = model(ids, attention_mask=mask, use_cache=False)
     assert not torch.allclose(sdpa.logits[:, -1], eager.logits[:, -1])
 

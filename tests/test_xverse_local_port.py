@@ -152,13 +152,13 @@ def oracle(model, ids, mask=None, positions=None, past=None, return_cache=False)
                 ("v_proj", c.num_key_value_heads),
             ]
         ]
-        theta = c.rope_theta
+        theta = c.rope_parameters["rope_theta"]
         pos = positions.double()
         if c.xverse_rope_type == "dynamic_256k" and total > c.max_position_embeddings:
             theta *= (total / (c.max_position_embeddings / 2) - 1) ** (head / (head - 2))
-        if c.xverse_rope_scaling is not None:
-            scale = c.xverse_rope_scaling
-            if scale["type"] == "linear":
+        if c.rope_parameters["rope_type"] != "default":
+            scale = c.rope_parameters
+            if scale["rope_type"] == "linear":
                 pos = pos / scale["factor"]
             elif positions.max() + 1 > c.max_position_embeddings:
                 theta *= (
@@ -287,7 +287,7 @@ def test_source_rotary_policy_independent_oracle_and_reload(tmp_path, variant):
     model.save_pretrained(tmp_path)
     loaded = XverseQModel.loader.from_pretrained(tmp_path, attn_implementation="eager")
     assert loaded.config.xverse_rope_type == model.config.xverse_rope_type
-    assert loaded.config.xverse_rope_scaling == model.config.xverse_rope_scaling
+    assert loaded.config.rope_parameters == model.config.rope_parameters
     # Dynamic MoE frequency state intentionally retains its source's warm-cache base.
     with torch.inference_mode():
         torch.testing.assert_close(loaded(ids).logits, model(ids).logits, rtol=1e-6, atol=1e-6)
@@ -348,7 +348,7 @@ def test_source_float32_rotary_at_released_context_boundary_and_dtype_movement(v
     length = 262144 if variant == "long" else 8192 if variant == "dense" else 16384
     positions = torch.tensor([[length - 3, length - 1]])
     dim = 128
-    base = config.rope_theta
+    base = config.rope_parameters["rope_theta"]
     pos = positions.float()
     if variant == "long":
         base *= (length / (config.max_position_embeddings / 2) - 1) ** (dim / (dim - 2))
@@ -417,12 +417,11 @@ def test_cache_continuation_greedy_beam_and_two_safetensors_cycles(tmp_path, moe
                 atol=tolerance,
             )
         assert cached.get_seq_length() == ids.shape[1]
-        legacy = tuple((layer.keys, layer.values) for layer in cached.layers)
         next_ids = torch.tensor([[8], [9]])
-        old = model(next_ids, past_key_values=legacy, attention_mask=F.pad(mask, (0, 1), value=1), use_cache=True)
-        assert isinstance(old.past_key_values, tuple)
+        step = model(next_ids, past_key_values=cached, attention_mask=F.pad(mask, (0, 1), value=1), use_cache=True)
+        assert step.past_key_values is cached
         torch.testing.assert_close(
-            old.logits,
+            step.logits,
             model(torch.cat([ids, next_ids], -1), attention_mask=F.pad(mask, (0, 1), value=1)).logits[:, -1:],
             rtol=tolerance,
             atol=tolerance,
@@ -702,8 +701,8 @@ def test_released_index_metadata_preserves_exported_rope_without_loading_pickle(
     assert XverseQModel.loader.from_config(loaded).config._attn_implementation == "sdpa"
     with pytest.raises(ValueError, match="Flash Attention 2"):
         XverseQModel.loader.from_config(loaded, attn_implementation="flash_attention_2")
-    # Attention is hand-written (eager/SDPA), not routed through ALL_ATTENTION_FUNCTIONS.
-    assert not XverseForCausalLM.is_backend_compatible()
+    # Attention dispatches through ALL_ATTENTION_FUNCTIONS.
+    assert XverseForCausalLM.is_backend_compatible()
     loaded.save_pretrained(tmp_path / "roundtrip")
     assert XverseQModel.loader.load_config(tmp_path / "roundtrip").xverse_rope_persistent is persistent
 

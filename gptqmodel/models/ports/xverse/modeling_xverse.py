@@ -3,20 +3,23 @@
 # SPDX-License-Identifier: Apache-2.0
 """Source-matched XVERSE dense, 256K and MoE decoder."""
 
-import math
-
 import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import GenerationMixin, PreTrainedModel
 from transformers.activations import ACT2FN
-from transformers.cache_utils import DynamicCache
+from transformers.cache_utils import Cache, DynamicCache
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
     MoeCausalLMOutputWithPast,
     MoeModelOutputWithPast,
 )
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from transformers.utils import can_return_tuple
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import OutputRecorder, capture_outputs
 
 from .configuration_xverse import XverseConfig
 
@@ -41,7 +44,7 @@ class XverseRotaryEmbedding(nn.Module):
         super().__init__()
         self.config = config
         self.dim = config.hidden_size // config.num_attention_heads
-        inv_freq = 1.0 / (config.rope_theta ** (torch.arange(0, self.dim, 2, dtype=torch.float32) / self.dim))
+        inv_freq = 1.0 / (config.rope_parameters["rope_theta"] ** (torch.arange(0, self.dim, 2, dtype=torch.float32) / self.dim))
         self.register_buffer("inv_freq", inv_freq, persistent=config.xverse_rope_persistent)
 
     def _apply(self, fn, recurse=True):
@@ -52,18 +55,19 @@ class XverseRotaryEmbedding(nn.Module):
 
     def forward(self, x, position_ids, seq_len):
         c = self.config
+        rope = c.rope_parameters
         positions = position_ids.float()
         frequency = self.inv_freq.float()
         if c.xverse_rope_type == "dynamic_256k" and seq_len > c.max_position_embeddings:
-            base = c.rope_theta * (seq_len / (c.max_position_embeddings / 2) - 1) ** (self.dim / (self.dim - 2))
+            base = rope["rope_theta"] * (seq_len / (c.max_position_embeddings / 2) - 1) ** (self.dim / (self.dim - 2))
             frequency = 1.0 / (base ** (torch.arange(0, self.dim, 2, device=x.device, dtype=torch.float32) / self.dim))
-        if c.xverse_rope_scaling is not None:
-            factor = c.xverse_rope_scaling["factor"]
-            if c.xverse_rope_scaling["type"] == "linear":
+        if rope["rope_type"] != "default":
+            factor = rope["factor"]
+            if rope["rope_type"] == "linear":
                 positions = positions / factor
             elif position_ids.max() + 1 > c.max_position_embeddings:
                 length = position_ids.max() + 1
-                base = c.rope_theta * (factor * length / c.max_position_embeddings - (factor - 1)) ** (
+                base = rope["rope_theta"] * (factor * length / c.max_position_embeddings - (factor - 1)) ** (
                     self.dim / (self.dim - 2)
                 )
                 frequency = 1.0 / (
@@ -128,6 +132,26 @@ class XverseMoEMLP(nn.Module):
         return result, logits
 
 
+def repeat_kv(hidden_states, n_rep):
+    batch, num_key_value_heads, length, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, length, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, length, head_dim)
+
+
+def eager_attention_forward(module, query, key, value, attention_mask, scaling, dropout=0.0, **kwargs):
+    key = repeat_kv(key, module.num_key_value_groups)
+    value = repeat_kv(value, module.num_key_value_groups)
+    scores = torch.matmul(query, key.transpose(2, 3)) * scaling
+    if attention_mask is not None:
+        # Upstream clamps so additive masks never overflow to -inf.
+        scores = (scores + attention_mask).clamp_min(torch.finfo(scores.dtype).min)
+    weights = scores.softmax(-1, dtype=torch.float32).to(query.dtype)
+    weights = F.dropout(weights, p=dropout, training=module.training)
+    return torch.matmul(weights, value).transpose(1, 2).contiguous(), weights
+
+
 class XverseAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -136,6 +160,9 @@ class XverseAttention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
         self.head_dim = config.hidden_size // self.num_heads
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        self.scaling = self.head_dim**-0.5
+        self.is_causal = True
         self.q_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
         self.k_proj = nn.Linear(
             config.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias
@@ -146,17 +173,7 @@ class XverseAttention(nn.Module):
         self.o_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
         self.rotary_emb = XverseRotaryEmbedding(config)
 
-    def forward(
-        self,
-        hidden_states,
-        attention_mask=None,
-        position_ids=None,
-        past_key_value=None,
-        output_attentions=False,
-        use_cache=False,
-        cache_position=None,
-        **kwargs,
-    ):
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_values=None, **kwargs):
         b, t, _ = hidden_states.shape
 
         def project(layer, heads):
@@ -171,26 +188,19 @@ class XverseAttention(nn.Module):
         q = project(self.q_proj, self.num_heads)
         k = project(self.k_proj, self.num_key_value_heads)
         v = project(self.v_proj, self.num_key_value_heads)
-        length = t + (past_key_value.get_seq_length(self.layer_idx) if past_key_value is not None else 0)
+        length = t + (past_key_values.get_seq_length(self.layer_idx) if past_key_values is not None else 0)
         cos, sin = self.rotary_emb(v, position_ids, length)
         q, k = q * cos + _rotate(q) * sin, k * cos + _rotate(k) * sin
-        if past_key_value is not None:
-            k, v = past_key_value.update(k, v, self.layer_idx)
-        groups = self.num_heads // self.num_key_value_heads
-        k, v = k.repeat_interleave(groups, 1), v.repeat_interleave(groups, 1)
-        if self.config._attn_implementation == "sdpa" and not output_attentions:
-            out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=attention_mask, dropout_p=self.config.attention_dropout if self.training else 0.0
-            )
-            probabilities = None
-        else:
-            scores = q @ k.transpose(-1, -2) / math.sqrt(self.head_dim)
-            if attention_mask is not None:
-                scores = (scores + attention_mask).clamp_min(torch.finfo(scores.dtype).min)
-            probabilities = scores.softmax(-1, dtype=torch.float32).to(q.dtype)
-            probabilities = F.dropout(probabilities, p=self.config.attention_dropout, training=self.training)
-            out = probabilities @ v
-        out = out.transpose(1, 2).reshape(b, t, -1)
+        if past_key_values is not None:
+            k, v = past_key_values.update(k, v, self.layer_idx)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
+        out, probabilities = attention_interface(
+            self, q, k, v, attention_mask,
+            dropout=self.config.attention_dropout if self.training else 0.0, scaling=self.scaling, **kwargs,
+        )
+        out = out.reshape(b, t, -1)
         if self.config.pretraining_tp == 1:
             out = self.o_proj(out)
         else:
@@ -200,10 +210,10 @@ class XverseAttention(nn.Module):
                     out.chunk(self.config.pretraining_tp, -1), self.o_proj.weight.chunk(self.config.pretraining_tp, 1)
                 )
             )
-        return out, probabilities if output_attentions else None
+        return out, probabilities
 
 
-class XverseDecoderLayer(nn.Module):
+class XverseDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.self_attn = XverseAttention(config, layer_idx)
@@ -211,12 +221,15 @@ class XverseDecoderLayer(nn.Module):
         self.input_layernorm = XverseRMSNorm(config)
         self.post_attention_layernorm = XverseRMSNorm(config)
 
-    def forward(self, hidden_states, **kwargs):
-        attended, weights = self.self_attn(self.input_layernorm(hidden_states), **kwargs)
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_values=None,
+                use_cache=False, **kwargs):
+        attended, _ = self.self_attn(
+            self.input_layernorm(hidden_states), attention_mask=attention_mask, position_ids=position_ids,
+            past_key_values=past_key_values, **kwargs,
+        )
         hidden_states = hidden_states + attended
         mlp = self.mlp(self.post_attention_layernorm(hidden_states))
-        routed = isinstance(mlp, tuple)
-        return hidden_states + (mlp[0] if routed else mlp), weights, mlp[1] if routed else None
+        return hidden_states + (mlp[0] if isinstance(mlp, tuple) else mlp)
 
 
 class XversePreTrainedModel(PreTrainedModel):
@@ -224,6 +237,13 @@ class XversePreTrainedModel(PreTrainedModel):
     base_model_prefix = "model"
     _no_split_modules = ["XverseDecoderLayer"]
     _supports_sdpa = True
+    _supports_attention_backend = True
+    _skip_keys_device_placement = ["past_key_values"]
+    _can_record_outputs = {
+        "router_logits": OutputRecorder(XverseMoEMLP, index=1),
+        "hidden_states": XverseDecoderLayer,
+        "attentions": XverseAttention,
+    }
     _keep_in_fp32_modules_strict = ["router", "inv_freq"]
 
     def _init_weights(self, module):
@@ -238,7 +258,7 @@ class XversePreTrainedModel(PreTrainedModel):
             nn.init.ones_(module.weight)
         elif isinstance(module, XverseRotaryEmbedding):
             frequencies = 1.0 / (
-                module.config.rope_theta
+                module.config.rope_parameters["rope_theta"]
                 ** (torch.arange(0, module.dim, 2, device=module.inv_freq.device, dtype=torch.float32) / module.dim)
             )
             module.inv_freq.copy_(frequencies)
@@ -250,6 +270,7 @@ class XverseModel(XversePreTrainedModel):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
         self.layers = nn.ModuleList([XverseDecoderLayer(config, i) for i in range(config.num_hidden_layers)])
         self.norm = XverseRMSNorm(config)
+        self.gradient_checkpointing = False
         self.post_init()
 
     def get_input_embeddings(self):
@@ -258,43 +279,25 @@ class XverseModel(XversePreTrainedModel):
     def set_input_embeddings(self, embeddings):
         self.embed_tokens = embeddings
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(
         self,
         input_ids=None,
         attention_mask=None,
         position_ids=None,
-        past_key_values=None,
+        past_key_values: Cache | None = None,
         inputs_embeds=None,
         use_cache=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        output_router_logits=None,
-        return_dict=None,
-        cache_position=None,
         **kwargs,
     ):
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Specify exactly one of input_ids and inputs_embeds")
-        use_cache = self.config.use_cache if use_cache is None else use_cache
-        output_attentions = self.config.output_attentions if output_attentions is None else output_attentions
-        output_hidden_states = (
-            self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
-        )
-        output_router_logits = (
-            self.config.output_router_logits if output_router_logits is None else output_router_logits
-        )
-        return_dict = self.config.return_dict if return_dict is None else return_dict
-        legacy = isinstance(past_key_values, (tuple, list))
-        if legacy:
-            cache = DynamicCache()
-            for i, (k, v) in enumerate(past_key_values):
-                cache.update(k, v, i)
-        elif past_key_values is None or isinstance(past_key_values, DynamicCache):
-            cache = past_key_values
-        else:
-            raise ValueError("XVERSE supports DynamicCache or legacy tuple caches only")
+        if past_key_values is not None and not isinstance(past_key_values, DynamicCache):
+            raise ValueError("XVERSE supports DynamicCache only")
+        cache = past_key_values
         if cache is None and use_cache:
-            cache = DynamicCache()
+            cache = DynamicCache(config=self.config)
         x = self.embed_tokens(input_ids) if inputs_embeds is None else inputs_embeds
         b, t, _ = x.shape
         past = cache.get_seq_length() if cache is not None else 0
@@ -316,40 +319,14 @@ class XverseModel(XversePreTrainedModel):
             mask = attention_mask.to(x.dtype)
         else:
             raise ValueError("Invalid XVERSE attention_mask shape")
-        states, attentions, routers = (), (), ()
         for layer in self.layers:
-            if output_hidden_states:
-                states += (x,)
-            x, weights, router = layer(
-                x,
-                attention_mask=mask,
-                position_ids=position_ids,
-                past_key_value=cache,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                cache_position=cache_position,
+            x = layer(
+                x, attention_mask=mask, position_ids=position_ids, past_key_values=cache, use_cache=use_cache,
+                **kwargs,
             )
-            if output_attentions:
-                attentions += (weights,)
-            if output_router_logits and router is not None:
-                routers += (router,)
         x = self.norm(x)
-        if output_hidden_states:
-            states += (x,)
-        result_cache = cache if use_cache else None
-        if legacy and result_cache is not None:
-            result_cache = tuple((layer.keys, layer.values) for layer in cache.layers)
-        output = {
-            "last_hidden_state": x,
-            "past_key_values": result_cache,
-            "hidden_states": states if output_hidden_states else None,
-            "attentions": attentions if output_attentions else None,
-        }
-        if self.config.num_experts:
-            result = MoeModelOutputWithPast(**output, router_logits=routers if output_router_logits else None)
-        else:
-            result = BaseModelOutputWithPast(**output)
-        return result if return_dict else result.to_tuple()
+        output_class = MoeModelOutputWithPast if self.config.num_experts else BaseModelOutputWithPast
+        return output_class(last_hidden_state=x, past_key_values=cache if use_cache else None)
 
 
 class XverseForCausalLM(XversePreTrainedModel, GenerationMixin):
@@ -434,6 +411,7 @@ class XverseForCausalLM(XversePreTrainedModel, GenerationMixin):
         result = self.generate(ids, generation_config=policy)
         return tokenizer.decode(result[0, ids.shape[-1] :], skip_special_tokens=True)
 
+    @can_return_tuple
     def forward(
         self,
         input_ids=None,
@@ -443,11 +421,6 @@ class XverseForCausalLM(XversePreTrainedModel, GenerationMixin):
         inputs_embeds=None,
         labels=None,
         use_cache=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        output_router_logits=None,
-        return_dict=None,
-        cache_position=None,
         logits_to_keep=0,
         **kwargs,
     ):
@@ -458,11 +431,7 @@ class XverseForCausalLM(XversePreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            output_router_logits=output_router_logits,
-            return_dict=True,
-            cache_position=cache_position,
+            **kwargs,
         )
         selection = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         hidden = output.last_hidden_state[:, selection]
@@ -486,7 +455,7 @@ class XverseForCausalLM(XversePreTrainedModel, GenerationMixin):
         }
         if self.config.num_experts:
             aux = None
-            if output.router_logits is not None:
+            if output.router_logits:
                 probabilities = torch.cat(output.router_logits, 0).softmax(-1)
                 chosen = F.one_hot(
                     probabilities.topk(self.config.moe_top_k, -1).indices, self.config.num_experts
@@ -501,7 +470,5 @@ class XverseForCausalLM(XversePreTrainedModel, GenerationMixin):
                 aux = (tokens * means.unsqueeze(0)).sum() * self.config.num_experts
                 if loss is not None:
                     values["loss"] = loss + self.config.router_aux_loss_coef * aux
-            result = MoeCausalLMOutputWithPast(**values, aux_loss=aux, router_logits=output.router_logits)
-        else:
-            result = CausalLMOutputWithPast(**values)
-        return result if (self.config.return_dict if return_dict is None else return_dict) else result.to_tuple()
+            return MoeCausalLMOutputWithPast(**values, aux_loss=aux, router_logits=output.router_logits)
+        return CausalLMOutputWithPast(**values)
