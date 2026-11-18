@@ -429,6 +429,40 @@ def _warn_compile_fallback(label: str, exc: BaseException) -> None:
     )
 
 
+def _dynamo_config():
+    """Return ``torch._dynamo.config`` without importing dynamo, or ``None``.
+
+    Importing dynamo only to read one flag would force its side effects on a
+    process that never compiled anything. ``torch_compile`` imports it
+    (``configure_dynamo_cache(ensure_import=True)``) before a wrapper exists, so
+    it is already present whenever this runs in practice.
+    """
+    dynamo = sys.modules.get("torch._dynamo")
+    return getattr(dynamo, "config", None)
+
+
+def _call_with_dynamo_suppression(compiled: Callable, fullgraph: bool, args: tuple, kwargs: dict):
+    """Invoke ``compiled`` with dynamo allowed to fall back for the failing frame.
+
+    ``fullgraph=True`` is an explicit single-graph contract and stays
+    fail-closed, so suppression is not enabled for it. The previous flag value
+    is restored in a ``finally`` block: this is a per-call behaviour switch, not
+    a process setting, and a concurrent compile in another thread must not see
+    it (a GLOBAL_STATE guard failure from that race is issue #4094).
+    """
+    if fullgraph:
+        return compiled(*args, **kwargs)
+    config = _dynamo_config()
+    if config is None:
+        return compiled(*args, **kwargs)
+    previous = getattr(config, "suppress_errors", False)
+    config.suppress_errors = True
+    try:
+        return compiled(*args, **kwargs)
+    finally:
+        config.suppress_errors = previous
+
+
 def model_global_state_lock():
     """Return the process-wide lock guarding torch's global default dtype.
 
@@ -446,7 +480,22 @@ def model_global_state_lock():
 
 
 def _install_callable_compile_fallback(original: Callable, compiled: Callable, fullgraph: bool) -> Callable:
-    """Return a callable that retries ``original`` eagerly after a compile failure."""
+    """Return a callable that degrades to eager after a compile failure.
+
+    The failure is never retried by re-running ``original`` from the start. With
+    ``fullgraph=False`` dynamo executes the forward as compiled fragments plus
+    resume frames, so a compiler failure can arrive after earlier frames already
+    mutated state (the KV cache in ``generate()``, Mamba/SSM state, offload
+    hooks). Re-running there applies those side effects twice -- the first
+    ``generate()`` after ``optimize()`` appended every KV entry a second time and
+    died on the mask length (#5119).
+
+    ``torch._dynamo.config.suppress_errors`` makes dynamo skip only the failing
+    frame and run that frame eagerly, which executes nothing twice. The flag is
+    scoped to this call and restored afterwards; the skip dynamo installs is
+    sticky, so later calls stay eager without it. For ``fullgraph=True`` nothing
+    has executed yet when the compiler fails, so the eager retry is exact.
+    """
     label = _compile_label(original)
     state = {"fallback": False, "compiled": False}
 
@@ -456,7 +505,9 @@ def _install_callable_compile_fallback(original: Callable, compiled: Callable, f
 
         def run_compiled():
             try:
-                return compiled(*args, **kwargs)
+                return _call_with_dynamo_suppression(
+                    compiled, fullgraph, args, kwargs
+                )
             except Exception as exc:
                 if not _is_compiler_failure(exc, fullgraph=fullgraph):
                     raise
@@ -520,7 +571,9 @@ def _install_module_compile_fallback(module: torch.nn.Module, compiled, fullgrap
 
         def run_compiled():
             try:
-                return compiled_forward(*args, **kwargs)
+                return _call_with_dynamo_suppression(
+                    compiled_forward, fullgraph, args, kwargs
+                )
             except Exception as exc:
                 if not _is_compiler_failure(exc, fullgraph=fullgraph):
                     raise
