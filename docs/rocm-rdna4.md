@@ -116,8 +116,7 @@ set it, so rocBLAS runs its own deterministic kernels.
 That pin is scoped to methods that build a Hessian or input Gram. #4079 forced
 rocBLAS for every calibrated run; on gfx1201 rocBLAS has no fast fp16/bf16
 kernels, so AWQ and RTN paid 8-14x on their GEMMs with no determinism gain. A
-run plan that contains a Hessian/Gram builder - GPTQ, QQQ, VPTQ, MACaQ, EXL3,
-calibrated FP8 GSQ or an EoRA adapter (`_needs_deterministic_hessian` in
+run plan that contains a Hessian/Gram builder - GPTQ, QQQ, VPTQ, MACaQ, EXL3, or an EoRA adapter (`_needs_deterministic_hessian` in
 `gptqmodel/models/base.py`) - now pins rocBLAS, as does Paro (no Hessian, but
 hipBLASLt's per-process kernel choice made seeded runs differ, #4460); every
 other method pins hipBLASLt for its whole run. An AWQ plan with an EoRA adapter

@@ -9,6 +9,7 @@ import torch.nn as nn
 
 import gptqmodel.nn_modules.qlinear.fp8 as fp8_module
 from gptqmodel.quantization.dtype import available_float8_dtype_names
+from tests.fp8_test_utils import pack_fp8_module, quantize_fp8_weight
 
 
 def _available_fp8_quant_formats():
@@ -32,7 +33,7 @@ def _make_fp8_kernel(*, in_features: int = 64, out_features: int = 64) -> fp8_mo
         weight_block_size=None,
         register_buffers=False,
     )
-    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    pack_fp8_module(kernel, linear)
     return kernel.eval()
 
 
@@ -94,7 +95,7 @@ def test_fp8_empty_cuda_forward_preserves_scaled_mm_for_later_tokens(monkeypatch
         format="float8_e4m3fn", weight_scale_method="tensor",
         activation_quant_method="per_token",
     )
-    module.pack_original(linear, scales=None, zeros=None)
+    pack_fp8_module(module, linear)
     module = module.eval().to(device="cuda")
     x = torch.randn(*prefix, 64, device="cuda", dtype=dtype)
     empty = x[:0]
@@ -159,9 +160,9 @@ def test_fp8_pack_matches_reference_quantizer(fmt: str, weight_scale_method: str
         weight_block_size=block_size,
         register_buffers=False,
     )
-    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    pack_fp8_module(kernel, linear)
 
-    expected_weight, expected_scale_inv = fp8_module.quantize_fp8_weight(
+    expected_weight, expected_scale_inv = quantize_fp8_weight(
         linear.weight.detach().to(torch.float32),
         format=fmt,
         weight_scale_method=weight_scale_method,
@@ -194,7 +195,7 @@ def test_fp8_pack_rejects_e8m0fnu(weight_scale_method: str):
     )
 
     with pytest.raises(ValueError, match="dequantization of existing checkpoints"):
-        kernel.pack_original(linear=linear, scales=None, zeros=None)
+        pack_fp8_module(kernel, linear)
 
 
 @pytest.mark.parametrize("fmt", _available_fp8_quant_formats())
@@ -219,7 +220,7 @@ def test_fp8_forward_matches_dequantized_reference(fmt: str, weight_scale_method
         weight_block_size=block_size,
         register_buffers=False,
     )
-    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    pack_fp8_module(kernel, linear)
     kernel = kernel.to(device=device).eval()
 
     x_dtype = torch.float32 if device == "cpu" else torch.float16
@@ -268,7 +269,7 @@ def _packed_gpu_kernel(
         register_buffers=False,
         **kwargs,
     )
-    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    pack_fp8_module(kernel, linear)
     return kernel.eval()
 
 
@@ -567,7 +568,7 @@ def test_fp8_scaled_mm_matches_dense_reference(fmt: str, weight_scale_method: st
         activation_quant_method="per_token",
         register_buffers=False,
     )
-    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    pack_fp8_module(kernel, linear)
     kernel = kernel.to(device="cuda").eval()
 
     x = torch.randn(7, 64, device="cuda", dtype=torch.float16)

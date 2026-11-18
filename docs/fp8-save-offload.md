@@ -173,7 +173,6 @@ Measured on a synthetic 512-column linear with `group_size=-1`, `beta=0.2`,
 | Test | Invariant |
 | --- | --- |
 | `tests/test_fp8_save_offload.py::test_save_materialization_skips_packed_fp8_payload` | the writer's skip tuple leaves a META FP8 `weight` for the offload restore; without it the source replaces the codes |
-| `tests/test_fp8_save_offload.py::test_fp8_default_offload_save_round_trip_keeps_packed_codes` | end to end: saved `q_proj.weight` bytes equal the packed codes and the reloaded PPL is sane |
 | `tests/test_auto_dtype_cast.py::test_forward_only_processor_keeps_dense_modules_in_the_tree` | a capture-only forward does not install `AutoNF12HookedLinear` |
 | `tests/test_auto_dtype_cast.py::test_native_processor_forward_forbids_auto_dtype_cast` | `NativeProcessor` declares the policy |
 | `tests/test_gptaq_foem_batch.py::test_foem_block_boundary_beta_correction_is_blocksize_invariant` | FOEM's `beta` correction reaches the first column of every block |

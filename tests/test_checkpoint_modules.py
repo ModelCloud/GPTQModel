@@ -236,7 +236,7 @@ def test_checkpoint_persists_effective_dynamic_fp8_settings():
         "format": "float8_e5m2",
         "weight_scale_method": "block",
         "weight_block_size": [32, 32],
-        "weight_scale_semantics": "inverse",
+        "weight_scale_semantics": "multiplier",
     }
 
     restored = restore_packed_module(

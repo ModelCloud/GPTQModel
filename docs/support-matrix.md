@@ -25,9 +25,9 @@ reference inventories, not a promise that every combination works on every devic
 | Rotation                  | ✅          | x | x | x | x             |
 | GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
 | FOEM                      | ✅          | ✅ | ✅ | ✅ | ✅             |
-| GSQ (GPTQ, AWQ, RTN, QQQ, FP8, Paro) | ✅ | Existing format† | Existing format† | Existing format† | Existing format† |
+| GSQ (GPTQ, AWQ, RTN, QQQ, Paro) | ✅ | Existing format† | Existing format† | Existing format† | Existing format† |
 
-`GGUF`, `FP8`, `EXL3`, `Paro`, `VPTQ`, `MACaQ`, and `NF12` are currently native GPT-QModel quantization/runtime paths. Every GPT-QModel FP8 export publishes `quant_method: "gptqmodel_fp8"` and is refused by transformers: GPT-QModel writes inverse scales for `row`, `tensor`, and `block`, while `FineGrainedFP8` reads block scales as multipliers. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
+`GGUF`, `EXL3`, `Paro`, `VPTQ`, `MACaQ`, and `NF12` are currently native GPT-QModel quantization/runtime paths. FP8 is load-only: GPT-QModel reads production FP8 checkpoints (transformers `FineGrainedFP8`, DeepSeek/Qwen block scales, NVIDIA ModelOpt, MXFP8, NVFP8) and no longer writes its own FP8 layout, so there is no `gptqmodel_fp8` alias. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
 
 † GSQ preserves the initializer's checkpoint format; it does not add a runtime format.
 

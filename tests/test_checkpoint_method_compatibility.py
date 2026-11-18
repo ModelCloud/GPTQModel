@@ -118,7 +118,7 @@ def test_awq_checkpoint_recovery(tmp_path, family, mode, eora):
     )
 
 
-@pytest.mark.parametrize("method", ["rtn", "fp8", "gguf", "bitsandbytes"])
+@pytest.mark.parametrize("method", ["rtn", "gguf", "bitsandbytes"])
 @pytest.mark.parametrize("mode", ["term", "kill-before", "kill-after", "error"])
 @pytest.mark.checkpoint_recovery
 def test_weight_only_checkpoint_recovery(tmp_path, method, mode):
@@ -171,7 +171,7 @@ def test_specialized_eora_checkpoint_recovery(tmp_path, method, family, mode):
 
 
 @pytest.mark.parametrize(
-    "method", ["rtn", "fp8", "gguf", "bitsandbytes", "qqq", "paro", "exl3"]
+    "method", ["rtn", "gguf", "bitsandbytes", "qqq", "paro", "exl3"]
 )
 @pytest.mark.parametrize("mode", ["term", "kill-before"])
 @pytest.mark.checkpoint_recovery
@@ -194,7 +194,6 @@ def test_moe_method_checkpoint_recovery(tmp_path, method, mode):
         ("awq", "gemv_fast"),
         ("awq", "llm-awq"),
         ("awq", "bitblas"),
-        ("fp8", "float8_e5m2"),
         ("bitsandbytes", "fp4"),
         ("bitsandbytes", "int8"),
     ],

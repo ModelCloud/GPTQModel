@@ -75,8 +75,10 @@ flowchart TD
 `_dequantize_native`, `_dequantize_cpu`, `dequantize_weight`, and the
 `torch._scaled_mm` weight scale. The `_scaled_mm` path is only used by the
 explicit per-token W8A8 opt-in; see
-[FP8 weight-only dispatch](fp8-weight-only-dispatch.md). `FP8Config` still emits only GPT-QModel's own
-inverse scales; the multiplier spelling is accepted for loaded checkpoints.
+[FP8 weight-only dispatch](fp8-weight-only-dispatch.md). `FP8Config` is
+load-only: it accepts `multiplier` (the HF/DeepSeek/Qwen default) and
+`inverse` (legacy GPT-QModel checkpoints) on load, and never writes a
+checkpoint.
 
 ## Before / after
 

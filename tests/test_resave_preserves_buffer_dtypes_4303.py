@@ -159,34 +159,3 @@ def test_gptq_resave_is_byte_identical(tmp_path):
         assert after[name][0] is dtype, (name, dtype, after[name][0])
         assert torch.equal(after[name][1], payload), name
     assert _checkpoint_bytes(resaved) == _checkpoint_bytes(quantized)
-
-
-def test_fp8_resave_keeps_packed_weight_and_scales(tmp_path):
-    source = _tiny_source(tmp_path / "source")
-    quantized = tmp_path / "quantized"
-    resaved = tmp_path / "resaved"
-    _quantize(
-        source,
-        quantized,
-        QuantizeConfig(method="fp8", device="cpu", offload_to_disk=False),
-        BACKEND.FP8_TORCH,
-    )
-    _resave(quantized, resaved, BACKEND.FP8_TORCH)
-
-    before = _shard_tensors(quantized)
-    after = _shard_tensors(resaved)
-    assert set(before) == set(after)
-    scales = [name for name in before if name.endswith(".weight_scale_inv")]
-    packed = [name[: -len("weight_scale_inv")] + "weight" for name in scales]
-    assert packed and scales
-    for name in packed:
-        assert before[name][0] is torch.float8_e4m3fn, (name, before[name][0])
-        assert after[name][0] is torch.float8_e4m3fn, (name, after[name][0])
-        assert torch.equal(after[name][1], before[name][1]), name
-    for name in scales:
-        assert after[name][0] is torch.float32, (name, after[name][0])
-        assert torch.equal(after[name][1], before[name][1]), name
-    assert _checkpoint_bytes(resaved) == _checkpoint_bytes(quantized)
-
-    # The pre-fix re-save wrote bf16 packed weights and refused to reload.
-    GPTQModel.load(str(resaved), backend=BACKEND.FP8_TORCH, device="cpu")

@@ -29,6 +29,7 @@ import torch.nn as nn
 
 import gptqmodel.nn_modules.qlinear.fp8 as fp8_module
 from gptqmodel.nn_modules.qlinear._numerics import matmul_fp32_reduce
+from tests.fp8_test_utils import pack_fp8_module
 
 
 _CUDA = pytest.mark.skipif(
@@ -68,7 +69,7 @@ def _inverse_kernel(
         weight_block_size=block,
         register_buffers=False,
     )
-    kernel.pack_original(linear, None, None)
+    pack_fp8_module(kernel, linear)
     return kernel.to("cuda").eval()
 
 
