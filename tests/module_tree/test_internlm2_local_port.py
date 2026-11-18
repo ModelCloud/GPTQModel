@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Exact checkpoint ownership and plain-AWQ consumer tests on real InternLM2."""
+"""Exact checkpoint ownership and AWQ scale-fold/consumer tests on real InternLM2."""
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.loop_processor import CalibrationConfig
@@ -64,14 +65,13 @@ def test_checkpoint_weights_exactly_owned_by_live_plan(heads, bias, device):
 
 
 @pytest.mark.parametrize("heads,bias", [(1, True), (4, False)])
-def test_plain_awq_quantizes_every_native_linear_without_norm_fold(monkeypatch, heads, bias):
+def test_awq_quantizes_every_native_linear_with_norm_folds(monkeypatch, heads, bias):
     previous = torch.get_num_threads()
     torch.set_num_threads(1)
     try:
         torch.manual_seed(57)
         model, wrapper = build(heads, bias)
         layer = model.model.layers[0]
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
         before = {k: v.detach().clone() for k, v in layer.state_dict().items()}
         processor = AWQProcessor(
             tokenizer=None, qcfg=AWQConfig(device="cpu", group_size=8, fallback=None),
@@ -95,8 +95,34 @@ def test_plain_awq_quantizes_every_native_linear_without_norm_fold(monkeypatch, 
             assert "q_scales" in named.state and "q_zeros" in named.state and "wq" in named.state
             assert (named.module.weight != before[name + ".weight"]).any()
             assert torch.isfinite(named.module.weight).all()
+        # Both RMSNorm gains absorbed the scale searched for the packed wqkv and w1/w3 groups.
         for name in NORMS:
-            torch.testing.assert_close(layer.get_submodule(name).weight, before[name + ".weight"], atol=0, rtol=0)
+            assert not torch.equal(layer.get_submodule(name).weight, before[name + ".weight"])
         assert torch.isfinite(model(torch.tensor([[1, 5, 7]]), use_cache=False).logits).all()
     finally:
         torch.set_num_threads(previous)
+
+
+@pytest.mark.parametrize("heads,bias", [(2, False), (4, True)])
+def test_awq_scale_folds_preserve_real_layer_output(heads, bias):
+    # wqkv packs KV-group-interleaved q/k/v rows, but a norm fold only scales its
+    # input columns, so the packing order is irrelevant. wqkv -> wo has no
+    # width-matching fold and is filtered out.
+    torch.manual_seed(57)
+    model, _ = build(heads, bias)
+    with torch.no_grad():
+        for name, value in model.named_parameters():
+            if "norm" in name:
+                value.uniform_(0.6, 1.4)
+    ids = torch.tensor([[1, 4, 7, 8, 9, 5, 3, 6]])
+
+    def forward():
+        return model(ids, use_cache=False).logits
+
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(InternLM2QModel, model, layer, forward)
+        assert {source: targets for source, targets, _ in checked} == {
+            "attention_norm": ["attention.wqkv"],
+            "ffn_norm": ["feed_forward.w1", "feed_forward.w3"],
+            "feed_forward.w3": ["feed_forward.w2"],
+        }
