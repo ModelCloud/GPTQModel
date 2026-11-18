@@ -15,8 +15,10 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.spark2_5.configuration_spark import Spark2_5Config
 from gptqmodel.models.ports.spark2_5.modeling_spark import Spark2_5ForCausalLM
+from awq_neutrality import assert_awq_folds_neutral
+
 from tests.port_assets import DATA
-from tests.test_spark2_5_local_port import tiny_config
+from tests.test_spark2_5_local_port import tiny_config, tiny_model
 
 
 # sha256 of the sorted [key, shape] pairs from the pinned Spark-X2.5-4B safetensors headers
@@ -69,5 +71,29 @@ def test_real_weight_owners_resolve_to_exact_module_plan(bias, gate, kv_heads, d
             assert spec is not None, key
             assert spec.quantize is (owner in expected)
             assert plan.find(owner + ".undeclared") is None
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     assert Spark2_5QModel.fusable is None
+
+
+@pytest.mark.parametrize(
+    "gate,bias,kv_heads", [(True, False, 2), (True, True, 4), (False, False, 4), (False, True, 1)]
+)
+def test_awq_scale_folds_preserve_sliding_and_full_layer_outputs(gate, bias, kv_heads):
+    model = tiny_model(
+        headwise_attn_output_gate=gate, attention_bias=bias, mlp_bias=bias, num_key_value_heads=kv_heads
+    )
+    ids = torch.tensor([[4, 5, 6, 7, 4, 5, 6, 7]])
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    # Layer 0 is sliding-window, layer 1 is full partial-RoPE attention.
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(Spark2_5QModel, model, layer, forward)
+        groups = {source: (targets, consumers) for source, targets, consumers in checked}
+        # The unquantized head gate reads the same normed input and is compensated.
+        assert groups["input_layernorm"] == (["self_attn.q_k_v_proj"], ["self_attn.g_proj"] if gate else [])
+        assert groups["post_attention_layernorm"] == (["mlp.gate_proj", "mlp.up_proj"], [])
+        assert groups["mlp.up_proj"] == (["mlp.down_proj"], [])
+        # out_proj reads the attention output; no layer producer can absorb its scale.
+        assert set(groups) == {"input_layernorm", "post_attention_layernorm", "mlp.up_proj"}
+        assert all("self_attn.out_proj" not in targets for targets, _ in groups.values())

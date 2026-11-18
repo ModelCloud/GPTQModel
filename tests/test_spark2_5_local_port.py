@@ -367,7 +367,7 @@ def test_failed_forward_then_retry_inputs_embeds_and_independent_cache_ownership
 
 @pytest.mark.parametrize("gate,bias,kv_heads", [(True, False, 1), (True, True, 2), (False, False, 4)])
 @pytest.mark.parametrize("offload", [False, True])
-def test_real_public_plain_awq_all_linears_and_two_exact_reloads(tmp_path, gate, bias, kv_heads, offload):
+def test_real_public_awq_scaled_all_linears_and_two_exact_reloads(tmp_path, gate, bias, kv_heads, offload):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
@@ -388,11 +388,11 @@ def test_real_public_plain_awq_all_linears_and_two_exact_reloads(tmp_path, gate,
         for key, value in model.state_dict().items()
         if "norm" in key or ".g_proj." in key or key in {"model.embedding.weight", "lm_head.weight"}
     }
+    untouched = {"model.embedding.weight", "lm_head.weight", "model.norm.weight"}
     calibration = [
         {"input_ids": torch.tensor([[4, 5, 6, 7, 4, 5, 6, 7]]), "attention_mask": torch.ones(1, 8, dtype=torch.long)}
         for _ in range(2)
     ]
-    assert loaded.awq_get_modules_for_scaling(loaded.model.model.layers[0], {}, {}) == []
     loaded.quantize(
         CalibrationConfig(dataset=calibration, batch_size=1, min_length=1, sort="desc"), backend=BACKEND.TORCH
     )
@@ -408,7 +408,20 @@ def test_real_public_plain_awq_all_linears_and_two_exact_reloads(tmp_path, gate,
         assert not hasattr(loaded.model.get_submodule(name), "weight")
     state = {key: value.clone() for key, value in loaded.model.state_dict().items()}
     for key, value in excluded.items():
-        torch.testing.assert_close(state[key], value, atol=0, rtol=0)
+        # Excluded tensors stay dense in their source dtype and shape.
+        assert state[key].dtype == value.dtype and state[key].shape == value.shape
+        if key in untouched:
+            torch.testing.assert_close(state[key], value, atol=0, rtol=0)
+    # Scale search ran and folded into at least one decoder norm.
+    assert any(not torch.equal(state[key], excluded[key]) for key in excluded if "layernorm" in key)
+    for i in range(2):
+        if gate:
+            # AWQ folds the input-norm scale into the unquantized head gate:
+            # gate columns are multiplied by exactly what the norm was divided by.
+            prefix = f"model.layers.{i}."
+            before = excluded[prefix + "self_attn.g_proj.weight"].float() * excluded[prefix + "input_layernorm.weight"].float()
+            after = state[prefix + "self_attn.g_proj.weight"].float() * state[prefix + "input_layernorm.weight"].float()
+            torch.testing.assert_close(after, before, rtol=2e-3, atol=2e-3)
     with torch.inference_mode():
         logits = loaded.model(**calibration[0], use_cache=False).logits
     assert logits.isfinite().all()
