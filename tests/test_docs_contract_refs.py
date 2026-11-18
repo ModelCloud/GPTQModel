@@ -60,6 +60,14 @@ CONTRACT_REFS = (
     ("docs/fp8-scale-semantics.md", "gptqmodel/models/base.py",
      "_decoder_fp8_scale_semantics", SYMBOL_CITATION),
     ("docs/fusion-planner.md", "gptqmodel/models/fusion.py", "_share_operands", 444),
+    ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
+     "_normalize_gguf_config", 925),
+    ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
+     "_gguf_bits_spec_from_format_value", 855),
+    ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
+     "_gguf_bits_from_components", 896),
+    ("docs/gguf-config-resolution.md", "gptqmodel/quantization/protocol.py",
+     "_resolve_gguf_public_format", 1334),
     # `awq_processor.py` keeps growing (the #4880 replay packing added ~70
     # lines above this symbol), so cite it by name.
     ("docs/layer-type-replay-masks.md", "gptqmodel/looper/awq_processor.py",

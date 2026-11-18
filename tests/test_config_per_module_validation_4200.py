@@ -14,7 +14,13 @@ later, when the module was cloned or packed:
   the Q4_K_M + Q6_K recipe could not be expressed;
 * per-module `sym`/`desc_act` were coerced with `bool()`, and AWQ ignored a
   per-module `sym` in its staging math while labelling the packed layer with it.
+
+#5106 extends the GGUF cases: a full subtype (`q8_0`, `q4_k_m`) in `format` or
+in a `dynamic` override names its own bit width, so a conflicting `bits` must
+be rejected instead of silently projected to the width-less public token.
 """
+
+import json
 
 import pytest
 import torch
@@ -27,6 +33,7 @@ from gptqmodel.quantization.config import (
     FP8Config,
     GGUFConfig,
     GPTQConfig,
+    QuantizeConfig,
     clone_weight_only_config_for_module,
 )
 from gptqmodel.quantization.module_config import resolve_module_constructor_config
@@ -156,6 +163,104 @@ def test_gguf_subtype_bits_override_implies_its_own_format():
 def test_gguf_conflicting_bits_and_format_are_still_rejected():
     with pytest.raises(ValueError, match="Unsupported GGUF combination"):
         GGUFConfig(bits="q4_k_m", dynamic={NAME: {"bits": "q6_k", "format": "q4_k_m"}})
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "bits_label", "format_label"),
+    [
+        # Every pair below names a subtype that exists at both widths, so the
+        # old "unsupported combination" existence check could not catch it.
+        ({"bits": 4, "format": "q8_0"}, "bits=4", "format=q8_0"),
+        ({"bits": 4, "format": "q6_k"}, "bits=4", "format=q6_k"),
+        ({"bits": 6, "format": "q4_k"}, "bits=6", "format=q4_k"),
+        ({"bits": 8, "format": "q4_0"}, "bits=8", "format=q4_0"),
+        ({"bits": 4, "format": "q5_k_m"}, "bits=4", "format=q5_k_m"),
+        ({"bits": 8, "format": "q4_k_m"}, "bits=8", "format=q4_k_m"),
+        # Both directions: a subtype `bits` conflicts with a numeric `format`.
+        ({"bits": "q8_0", "format": "q4_0"}, "bits=q8_0", "format=q4_0"),
+        ({"bits": "q4_k_m", "format": "q4_0"}, "bits=q4_k_m", "format=q4_0"),
+    ],
+)
+def test_gguf_full_subtype_bits_conflict_is_rejected(kwargs, bits_label, format_label):
+    with pytest.raises(ValueError, match="Unsupported GGUF combination") as excinfo:
+        GGUFConfig(**kwargs)
+
+    message = str(excinfo.value)
+    assert bits_label in message
+    assert format_label in message
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({"bits": 4, "format": "q4_k_m"}, "q4_k_m"),
+        ({"bits": 8, "format": "q8_0"}, "q8_0"),
+        ({"bits": "q8_0"}, "q8_0"),
+        ({"bits": 6, "format": "q6_k"}, "q6_k"),
+        ({"bits": "q4_k_m", "format": "q4_k_m"}, "q4_k_m"),
+        ({"bits": "q4_k_m", "format": "q_k_m"}, "q4_k_m"),
+    ],
+)
+def test_gguf_consistent_bits_and_format_are_accepted(kwargs, expected):
+    assert GGUFConfig(**kwargs).runtime_bits.to_string() == expected
+
+
+def test_gguf_dynamic_full_subtype_format_conflict_is_rejected():
+    # `bits` is inherited from the global config (4), so requesting q8_0 for
+    # one module is a genuine conflict, not a width-less format override.
+    with pytest.raises(ValueError, match="Unsupported GGUF combination") as excinfo:
+        GGUFConfig(bits=4, dynamic={NAME: {"format": "q8_0"}})
+
+    message = str(excinfo.value)
+    assert "bits=4" in message
+    assert "format=q8_0" in message
+
+
+def test_gguf_dynamic_conflicting_bits_and_format_are_rejected():
+    with pytest.raises(ValueError, match="Unsupported GGUF combination"):
+        GGUFConfig(bits=4, dynamic={NAME: {"bits": 8, "format": "q4_0"}})
+
+
+def test_gguf_dynamic_consistent_full_subtype_still_overrides():
+    config = GGUFConfig(bits=4, dynamic={NAME: {"bits": 8, "format": "q8_0"}})
+
+    clone = clone_weight_only_config_for_module(config, NAME)
+    assert clone.bits == 8
+    assert clone.runtime_bits.to_string() == "q8_0"
+    assert clone_weight_only_config_for_module(config, OTHER).runtime_bits.to_string() == "q4_0"
+
+
+def test_gguf_quantize_config_json_round_trip_keeps_the_subtype(tmp_path):
+    # A conflicting config must fail before it can write the wrong subtype to
+    # `quantize_config.json` (the old flow silently saved bits=4 + q_0).
+    with pytest.raises(ValueError, match="Unsupported GGUF combination"):
+        GGUFConfig(bits=4, format="q8_0")
+    assert not (tmp_path / "quantize_config.json").exists()
+
+    config = GGUFConfig(bits=8, format="q8_0")
+    config.save_pretrained(tmp_path)
+
+    payload = json.loads((tmp_path / "quantize_config.json").read_text())
+    assert payload["bits"] == 8
+    assert payload["format"] == "q_0"
+
+    reloaded = QuantizeConfig.from_quant_config(payload)
+    assert isinstance(reloaded, GGUFConfig)
+    assert reloaded.bits == 8
+    assert reloaded.runtime_bits.to_string() == "q8_0"
+
+
+def test_gguf_quantize_config_json_with_conflicting_subtype_is_rejected():
+    # A hand-written or previously corrupted payload must not be reinterpreted
+    # at the `bits` width.
+    payload = {"bits": 4, "quant_method": "gguf", "format": "q8_0"}
+
+    with pytest.raises(ValueError, match="Unsupported GGUF combination") as excinfo:
+        QuantizeConfig.from_quant_config(payload)
+
+    message = str(excinfo.value)
+    assert "bits=4" in message
+    assert "format=q8_0" in message
 
 
 def test_gguf_module_constructor_accepts_a_subtype_only_override():
