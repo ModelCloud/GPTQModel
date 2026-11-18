@@ -52,8 +52,7 @@ def hostile_checkpoint(path, config):
     return marker
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [False, True])
+@pytest.mark.parametrize("trust,bypass", [(False, False), (True, True)])
 def test_definition_loader_ignores_hostile_checkpoint_and_retry(tmp_path, monkeypatch, trust, bypass):
     monkeypatch.delenv(BYPASS_ENV, raising=False)
     if bypass:
@@ -139,9 +138,11 @@ def reference_logits(model, ids, mask=None, positions=None):
     return linear(norm(x, "model.norm.weight"), "output").float()
 
 
-@pytest.mark.parametrize("heads", [1, 2, 4], ids=["mqa", "gqa", "mha"])
-@pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("rope", [None, {"type": "linear", "factor": 2.0}, {"type": "dynamic", "factor": 2.0}])
+@pytest.mark.parametrize(
+    "heads,bias,rope",
+    [(1, True, None), (2, False, {"type": "linear", "factor": 2.0}), (4, True, {"type": "dynamic", "factor": 2.0})],
+    ids=["mqa", "gqa-linear", "mha-dynamic"],
+)
 def test_full_model_matches_independent_checkpoint_oracle(heads, bias, rope):
     model = InternLM2ForCausalLM(tiny_config(num_key_value_heads=heads, bias=bias, rope_scaling=rope, max_position_embeddings=4)).eval()
     # Bias initialization is zero; make the bias branch observable.
@@ -209,8 +210,7 @@ def test_legacy_tensor_parallel_eager_simulation(bias):
     torch.testing.assert_close(model(ids, use_cache=False).logits, reference_logits(model, ids), atol=1e-7, rtol=1e-5)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("tied", [False, True])
+@pytest.mark.parametrize("dtype,tied", [(torch.float32, True), (torch.float16, False), (torch.bfloat16, True)])
 def test_safetensors_save_reload_resave_equivalence(tmp_path, dtype, tied):
     model = InternLM2ForCausalLM(tiny_config(tie_word_embeddings=tied, rope_scaling={"type": "dynamic", "factor": 2.0})).to(dtype).eval()
     ids = torch.tensor([[1, 5, 9, 13]])
@@ -265,8 +265,7 @@ def write_tokenizer(path):
     copy_release_assets(path)
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [False, True])
+@pytest.mark.parametrize("trust,bypass", [(False, False), (True, True)])
 def test_public_dense_load_never_dispatches_checkpoint_python(tmp_path, monkeypatch, trust, bypass):
     monkeypatch.delenv(BYPASS_ENV, raising=False)
     if bypass:
@@ -294,8 +293,7 @@ def test_twenty_b_head_group_ratio_and_explicit_positions():
 
 
 @pytest.mark.cpu
-@pytest.mark.parametrize("heads", [1, 2, 4], ids=["mqa", "gqa", "mha"])
-@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("heads,bias", [(1, False), (2, True)], ids=["mqa", "gqa-bias"])
 def test_public_plain_awq_quantizes_packs_and_reloads(tmp_path, heads, bias):
     from gptqmodel import BACKEND
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear

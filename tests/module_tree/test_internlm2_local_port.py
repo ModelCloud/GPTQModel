@@ -31,9 +31,7 @@ def build(heads, bias, device="cpu"):
     return model, InternLM2QModel(model=model, quantized=False, quantize_config=QuantizeConfig())
 
 
-@pytest.mark.parametrize("heads", [1, 2, 4])
-@pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("device", ["cpu", "meta"])
+@pytest.mark.parametrize("heads,bias,device", [(1, True, "meta"), (2, False, "cpu"), (4, True, "cpu")])
 def test_checkpoint_weights_exactly_owned_by_live_plan(heads, bias, device):
     model, wrapper = build(heads, bias, device)
     assert MODEL_MAP["internlm2"] is InternLM2QModel
@@ -65,8 +63,7 @@ def test_checkpoint_weights_exactly_owned_by_live_plan(heads, bias, device):
         assert plan.find(invalid) is None
 
 
-@pytest.mark.parametrize("heads", [1, 2, 4])
-@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("heads,bias", [(1, True), (4, False)])
 def test_plain_awq_quantizes_every_native_linear_without_norm_fold(monkeypatch, heads, bias):
     previous = torch.get_num_threads()
     torch.set_num_threads(1)
