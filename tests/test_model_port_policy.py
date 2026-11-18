@@ -25,20 +25,16 @@ from gptqmodel.models.local import LocalModelLoader
 PORTS = Path(__file__).resolve().parents[1] / "gptqmodel" / "models" / "ports"
 
 PENDING_NATIVE_DEFINITIONS = frozenset({
-    "afmoe", "apertus", "axk2", "bloom", "cohere2_moe", "cohere_compass", "dbrx", "decision_transformer",
-    "deepseek_ocr2", "deepseek_v32", "deepseek_v4", "deepseek_vl", "diffusion_gemma", "dots1", "dots3_note",
-    "ernie4_5", "ernie4_5_moe", "exaone4_5", "falcon_h1", "falcon_mamba", "flint", "gemma2", "gemma3",
-    "gemma3_text", "gemma3n", "gemma3n_text", "gemma4", "gemma4_text", "gemma4_unified", "gemma4_unified_text",
-    "glm", "glm4", "glm4_moe", "glm4_moe_lite", "glm4v", "glm4v_moe", "glm4v_moe_text", "glm5_next", "glm_moe_dsa",
-    "glm_ocr", "glmasr", "gpt2", "gpt_bigcode", "gpt_neo", "gpt_neox", "gpt_oss", "gptj", "granite_swa",
-    "granitemoe", "granitemoe_swa", "granitemoehybrid", "hrm_text", "hunyuan_v1_dense", "hunyuan_v1_moe",
-    "hunyuan_vl", "hy_v3", "inkling_mm_model", "internvl", "jamba", "laguna", "lfm2", "lfm2_moe", "lfm2_vl", "lfm3",
-    "llama4", "llama4_text", "llava", "longcat_flash", "mimo_v2_flash", "minicpm3", "minicpmv4_6", "minimax_m2",
-    "minimax_m3_vl", "ministral3", "mistral3", "mixtral", "mllama", "mllama_text_model", "mpt", "muse_glimmer",
-    "olmo2", "olmo3", "olmo_hybrid", "olmoe", "opt", "ovis2", "phi", "phi3", "phimoe", "qwen2", "qwen2_5_omni",
-    "qwen2_audio", "qwen2_moe", "qwen3_5", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5_text", "qwen3_moe",
-    "qwen3_next", "qwen3_omni_moe", "qwen3_vl", "qwen3_vl_moe", "qwen4_exp", "qwen4_exp_text", "smolvlm",
-    "solar_open", "starcoder2", "voxtral", "zamba", "zamba2",
+    "afmoe", "apertus", "axk2", "bloom", "cohere_compass", "dbrx", "decision_transformer", "deepseek_v32",
+    "deepseek_v4", "deepseek_vl", "dots1", "dots3_note", "ernie4_5", "exaone4_5", "falcon_h1", "falcon_mamba",
+    "gemma2", "gemma3", "gemma3_text", "gemma3n", "gemma3n_text", "gemma4_unified", "gemma4_unified_text", "glm",
+    "glm4", "glm4_moe", "glm4_moe_lite", "glm4v_moe_text", "glm5_next", "glm_moe_dsa", "glm_ocr",
+    "gpt2", "gpt_bigcode", "gpt_neo", "gpt_oss", "gptj", "granite_swa", "granitemoe_swa", "granitemoehybrid",
+    "hrm_text", "hunyuan_v1_moe", "hunyuan_vl", "hy_v3", "internvl", "jamba", "laguna", "lfm2_moe", "lfm2_vl",
+    "lfm3", "longcat_flash", "mimo_v2_flash", "minicpm3", "minimax_m2", "minimax_m3_vl", "ministral3", "mixtral",
+    "mllama", "mllama_text_model", "mpt", "muse_glimmer", "olmo3", "olmo_hybrid", "olmoe", "ovis2", "phi", "phi3",
+    "phimoe", "qwen2", "qwen2_audio", "qwen2_moe", "qwen3_5", "qwen3_5_moe_text", "qwen3_5_text", "qwen3_moe",
+    "qwen3_omni_moe", "qwen3_vl", "qwen3_vl_moe", "smolvlm", "solar_open", "voxtral", "zamba", "zamba2",
 })
 
 PENDING_MODEL_IMPORT_PORTS = frozenset({

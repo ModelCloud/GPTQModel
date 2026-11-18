@@ -6,7 +6,7 @@
 from typing import Any, Dict
 
 import torch
-from transformers import AutoModelForMultimodalLM, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
 from ...utils.model import MODALITY, move_to
@@ -14,6 +14,7 @@ from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 
@@ -21,7 +22,12 @@ from ._vlm_calibration import prepare_vlm_calibration_dataset
 class InklingMMQModel(BaseQModel):
     fusable = FusableConfig("inkling_mm_model").merge(LlamaFusableConfig(), profiles=("qkv",))
 
-    loader = AutoModelForMultimodalLM
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForMultimodalLM",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
 
     require_load_processor = True
     require_trust_remote_code = False
@@ -112,7 +118,14 @@ class InklingMMQModel(BaseQModel):
         core_model.audio_tower = move_to(core_model.audio_tower, device=CPU)
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)
+        processor = getattr(self, "processor", None)
+        if processor is not None:
+            return processor
+        return self.loader.load_processor(
+            self.model_local_path,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+        )
 
     @classmethod
     def prepare_inputs_for_conversations(

@@ -1,16 +1,19 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModelForPreTraining
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig
+from ..local import LocalModelLoader
 from .llama import LlamaQModel
 
 
 class Mistral3GPTQ(BaseQModel):
     fusable = FusableConfig("mistral3").merge(LlamaQModel.fusable, source_model_type="mistral")
 
-    loader = AutoModelForPreTraining
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForPreTraining",
+    )
 
     # The decoder is the verified Mistral/Llama layout, so q/k/v share the post-norm
     # hidden state and gate/up share the MLP input. The tags stay inert until the
