@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Moonshot AI
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: LicenseRef-Kimi-Modified-MIT
-"""Standalone Kimi-K2 tokenizer; pinned source and license in PROVENANCE.md / LICENSE-KIMI."""
+"""Standalone Kimi-K2 tokenizer (moonshotai/Kimi-K2 tokenization_kimi.py); license in LICENSE-KIMI."""
 
 import os
 from hashlib import sha256
@@ -13,9 +13,8 @@ from typing import Any
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
 from tokenizers import AddedToken
+from transformers.convert_slow_tokenizer import bytes_to_unicode
 from transformers.tokenization_python import PythonBackend
-
-from .tokenization_utils import bytes_to_unicode
 
 
 logger = getLogger(__name__)
