@@ -329,7 +329,11 @@ def test_real_tokenizer_public_awq_pack_save_reload(real_assets, tmp_path, monke
     )}
     dense = {key: value.clone() for key, value in model.model.state_dict().items()
              if key.removesuffix('.weight') not in expected}
-    assert model.awq_get_modules_for_scaling(model.model.model.layers[0], {}, {}) == []
+    # AWQ scale search folds into both pre-norm gains (input_layernorm ->
+    # W_pack, post_attention_layernorm -> gate/up); every other dense tensor
+    # must stay untouched.
+    folded = {f'model.layers.0.{name}.weight' for name in ('input_layernorm', 'post_attention_layernorm')}
+    assert folded <= dense.keys()
     # Public string calibration must pass through the real owned tokenizer.
     model.quantize(
         CalibrationConfig(dataset=[sample['text'] for sample in case['samples'][:2]], batch_size=1, min_length=1),
@@ -337,7 +341,10 @@ def test_real_tokenizer_public_awq_pack_save_reload(real_assets, tmp_path, monke
     )
     assert {name for name, module in model.model.named_modules() if isinstance(module, AwqTorchLinear)} == expected
     for key, value in dense.items():
-        torch.testing.assert_close(model.model.state_dict()[key], value, rtol=0, atol=0)
+        if key in folded:
+            assert not torch.equal(model.model.state_dict()[key], value), key
+        else:
+            torch.testing.assert_close(model.model.state_dict()[key], value, rtol=0, atol=0, msg=key)
     # Source Baichuan1 permits narrowing its checkpoint-owned inv_freq through
     # Module.half(). Make the saved state explicitly match the requested
     # reload dtype; quantized-loading dtype conversion is a separate concern.

@@ -21,6 +21,9 @@ from tests.port_assets import read_port_asset
 
 
 FIXTURES = Path(__file__).parent / "fixtures/ports/ovis2_6_moe/fixtures"
+# Bit-exact weights reloaded as unaligned safetensors views can change CPU
+# GEMM rounding by a few fp32 ulps (observed <= 1.2e-7 abs on O(1) logits).
+RELOAD_FP32_TOLERANCE = {"atol": 1e-6, "rtol": 1e-5}
 CASES = [(Ovis2_6_MoeQModel, Ovis2_6_Moe_Config), (Ovis2_6_NextQModel, Ovis2_6_Next_Config)]
 
 
@@ -162,7 +165,11 @@ def assert_public_generation_policy(loaded, inputs):
         assert torch.equal(actual.sequences, expected.sequences)
         assert torch.isfinite(expected.scores[0]).sum() > 1
         for got, want in zip(actual.scores, expected.scores, strict=True):
-            torch.testing.assert_close(got, want, atol=0, rtol=0)
+            # The reference is an in-memory deepcopy; the loaded model's weights
+            # are safetensors mmap views at unaligned offsets (native
+            # Transformers 5.23 loads the same way), and CPU GEMM kernels round
+            # differently for unaligned operands. Allow a few fp32 ulps.
+            torch.testing.assert_close(got, want, **RELOAD_FP32_TOLERANCE)
     caller = GenerationConfig(
         do_sample=False, eos_token_id=63, pad_token_id=0, max_new_tokens=4, return_dict_in_generate=False
     )
@@ -554,7 +561,10 @@ def test_safetensors_two_cycles_and_assignment(definition, config_class, dtype, 
                 torch.testing.assert_close(tensor, original[key], atol=0, rtol=0)
             for key, tensor in model.named_buffers():
                 torch.testing.assert_close(tensor, buffers[key], atol=0, rtol=0, msg=key)
-            torch.testing.assert_close(model(**inputs).logits, expected, atol=0, rtol=0)
+            # Weights above are bit-exact; reloaded weights are unaligned
+            # safetensors mmap views, so fp32 CPU GEMMs may differ by ulps.
+            tolerance = RELOAD_FP32_TOLERANCE if dtype == torch.float32 else {"atol": 0, "rtol": 0}
+            torch.testing.assert_close(model(**inputs).logits, expected, **tolerance)
             assert list(path.glob("*.safetensors"))
             assert not list(path.glob("*.bin"))
 
