@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Actual model/checkpoint ownership, consumers and plain AWQ for K2-Horizon."""
+"""Actual model/checkpoint ownership, consumers and AWQ for K2-Horizon."""
 
 import hashlib
 import json
@@ -20,6 +20,8 @@ from gptqmodel.models.definitions.k2_horizon import K2HorizonGPTQ, K2HorizonQMod
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.ports.k2_horizon import K2HorizonConfig, K2HorizonForCausalLM
 from gptqmodel.quantization.config import AWQConfig
+from awq_neutrality import assert_awq_folds_neutral
+
 from tests.test_k2_horizon_local_port import variant_config
 
 
@@ -97,7 +99,14 @@ def test_native_weight_owners_tags_aliases_and_looper_consumers(variant):
 
 
 @pytest.mark.parametrize("variant", ["dense", "mova", "moe", "qknorm"])
-def test_plain_awq_quantizes_every_supported_linear_without_mutating_norms_or_routers(monkeypatch, variant):
+def test_awq_no_group_fallback_quantizes_every_supported_linear_without_mutating_norms_or_routers(
+    monkeypatch, variant
+):
+    """Processor ownership when a layer yields no scaling group (plain fallback path).
+
+    Scale search itself is qualified by the neutrality test below and the
+    public scaled pack/reload test in ``tests/test_k2_horizon_local_port.py``.
+    """
     previous_threads = torch.get_num_threads()
     torch.set_num_threads(1)
     try:
@@ -117,7 +126,7 @@ def test_plain_awq_quantizes_every_supported_linear_without_mutating_norms_or_ro
             original = {name: tensor.clone() for name, tensor in layer.state_dict().items()}
             selected = {name: module for name, module in layer.named_modules()
                         if isinstance(module, torch.nn.Linear) and plan.find(name).quantize}
-            assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
+            monkeypatch.setattr(wrapper, "awq_get_modules_for_scaling", lambda *args, **kwargs: [])
             state = processor._get_layer_state(index)
             state.layer_module = layer
             state.modules = {name: NamedModule(module, name, f"model.layers.{index}.{name}", index)
@@ -144,3 +153,42 @@ def test_plain_awq_quantizes_every_supported_linear_without_mutating_norms_or_ro
             assert torch.isfinite(model(torch.tensor([[1, 4, 8]]), use_cache=False).logits).all()
     finally:
         torch.set_num_threads(previous_threads)
+
+
+@pytest.mark.parametrize("variant", ["dense", "mova", "moe", "qknorm", "yarn"])
+def test_awq_scale_folds_preserve_dense_moe_and_mova_layer_outputs(variant):
+    with torch.random.fork_rng():
+        torch.manual_seed(281)
+        model = K2HorizonForCausalLM(variant_config(variant)).eval()
+    ids = torch.tensor([[1, 5, 8, 13, 20, 9, 25, 6, 7, 11, 30, 3]])
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    gated = model.config.attention_gate_func is not None
+    for index, layer in enumerate(model.model.layers):
+        with K2HorizonQModel._module_tree_context(K2HorizonQModel.module_tree):
+            checked = assert_awq_folds_neutral(K2HorizonQModel, model, layer, forward)
+        groups = {source: (targets, consumers) for source, targets, consumers in checked}
+        mova = hasattr(layer.self_attn, "v_router")
+        if mova:
+            # The value router never runs as a module, so the attention input stays plain.
+            assert "input_layernorm" not in groups
+        else:
+            # q/k/v/gate read input_layernorm, never the q/k output norms.
+            expected = ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]
+            assert groups["input_layernorm"] == (expected + (["self_attn.gate_proj"] if gated else []), [])
+        assert not {"self_attn.q_norm", "self_attn.k_norm"} & set(groups)
+        assert all("self_attn.o_proj" not in targets for targets, _ in groups.values())
+        if hasattr(layer.mlp, "experts"):
+            targets, consumers = groups["post_attention_layernorm"]
+            assert targets == [
+                f"mlp.experts.{i}.{name}" for i in range(3) for name in ("gate_proj", "up_proj")
+            ] + ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"]
+            # The biased router reads the same norm and is compensated.
+            assert consumers == ["mlp.gate"]
+            assert groups["mlp.shared_experts.up_proj"] == (["mlp.shared_experts.down_proj"], [])
+            assert any(source.startswith("mlp.experts.") for source in groups)
+        else:
+            assert groups["post_attention_layernorm"] == (["mlp.gate_proj", "mlp.up_proj"], [])
+            assert groups["mlp.up_proj"] == (["mlp.down_proj"], [])

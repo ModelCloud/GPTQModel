@@ -375,7 +375,7 @@ def test_public_gptqmodel_load_uses_local_classes_and_native_tokenizer(tmp_path,
 
 @pytest.mark.cpu
 @pytest.mark.parametrize("variant", ["dense", "mova"])
-def test_public_plain_awq_native_pack_save_reload(tmp_path, variant):
+def test_public_awq_scaled_native_pack_save_reload(tmp_path, variant):
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel
     from transformers import PreTrainedTokenizerFast
@@ -401,6 +401,13 @@ def test_public_plain_awq_native_pack_save_reload(tmp_path, variant):
     )
     quantized_names = {name for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert len(quantized_names) == (14 if variant == "dense" else 28)
+    # Scale search ran: at least one decoder norm absorbed a searched scale.
+    state = wrapper.model.state_dict()
+    assert any(
+        not torch.equal(state[name], value)
+        for name, value in model.state_dict().items()
+        if name.endswith("layernorm.weight")
+    )
     if variant == "mova":
         assert "model.layers.1.self_attn.v_experts.3" in quantized_names
         assert "model.layers.1.mlp.experts.2.down_proj" in quantized_names
