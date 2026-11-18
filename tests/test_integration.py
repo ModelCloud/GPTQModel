@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+import importlib.util
 import os
 
 
@@ -15,6 +16,18 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig, LlamaC
 
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+
+
+# Transformers routes GPTQConfig quantize/load through the optional `optimum` package.
+HAS_OPTIMUM = importlib.util.find_spec("optimum") is not None
+requires_optimum = unittest.skipUnless(HAS_OPTIMUM, "requires optimum")
+requires_cuda = unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+
+
+def _hub_cached(model_id: str) -> bool:
+    from huggingface_hub import try_to_load_from_cache
+
+    return isinstance(try_to_load_from_cache(model_id, "config.json"), str)
 
 
 class TestIntegration(unittest.TestCase):
@@ -78,21 +91,27 @@ class TestIntegration(unittest.TestCase):
     def test_load_quantized_model_gptq_v1_torch_fused(self):
         self._test_load_quantized_model_gptq_v1(device_map="cpu")
 
+    @requires_cuda
     def test_load_quantized_model_gptq_v1_cuda(self):
         self._test_load_quantized_model_gptq_v1(device_map="cuda")
 
     def test_load_quantized_model_gptq_v2_torch_fused(self):
         self._test_load_quantized_model_gptq_v2(device_map="cpu")
 
+    @requires_cuda
     def test_load_quantized_model_gptq_v2_cuda(self):
         self._test_load_quantized_model_gptq_v2(device_map="cuda")
 
+    @requires_optimum
     def test_quantize_torch_fused(self):
         self._test_quantize(device_map="cpu")
 
+    @requires_cuda
+    @requires_optimum
     def test_quantize_cuda(self):
         self._test_quantize(device_map="cuda")
 
+    @requires_optimum
     def test_transformers_native_gptqmodel_load_bridge(self):
         import json
 
@@ -210,6 +229,8 @@ class TestIntegration(unittest.TestCase):
         print(f"Result is: >>\n{output}\n<<")
         return output
 
+    @requires_cuda
+    @unittest.skipUnless(_hub_cached("ModelCloud/opt-125m-llm-awq"), "ModelCloud/opt-125m-llm-awq is not in the local Hugging Face cache")
     def test_llm_awq(self):
         model_name = "ModelCloud/opt-125m-llm-awq"
         model = AutoModelForCausalLM.from_pretrained(
