@@ -862,10 +862,14 @@ class GPTQProcessor(LoopProcessor):
                     f"does not match target device {expected_device}."
                 )
 
-            g_h = getattr(g, "H", None)
-            if g_h is not None:
-                assert torch.device(g_h.device) == expected_device, (
-                    f"GPTQ Hessian tensor for '{module.full_name}' lives on {g_h.device}, expected {expected_device}."
+            # Read the Hessian's device through the task instead of binding it
+            # to a local: GPTAQ/FOEM hand their `[C, C]` accumulator to the
+            # quantizer and rebind it to a permuted copy, so a local reference
+            # kept the original unpermuted fp32 Hessian alive across
+            # `g.quantize()` and its peak (#5026).
+            if getattr(g, "H", None) is not None:
+                assert torch.device(g.H.device) == expected_device, (
+                    f"GPTQ Hessian tensor for '{module.full_name}' lives on {g.H.device}, expected {expected_device}."
                 )
 
             if expected_device.type == "cuda" and torch.cuda.is_available():
@@ -881,7 +885,16 @@ class GPTQProcessor(LoopProcessor):
                     f"while processing '{module.full_name}'."
                 )
 
-        wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+        try:
+            wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+        except BaseException:
+            # `free()` below is the success-path teardown. A failing quantize
+            # must still drop the `[C, C]` accumulator, or the task pins it
+            # until the processor is torn down. Only the Hessian state is
+            # released: the module and quantizer are left intact for the
+            # failed-run cleanup (#5026).
+            g.release_hessian_state()
+            raise
         gsq_diagnostics = getattr(g, "gsq_diagnostics", None)
         if gsq_diagnostics is not None:
             module.state["gsq_diagnostics"] = gsq_diagnostics
