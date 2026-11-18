@@ -153,7 +153,7 @@ __device__ __inline__ void global_to_share_one_stage_A(half *src, half *dst, int
     int ld_row = global_iter * cta_step_m_or_n + threadIdx.y * warp_step_m_or_n + (threadIdx.x / threads_per_row);
     int ld_col_swizzled = (ld_col ^ (ld_row) & 7) * PACK_SIZE;
     void *dst_ptr = (void *)(dst + ld_row * kSmemCol + ld_col_swizzled);
-    uint4 *src_ptr = (uint4 *)(src + (ld_row + cta_offset_m) * global_ncols + ld_col * PACK_SIZE + global_iter_k * CTA_K + cta_offset_k); // cta_offset_m * global_ncols + global_iter * cta_step_m_or_n * global_ncols + threadIdx.y * warp_step_m_or_n * global_ncols + (threadIdx.x / threads_per_row) * global_ncols + global_iter_k * CTA_K + (threadIdx.x % threads_per_row) * PACK_SIZE);
+    uint4 *src_ptr = (uint4 *)(src + static_cast<int64_t>(ld_row + cta_offset_m) * global_ncols + ld_col * PACK_SIZE + global_iter_k * CTA_K + cta_offset_k); // cta_offset_m * global_ncols + global_iter * cta_step_m_or_n * global_ncols + threadIdx.y * warp_step_m_or_n * global_ncols + (threadIdx.x / threads_per_row) * global_ncols + global_iter_k * CTA_K + (threadIdx.x % threads_per_row) * PACK_SIZE);
     if constexpr (STAGES > 1)
     {
       uint32_t addr = cast_smem_ptr_to_uint(dst_ptr);
@@ -548,7 +548,7 @@ __global__ void gemm_w4a16_T1(half *__restrict__ A, half *__restrict__ B, half *
           int write_row = cta_offset_m + warp_offset_m + ax0_0_1 * OP_M + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4));
           if (write_row < M)
           {
-            int index = write_row * N + cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
+            int64_t index = static_cast<int64_t>(write_row) * N + cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
                         (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2;
             float2 value = *reinterpret_cast<float2 *>(
                 C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id);
@@ -605,7 +605,7 @@ __device__ __inline__ void global_to_share_one_stage_A_T2(half *src, half *dst, 
     int ld_row = global_iter * cta_step_m_or_n + threadIdx.y * warp_step_m_or_n + (threadIdx.x / threads_per_row);
     int ld_col_swizzled = (ld_col ^ (ld_row) & 7) * PACK_SIZE;
     void *dst_ptr = (void *)(dst + ld_row * kSmemCol + ld_col_swizzled);
-    uint4 *src_ptr = (uint4 *)(src + (ld_row + cta_offset_m) * global_ncols + ld_col * PACK_SIZE + global_iter_k * CTA_K); // cta_offset_m * global_ncols + global_iter * cta_step_m_or_n * global_ncols + threadIdx.y * warp_step_m_or_n * global_ncols + (threadIdx.x / threads_per_row) * global_ncols + global_iter_k * CTA_K + (threadIdx.x % threads_per_row) * PACK_SIZE);
+    uint4 *src_ptr = (uint4 *)(src + static_cast<int64_t>(ld_row + cta_offset_m) * global_ncols + ld_col * PACK_SIZE + global_iter_k * CTA_K); // cta_offset_m * global_ncols + global_iter * cta_step_m_or_n * global_ncols + threadIdx.y * warp_step_m_or_n * global_ncols + (threadIdx.x / threads_per_row) * global_ncols + global_iter_k * CTA_K + (threadIdx.x % threads_per_row) * PACK_SIZE);
     if constexpr (STAGES > 1)
     {
       uint32_t addr = cast_smem_ptr_to_uint(dst_ptr);
@@ -917,7 +917,7 @@ __global__ void gemm_w4a16_T2(half *__restrict__ A, half *__restrict__ B, half *
           const float2 value = *reinterpret_cast<float2 *>(
               C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id);
           *reinterpret_cast<half2 *>(
-              C + write_row * N + cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
+              C + static_cast<int64_t>(write_row) * N + cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
               (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2) =
               __floats2half2_rn(value.x, value.y);
         }
