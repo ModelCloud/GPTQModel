@@ -347,11 +347,13 @@ def _is_compiler_failure(exc: BaseException, *, fullgraph: bool = False) -> bool
     without ``fullgraph``: ``fullgraph=True`` is an explicit single-graph
     contract and must still fail closed.
 
-    The remaining fallback is deliberately narrow: only a ``RuntimeError``
-    raised inside PyTorch's compiler packages, or dynamo's guard-check
-    ``AssertionError`` (``Guard failed on the same frame it was created ...
-    GLOBAL_STATE changed``) which fires when another thread changes a
-    process-global setting, such as ``torch.set_default_dtype``, during a
+    The remaining fallback is deliberately narrow: a ``RuntimeError`` raised
+    inside PyTorch's compiler packages, a ``LookupError`` raised there (dynamo's
+    guard bookkeeping raises ``KeyError`` from ``get_guard_fail_reason`` when a
+    concurrent compile invalidates its state, issue #5127), or dynamo's
+    guard-check ``AssertionError`` (``Guard failed on the same frame it was
+    created ... GLOBAL_STATE changed``) which fires when another thread changes
+    a process-global setting, such as ``torch.set_default_dtype``, during a
     concurrent first compile (issue #4094). Everything else belongs to the
     traced user code; retrying eagerly would run that code twice and hide the
     original error. The innermost frame is what matters: user code raising the
@@ -381,9 +383,11 @@ def _is_compiler_failure(exc: BaseException, *, fullgraph: bool = False) -> bool
         for token in ("/torch/_dynamo/", "/torch/_inductor/", "/torch/_functorch/")
     ):
         return False
-    if isinstance(exc, RuntimeError):
+    if isinstance(exc, (RuntimeError, LookupError)):
         # Inductor compile workers raise RuntimeError outside the traced frame
-        # (for example ``Attempting to use a closed pool``).
+        # (for example ``Attempting to use a closed pool``), and dynamo's guard
+        # bookkeeping raises KeyError from ``get_guard_fail_reason`` when a
+        # concurrent compile changed the process-global state (#5127).
         return True
     return isinstance(exc, AssertionError) and "Guard failed on the same frame it was created" in str(exc)
 
@@ -425,22 +429,55 @@ def _warn_compile_fallback(label: str, exc: BaseException) -> None:
     )
 
 
+def model_global_state_lock():
+    """Return the process-wide lock guarding torch's global default dtype.
+
+    transformers' ``from_pretrained``/``from_config`` saves, sets and restores
+    ``torch.set_default_dtype``; dynamo's ``preserve_global_state`` does the
+    same around every trace. The loader serializes model construction with
+    this re-entrant lock, so the lazy first compile must take it too: otherwise
+    a compile that starts inside a load's bf16 window restores bf16 after the
+    load restored fp32 (or trips ``assert_loaded_model_state``). Look the lock
+    up through the loader accessor so tests and callers share one object.
+    """
+    from ..models.loader import model_load_lock
+
+    return model_load_lock()
+
+
 def _install_callable_compile_fallback(original: Callable, compiled: Callable, fullgraph: bool) -> Callable:
     """Return a callable that retries ``original`` eagerly after a compile failure."""
     label = _compile_label(original)
-    state = {"fallback": False}
+    state = {"fallback": False, "compiled": False}
 
     def call(*args, **kwargs):
         if state["fallback"]:
             return original(*args, **kwargs)
-        try:
-            return compiled(*args, **kwargs)
-        except Exception as exc:
-            if not _is_compiler_failure(exc, fullgraph=fullgraph):
-                raise
-            state["fallback"] = True
-            _warn_compile_fallback(label, exc)
-            return original(*args, **kwargs)
+
+        def run_compiled():
+            try:
+                return compiled(*args, **kwargs)
+            except Exception as exc:
+                if not _is_compiler_failure(exc, fullgraph=fullgraph):
+                    raise
+                state["fallback"] = True
+                _warn_compile_fallback(label, exc)
+                return original(*args, **kwargs)
+
+        if state["compiled"]:
+            return run_compiled()
+        # Dynamo saves/restores the process-global default dtype while it
+        # traces, exactly like model construction. Hold the loader's lock only
+        # for the first (compiling) call; steady-state calls stay lock-free.
+        with model_global_state_lock():
+            if state["fallback"]:
+                return original(*args, **kwargs)
+            if state["compiled"]:
+                return run_compiled()
+            result = run_compiled()
+            if not state["fallback"]:
+                state["compiled"] = True
+            return result
 
     functools.update_wrapper(call, original)
     # Keep the dynamo wrapper chain truthful: this proxy really does forward to
@@ -475,19 +512,35 @@ def _install_module_compile_fallback(module: torch.nn.Module, compiled, fullgrap
         return module
     label = _compile_label(module)
     compiled_forward = compiled.forward
-    state = {"fallback": False}
+    state = {"fallback": False, "compiled": False}
 
     def forward(*args, **kwargs):
         if state["fallback"]:
             return module(*args, **kwargs)
-        try:
-            return compiled_forward(*args, **kwargs)
-        except Exception as exc:
-            if not _is_compiler_failure(exc, fullgraph=fullgraph):
-                raise
-            state["fallback"] = True
-            _warn_compile_fallback(label, exc)
-            return module(*args, **kwargs)
+
+        def run_compiled():
+            try:
+                return compiled_forward(*args, **kwargs)
+            except Exception as exc:
+                if not _is_compiler_failure(exc, fullgraph=fullgraph):
+                    raise
+                state["fallback"] = True
+                _warn_compile_fallback(label, exc)
+                return module(*args, **kwargs)
+
+        if state["compiled"]:
+            return run_compiled()
+        # The first model forward is where dynamo traces and mutates the
+        # process-global default dtype; serialize it with model construction.
+        with model_global_state_lock():
+            if state["fallback"]:
+                return module(*args, **kwargs)
+            if state["compiled"]:
+                return run_compiled()
+            result = run_compiled()
+            if not state["fallback"]:
+                state["compiled"] = True
+            return result
 
     compiled.forward = forward
     return compiled
