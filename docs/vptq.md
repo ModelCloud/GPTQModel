@@ -150,6 +150,14 @@ quantizer; it does not toggle the process-global
 concurrent quantization worker's kernels and can raise for an op that has no
 deterministic implementation.
 
+One Lloyd iteration reduces two quantities over the same assignment: the
+weighted vector sums and the per-centroid weight totals. Both share a single
+`_SegmentPlan` — the stable `argsort`, bucket lengths and non-empty mask — that
+is built once per iteration and applied to each source array. Rebuilding that
+plan for the second reduction only repeated the sort and `bincount`; sharing it
+leaves the reduction order, the FP64 accumulation and the resulting codebook
+bits unchanged.
+
 Cross-device results are **not** bit-identical. `kmeans_seed` seeds the initial
 `randperm`, and CUDA and ROCm draw that permutation from different device RNG
 streams, so their initial centroids differ. Both streams are uniform, so
