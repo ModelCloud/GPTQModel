@@ -22,7 +22,6 @@ import torch
 from accelerate import disk_offload
 from accelerate.hooks import remove_hook_from_module, remove_hook_from_submodules
 from accelerate.utils import align_module_device, has_offloaded_params
-from safetensors.torch import save_file as safetensors_save_file
 from torch import nn
 
 from ..looper.named_module import NamedModule
@@ -30,6 +29,7 @@ from .checkpoint_paths import resolve_checkpoint_path
 from .device import get_device
 from .logger import setup_logger
 from .module_locks import parent_module_lock
+from .safe import safetensors_save_file
 from .tensor import tensor_buffer
 from .tied_weights import retie_tied_weights, tied_weights_keys, word_embeddings_tied
 from .torch import CPU, META

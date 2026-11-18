@@ -1434,7 +1434,7 @@ def save_blockfloat_checkpoint(
                 summary[key]["bias_dtype"] = _dtype_name(stored_bias)
 
     os.makedirs(output_dir, exist_ok=True)
-    from safetensors.torch import save_file
+    from .safe import safetensors_save_file as save_file
 
     save_file(
         {key: value.contiguous() for key, value in tensors.items()},
@@ -1697,7 +1697,7 @@ def _write_shards(
     import json
     import os
 
-    from safetensors.torch import save_file
+    from .safe import safetensors_save_file as save_file
 
     header_metadata = {"format": "pt"}
     for key, value in dict(safetensors_metadata or {}).items():

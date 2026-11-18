@@ -50,7 +50,7 @@ _rocm_llc_status = _apply_rocm_llc()
 
 from ._banner import get_startup_banner  # noqa: E402
 from .utils.logger import setup_logger  # noqa: E402
-from .utils.nogil_patcher import TritonPatch, patch_safetensors_save_file  # noqa: E402
+from .utils.nogil_patcher import TritonPatch  # noqa: E402
 from .utils.rocm import warn_unsupported_rocm  # noqa: E402
 
 # isort: on
@@ -181,8 +181,6 @@ if _installed_rocm_blas_env is not None:
 
 # Fail loudly (once) on ROCm releases older than the supported floor.
 warn_unsupported_rocm()
-
-patch_safetensors_save_file()
 
 # TODO: waiting for official fix from triton
 #  monkeypatching triton threading issues is fragile

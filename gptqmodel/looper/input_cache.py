@@ -14,7 +14,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import torch
 from safetensors import safe_open
-from safetensors.torch import save_file as save_safetensors_file
+
+from ..utils.safe import safetensors_save_file as save_safetensors_file
 
 
 @dataclass

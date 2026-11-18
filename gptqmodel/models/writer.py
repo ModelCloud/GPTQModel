@@ -18,7 +18,6 @@ from typing import Any, Dict, List, Optional, Union
 import pcre
 import torch
 from safetensors import safe_open
-from safetensors.torch import save_file
 from transformers import PreTrainedTokenizerFast, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
 
@@ -87,6 +86,7 @@ from ..utils.model import (
     resolve_resave_format_conversion,
     streaming_state_dict_to_shards,
 )
+from ..utils.safe import safetensors_save_file as save_file
 from ..utils.structure import alias_all_from_turtle_if_meta, alias_from_turtle_for_submodule
 from ..utils.tied_weights import (
     lm_head_is_tied,
