@@ -12,15 +12,17 @@ projections on meta before defusion; the checkpoint loader materializes the
 packed weights straight from disk.
 """
 
+import dataclasses
 import json
 from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import OlmoeConfig, OlmoeForCausalLM
 
 from gptqmodel.models import loader as loader_module
 from gptqmodel.models.definitions.olmoe import OlmoeQModel
+from gptqmodel.models.ports.native.olmoe.configuration_olmoe import OlmoeConfig
+from gptqmodel.models.ports.native.olmoe.modeling_olmoe import OlmoeForCausalLM
 from gptqmodel.quantization.config import FORMAT, METHOD
 from gptqmodel.utils.hf import suspend_hf_weight_init
 
@@ -162,7 +164,11 @@ def test_quantized_loader_meta_izes_fused_experts_before_defuser(tmp_path, monke
         "get_checkpoints",
         lambda *args, **kwargs: (False, str(checkpoint / "model.safetensors"), "model"),
     )
-    monkeypatch.setattr(OlmoeQModel.loader, "from_config", lambda config, **kwargs: model)
+    class _ShellLoader(type(OlmoeQModel.loader)):
+        def from_config(self, config, **kwargs):
+            return model
+
+    monkeypatch.setattr(OlmoeQModel, "loader", _ShellLoader(**dataclasses.asdict(OlmoeQModel.loader)))
 
     with pytest.raises(_StopLoad):
         loader_module.ModelLoader(OlmoeQModel).from_quantized(

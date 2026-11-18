@@ -15,6 +15,7 @@ from safetensors.torch import save_file
 from transformers import AutoConfig, LlamaConfig, LlamaForCausalLM
 
 from gptqmodel.models.auto import check_and_get_model_definition
+from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.writer import ModelWriter, _merge_selected_tensors_into_state_dict
 from gptqmodel.quantization.config import FORMAT, METHOD
 from gptqmodel.utils.model import TensorSource
@@ -427,8 +428,12 @@ def _build_writer_from_real_model_config(model_local_path, expected_out_of_model
             "gptqmodel.models.base.AutoProcessor.from_pretrained",
             lambda *args, **kwargs: None,
         )
+        monkeypatch.setattr(LocalModelLoader, "load_processor", lambda self, *args, **kwargs: None)
 
-    config = AutoConfig.from_pretrained(model_local_path, trust_remote_code=False)
+    if isinstance(model_definition.loader, LocalModelLoader):
+        config = model_definition.loader.load_config(model_local_path)
+    else:
+        config = AutoConfig.from_pretrained(model_local_path, trust_remote_code=False)
     model = model_definition.loader.from_config(config, trust_remote_code=False)
 
     instance = model_definition(
