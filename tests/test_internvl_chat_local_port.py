@@ -355,7 +355,7 @@ def test_public_gptq_load_uses_local_config_and_model_with_hostile_automap(tmp_p
 
 @pytest.mark.cpu
 @pytest.mark.parametrize("architecture", ARCHITECTURES)
-def test_public_plain_awq_packs_and_reloads_actual_decoder_weights(tmp_path, architecture):
+def test_public_awq_packs_and_reloads_actual_decoder_weights(tmp_path, architecture):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig

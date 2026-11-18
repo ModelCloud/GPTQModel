@@ -315,10 +315,20 @@ def test_public_missing_scientific_asset_fails_without_serialized_fallback_then_
 
 
 @torch.no_grad()
-def test_public_plain_awq_quantized_safetensors_roundtrip(tmp_path):
+def test_public_awq_scaled_quantized_safetensors_roundtrip(tmp_path, monkeypatch):
     from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel.looper import awq_processor
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
+
+    applied = []
+    real_apply_scale = awq_processor.apply_scale
+
+    def spy_apply_scale(module, scales_list, *args, **kwargs):
+        applied.extend((prev, tuple(layers)) for prev, layers, _scales, _loss in scales_list)
+        return real_apply_scale(module, scales_list, *args, **kwargs)
+
+    monkeypatch.setattr(awq_processor, "apply_scale", spy_apply_scale)
 
     torch.manual_seed(53)
     save_tiny_owned_checkpoint(tmp_path)
@@ -336,6 +346,14 @@ def test_public_plain_awq_quantized_safetensors_roundtrip(tmp_path):
     counts = [sum(isinstance(mod, AwqTorchLinear) for mod in layer.modules())
               for layer in wrapped.model.model.language_model.layers]
     assert counts == [15,16]
+    # Scale search ran (fallback=None raises on any failed group) on both hybrid layer types.
+    experts = tuple(f"mlp.{branch}.{proj}" for branch in ("shared_expert", "experts.0", "experts.1", "experts.2")
+                    for proj in ("gate_proj", "up_proj"))
+    assert ("input_layernorm", ("linear_attn.in_proj_qkv", "linear_attn.in_proj_z")) in applied
+    assert ("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")) in applied
+    assert applied.count(("post_attention_layernorm", experts)) == 2
+    assert ("mlp.shared_expert.up_proj", ("mlp.shared_expert.down_proj",)) in applied
+    assert not any(prev.startswith("linear_attn.") for prev, _ in applied)
     ids = torch.tensor([[1,2,3,4]])
     expected = wrapped.model(ids, use_cache=False).logits
     time_series = (torch.randn(1,64,2).half(), torch.tensor([64]), torch.tensor([10.]), torch.tensor([2]))

@@ -8,12 +8,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from awq_neutrality import assert_awq_folds_neutral
+
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.nemotron_labs_diffusion import NemotronLabsDiffusionQModel as Definition
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.nemotron_labs_diffusion import NemotronLabsDiffusionConfig as Config
 from gptqmodel.models.ports.nemotron_labs_diffusion import NemotronLabsDiffusionModel as Model
-from tests.test_nemotron_labs_diffusion_local_port import tiny_config
+from tests.test_nemotron_labs_diffusion_local_port import tiny_config, tiny_model
 
 
 EXPECTED_PLAN = {
@@ -54,7 +56,7 @@ def test_pinned_released_checkpoint_header_has_exact_owners_on_meta():
 @pytest.mark.parametrize("paradigm", ["bidirectional", "autoregressive", "block_diff"])
 @pytest.mark.parametrize("kv", [1, 2, 4])
 @pytest.mark.parametrize("device", ["cpu", "meta"])
-def test_real_owner_inventory_and_plain_awq_policy(paradigm, kv, device):
+def test_real_owner_inventory(paradigm, kv, device):
     cfg = tiny_config(dlm_paradigm=paradigm, num_key_value_heads=kv)
     with torch.device(device):
         model = Model(cfg)
@@ -73,7 +75,6 @@ def test_real_owner_inventory_and_plain_awq_policy(paradigm, kv, device):
             else:
                 assert "!" in spec.flags
         assert quantized == names
-        assert Definition.awq_get_modules_for_scaling(None, layer, {}, {}) == []
     assert plan.find("self_attn.q_proj.fake") is None
     assert plan.find("mlp.gate_proj_extra") is None
     assert Definition.fusable is None
@@ -97,3 +98,30 @@ def test_source_ignores_bias_metadata_and_optional_tied_embeddings(bias, tied):
     model = Model(tiny_config(attention_bias=bias, mlp_bias=bias, tie_word_embeddings=tied))
     assert all(not name.endswith("bias") for name in model.state_dict())
     assert (model.diffusion_head.weight is model.encoder.embed_tokens.weight) == tied
+
+
+ATTENTION_INPUT = ("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"])
+VALUE_OUTPUT = ("self_attn.v_proj", ["self_attn.o_proj"])
+MLP_INPUT = ("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"])
+MLP_OUTPUT = ("mlp.up_proj", ["mlp.down_proj"])
+
+
+@pytest.mark.parametrize("paradigm", ["bidirectional", "autoregressive", "block_diff"])
+@pytest.mark.parametrize(("kv", "hidden", "expected"), [
+    # MHA with hidden == heads * head_dim: v_proj feeds o_proj column-for-column.
+    (4, 32, [ATTENTION_INPUT, VALUE_OUTPUT, MLP_INPUT, MLP_OUTPUT]),
+    # GQA: v_proj is narrower than o_proj's input, so the planner emits no v -> o fold.
+    (2, 24, [ATTENTION_INPUT, MLP_INPUT, MLP_OUTPUT]),
+])
+def test_awq_scale_folds_preserve_diffusion_model_output(paradigm, kv, hidden, expected):
+    # Fold every emitted group into a real tri-mode decoder layer and compare the
+    # full diffusion-head logits; the attention mode only changes the mask.
+    model = tiny_model(dlm_paradigm=paradigm, num_key_value_heads=kv, hidden_size=hidden)
+    ids = torch.tensor([[1, 4, 7, 9, 10, 12, 15, 2]])
+
+    def forward():
+        return model(ids).logits
+
+    for layer in model.encoder.layers:
+        checked = assert_awq_folds_neutral(Definition, model, layer, forward)
+        assert [(source, targets) for source, targets, _ in checked] == expected

@@ -12,10 +12,6 @@ class NemotronLabsDiffusionQModel(BaseQModel):
         model_class="gptqmodel.models.ports.nemotron_labs_diffusion.NemotronLabsDiffusionModel",
     )
 
-    # Bidirectional denoising and causal verification have not qualified fold/search replay.
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        return []
-
     lm_head = "diffusion_head"
     pre_lm_head_norm_module = "encoder.norm"
 

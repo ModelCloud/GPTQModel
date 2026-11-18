@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Independent checkpoint audit, live hybrid plans and conservative AWQ."""
+"""Independent checkpoint audit, live hybrid plans and AWQ scale-fold qualification."""
 
 import hashlib
 import json
@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor
@@ -122,7 +123,7 @@ def test_independent_registry_block_contract():
 
 @pytest.mark.parametrize("layout", LAYOUTS)
 @torch.no_grad()
-def test_plain_awq_quantizes_all_declared_linears_without_folding(layout, monkeypatch):
+def test_awq_without_captured_features_quantizes_all_declared_linears_plainly(layout, monkeypatch):
     torch.manual_seed(43)
     model = InternS2PreviewForConditionalGeneration(tiny_config(layout)).eval()
     _convert_model_with_defuser(Definition, model, cleanup_original=True)
@@ -158,3 +159,37 @@ def test_plain_awq_quantizes_all_declared_linears_without_folding(layout, monkey
         changed = {name for name, value in layer.state_dict().items() if not torch.equal(value, original[name])}
         assert changed == {named.name + ".weight" for named in named_linears}
     assert torch.isfinite(model(torch.tensor([[1, 2, 3, 4]]), use_cache=False).logits).all()
+
+
+EXPERT_GATE_UP = [f"mlp.{branch}.{projection}" for branch in ("shared_expert", "experts.0", "experts.1", "experts.2")
+                  for projection in ("gate_proj", "up_proj")]
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_awq_folds_preserve_hybrid_model_output(layout):
+    torch.manual_seed(47)
+    model = InternS2PreviewForConditionalGeneration(tiny_config(layout)).eval()
+    _convert_model_with_defuser(Definition, model, cleanup_original=True)
+    ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]])
+
+    def forward():
+        return model(ids, use_cache=False).logits
+
+    for kind, layer in zip(layout, model.model.language_model.layers):
+        checked = assert_awq_folds_neutral(Definition, model, layer, forward, tree=Definition.module_tree)
+        groups = {source: (targets, consumers) for source, targets, consumers in checked}
+        if kind == "linear_attention":
+            # One native input edge for all four DeltaNet projections; the
+            # unquantized b/a gates are compensated, nothing folds inside DeltaNet.
+            assert groups["input_layernorm"] == (
+                ["linear_attn.in_proj_qkv", "linear_attn.in_proj_z"],
+                ["linear_attn.in_proj_b", "linear_attn.in_proj_a"],
+            )
+            assert not any(source.startswith("linear_attn.") for source in groups)
+        else:
+            assert groups["input_layernorm"] == (["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"], [])
+        # Router and shared-expert gate read the same norm output as every expert.
+        assert groups["post_attention_layernorm"] == (EXPERT_GATE_UP, ["mlp.gate", "mlp.shared_expert_gate"])
+        for branch in ("shared_expert", "experts.0", "experts.1", "experts.2"):
+            assert groups[f"mlp.{branch}.up_proj"] == ([f"mlp.{branch}.down_proj"], [])
+        assert len(groups) == len(checked) == 6

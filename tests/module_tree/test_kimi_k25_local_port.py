@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Live Kimi-K2.5 decoder ownership, MoE consumers, and conservative plain AWQ."""
+"""Live Kimi-K2.5 decoder ownership, MoE consumers, and the no-feature AWQ path."""
 
 import hashlib
 import itertools
@@ -144,7 +144,7 @@ def test_every_real_checkpoint_owner_and_moe_consumer(tmp_path, q_lora_rank, fir
 
 @pytest.mark.parametrize("q_lora_rank", [None, 16], ids=["dense_q", "split_q"])
 @pytest.mark.parametrize("fallback", [None, {}], ids=["no_fallback", "fallback"])
-def test_plain_awq_real_projection_pack_infer_and_safetensors_retry(tmp_path, monkeypatch, q_lora_rank, fallback):
+def test_featureless_awq_real_projection_pack_infer_and_safetensors_retry(tmp_path, monkeypatch, q_lora_rank, fallback):
     torch.manual_seed(90)
     config = tiny_config(
         q_lora_rank, hidden_size=32, intermediate_size=32, moe_intermediate_size=16, kv_lora_rank=16,
@@ -175,7 +175,8 @@ def test_plain_awq_real_projection_pack_infer_and_safetensors_retry(tmp_path, mo
             for name, module in layer.named_modules()
             if isinstance(module, torch.nn.Linear) and plan.find(name).quantize
         }
-        # Plain quantization also quantizes experts absent from activation samples.
+        # Without captured features no scale group is built, and every
+        # projection (including experts absent from samples) is still quantized.
         monkeypatch.setattr(processor, "_layer_input_features", lambda _: {})
         assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
         named_modules = dict(state.modules)

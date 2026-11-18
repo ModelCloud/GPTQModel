@@ -288,7 +288,7 @@ def test_shared_tokenizer_survives_failed_processor_and_two_live_consumers(tmp_p
 
 
 @pytest.mark.parametrize("q_lora_rank", [None, 16], ids=["dense_q", "split_q"])
-def test_public_plain_awq_preserves_shared_tokenizer_across_two_save_reloads(tmp_path, q_lora_rank):
+def test_public_awq_preserves_shared_tokenizer_across_two_save_reloads(tmp_path, q_lora_rank):
     from gptqmodel import BACKEND
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
@@ -317,10 +317,13 @@ def test_public_plain_awq_preserves_shared_tokenizer_across_two_save_reloads(tmp
     with torch.inference_mode():
         dense_logits = wrapper.model(**calibration[0], use_cache=False).logits
         assert torch.isfinite(dense_logits).all() and dense_logits.std() > .01
+    norms = {name: value.clone() for name, value in wrapper.model.state_dict().items() if "layernorm" in name}
     wrapper.quantize(
         CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
         backend=BACKEND.TORCH,
     )
+    # AWQ scale search is active: decoder norms absorbed non-unit scales.
+    assert any(not torch.equal(wrapper.model.state_dict()[name], value) for name, value in norms.items())
     packed_count = 26 if q_lora_rank is None else 28
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == packed_count
     with torch.inference_mode():

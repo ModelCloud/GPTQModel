@@ -101,11 +101,19 @@ class InternVLChatQModel(BaseQModel):
     def _expert_count_config(cls, model_config, field_name=None):
         return model_config.llm_config
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Decoder alternatives, Q/K head norms, interleaved QKV and the image
-        # bridge have not been jointly qualified for scale search/folding.
-        # Empty groups retain ordinary AWQ weight quantization and clipping.
-        return []
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # The base AWQ feature policy is a classmethod over the class tree, which
+        # declares a dense `mlp`. The Qwen3-MoE `mlp:moe` root exists only in
+        # this instance's effective tree, so resolve the policy from that plan.
+        self.__dict__["awq_input_feature_aggregation"] = self._effective_awq_input_feature_aggregation
+
+    def _effective_awq_input_feature_aggregation(self, module_name):
+        # The routed gate/up scale group replays the whole MoE block from its
+        # shared pre-router input, so that root input must be captured.
+        if module_name in {spec.template for spec in self.module_plan().moe_roots()}:
+            return {"mode": "token_rows", "capture_root": True}
+        return type(self).awq_input_feature_aggregation(module_name)
 
     IMG_START_TOKEN = "<img>"
     IMG_END_TOKEN = "</img>"

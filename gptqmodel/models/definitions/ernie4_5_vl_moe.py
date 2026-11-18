@@ -402,9 +402,33 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
         return self.processor
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Both modality routers and shared/routed experts need joint replay.
-        # Until qualified, keep all declared linears on plain quantization.
-        return []
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        mlp = getattr(module, "mlp", None)
+        # Both modality routers read the post-attention norm output, like every
+        # shared/text/vision expert, but sit one level below the MoE root and
+        # share their block with `moe_statics`, so the generic planner does not
+        # see them. Compensate both whenever that norm absorbs a scale.
+        routers = [
+            f"mlp.{family}.gate"
+            for family in ("text_moe", "vision_moe")
+            if hasattr(getattr(mlp, family, None), "gate")
+        ]
+        if not routers:
+            return nodes
+        # Every shared/text/vision gate/up projection reads that norm too. A
+        # modality that saw no calibration token must still be rescaled, or
+        # the fold changes its input at inference.
+        readers = [
+            child for name, child in mlp.named_modules()
+            if name.rsplit(".", 1)[-1] in ("gate_proj", "up_proj")
+        ]
+        for node in nodes:
+            if node.get("prev_op") is module.post_attention_layernorm:
+                targets = list(node["layers"])
+                node["layers"] = targets + [child for child in readers if all(child is not t for t in targets)]
+                consumers = list(node.get("_scale_consumers") or [])
+                node["_scale_consumers"] = consumers + [name for name in routers if name not in consumers]
+        return nodes
 
     def _prepare_calibration_batch(self, processor, batch):
         text = processor.apply_chat_template(
