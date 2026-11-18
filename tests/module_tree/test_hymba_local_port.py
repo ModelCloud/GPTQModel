@@ -70,7 +70,8 @@ def test_published_1_5b_state_dict_matches_every_checkpoint_key_and_shape():
     # The official safetensors header stores the tied embedding once. HF's
     # state_dict exposes its lm_head alias too; it is not a missing weight.
     assert model.lm_head.weight is model.model.embed_tokens.weight
-    assert actual.pop("lm_head.weight") == actual["model.embed_tokens.weight"] == [32001, 1600]
+    lm_head_shape = actual.pop("lm_head.weight")
+    assert lm_head_shape == actual["model.embed_tokens.weight"] == [32001, 1600]
     assert actual["model.memory_tokens"] == [128, 1600]
     assert actual["model.layers.0.mamba.x_proj.0.weight"] == [132, 3200]
     assert actual["model.layers.31.moe.experts.0.down_proj.weight"] == [1600, 5504]
