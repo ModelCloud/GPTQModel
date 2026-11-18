@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from ricursiveAI/Ripple-65B-Preview, revision
-# 2f007aabfcedd0f8763d86d08f9aa0afbc344cea. See NOTICE and README.md.
+# 2f007aabfcedd0f8763d86d08f9aa0afbc344cea. See NOTICE.
 """Package-owned Ripple inference, preserving released parameter names and equations."""
 
 from functools import partial
@@ -18,12 +18,6 @@ from transformers.modeling_outputs import (
 )
 
 from .configuration_ricursive import RicursiveConfig
-
-
-# Marks the package-owned Transformers 5 generation/cache contract.
-# Downstream loaders that monkeypatch older checkpoints check this marker and
-# stand down instead of re-installing the equivalent runtime patch.
-RICURSIVE_TF5_COMPAT = "2026-11-09.1"
 
 
 def _new_default_cache(config: RicursiveConfig) -> DynamicCache:
@@ -487,7 +481,6 @@ class RicursivePreTrainedModel(PreTrainedModel):
     supports_gradient_checkpointing = True
     _no_split_modules = ["RicursiveDecoderLayer"]
     _supports_sdpa = True
-    _supports_cache_class = True
 
 
 class RicursiveModel(RicursivePreTrainedModel):
@@ -524,7 +517,7 @@ class RicursiveModel(RicursivePreTrainedModel):
             else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         checkpointing = self.gradient_checkpointing and self.training
         if checkpointing:
@@ -707,13 +700,7 @@ class RicursiveForCausalLM(RicursivePreTrainedModel, GenerationMixin):
     # Transformers 5 target-to-source tied-weight ownership.
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
-    # transformers 5 no longer injects `GenerationMixin` into remote-code classes,
-    # so inherit it explicitly above. Without it `generate` is missing entirely and
-    # `PreTrainedModel.__init__` never builds `generation_config`.
-    #
-    # This attribute marks the native transformers-5 compatibility fixes so that
-    # downstream loaders can skip their runtime monkeypatch.
-    _ricursive_tf5_native_fix = RICURSIVE_TF5_COMPAT
+    # Transformers 5 no longer injects `GenerationMixin`; it is inherited explicitly.
 
     def __init__(self, config: RicursiveConfig):
         super().__init__(config)
@@ -750,7 +737,7 @@ class RicursiveForCausalLM(RicursivePreTrainedModel, GenerationMixin):
         num_items_in_batch: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         outputs = self.model(
             input_ids=input_ids,

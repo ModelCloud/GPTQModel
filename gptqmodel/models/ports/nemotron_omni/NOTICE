@@ -18,5 +18,4 @@ Model Agreement for the model/weights. This source-code license does not
 relicense NVIDIA's trained weights, tokenizer data or accompanying assets.
 https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-agreement/
 
-Pinned source, data/header digests and reproducible scope: PROVENANCE.json
-and README.md. No checkpoint Python is loaded or executed at runtime.
+No checkpoint Python is loaded or executed at runtime.
