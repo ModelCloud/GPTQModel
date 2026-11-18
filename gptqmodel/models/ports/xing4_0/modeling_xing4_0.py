@@ -17,18 +17,18 @@ from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
-from transformers.models.deepseek_v3.modeling_deepseek_v3 import (
+from transformers.processing_utils import Unpack
+from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple
+from transformers.utils.generic import is_flash_attention_requested, maybe_autocast, merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
+
+from ..native.deepseek_v3.modeling_deepseek_v3 import (
     DeepseekV3MLP,
     DeepseekV3TopkRouter,
     eager_attention_forward,
     rotate_half,
     yarn_apply_mscale,
 )
-from transformers.processing_utils import Unpack
-from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple
-from transformers.utils.generic import is_flash_attention_requested, maybe_autocast, merge_with_config_defaults
-from transformers.utils.output_capturing import capture_outputs
-
 from .configuration_xing4_0 import Xing4_0Config
 
 
