@@ -31,11 +31,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers import initialization as init
 from transformers.activations import GELUTanh as PytorchGELUTanh
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 from transformers.generation import GenerationMixin
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.llava.modeling_llava import LlavaCausalLMOutputWithPast
+from transformers.utils import can_return_tuple
 
 from .checkpoint import KimiCheckpointMixin
 from .configuration_kimi_k3 import KimiK3Config
@@ -592,6 +594,14 @@ class MoonViT3dPretrainedModel(PreTrainedModel):
     _supports_flash_attn = False
     _supports_sdpa = True
 
+    @torch.no_grad()
+    def _init_weights(self, module):
+        super()._init_weights(module)
+        if isinstance(module, Learnable2DInterpPosEmbDivided_fixed):
+            init.normal_(module.weight)
+            sincos = get_1d_sincos_pos_embed(module.dim, module.num_frames)
+            init.copy_(module.time_weight, torch.from_numpy(sincos).float().unsqueeze(1))
+
     def __init__(self, config, *inputs, **kwargs):
         super().__init__(config, *inputs, **kwargs)
         config = deepcopy(config)
@@ -752,30 +762,9 @@ class KimiK3PreTrainedModel(KimiCheckpointMixin, PreTrainedModel):
     _supports_flash_attn = False
     _supports_sdpa = False
 
-    def _init_weights(self, module):
-        # important: this ported version of Llava isn't meant for training from scratch - only
-        # inference and fine-tuning - so the proper init weights code has been removed - the original codebase
-        # https://github.com/haotian-liu/LLaVA/tree/main/llava should serve for that purpose
-        std = (
-            self.config.initializer_range
-            if hasattr(self.config, "initializer_range")
-            else self.config.text_config.initializer_range
-        )
-
-        if hasattr(module, "class_embedding"):
-            module.class_embedding.data.normal_(mean=0.0, std=std)
-
-        if isinstance(module, (nn.Linear, nn.Conv2d)):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
 
 
-class VisionTowerConfig(PretrainedConfig):
+class VisionTowerConfig(PreTrainedConfig):
     model_type = "moonvit3d"
 
     def __init__(self, config: KimiK3Config, **kwargs):
@@ -1006,6 +995,7 @@ class KimiK3ForConditionalGeneration(KimiK3PreTrainedModel, GenerationMixin):
         image_features = self.vision_tower(pixel_values, grid_thws)
         return image_features
 
+    @can_return_tuple
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -1013,30 +1003,16 @@ class KimiK3ForConditionalGeneration(KimiK3PreTrainedModel, GenerationMixin):
         grid_thws: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
-        past_key_values: list[torch.FloatTensor] | None = None,
+        past_key_values: KimiDynamicCache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         labels: torch.LongTensor | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
         **kwargs,
-    ) -> tuple | LlavaCausalLMOutputWithPast:
+    ) -> LlavaCausalLMOutputWithPast:
         r"""
-        Args:
-            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
-                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
-                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
-
-        ```"""
-        assert self.vision_tower is not None, "vision_tower is not loaded"
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
+        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Next-token labels; positions where the merged attention mask is 0 are excluded from the loss.
+        """
         input_mask = None
         cached_mask = getattr(past_key_values, "multimodal_attention_mask", None)
         if (
@@ -1108,15 +1084,11 @@ class KimiK3ForConditionalGeneration(KimiK3PreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            return_dict=True,
         )
 
-        logits = outputs[0]
-        returned_cache = getattr(outputs, "past_key_values", None)
-        if isinstance(outputs, tuple) and len(outputs) > 1 and isinstance(outputs[1], KimiDynamicCache):
-            returned_cache = outputs[1]
+        logits = outputs.logits
+        returned_cache = outputs.past_key_values
         if input_mask is not None and returned_cache is not None:
             returned_cache.multimodal_attention_mask = attention_mask.clone()
             returned_cache.multimodal_input_mask = input_mask.clone()
@@ -1138,17 +1110,7 @@ class KimiK3ForConditionalGeneration(KimiK3PreTrainedModel, GenerationMixin):
                 shift_labels.view(-1).to(shift_logits.device),
             )
 
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
-
-        return LlavaCausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
+        return LlavaCausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=outputs.past_key_values)
 
     def prepare_inputs_for_generation(
         self,
@@ -1166,29 +1128,14 @@ class KimiK3ForConditionalGeneration(KimiK3PreTrainedModel, GenerationMixin):
                 input_ids = input_ids[:, processed:]
             pixel_values = grid_thws = None
         elif past_key_values is not None:
-            if hasattr(past_key_values, "get_seq_length"):
-                cache_length = past_key_values.get_seq_length()
-                past_length = getattr(past_key_values, "seen_tokens", cache_length)
-            else:
-                cache_length = past_length = past_key_values[0][0].shape[2]
-
-            # Keep only the unprocessed tokens:
-            # 1 - If the length of the attention_mask exceeds the length of input_ids, then we are in a setting where
-            # some of the inputs are exclusively passed as part of the cache (e.g. when passing input_embeds as
-            # input)
+            past_length = past_key_values.get_seq_length()
+            # Keep only unprocessed tokens (the K3 cache is unbounded, so the mask is never cropped).
             if attention_mask is not None and attention_mask.shape[1] > input_ids.shape[1]:
                 input_ids = input_ids[:, -(attention_mask.shape[1] - past_length) :]
-            # 2 - If the past_length is smaller than input_ids', then input_ids holds all input tokens. We can discard
-            # input_ids based on the past_length.
             elif past_length < input_ids.shape[1]:
                 input_ids = input_ids[:, past_length:]
-            # 3 - Otherwise (past_length >= input_ids.shape[1]), let's assume input_ids only has unprocessed tokens.
             elif self.config.media_placeholder_token_id in input_ids:
                 input_ids = input_ids[:, input_ids.shape[1] - 1 :]
-            # If the cache has seen more tokens than it can hold, then the cache has a size limit. Let's discard the
-            # older attention values, as their corresponding values are not part of the input.
-            if cache_length < past_length and attention_mask is not None:
-                attention_mask = attention_mask[:, -(cache_length + input_ids.shape[1]) :]
 
         position_ids = kwargs.get("position_ids", None)
         if attention_mask is not None and position_ids is None:

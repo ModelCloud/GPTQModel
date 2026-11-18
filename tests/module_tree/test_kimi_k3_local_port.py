@@ -2,24 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real decoder checkpoint ownership for K3 and the AttnRes text alias."""
 
+import hashlib
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 from test_kimi_k3_local_port import tiny_config, tiny_k3
-
-
-def test_port_registry_cases_are_exact_for_both_aliases():
-    from gptqmodel.models.ports import kimi_k3
-
-    cases = json.loads((Path(kimi_k3.__file__).parent / "module_plan_cases.json").read_text())
-    for definition in (KimiK3QModel, KimiLinearQModel):
-        expected = cases[f"{definition.__name__}/gptq"]
-        assert expected["layers"] == definition.extract_layers_node()
-        assert expected["blocks"] == definition.build_layer_modules(definition.module_tree, include_capture_only=True)
-
 
 from gptqmodel.models.definitions.kimi_k3 import KimiK3QModel, KimiLinearQModel
 from gptqmodel.models.module_plan import ModulePlan
@@ -27,6 +16,21 @@ from gptqmodel.models.ports.kimi_k3.modeling_kimi_k3 import KimiK3ForConditional
 from gptqmodel.models.ports.kimi_k3.modeling_kimi_linear import KimiLinearForCausalLM
 from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.quantization.config import AWQConfig
+
+
+# sha256 of the canonical layers/blocks plan of both aliases; the live owner test below checks semantics.
+PLAN_SHA256 = "8855ca5b42c39816b48924f9e7536beb976ce8648b5544557e5fe00acf02598d"
+
+
+def test_port_registry_plan_is_pinned_for_both_aliases():
+    plan = {
+        definition.__name__: {
+            "layers": definition.extract_layers_node(),
+            "blocks": definition.build_layer_modules(definition.module_tree, include_capture_only=True),
+        }
+        for definition in (KimiK3QModel, KimiLinearQModel)
+    }
+    assert hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest() == PLAN_SHA256
 
 
 @pytest.mark.parametrize("mode", ["mla", "hybrid", "kda"])

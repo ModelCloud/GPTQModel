@@ -8,25 +8,13 @@ from typing import Dict, Iterator, List, Optional, Tuple, Union, cast
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
 from tokenizers import AddedToken
+from transformers.convert_slow_tokenizer import bytes_to_unicode
 from transformers.tokenization_python import PythonBackend
 
 from .encoding_k3 import build_chat_segments, is_batched_conversation
 
 
 logger = getLogger(__name__)
-
-
-def bytes_to_unicode():
-    """GPT-2 byte alphabet (OpenAI/Hugging Face, Apache-2.0)."""
-    values = list(range(33, 127)) + list(range(161, 173)) + list(range(174, 256))
-    characters = list(values)
-    offset = 0
-    for byte in range(256):
-        if byte not in values:
-            values.append(byte)
-            characters.append(256 + offset)
-            offset += 1
-    return dict(zip(values, map(chr, characters)))
 
 
 VOCAB_FILES_NAMES = {"vocab_file": "tiktoken.model"}

@@ -2,10 +2,10 @@
 # Licensed under the Kimi K3 License; see LICENSE.
 from typing import Optional
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class KimiLinearConfig(PretrainedConfig):
+class KimiLinearConfig(PreTrainedConfig):
     model_type = "kimi_linear"
     keys_to_ignore_at_inference = ["past_key_values"]
 
@@ -26,8 +26,6 @@ class KimiLinearConfig(PretrainedConfig):
         pad_token_id=0,
         bos_token_id=1,
         eos_token_id=2,
-        rope_theta=10000.0,
-        rope_scaling=None,
         tie_word_embeddings=False,
         moe_intermediate_size: Optional[int] = None,
         moe_renormalize: bool = True,
@@ -76,8 +74,6 @@ class KimiLinearConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
-        self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
 
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
@@ -157,7 +153,7 @@ class KimiLinearConfig(PretrainedConfig):
         return self.linear_attn_config is not None and (layer_idx + 1) in self.linear_attn_config["kda_layers"]
 
 
-class KimiK3VisionConfig(PretrainedConfig):
+class KimiK3VisionConfig(PreTrainedConfig):
     def __init__(
         self,
         patch_size: int = 14,
@@ -226,7 +222,7 @@ class KimiK3VisionConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
 
-class KimiK3Config(PretrainedConfig):
+class KimiK3Config(PreTrainedConfig):
     """Kimi-K3 model configuration.
 
     Args:
@@ -291,7 +287,7 @@ class KimiK3Config(PretrainedConfig):
 class KimiConfigFactory:
     @classmethod
     def from_pretrained(cls, model_id_or_path, **kwargs):
-        values, kwargs = PretrainedConfig.get_config_dict(model_id_or_path, **kwargs)
+        values, kwargs = PreTrainedConfig.get_config_dict(model_id_or_path, **kwargs)
         return cls.from_dict(values, **kwargs)
 
     @classmethod
