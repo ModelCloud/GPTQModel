@@ -1,4 +1,5 @@
 # Vendored from huggingface/transformers v5.23.0 (Apache-2.0) by GPT-QModel.
+# GPT-QModel: modernized to Transformers 5.23 conventions (no legacy return paths).
 # Do not edit by hand except to keep it on the 5.23 ABI; see docs/transformers5-model-ports.md.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
 #           This file was automatically generated from src/transformers/models/zamba2/modular_zamba2.py.
@@ -1336,7 +1337,7 @@ class Zamba2ForCausalLM(Zamba2PreTrainedModel, GenerationMixin):
         )
 
     def prepare_inputs_for_generation(self, input_ids, **kwargs):
-        kwargs["logits_to_keep"] = self.config.num_logits_to_keep
+        kwargs["logits_to_keep"] = self.config.logits_to_keep
         model_inputs = super().prepare_inputs_for_generation(input_ids, **kwargs)
         return model_inputs
 
