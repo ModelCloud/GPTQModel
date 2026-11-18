@@ -293,7 +293,7 @@ layout alone does not authorize it.
 | `refinedWeb` | `RwgQModel` | Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified. |
 | `refinedWebModel` | `RwgQModel` | Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified. |
 | `ricursive` | `RicursiveQModel` | Package-owned Ricursive hybrid sliding/full attention with value residuals, gated attention and PeriNorm; fusion executor has not been qualified. |
-| `sensenova_loop` | `SenseNovaLoopQModel` | Custom/remote looped implementation: the mHC decoder layer runs the remote forward, so QKV and gate/up fusion needs its own native-forward qualification. |
+| `sensenova_loop` | `SenseNovaLoopQModel` | Package-owned looped port: the mHC decoder layer runs its own routed forward, so QKV and gate/up fusion needs a separate qualification. |
 | `solar_open2` | `SolarOpen2QModel` | Package-owned Solar-Open2 hybrid GQA/KDA MoE with vector-decay recurrent state; fusion executor has not been qualified. |
 | `spark2_5` | `Spark2_5QModel` | Package-owned Spark2.5 packed-QKV/head-gated hybrid decoder; fusion executor has not been qualified. |
 | `stablelm_epoch` | `LlamaQModel` | Source-matched native Transformers 5 StableLM Epoch adapter; fusion executor has not been qualified. |
