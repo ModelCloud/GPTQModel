@@ -420,6 +420,49 @@ def test_normalize_hf_config_compat_restores_legacy_cache_length_helpers(monkeyp
     assert EmptyCache().get_max_length() is None
 
 
+def test_legacy_storage_cache_reports_length_without_layers():
+    """#5090 item 3: a Cache subclass may keep the pre-5.x storage lists.
+
+    Hymba's `HybridMambaAttentionDynamicCache` subclasses `DynamicCache` but
+    stores `key_cache`/`value_cache`. transformers 5's `Cache.__len__` (reached
+    through `bool(cache)`) and `get_max_length()` assume a `layers` list and
+    raised `AttributeError: ... has no attribute 'layers'`.
+    """
+
+    normalize_hf_config_compat(SimpleNamespace(), trust_remote_code=True)
+
+    class LegacyStorageCache(cache_utils.Cache):
+        def __init__(self, layers: int = 3):
+            self.key_cache = [torch.zeros(1, 2, 5, 4) for _ in range(layers)]
+            self.value_cache = [torch.zeros(1, 2, 5, 4) for _ in range(layers)]
+
+        def get_seq_length(self, layer_idx: int = 0) -> int:
+            return self.key_cache[layer_idx].shape[-2]
+
+        def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+            self.key_cache[layer_idx] = key_states
+            self.value_cache[layer_idx] = value_states
+            return key_states, value_states
+
+    cache = LegacyStorageCache()
+    assert len(cache) == 3
+    assert bool(cache) is True
+    assert cache.get_max_length() is None
+
+
+def test_layer_based_cache_length_is_unchanged():
+    """The legacy-storage shim must not alter real `layers`-based caches."""
+
+    normalize_hf_config_compat(SimpleNamespace(), trust_remote_code=True)
+
+    class LayerCache(cache_utils.Cache):
+        def __init__(self, layers):
+            self.layers = layers
+
+    assert len(LayerCache([object(), object()])) == 2
+    assert len(LayerCache([])) == 0
+
+
 def test_normalize_hf_config_compat_restores_legacy_dynamic_cache_converters(monkeypatch):
     monkeypatch.delattr(cache_utils.DynamicCache, "to_legacy_cache", raising=False)
     monkeypatch.delattr(cache_utils.DynamicCache, "from_legacy_cache", raising=False)

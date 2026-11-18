@@ -1410,6 +1410,42 @@ def _patch_transformers_remote_code_compat() -> None:
 
             cache_base_cls.get_usable_length = get_usable_length
 
+        if cache_base_cls is not None and not getattr(
+            cache_base_cls.__dict__.get("__len__"), "_gptqmodel_legacy_layer_storage", False
+        ):
+            # transformers 5 moved cache length bookkeeping onto a `layers`
+            # list. Some remote caches subclass `Cache` while keeping the
+            # transformers-4 `key_cache`/`value_cache` lists (Hymba's
+            # `HybridMambaAttentionDynamicCache`), so `len(cache)` (through
+            # `bool(cache)`) and `get_max_length()` raised
+            # `AttributeError: ... has no attribute 'layers'`.
+            original_cache_len = cache_base_cls.__len__
+            original_cache_max_length = getattr(cache_base_cls, "get_max_length", None)
+
+            def __len__(self) -> int:
+                if getattr(self, "layers", None) is None:
+                    key_cache = getattr(self, "key_cache", None)
+                    if isinstance(key_cache, (list, tuple)):
+                        return len(key_cache)
+                    return 0
+                return original_cache_len(self)
+
+            __len__._gptqmodel_legacy_layer_storage = True
+            cache_base_cls.__len__ = __len__
+
+            if callable(original_cache_max_length) and not getattr(
+                original_cache_max_length, "_gptqmodel_legacy_layer_storage", False
+            ):
+                def get_max_length(self, layer_idx: Optional[int] = None):
+                    if getattr(self, "layers", None) is None:
+                        # A pre-5.x cache grows without a declared limit;
+                        # transformers 4 reported that as `None`.
+                        return None
+                    return original_cache_max_length(self, layer_idx)
+
+                get_max_length._gptqmodel_legacy_layer_storage = True
+                cache_base_cls.get_max_length = get_max_length
+
         dynamic_cache_cls = getattr(cache_utils, "DynamicCache", None) if cache_utils is not None else None
         if dynamic_cache_cls is not None and not hasattr(dynamic_cache_cls, "to_legacy_cache"):
             # Older remote generation code still serializes cache state as
@@ -2147,6 +2183,16 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
         if getattr(config, 'attn_implementation_new', None) == "flex":
             from transformers.utils import is_flash_attn_2_available
             config.attn_implementation_new = "flash_attention_2" if is_flash_attn_2_available() else "sdpa"
+        if getattr(config, "attn_implementation_new", None) in (
+            "sdpa",
+            "flash_attention_2",
+        ) and getattr(config, "_attn_implementation", None) == "flex":
+            # `HymbaConfig` declares the mixer selection under its own
+            # `attn_implementation_new` field and `HymbaModel.__init__` copies
+            # it to `_attn_implementation`; transformers 5 validates
+            # `_attn_implementation` in `PreTrainedModel.__init__` *before*
+            # that copy runs and rejects the legacy `flex` value outright.
+            config._attn_implementation = config.attn_implementation_new
 
     if model_type_lower == "dream" or model_type == "brumby":
         import transformers.modeling_rope_utils as rope_utils
@@ -2343,6 +2389,22 @@ def install_legacy_generation_compat(model: Any) -> bool:
     accepts_cache_position = "cache_position" in parameters or any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     )
+    accepts_attention_mask = any(
+        parameter.name == "attention_mask"
+        and parameter.kind
+        in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+        for parameter in parameters.values()
+    )
+    # transformers 4 never synthesized `position_ids` inside `generate()`; a
+    # remote implementation that does not declare the argument builds its own
+    # from `attention_mask` or the cache length. transformers 5 injects ids
+    # sized to the text sequence, which such code rejects (Hymba expects the id
+    # span to include its memory tokens on prefill).
+    accepts_position_ids = "position_ids" in parameters
 
     @wraps(original)
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, *args, **kwargs):
@@ -2359,6 +2421,28 @@ def install_legacy_generation_compat(model: Any) -> bool:
         num_new_tokens = None if modern_sequence_length else kwargs.pop(
             "next_sequence_length", None
         )
+
+        if not modern_sequence_length and accepts_attention_mask and kwargs.get("attention_mask") is None:
+            # transformers 5 drops an all-ones mask before calling the callee
+            # (no padding); transformers 4 always supplied it, and legacy
+            # remote implementations read it unconditionally (Hymba
+            # concatenates its memory-token mask onto `attention_mask.device`).
+            # An all-ones mask is exactly the transformers-4 value for an
+            # unpadded prompt, and it spans the sequence this step processes.
+            kwargs["attention_mask"] = torch.ones(
+                (int(input_ids.shape[0]), int(input_ids.shape[-1])),
+                dtype=torch.long,
+                device=input_ids.device,
+            )
+
+        if not modern_sequence_length and not accepts_position_ids:
+            # transformers 4 never synthesized ids; a legacy implementation
+            # that does not declare the argument builds its own from the mask
+            # or the cache length. transformers 5 injects ids sized to the text
+            # sequence, which that code rejects on prefill (Hymba's id span
+            # must include its memory tokens).
+            kwargs.pop("position_ids", None)
+
         if (
             accepts_cache_position
             and not modern_sequence_length

@@ -176,6 +176,115 @@ def test_filled_cache_keeps_tuple_indexing_and_seen_tokens():
     assert out["cache_position"].tolist() == [5, 6]
 
 
+def _mask_and_position_prepare(self, input_ids, past_key_values=None,
+                               attention_mask=None, **kwargs):
+    """Hymba's remote shape: the mask is read unconditionally.
+
+    `HymbaForCausalLM.prepare_inputs_for_generation` concatenates its memory
+    token mask onto `attention_mask.device` before it looks at
+    `past_key_values`, and builds `position_ids` from that mask itself.
+    """
+
+    self.calls.append(
+        {
+            "attention_mask": attention_mask,
+            "position_ids": kwargs.get("position_ids"),
+        }
+    )
+    width = input_ids.shape[-1]
+    if attention_mask is not None and attention_mask.shape[-1] != width:
+        raise AssertionError("mask must span the step's input ids")
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "position_ids": kwargs.get("position_ids"),
+    }
+
+
+def test_dropped_all_ones_mask_is_rematerialized_for_legacy_remote_code():
+    """#5090 item 1: transformers 5 drops an all-ones mask before the callee.
+
+    transformers 4 always passed the mask, so Hymba's remote
+    `prepare_inputs_for_generation` reads `attention_mask.device` and raised
+    `AttributeError: 'NoneType' object has no attribute 'device'` on every
+    unpadded prompt.
+    """
+
+    cls = _remote_class({"prepare_inputs_for_generation": _mask_and_position_prepare})
+    assert install_legacy_generation_compat(cls()) is True
+    model = cls()
+    model.calls = []
+
+    out = model.prepare_inputs_for_generation(
+        torch.tensor([[1, 2, 3, 4]]), attention_mask=None
+    )
+
+    mask = out["attention_mask"]
+    assert mask is not None
+    assert mask.dtype == torch.long
+    assert mask.tolist() == [[1, 1, 1, 1]]
+
+
+def test_explicit_mask_is_not_overwritten():
+    cls = _remote_class({"prepare_inputs_for_generation": _mask_and_position_prepare})
+    install_legacy_generation_compat(cls())
+    model = cls()
+    model.calls = []
+
+    given = torch.tensor([[1, 1, 0, 1]])
+    out = model.prepare_inputs_for_generation(
+        torch.tensor([[1, 2, 3, 4]]), attention_mask=given
+    )
+
+    assert out["attention_mask"] is given
+
+
+def test_hf_built_position_ids_are_dropped_for_remote_implementations():
+    """#5090 item 2: transformers 5 injects `position_ids` before the callee.
+
+    Hymba sizes its on-prefill id span to include the 128 memory tokens and
+    raised `RuntimeError: shape '[-1, 134]' is invalid for input of size 6`.
+    transformers 4 left the argument to the model.
+    """
+
+    cls = _remote_class({"prepare_inputs_for_generation": _mask_and_position_prepare})
+    install_legacy_generation_compat(cls())
+    model = cls()
+    model.calls = []
+
+    out = model.prepare_inputs_for_generation(
+        torch.tensor([[1, 2, 3, 4]]),
+        attention_mask=torch.ones(1, 4, dtype=torch.long),
+        position_ids=torch.arange(4).unsqueeze(0),
+    )
+
+    assert out["position_ids"] is None
+
+
+def _declares_position_ids(self, input_ids, past_key_values=None, position_ids=None,
+                           attention_mask=None, cache_position=None, **kwargs):
+    return {
+        "input_ids": input_ids,
+        "position_ids": position_ids,
+        "cache_position": cache_position,
+    }
+
+
+def test_position_ids_are_forwarded_when_the_remote_code_declares_them():
+    # A remote class that declares `position_ids` keeps receiving the value the
+    # caller passed; the adapter only restores the transformers-4 state for
+    # implementations that never accepted the argument.
+    cls = _remote_class({"prepare_inputs_for_generation": _declares_position_ids})
+    install_legacy_generation_compat(cls())
+
+    ids = torch.arange(4).unsqueeze(0)
+    out = cls().prepare_inputs_for_generation(
+        torch.tensor([[1, 2, 3, 4]]), attention_mask=torch.ones(1, 4, dtype=torch.long),
+        position_ids=ids,
+    )
+    assert out["position_ids"] is ids
+
+
 def test_install_is_idempotent_for_repeated_loads():
     cls = _remote_class({"prepare_inputs_for_generation": _legacy_prepare})
     assert install_legacy_generation_compat(cls()) is True
