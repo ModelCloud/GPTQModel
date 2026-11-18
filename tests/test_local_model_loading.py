@@ -159,7 +159,8 @@ def test_native_model_ignores_checkpoint_model_code(tmp_path, monkeypatch, bypas
     if bypass:
         monkeypatch.setenv(BYPASS_ENV, "1")
     config = load_model_config(path, trust_remote_code=True)
-    assert type(config).__module__.startswith("transformers.models.llama")
+    # The package-owned Llama port is selected; checkpoint code is never imported.
+    assert type(config).__module__.startswith("gptqmodel.models.ports.native.llama")
     assert not marker.exists()
 
 

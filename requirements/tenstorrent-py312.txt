@@ -39,7 +39,7 @@ pyarrow==26.0.1
 requests==2.34.2
 safetensors==0.8.0
 threadpoolctl==3.8.0
-tokenicer==0.0.20
+tokenicer==0.0.21
 torch==2.11.0+cpu
 torchao==0.18.0
 torch-xla==2.9.0+gited8a445

@@ -6,9 +6,11 @@ import torch
 from safetensors.torch import save_file
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
-from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizerFast
 
 from gptqmodel import CalibrationConfig, GPTQModel
+from gptqmodel.models.ports.native.llama.configuration_llama import LlamaConfig
+from gptqmodel.models.ports.native.llama.modeling_llama import LlamaForCausalLM
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.model import co_locate_shared_module_aliases

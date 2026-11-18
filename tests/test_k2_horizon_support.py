@@ -6,13 +6,13 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import dynamic_module_utils
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.k2_horizon import (
     K2HorizonMoELifecycleHooks,
     K2HorizonQModel,
 )
+from gptqmodel.utils.hf import load_model_config
 from gptqmodel.utils.model import (
     find_moe_routing_modules,
     restore_moe_topk,
@@ -228,12 +228,7 @@ def test_local_k2_horizon_remote_config_matches_registered_definition(
     if not model_path.is_dir():
         pytest.skip(f"local K2 fixture is unavailable: {model_path}")
 
-    modules_cache = tmp_path / "hf_modules"
-    monkeypatch.setattr(dynamic_module_utils, "HF_MODULES_CACHE", str(modules_cache))
-    config = auto.AutoConfig.from_pretrained(
-        model_path,
-        trust_remote_code=True,
-        local_files_only=True,
-    )
+    # The definition-owned K2-Horizon port reads the config; no checkpoint Python runs.
+    config = load_model_config(model_path, local_files_only=True)
     assert config.model_type == "k2_horizon"
     assert auto.MODEL_MAP[config.model_type] is K2HorizonQModel
