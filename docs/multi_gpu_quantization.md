@@ -442,7 +442,7 @@ override), two GPUs, default `auto_forward_data_parallel=True`:
 | Layer-0 Hessian vs serial capture | Not reached | Normalized error <= 4.3e-8 |
 | Serial and single-GPU controls | Completed | Completed |
 
-Introduced in PR #TBD.
+Introduced in PR #5144.
 
 ## GPU peer access (P2P)
 
