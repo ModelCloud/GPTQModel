@@ -410,6 +410,13 @@ def test_homogeneous_plans_and_single_sample_left_padding(layer_types):
     output = model(ids[:, 3:], attention_mask=mask, past_key_values=cache, use_cache=True)
     torch.testing.assert_close(output.logits, full[:, 3:], rtol=2e-5, atol=2e-6)
     assert cache.get_seq_length() == 5
+    # The cache derives its length from layer state / stored padding mask, not a counter.
+    assert cache.attention_mask.shape == (1, 5)
+    generated = model.generate(ids[:, 2:], max_new_tokens=3, do_sample=False)
+    uncached = model.generate(ids[:, 2:], max_new_tokens=3, do_sample=False, use_cache=False)
+    assert torch.equal(generated, uncached)
+    torch.testing.assert_close(model(generated, use_cache=False).logits[:, -4:-1],
+                               model(generated, use_cache=True).logits[:, -4:-1], rtol=2e-5, atol=2e-6)
 
 
 @torch.no_grad()
@@ -676,10 +683,10 @@ def test_appended_media_padding_history_follows_beam_selection_and_reset():
               "mm_token_type_ids": full.eq(60).long(), "attention_mask": full.ne(0).long()}
     expected = model(full, **kwargs, use_cache=False).logits
     torch.testing.assert_close(actual, expected[:, -later.shape[1]:], rtol=2e-5, atol=2e-6)
-    assert cache._agnes_valid_tokens.tolist() == [[13], [16], [16]]
+    assert cache.attention_mask.sum(-1, keepdim=True).tolist() == [[13], [16], [16]]
     assert cache.rope_deltas.tolist() == [[-2], [-4], [-4]]
     cache.reset()
-    assert cache._agnes_valid_tokens is None and cache._agnes_attention_mask is None
+    assert cache.attention_mask is None and cache.get_seq_length() == 0
     replay = model(full, **kwargs, past_key_values=cache, use_cache=True)
     torch.testing.assert_close(replay.logits, expected)
 

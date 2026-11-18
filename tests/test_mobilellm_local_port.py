@@ -469,7 +469,8 @@ def test_shared_physical_cache_rejected_before_any_mutation_then_retry(tiny_conf
 
 @pytest.mark.parametrize("shared_embedding", [False, True])
 def test_loss_embeds_output_selection_and_head_replacement(tiny_config, shared_embedding):
-    model = _model(tiny_config, share_embedding=shared_embedding, layer_sharing=True)
+    # Transformers 5.23 returns attention probabilities only from eager attention.
+    model = _model(tiny_config, share_embedding=shared_embedding, layer_sharing=True, _attn_implementation="eager")
     ids = torch.tensor([[1, 7, 13, 8]])
     expected, _ = _reference(model, ids)
     result = model(ids, labels=ids, output_hidden_states=True, output_attentions=True)

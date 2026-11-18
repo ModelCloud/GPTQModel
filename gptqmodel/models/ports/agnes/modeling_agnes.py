@@ -33,7 +33,7 @@ from transformers.generation import GenerationMixin
 from transformers.masking_utils import create_causal_mask, create_recurrent_attention_mask
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, BaseModelOutputWithPooling, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_utils import PreTrainedModel, slice_logits_to_keep
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5Attention,
     Qwen3_5MLP,
@@ -63,12 +63,13 @@ from .configuration_agnes import LAYER_DELTA, LAYER_GLOBAL, AgnesConfig, AgnesTe
 
 
 class AgnesDynamicCache(Cache):
-    """Own the hybrid cache without modifying Transformers' global registries.
+    """Hybrid 5.23 cache: one `LinearAttentionLayer` per delta layer and one
+    `DynamicLayer` per global layer, built from Agnes' own `layer_types`.
 
-    Current Transformers stores linear states in dictionaries indexed by stream.
-    Agnes has one stream per layer. Count tokens independently so all-delta and
-    all-global layer plans remain valid as well as the released hybrid layout.
-    A cache belongs to one request and must not be shared between threads.
+    Besides the layer states the cache keeps the request's 2D padding mask
+    (`attention_mask`) and multimodal rotary offsets (`rope_deltas`), both
+    batch-aligned with the layer states. A cache belongs to one request and
+    must not be shared between threads.
     """
 
     def __init__(self, config: AgnesTextConfig):
@@ -76,45 +77,34 @@ class AgnesDynamicCache(Cache):
             LinearAttentionLayer() if kind == LAYER_DELTA else DynamicLayer()
             for kind in config.layer_types
         ])
-        self._agnes_seen_tokens = 0
-        self._agnes_valid_tokens = None
-        self._agnes_attention_mask = None
+        self.attention_mask = None
         self.rope_deltas = None
         self._in_forward = False
 
     def get_seq_length(self, layer_idx=0):
-        return self._agnes_seen_tokens
+        # Global layers report their KV length natively. An all-delta plan has
+        # no sequence axis in any layer, so the padding mask is the source.
+        if any(isinstance(layer, DynamicLayer) for layer in self.layers):
+            return super().get_seq_length(layer_idx)
+        return 0 if self.attention_mask is None else self.attention_mask.shape[-1]
 
     def reset(self):
         super().reset()
-        self._agnes_seen_tokens = 0
-        self._agnes_valid_tokens = None
-        self._agnes_attention_mask = None
+        self.attention_mask = None
         self.rope_deltas = None
         self._in_forward = False
 
     def reorder_cache(self, beam_idx):
         super().reorder_cache(beam_idx)
-        if self._agnes_valid_tokens is not None:
-            self._agnes_valid_tokens = self._agnes_valid_tokens.index_select(0, beam_idx.to(self._agnes_valid_tokens.device))
-        if self._agnes_attention_mask is not None:
-            self._agnes_attention_mask = self._agnes_attention_mask.index_select(0, beam_idx.to(self._agnes_attention_mask.device))
+        if self.attention_mask is not None:
+            self.attention_mask = self.attention_mask.index_select(0, beam_idx.to(self.attention_mask.device))
         if self.rope_deltas is not None:
             self.rope_deltas = self.rope_deltas.index_select(0, beam_idx.to(self.rope_deltas.device))
 
     def batch_repeat_interleave(self, repeats):
-        # LinearAttentionLayer has reorder_cache, but no batch repeat/select
-        # methods in Transformers 5. Use the same indices for every state and
-        # the request's rotary offsets.
-        sample = self.rope_deltas
-        if sample is None:
-            for layer in self.layers:
-                if isinstance(layer, LinearAttentionLayer):
-                    sample = next(iter(layer.conv_states.values()), None)
-                elif layer.is_initialized:
-                    sample = layer.keys
-                if sample is not None:
-                    break
+        # 5.23 `LinearAttentionLayer` has `reorder_cache` but no batch
+        # repeat/select, so route both through `reorder_cache`.
+        sample = self.attention_mask if self.attention_mask is not None else self.rope_deltas
         if sample is not None:
             indices = torch.arange(sample.shape[0], device=sample.device).repeat_interleave(repeats)
             self.reorder_cache(indices)
@@ -122,7 +112,7 @@ class AgnesDynamicCache(Cache):
     def batch_select_indices(self, indices):
         self.reorder_cache(indices)
 
-    def crop(self, max_length):
+    def crop(self, tokens_to_remove):
         raise ValueError("Agnes recurrent cache cannot crop; reset() and replay the prefix")
 
 
@@ -576,21 +566,22 @@ class AgnesCausalLMOutput(CausalLMOutputWithPast):
 def _text_positions_and_lengths(inputs_embeds, attention_mask, cache):
     """Current logical text positions and total valid lengths, before mutation.
 
-    Keep padding counts with the request, so either a full-prefix mask or a
-    chunk-local mask (or no subsequent mask) can extend its rotary coordinates.
-    The scalar cache length still counts physical tokens for KV/mask indexing.
+    The cache's stored padding mask lets a chunk-local mask (or no subsequent
+    mask) extend rotary coordinates exactly like a full-prefix mask.
     """
     batch, seq, _ = inputs_embeds.shape
-    past_len = 0 if cache is None else cache.get_seq_length()
-    prefix = getattr(cache, "_agnes_valid_tokens", None)
-    if prefix is None:
+    history = getattr(cache, "attention_mask", None)
+    if attention_mask is not None and attention_mask.shape[-1] > seq:
+        prefix = attention_mask[:, :-seq].long().sum(-1, keepdim=True).to(inputs_embeds.device)
+    elif history is not None:
+        prefix = history.long().sum(-1, keepdim=True).to(inputs_embeds.device)
+    else:
+        past_len = 0 if cache is None else cache.get_seq_length()
         prefix = torch.full((batch, 1), past_len, device=inputs_embeds.device, dtype=torch.long)
     if attention_mask is None:
         mask = torch.ones((batch, seq), device=inputs_embeds.device, dtype=torch.long)
     else:
         mask = attention_mask[:, -seq:].long().to(inputs_embeds.device)
-        if attention_mask.shape[-1] > seq:
-            prefix = attention_mask[:, :-seq].long().sum(-1, keepdim=True).to(inputs_embeds.device)
     positions = (mask.cumsum(-1) - 1 + prefix).masked_fill(mask == 0, 0)
     return positions, prefix + mask.sum(-1, keepdim=True)
 
@@ -642,7 +633,7 @@ class AgnesTextModel(AgnesPreTrainedModel):
             if attention_mask is None or attention_mask.shape[-1] == inputs_embeds.shape[1]:
                 current_mask = (torch.ones(inputs_embeds.shape[:2], device=inputs_embeds.device, dtype=torch.long)
                                 if attention_mask is None else attention_mask)
-                attention_mask = torch.cat((past_key_values._agnes_attention_mask.to(current_mask.device), current_mask), dim=-1)
+                attention_mask = torch.cat((past_key_values.attention_mask.to(current_mask.device), current_mask), dim=-1)
 
         text_positions, valid_lengths = _text_positions_and_lengths(inputs_embeds, attention_mask, past_key_values)
         # position ids carry four rows: plain text positions, then T / H / W
@@ -676,9 +667,7 @@ class AgnesTextModel(AgnesPreTrainedModel):
             )
         h = self.norm(h)
         if past_key_values is not None:
-            past_key_values._agnes_seen_tokens += inputs_embeds.shape[1]
-            past_key_values._agnes_valid_tokens = valid_lengths
-            past_key_values._agnes_attention_mask = (attention_mask.clone() if attention_mask is not None else
+            past_key_values.attention_mask = (attention_mask.clone() if attention_mask is not None else
                 torch.ones(inputs_embeds.shape[:2], device=inputs_embeds.device, dtype=torch.long))
             if not _defer_cache_commit:
                 past_key_values._in_forward = False
@@ -1000,8 +989,7 @@ class AgnesForCausalLM(AgnesPreTrainedModel, GenerationMixin):
             past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs,
             _defer_cache_commit=True,
         )
-        keep = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(out.last_hidden_state[:, keep, :])
+        logits = self.lm_head(slice_logits_to_keep(out.last_hidden_state, logits_to_keep))
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
@@ -1088,8 +1076,7 @@ class AgnesForConditionalGeneration(AgnesPreTrainedModel, GenerationMixin):
             mm_token_type_ids=mm_token_type_ids, **kwargs,
             _defer_cache_commit=True,
         )
-        keep = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(out[0][:, keep, :])
+        logits = self.lm_head(slice_logits_to_keep(out.last_hidden_state, logits_to_keep))
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.text_config.vocab_size)

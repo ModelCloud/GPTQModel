@@ -7,7 +7,6 @@
 # The upstream implementation also includes Apache-2.0 licensed Transformers
 # code; see the repository root LICENSE (Apache-2.0) and NOTICE.
 
-import math
 from contextlib import contextmanager
 from typing import cast
 
@@ -19,7 +18,13 @@ from transformers import initialization as init
 from transformers.activations import ACT2FN
 from transformers.cache_utils import DynamicCache
 from transformers.generation.utils import GenerationMixin
+from transformers.masking_utils import create_causal_mask
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, slice_logits_to_keep
+from transformers.utils import can_return_tuple
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
 
 from .configuration_mobilellm import MobileLLMConfig
 
@@ -111,11 +116,25 @@ def _row_parallel(x, module, shards):
                zip(x.chunk(shards, dim=-1), module.weight.chunk(shards, dim=1)))
 
 
+def eager_attention_forward(module, query, key, value, attention_mask, scaling, dropout=0.0, **kwargs):
+    key = key.repeat_interleave(module.num_key_value_groups, dim=1)
+    value = value.repeat_interleave(module.num_key_value_groups, dim=1)
+    weights = torch.matmul(query, key.transpose(-2, -1)) * scaling
+    if attention_mask is not None:
+        weights = weights + attention_mask
+    weights = F.softmax(weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    weights = F.dropout(weights, p=dropout, training=module.training)
+    return torch.matmul(weights, value).transpose(1, 2).contiguous(), weights
+
+
 class MobileLLMAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
+        self.is_causal = True
+        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.scaling = config.head_dim ** -0.5
         self.q_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
         kv_width = config.num_key_value_heads * config.head_dim
         self.k_proj = nn.Linear(config.hidden_size, kv_width, bias=config.attention_bias)
@@ -123,11 +142,12 @@ class MobileLLMAttention(nn.Module):
         self.o_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
         self.rotary_emb = MobileLLMRotaryEmbedding(config)
 
-    def forward(self, hidden_states, attention_mask=None, position_ids=None,
-                past_key_value=None, output_attentions=False, cache_idx=None, **kwargs):
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_values=None,
+                cache_idx=None, **kwargs):
         config = self.config
         batch, length, _ = hidden_states.shape
-        split = config.pretraining_tp > 1 and (config._attn_implementation != "sdpa" or output_attentions)
+        # Source Llama slices projections for pretraining_tp everywhere except the SDPA attention class.
+        split = config.pretraining_tp > 1 and config._attn_implementation != "sdpa"
         project = (lambda module: _column_parallel(hidden_states, module, config.pretraining_tp)) if split else (
             lambda module: module(hidden_states))
         q = project(self.q_proj).view(batch, length, config.num_attention_heads, config.head_dim).transpose(1, 2)
@@ -135,24 +155,17 @@ class MobileLLMAttention(nn.Module):
         v = project(self.v_proj).view(batch, length, config.num_key_value_heads, config.head_dim).transpose(1, 2)
         cos, sin = self.rotary_emb(v, position_ids)
         q, k = _rotate(q, cos, sin), _rotate(k, cos, sin)
-        if past_key_value is not None:
-            k, v = past_key_value.update(k, v, self.layer_idx if cache_idx is None else cache_idx)
-        groups = config.num_attention_heads // config.num_key_value_heads
-        k, v = k.repeat_interleave(groups, dim=1), v.repeat_interleave(groups, dim=1)
-        dropout = config.attention_dropout if self.training else 0.0
-        if config._attn_implementation == "sdpa" and not output_attentions:
-            output = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask, dropout_p=dropout)
-            weights = None
-        else:
-            weights = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(config.head_dim)
-            if attention_mask is not None:
-                weights = weights + attention_mask
-            weights = F.softmax(weights, dim=-1, dtype=torch.float32).to(q.dtype)
-            weights = F.dropout(weights, p=dropout, training=self.training)
-            output = torch.matmul(weights, v)
-        output = output.transpose(1, 2).contiguous().reshape(batch, length, config.hidden_size)
+        if past_key_values is not None:
+            k, v = past_key_values.update(k, v, self.layer_idx if cache_idx is None else cache_idx)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(config._attn_implementation,
+                                                                    eager_attention_forward)
+        output, weights = attention_interface(
+            self, q, k, v, attention_mask,
+            dropout=config.attention_dropout if self.training else 0.0, scaling=self.scaling, **kwargs,
+        )
+        output = output.reshape(batch, length, config.hidden_size)
         output = _row_parallel(output, self.o_proj, config.pretraining_tp) if split else self.o_proj(output)
-        return output, weights if output_attentions else None
+        return output, weights
 
 
 class MobileLLMMLP(nn.Module):
@@ -173,7 +186,7 @@ class MobileLLMMLP(nn.Module):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
-class MobileLLMDecoderLayer(nn.Module):
+class MobileLLMDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.self_attn = MobileLLMAttention(config, layer_idx)
@@ -182,16 +195,20 @@ class MobileLLMDecoderLayer(nn.Module):
         self.post_attention_layernorm = MobileLLMRMSNorm(config.hidden_size, config.rms_norm_eps)
 
     def forward(self, hidden_states, **kwargs):
-        attention, weights = self.self_attn(self.input_layernorm(hidden_states), **kwargs)
+        attention, _ = self.self_attn(self.input_layernorm(hidden_states), **kwargs)
         hidden_states = hidden_states + attention
-        return hidden_states + self.mlp(self.post_attention_layernorm(hidden_states)), weights
+        return hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
 
 
 class MobileLLMPreTrainedModel(PreTrainedModel):
     config_class = MobileLLMConfig
     base_model_prefix = "model"
+    supports_gradient_checkpointing = True
     _no_split_modules = ["MobileLLMDecoderLayer"]
+    _skip_keys_device_placement = ["past_key_values"]
     _supports_sdpa = True
+    _supports_attention_backend = True
+    _can_record_outputs = {"hidden_states": MobileLLMDecoderLayer, "attentions": MobileLLMAttention}
     _keep_in_fp32_modules_strict = ["inv_freq"]
 
     @torch.no_grad()
@@ -219,20 +236,18 @@ class MobileLLMModel(MobileLLMPreTrainedModel):
     def set_input_embeddings(self, value: nn.Module):
         self.embed_tokens = value
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-                inputs_embeds=None, use_cache=None, output_attentions=None, output_hidden_states=None,
-                return_dict=True, **kwargs):
+                inputs_embeds=None, use_cache=None, **kwargs):
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Specify exactly one of input_ids and inputs_embeds")
-        use_cache = self.config.use_cache if use_cache is None else use_cache
-        output_attentions = self.config.output_attentions if output_attentions is None else output_attentions
-        output_hidden_states = self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
         if past_key_values is not None and not isinstance(past_key_values, DynamicCache):
             raise ValueError("MobileLLM supports DynamicCache only")
-        uses = self.config.num_hidden_layers * (2 if self.config.layer_sharing else 1)
+        repetitions = 2 if self.config.layer_sharing else 1
         if (past_key_values is not None and past_key_values.layers
                 and getattr(past_key_values, "layer_class_to_replicate", None) is None
-                and len(past_key_values.layers) != uses):
+                and len(past_key_values.layers) != self.config.num_hidden_layers * repetitions):
             raise ValueError("MobileLLM cache must have one slot for each decoder use")
         hidden_states = self.embed_tokens(input_ids) if inputs_embeds is None else inputs_embeds
         length = hidden_states.shape[1]
@@ -241,38 +256,21 @@ class MobileLLMModel(MobileLLMPreTrainedModel):
                                           attention_mask.shape != (hidden_states.shape[0], past_length + length)):
             raise ValueError("MobileLLM attention_mask must be [batch, past + current tokens]")
         if use_cache and past_key_values is None:
+            # Layer sharing needs one cache slot per decoder use, so the cache grows lazily.
             past_key_values = DynamicCache()
-        positions = torch.arange(past_length, past_length + length, device=hidden_states.device)
         if position_ids is None:
-            position_ids = positions.unsqueeze(0)
-        keep = torch.arange(past_length + length, device=hidden_states.device)[None, :] <= positions[:, None]
-        keep = keep[None, None]
-        if attention_mask is not None:
-            keep = keep & attention_mask[:, None, None, :].bool()
-        mask = torch.zeros(keep.shape, device=hidden_states.device, dtype=hidden_states.dtype)
-        mask.masked_fill_(~keep, torch.finfo(hidden_states.dtype).min)
-        all_hidden, all_attentions = (), ()
-        repetitions = 2 if self.config.layer_sharing else 1
+            position_ids = torch.arange(past_length, past_length + length, device=hidden_states.device).unsqueeze(0)
+        mask = create_causal_mask(config=self.config, inputs_embeds=hidden_states, attention_mask=attention_mask,
+                                  past_key_values=past_key_values, position_ids=position_ids)
         with _restore_forward_state_on_error(past_key_values, self.layers):
             for index, layer in enumerate(self.layers):
                 for repeat in range(repetitions):
-                    if output_hidden_states:
-                        all_hidden += (hidden_states,)
-                    hidden_states, weights = layer(
+                    hidden_states = layer(
                         hidden_states, attention_mask=mask, position_ids=position_ids,
-                        past_key_value=past_key_values, output_attentions=output_attentions,
-                        cache_idx=index * repetitions + repeat,
+                        past_key_values=past_key_values, cache_idx=index * repetitions + repeat, **kwargs,
                     )
-                    if output_attentions:
-                        all_attentions += (weights,)
-            hidden_states = self.norm(hidden_states)
-            if output_hidden_states:
-                all_hidden += (hidden_states,)
-            result = BaseModelOutputWithPast(last_hidden_state=hidden_states,
-                                            past_key_values=past_key_values if use_cache else None,
-                                            hidden_states=all_hidden if output_hidden_states else None,
-                                            attentions=all_attentions if output_attentions else None)
-            return result if return_dict else result.to_tuple()
+            return BaseModelOutputWithPast(last_hidden_state=self.norm(hidden_states),
+                                           past_key_values=past_key_values if use_cache else None)
 
 
 class MobileLLMForCausalLM(MobileLLMPreTrainedModel, GenerationMixin):
@@ -307,15 +305,14 @@ class MobileLLMForCausalLM(MobileLLMPreTrainedModel, GenerationMixin):
         else:
             self.lm_head = new_embeddings
 
+    @can_return_tuple
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-                inputs_embeds=None, labels=None, use_cache=None, logits_to_keep=0,
-                output_attentions=None, output_hidden_states=None, return_dict=True, **kwargs):
+                inputs_embeds=None, labels=None, use_cache=None, logits_to_keep=0, **kwargs):
         with _restore_forward_state_on_error(past_key_values, self.model.layers):
             output = self.model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
                                 past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache,
-                                output_attentions=output_attentions, output_hidden_states=output_hidden_states)
-            states = output.last_hidden_state
-            states = states[:, -logits_to_keep:, :] if isinstance(logits_to_keep, int) else states[:, logits_to_keep, :]
+                                **kwargs)
+            states = slice_logits_to_keep(output.last_hidden_state, logits_to_keep)
             if self.config.pretraining_tp > 1:
                 logits = _column_parallel(states, self.get_output_embeddings(), self.config.pretraining_tp).float()
             else:
@@ -324,6 +321,5 @@ class MobileLLMForCausalLM(MobileLLMPreTrainedModel, GenerationMixin):
             loss = None
             if labels is not None:
                 loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
-            result = CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=output.past_key_values,
-                                           hidden_states=output.hidden_states, attentions=output.attentions)
-            return result if return_dict else result.to_tuple()
+            return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=output.past_key_values,
+                                          hidden_states=output.hidden_states, attentions=output.attentions)
