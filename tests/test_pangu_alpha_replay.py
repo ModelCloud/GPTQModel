@@ -12,17 +12,12 @@ wrong input (arg0 relative difference 0.953; GPTQ worse than RTN).
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
 import torch
 import torch.nn as nn
 
 from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.pangu_alpha import PanguAlphaQModel
 
-
-PANGU_PATH = Path("/monster/data/model/pangu_alpha_2_6B")
 
 
 class _PanguTransformer(nn.Module):
@@ -113,39 +108,22 @@ def test_last_layer_replay_rebuilds_missing_position_ids():
     assert additional_inputs["custom_query"].dtype == model.transformer.wqe.weight.dtype
 
 
-@pytest.mark.skipif(
-    not PANGU_PATH.is_dir(),
-    reason=f"local PanGu-alpha fixture is unavailable: {PANGU_PATH}",
-)
 def test_pangu_last_layer_gptq_beats_rtn(tmp_path):
     """Acceptance criterion: GPTQ must be closer than RTN on the top-query layer."""
 
     from gptqmodel import GPTQModel
+    from gptqmodel.models.ports.pangu_alpha import GPTPanguForCausalLM
+    from gptqmodel.models.ports.pangu_alpha.tokenization_pangu import GPTPanguTokenizer
     from gptqmodel.quantization.config import GPTQConfig, RTNConfig
-    from tests.tiny_remote_models import build_tiny_remote_model
+    from tests.test_pangu_alpha_local_port import real_assets, tiny_config
 
-    path = build_tiny_remote_model(
-        PANGU_PATH,
-        tmp_path / "tiny",
-        {
-            "vocab_size": 128,
-            "hidden_size": 64,
-            "intermediate_size": 256,
-            "num_layers": 4,
-            "num_heads": 4,
-            "max_position_embeddings": 64,
-            "layer_norm_epsilon": 1e-5,
-            "activation_function": "gelu",
-            "bos_token_id": 1,
-            "eos_token_id": 2,
-            "pad_token_id": 0,
-        },
-    )
-    from transformers import AutoModelForCausalLM
-
-    hf = AutoModelForCausalLM.from_pretrained(
-        str(path), trust_remote_code=True
+    path = real_assets(tmp_path / "tiny")
+    torch.manual_seed(0)
+    hf = GPTPanguForCausalLM(
+        tiny_config(vocab_size=128, hidden_size=64, intermediate_size=256, num_layers=4, max_position_embeddings=64)
     ).eval()
+    hf.save_pretrained(path)
+    GPTPanguTokenizer(path / "vocab.model", pad_token="<eot>").save_pretrained(path)
     generator = torch.Generator().manual_seed(0)
 
     def sample():
@@ -165,20 +143,13 @@ def test_pangu_last_layer_gptq_beats_rtn(tmp_path):
         ("RTN", RTNConfig(bits=4, group_size=32, device="cpu")),
         ("GPTQ", GPTQConfig(bits=4, group_size=32, device="cpu")),
     ):
-        model = GPTQModel.load(
-            str(path),
-            quantize_config=config,
-            trust_remote_code=True,
-            dtype=torch.float32,
-        )
+        model = GPTQModel.load(str(path), quantize_config=config, dtype=torch.float32)
         model.quantize(CalibrationConfig(dataset=calibration, batch_size=1))
         save_path = tmp_path / label
         model.save(str(save_path))
         del model
 
-        reloaded = GPTQModel.load(
-            str(save_path), device="cpu", trust_remote_code=True, dtype=torch.float32
-        )
+        reloaded = GPTQModel.load(str(save_path), device="cpu", dtype=torch.float32)
         with torch.no_grad():
             quantized = reloaded.model.transformer.h[-1].attn.q_proj(custom_query)
         errors[label] = float((quantized - reference).norm() / reference.norm())
