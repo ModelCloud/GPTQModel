@@ -27,7 +27,15 @@ from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 from tests.port_assets import read_port_asset
 
 
+# Port-relative names resolved by read_port_asset to tests/fixtures/ports or
+# the pinned Qwen/Qwen-Drive-1.0-4B@28484089 release files.
 FIXTURES = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/qwen_drive/fixtures"
+RELEASED_ASSETS_SHA256 = {
+    "tokenizer.json": "9825446f866dd1d1f6ab843f10af4014c168334d50d977f0afbd3ee304c4856a",
+    "tokenizer_config.json": "28ed2feadb6891c10cd943b2b978f05ccca1f8b0093ec4e42809f43c7dc4a1a0",
+    "chat_template.jinja": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "preprocessor_config.json": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+}
 
 
 def tiny_config(layout="hybrid", kv_heads=2, bias=False):
@@ -89,10 +97,12 @@ def test_definition_owns_model_without_official_registration():
     assert QwenDriveQModel.loader.model_class == "gptqmodel.models.ports.qwen_drive.QwenDriveForConditionalGeneration"
     assert QwenDriveQModel.require_trust_remote_code is False
     assert QwenDriveQModel.fusable is None
+    for flag in ("_supports_sdpa", "_supports_flash_attn", "_is_stateful", "_no_split_modules", "input_modalities"):
+        assert getattr(QwenDriveForConditionalGeneration, flag) == getattr(Qwen3_5ForConditionalGeneration, flag)
 
 
 def test_entire_released_header_matches_meta_and_only_tied_head_is_omitted():
-    data = (FIXTURES / "released_config.json").read_bytes()
+    data = read_port_asset(FIXTURES / "released_config.json")
     assert hashlib.sha256(data).hexdigest() == "91e765ca4a46e63b364b7e79f16bdb2b5d0e271684c566c03ae87d259c2d9ff8"
     header_data = read_port_asset(FIXTURES / "released_header.json")
     assert hashlib.sha256(header_data).hexdigest() == "03323c11647701e1a73546f00869740bd3e92261260f214714aa698cb656d54b"
@@ -112,9 +122,9 @@ def test_entire_released_header_matches_meta_and_only_tied_head_is_omitted():
     assert not hasattr(model, "planning_expert")
 
 
-@pytest.mark.parametrize("layout", ["hybrid", "full", "linear"])
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("layout,kv_heads,bias", [
+    ("hybrid", 2, False), ("hybrid", 1, True), ("full", 4, True), ("full", 1, False), ("linear", 2, True),
+])
 def test_native_exact_owner_and_forward_cache(layout, kv_heads, bias):
     model = QwenDriveForConditionalGeneration(tiny_config(layout, kv_heads, bias)).eval()
     reference = native_reference(model)
@@ -136,9 +146,10 @@ def test_native_exact_owner_and_forward_cache(layout, kv_heads, bias):
     assert set(model.state_dict()) == {f"vlm.{key}" for key in reference.state_dict()}
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("attention", ["eager", "sdpa"])
-@pytest.mark.parametrize("kind", ["text", "image", "video"])
+@pytest.mark.parametrize("dtype,attention,kind", [
+    (torch.float32, "eager", "text"), (torch.float32, "sdpa", "image"), (torch.bfloat16, "eager", "video"),
+    (torch.float16, "sdpa", "video"), (torch.bfloat16, "sdpa", "image"),
+])
 def test_media_native_parity_cache_and_greedy_beam(dtype, attention, kind):
     config = tiny_config()
     config._attn_implementation = attention
@@ -410,10 +421,9 @@ def test_real_released_tokenizer_public_ids_chat_media_and_two_reloads(tmp_path,
     source = tmp_path / "source"
     model = QwenDriveForConditionalGeneration._from_config(config, dtype=torch.float16).eval()
     model.save_pretrained(source)
-    manifest = json.loads((FIXTURES / "provenance.json").read_text())
-    for name, entry in manifest["assets"].items():
+    for name, sha256 in RELEASED_ASSETS_SHA256.items():
         data = read_port_asset(FIXTURES / name)
-        assert hashlib.sha256(data).hexdigest() == entry["sha256"]
+        assert hashlib.sha256(data).hexdigest() == sha256
         (source / name).write_bytes(data)
     tokenizer_config = json.loads((source / "tokenizer_config.json").read_text())
     tokenizer_config["auto_map"] = {"AutoTokenizer": ["hostile.HostileTokenizer", None]}

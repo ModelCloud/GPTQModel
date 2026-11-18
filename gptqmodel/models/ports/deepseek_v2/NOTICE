@@ -8,8 +8,8 @@ Licensed under the Apache License, Version 2.0. A copy is available in the
 repository LICENSE and at https://www.apache.org/licenses/LICENSE-2.0 .
 Provided on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-This package adapts constructors and routing semantics from the sources pinned
-in README.md. Native Transformers supplies MLA, RoPE, cache, expert execution,
+This package adapts constructors and routing semantics from Transformers 5.23.0
+(52b080b6) and deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct (e434a23f). Native Transformers supplies MLA, RoPE, cache, expert execution,
 generation and checkpoint conversion. The original DeepSeek source acknowledges
 EleutherAI's GPT-NeoX library and Hugging Face's GPT-NeoX and OPT implementations,
 modified for the architectural differences of models trained by the Meta AI team.

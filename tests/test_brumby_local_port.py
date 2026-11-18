@@ -400,6 +400,34 @@ def test_model_is_causal_and_exponential_variant_keeps_sliding_window(use_exp):
     torch.testing.assert_close(model(ids[:, 4:], past_key_values=cache).logits, baseline[:, 4:], rtol=2e-5, atol=2e-5)
 
 
+@torch.no_grad()
+def test_native_modules_and_init_preserve_partially_loaded_tensors():
+    from transformers.models.qwen3 import modeling_qwen3
+
+    model = BrumbyForCausalLM(tiny_config(attention_bias=True, tie_word_embeddings=True))
+    layer = model.model.layers[0]
+    assert type(layer.mlp) is modeling_qwen3.Qwen3MLP
+    assert type(layer.self_attn.q_norm) is modeling_qwen3.Qwen3RMSNorm
+    assert type(model.model.rotary_emb) is modeling_qwen3.Qwen3RotaryEmbedding
+    assert model.lm_head.weight is model.model.embed_tokens.weight
+    # Transformers 5 initializes only tensors that were not loaded: a module
+    # with a loaded weight and a missing bias must keep the loaded weight.
+    proj = layer.self_attn.q_proj
+    proj.weight.fill_(0.5)
+    proj.bias.fill_(7.0)
+    proj.weight._is_hf_initialized = True
+    model._init_weights(proj)
+    assert torch.all(proj.weight == 0.5)
+    assert torch.all(proj.bias == 0)
+    rotary = model.model.rotary_emb
+    expected = rotary.inv_freq.clone()
+    rotary.inv_freq.zero_()
+    rotary.original_inv_freq.zero_()
+    model._init_weights(rotary)
+    torch.testing.assert_close(rotary.inv_freq, expected, rtol=0, atol=0)
+    torch.testing.assert_close(rotary.original_inv_freq, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     "kwargs, message",
     [

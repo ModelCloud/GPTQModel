@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 HuggingFace Inc. team
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Preserve the legacy DeepSeek V2 architecture switches (see README.md)."""
+"""Preserve the legacy DeepSeek V2 architecture switches (DeepSeek-Coder-V2-Lite-Instruct@e434a23f)."""
 
 import math
 

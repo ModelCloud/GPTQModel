@@ -6,20 +6,23 @@
 # portable retention arithmetic, transactional recurrent cache, and padding.
 """Brumby with the publisher's projections and degree-2 power retention.
 
-This is a portable Torch implementation, not a claim to qualify retention's
-optional Triton/CUDA kernels. See PROVENANCE.md for sources and limitations.
+Norms, MLP and RoPE are the native Qwen3 modules Brumby inherits (same tensor
+names). Retention is a portable Torch implementation; the optional
+Triton/CUDA kernels are not qualified.
 """
 
 import math
 
 import torch
 from torch import nn
-from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, CacheLayerMixin
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import PreTrainedModel
+from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP as BrumbyMLP
+from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm as BrumbyRMSNorm
+from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding as BrumbyRotaryEmbedding
+from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb
 
 from .configuration_brumby import BrumbyConfig
 
@@ -87,44 +90,8 @@ class PowerAttentionDynamicCache(Cache):
         raise ValueError("Brumby cache offloading is not supported")
 
 
-class BrumbyRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        dtype = hidden_states.dtype
-        hidden_states = hidden_states.float()
-        hidden_states = hidden_states * torch.rsqrt(
-            hidden_states.square().mean(-1, keepdim=True) + self.variance_epsilon
-        )
-        return self.weight * hidden_states.to(dtype)
-
-
-class BrumbyMLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
-
-    def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-
-
-def rotate_half(x):
-    x1, x2 = x.chunk(2, dim=-1)
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(q, k, cos, sin):
-    cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
-    return q * cos + rotate_half(q) * sin, k * cos + rotate_half(k) * sin
-
-
 def repeat_kv(x, repeats):
+    # Unlike Transformers' 4D helper, retention also expands 3D gate/normalizer tensors.
     return x.repeat_interleave(repeats, dim=1)
 
 
@@ -295,38 +262,6 @@ class BrumbyDecoderLayer(nn.Module):
         return hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
 
 
-class BrumbyRotaryEmbedding(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.rope_type = config.rope_parameters["rope_type"]
-        self.max_seq_len_cached = self.original_max_seq_len = config.max_position_embeddings
-        init_fn = (
-            self.compute_default_rope_parameters
-            if self.rope_type == "default"
-            else ROPE_INIT_FUNCTIONS[self.rope_type]
-        )
-        self.rope_init_fn = init_fn
-        inv_freq, self.attention_scaling = init_fn(config)
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.register_buffer("original_inv_freq", inv_freq.clone(), persistent=False)
-
-    @staticmethod
-    def compute_default_rope_parameters(config, device=None, **kwargs):
-        dim = config.head_dim
-        return 1.0 / config.rope_parameters["rope_theta"] ** (
-            torch.arange(0, dim, 2, device=device).float() / dim
-        ), 1.0
-
-    @torch.no_grad()
-    @dynamic_rope_update
-    def forward(self, x, position_ids):
-        with torch.autocast(device_type=x.device.type if x.device.type != "mps" else "cpu", enabled=False):
-            freqs = position_ids[..., None].float() * self.inv_freq.to(device=x.device, dtype=torch.float32)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            return (emb.cos() * self.attention_scaling).to(x.dtype), (emb.sin() * self.attention_scaling).to(x.dtype)
-
-
 class BrumbyPreTrainedModel(PreTrainedModel):
     config_class = BrumbyConfig
     base_model_prefix = "model"
@@ -334,29 +269,6 @@ class BrumbyPreTrainedModel(PreTrainedModel):
     _skip_keys_device_placement = ["past_key_values"]
     _supports_attention_backend = False
     _can_compile_fullgraph = False
-
-    @torch.no_grad()
-    def _init_weights(self, module):
-        if isinstance(module, (nn.Linear, nn.Embedding)):
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-            if getattr(module, "bias", None) is not None:
-                module.bias.data.zero_()
-            if isinstance(module, nn.Embedding) and module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
-        elif isinstance(module, BrumbyRMSNorm):
-            module.weight.data.fill_(1.0)
-        elif isinstance(module, BrumbyRotaryEmbedding):
-            # from_pretrained materializes nonpersistent meta buffers with
-            # empty storage. Reconstruct frequencies rather than serializing
-            # a runtime-only tensor or relying on checkpoint Python to do it.
-            init_fn = (
-                module.compute_default_rope_parameters
-                if module.rope_type == "default"
-                else ROPE_INIT_FUNCTIONS[module.rope_type]
-            )
-            inv_freq, module.attention_scaling = init_fn(module.config, device=module.inv_freq.device)
-            module.inv_freq.copy_(inv_freq)
-            module.original_inv_freq.copy_(inv_freq)
 
 
 class BrumbyModel(BrumbyPreTrainedModel):

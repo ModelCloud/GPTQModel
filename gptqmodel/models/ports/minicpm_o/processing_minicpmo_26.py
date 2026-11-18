@@ -283,9 +283,9 @@ class MiniCPMOProcessor26(MiniCPMOProcessor):
             return MiniCPMOBatchFeature(data={**model_inputs})
 
         image_tag = "(<image>./</image>)"
-        image_pattern = "\(<image>./</image>\)"
+        image_pattern = r"\(<image>./</image>\)"
         audio_tag = "(<audio>./</audio>)"
-        audio_pattern = "\(<audio>./</audio>\)"
+        audio_pattern = r"\(<audio>./</audio>\)"
         split_pattern = f"({image_pattern}|{audio_pattern})"
 
         if isinstance(texts, str):

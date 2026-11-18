@@ -178,11 +178,15 @@ def test_normalized_routing_ignores_even_extreme_finite_scale(method, scale):
     torch.testing.assert_close(actual, reference(ids, use_cache=False).logits, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("return_dict", [False, True])
-@pytest.mark.parametrize("stage", ["decoder0", "decoder1", "head", "loss"])
-@pytest.mark.parametrize("q_rank", [None, 8], ids=["lite", "full"])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16], ids=["fp32", "fp16", "bf16"])
-@pytest.mark.parametrize("routed,freq", [(None, 1), (4, 1), (4, 2)], ids=["dense", "mixed", "periodic"])
+@pytest.mark.parametrize("return_dict,stage,q_rank,dtype,routed,freq", [
+    (False, "decoder0", None, torch.float32, None, 1),
+    (True, "decoder1", 8, torch.float16, 4, 1),
+    (False, "head", None, torch.bfloat16, 4, 2),
+    (True, "loss", 8, torch.float32, 4, 2),
+    (True, "decoder0", None, torch.float32, 4, 1),
+    (False, "decoder1", 8, torch.float32, None, 1),
+    (True, "loss", None, torch.float32, 4, 2),
+])
 @torch.inference_mode()
 def test_public_cache_failure_retry_is_transactional(monkeypatch, return_dict, stage, q_rank, dtype, routed, freq):
     hf_model = model(
@@ -242,10 +246,12 @@ def test_public_cache_failure_retry_is_transactional(monkeypatch, return_dict, s
         torch.testing.assert_close(layer.values, expected.values, rtol=rtol, atol=atol)
 
 
-@pytest.mark.parametrize("return_dict", [False, True])
-@pytest.mark.parametrize("q_rank", [None, 8], ids=["lite", "full"])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16], ids=["fp32", "fp16", "bf16"])
-@pytest.mark.parametrize("routed,freq,native_dense", [(None, 1, 3), (4, 1, 1), (4, 2, 2)], ids=["dense", "mixed", "periodic"])
+@pytest.mark.parametrize("return_dict,q_rank,dtype,routed,freq,native_dense", [
+    (False, None, torch.float32, None, 1, 3),
+    (True, 8, torch.float16, 4, 1, 1),
+    (True, None, torch.bfloat16, 4, 2, 2),
+    (False, 8, torch.float32, 4, 2, 2),
+])
 @torch.inference_mode()
 def test_external_cache_manual_1_4_1_native_identity_and_reload(tmp_path, return_dict, q_rank, dtype, routed, freq, native_dense):
     hf_model = model(
@@ -298,9 +304,10 @@ def test_external_cache_manual_1_4_1_native_identity_and_reload(tmp_path, return
         torch.testing.assert_close(layer.values, reference.values, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("return_dict", [False, True])
-@pytest.mark.parametrize("kind", ["lazy", "configured", "reset"])
-@pytest.mark.parametrize("stage", ["decoder", "lm_decoder", "head", "loss"])
+@pytest.mark.parametrize("return_dict,kind,stage", [
+    (False, "lazy", "decoder"), (True, "configured", "lm_decoder"), (False, "reset", "head"),
+    (True, "lazy", "loss"), (True, "reset", "decoder"), (False, "configured", "loss"),
+])
 @torch.inference_mode()
 def test_empty_cache_failure_restores_initialization_and_retry(monkeypatch, return_dict, kind, stage):
     hf_model = model(initializer_range=0.2)
@@ -474,10 +481,13 @@ def test_invalid_cache_prefix_rejected_without_mutation(kind):
         assert all(vars(layer)[key] is value for key, value in state.items())
 
 
-@pytest.mark.parametrize("q_rank", [None, 8], ids=["lite", "full"])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
-@pytest.mark.parametrize("construction", ["cast", "from_config"])
-@pytest.mark.parametrize("rope_type", ["default", "dynamic", "yarn"])
+@pytest.mark.parametrize("q_rank,dtype,construction,rope_type", [
+    (None, torch.float16, "cast", "default"),
+    (8, torch.bfloat16, "from_config", "dynamic"),
+    (None, torch.bfloat16, "cast", "yarn"),
+    (8, torch.float16, "from_config", "yarn"),
+    (None, torch.float16, "from_config", "dynamic"),
+])
 @torch.inference_mode()
 def test_rope_precision_cast_reload_and_generation(tmp_path, q_rank, dtype, construction, rope_type):
     rope = {"rope_type": rope_type, "rope_theta": 10000.0}

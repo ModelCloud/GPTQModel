@@ -23,6 +23,7 @@ import os
 import tempfile
 import threading
 import time
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
@@ -58,16 +59,27 @@ from .utils import (
     TTSSamplingParams,
     TTSStreamingGenerator,
     as_dynamic_cache,
+    config_rope_theta,
     drop_tokens_from_cache,
     get_kv_cache_length,
     normalize_content,
-    realign_rotary_suffix,
     streaming_token_decoder,
     torch_clone_recursive,
 )
 
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _temporary_wav(audio, sample_rate=16000):
+    """Write a 16 kHz prompt for the external codec; always removed afterwards."""
+    import soundfile as sf
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "prompt.wav")
+        sf.write(path, audio, sample_rate)
+        yield path
 
 
 class MiniCPMOPreTrainedModel(Qwen3PreTrainedModel):
@@ -1361,29 +1373,22 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
 
         generated_tokens = outputs.new_ids.squeeze(-1)
         reference_audio = audio_prompt
-        prompt_wav_path = None
         if reference_audio is not None:
             logger.debug("use reference audio in data to generate waveform")
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
-                prompt_wav_path = tmp_wav.name
-                sf.write(prompt_wav_path, reference_audio, 16000)
-        wav_bytes = self.tts.audio_tokenizer(
-            generated_tokens.squeeze(0).tolist(),
-            prompt_wav_path,
-        )
+        with _temporary_wav(reference_audio) if reference_audio is not None else nullcontext() as prompt_wav_path:
+            wav_bytes = self.tts.audio_tokenizer(
+                generated_tokens.squeeze(0).tolist(),
+                prompt_wav_path,
+            )
         # convert wav bytes back to tensor for caller compatibility
         waveform, sr = sf.read(io.BytesIO(wav_bytes))
         return torch.tensor(waveform, dtype=torch.float32)
 
     @torch.inference_mode()
     def init_token2wav_cache(self, prompt_speech_16k):
-        import soundfile as sf
-
         if hasattr(self.tts.audio_tokenizer, "set_stream_cache"):
             self.tts.audio_tokenizer.cache = None
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
-                prompt_wav_path = tmp_wav.name
-                sf.write(prompt_wav_path, prompt_speech_16k, 16000)
+            with _temporary_wav(prompt_speech_16k) as prompt_wav_path:
                 flow_cache_base, hift_cache_base = self.tts.audio_tokenizer.set_stream_cache(prompt_wav_path)
 
             self.token2wav_cache = {
@@ -1436,48 +1441,8 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
         cache = cache if cache is not None else self.llm_past_key_values
         return get_kv_cache_length(cache)
 
-    # todo: not-used del?
-    def _rebuild_cache_from_history(self):
-        preserved_ids: List[torch.Tensor] = []
-        for entry in self._omni_chunk_history:
-            ids = entry.get("input_ids")
-            if ids is None or not isinstance(ids, torch.Tensor) or ids.numel() == 0:
-                continue
-            preserved_ids.append(ids.to(self.device))
-        if not preserved_ids:
-            self.llm_past_key_values = None
-            self.streaming_position_offset = 0
-            self._rope_inv_freq_cache.clear()
-            return
-
-        concat_ids = torch.cat(preserved_ids, dim=1)
-        attention_mask = torch.ones((1, concat_ids.shape[1]), dtype=torch.bool, device=self.device)
-        outputs = self.llm(
-            input_ids=concat_ids,
-            attention_mask=attention_mask,
-            use_cache=True,
-            return_dict=True,
-        )
-        self.llm_past_key_values = outputs.past_key_values
-        self.streaming_position_offset = 0
-        self._rope_inv_freq_cache.clear()
-
     def _get_rope_theta(self) -> float:
-        return float(getattr(self.llm.config, "rope_theta", 10000.0))
-
-    def _realign_rotary_suffix(
-        self,
-        suffix_keys: torch.Tensor,
-        old_positions: torch.Tensor,
-        new_positions: torch.Tensor,
-    ) -> torch.Tensor:
-        return realign_rotary_suffix(
-            suffix_keys,
-            old_positions,
-            new_positions,
-            rope_theta=self._get_rope_theta(),
-            inv_freq_cache=self._rope_inv_freq_cache,
-        )
+        return config_rope_theta(self.llm.config)
 
     def _encode_text(self, tokenizer, text) -> Optional[torch.Tensor]:
         if tokenizer is None or not text:

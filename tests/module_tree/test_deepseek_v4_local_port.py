@@ -34,29 +34,24 @@ COMPRESSOR_KEYS = {"position_bias", "kv_proj.weight", "gate_proj.weight", "kv_no
 INDEXER_KEYS = {*COMPRESSOR_KEYS, "q_b_proj.weight", "scorer.weights_proj.weight"}
 
 
+# deepseek-ai/DeepSeek-V4-Flash@60d8d707: SHA-256 of the sorted released
+# safetensors index keys (69187) minus FP8 ``.scale`` tensors and the 1575
+# integrated MTP keys that native Transformers does not instantiate.
+FLASH_NATIVE_KEY_COUNT = 34223
+FLASH_NATIVE_KEYS_SHA256 = "dec32ffa8ac3d3e378b37f16474ee281a5bf64e18a2d50be0f1a684621efa543"
+
+
 def test_full_native_meta_inventory_matches_pinned_flash_checkpoint():
     from transformers import DeepseekV4Config, DeepseekV4ForCausalLM
 
-    port = Path(__file__).resolve().parents[2] / "gptqmodel/models/ports/deepseek_v4"
-    schema = json.loads((port / "checkpoint-schema.json").read_text())
-    assert hashlib.sha256((port / "upstream_config.json").read_bytes()).hexdigest() == schema["config_sha256"]
-    config = DeepseekV4Config(**json.loads((port / "upstream_config.json").read_text()))
-    expected = set(schema["global_keys"])
-    indexed_layer_key_count = 0
-    for index, name in schema["layers"].items():
-        for suffix in schema["layer_schemas"][name]:
-            for expert in range(config.n_routed_experts) if "#" in suffix else (0,):
-                key = f"layers.{index}.{suffix.replace('#', str(expert))}"
-                indexed_layer_key_count += 1
-                if not key.endswith(".scale"):
-                    expected.add(key)
-    assert len(expected) == schema["native_target_key_count"] == 34223
+    fixture = Path(__file__).resolve().parents[1] / "fixtures/ports/deepseek_v4/upstream_config.json"
+    config = DeepseekV4Config(**json.loads(fixture.read_text()))
     with torch.device("meta"):
         model = DeepseekV4ForCausalLM(config)
-    assert set(source_checkpoint(model)) == expected
-    assert schema["index_key_count"] == 69187
-    assert schema["mtp_key_count"] == 1575
-    assert indexed_layer_key_count + len(schema["global_keys"]) + schema["mtp_key_count"] == schema["index_key_count"]
+    keys = sorted(source_checkpoint(model))
+    assert len(keys) == FLASH_NATIVE_KEY_COUNT
+    assert hashlib.sha256("\n".join(keys).encode()).hexdigest() == FLASH_NATIVE_KEYS_SHA256
+    assert {"embed.weight", "head.weight", "hc_head_fn", "layers.0.attn.attn_sink", "layers.42.ffn.experts.255.w2.weight"} <= set(keys)
     del model
 
 

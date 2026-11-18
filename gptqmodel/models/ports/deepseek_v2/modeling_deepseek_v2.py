@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Native Transformers 5 MLA/cache/generation with legacy V2 layout semantics.
 
-Adapted from the pinned Apache-2.0 sources documented in README.md. No
+Adapted from Transformers 5.23 and DeepSeek-Coder-V2-Lite-Instruct@e434a23f. No
 checkpoint Python or global Transformers registration is used.
 """
 

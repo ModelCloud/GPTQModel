@@ -3,7 +3,7 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Modified by ModelCloud.ai, 2026: Transformers 5 config and explicit validation.
-"""Brumby config adapted from the pinned Manifest AI source in PROVENANCE.md."""
+"""Brumby config adapted from the Manifest AI release (manifestai/Brumby-14B-Base@8f162fef)."""
 
 from transformers.configuration_utils import PreTrainedConfig
 

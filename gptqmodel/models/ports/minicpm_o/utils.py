@@ -509,7 +509,7 @@ class TTSStreamingGenerator:
         self.token_window_size = model.token_window_size  # token-level window for sliding_window/reindex (default 300)
 
         # RoPE config (for reindex mode)
-        self.rope_theta = model.model.config.rope_theta
+        self.rope_theta = config_rope_theta(model.model.config)
         self.head_dim = model.model.config.hidden_size // model.model.config.num_attention_heads
 
         # Logits processors
@@ -929,6 +929,12 @@ class DuplexWindowConfig:
 
     # verification mode (for comparison test)
     verify_mode: bool = False  # whether to enable verification log
+
+
+def config_rope_theta(config, default: float = 10000.0) -> float:
+    """RoPE base from a Transformers 5 config (``rope_parameters``) or a legacy attribute."""
+    parameters = getattr(config, "rope_parameters", None) or {}
+    return float(parameters.get("rope_theta", getattr(config, "rope_theta", default)))
 
 
 def as_dynamic_cache(past_key_values):
@@ -1396,7 +1402,7 @@ class StreamDecoder:
 
     def _get_rope_theta(self) -> float:
         """get model rope_theta configuration"""
-        return float(getattr(self.m.config, "rope_theta", 10000.0))
+        return config_rope_theta(self.m.config)
 
     def _drop_tokens_from_cache(self, length: int) -> bool:
         """remove specified number of tokens from cache (protect system prompt)

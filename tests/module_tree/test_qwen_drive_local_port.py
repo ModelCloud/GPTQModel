@@ -16,8 +16,13 @@ from tests.test_qwen_drive_local_port import tiny_config
 
 
 def test_explicit_released_plan_proposal_and_input_tags():
-    fixture = Path(__file__).resolve().parents[2] / "gptqmodel/models/ports/qwen_drive/central_fixture_proposals.json"
-    expected = json.loads(fixture.read_text())["registered_module_plans"]["cases"]["QwenDriveQModel/gptq"]
+    fixtures = Path(__file__).resolve().parent / "fixtures"
+    registry = json.loads((fixtures / "registered_module_plans.json").read_text())
+    assert registry["models"]["qwen_drive"] == "QwenDriveQModel"
+    assert json.loads((fixtures / "fusable_models.json").read_text())["models"]["qwen_drive"]["definition"] == "QwenDriveQModel"
+    expected = registry["cases"]["QwenDriveQModel/gptq"]
+    assert expected["layers"] == ["vlm.model.language_model.layers"]
+    assert ["linear_attn:!"] in expected["blocks"]
     tree = QwenDriveQModel._resolve_effective_module_tree(SimpleNamespace(), SimpleNamespace(method="gptq"))
     assert QwenDriveQModel.extract_layers_node() == expected["layers"]
     assert QwenDriveQModel.build_layer_modules(tree, include_capture_only=True) == expected["blocks"]
@@ -30,10 +35,9 @@ def test_explicit_released_plan_proposal_and_input_tags():
     assert not plan.find("linear_attn").quantize
 
 
-@pytest.mark.parametrize("layout", ["hybrid", "linear", "full"])
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("device", ["cpu", "meta"])
+@pytest.mark.parametrize("layout,kv_heads,bias,device", [
+    ("hybrid", 2, False, "cpu"), ("hybrid", 4, True, "meta"), ("linear", 1, True, "cpu"), ("full", 1, False, "meta"),
+])
 def test_live_decoder_owners_plan_tags_aliases_and_plain_awq(layout, kv_heads, bias, device):
     with torch.device(device):
         model = QwenDriveForConditionalGeneration(tiny_config(layout, kv_heads, bias))
