@@ -14,6 +14,7 @@ import ctypes
 import functools
 import threading
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -453,6 +454,96 @@ def test_q8_pack_boundaries_match_torch_and_ggml(qtype, dtype):
         native = np.zeros_like(packed)  # Q8_K leaves zero-block auxiliary sums unwritten.
         fn(weight.numpy().ctypes.data, native.ctypes.data, weight.numel())
         np.testing.assert_array_equal(packed, native)
+
+
+def _q8_k_parts(packed: np.ndarray):
+    blocks = np.asarray(packed, dtype=np.uint8).reshape(-1, _GGUF_TYPE_INFO["Q8_K"]["type_size"])
+    scale = blocks[:, :4].copy().view(np.float32).reshape(-1)
+    codes = blocks[:, 4:260].copy().view(np.int8).reshape(-1, 256)
+    sums = blocks[:, 260:].copy().view(np.int16).reshape(-1, 16)
+    return scale, codes, sums
+
+
+_Q8_K_OVERFLOW_PEAKS = [
+    pytest.param(np.float32(127.0) / np.finfo(np.float32).max, id="reciprocal-threshold"),
+    pytest.param(
+        np.nextafter(np.float32(127.0) / np.finfo(np.float32).max, np.float32(0)),
+        id="reciprocal-overflows",
+    ),
+    pytest.param(np.float32(1e-36), id="subnormal-control"),
+    pytest.param(np.float32(1e-37), id="positive-1e-37"),
+    pytest.param(np.float32(-1e-37), id="negative-1e-37"),
+    pytest.param(np.float32(1e-42), id="deep-subnormal"),
+    pytest.param(np.float32(0.0), id="zero"),
+    pytest.param(np.nextafter(np.float32(0.0), np.float32(1.0)), id="scale-unrepresentable"),
+]
+
+
+@pytest.mark.parametrize("peak", _Q8_K_OVERFLOW_PEAKS)
+def test_q8_k_overflowing_reciprocal_keeps_representable_scale(peak):
+    """A subnormal Q8_K scale must not become zero through a reciprocal overflow.
+
+    This is the CPU NumPy packer, so the assertions pin IEEE-754 gradual
+    underflow for the stored fp32 scale instead of assuming a device's
+    flush-to-zero mode. The direct quotient ``-peak / 127`` is the independent
+    FP64 oracle, rounded once to fp32.
+    """
+
+    ratios = np.array([1.0, -1.0, 0.5, -0.5, 0.9, -0.9, 0.75, -0.75], dtype=np.float32)
+    block = (np.resize(ratios, 256) * peak).astype(np.float32)
+    block[0] = peak  # Keep the requested peak even when a ratio underflows.
+    weight = block.reshape(1, -1)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        packed = _quantize_gguf_tensor_numpy(weight, "Q8_K")
+
+    overflow_warnings = [
+        str(item.message)
+        for item in caught
+        if issubclass(item.category, RuntimeWarning) and "overflow" in str(item.message)
+    ]
+    assert not overflow_warnings, overflow_warnings
+
+    scale, codes, sums = _q8_k_parts(packed)
+    np.testing.assert_array_equal(sums, codes.reshape(1, 16, 16).sum(axis=2).astype(np.int16))
+    assert np.isfinite(scale).all()
+
+    expected_scale = np.float32(-float(peak) / 127.0)
+    uniform = np.full((1, 256), peak, dtype=np.float32)
+    uniform_scale, uniform_codes, _ = _q8_k_parts(
+        _quantize_gguf_tensor_numpy(uniform, "Q8_K")
+    )
+    assert uniform_scale[0] == expected_scale
+    if expected_scale == 0:
+        np.testing.assert_array_equal(uniform_codes, 0)
+    else:
+        np.testing.assert_allclose(
+            uniform_scale[0] * uniform_codes[0].astype(np.float64),
+            uniform[0],
+            rtol=0.02,
+            atol=0,
+        )
+
+    if peak == 0 or expected_scale == 0:
+        # No nonzero fp32 scale represents this block. Pack the canonical zero
+        # block instead of deriving codes from an Inf reciprocal.
+        assert scale[0] == 0
+        np.testing.assert_array_equal(codes, 0)
+        np.testing.assert_array_equal(scale[0] * codes[0].astype(np.float64), np.zeros(256))
+        return
+
+    assert scale[0] == expected_scale
+    if abs(float(expected_scale)) < np.finfo(np.float32).tiny:
+        assert scale[0] != 0  # Stored as a subnormal, not flushed to zero.
+    assert codes[0, 0] < 0  # The peak and its opposite-signed scale stay negative.
+    assert np.unique(codes).size > 2  # Codes are not all saturated by an Inf reciprocal.
+    np.testing.assert_allclose(
+        scale[0] * codes[0].astype(np.float64),
+        block,
+        rtol=0.02,
+        atol=0,
+    )
 
 
 @pytest.mark.parametrize("alias", ["q8_1", "q8_k"])
