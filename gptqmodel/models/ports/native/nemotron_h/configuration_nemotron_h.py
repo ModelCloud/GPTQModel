@@ -1,4 +1,5 @@
 # Vendored from huggingface/transformers v5.23.0 (Apache-2.0) by GPT-QModel.
+# GPT-QModel: modernized to Transformers 5.23 conventions (no legacy return paths).
 # Do not edit by hand except to keep it on the 5.23 ABI; see docs/transformers5-model-ports.md.
 # Copyright 2024-2025 NVIDIA Corporation and The HuggingFace Inc. team. All rights reserved.
 #
@@ -31,7 +32,7 @@ class NemotronHConfig(PreTrainedConfig):
     layers_block_type (`list`, *optional*):
         Explicit list of layer types for each layer. Each element must be one of: "mlp", "linear_attention", "full_attention", or "moe".
         The number of layers is determined by the length of this list.
-    num_logits_to_keep (`int`, *optional*, defaults to 1):
+    logits_to_keep (`int`, *optional*, defaults to 1):
         Number of prompt logits to calculate during generation. If `None`, all logits will be calculated.
     use_mamba_kernels (`bool`, *optional*, defaults to `True`):
         Deprecated and has no effect. The fast Mamba kernels are used automatically when available.
@@ -102,7 +103,7 @@ class NemotronHConfig(PreTrainedConfig):
     layers_block_type: list[str] | None = None
     tie_word_embeddings: bool = False
     use_cache: bool = True
-    num_logits_to_keep: int = 1
+    logits_to_keep: int = 1
     pad_token_id: int | None = 0
     bos_token_id: int | None = 1
     eos_token_id: int | list[int] | None = 2
@@ -154,6 +155,9 @@ class NemotronHConfig(PreTrainedConfig):
     rescale_prenorm_residual: bool = True
 
     def __post_init__(self, **kwargs):
+        # Released config.json files spell this field the pre-5.23 way; convert it once at parse time.
+        if "num_logits_to_keep" in kwargs:
+            self.logits_to_keep = kwargs.pop("num_logits_to_keep")
         # Backward compatibility; configs expect different names for these fields when init
         # but they have to be renamed when creating/saving the config.
         self.n_groups = kwargs.pop("mamba_n_groups") if "mamba_n_groups" in kwargs else self.n_groups
