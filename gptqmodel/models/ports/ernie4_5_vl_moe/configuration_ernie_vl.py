@@ -4,7 +4,7 @@
 
 from copy import deepcopy
 
-from transformers import Ernie4_5_VLMoeConfig, Ernie4_5_VLMoeTextConfig
+from ..native.ernie4_5_vl_moe.configuration_ernie4_5_vl_moe import Ernie4_5_VLMoeConfig, Ernie4_5_VLMoeTextConfig
 
 
 def _legacy_text_config(values):

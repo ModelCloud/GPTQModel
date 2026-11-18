@@ -43,7 +43,7 @@ PENDING_NATIVE_DEFINITIONS = frozenset({
 
 PENDING_MODEL_IMPORT_PORTS = frozenset({
     "agnes", "bailing_moe", "brumby", "codegen", "dbrx_converted", "deepseek_v2",
-    "deepseek_v3", "deepseek_vl_v2", "dream", "ernie4_5_vl_moe", "exaone4", "instella", "intern_s2_preview",
+    "deepseek_v3", "deepseek_vl_v2", "dream", "exaone4", "instella", "intern_s2_preview",
     "internlm", "interns1", "internvl_chat", "kimi_k25", "kimi_k3", "klear", "lfm3_omni", "lfm3_vl", "llama",
     "llava_qwen2", "locateanything", "mage_vl", "mimo_v2", "minicpmv", "minimax_m2", "moss",
     "nemotron_h", "nemotron_labs_diffusion", "nemotron_omni", "openvla", "ouro", "ovis",
@@ -52,7 +52,7 @@ PENDING_MODEL_IMPORT_PORTS = frozenset({
 })
 
 PENDING_STALE_PATTERN_PORTS = frozenset({
-    "ernie4_5_vl_moe", "kimi_k3", "native/bloom", "native/codegen", "native/decision_transformer", "native/falcon",
+    "kimi_k3", "native/bloom", "native/codegen", "native/decision_transformer", "native/falcon",
     "native/falcon_h1", "native/falcon_mamba", "native/gpt_neo", "native/gptj", "native/llama4", "native/mpt",
     "native/nemotron_h", "native/nemotron_h_omni", "native/timm_wrapper", "native/zamba", "native/zamba2",
 })

@@ -27,7 +27,7 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
     fusable = FusableConfig("ernie4_5_vl_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     loader = LocalModelLoader(
-        config_class="gptqmodel.models.ports.ernie4_5_vl_moe.configuration.ErnieVLConfig",
+        config_class="gptqmodel.models.ports.ernie4_5_vl_moe.configuration_ernie_vl.ErnieVLConfig",
         model_class="gptqmodel.models.ports.ernie4_5_vl_moe.native.Ernie4_5_VLMoeForConditionalGeneration",
         processor_class="gptqmodel.models.ports.ernie4_5_vl_moe.processing.ErnieVLProcessor",
     )

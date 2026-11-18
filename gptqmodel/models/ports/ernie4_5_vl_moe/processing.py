@@ -4,16 +4,16 @@
 
 from pathlib import Path
 
-from transformers import Ernie4_5_VLMoeProcessor
+from ..native.ernie4_5_vl_moe.processing_ernie4_5_vl_moe import Ernie4_5_VLMoeProcessor
 
 
 class ErnieVLProcessor(Ernie4_5_VLMoeProcessor):
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *, config=None, tokenizer=None, **kwargs):
-        from transformers import Ernie4_5_VLMoeImageProcessorPil, Ernie4_5_VLMoeVideoProcessor
-
         from ....utils.hf import load_hf_tokenizer
-        from .configuration import ErnieVLConfig
+        from ..native.ernie4_5_vl_moe.image_processing_pil_ernie4_5_vl_moe import Ernie4_5_VLMoeImageProcessorPil
+        from ..native.ernie4_5_vl_moe.video_processing_ernie4_5_vl_moe import Ernie4_5_VLMoeVideoProcessor
+        from .configuration_ernie_vl import ErnieVLConfig
 
         kwargs.pop("trust_remote_code", None)
         kwargs.pop("code_revision", None)
