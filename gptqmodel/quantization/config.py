@@ -26,7 +26,11 @@ import pcre
 import torch
 from packaging import version
 
-from .._quant_methods import GGUF_EXPORT_QUANT_METHOD, LEGACY_PARO_QUANT_METHOD
+from .._quant_methods import (
+    FP8_EXPORT_QUANT_METHOD,
+    GGUF_EXPORT_QUANT_METHOD,
+    LEGACY_PARO_QUANT_METHOD,
+)
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.backend_config import RuntimeConfig
 from ..utils.hf import resolve_checkpoint_subfolder
@@ -4189,6 +4193,8 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
             return METHOD.EXL3
         if value == GGUF_EXPORT_QUANT_METHOD:
             return METHOD.GGUF
+        if value == FP8_EXPORT_QUANT_METHOD:
+            return METHOD.FP8
         if value == FORMAT.PARO:
             return METHOD.PARO
         try:
@@ -4940,17 +4946,52 @@ def _resolve_export_quant_method(format_value: FORMAT, fallback_method: Optional
     return method
 
 
-def _serialize_export_quant_method(method: METHOD) -> str:
+def _fp8_layout_is_hf_readable(quantize_config: Any) -> bool:
+    """Whether ``transformers``' ``FineGrainedFP8`` can read this FP8 layout.
+
+    ``FineGrainedFP8`` consumes a 2-D ``[out/block_rows, in/block_cols]``
+    ``weight_scale_inv`` grid. GPT-QModel's default ``row`` layout is a 1-D
+    per-output-row vector and ``tensor`` is a scalar; both are GPT-QModel-only.
+    A per-module ``dynamic`` override can mix layouts, so the whole checkpoint
+    is only HF-readable when every declared scale method is ``block``.
+    """
+
+    if getattr(quantize_config, "weight_scale_method", None) != "block":
+        return False
+    if getattr(quantize_config, "weight_block_size", None) is None:
+        return False
+    dynamic = getattr(quantize_config, "dynamic", None)
+    if isinstance(dynamic, Mapping):
+        for overrides in dynamic.values():
+            if not isinstance(overrides, Mapping):
+                continue
+            scale_method = overrides.get("weight_scale_method")
+            if scale_method is not None and str(scale_method).strip().lower() != "block":
+                return False
+    return True
+
+
+def _serialize_export_quant_method(
+    method: METHOD,
+    quantize_config: Any = None,
+) -> str:
     """Return the HF-facing ``quant_method`` name for an export method.
 
     ``METHOD.GGUF`` keeps its internal name but is published under
     ``GGUF_EXPORT_QUANT_METHOD``: transformers reserves ``gguf`` for its own
     ``GgufHfQuantizer``, which expects a ``.gguf`` file and otherwise loads the
     checkpoint as randomly initialized weights.
+
+    ``METHOD.FP8`` is split the same way. transformers registers ``fp8`` for
+    ``FineGrainedFP8``, so only a block-scaled layout it can decode keeps the
+    standard name. GPT-QModel's default row/tensor scales are published under
+    ``FP8_EXPORT_QUANT_METHOD`` and refused by the import-time guard.
     """
 
     if method == METHOD.GGUF:
         return GGUF_EXPORT_QUANT_METHOD
+    if method == METHOD.FP8 and not _fp8_layout_is_hf_readable(quantize_config):
+        return FP8_EXPORT_QUANT_METHOD
     return method.value if isinstance(method, METHOD) else str(method)
 
 
@@ -6386,7 +6427,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "activation": self.activation,
             "auto_dtype_cast": self.auto_dtype_cast.value,
             METHOD_FIELD_CODE: self.method,
-            QUANT_METHOD_FIELD: _serialize_export_quant_method(self.export_quant_method()),
+            QUANT_METHOD_FIELD: _serialize_export_quant_method(
+                self.export_quant_method(),
+                quantize_config=self,
+            ),
             FORMAT_FIELD_CODE: self.format,
             FORMAT_FIELD_CHECKPOINT: self.format,
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
