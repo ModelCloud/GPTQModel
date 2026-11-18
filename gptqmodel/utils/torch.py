@@ -489,21 +489,159 @@ def _call_with_dynamo_suppression(compiled: Callable, fullgraph: bool, args: tup
         config.suppress_errors = previous
 
 
-def model_global_state_lock():
-    """Return the process-wide lock guarding torch's global default dtype.
+class _ModelGlobalStateLock:
+    """Process-wide reader/writer lock for torch's global default dtype.
 
     transformers' ``from_pretrained``/``from_config`` saves, sets and restores
     ``torch.set_default_dtype``; dynamo's ``preserve_global_state`` does the
     same around every trace, and its ``GLOBAL_STATE`` guard re-reads the dtype
-    on every compiled call. The loader serializes model construction with this
-    re-entrant lock, so a compiled call must take it too: otherwise a call that
-    re-traces inside a load's bf16 window restores bf16 after the load restored
-    fp32 (or trips ``assert_loaded_model_state``). Look the lock up through the
-    loader accessor so tests and callers share one object.
-    """
-    from ..models.loader import model_load_lock
+    on every compiled call. A compiled call that re-traces inside a load's bf16
+    window would restore bf16 after the load restored fp32 (or trip
+    ``assert_loaded_model_state``, #5127/#5209), so it may not overlap that
+    window.
 
-    return model_load_lock()
+    Compiled calls only read the process state: they take :meth:`reader` and
+    run concurrently with each other. Model construction changes it: it takes
+    the writer (also via ``with``), which excludes every in-flight compiled
+    call but holds for the construction window only, not for the rest of a
+    load. The lock is re-entrant on both sides for the owning thread: a load
+    may execute compiled code while it owns the writer, and a compiled call may
+    nest into another compiled call.
+    """
+
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._readers = 0
+        self._writer = None
+        self._writer_depth = 0
+        self._waiting_writers = 0
+        self._local = threading.local()
+
+    def __enter__(self):
+        self.acquire_write()
+        return self
+
+    def __exit__(self, *_exc):
+        self.release_write()
+        return False
+
+    def reader(self):
+        """Return a context manager holding shared access for one compiled call."""
+
+        return _ModelGlobalStateReader(self)
+
+    def holds_reader(self) -> bool:
+        """Whether the calling thread currently holds the shared side."""
+
+        return bool(getattr(self._local, "read_depth", 0))
+
+    def _acquire_reader(self) -> bool:
+        """Take the shared side; return False when this thread owns the writer."""
+
+        ident = threading.get_ident()
+        if self._writer == ident:
+            # A load thread running compiled code is already exclusive; taking
+            # a reader here would deadlock against its own writer.
+            return False
+
+        depth = getattr(self._local, "read_depth", 0)
+        with self._condition:
+            if depth == 0:
+                # Writer preference: once a load is waiting, new calls queue
+                # behind it instead of starving it with a stream of readers.
+                while self._writer is not None or self._waiting_writers:
+                    self._condition.wait()
+            self._readers += 1
+        self._local.read_depth = depth + 1
+        return True
+
+    def _release_reader(self) -> None:
+        self._local.read_depth -= 1
+        with self._condition:
+            self._readers -= 1
+            if self._readers == 0:
+                self._condition.notify_all()
+
+    def acquire_write(self):
+        ident = threading.get_ident()
+        with self._condition:
+            if self._writer == ident:
+                self._writer_depth += 1
+                return
+            if getattr(self._local, "read_depth", 0):
+                # Upgrading a reader to a writer can deadlock against another
+                # reader; the compiled path never needs it, so fail loudly
+                # instead of hanging a load.
+                raise RuntimeError(
+                    "model global-state lock cannot upgrade a reader to a writer"
+                )
+            self._waiting_writers += 1
+            try:
+                while self._writer is not None or self._readers:
+                    self._condition.wait()
+            finally:
+                self._waiting_writers -= 1
+            self._writer = ident
+            self._writer_depth = 1
+
+    def release_write(self):
+        with self._condition:
+            self._writer_depth -= 1
+            if self._writer_depth == 0:
+                self._writer = None
+                self._condition.notify_all()
+
+
+class _ModelGlobalStateReader:
+    """One compiled call's shared hold on :class:`_ModelGlobalStateLock`.
+
+    A plain object instead of a generator-based context manager: the compiled
+    proxies enter this on every forward, so the per-call cost matters.
+    """
+
+    __slots__ = ("_lock", "_held")
+
+    def __init__(self, lock: _ModelGlobalStateLock):
+        self._lock = lock
+        self._held = False
+
+    def __enter__(self):
+        self._held = self._lock._acquire_reader()
+        return self
+
+    def __exit__(self, *_exc):
+        if self._held:
+            self._held = False
+            self._lock._release_reader()
+        return False
+
+
+_MODEL_GLOBAL_STATE_ACCESSOR = None
+
+
+def model_global_state_lock():
+    """Return the process-wide reader/writer lock for torch's global dtype.
+
+    Loads and the save-side shell rebuild take the writer around the
+    transformers construction call that saves, sets and restores
+    ``torch.set_default_dtype``. Compiled calls take :meth:`reader`, so they
+    overlap each other and the rest of a load, but never the dtype window.
+    Look the lock up through the loader accessor so tests and callers share
+    one object.
+    """
+    global _MODEL_GLOBAL_STATE_ACCESSOR
+
+    accessor = _MODEL_GLOBAL_STATE_ACCESSOR
+    if accessor is None:
+        # Resolve lazily: the loader imports this module at import time. The
+        # accessor is cached because a compiled call resolves this on every
+        # forward; the accessor itself still returns the loader's current lock
+        # object, so tests and callers that replace it keep working.
+        from ..models.loader import model_global_state_lock as accessor
+
+        _MODEL_GLOBAL_STATE_ACCESSOR = accessor
+
+    return accessor()
 
 
 def _install_callable_compile_fallback(original: Callable, compiled: Callable, fullgraph: bool) -> Callable:
@@ -549,13 +687,14 @@ def _install_callable_compile_fallback(original: Callable, compiled: Callable, f
 
         # Dynamo saves/restores the process-global default dtype around every
         # trace and its GLOBAL_STATE guard re-reads it on every call. Any call
-        # can re-trace when a guard changes -- not just the first -- so every
-        # call is serialized with model construction; otherwise a load's bf16
-        # window is captured by a re-trace and restored after the load restored
-        # fp32, or a guard failure re-traces while the load resets dynamo
-        # (#5127, #5209). The lock is re-entrant, so nested compiled calls are
-        # cheap and cannot deadlock.
-        with model_global_state_lock():
+        # can re-trace when a guard changes -- not just the first -- so a call
+        # may not overlap a load's dtype window; otherwise the window is
+        # captured by a re-trace and restored after the load restored fp32
+        # (#5127, #5209). The reader side is shared: compiled calls run
+        # concurrently with each other and with the rest of a load, and only
+        # wait while construction owns the writer. Nested calls from this
+        # thread are re-entrant.
+        with model_global_state_lock().reader():
             if state["fallback"]:
                 return original(*args, **kwargs)
             return run_compiled()
@@ -616,10 +755,10 @@ def _install_module_compile_fallback(module: torch.nn.Module, compiled, fullgrap
                 return module(*args, **kwargs)
 
         # Every forward can re-trace and mutate the process-global default
-        # dtype (see the callable proxy above); serialize it with model
-        # construction. The loader lock is re-entrant, so a module forward that
-        # reaches this proxy again from the same thread stays cheap.
-        with model_global_state_lock():
+        # dtype (see the callable proxy above), so it may not overlap a load's
+        # dtype window. The reader side is shared, so forwards from different
+        # threads run concurrently and only wait for construction.
+        with model_global_state_lock().reader():
             if state["fallback"]:
                 return module(*args, **kwargs)
             return run_compiled()

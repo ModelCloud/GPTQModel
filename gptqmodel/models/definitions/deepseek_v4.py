@@ -395,12 +395,17 @@ class DeepSeekV4MTPAuxiliary:
         """
 
         from ...utils.structure import LazyTurtle
+        from ...utils.torch import model_global_state_lock
 
         if not isinstance(model_local_path, str) or not model_local_path:
             raise ValueError(
                 "DeepSeek V4 MTP auxiliary loading requires a local checkpoint snapshot"
             )
-        shell = DeepSeekV4MTPAuxiliaryShell(config, device=device)
+        # The shell wraps construction in ``local_torch_dtype``, a
+        # process-global default-dtype window; exclude compiled forwards from
+        # it (#5209, #5268).
+        with model_global_state_lock():
+            shell = DeepSeekV4MTPAuxiliaryShell(config, device=device)
         turtle = LazyTurtle.maybe_create(
             model_local_path=model_local_path,
             config=shell.config,

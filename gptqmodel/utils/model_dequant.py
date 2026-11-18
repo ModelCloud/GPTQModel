@@ -371,7 +371,7 @@ def _discover_compressed_tensors_module_schemes(
 
     # ``from_config`` mutates process-global torch state (default dtype,
     # init hooks); serialize it against loads/saves with the shared lock.
-    from ..models.loader import model_load_lock
+    from ..models.loader import model_global_state_lock, model_load_lock
 
     loader_candidates = (
         deps["AutoModelForCausalLM"],
@@ -387,7 +387,7 @@ def _discover_compressed_tensors_module_schemes(
 
         with init_empty_weights(include_buffers=True):
             try:
-                with model_load_lock():
+                with model_load_lock(), model_global_state_lock():
                     model = loader.from_config(
                         config,
                         trust_remote_code=trust_remote_code,

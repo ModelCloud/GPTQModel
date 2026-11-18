@@ -232,17 +232,37 @@ flowchart TD
     I --> D
 ```
 
-Every compiled call takes the same `_MODEL_LOAD_LOCK`
-(`gptqmodel/utils/torch.py:492` and `gptqmodel/nn_modules/qlinear/torch.py:472`).
-Dynamo's `preserve_global_state` saves and restores `torch.get_default_dtype()`
-around every trace, and its `GLOBAL_STATE` guard re-reads it on every call;
-without the shared lock a later call could re-trace through a load's bf16 window
-and restore bf16 after the load restored fp32, or fail the load's invariant
-check (#5127). Holding it for the first call only was not enough (#5209), so the
-lock is taken for every call: the steady-state cost is one uncontended
-re-entrant acquire, and a load's dtype window can never be captured. A load also
-no longer calls `torch._dynamo.reset()`, which used to discard other models'
-compiled frames and crash a concurrent forward. See
+Compiled calls do **not** take `_MODEL_LOAD_LOCK`. They take the shared reader
+side of a separate process-global reader/writer lock
+(`_MODEL_GLOBAL_STATE_LOCK`, `gptqmodel/models/loader.py`); the transformers
+construction sites that save, set and restore `torch.get_default_dtype()` take
+the exclusive writer side for that window only
+(`model_global_state_lock()`, `gptqmodel/utils/torch.py`).
+
+Dynamo's `preserve_global_state` saves and restores the default dtype around
+every trace, and its `GLOBAL_STATE` guard re-reads it on every call. A call that
+re-traces inside a load's bf16 window would restore bf16 after the load restored
+fp32, or fail the load's invariant check (#5127). Holding the load lock for the
+first call only was not enough (#5209); holding it for every call serialized all
+compiled forwards and stalled them for a whole load (#5268). The reader/writer
+split keeps the exclusion where it is needed: many compiled forwards run
+concurrently, and a load's dtype window can never be captured. The writer is
+held for the construction call, not for the load's weight I/O, packing or kernel
+post-init, so a compiled forward waits at most for that window.
+
+```mermaid
+flowchart LR
+    A["thread 1: load"] --> B["_MODEL_LOAD_LOCK<br/>whole load"]
+    B --> C["global-state writer<br/>from_config / from_pretrained"]
+    C --> D["weight I/O, packing,<br/>kernel post-init"]
+    E["thread 2: compiled call"] --> F["global-state reader"]
+    F --> G["compiled forward"]
+    C -. "excludes" .-> F
+    D -. "does not exclude" .-> F
+```
+
+A load also no longer calls `torch._dynamo.reset()`, which used to discard other
+models' compiled frames and crash a concurrent forward. See
 [torch compile fallback](torch-compile-fallback.md).
 
 `quantize()` itself is not serialized: once a model is loaded, overlapping

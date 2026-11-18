@@ -121,7 +121,11 @@ from ..utils.model import (
     simple_dispatch_model,
     validate_checkpoint_qweights,
 )
-from ..utils.torch import defuser_conversion_scope, xla_device_count
+from ..utils.torch import (
+    _ModelGlobalStateLock,
+    defuser_conversion_scope,
+    xla_device_count,
+)
 from ._const import DEVICE, EXPERT_INDEX_PLACEHOLDER, HAS_NPU, normalize_device
 
 
@@ -1551,6 +1555,15 @@ def compare_versions(installed_version, required_version, operator):
 # through this lock; ``quantize()`` on already-loaded models stays concurrent.
 _MODEL_LOAD_LOCK = threading.RLock()
 
+# Compiled calls only read the process-global torch state (dynamo's
+# ``GLOBAL_STATE`` guard reads the default dtype on every call), while model
+# construction changes it. This reader/writer lock lets compiled forwards run
+# concurrently and holds the writer only for the construction window that
+# saves/sets/restores the dtype, not for a whole load's weight I/O or kernel
+# post-init (#5268). It is separate from ``_MODEL_LOAD_LOCK`` so load-vs-load
+# serialization does not serialize inference.
+_MODEL_GLOBAL_STATE_LOCK = _ModelGlobalStateLock()
+
 
 def model_load_lock():
     """Return the process-wide, re-entrant lock guarding model construction.
@@ -1565,11 +1578,34 @@ def model_load_lock():
     return _MODEL_LOAD_LOCK
 
 
+def model_global_state_lock():
+    """Return the process-wide reader/writer lock for torch's default dtype.
+
+    Compiled calls take the shared reader side (``.reader()``); the
+    transformers construction sites that save, set and restore
+    ``torch.set_default_dtype`` take the exclusive writer side (``with``).
+    Look the lock up through this accessor so tests and callers share one
+    object.
+    """
+
+    return _MODEL_GLOBAL_STATE_LOCK
+
+
 def _serialized_model_load(method):
     """Serialize a model-construction entry point across threads."""
 
     @wraps(method)
     def wrapper(*args, **kwargs):
+        if model_global_state_lock().holds_reader():
+            # The calling thread is inside a compiled call, which holds the
+            # shared side of the global-state lock. A load needs the writer;
+            # waiting for it here could deadlock against another load that
+            # holds the model-load lock and is waiting for this reader. Fail
+            # loudly instead of hanging the process.
+            raise RuntimeError(
+                "a model load cannot start inside a compiled call: the compiled "
+                "call holds the shared model-global-state lock"
+            )
         with model_load_lock():
             return method(*args, **kwargs)
 
@@ -2367,12 +2403,17 @@ def ModelLoader(cls):
                 model_local_path=model_local_path,
                 load_quantized_model=False,
             )
-            model = _hf_loader_from_pretrained_with_dynamic_module_retry(
-                cls.loader,
-                model_local_path,
-                config=config,
-                **hf_model_init_kwargs,
-            )
+            # transformers' ``from_pretrained`` wraps model construction in
+            # ``local_torch_dtype`` (a process-global default-dtype window).
+            # Exclude compiled forwards from that window; the writer is held
+            # for this construction call, not for the rest of the load.
+            with model_global_state_lock():
+                model = _hf_loader_from_pretrained_with_dynamic_module_retry(
+                    cls.loader,
+                    model_local_path,
+                    config=config,
+                    **hf_model_init_kwargs,
+                )
             model._model_init_kwargs = hf_model_init_kwargs
             _maybe_print_module_tree(model=model)
             _apply_requested_module_tree(
@@ -2501,13 +2542,14 @@ def ModelLoader(cls):
                     fallback_init_kwargs = model_init_kwargs_without_internal.copy()
                     fallback_init_kwargs.pop("device_map", None)
                     fallback_init_kwargs["low_cpu_mem_usage"] = False
-                    model = _hf_loader_from_pretrained_with_dynamic_module_retry(
-                        cls.loader,
-                        model_local_path,
-                        config=config,
-                        **fallback_init_kwargs,
-                        **hf_gguf_load_kwargs,
-                    )
+                    with model_global_state_lock():
+                        model = _hf_loader_from_pretrained_with_dynamic_module_retry(
+                            cls.loader,
+                            model_local_path,
+                            config=config,
+                            **fallback_init_kwargs,
+                            **hf_gguf_load_kwargs,
+                        )
                     if getattr(model, "config", None) is config:
                         model.config = copy.deepcopy(config)
                     _convert_model_with_defuser(cls, model, cleanup_original=False)
@@ -3161,9 +3203,16 @@ def ModelLoader(cls):
             set_dtype_compat(args, dtype)
 
             try:
-                model = cls.loader.from_config(
-                    config, trust_remote_code=trust_remote_code, **args
-                )
+                # ``from_config`` wraps construction in transformers'
+                # ``local_torch_dtype``, a process-global ``set_default_dtype``.
+                # Hold the writer for exactly this window; a compiled forward
+                # waits here but not for the rest of the load (weight I/O,
+                # kernel post-init), and never traces through the bf16 window
+                # (#5209, #5268).
+                with model_global_state_lock():
+                    model = cls.loader.from_config(
+                        config, trust_remote_code=trust_remote_code, **args
+                    )
             except FileNotFoundError as exc:
                 # trust_remote_code dynamic-module caches can be incomplete for
                 # legacy Deci files; rebuild missing shim + refresh once.
@@ -3198,9 +3247,10 @@ def ModelLoader(cls):
                             force_download=True,
                         )
 
-                    model = cls.loader.from_config(
-                        config, trust_remote_code=trust_remote_code, **args
-                    )
+                    with model_global_state_lock():
+                        model = cls.loader.from_config(
+                            config, trust_remote_code=trust_remote_code, **args
+                        )
                 else:
                     raise
             # This path replaces the fused experts with quantized kernels and

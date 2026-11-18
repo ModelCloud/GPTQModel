@@ -3,7 +3,7 @@
 """A compiled model must keep serving while another model loads (#5209).
 
 #5159 serialized only the *first* call of a compiled callable/module with model
-construction. Every later call ran outside ``_MODEL_LOAD_LOCK``, and
+construction. Every later call ran outside the model-global state lock, and
 ``from_quantized`` called ``torch._dynamo.reset()`` on every load. A later call
 re-enters dynamo tracing whenever a guard changes -- the load's bf16
 ``set_default_dtype`` window is exactly such a change -- so:
@@ -90,11 +90,12 @@ def test_a_load_does_not_reset_another_models_compiled_frames(tmp_path, monkeypa
 
 
 def _assert_compiled_call_waits_for_the_lock(lock, call, *args):
-    """Run ``call`` while another thread holds the model-global lock.
+    """Run ``call`` while another thread holds the global-state writer.
 
     Pre-#5209 the proxy short-circuited on ``state["compiled"]`` and never took
     the lock, so the call finished while the holder still owned it. With the fix
-    every call waits, which is what serializes a re-trace with a load.
+    every call takes the shared side and waits for a writer, which is what
+    excludes a re-trace from a load's dtype window.
     """
 
     holding = threading.Event()
@@ -132,11 +133,11 @@ def _assert_compiled_call_waits_for_the_lock(lock, call, *args):
 
 
 def test_every_compiled_call_takes_the_model_global_lock(monkeypatch):
-    """The callable proxy must take the lock on later calls, not just the first."""
+    """The callable proxy must take the state lock on later calls, not just the first."""
 
     _require_dynamo()
     lock = _SignallingLock()
-    monkeypatch.setattr(loader_module, "_MODEL_LOAD_LOCK", lock)
+    monkeypatch.setattr(loader_module, "_MODEL_GLOBAL_STATE_LOCK", lock)
 
     compiled = torch_compile(lambda value: value * 2, backend="eager")
     value = torch.ones(2)
@@ -146,11 +147,11 @@ def test_every_compiled_call_takes_the_model_global_lock(monkeypatch):
 
 
 def test_every_compiled_module_forward_takes_the_model_global_lock(monkeypatch):
-    """The module proxy must take the lock on later forwards, not just the first."""
+    """The module proxy must take the state lock on later forwards, not just the first."""
 
     _require_dynamo()
     lock = _SignallingLock()
-    monkeypatch.setattr(loader_module, "_MODEL_LOAD_LOCK", lock)
+    monkeypatch.setattr(loader_module, "_MODEL_GLOBAL_STATE_LOCK", lock)
 
     module = torch.nn.Linear(2, 2)
     compiled = torch_compile(module, backend="eager")
@@ -165,7 +166,7 @@ def test_optimized_forward_does_not_trace_through_a_loads_bf16_window(tmp_path, 
     """A warm compiled forward must not capture and restore a load's bf16 dtype.
 
     The load thread is held inside transformers' bf16 ``set_default_dtype``
-    window while it owns ``_MODEL_LOAD_LOCK``. The forward thread calls the
+    window while it owns the global-state writer. The forward thread calls the
     ``optimize()``d model: pre-fix the later call is lock-free, so its
     global-state guard fails on bf16 and dynamo re-traces with bf16 captured.
     The backend parks the trace until the load has restored fp32; when the trace
@@ -211,7 +212,7 @@ def test_optimized_forward_does_not_trace_through_a_loads_bf16_window(tmp_path, 
     state["armed"] = True
 
     lock = _SignallingLock()
-    monkeypatch.setattr(loader_module, "_MODEL_LOAD_LOCK", lock)
+    monkeypatch.setattr(loader_module, "_MODEL_GLOBAL_STATE_LOCK", lock)
 
     load_bf16 = threading.Event()
     release_load = threading.Event()
