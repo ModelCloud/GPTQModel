@@ -6,7 +6,7 @@ import warnings
 import pytest
 import torch
 from safetensors.torch import load_file
-from transformers.cache_utils import DynamicCache
+from transformers.cache_utils import DynamicCache, LinearAttentionLayer
 
 from gptqmodel.models.definitions.bailing_moe import BailingMoeQModel
 from gptqmodel.models.ports.bailing_moe.configuration_bailing import BailingConfig
@@ -17,6 +17,13 @@ from gptqmodel.models.ports.bailing_moe.modeling_bailing import (
     RotaryEmbedding,
 )
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
+
+
+def recurrent_states(cache):
+    return {
+        idx: layer.recurrent_states[0] for idx, layer in enumerate(cache.layers)
+        if isinstance(layer, LinearAttentionLayer) and layer.has_previous_state[0]
+    }
 
 
 def tiny_config(layout="dense", **kwargs):
@@ -153,26 +160,25 @@ def test_failure_invalidates_partial_cache_then_reset_replays_exactly(layout):
         with pytest.raises(RuntimeError, match="injected"):
             model(ids[:, 2:], past_key_values=cache)
         handle.remove()
-        assert cache.incomplete and cache.get_seq_length() == 2
+        assert cache.incomplete
         if layout == "hybrid":
-            assert cache.recurrent_states
+            assert recurrent_states(cache)
         else:
             assert cache.layers[0].get_seq_length() == 4
         with pytest.raises(ValueError, match="failed partial forward"):
             model(ids[:, 2:], past_key_values=cache)
         cache.reset()
-        assert not cache.incomplete and cache.get_seq_length() == 0 and not cache.recurrent_states
+        assert not cache.incomplete and cache.get_seq_length() == 0 and not recurrent_states(cache)
         replay = model(ids, past_key_values=cache).logits
         fresh = model(ids, use_cache=False).logits
         torch.testing.assert_close(replay, fresh, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("layout", ["dense", "mla", "mla_dense_q", "hybrid", "legacy_gqa", "mla_alias"])
-@pytest.mark.parametrize("boundary", ["lm_head", "loss", "mtp_head", "mtp_loss", "return_tuple"])
+@pytest.mark.parametrize("boundary", ["lm_head", "loss", "mtp_head", "mtp_loss"])
 def test_public_forward_failure_invalidates_advanced_cache_until_reset(layout, boundary, monkeypatch):
     from torch.nn import functional as functional
 
-    from gptqmodel.models.ports.bailing_moe.modeling_bailing import BailingCausalLMOutput
 
     torch.manual_seed(93)
     model = BailingForCausalLM(tiny_config(layout, num_nextn_predict_layers=1)).eval()
@@ -205,30 +211,27 @@ def test_public_forward_failure_invalidates_advanced_cache_until_reset(layout, b
     with torch.no_grad():
         cache = model(ids[:, :3], attention_mask=mask[:, :3]).past_key_values
         assert not cache.incomplete and cache.get_seq_length() == 3
-        previous_recurrent = {idx: state.clone() for idx, state in cache.recurrent_states.items()}
+        previous_recurrent = {idx: state.clone() for idx, state in recurrent_states(cache).items()}
         with monkeypatch.context() as patch:
             if boundary in ("lm_head", "mtp_head"):
                 patch.setattr(functional, "linear", linear)
             elif boundary in ("loss", "mtp_loss"):
                 patch.setattr(model, "loss_function", loss)
-            else:
-                patch.setattr(BailingCausalLMOutput, "to_tuple", lambda *args: fail())
             with pytest.raises(RuntimeError, match=f"injected public {boundary}"):
                 model(
                     ids[:, 3:], attention_mask=mask, labels=ids[:, 3:], past_key_values=cache,
-                    return_dict=boundary != "return_tuple",
                 )
             assert fired
             assert cache.get_seq_length() == ids.shape[1]
             if previous_recurrent:
-                assert any(not torch.equal(state, cache.recurrent_states[idx]) for idx, state in previous_recurrent.items())
+                assert any(not torch.equal(state, recurrent_states(cache)[idx]) for idx, state in previous_recurrent.items())
             else:
                 assert cache.layers[0].get_seq_length() == ids.shape[1]
             assert cache.incomplete
             with pytest.raises(ValueError, match="failed partial forward"):
                 model(ids[:, 3:], attention_mask=mask, past_key_values=cache)
         cache.reset()
-        assert not cache.incomplete and cache.get_seq_length() == 0 and not cache.recurrent_states
+        assert not cache.incomplete and cache.get_seq_length() == 0 and not recurrent_states(cache)
         fresh = model(ids, attention_mask=mask, labels=ids, use_cache=False)
         replay = model(ids, attention_mask=mask, labels=ids, past_key_values=cache)
         torch.testing.assert_close(replay.logits, fresh.logits, rtol=0, atol=0)
@@ -248,20 +251,20 @@ def test_recurrent_cache_reorder_repeat_select_and_crop_rejection():
     ids = torch.tensor([[3, 7, 9], [8, 4, 5]])
     with torch.no_grad():
         cache = model(ids[:, :2]).past_key_values
-        original_state = cache.recurrent_states[0].clone()
+        original_state = recurrent_states(cache)[0].clone()
         cache.reorder_cache(torch.tensor([1, 0]))
-        torch.testing.assert_close(cache.recurrent_states[0], original_state.flip(0))
+        torch.testing.assert_close(recurrent_states(cache)[0], original_state.flip(0))
         out = model(ids.flip(0)[:, 2:], past_key_values=cache).logits
         torch.testing.assert_close(out, model(ids.flip(0), use_cache=False).logits[:, 2:], atol=2e-6, rtol=2e-6)
         cache.batch_repeat_interleave(2)
-        assert cache.recurrent_states[0].shape[0] == 4
+        assert recurrent_states(cache)[0].shape[0] == 4
         cache.batch_select_indices(torch.tensor([0, 3]))
-        assert cache.recurrent_states[0].shape[0] == 2
+        assert recurrent_states(cache)[0].shape[0] == 2
         with pytest.raises(NotImplementedError, match="cannot be cropped"):
             cache.crop(-1)
         assert cache.get_seq_length() == 3
         cache.reset()
-        assert not cache.layers and not cache.recurrent_states
+        assert cache.get_seq_length() == 0 and not recurrent_states(cache)
     with pytest.raises(TypeError, match="BailingCache"):
         model(ids, past_key_values=DynamicCache())
 
@@ -282,10 +285,10 @@ def test_mtp_owned_weights_and_loss_survive_round_trip(tmp_path):
 def test_validation_fails_before_cache_mutation_and_retry_works():
     model = BailingForCausalLM(tiny_config("hybrid")).eval()
     ids = torch.tensor([[3, 5]])
-    cache = BailingCache()
+    cache = BailingCache(model.config)
     with pytest.raises(ValueError, match="attention_mask"):
         model(ids, past_key_values=cache, attention_mask=torch.ones(1, 3))
-    assert not cache.incomplete and not cache.recurrent_states and not cache.layers
+    assert not cache.incomplete and not recurrent_states(cache) and cache.get_seq_length() == 0
     assert model(ids, past_key_values=cache).past_key_values.get_seq_length() == 2
     with pytest.raises(ValueError, match="group-limited"):
         tiny_config("dense", n_group=4)

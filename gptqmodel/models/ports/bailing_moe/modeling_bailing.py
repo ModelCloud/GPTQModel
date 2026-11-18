@@ -23,10 +23,15 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from transformers.activations import ACT2FN
-from transformers.cache_utils import DynamicCache
+from transformers.cache_utils import Cache, DynamicLayer, LinearAttentionLayer
 from transformers.generation import GenerationMixin
+from transformers.masking_utils import create_causal_mask
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast, MoeModelOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.utils import can_return_tuple
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import OutputRecorder, capture_outputs
 
 from .configuration_bailing import BailingConfig, is_native_hybrid
 
@@ -172,15 +177,27 @@ class SparseMoeBlock(nn.Module):
         return out, (logits.reshape(*x.shape[:-1], -1), indices.reshape(*x.shape[:-1], -1))
 
 
-def softmax_attention(q, k, v, mask, scale, dropout, training):
-    repeat = q.shape[1] // k.shape[1]
-    k, v = k.repeat_interleave(repeat, dim=1), v.repeat_interleave(repeat, dim=1)
-    scores = (q @ k.transpose(-1, -2)) * scale
-    if mask is not None:
-        scores = scores + mask
-    weights = F.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
-    weights = F.dropout(weights, p=dropout, training=training)
-    return (weights @ v).transpose(1, 2).contiguous(), weights
+def repeat_kv(hidden_states, n_rep):
+    if n_rep == 1:
+        return hidden_states
+    batch, heads, length, dim = hidden_states.shape
+    return hidden_states[:, :, None].expand(batch, heads, n_rep, length, dim).reshape(batch, heads * n_rep, length, dim)
+
+
+def eager_attention_forward(module, query, key, value, attention_mask, scaling, dropout=0.0, **kwargs):
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+    if attention_mask is not None:
+        attn_weights = attn_weights + attention_mask
+    attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_weights = F.dropout(attn_weights, p=dropout, training=module.training)
+    attn_output = torch.matmul(attn_weights, value_states)
+    return attn_output.transpose(1, 2).contiguous(), attn_weights
+
+
+def attention_interface(config):
+    return ALL_ATTENTION_FUNCTIONS.get_interface(config._attn_implementation, eager_attention_forward)
 
 
 class DenseAttention(nn.Module):
@@ -189,6 +206,7 @@ class DenseAttention(nn.Module):
         self.config, self.layer_idx = config, layer_idx
         self.num_heads, self.head_dim = config.num_attention_heads, config.head_dim
         self.num_key_value_heads = config.num_key_value_heads
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.query_key_value = nn.Linear(
             config.hidden_size, (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim,
             bias=config.use_qkv_bias,
@@ -211,8 +229,9 @@ class DenseAttention(nn.Module):
         q, k, v = self.project(hidden_states, position_embeddings)
         if past_key_values is not None:
             k, v = past_key_values.update(k, v, self.layer_idx)
-        out, weights = softmax_attention(
-            q, k, v, attention_mask, self.head_dim ** -0.5, self.config.attention_dropout, self.training,
+        out, weights = attention_interface(self.config)(
+            self, q, k, v, attention_mask, scaling=self.head_dim ** -0.5,
+            dropout=self.config.attention_dropout if self.training else 0.0, **kwargs,
         )
         return self.dense(out.reshape(*hidden_states.shape[:-1], -1)), weights
 
@@ -221,6 +240,7 @@ class MLAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.config, self.layer_idx = config, layer_idx
+        self.num_key_value_groups = 1
         if config.q_lora_rank is None:
             self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * config.qk_head_dim, bias=False)
         else:
@@ -260,7 +280,10 @@ class MLAttention(nn.Module):
         k = torch.cat((k_pass, k_rot.expand(*k_pass.shape[:-1], -1)), dim=-1)
         if past_key_values is not None:
             k, v = past_key_values.update(k, v, self.layer_idx)
-        out, weights = softmax_attention(q, k, v, attention_mask, self.scaling, c.attention_dropout, self.training)
+        out, weights = attention_interface(c)(
+            self, q, k, v, attention_mask, scaling=self.scaling,
+            dropout=c.attention_dropout if self.training else 0.0, **kwargs,
+        )
         return self.dense(out.reshape(batch, length, -1)), weights
 
 
@@ -281,6 +304,7 @@ class LinearAttention(DenseAttention):
         # Ling's linear branch uses all heads for K/V, regardless of dense GQA.
         super().__init__(config, layer_idx)
         self.num_key_value_heads = config.num_attention_heads
+        self.num_key_value_groups = 1
         self.query_key_value = nn.Linear(config.hidden_size, self.num_heads * 3 * self.head_dim, bias=config.use_qkv_bias)
         self.g_proj = nn.Linear(config.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.g_norm = RMSNorm(self.num_heads * self.head_dim, config.rms_norm_eps, groups=config.group_norm_size)
@@ -293,7 +317,7 @@ class LinearAttention(DenseAttention):
 
     def forward(self, hidden_states, position_embeddings, attention_mask=None, past_key_values=None, **kwargs):
         q, k, v = self.project(hidden_states, position_embeddings)
-        state = None if past_key_values is None else past_key_values.recurrent_states.get(self.layer_idx)
+        state = None if past_key_values is None else past_key_values.get_recurrent_state(self.layer_idx)
         if state is None:
             state = torch.zeros(
                 q.shape[0], self.num_heads, self.head_dim, self.head_dim, device=q.device, dtype=torch.float32,
@@ -310,60 +334,74 @@ class LinearAttention(DenseAttention):
         out = torch.stack(outputs, dim=1).to(hidden_states.dtype).reshape(*hidden_states.shape[:-1], -1)
         out = self.g_norm(out) * self.g_proj(hidden_states).sigmoid()
         if past_key_values is not None:
-            past_key_values.recurrent_states[self.layer_idx] = state
+            past_key_values.update_recurrent_state(state, self.layer_idx)
         return self.dense(out), None
 
 
-class BailingCache(DynamicCache):
-    """KV tensors and recurrent state have separate ownership and sequence length."""
+def is_linear_layer(config, layer_idx):
+    """Ling 2.5 hybrid: every `layer_group_size`-th main layer is MLA, the rest lightning attention."""
+    return (
+        config.model_type == "bailing_hybrid" and layer_idx < config.num_hidden_layers
+        and (layer_idx + 1) % config.layer_group_size != 0
+        and layer_idx < config.num_hidden_layers // config.layer_group_size * config.layer_group_size
+    )
 
-    def __init__(self):
-        super().__init__()
-        self.recurrent_states = {}
-        self._ling_seen_tokens = 0
-        self.incomplete = False
 
-    def get_seq_length(self, layer_idx=0):
-        return self._ling_seen_tokens
+class BailingRecurrentLayer(LinearAttentionLayer):
+    """Lightning-attention state: a native linear-attention cache layer without conv state."""
 
-    def reorder_cache(self, beam_idx):
-        super().reorder_cache(beam_idx)
-        self.recurrent_states = {
-            key: value.index_select(0, beam_idx.to(value.device)) for key, value in self.recurrent_states.items()
-        }
+    def update_recurrent_state(self, recurrent_states, state_idx=0, **kwargs):
+        if not self.is_recurrent_states_initialized[state_idx]:
+            self.lazy_initialization(recurrent_states=recurrent_states, state_idx=state_idx)
+            self.device = recurrent_states.device
+        # The batch dimension may change (beam/contrastive search), so assign instead of copying in place.
+        self.recurrent_states[state_idx] = recurrent_states
+        self.has_previous_state[state_idx] = True
+        return recurrent_states
 
     def batch_repeat_interleave(self, repeats):
-        super().batch_repeat_interleave(repeats)
-        self.recurrent_states = {key: value.repeat_interleave(repeats, dim=0) for key, value in self.recurrent_states.items()}
+        for idx, state in self.recurrent_states.items():
+            if state is not None:
+                self.recurrent_states[idx] = state.repeat_interleave(repeats, dim=0)
 
     def batch_select_indices(self, indices):
-        super().batch_select_indices(indices)
-        self.recurrent_states = {
-            key: value[indices.to(value.device)] for key, value in self.recurrent_states.items()
-        }
+        for idx, state in self.recurrent_states.items():
+            if state is not None:
+                self.recurrent_states[idx] = state[indices.to(state.device)]
 
     def crop(self, tokens_to_remove):
-        if self.recurrent_states and tokens_to_remove != 0:
+        if tokens_to_remove != 0 and any(self.has_previous_state.values()):
             raise NotImplementedError("Ling recurrent cache cannot be cropped; replay the prefix into a fresh cache")
-        super().crop(tokens_to_remove)
-        self._ling_seen_tokens = max(0, self._ling_seen_tokens + tokens_to_remove)
+
+
+class BailingCache(Cache):
+    """Per-layer cache: native KV layers for softmax/MLA (and MTP) layers, recurrent layers for lightning attention.
+
+    `incomplete` marks a cache whose last forward failed part-way; it must be reset before reuse.
+    """
+
+    def __init__(self, config):
+        layers = [
+            BailingRecurrentLayer() if is_linear_layer(config, idx) else DynamicLayer()
+            for idx in range(config.num_hidden_layers + config.num_nextn_predict_layers)
+        ]
+        super().__init__(layers=layers)
+        self.incomplete = False
 
     def reset(self):
-        self.layers.clear()
-        self.recurrent_states.clear()
-        self._ling_seen_tokens = 0
+        super().reset()
         self.incomplete = False
 
 
-class DecoderLayer(nn.Module):
-    def __init__(self, config, layer_idx, mtp=False):
+class LingLayer(GradientCheckpointingLayer):
+    is_mtp = False
+
+    def __init__(self, config, layer_idx):
         super().__init__()
         self.layer_idx = layer_idx
-        self.is_mtp = mtp
+        mtp = self.is_mtp
         hybrid = config.model_type == "bailing_hybrid"
-        linear = hybrid and not mtp and (layer_idx + 1) % config.layer_group_size != 0 and (
-            layer_idx < config.num_hidden_layers // config.layer_group_size * config.layer_group_size
-        )
+        linear = is_linear_layer(config, layer_idx)
         attention_cls = LinearAttention if linear else MLAttention if hybrid or config.q_lora_rank is not None else DenseAttention
         self.attention = attention_cls(config, layer_idx)
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -381,19 +419,28 @@ class DecoderLayer(nn.Module):
         if self.is_mtp:
             hidden_states = self.eh_proj(torch.cat((self.enorm(input_embeds), self.hnorm(hidden_states)), dim=-1))
         residual = hidden_states
-        out, weights = self.attention(
+        out, _ = self.attention(
             self.input_layernorm(hidden_states), position_embeddings=position_embeddings,
-            attention_mask=attention_mask, past_key_values=past_key_values,
+            attention_mask=attention_mask, past_key_values=past_key_values, **kwargs,
         )
         hidden_states = residual + out
         out = self.mlp(self.post_attention_layernorm(hidden_states))
-        router_logits = None
         if isinstance(out, tuple):
-            out, router_logits = out
+            out = out[0]
         hidden_states = hidden_states + out
         if self.is_mtp:
             hidden_states = self.final_layernorm(hidden_states)
-        return hidden_states, weights, router_logits
+        return hidden_states
+
+
+class DecoderLayer(LingLayer):
+    """Main decoder layer; its outputs are the model's recorded hidden states."""
+
+
+class MTPLayer(LingLayer):
+    """Multi-token-prediction layer appended after the main stack."""
+
+    is_mtp = True
 
 
 @dataclass
@@ -410,9 +457,18 @@ class BailingCausalLMOutput(MoeCausalLMOutputWithPast):
 class BailingPreTrainedModel(PreTrainedModel):
     config_class = BailingConfig
     base_model_prefix = "model"
-    _no_split_modules = ["DecoderLayer"]
+    _no_split_modules = ["DecoderLayer", "MTPLayer"]
     _supports_sdpa = False
     _is_stateful = True
+    supports_gradient_checkpointing = True
+    _can_record_outputs = {
+        "hidden_states": DecoderLayer,
+        "attentions": [
+            OutputRecorder(DenseAttention, index=1),
+            OutputRecorder(MLAttention, index=1),
+        ],
+        "router_logits": OutputRecorder(SparseMoeBlock, index=1),
+    }
 
     def _init_weights(self, module):
         if isinstance(module, (nn.Linear, nn.Embedding, Gate)):
@@ -441,7 +497,7 @@ class BailingModel(BailingPreTrainedModel):
         super().__init__(config)
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
         self.layers = nn.ModuleList([
-            DecoderLayer(config, idx, mtp=idx >= config.num_hidden_layers)
+            (MTPLayer if idx >= config.num_hidden_layers else DecoderLayer)(config, idx)
             for idx in range(config.num_hidden_layers + config.num_nextn_predict_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -456,10 +512,11 @@ class BailingModel(BailingPreTrainedModel):
     def set_input_embeddings(self, value):
         self.word_embeddings = value
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(
         self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-        inputs_embeds=None, use_cache=None, output_attentions=None, output_hidden_states=None,
-        output_router_logits=None, return_dict=True, **kwargs,
+        inputs_embeds=None, use_cache=None, **kwargs,
     ):
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Specify exactly one of input_ids and inputs_embeds")
@@ -467,10 +524,6 @@ class BailingModel(BailingPreTrainedModel):
             raise TypeError("Ling requires BailingCache, not a KV-only or static cache")
         if past_key_values is not None and past_key_values.incomplete:
             raise ValueError("Ling cache contains a failed partial forward; reset it and replay the prefix")
-        use_cache = self.config.use_cache if use_cache is None else use_cache
-        output_attentions = self.config.output_attentions if output_attentions is None else output_attentions
-        output_hidden_states = self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
-        output_router_logits = self.config.output_router_logits if output_router_logits is None else output_router_logits
         hidden = self.word_embeddings(input_ids) if inputs_embeds is None else inputs_embeds
         batch, length = hidden.shape[:2]
         seen = 0 if past_key_values is None else past_key_values.get_seq_length()
@@ -480,26 +533,19 @@ class BailingModel(BailingPreTrainedModel):
             position_ids = torch.arange(seen, seen + length, device=hidden.device).unsqueeze(0)
         positions = self.rotary_emb(hidden, position_ids)
         mla_positions = self.rotary_emb_mla(hidden, position_ids) if hasattr(self, "rotary_emb_mla") else positions
-        causal = torch.arange(seen + length, device=hidden.device)[None, :] <= torch.arange(
-            seen, seen + length, device=hidden.device,
-        )[:, None]
-        causal = causal[None, None].expand(batch, 1, length, seen + length)
-        if attention_mask is not None:
-            causal = causal & attention_mask[:, None, None, :].bool()
-        mask = torch.zeros(causal.shape, dtype=hidden.dtype, device=hidden.device).masked_fill(
-            ~causal, torch.finfo(hidden.dtype).min,
-        )
         cache = past_key_values if use_cache else None
         if use_cache and cache is None:
-            cache = BailingCache()
+            cache = BailingCache(self.config)
+        causal_mask = create_causal_mask(
+            config=self.config, inputs_embeds=hidden, attention_mask=attention_mask,
+            past_key_values=cache, position_ids=position_ids,
+        )
         if cache is not None:
             cache.incomplete = True
-        all_hidden, all_attn, all_router, mtp_hidden = (), (), (), ()
+        mtp_hidden = ()
         main_hidden = None
         mtp_ids = input_ids
         for idx, layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden += (hidden,)
             embeds = None
             if layer.is_mtp:
                 if mtp_ids is None:
@@ -508,31 +554,20 @@ class BailingModel(BailingPreTrainedModel):
                 mtp_ids[:, -1] = 0
                 embeds = self.word_embeddings(mtp_ids)
             linear = isinstance(layer.attention, LinearAttention)
-            hidden, weights, router = layer(
+            hidden = layer(
                 hidden, position_embeddings=mla_positions if isinstance(layer.attention, MLAttention) else positions,
-                attention_mask=attention_mask if linear else mask, past_key_values=cache, input_embeds=embeds,
+                attention_mask=attention_mask if linear else causal_mask, past_key_values=cache, input_embeds=embeds,
             )
             if idx == self.config.num_hidden_layers - 1:
                 hidden = self.norm(hidden)
                 main_hidden = hidden
             if layer.is_mtp:
                 mtp_hidden += (hidden,)
-            if output_attentions:
-                all_attn += (weights,)
-            if output_router_logits and router is not None:
-                all_router += (router,)
         if cache is not None:
-            cache._ling_seen_tokens = seen + length
             cache.incomplete = False
-        if output_hidden_states:
-            all_hidden += (hidden,)
-        output = BailingModelOutput(
-            last_hidden_state=main_hidden, past_key_values=cache,
-            hidden_states=all_hidden if output_hidden_states else None,
-            attentions=all_attn if output_attentions else None,
-            router_logits=all_router if output_router_logits else None, mtp_hidden_states=mtp_hidden or None,
+        return BailingModelOutput(
+            last_hidden_state=main_hidden, past_key_values=cache, mtp_hidden_states=mtp_hidden or None,
         )
-        return output if return_dict else output.to_tuple()
 
 
 class BailingForCausalLM(BailingPreTrainedModel, GenerationMixin):
@@ -583,10 +618,11 @@ class BailingForCausalLM(BailingPreTrainedModel, GenerationMixin):
         if generation_config.cache_implementation is not None:
             raise ValueError("Ling supports only its dynamic hybrid cache")
         if generation_config.use_cache and model_kwargs.get("past_key_values") is None:
-            model_kwargs["past_key_values"] = BailingCache()
+            model_kwargs["past_key_values"] = BailingCache(self.config)
 
-    def forward(self, input_ids=None, attention_mask=None, labels=None, logits_to_keep=0, return_dict=True, **kwargs):
-        output = self.model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True, **kwargs)
+    @can_return_tuple
+    def forward(self, input_ids=None, attention_mask=None, labels=None, logits_to_keep=0, **kwargs):
+        output = self.model(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
         cache = output.past_key_values
         if cache is not None:
             cache.incomplete = True
@@ -614,7 +650,6 @@ class BailingForCausalLM(BailingPreTrainedModel, GenerationMixin):
             hidden_states=output.hidden_states, attentions=output.attentions, router_logits=output.router_logits,
             mtp_logits=mtp_logits or None, mtp_loss=tuple(mtp_loss) or None,
         )
-        result = result if return_dict else result.to_tuple()
         if cache is not None:
             cache.incomplete = False
         return result
