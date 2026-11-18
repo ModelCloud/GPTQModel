@@ -52,17 +52,22 @@ PENDING_MODEL_IMPORT_PORTS = frozenset({
 })
 
 PENDING_STALE_PATTERN_PORTS = frozenset({
-    "bailing_moe", "brumby", "dbrx_converted", "decilm", "deepseek_vl_v2", "dream", "ernie4_5_vl_moe", "exaone",
-    "grinmoe", "hymba", "instella", "intern_s2_preview", "internlm2", "interns1", "internvl_chat", "k2_horizon",
-    "kimi_k3", "klear", "lfm3_omni", "llada2", "llama", "locateanything", "mimo", "mimo_v2", "minicpm", "minicpm_o",
-    "minimax_m2", "mobilellm", "nanbeige", "nemotron_h_puzzle", "nemotron_labs_diffusion", "nemotron_omni", "ouro",
-    "ovis2_5", "ovis2_6_moe", "phi4", "raon1_mini", "ricursive", "solar_open2", "spark2_5", "telechat2", "xing4_0",
-    "xverse",
+    "bailing_moe", "brumby", "decilm", "deepseek_vl_v2", "dream", "ernie4_5_vl_moe", "exaone", "grinmoe", "hymba",
+    "instella", "intern_s2_preview", "internlm2", "interns1", "internvl_chat", "k2_horizon", "kimi_k3", "klear",
+    "llada2", "llama", "locateanything", "mimo", "mimo_v2", "minicpm", "minicpm_o", "mobilellm", "nanbeige",
+    "native/bloom", "native/codegen", "native/cohere2_moe", "native/decision_transformer", "native/deepseek_v4",
+    "native/diffusion_gemma", "native/dots3_note", "native/falcon", "native/falcon_h1", "native/falcon_mamba",
+    "native/gemma3", "native/gemma3n", "native/gemma4", "native/gemma4_unified", "native/gpt_neo",
+    "native/gpt_neox", "native/gptj", "native/hunyuan_vl", "native/llama4", "native/minimax_m3_vl", "native/mpt",
+    "native/nemotron_h", "native/nemotron_h_omni", "native/olmo3", "native/ovis2", "native/phi3",
+    "native/phi4_multimodal", "native/qwen2_5_vl", "native/qwen2_vl", "native/voxtral", "native/zamba",
+    "native/zamba2", "nemotron_labs_diffusion", "nemotron_omni", "ouro", "ovis2_5", "ovis2_6_moe", "phi4",
+    "raon1_mini", "ricursive", "spark2_5", "telechat2", "xing4_0", "xverse",
 })
 
 STALE_PATTERNS = re.compile(
     r"\bcache_position\b|\bpast_key_value\b|use_return_dict|if not return_dict|from_legacy_cache|to_legacy_cache"
-    r"|get_usable_length|seen_tokens|_prepare_4d_|AttentionMaskConverter|_update_causal_mask|def _reorder_cache"
+    r"|get_usable_length|\bseen_tokens\b|_prepare_4d_|AttentionMaskConverter|_update_causal_mask|def _reorder_cache"
     r"|def _set_gradient_checkpointing|torch\.utils\.checkpoint|_supports_cache_class|_supports_static_cache"
     r"|_supports_quantized_cache|_supports_flash_attn_2|num_logits_to_keep|\brope_scaling\b|\btorch_dtype\b"
     r"|check_model_inputs|all_hidden_states|all_self_attns|transformers\.__version__|is_transformers_version"
@@ -74,7 +79,11 @@ def _port_files():
 
 
 def _port_name(path):
-    return path.relative_to(PORTS).parts[0]
+    parts = path.relative_to(PORTS).parts
+    # Vendored Transformers families are tracked individually: native/<family>.
+    if parts[0] == "native" and len(parts) > 2:
+        return f"native/{parts[1]}"
+    return parts[0]
 
 
 def _model_family_imports(path):
