@@ -287,6 +287,9 @@ class Case:
     cls: type
     build: Optional[Callable]
     unavailable: Callable[[], Optional[str]]
+    #: Device the case builds on; a CPU-built case must be measurable on a
+    #: CPU-only runner (#5110).
+    device: str = "cuda"
 
 
 CASES = [
@@ -316,26 +319,31 @@ CASES = [
         AwqGEMVFastTorchLinear,
         lambda: _packed(AwqGEMVFastTorchLinear, device="cpu", cuda_graph=False),
         lambda: None,
+        device="cpu",
     ),
     Case(
         LLMAwqTorchLinear,
         lambda: _packed(LLMAwqTorchLinear, device="cpu", cuda_graph=False),
         lambda: None,
+        device="cpu",
     ),
     Case(
         TorchFusedAwqLinear,
         lambda: _checkpoint(TorchFusedAwqLinear, device="cpu", cuda_graph=False),
         lambda: None,
+        device="cpu",
     ),
     Case(
         TorchAtenAwqLinear,
         lambda: _checkpoint(TorchAtenAwqLinear, device="cpu", cuda_graph=False),
         lambda: None,
+        device="cpu",
     ),
     Case(
         TorchCpuAvx512AwqLinear,
         _build_cpu_avx512_awq,
         lambda: _validate_unavailable(TorchCpuAvx512AwqLinear),
+        device="cpu",
     ),
     Case(
         TorchInt8AwqLinear,
@@ -378,7 +386,7 @@ def test_awq_kernel_reaches_declared_compile_level(case):
     if reason is not None:
         pytest.skip(reason)
     assert case.build is not None, f"{case.cls.__name__}: no builder and no skip reason"
-    skip_without_measurable_device(case.cls)
+    skip_without_measurable_device(case.cls, device_type=case.device)
 
     try:
         module, x, cuda_graph = case.build()
@@ -390,7 +398,7 @@ def test_awq_kernel_reaches_declared_compile_level(case):
             f"{type(error).__name__}: {str(error)[:200]}"
         )
     result = probe(module, (x,), check_cuda_graph=cuda_graph)
-    declared = compile_level(case.cls)
+    declared = compile_level(case.cls, device_type=case.device)
 
     assert result.eager, (
         f"{case.cls.__name__}: eager forward failed: {result.eager_error}"
