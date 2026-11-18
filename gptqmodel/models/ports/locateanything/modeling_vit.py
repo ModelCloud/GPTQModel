@@ -13,13 +13,7 @@ from typing import List, Optional, Sequence, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
-try:
-    from transformers.activations import PytorchGELUTanh
-except ImportError:
-    def PytorchGELUTanh():
-        return nn.GELU(approximate='tanh')
+from transformers.activations import GELUTanh
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import is_flash_attn_2_available, logging
@@ -576,7 +570,7 @@ class MoonVitPretrainedModel(PreTrainedModel):
     config_class = MoonViTConfig
     model_type = "moonvit"
     _no_split_modules = ["PackingTransformer"]
-    _supports_flash_attn_2 = True
+    _supports_flash_attn = True
     _supports_sdpa = True
 
     def __init__(self, config: MoonViTConfig, *inputs, **kwargs):
@@ -598,7 +592,7 @@ class MoonVitPretrainedModel(PreTrainedModel):
                 "num_heads": config.num_attention_heads,
                 "hidden_dim": config.hidden_size,
                 "mlp_dim": config.intermediate_size,
-                "activation": PytorchGELUTanh(),
+                "activation": GELUTanh(),
                 "attn_bias": True,
                 "attn_implementation": config._attn_implementation,
             },

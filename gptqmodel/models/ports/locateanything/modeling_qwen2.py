@@ -32,6 +32,8 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM as NativeQwen2ForCausalLM
 from transformers.models.qwen2.modeling_qwen2 import Qwen2Model as NativeQwen2Model
 from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM as NativeQwen3ForCausalLM
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
 
 from .mask_sdpa_utils import (
     create_block_diff_mask_by_pe_4d,
@@ -107,10 +109,10 @@ class Qwen2Model(NativeQwen2Model):
                     )
         return mask
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-                inputs_embeds=None, visual_features=None, image_token_index=None, use_cache=None,
-                output_hidden_states=None, output_attentions=None, return_dict=True, **kwargs):
-        use_cache = self.config.use_cache if use_cache is None else use_cache
+                inputs_embeds=None, visual_features=None, image_token_index=None, use_cache=None, **kwargs):
         if past_key_values is not None and not isinstance(past_key_values, DynamicCache):
             raise ValueError("LocateAnything supports Transformers DynamicCache only")
         if use_cache and past_key_values is None:
@@ -125,33 +127,12 @@ class Qwen2Model(NativeQwen2Model):
         position_ids = position_ids.expand(hidden_states.shape[0], -1)
         mask = self.block_mask(input_ids, hidden_states, position_ids, attention_mask, past_length, use_cache)
         positions = self.rotary_emb(hidden_states, position_ids)
-        all_hidden = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
-        # Explicit collection also works with ordinary layer capture/replay hooks.
         for layer in self.layers:
-            if output_hidden_states:
-                all_hidden += (hidden_states,)
-            if output_attentions:
-                residual = hidden_states
-                values, weights = layer.self_attn(
-                    hidden_states=layer.input_layernorm(hidden_states), attention_mask=mask,
-                    position_ids=position_ids, position_embeddings=positions,
-                    past_key_values=past_key_values, use_cache=use_cache, **kwargs,
-                )
-                hidden_states = residual + values
-                hidden_states = hidden_states + layer.mlp(layer.post_attention_layernorm(hidden_states))
-                all_attentions += (weights,)
-            else:
-                hidden_states = layer(hidden_states, attention_mask=mask, position_ids=position_ids,
-                                      position_embeddings=positions, past_key_values=past_key_values,
-                                      use_cache=use_cache, **kwargs)
-        hidden_states = self.norm(hidden_states)
-        if output_hidden_states:
-            all_hidden += (hidden_states,)
-        result = BaseModelOutputWithPast(last_hidden_state=hidden_states,
-                                        past_key_values=past_key_values if use_cache else None,
-                                        hidden_states=all_hidden, attentions=all_attentions)
-        return result if return_dict else result.to_tuple()
+            hidden_states = layer(hidden_states, attention_mask=mask, position_ids=position_ids,
+                                  position_embeddings=positions, past_key_values=past_key_values,
+                                  use_cache=use_cache, **kwargs)
+        return BaseModelOutputWithPast(last_hidden_state=self.norm(hidden_states),
+                                       past_key_values=past_key_values if use_cache else None)
 
 
 class Qwen2ForCausalLM(NativeQwen2ForCausalLM):

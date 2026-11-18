@@ -32,15 +32,10 @@ from torchvision import io, transforms
 from torchvision.transforms import InterpolationMode
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput
-
-
-try:
-    from transformers.image_utils import VideoInput
-except ImportError:
-    VideoInput = None
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.utils import logging
+from transformers.video_utils import VideoInput
 
 from ....utils.image import fetch_image as _fetch_local_image
 from ....utils.image import load_bytes_from_url, load_image_from_url
