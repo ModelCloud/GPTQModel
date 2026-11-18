@@ -9,6 +9,7 @@ from ...utils.device import get_device
 from ...utils.model import get_module_by_name_prefix, move_to, nested_move_to
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 def _prepare_gemma4_unified_replay_kwargs(model_def, layer, layer_input, additional_inputs, target_device):
@@ -90,6 +91,11 @@ class Gemma4UnifiedForConditionalGenerationGPTQ(BaseQModel):
     capture hooks are intentionally absent. The sliding/full rope boundaries still need the
     per-layer replay refresh below.
     """
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig("gemma4_unified").merge(LlamaFusableConfig(), profiles=("gate_up",))
 
 
@@ -123,6 +129,11 @@ class Gemma4UnifiedTextQModel(BaseQModel):
     rotary embedding at ``model.norm`` / ``model.rotary_emb``. The quantizable layout is identical
     to the composite variant, mirroring how ``gemma4_text`` parallels ``gemma4``.
     """
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig("gemma4_unified_text").merge(Gemma4UnifiedForConditionalGenerationGPTQ.fusable)
 
 

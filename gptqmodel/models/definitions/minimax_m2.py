@@ -15,6 +15,11 @@ class MiniMaxM2GPTQ(BaseQModel):
       - Standard attention with q/k normalization parameters
       - Sparse MoE block (MiniMaxM2SparseMoeBlock) with up to 256 experts
     """
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = None
 
     pre_lm_head_norm_module = "model.norm"

@@ -16,6 +16,11 @@ from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class ApertusQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig("apertus").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     # q/k/v share the post-norm hidden state. Apertus' MLP has no gate projection,
