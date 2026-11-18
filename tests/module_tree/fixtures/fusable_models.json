@@ -363,7 +363,7 @@
     },
     "dbrx_converted": {
       "definition": "DbrxConvertedQModel",
-      "reason": "Package-owned converted DBRX eager attention; fused projection execution has not been qualified."
+      "reason": "Fused projection execution has not been qualified for package-owned converted DBRX."
     },
     "deci": {
       "definition": "DeciLMQModel",

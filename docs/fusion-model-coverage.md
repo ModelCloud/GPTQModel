@@ -216,7 +216,7 @@ layout alone does not authorize it.
 | `chatglm` | `ChatGLMQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `codegen` | `CodeGenQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `dbrx` | `DbrxQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `dbrx_converted` | `DbrxConvertedQModel` | Package-owned converted DBRX eager attention; fused projection execution has not been qualified. |
+| `dbrx_converted` | `DbrxConvertedQModel` | Fused projection execution has not been qualified for package-owned converted DBRX. |
 | `deci` | `DeciLMQModel` | Heterogeneous no-op, linear and GQA attention/MLP layouts have no qualified fused executor. |
 | `deepseek_v2` | `DeepSeekV2QModel` | MLA has normalized low-rank Q/KV stages; no dense or expert projection fusion is qualified. |
 | `deepseek_v3` | `DeepSeekV3QModel` | Native MLA low-rank attention and routed/shared experts have no independently qualified fused executor. |

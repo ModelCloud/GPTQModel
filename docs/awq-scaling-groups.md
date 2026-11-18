@@ -590,10 +590,20 @@ constant shared by reference and candidate), and builds a causal bool mask.
 
 ## Looped decoder calibration
 
-HRM-Text, Ouro (`total_ut_steps=4`) and Nanbeige 4.2 (`num_loops=2`) run the
-same physical layers several times per forward. The default capture aborts at
-the first layer, so each processor's Hessian only saw loop 0. Ouro's steps 1-3
-have cosine -0.03..0.42 against the single captured input.
+HRM-Text, Ouro (`total_ut_steps=4`), Nanbeige 4.2 (`num_loops=2`) and
+SenseNova-Loop (`loop_settings = {start, end, eval_count}`) run the same
+physical layers several times per forward. The default capture aborts at the
+first layer, so each processor's Hessian only saw loop 0. Ouro's steps 1-3 have
+cosine -0.03..0.42 against the single captured input.
+
+A definition opts in by deriving from `LoopedLayerCaptureMixin`. When the mixin
+is missing the run still succeeds, so the guard is a definition-level contract:
+`tests/test_looped_decoder_capture.py` asserts the mixin is present for every
+looped family **and** that the captured invocation counts equal the model's own
+`execution_plan()`. SenseNova-Loop regressed exactly this way in #5081: its
+docstring claimed the looper already handled the loop, but the definition
+derived only from `Qwen3_5QModel`, so layers inside the looped block were
+calibrated on one visit and the post-loop layers on one-loop inputs.
 
 ```mermaid
 flowchart TD
@@ -661,7 +671,7 @@ Issue #4093 item coverage:
 | `tests/test_telechat2_coverage.py` | `query`/`key_value`/`dense` are quantized and no leaf is undeclared; replay supplies `residual` + mask |
 | `tests/test_awq_position_kwargs.py` | stale `position_ids` are rebuilt, mismatched `position_embeddings` dropped, module-local rotary rebuilds cos/sin |
 | `tests/test_pangu_alpha_replay.py` | last layer replays `ln_f` + `custom_query`; GPTQ beats RTN on the top-query `q_proj` |
-| `tests/test_looped_decoder_capture.py` | Ouro captures 4 invocations, Nanbeige 2, per-loop cosine < 0.99 |
+| `tests/test_looped_decoder_capture.py` | Ouro captures 4 invocations, Nanbeige 2, per-loop cosine < 0.99; SenseNova-Loop captures the published `execution_plan()` exactly and its post-loop replay input equals the real model's |
 | `tests/test_layer_module_coverage.py` | undeclared quantizable leaves are recorded and warned about |
 | `tests/test_awq_moe_root_capture_4697.py` | a real tiny Granite-MoE/gpt-oss quantize applies the routed-expert gate/up group from the declared root feature; an empty root warns instead of silently dropping the group |
 
@@ -673,15 +683,25 @@ Issue #4121 item coverage:
 | `tests/module_tree/test_nemotron_h_model_tree.py` | the Omni definition shares the Nemotron-H declaration, and its fold preserves the real remote decoder layer to `1e-5` relative |
 | `tests/test_awq_vl_rotary_resolution.py` | `_get_root_rotary` finds `model.language_model.rotary_emb`, never the vision tower, ignores per-layer rotaries, and `_prepare_module_forward` rebuilds cos/sin for a nested rotary; tiny Qwen2-VL quantizes with AWQ and GPTQ |
 
-### Real-checkpoint CPU CI
+### On-demand CPU test suites
 
-The `AWQ CPU` pull-request workflow runs the offline regressions plus
-`tests/test_awq_hf_cpu.py` against revision-pinned, trained SmolLM2-135M and
-TinyMoE-100M checkpoints from Hugging Face. The integration tests download real
+From the repository root, use the [CPU test runner](../tests/run_awq_cpu.sh)
+with the project dependencies (including CPU-capable PyTorch), `pytest`,
+`pytest-timeout`, and `parameterized` installed:
+
+```bash
+bash tests/run_awq_cpu.sh unit   # Offline regressions
+bash tests/run_awq_cpu.sh dense  # SmolLM2-135M
+bash tests/run_awq_cpu.sh moe    # TinyMoE-100M
+```
+
+These suites do not run automatically on pull requests. The optional
+checkpoint tests in `tests/test_awq_hf_cpu.py` use revision-pinned models from
+Hugging Face. They download real
 safetensors, compare held-out logits and next-token loss before/after 4-bit AWQ,
 check all expected packed projections and unquantized MoE routers, then save,
 reload with the same activation dtype, and check logits and greedy generation.
-Network/download failures fail the integration job rather than silently skip it.
+Network or download errors fail the test rather than silently skipping it.
 The MoE test permits configured fallback when calibration does not execute all
 experts and records how many groups used it. These short deterministic checks
 guard against catastrophic drift; they are not a corpus-level perplexity or
