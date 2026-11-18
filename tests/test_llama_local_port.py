@@ -294,12 +294,16 @@ def test_epoch_native_mapping_matches_independent_sequential_equations(kv_heads,
     with torch.no_grad():
         layer.input_layernorm.weight.copy_(torch.linspace(0.6, 1.4, 32))
         layer.input_layernorm.bias.copy_(torch.linspace(-0.3, 0.4, 32))
+        # StableLM-2 Epoch sources read use_qkv_bias; the bias must be applied.
+        for name in ("q_proj", "k_proj", "v_proj"):
+            getattr(layer.self_attn, name).bias.normal_(std=0.5)
+    attn = layer.self_attn
     ids = torch.tensor([[3, 7, 5, 9]])
     x = model.model.embed_tokens(ids)
     normed = F.layer_norm(x, (32,), layer.input_layernorm.weight, layer.input_layernorm.bias, 0.031)
-    q = F.linear(normed, layer.self_attn.q_proj.weight).view(1, 4, 4, 8).transpose(1, 2)
-    k = F.linear(normed, layer.self_attn.k_proj.weight).view(1, 4, kv_heads, 8).transpose(1, 2)
-    v = F.linear(normed, layer.self_attn.v_proj.weight).view(1, 4, kv_heads, 8).transpose(1, 2)
+    q = F.linear(normed, attn.q_proj.weight, attn.q_proj.bias).view(1, 4, 4, 8).transpose(1, 2)
+    k = F.linear(normed, attn.k_proj.weight, attn.k_proj.bias).view(1, 4, kv_heads, 8).transpose(1, 2)
+    v = F.linear(normed, attn.v_proj.weight, attn.v_proj.bias).view(1, 4, kv_heads, 8).transpose(1, 2)
     rotary = int(8 * rope_pct)
     positions = torch.arange(4).view(1, -1)
     q = torch.cat((_rotate_oracle(q[..., :rotary], positions), q[..., rotary:]), dim=-1)
@@ -563,3 +567,49 @@ def test_state_dict_assignment_replaces_initialized_owners(model_type, assign):
     target.load_state_dict(source.state_dict(), assign=assign, strict=True)
     with torch.inference_mode():
         torch.testing.assert_close(target(ids).logits, expected, atol=0, rtol=0)
+
+
+def test_original_yi_layout_loads_ln1_ln2_and_source_defaults(tmp_path):
+    from safetensors.torch import save_file
+
+    from gptqmodel.models.ports.llama.dispatch import YiConfig
+
+    defaults = YiConfig()
+    assert (defaults.vocab_size, defaults.num_key_value_heads, defaults.max_position_embeddings) == (64000, 4, 4096)
+    assert (defaults.rms_norm_eps, defaults.pad_token_id) == (1e-5, 0)
+    assert defaults.rope_parameters["rope_theta"] == 5_000_000.0
+    torch.manual_seed(5)
+    model = local_model("yi", num_key_value_heads=2)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.normal_()
+    # 01-ai's pre-conversion checkpoints: model_type "Yi" and ln1/ln2 decoder norms.
+    state = {
+        key.replace(".input_layernorm.", ".ln1.").replace(".post_attention_layernorm.", ".ln2."): value
+        for key, value in model.state_dict().items()
+    }
+    assert any(".ln1." in key for key in state) and not any("_layernorm" in key for key in state)
+    save_file(state, tmp_path / "model.safetensors", metadata={"format": "pt"})
+    (tmp_path / "config.json").write_text(
+        json.dumps(tiny_payload("Yi", num_key_value_heads=2, architectures=["YiForCausalLM"]))
+    )
+    config = load_model_config(tmp_path)
+    assert config.model_type == "yi"
+    loaded = LlamaQModel.loader.from_pretrained(tmp_path, config=config).eval()
+    for key, value in model.state_dict().items():
+        torch.testing.assert_close(loaded.state_dict()[key], value, atol=0, rtol=0)
+
+
+def test_longllama_gradient_checkpointing_uses_transformers_checkpoint_func():
+    import warnings
+
+    model = local_model(mem_layers=[])
+    model.train()
+    model.activation_checkpointing_enable()
+    assert model.model.gradient_checkpointing
+    ids = torch.tensor([[3, 7, 5, 9]])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)  # torch: use_reentrant must be passed explicitly
+        loss = model(ids, labels=ids, use_cache=False).loss
+    loss.backward()
+    assert model.model.layers[0].self_attn.q_proj.weight.grad is not None

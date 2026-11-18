@@ -26,6 +26,11 @@ Yi-Coder config/header metadata was inspected from 01-ai/Yi-Coder-1.5B-Chat
 revision 92fdd1b2f1539ac990e7f4a921db5601da2f0299. No Yi model or weights are
 vendored. The published config selects the native Llama architecture.
 
+Original-format Yi (model_type "Yi", ln1/ln2 norms) config defaults and key
+names were checked against 01-ai/Yi-6B revision
+aa0636a928c0569410a7ace0f0623832db5d51b2 (configuration_yi.py, modeling_yi.py).
+StableLM-2 Epoch use_qkv_bias semantics were checked against
+stabilityai/stablelm-2-1_6b revision 3aeae296739a82430a56141010efae02a2a7686d.
+
 Transformers modeling implementations remain dependencies under their own
-Apache-2.0 license and original notices. Source pins, SHA256 hashes and test
-scope are documented in README.md and checkpoint_inventory.json.
+Apache-2.0 license and original notices.

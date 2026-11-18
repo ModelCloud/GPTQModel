@@ -20,13 +20,6 @@
 """LongLLaMA model configuration"""
 
 from transformers.configuration_utils import PretrainedConfig
-from transformers.utils import logging
-
-
-logger = logging.get_logger(__name__)
-LONGLLAMA_PRETRAINED_CONFIG_ARCHIVE_MAP = {
-    "syzymon/long_llama_3b": "https://huggingface.co/syzymon/long_llama_3b/resolve/main/config.json"
-}
 
 
 class LongLlamaConfig(PretrainedConfig):

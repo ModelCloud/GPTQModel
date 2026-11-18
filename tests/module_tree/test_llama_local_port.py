@@ -58,7 +58,7 @@ def test_alias_loader_is_owned_by_this_definition_not_its_subclasses():
 
 @pytest.mark.parametrize("checkpoint", ["longllama", "stablelm_epoch", "yi_coder"])
 def test_full_checkpoint_metadata_matches_every_meta_tensor(checkpoint):
-    records = json.loads((Path(dispatch.__file__).parent / "checkpoint_inventory.json").read_text())
+    records = json.loads((Path(__file__).parents[1] / "fixtures/ports/llama/checkpoint_inventory.json").read_text())
     record = records[checkpoint]
     config = dispatch._config_class(record["config"]["model_type"]).from_dict(record["config"])
     with torch.device("meta"):
@@ -85,7 +85,7 @@ def expected_keys(family, heads, bias):
     if family == "longllama":
         keys.add("self_attn.rotary_emb.inv_freq")
     if bias:
-        if family not in {"mistral", "longllama", "stablelm_epoch"}:
+        if family not in {"mistral", "longllama"}:
             keys |= {f"self_attn.{name}_proj.bias" for name in ("q", "k", "v")}
         if family in {"cohere", "cohere2", "gemma", "granite", "llama", "olmo", "smollm3", "yi"}:
             keys.add("self_attn.o_proj.bias")
