@@ -76,7 +76,3 @@ class DeepSeekV3QModel(BaseQModel):
             },
         }
     ]
-
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # MLA latent norms and routed/shared consumers are not qualified for scale folding.
-        return []
