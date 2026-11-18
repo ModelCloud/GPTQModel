@@ -922,20 +922,9 @@ def prepare_calibration_dataset(
         if mask_tensor.ndim == 1:
             mask_tensor = mask_tensor.unsqueeze(0)
 
-        # An additive/extended mask encodes "attend" as 0 (or a positive bias)
-        # and "masked" as a negative bias. When such a mask is all zeros there
-        # is no padding at all, but ``normalize_seq_mask`` reads 0 as "drop" for
-        # a 0/1 mask and would erase every token. Resolve it here first so only
-        # genuinely masked positions are dropped. A 2-D integer 0/1 mask keeps
-        # the usual meaning: an all-zero row is all padding.
-        if (
-            mask_tensor.dtype != torch.bool
-            and mask_tensor.numel() > 0
-            and torch.count_nonzero(mask_tensor).item() == 0
-            and (mask_tensor.is_floating_point() or mask_tensor.ndim >= 3)
-        ):
-            mask_tensor = torch.ones_like(mask_tensor)
-
+        # ``normalize_seq_mask`` owns the additive-versus-0/1 inference,
+        # including the all-zero unpadded extended mask (#5134), so the
+        # layer-replay and user-calibration paths share one rule.
         try:
             keep_mask = normalize_seq_mask(mask_tensor, seq_len=ids_tensor.shape[-1])
         except ValueError as exc:

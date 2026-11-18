@@ -154,6 +154,10 @@ Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kerne
   each block as a positional argument; reading only keyword arguments dropped it
   and replayed every layer without causality. See
   [positional replay mask capture](https://github.com/ModelCloud/GPTQModel/blob/main/docs/positional-replay-mask-capture.md).
+- **Classify additive masks before dropping padding.** An all-zero extended mask
+  means "no padding", not "all padding"; layer replay, user calibration and AWQ
+  share one keep-mask classifier. See
+  [attention-mask keep classification](https://github.com/ModelCloud/GPTQModel/blob/main/docs/attention-mask-keep-classification.md).
 - **Replay each calibration document separately.** AWQ token-row replay rebuilds
   a block-diagonal per-document mask and keeps each row's original position;
   additive masks treat `0` as attended. See

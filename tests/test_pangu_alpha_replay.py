@@ -184,7 +184,82 @@ def test_pangu_last_layer_gptq_beats_rtn(tmp_path):
         errors[label] = float((quantized - reference).norm() / reference.norm())
         del reloaded
 
+    print(f"[pangu-quality] {errors}")
     assert errors["GPTQ"] < errors["RTN"], (
         f"GPTQ last-layer q_proj error {errors['GPTQ']:.4f} must beat RTN "
         f"{errors['RTN']:.4f}; the top-query layer is calibrated on the wrong input"
     )
+
+
+@pytest.mark.skipif(
+    not PANGU_PATH.is_dir(),
+    reason=f"local PanGu-alpha fixture is unavailable: {PANGU_PATH}",
+)
+def test_pangu_unpadded_calibration_reaches_every_gptq_module(tmp_path, monkeypatch):
+    """Unpadded rows must still accumulate a non-zero Hessian (#5134).
+
+    PanGu-alpha's remote block code turns an unpadded 0/1 tokenizer mask into
+    an all-zero extended additive mask. If the keep-mask classifier reads that
+    as "all padding", every module records zero samples and silently falls back
+    to RTN. Assert the sample counts the quantizer actually accumulated, not
+    just the downstream quality comparison.
+    """
+
+    from gptqmodel import GPTQModel
+    from gptqmodel.quantization.config import GPTQConfig
+    from gptqmodel.quantization.gptq import GPTQ
+    from tests.tiny_remote_models import build_tiny_remote_model
+
+    path = build_tiny_remote_model(
+        PANGU_PATH,
+        tmp_path / "tiny",
+        {
+            "vocab_size": 128,
+            "hidden_size": 64,
+            "intermediate_size": 256,
+            "num_layers": 4,
+            "num_heads": 4,
+            "max_position_embeddings": 64,
+            "layer_norm_epsilon": 1e-5,
+            "activation_function": "gelu",
+            "bos_token_id": 1,
+            "eos_token_id": 2,
+            "pad_token_id": 0,
+        },
+    )
+
+    generator = torch.Generator().manual_seed(0)
+    calibration = [
+        {
+            "input_ids": torch.randint(4, 128, (1, 32), generator=generator),
+            # No padding: PanGu's block-level extended mask is all zeros.
+            "attention_mask": torch.ones(1, 32, dtype=torch.long),
+        }
+        for _ in range(4)
+    ]
+
+    sample_counts = {}
+    original_quantize = GPTQ.quantize
+
+    def spy_quantize(self, blocksize=128):
+        name = getattr(self._named_module, "full_name", None) or self.name
+        sample_counts[name] = int(self.nsamples)
+        return original_quantize(self, blocksize=blocksize)
+
+    monkeypatch.setattr(GPTQ, "quantize", spy_quantize)
+
+    model = GPTQModel.load(
+        str(path),
+        quantize_config=GPTQConfig(bits=4, group_size=32, device="cpu"),
+        trust_remote_code=True,
+        dtype=torch.float32,
+    )
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1))
+
+    print(f"[pangu-hessian] modules={len(sample_counts)} samples={sample_counts}")
+    assert sample_counts, "no GPTQ module was quantized"
+    empty = {name: count for name, count in sample_counts.items() if count <= 0}
+    assert not empty, f"modules with an empty Hessian: {empty}"
+    assert any(
+        "h.3" in name and "q_proj" in name for name in sample_counts
+    ), sample_counts
