@@ -79,7 +79,10 @@ def decode_mxfp4(packed, scales, *, dtype=torch.bfloat16):
                        device=packed.device, dtype=torch.float32)
     codes = torch.stack((packed & 15, packed >> 4), -1).reshape(packed.shape[0], -1)
     values = lut[codes.long()].reshape(packed.shape[0], -1, 32)
-    scale = torch.ldexp(torch.ones_like(scales, dtype=torch.float32), scales.int() - 127)
+    # ``pow(2, exponent)`` rather than ``ldexp``: ``torch.ldexp`` launches on
+    # the *current* device and faults with an illegal memory access when its
+    # inputs live on another GPU (#5263).
+    scale = torch.pow(2.0, scales.int() - 127)
     values.mul_(scale.unsqueeze(-1))
     result = values.reshape(packed.shape[0], -1).to(dtype)
     if not bool(torch.isfinite(result).all()):

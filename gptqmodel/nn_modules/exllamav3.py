@@ -469,9 +469,15 @@ class ExllamaV3Linear(nn.Module):
         # FP16 number, with the most headroom left for the row's small elements.
         # Rows that do not need it keep 1.0, so only the wide rows change.
         _, exponent = torch.frexp(row_amax / _FP16_SAFE_AMAX)
+        # ``pow(2, exponent)`` rather than ``ldexp``: ``torch.ldexp`` launches
+        # on the *current* device and faults with an illegal memory access when
+        # its inputs live on another GPU, which is the normal state for a
+        # ``device_map`` split or an explicit ``cuda:1`` placement (#5263).
+        # ``2**exponent`` is exact for every integer exponent here, and only
+        # the rows above the FP16 bound reach this value.
         output_scale = torch.where(
             row_amax > _FP16_SAFE_AMAX,
-            torch.ldexp(torch.ones_like(row_amax), exponent),
+            torch.pow(2.0, exponent).to(row_amax.dtype),
             torch.ones_like(row_amax),
         )
         return (x / output_scale).to(torch.float16), output_scale

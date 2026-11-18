@@ -114,7 +114,12 @@ def decode_e8m0_scale(scale: torch.Tensor) -> torch.Tensor:
     else:
         raise TypeError(f"E8M0 scale must use uint8 or float8_e8m0fnu storage, got {scale.dtype}.")
     exponent = encoded.to(torch.int32) - 127
-    decoded = torch.ldexp(torch.ones_like(encoded, dtype=torch.float32), exponent)
+    # ``pow(2, exponent)`` rather than ``ldexp``: ``torch.ldexp`` launches on
+    # the *current* device and faults with an illegal memory access when its
+    # inputs live on another GPU (#5263). ``2**exponent`` is bit-exact for the
+    # whole E8M0 range, including the denormal 2**-127 that ``exp2`` rounds one
+    # ulp low on CUDA.
+    decoded = torch.pow(2.0, exponent)
     return torch.where(encoded == 255, torch.full_like(decoded, float("nan")), decoded)
 
 
