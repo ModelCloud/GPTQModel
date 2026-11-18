@@ -2177,15 +2177,65 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 # outlives the model unless the run releases it, and a failed
                 # run must release it too.
                 self._release_run_workspace()
-            self._restore_offloaded_base_modules(strict=True)
-            self._restore_disk_offloaded_modules()
-            self._materialize_remaining_meta_modules()
-            # Unquantized layers keep the parameters `pre_quantize`
-            # materialized under inference mode, and `post_quantize`'s
-            # `param.data =` move leaves them without a version counter
-            # (issue #4572). Repair every one before the model is returned.
-            ensure_version_counters(self.gptq_model.model)
+            try:
+                self._restore_offloaded_base_modules(strict=True)
+                self._restore_disk_offloaded_modules()
+                self._materialize_remaining_meta_modules()
+                # Unquantized layers keep the parameters `pre_quantize`
+                # materialized under inference mode, and `post_quantize`'s
+                # `param.data =` move leaves them without a version counter
+                # (issue #4572). Repair every one before the model is returned.
+                ensure_version_counters(self.gptq_model.model)
+            except BaseException:
+                # The tail turns the lazy offloaded shell back into a usable
+                # in-session model, and a Ctrl-C, OOM or I/O error can land in
+                # any of its steps. Recover before re-raising, or the base
+                # modules stay on meta and every later forward fails (#5023).
+                self._recover_post_loop_tail_failure()
+                raise
             return result
+
+    def _recover_post_loop_tail_failure(self) -> None:
+        """Best-effort recovery when the post-loop tail itself fails (#5023).
+
+        ``_loop_impl`` already returned, so the layer that was mid-stage and the
+        processors are fine: only the base-module restore and the
+        meta-materialization steps still need to run. Every step is best effort
+        so the recovery can never mask the failure that brought us here.
+        """
+
+        try:
+            self._restore_offloaded_base_modules(strict=False)
+        except Exception:
+            log.warning(
+                "failed to restore the offloaded base modules after a post-loop "
+                "failure",
+                exc_info=True,
+            )
+        try:
+            self._materialize_unreached_meta_modules()
+        except Exception:
+            log.warning(
+                "failed to materialize the meta modules after a post-loop failure",
+                exc_info=True,
+            )
+        try:
+            ensure_version_counters(self.gptq_model.model)
+        except Exception:
+            log.warning(
+                "failed to repair tensor version counters after a post-loop failure",
+                exc_info=True,
+            )
+        # Completed layers stay as disk-offloaded meta shells pointing into this
+        # run's private offload root; keep it while they read from it (#4807).
+        model = getattr(self.gptq_model, "model", None)
+        if model is not None and has_disk_offloaded_modules(model):
+            log.debug(
+                "Offload: keeping the per-run directory for the disk-offloaded "
+                "layers of a post-loop failure."
+            )
+        else:
+            release_private_offload_root(self.gptq_model)
 
     def _materialize_deferred_boundary_prefix(self, checkpoint) -> None:
         """Install a recovered packed prefix only when publication needs it."""
