@@ -11,11 +11,12 @@ import pytest
 import torch
 import torch.nn.functional as F
 from awq_neutrality import assert_awq_folds_neutral
-from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizerFast
 
 from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.ports.native.auto import AutoConfig, AutoModelForCausalLM
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 from gptqmodel.utils.security import BYPASS_ENV
