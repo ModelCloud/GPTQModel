@@ -1,5 +1,6 @@
 # Vendored from huggingface/transformers v5.23.0 (Apache-2.0) by GPT-QModel.
 # Do not edit by hand except to keep it on the 5.23 ABI; see docs/transformers5-model-ports.md.
+# GPT-QModel: modernized to Transformers 5.23 conventions (no legacy return paths).
 # Copyright 2024 Zyphra Technologies and the HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
@@ -1009,11 +1010,6 @@ class ZambaForCausalLM(ZambaPreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-
-    def prepare_inputs_for_generation(self, input_ids, **kwargs):
-        kwargs["logits_to_keep"] = self.config.num_logits_to_keep
-        model_inputs = super().prepare_inputs_for_generation(input_ids, **kwargs)
-        return model_inputs
 
 
 @auto_docstring(
