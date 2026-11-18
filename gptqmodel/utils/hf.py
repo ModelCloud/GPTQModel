@@ -387,18 +387,21 @@ def suspend_hf_weight_init():
 _KEEP_IN_FP32_ATTRS = ("_keep_in_fp32_modules", "_keep_in_fp32_modules_strict")
 
 
-def _iter_keep_in_fp32_declarations(model):
+def _iter_keep_in_fp32_declarations(model, attrs=_KEEP_IN_FP32_ATTRS):
     """Yield the keep-in-fp32 patterns a model declares on itself or a child.
 
     ``PreTrainedModel.post_init`` already unions child declarations onto the
     top-level model, but walking submodules keeps the guard correct for models
     built without that step.
+
+    ``attrs`` narrows the walk to one declaration class. ``_strict`` entries
+    stay fp32 for every half dtype; the non-strict ones only for fp16.
     """
 
     seen = set()
     modules = getattr(model, "modules", None)
     for module in (modules() if callable(modules) else (model,)):
-        for attr in _KEEP_IN_FP32_ATTRS:
+        for attr in attrs:
             declared = getattr(module, attr, None)
             if not declared:
                 continue
@@ -410,7 +413,7 @@ def _iter_keep_in_fp32_declarations(model):
                     yield name
 
 
-def _compile_keep_in_fp32_matcher(model):
+def _compile_keep_in_fp32_matcher(model, attrs=_KEEP_IN_FP32_ATTRS):
     """Compile the model's fp32-pinned parameter patterns, transformers-style.
 
     transformers 5.22 matches every ``_keep_in_fp32_modules`` and
@@ -423,7 +426,7 @@ def _compile_keep_in_fp32_matcher(model):
 
     patterns = [
         re.compile(name.replace("*", ".*"))
-        for name in _iter_keep_in_fp32_declarations(model)
+        for name in _iter_keep_in_fp32_declarations(model, attrs=attrs)
     ]
     if not patterns:
         return None
