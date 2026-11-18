@@ -47,7 +47,7 @@ PENDING_MODEL_IMPORT_PORTS = frozenset({
     "internlm", "interns1", "internvl_chat", "kimi_k25", "kimi_k3", "klear", "lfm3_omni", "lfm3_vl", "llama",
     "llava_qwen2", "locateanything", "mage_vl", "mimo", "mimo_v2", "minicpm_o", "minicpmv", "minimax_m2",
     "nemotron_h", "nemotron_h_puzzle", "nemotron_labs_diffusion", "nemotron_omni", "openvla", "ouro", "ovis",
-    "ovis2_5", "ovis2_6_moe", "phi4", "qwen2_5_vl", "qwen2_vl", "qwen3", "qwen_drive", "rw", "sensenova_loop",
+    "ovis2_5", "ovis2_6_moe", "phi4", "qwen2_5_vl", "qwen2_vl", "qwen_drive", "rw", "sensenova_loop",
     "solar_open2", "unlimited_ocr", "zdtaichu5",
 })
 

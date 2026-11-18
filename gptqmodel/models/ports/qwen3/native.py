@@ -1,13 +1,37 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Native class aliases, imported only when the definition's loader is used."""
+"""Vendored Transformers 5.23 Qwen3 class aliases, imported only when the definition's loader is used."""
 
-from transformers import PreTrainedConfig, Qwen2Tokenizer, Qwen3Config, Qwen3ForCausalLM, TokenizersBackend
-from transformers.models.auto.tokenization_auto import get_tokenizer_config
+import json
+
+from transformers.configuration_utils import PreTrainedConfig
+from transformers.tokenization_utils_tokenizers import TokenizersBackend
+from transformers.utils import cached_file
+
+from ..native.qwen2.tokenization_qwen2 import Qwen2Tokenizer
+from ..native.qwen3.configuration_qwen3 import Qwen3Config
+from ..native.qwen3.modeling_qwen3 import Qwen3ForCausalLM
+
+
+def _tokenizer_config(model_id_or_path, **kwargs):
+    """Read ``tokenizer_config.json`` (or ``{}``) the way Transformers' ``get_tokenizer_config`` does."""
+
+    resolved = cached_file(
+        model_id_or_path,
+        "tokenizer_config.json",
+        _raise_exceptions_for_gated_repo=False,
+        _raise_exceptions_for_missing_entries=False,
+        _raise_exceptions_for_connection_errors=False,
+        **kwargs,
+    )
+    if resolved is None:
+        return {}
+    with open(resolved, encoding="utf-8") as reader:
+        return json.load(reader)
 
 
 class NativeQwen3Config:
-    """Read data only, then construct an exact native config without AutoConfig.
+    """Read data only, then construct the vendored native config without AutoConfig.
 
     The supported Marin-32B release declares ``model_type=qwen3``. There is no
     inspected source for a distinct ``marin`` schema; a registry alias alone
@@ -39,7 +63,7 @@ class Qwen3Tokenizer:
     def from_pretrained(cls, model_id_or_path, **kwargs):
         from ....utils.hf import get_config_selection_kwargs
 
-        declared = get_tokenizer_config(model_id_or_path, **get_config_selection_kwargs(kwargs)).get("tokenizer_class")
+        declared = _tokenizer_config(model_id_or_path, **get_config_selection_kwargs(kwargs)).get("tokenizer_class")
         if declared is None or declared.removesuffix("Fast") == "Qwen2Tokenizer":
             tokenizer_class = Qwen2Tokenizer
         else:

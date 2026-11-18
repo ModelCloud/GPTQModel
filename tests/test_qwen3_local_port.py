@@ -22,6 +22,8 @@ from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.qwen3 import Qwen3QModel
 from gptqmodel.models.definitions.qwen3_5_text import Qwen3_5TextQModel
 from gptqmodel.models.local import LocalModelLoader
+from gptqmodel.models.ports.native.qwen3.configuration_qwen3 import Qwen3Config as VendoredQwen3Config
+from gptqmodel.models.ports.native.qwen3.modeling_qwen3 import Qwen3ForCausalLM as VendoredQwen3ForCausalLM
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.hf import load_model_config
@@ -62,7 +64,9 @@ def test_tokenizer_class_matches_native_auto_selection(tmp_path, declared):
 
     expected = AutoTokenizer.from_pretrained(tmp_path)
     actual = Qwen3QModel.loader.load_tokenizer(tmp_path)
-    assert type(actual) is type(expected)
+    # Same class as Transformers' AutoTokenizer selection, served from the vendored/framework module.
+    assert type(actual).__name__ == type(expected).__name__
+    assert not type(actual).__module__.startswith("transformers.models.")
     assert type(actual).__name__ == ("TokenizersBackend" if declared == "PreTrainedTokenizerFast" else "Qwen2Tokenizer")
     assert actual("ab a b").input_ids == expected("ab a b").input_ids
 
@@ -154,9 +158,9 @@ def tiny_config(**overrides):
 
 def test_definition_owns_exact_native_qwen3():
     assert isinstance(Qwen3QModel.loader, LocalModelLoader)
-    model = Qwen3QModel.loader.from_config(tiny_config())
-    assert type(model) is Qwen3ForCausalLM
-    assert type(model.config) is Qwen3Config
+    model = Qwen3QModel.loader.from_config(VendoredQwen3Config.from_dict(tiny_config().to_dict()))
+    assert type(model) is VendoredQwen3ForCausalLM
+    assert type(model.config) is VendoredQwen3Config
     assert not Qwen3QModel.require_trust_remote_code
     assert Qwen3_5TextQModel.loader is AutoModelForCausalLM
     assert AutoConfig.for_model("qwen3").__class__ is Qwen3Config
@@ -207,8 +211,8 @@ def test_public_native_selection_tokenizer_generation_and_reload(tmp_path, monke
         trust_remote_code=trust,
         attn_implementation="eager",
     )
-    assert type(loaded.model) is Qwen3ForCausalLM
-    assert type(loaded.model.config) is Qwen3Config
+    assert type(loaded.model) is VendoredQwen3ForCausalLM
+    assert type(loaded.model.config) is VendoredQwen3Config
     assert loaded.tokenizer.encode("Marin and Qwen: café 你好!") == ids[0].tolist()
     assert loaded.tokenizer.decode(ids[0].tolist(), skip_special_tokens=True) == "Marin and Qwen: café 你好!"
     if family == "qwen3":
@@ -233,7 +237,7 @@ def test_public_native_selection_tokenizer_generation_and_reload(tmp_path, monke
             trust_remote_code=trust,
             attn_implementation="eager",
         )
-        assert type(loaded.model) is Qwen3ForCausalLM
+        assert type(loaded.model) is VendoredQwen3ForCausalLM
         for name in [
             "bos_token_id",
             "eos_token_id",
@@ -335,7 +339,7 @@ def test_public_awq_scaling_pack_infer_two_exact_reloads(tmp_path, family, offlo
         loaded = GPTQModel.load(
             str(target), device="cpu", backend=BACKEND.TORCH, dtype=torch.float16, attn_implementation="eager"
         )
-        assert type(loaded.model) is Qwen3ForCausalLM
+        assert type(loaded.model) is VendoredQwen3ForCausalLM
         assert set(loaded.model.state_dict()) == set(packed)
         for key, value in packed.items():
             actual = loaded.model.state_dict()[key]
@@ -476,7 +480,7 @@ def test_native_cache_continuation_assignment_and_safetensors_cycles(tmp_path, d
         target = tmp_path / str(cycle)
         model.save_pretrained(target, safe_serialization=True)
         model = Qwen3QModel.loader.from_pretrained(target, dtype=dtype, attn_implementation=implementation).eval()
-        assert type(model) is Qwen3ForCausalLM
+        assert type(model) is VendoredQwen3ForCausalLM
         for key, value in original.items():
             assert model.state_dict()[key].dtype == value.dtype
             torch.testing.assert_close(model.state_dict()[key], value, rtol=0, atol=0)
@@ -505,6 +509,6 @@ def test_subfolder_selection_and_corrupt_safetensors_repair_retry(tmp_path):
         dtype=torch.float32,
         attn_implementation="eager",
     )
-    assert type(loaded.model) is Qwen3ForCausalLM
+    assert type(loaded.model) is VendoredQwen3ForCausalLM
     for key, value in model.state_dict().items():
         torch.testing.assert_close(loaded.model.state_dict()[key], value, rtol=0, atol=0)
