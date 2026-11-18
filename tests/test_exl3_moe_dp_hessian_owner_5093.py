@@ -169,7 +169,10 @@ def _run_in_subprocess(
     timeout: int = 1800,
 ):
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = "0,1"
+    # Inherit the caller's visibility settings (CUDA_VISIBLE_DEVICES or
+    # ROCR_VISIBLE_DEVICES). The fixture already checked that the parent sees
+    # at least two devices, and forcing "0,1" would address different GPUs
+    # than the caller selected.
     env["HF_HUB_OFFLINE"] = "1"
     env["LOGBAR_ANIMATION"] = "0"
     env["GPTQ_BYPASS_SAFETY_CHECKS"] = "1"
@@ -341,10 +344,15 @@ def test_default_data_parallel_owns_routed_hessians_on_concrete_devices(
         native_model_dir, auto_forward_data_parallel=True, out_path=out_path
     )
 
+    import torch
+
     _assert_concrete_owners(record["owners"])
-    assert set(record["owners"]) == {"cuda:0", "cuda:1"}, (
-        "routed experts were not spread over the two data-parallel devices: "
-        f"{record['owners']}"
+    expected_owners = {
+        f"cuda:{index}" for index in range(torch.cuda.device_count())
+    }
+    assert set(record["owners"]) == expected_owners, (
+        "routed experts were not spread over every data-parallel device: "
+        f"{record['owners']} != {sorted(expected_owners)}"
     )
 
     experts = _expert_projections(record)
