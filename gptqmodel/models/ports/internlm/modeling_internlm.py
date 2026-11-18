@@ -15,9 +15,9 @@ from transformers.generation import GenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-from transformers.models.qwen2.modeling_qwen2 import Qwen2MLP as InternLMMLP
 from transformers.utils import can_return_tuple
 
+from ..native.qwen2.modeling_qwen2 import Qwen2MLP as InternLMMLP
 from .configuration_internlm import InternLMConfig
 
 
