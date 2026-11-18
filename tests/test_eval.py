@@ -7,6 +7,11 @@ import os
 import tempfile
 
 import pytest
+
+
+# Evaluation runs through the optional Evalution package (tests/eval.py).
+pytest.importorskip("evalution")
+
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 

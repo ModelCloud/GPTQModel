@@ -12,7 +12,13 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-from gptqmodel import BACKEND
+import pytest  # noqa: E402
+
+
+# Evaluation runs through the optional Evalution package (tests/eval.py).
+pytest.importorskip("evalution")
+
+from gptqmodel import BACKEND  # noqa: E402
 from tests.accelerator_gates import requires_nvidia_cuda  # noqa: E402
 from tests.eval import evaluate, format_eval_result_table, get_eval_task_metrics  # noqa: E402
 

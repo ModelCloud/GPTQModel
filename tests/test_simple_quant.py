@@ -6,6 +6,11 @@
 import tempfile
 
 import pytest
+
+
+# Evaluation runs through the optional Evalution package (tests/eval.py).
+pytest.importorskip("evalution")
+
 from datasets import load_dataset
 from logbar import LogBar
 
