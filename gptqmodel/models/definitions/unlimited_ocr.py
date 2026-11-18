@@ -60,9 +60,6 @@ class UnlimitedOCRQModel(BaseQModel):
         },
     ]
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        return []
-
     @classmethod
     def resolve_hf_conversion_map_reversed(cls, target_model=None):
         from ..ports.unlimited_ocr.checkpoint import checkpoint_mapping

@@ -7,6 +7,7 @@ import re
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from defuser.modeling.update_module import update_module
 from transformers import UnlimitedOcrConfig, UnlimitedOcrForConditionalGeneration
 
@@ -64,8 +65,44 @@ def test_live_module_plan_all_layout_owners(layout, kv_heads, bias, device):
     assert UnlimitedOCRQModel.fusable is None
 
 
-def test_explicit_plain_awq_policy():
-    wrapper = object.__new__(UnlimitedOCRQModel)
-    model = UnlimitedOcrForConditionalGeneration(tiny_config())
-    for layer in model.model.language_model.layers:
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
+@pytest.mark.parametrize("layout", ["mixed", "sparse"])
+@pytest.mark.parametrize("kv_heads", [1, 2, 4])
+@pytest.mark.parametrize("bias", [False, True])
+def test_awq_scale_folds_preserve_dense_and_moe_text_layers(layout, kv_heads, bias):
+    torch.manual_seed(7)
+    # Native eager attention only supports MHA/MQA; GQA runs through SDPA.
+    implementation = "sdpa" if kv_heads == 2 else "eager"
+    model = UnlimitedOCRQModel.loader.from_config(tiny_config(kv_heads, bias, layout=layout),
+                                                  attn_implementation=implementation).eval()
+    update_module(model, cleanup_original=False)
+    text = model.model.language_model
+    with torch.no_grad():
+        # Trained-like gains and a non-degenerate router (native init is ones
+        # and zeros, which would hide a missing router compensation).
+        for layer in text.layers:
+            layer.input_layernorm.weight.uniform_(0.5, 1.5)
+            layer.post_attention_layernorm.weight.uniform_(0.5, 1.5)
+            if hasattr(layer.mlp, "gate"):
+                layer.mlp.gate.weight.normal_()
+    ids = torch.randint(4, 60, (1, 16), generator=torch.Generator().manual_seed(1))
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    for layer in text.layers:
+        checked = assert_awq_folds_neutral(UnlimitedOCRQModel, model, layer, forward)
+        expected = [("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"])]
+        if kv_heads == 4:
+            # Grouped K/V make v_proj narrower than o_proj's input.
+            expected.append(("self_attn.v_proj", ["self_attn.o_proj"]))
+        if hasattr(layer.mlp, "gate"):
+            owners = ["mlp.shared_experts"] + [f"mlp.experts.{expert}" for expert in range(4)]
+            expected.append(("post_attention_layernorm", [f"{owner}.{name}" for owner in owners
+                                                          for name in ("gate_proj", "up_proj")]))
+            expected += [(f"{owner}.up_proj", [f"{owner}.down_proj"]) for owner in owners]
+        else:
+            expected += [("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"]),
+                         ("mlp.up_proj", ["mlp.down_proj"])]
+        assert [(source, targets) for source, targets, _ in checked] == expected
+        consumers = {source: consumers for source, _, consumers in checked}
+        assert consumers["post_attention_layernorm"] == (["mlp.gate"] if hasattr(layer.mlp, "gate") else [])
