@@ -3245,7 +3245,7 @@
     },
     "minicpmo": {
       "definition": "MiniCPMOQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned MiniCPM-o multimodal Qwen/vision/audio/TTS binding; fusion executor has not been qualified."
     },
     "minicpmv": {
       "definition": "MiniCPMVQModel",

@@ -334,8 +334,10 @@ records original scaled decoders, six legacy vision layouts, native MiniMax-M2,
 hybrid Text-01 attention and source-specific MiMo-V2. Native MiniCPM-V 4.6 keeps
 its separate Transformers loader. [MobileLLM](gptqmodel/models/ports/mobilellm/README.md)
 has public-source architecture coverage only; its FAIR Noncommercial Research
-License and acceptable-use policy do not grant commercial use. MiniCPM-o's local
-port remains excluded pending resolution of its ChatTTS licensing boundary.
+License and acceptable-use policy do not grant commercial use.
+[MiniCPM-o](gptqmodel/models/ports/minicpm_o/README.md) uses a package-owned
+loader for versions 2.6 and 4.5. Install `gptqmodel[minicpm-o]` for the 2.6 TTS
+module.
 [Recurrent, Nemotron and diffusion selection](docs/transformers5-model-ports.md#recurrent-nemotron-and-diffusion-implementation-selection)
 also records Ouro's owned recurrent decoder and Nemotron-Omni's native media
 owners. [OpenVLA model and action selection](docs/transformers5-model-ports.md#openvla-model-and-action-selection)

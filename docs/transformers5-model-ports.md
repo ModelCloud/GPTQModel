@@ -88,8 +88,7 @@ runtime/provenance/license assets, including 149 compressed JSON fixtures.
 Metadata now requires Python `>=3.11`, Transformers `>=5.23.0`, Tokenicer `>=0.0.20`,
 TikToken `>=0.12.0` and SentencePiece `>=0.2.1`; timm and einops are restricted
 to the vision extra. The moved Puzzle network inventory reader is excluded
-from both runtime artifacts. Licensing-held MiniCPM-o and Pangu implementations
-are also excluded.
+from both runtime artifacts.
 
 XVERSE's legacy Metaspace tokenizer needs the correction from
 [Tokenicer PR #67](https://github.com/ModelCloud/Tokenicer/pull/67), now shipped
@@ -303,7 +302,7 @@ The [checkpoint materialization reference](checkpoint-owned-materialization.md)
 records the shared placement, strict-FP32 and expert-storage contracts. These
 ports do not qualify trained checkpoints or GPU execution. Pangu remains on a
 licensing hold: the inspected custom upstream extension has no established
-redistribution license. MiniCPM-o also remains excluded pending license clearance.
+redistribution license.
 
 ### OpenVLA model and action selection
 
@@ -442,6 +441,11 @@ Llama, Qwen2 or Qwen3 decoder, vision tower and spatial/temporal resampler.
 Its AWQ policy is explicitly plain. The separate native `minicpmv4_6`
 definition retains its own loader, processor and hybrid AWQ policy.
 
+[MiniCPM-o](../gptqmodel/models/ports/minicpm_o/README.md) binds its own Omni
+config, modeling, tokenizer and processor. MiniCPM-o 2.6 uses native Qwen2 and
+4.5 uses native Qwen3, each with its matching vision, Whisper audio, resampler
+and TTS modules. Both use plain AWQ on the decoder projections.
+
 Original MiniMax-Text-01 needs its source partial-RoPE and hybrid cache owner;
 native MiniMax-M2 is selected directly. Both remain plain AWQ and excluded from
 fusion. MiMo-V2 owns its hybrid attention implementation and dense auxiliary
@@ -454,11 +458,13 @@ flowchart TD
     B -->|Legacy MiniCPM-V| D["Owned versioned vision, resampler and decoder"]
     B -->|MiniMax Text-01| E["Owned partial-RoPE hybrid decoder/cache"]
     B -->|MiMo-V2| F["Owned hybrid decoder and dense auxiliary state"]
+    B -->|MiniCPM-o| I["Owned Omni modules and native Qwen2 or Qwen3"]
     B -->|No| G["Native MiniMax-M2 or separate native MiniCPM-V 4.6"]
     C --> H["Checkpoint auto_map cannot replace selected implementation"]
     D --> H
     E --> H
     F --> H
+    I --> H
     A -->|Ambiguous missing model_type| X["Reject before checkpoint Python"]
     classDef failure fill:#ffcdd2,stroke:#b71c1c
     class X failure
@@ -468,15 +474,15 @@ flowchart TD
 | --- | --- | --- |
 | Original MiniCPM | `5e8bfc029^:gptqmodel/models/definitions/minicpm.py` required checkpoint trust | Explicit owned config/model, declared missing-type architecture and plain AWQ |
 | Legacy media wrapper | `fecb30425:gptqmodel/models/definitions/minicpmv.py` relied on checkpoint classes | Versioned owned media components; native 4.6 definition remains independent |
+| MiniCPM-o | `e44f276d1:gptqmodel/models/definitions/minicpm_o.py` used checkpoint AutoModel and a global cache patch | `MiniCPMOQModel.loader` binds the exact 2.6 or 4.5 package classes with an instance-owned cache adapter |
 | Original MiniMax | `22bea1201:gptqmodel/models/definitions/minimax.py` delegated to AutoModel | Preserve source half-head rotary and hybrid cache explicitly |
 
 MobileLLM's [full license and acceptable-use policy](../gptqmodel/models/ports/mobilellm/LICENSE)
 remain packaged with its Apache attribution and notice. Official HF assets were
 inaccessible, so its independently checked public-source architecture is not a
-released-checkpoint inventory or tokenizer qualification. The MiniCPM-o port is
-**excluded from integration**: the provenance audit found a broader ChatTTS
-boundary spanning codec and repetition/generation helpers with historical
-noncommercial/AGPL licensing. Including notices does not resolve that boundary.
+released-checkpoint inventory or tokenizer qualification. MiniCPM-o packages
+its source notices, including the historical ChatTTS code licenses and Vocos
+attribution. The port includes configuration and shape metadata only.
 
 ### MobileLLM cache failure recovery
 
@@ -1759,8 +1765,8 @@ Fresh wheel/sdist builds used `uv build --no-build-isolation --wheel --sdist`
 with the qualification interpreter, because its environment has no executable
 `python -m build` frontend. Artifact verification found 727 byte-identical port
 files and 63 valid compressed JSON assets in each, including the TeleChat PDF,
-all required dependency floors, and no tests/scripts, Kimi-K2.5 qualification
-assets, MiniCPM-o or Pangu runtime implementation.
+all required dependency floors, and no tests/scripts or Kimi-K2.5 qualification
+assets. This artifact check predates the MiniCPM-o integration.
 
 String/path norm teachers resolve their own config and loader. `NormConfig`
 does not expose independent revision/subfolder/cache arguments; pass an already
