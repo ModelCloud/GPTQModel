@@ -16,10 +16,5 @@ class MimoQModel(LlamaQModel):
         config_class="gptqmodel.models.ports.mimo.configuration_mimo.MiMoConfig",
         model_class="gptqmodel.models.ports.mimo.modeling_mimo.MiMoForCausalLM",
     )
-
-    # MTP is checkpoint-owned, full-precision auxiliary state outside the
-    # causal-LM decoder loop, exactly as in the pinned upstream implementation.
-    # Its concatenated hidden/token inputs are not ordinary Llama AWQ sources.
-    def awq_get_modules_for_scaling(self, *args, **kwargs):
-        """Plain AWQ only until fold/search/replay has been qualified."""
-        return []
+    # MTP layers are full-precision auxiliary state outside `model.layers`, so
+    # AWQ scale search only sees the ordinary Qwen2-style decoder layers.
