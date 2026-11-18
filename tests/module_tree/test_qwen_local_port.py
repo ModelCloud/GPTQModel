@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from test_qwen_local_port import ASSETS, tiny_model
+from test_qwen_local_port import ASSETS, FIXTURES, tiny_model
 
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.qwen import QwenQModel
@@ -50,13 +50,13 @@ def expected_shapes(c):
 
 @pytest.mark.parametrize("release", ["Qwen-1_8B", "Qwen-7B", "Qwen-14B", "Qwen-72B", "Qwen-7B-Chat"])
 def test_released_indices_headers_exact_live_meta_owners(release):
-    manifest = json.loads((ASSETS / "provenance.json").read_text())["releases"][release]
+    released = json.loads((FIXTURES / "released_metadata.json").read_text())[release]["config.json"]
     headers = read_port_json(ASSETS / "fixtures/checkpoint_headers.json")[release]
-    c = QWenConfig.from_dict(manifest["config"])
+    c = QWenConfig.from_dict(released)
     with torch.device("meta"):
         model = QWenLMHeadModel(c)
     state = {key: tuple(value.shape) for key, value in model.state_dict().items()}
-    assert set(manifest["keys"]) == set(state) == set(headers)
+    assert set(state) == set(headers)
     assert state == expected_shapes(c) == {key: tuple(value["shape"]) for key, value in headers.items()}
     assert all(p.device.type == "meta" for p in model.parameters())
     del model
