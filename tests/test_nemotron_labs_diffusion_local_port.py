@@ -451,7 +451,7 @@ def test_generation_eos_sampling_and_thinking_budget():
 @pytest.mark.parametrize("paradigm", ["bidirectional", "autoregressive", "block_diff"])
 @pytest.mark.parametrize("offload", [False, True])
 @pytest.mark.parametrize("kv", [1, 4])
-def test_public_plain_awq_pack_infer_two_safetensors_cycles(tmp_path, paradigm, offload, kv):
+def test_public_awq_pack_infer_two_safetensors_cycles(tmp_path, paradigm, offload, kv):
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
 
@@ -460,6 +460,10 @@ def test_public_plain_awq_pack_infer_two_safetensors_cycles(tmp_path, paradigm, 
                        dlm_paradigm=paradigm, mask_token_id=127, num_key_value_heads=kv)
     original_dense = {key: value.half().clone() for key, value in model.state_dict().items()
                       if not (".self_attn." in key or ".mlp." in key)}
+    # AWQ scale search folds its scales into the decoder input norms; every other
+    # dense tensor (embeddings, final norm, diffusion head) must stay untouched.
+    folded_norms = {key for key in original_dense if key.endswith(("input_layernorm.weight",
+                                                                     "post_attention_layernorm.weight"))}
     marker = hostile_checkpoint(path, model)
     config = AWQConfig(bits=4, group_size=16, device="cpu", offload_to_disk=offload, fallback=None)
     loaded = GPTQModel.load(str(path), quantize_config=config, backend=BACKEND.TORCH,
@@ -479,7 +483,9 @@ def test_public_plain_awq_pack_infer_two_safetensors_cycles(tmp_path, paradigm, 
     assert all(module.qweight.dtype == torch.int32 for module in packed.values())
     state = {key: value.clone() for key, value in loaded.model.state_dict().items()}
     for key, expected_value in original_dense.items():
-        assert torch.equal(state[key], expected_value), key
+        if key not in folded_norms:
+            assert torch.equal(state[key], expected_value), key
+    assert any(not torch.equal(state[key], original_dense[key]) for key in folded_norms)
     ids = rows[0]["input_ids"]
     expected_logits = loaded.model(ids).logits
     assert torch.isfinite(expected_logits).all()
