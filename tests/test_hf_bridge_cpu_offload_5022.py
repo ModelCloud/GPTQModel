@@ -536,3 +536,255 @@ def test_awq_marlin_uses_the_shared_offload_post_init(monkeypatch):
         monkeypatch.setattr(model_utils, "_post_init_cpu_offloaded_marlin", original)
 
     assert calls == ["AwqMarlinLinear"]
+
+
+def test_offload_predicates_cover_cpu_and_disk():
+    """AUTO must treat `disk` like `cpu`: neither leaves resident tensors."""
+
+    from gptqmodel.utils.backend import BACKEND
+    from gptqmodel.utils.importer import (
+        auto_cpu_offload,
+        device_map_offloads_layers,
+        device_map_uses_cpu,
+        is_offload_placement,
+    )
+
+    assert is_offload_placement("cpu")
+    assert is_offload_placement(torch.device("cpu"))
+    assert is_offload_placement("disk")
+    assert is_offload_placement("DISK")
+    assert not is_offload_placement(None)
+    assert not is_offload_placement(0)
+    assert not is_offload_placement("cuda:0")
+    assert not is_offload_placement(torch.device("cuda", 0))
+
+    assert device_map_offloads_layers({"a": 0, "b": "cpu"})
+    assert device_map_offloads_layers({"a": 0, "b": "disk"})
+    assert not device_map_offloads_layers({"a": 0, "b": 1})
+    assert not device_map_offloads_layers(None)
+    # An unresolved keyword is not a placement; the bridge must not guess.
+    assert not device_map_offloads_layers("auto")
+
+    # The wider predicate is what AUTO selection uses now (#5194).
+    assert auto_cpu_offload(BACKEND.AUTO, {"a": "disk"})
+    assert auto_cpu_offload(None, {"a": "disk"})
+    assert not auto_cpu_offload(BACKEND.MARLIN, {"a": "disk"})
+    # `device_map_uses_cpu` keeps its narrower "is CPU-resident" meaning.
+    assert not device_map_uses_cpu({"a": "disk"})
+
+
+class _OffloadableLayer(nn.Module):
+    """The contract `_post_init_offloaded` relies on, without a real kernel."""
+
+    SUPPORTS_CPU_OFFLOAD = True
+
+    def __init__(self):
+        super().__init__()
+        self.qweight = nn.Parameter(
+            torch.zeros(4, dtype=torch.int32), requires_grad=False
+        )
+        self.calls = 0
+
+    def post_init(self):
+        # A disk-offloaded layer is materialized for the call, then returned.
+        assert not self.qweight.is_meta
+        self.calls += 1
+
+
+class _NonOffloadableLayer(_OffloadableLayer):
+    """A CUDA-only kernel: its `post_init` needs resident tensors."""
+
+    SUPPORTS_CPU_OFFLOAD = False
+
+
+def test_post_init_offloaded_materializes_a_disk_layer_and_restores_meta():
+    """A disk-mapped layer must run `post_init` and go back to meta (#5194)."""
+
+    import accelerate
+
+    from gptqmodel.utils.model import _post_init_offloaded
+
+    layer = _OffloadableLayer()
+    model = nn.Sequential(layer)
+    accelerate.cpu_offload(model, execution_device=torch.device("cpu"))
+    assert layer.qweight.is_meta
+
+    _post_init_offloaded(layer)
+
+    assert layer.calls == 1
+    # The offload map stays authoritative: the hook re-materializes on forward.
+    assert layer.qweight.is_meta
+    hook = layer._hf_hook
+    hook.pre_forward(layer)
+    try:
+        assert not layer.qweight.is_meta
+    finally:
+        hook.post_forward(layer, None)
+
+
+def test_post_init_offloaded_rejects_a_kernel_without_the_declaration():
+    """Fail closed instead of running a CUDA-only `post_init` on meta."""
+
+    import accelerate
+
+    from gptqmodel.utils.model import _post_init_offloaded
+
+    layer = _NonOffloadableLayer()
+    model = nn.Sequential(layer)
+    accelerate.cpu_offload(model, execution_device=torch.device("cpu"))
+    assert layer.qweight.is_meta
+
+    with pytest.raises(RuntimeError, match="SUPPORTS_CPU_OFFLOAD"):
+        _post_init_offloaded(layer)
+    assert layer.calls == 0
+    assert layer.qweight.is_meta
+
+
+def test_post_init_offloaded_keeps_the_plain_path_for_resident_layers():
+    """A resident layer needs no hook: `post_init` runs in place."""
+
+    from gptqmodel.utils.model import _post_init_offloaded
+
+    layer = _OffloadableLayer()
+    _post_init_offloaded(layer)
+    assert layer.calls == 1
+    assert not layer.qweight.is_meta
+
+
+def test_reselect_helper_only_rewrites_auto_placements():
+    """Only AUTO may be re-routed, and only for a resolved map (#5194)."""
+
+    from types import SimpleNamespace
+
+    from gptqmodel.utils.backend import BACKEND
+    from gptqmodel.utils.hf_load import hf_gptqmodel_reselect_offloaded_kernels
+
+    model = nn.Linear(2, 2)
+    assert not hf_gptqmodel_reselect_offloaded_kernels(model, None, {"a": "cpu"})
+    context = SimpleNamespace(backend=None)
+    # The unresolved keyword is what `preprocess_model` sees; there is no map.
+    assert not hf_gptqmodel_reselect_offloaded_kernels(model, context, "auto")
+    assert not hf_gptqmodel_reselect_offloaded_kernels(model, context, None)
+    assert not hf_gptqmodel_reselect_offloaded_kernels(model, context, {})
+    # A model with no quantized layer has nothing to rebuild.
+    assert not hf_gptqmodel_reselect_offloaded_kernels(model, context, {"a": "cpu"})
+    # An explicit backend is the caller's choice, exactly as in AUTO selection.
+    for backend in (BACKEND.MARLIN, BACKEND.GPTQ_TRITON, BACKEND.TORCH):
+        explicit = SimpleNamespace(backend=backend)
+        assert not hf_gptqmodel_reselect_offloaded_kernels(
+            model, explicit, {"a": "cpu"}
+        )
+
+
+def _leaf_placement_map(model, resolved_map):
+    """Expand a coarse HF placement map to leaf names for the native loader."""
+
+    from gptqmodel.utils.hf_load import _resolved_placement
+
+    leaves = {}
+    for name, module in model.named_modules():
+        if not name or next(module.children(), None) is not None:
+            continue
+        placement = _resolved_placement(resolved_map, name)
+        if placement is not None:
+            leaves[name] = placement
+    return leaves
+
+
+# Budgets measured against the tiny fixture: its 689 KiB total does not fit in
+# 512 KiB, so the excess spills. The CPU budget keeps layers on CPU; the 64 KiB
+# CPU budget forces accelerate to disk-offload them instead.
+AUTO_MAX_MEMORY = {
+    "cpu": {0: "512KiB", "cpu": "10GiB"},
+    "disk": {0: "512KiB", "cpu": "64KiB"},
+}
+
+
+@pytest.mark.parametrize("spill", ["cpu", "disk"])
+@pytest.mark.parametrize("name", ["gptq4", "awq_gemm"])
+def test_auto_max_memory_spill_reselects_an_offload_safe_kernel(
+    checkpoints, name, spill, tmp_path
+):
+    """`device_map="auto"` is resolved after the bridge runs (#5194).
+
+    Transformers calls the bridge with the keyword `"auto"`, so AUTO selected
+    Marlin for every layer. `max_memory` then spilled a layer to CPU or disk and
+    `post_init` crashed on the missing resident tensors. The resolved map is
+    only available in `validate_environment`, where the kernels are rebuilt.
+    """
+
+    _require_cuda()
+    _require_hf_quantizers()
+    from transformers import AutoModelForCausalLM
+
+    from gptqmodel import GPTQModel
+
+    kwargs = {
+        "dtype": torch.float16,
+        "device_map": "auto",
+        "max_memory": dict(AUTO_MAX_MEMORY[spill]),
+        "attn_implementation": "eager",
+    }
+    if spill == "disk":
+        kwargs["offload_folder"] = str(tmp_path / "offload")
+        kwargs["offload_state_dict"] = True
+
+    model = AutoModelForCausalLM.from_pretrained(checkpoints[name], **kwargs)
+    # The native greedy allocator has no disk tier, so replay the placement the
+    # bridge resolved instead of asking it to re-derive the same budget.
+    resolved_map = dict(model.hf_device_map)
+    native_map = _leaf_placement_map(model, resolved_map)
+    try:
+        placements = {str(value) for value in resolved_map.values()}
+        assert spill in placements, (
+            f"{name}/{spill}: `max_memory` did not produce a {spill} placement; "
+            f"resolved map was {model.hf_device_map}"
+        )
+        kernel = type(model.model.layers[0].self_attn.q_proj).__name__
+        assert kernel in OFFLOAD_SAFE_KERNELS, (
+            f"{name}/{spill}: AUTO selected `{kernel}` after `max_memory` "
+            f"offloaded a layer; its post_init needs resident tensors"
+        )
+        logits = _logits(model)
+        assert torch.isfinite(logits).all(), f"{name}/{spill}: non-finite logits"
+    finally:
+        del model
+        torch.cuda.empty_cache()
+
+    if spill == "disk":
+        # The native loader has no disk tier for an explicit map, so use the
+        # same checkpoint on CPU: it exercises the same quantized weights
+        # through a portable kernel.
+        native_kwargs = {
+            "dtype": torch.float16,
+            "device": "cpu",
+            "attn_implementation": "eager",
+        }
+    else:
+        native_kwargs = {
+            "dtype": torch.float16,
+            "device_map": native_map,
+            "attn_implementation": "eager",
+        }
+    native = GPTQModel.load(checkpoints[name], **native_kwargs)
+    try:
+        if spill == "cpu":
+            # Same placement and budget: both loaders must agree on the kernel.
+            native_kernel = type(native.model.model.layers[0].self_attn.q_proj).__name__
+            assert native_kernel == kernel, (
+                f"{name}/{spill}: the bridge picked `{kernel}` but the native "
+                f"loader picked `{native_kernel}` for the same budget"
+            )
+        native_logits = _logits(native.model)
+    finally:
+        del native
+        torch.cuda.empty_cache()
+
+    tolerance = 8 * torch.finfo(torch.float16).eps * max(
+        float(native_logits.abs().max()), 1.0
+    )
+    delta = (logits - native_logits).abs().max().item()
+    assert delta <= tolerance, (
+        f"{name}/{spill}: the bridge and the native loader differ by {delta:.3e} "
+        f"for the same budget (tolerance {tolerance:.3e})"
+    )

@@ -617,6 +617,27 @@ def _ensure_optimum_gptqmodel_load_bridge():
     return False
 
 
+def _reselect_kernels_for_resolved_device_map(quantizer, device_map) -> None:
+    """Re-pick kernels once Transformers resolves a keyword ``device_map``.
+
+    ``preprocess_model`` runs before ``_get_device_map`` turns ``"auto"`` plus
+    ``max_memory`` into a placement, so the bridge cannot see a CPU/disk spill
+    and AUTO keeps a CUDA-only Marlin kernel. ``_get_device_map`` calls
+    ``validate_environment`` again with the *resolved* dict, which is the first
+    point both the model and its final placement are known (#5194).
+    """
+
+    if not isinstance(device_map, dict):
+        return
+    model = getattr(quantizer, "_gptqmodel_model", None)
+    context = getattr(model, "_gptqmodel_hf_load_context", None)
+    if model is None or context is None:
+        return
+    from .utils.hf_load import hf_gptqmodel_reselect_offloaded_kernels
+
+    hf_gptqmodel_reselect_offloaded_kernels(model, context, device_map)
+
+
 def _patch_transformers_gptq_quantizer_bridge():
     """Retry the Optimum GPTQ bridge from Transformers' GPTQ quantizer.
 
@@ -644,10 +665,16 @@ def _patch_transformers_gptq_quantizer_bridge():
             return
         original_after = GptqHfQuantizer._process_model_after_weight_loading
 
+        original_validate = getattr(GptqHfQuantizer, "validate_environment", None)
+
         @wraps(original_before)
         def _before_with_gptqmodel_bridge(self, model, **kwargs):
             _ensure_optimum_gptqmodel_load_bridge()
-            return original_before(self, model, **kwargs)
+            result = original_before(self, model, **kwargs)
+            # Keep the model reachable from `validate_environment`, which
+            # Transformers calls with the resolved placement but without it.
+            self._gptqmodel_model = model
+            return result
 
         @wraps(original_after)
         def _after_with_gptqmodel_bridge(self, model, **kwargs):
@@ -658,6 +685,20 @@ def _patch_transformers_gptq_quantizer_bridge():
         _after_with_gptqmodel_bridge._gptqmodel_load_bridge = True
         GptqHfQuantizer._process_model_before_weight_loading = _before_with_gptqmodel_bridge
         GptqHfQuantizer._process_model_after_weight_loading = _after_with_gptqmodel_bridge
+        if original_validate is not None and not getattr(
+            original_validate, "_gptqmodel_load_bridge", False
+        ):
+
+            @wraps(original_validate)
+            def _validate_with_gptqmodel_bridge(self, *args, **kwargs):
+                result = original_validate(self, *args, **kwargs)
+                _reselect_kernels_for_resolved_device_map(
+                    self, kwargs.get("device_map")
+                )
+                return result
+
+            _validate_with_gptqmodel_bridge._gptqmodel_load_bridge = True
+            GptqHfQuantizer.validate_environment = _validate_with_gptqmodel_bridge
 
 
 def _patch_transformers_awq_gptqmodel_load_bridge():
@@ -710,6 +751,7 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
             _AWQ_BRIDGE_INSTALLED = True
             return True
         original_post_init = AwqQuantizer._process_model_after_weight_loading
+        original_validate = getattr(AwqQuantizer, "validate_environment", None)
 
         @wraps(original_prepare)
         def _prepare_with_gptqmodel_bridge(self, model, **kwargs):
@@ -730,6 +772,8 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
             if context is None:
                 return original_prepare(self, model, **kwargs)
             model._gptqmodel_hf_load_context = context
+            # `validate_environment` gets the resolved placement but no model.
+            self._gptqmodel_model = model
             return model
 
         @wraps(original_post_init)
@@ -761,6 +805,20 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
         _post_init_with_gptqmodel_bridge._gptqmodel_load_bridge = True
         AwqQuantizer._process_model_before_weight_loading = _prepare_with_gptqmodel_bridge
         AwqQuantizer._process_model_after_weight_loading = _post_init_with_gptqmodel_bridge
+        if original_validate is not None and not getattr(
+            original_validate, "_gptqmodel_load_bridge", False
+        ):
+
+            @wraps(original_validate)
+            def _validate_with_gptqmodel_bridge(self, *args, **kwargs):
+                result = original_validate(self, *args, **kwargs)
+                _reselect_kernels_for_resolved_device_map(
+                    self, kwargs.get("device_map")
+                )
+                return result
+
+            _validate_with_gptqmodel_bridge._gptqmodel_load_bridge = True
+            AwqQuantizer.validate_environment = _validate_with_gptqmodel_bridge
         _AWQ_BRIDGE_INSTALLED = True
         return True
 
