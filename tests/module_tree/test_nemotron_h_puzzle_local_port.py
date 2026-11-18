@@ -16,7 +16,10 @@ from gptqmodel.models.definitions.nemotron_h_puzzle import NemotronHPuzzleQModel
 from gptqmodel.models.fusable import require_fusable_config
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.nemotron_h_puzzle import NemotronHPuzzleConfig, NemotronHPuzzleForCausalLM
+from awq_neutrality import assert_awq_folds_neutral
+
 from tests.port_assets import read_port_json
+from tests.test_nemotron_h_puzzle_local_port import TOKENS, tiny_config, varied_model
 
 
 PORT = Path(__file__).parents[2] / "gptqmodel/models/ports/nemotron_h_puzzle"
@@ -128,16 +131,12 @@ def test_real_heterogeneous_live_owners(device, kv_heads, latent, bias):
     _assert_all_owners(model)
 
 
-def test_explicit_plan_and_plain_awq_policy():
+def test_explicit_plan_and_fusion_policy():
     tree = NemotronHPuzzleQModel._resolve_effective_module_tree(SimpleNamespace(), SimpleNamespace(method="gptq"))
     assert NemotronHPuzzleQModel.extract_layers_node() == EXPECTED_PLAN["layers"]
     assert NemotronHPuzzleQModel.build_layer_modules(tree, include_capture_only=True) == EXPECTED_PLAN["blocks"]
     plan = ModulePlan.from_tree(tree)
     assert plan.find("mixer.gate") is not None
-    with torch.device("meta"):
-        native = NemotronHPuzzleForCausalLM(small_config())
-    wrapped = NemotronHPuzzleQModel(model=native, quantized=False, quantize_config=None)
-    assert all(wrapped.awq_get_modules_for_scaling(layer, {}, {}) == [] for layer in native.model.layers)
     assert NemotronHPuzzleQModel.fusable is None
     with pytest.raises(ValueError):
         require_fusable_config(NemotronHPuzzleQModel, "nemotron_h_puzzle")
@@ -158,3 +157,38 @@ def test_invalid_config_rejected_and_valid_retry(changes, reason):
     with pytest.raises((ValueError, AttributeError), match=reason):
         small_config(**changes)
     assert NemotronHPuzzleForCausalLM(small_config()).model.layers[2].block_type == "moe"
+
+
+@pytest.mark.parametrize("overrides", [
+    {},
+    {"moe_latent_size": None, "num_key_value_heads": 4},
+    {"mamba_n_groups": 1, "mlp_bias": True, "attention_bias": True},
+])
+def test_awq_scale_folds_preserve_mamba_attention_and_moe_block_outputs(overrides):
+    model = varied_model(tiny_config(**overrides))
+    tree = NemotronHPuzzleQModel.module_tree
+
+    def forward():
+        return model(input_ids=TOKENS[:1], use_cache=False).logits
+
+    seen = set()
+    for layer in model.model.layers:
+        with NemotronHPuzzleQModel._module_tree_context(tree):
+            checked = assert_awq_folds_neutral(NemotronHPuzzleQModel, model, layer, forward, tree=tree)
+        groups = {source: (targets, consumers) for source, targets, consumers in checked}
+        seen.add(layer.block_type)
+        # Only the block norm feeds a mixer projection directly.
+        assert set(groups) == {"norm"}
+        targets, consumers = groups["norm"]
+        if layer.block_type == "mamba":
+            # out_proj reads the gated-norm SSM output.
+            assert (targets, consumers) == (["mixer.in_proj"], [])
+        elif layer.block_type == "attention":
+            assert (targets, consumers) == (["mixer.q_proj", "mixer.k_proj", "mixer.v_proj"], [])
+        elif model.config.moe_latent_size is not None:
+            # Routed experts read the latent projection, not the norm.
+            assert (targets, consumers) == (["mixer.fc1_latent_proj", "mixer.shared_experts.up_proj"], ["mixer.gate"])
+        else:
+            routed = [f"mixer.experts.{i}.up_proj" for i in range(4)]
+            assert (targets, consumers) == (routed + ["mixer.shared_experts.up_proj"], ["mixer.gate"])
+    assert seen == {"mamba", "attention", "moe"}
