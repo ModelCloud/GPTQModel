@@ -247,11 +247,6 @@ class MiniMaxText01Model(MiniMaxModel):
 class MiniMaxText01ForCausalLM(MiniMaxForCausalLM):
     config_class = MiniMaxText01Config
 
-    @classmethod
-    def is_custom_code(cls):
-        # Opt this exact-layout native adapter into Transformers' MiniMax weight conversions.
-        return False
-
     def __init__(self, config):
         if not isinstance(config, MiniMaxText01Config):
             implementation = config._attn_implementation
