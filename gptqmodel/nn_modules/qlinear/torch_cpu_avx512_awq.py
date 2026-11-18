@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 import torch
 
 from ...extension import op as extension_op
+from ...extension import register_fake
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import dequantize_gemm
@@ -19,7 +20,7 @@ from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import capture_fused_train_state, finalize_fused_train_state
 from ._numerics import matmul_fp32_reduce
 from .torch_aten_kernel import TorchAtenLinear
-from .torch_cpu_avx512 import unpack_hf_int4
+from .torch_cpu_avx512 import _fake_gemm_int4_qzero_group_scaled, unpack_hf_int4
 
 
 log = setup_logger()
@@ -119,6 +120,11 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
         try:
             cls.gemm_int4_qzero_group_scaled_cpu_kernel = extension_op(
                 "int4_qzero_group_scaled_cpu", "gemm_int4_qzero_group_scaled_cpu_forward"
+            )
+            register_fake(
+                "int4_qzero_group_scaled_cpu",
+                "gemm_int4_qzero_group_scaled_cpu_forward",
+                _fake_gemm_int4_qzero_group_scaled,
             )
             cls.pack_awq_int4_kernel = extension_op("int4_qzero_group_scaled_cpu", "pack_awq_int4")
         except Exception as exc:
