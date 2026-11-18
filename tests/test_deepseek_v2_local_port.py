@@ -13,7 +13,6 @@ from tokenizers.models import WordLevel
 from transformers import DeepseekV2ForCausalLM as NativeModel
 from transformers import PreTrainedTokenizerFast
 from transformers.cache_utils import DynamicCache, DynamicLayer, StaticCache
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2MLP
 from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
     DeepseekV2RotaryEmbedding as NativeRotaryEmbedding,
 )
@@ -26,6 +25,7 @@ from gptqmodel.models.definitions.deepseek_v2 import DeepSeekV2QModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.ports.deepseek_v2.configuration_deepseek_v2 import DeepseekV2Config
 from gptqmodel.models.ports.deepseek_v2.modeling_deepseek_v2 import DeepseekV2ForCausalLM
+from gptqmodel.models.ports.native.deepseek_v2.modeling_deepseek_v2 import DeepseekV2MLP
 from gptqmodel.quantization.config import AWQConfig, QuantizeConfig
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 from gptqmodel.utils.security import BYPASS_ENV

@@ -16,32 +16,32 @@ from torch import nn
 from transformers.cache_utils import DynamicCache, DynamicLayer
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
+
+from ..native.deepseek_v2.modeling_deepseek_v2 import (
     DeepseekV2Attention,
     DeepseekV2Experts,
     DeepseekV2MLP,
     DeepseekV2PreTrainedModel,
     DeepseekV2RMSNorm,
 )
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
+from ..native.deepseek_v2.modeling_deepseek_v2 import (
     DeepseekV2DecoderLayer as NativeDeepseekV2DecoderLayer,
 )
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
+from ..native.deepseek_v2.modeling_deepseek_v2 import (
     DeepseekV2ForCausalLM as NativeDeepseekV2ForCausalLM,
 )
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
+from ..native.deepseek_v2.modeling_deepseek_v2 import (
     DeepseekV2Model as NativeDeepseekV2Model,
 )
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
+from ..native.deepseek_v2.modeling_deepseek_v2 import (
     DeepseekV2Moe as NativeDeepseekV2Moe,
 )
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
+from ..native.deepseek_v2.modeling_deepseek_v2 import (
     DeepseekV2RotaryEmbedding as NativeDeepseekV2RotaryEmbedding,
 )
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
+from ..native.deepseek_v2.modeling_deepseek_v2 import (
     DeepseekV2TopkRouter as NativeDeepseekV2TopkRouter,
 )
-
 from .configuration_deepseek_v2 import DeepseekV2Config
 
 
@@ -178,15 +178,6 @@ class _NativeCheckpointLayout:
             # HF's meta/low-dtype materialization may allocate nonpersistent
             # buffers in the parameter dtype before initializing them.
             module._refresh_frequencies()
-
-    @classmethod
-    def is_custom_code(cls):
-        # Transformers otherwise skips its native checkpoint conversion map for
-        # every class outside transformers.*. These subclasses intentionally
-        # retain the DeepSeek V2 tensor ABI, including fused expert conversion.
-        # This only declares serialization layout; it does not register classes
-        # or authorize checkpoint code. LocalModelLoader owns class selection.
-        return False
 
 
 class DeepseekV2Model(_NativeCheckpointLayout, NativeDeepseekV2Model):

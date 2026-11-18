@@ -6,7 +6,8 @@
 import math
 
 from huggingface_hub.dataclasses import strict
-from transformers import DeepseekV2Config as NativeDeepseekV2Config
+
+from ..native.deepseek_v2.configuration_deepseek_v2 import DeepseekV2Config as NativeDeepseekV2Config
 
 
 @strict
