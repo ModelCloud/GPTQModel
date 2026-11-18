@@ -301,6 +301,11 @@ __global__ void Marlin(
     static_assert(s_type == vllm::kFloat16);
   }
 
+  // 8-bit scales (E4M3 for NVFP4, E8M0 for MXFP4 and MXFP8) use a paired
+  // layout: one 16-bit slot holds the scales of two adjacent groups. Key the
+  // scale strides and reads on the scale width, not the weight type, so FP8
+  // weights with E8M0 scales (MXFP8) read the same layout as FP4.
+  constexpr bool is_8bit_scale = s_type.size_bits() == 8;
   constexpr bool has_zp = w_type == vllm::kU4 || w_type == vllm::kU8;
   constexpr bool is_int_type = w_type == vllm::kU4 || w_type == vllm::kU8 ||
                                w_type == vllm::kU4B8 || w_type == vllm::kU8B128;
@@ -473,7 +478,7 @@ __global__ void Marlin(
   constexpr int s_sh_stride = 16 * thread_n_blocks / 8;
   constexpr int s_tb_groups =
       !has_act_order && group_blocks != -1 && group_blocks < thread_k_blocks
-          ? thread_k_blocks / group_blocks / (w_type == vllm::kFE2M1f ? 2 : 1)
+          ? thread_k_blocks / group_blocks / (is_8bit_scale ? 2 : 1)
           : 1;
   constexpr int s_sh_stage = s_tb_groups * s_sh_stride;
   int s_gl_rd_delta = s_gl_stride;
@@ -533,7 +538,7 @@ __global__ void Marlin(
       s_gl_rd = s_sh_stride * slice_col + threadIdx.x;
     } else {
       s_gl_rd = s_gl_stride * ((thread_k_blocks * slice_row) / group_blocks) /
-                    (w_type == vllm::kFE2M1f ? 2 : 1) +
+                    (is_8bit_scale ? 2 : 1) +
                 s_sh_stride * slice_col + threadIdx.x;
     }
   }
@@ -557,7 +562,7 @@ __global__ void Marlin(
   // we scale a `half2` tile in column-major layout in the former and in
   // row-major in the latter case.
   int s_sh_rd;
-  if constexpr (group_blocks != -1 && w_type == vllm::kFE2M1f) {
+  if constexpr (group_blocks != -1 && is_8bit_scale) {
     auto warp_id = threadIdx.x / 32;
     int n_warps = thread_n_blocks / 4;
     int warp_row = warp_id / n_warps;
@@ -925,11 +930,11 @@ __global__ void Marlin(
 
           int k_blocks = cur_k / 16;
           int cur_group_id =
-              k_blocks / (group_blocks * (w_type == vllm::kFE2M1f ? 2 : 1));
+              k_blocks / (group_blocks * (is_8bit_scale ? 2 : 1));
 
           int4* sh_s_stage = sh_s + s_sh_stage * pipe;
 
-          if constexpr (w_type_id != vllm::kFE2M1f.id()) {
+          if constexpr (!is_8bit_scale) {
             reinterpret_cast<int4*>(&frag_s[k % 2])[0] =
                 sh_s_stage[s_sh_rd + cur_group_id * s_sh_stride];
           } else if constexpr (group_blocks == 1 || thread_k_blocks > 4) {

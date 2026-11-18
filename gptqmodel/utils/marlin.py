@@ -747,6 +747,78 @@ def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
     return s
 
 
+def marlin_interleave_8bit_scales(marlin_scales: torch.Tensor) -> torch.Tensor:
+    """Pack Marlin-permuted 8-bit group scales into the kernel's paired layout.
+
+    ``marlin_template.h`` reads 8-bit scales (``is_8bit_scale``: E8M0 for
+    MXFP4/MXFP8, E4M3 for NVFP4) two groups at a time. One 16-bit slot holds the
+    scales of two adjacent groups, and each thread's 8 scales are reordered for
+    ``dequant_fp8_scales``. The input is the output of ``marlin_permute_scales``
+    as a ``(groups, size_n)`` tensor of any 1-byte dtype; the result keeps that
+    dtype and shape.
+    """
+
+    if marlin_scales.element_size() != 1:
+        raise ValueError("marlin_interleave_8bit_scales expects a 1-byte scale tensor")
+    if marlin_scales.size(0) % 2 != 0:
+        raise ValueError("8-bit Marlin scales need an even number of groups along K")
+    groups = marlin_scales.size(0)
+    # Each thread consumes 8 scales; pair groups (2g, 2g+1) per 8-scale chunk.
+    s = marlin_scales.view(groups // 2, 2, -1, 8).permute(0, 2, 1, 3).reshape(groups, -1)
+    # Match the byte order dequant_fp8_scales expands into scalar_t2 pairs.
+    return s.view(-1, 4)[:, [0, 2, 1, 3]].reshape(groups, -1).contiguous()
+
+
+def pack_fp8_to_int32(fp8_weight: torch.Tensor) -> torch.Tensor:
+    """Pack an ``(N, K)`` float8_e4m3fn weight into the ``(K // 4, N)`` int32 GPTQ layout."""
+
+    if fp8_weight.dtype != torch.float8_e4m3fn or fp8_weight.ndim != 2:
+        raise ValueError("pack_fp8_to_int32 expects a 2-D float8_e4m3fn (N, K) weight")
+    if fp8_weight.shape[1] % 4 != 0:
+        raise ValueError("pack_fp8_to_int32 needs K divisible by 4")
+    return fp8_weight.contiguous().view(torch.int32).T.contiguous()
+
+
+MXFP8_GROUP_SIZE = 32
+
+
+def mxfp8_marlin_prepare(
+    weight: torch.Tensor, scales: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Convert an OCP MXFP8 weight into Marlin's bf16 ``kFE4M3fn`` + ``kFE8M0fnu`` operands.
+
+    ``weight`` is ``(N, K)`` float8_e4m3fn and ``scales`` is ``(N, K // 32)``
+    float8_e8m0fnu, so the dequantized weight is ``weight * 2 ** (scale - 127)``.
+    Returns ``(marlin_qweight, marlin_scales)`` for ``gptq_marlin_gemm`` with
+    ``b_q_type = scalar_types.float8_e4m3fn`` and bfloat16 activations.
+    """
+
+    size_n, size_k = weight.shape
+    if scales.dtype != torch.float8_e8m0fnu or scales.shape != (size_n, size_k // MXFP8_GROUP_SIZE):
+        raise ValueError(
+            f"MXFP8 scales must be float8_e8m0fnu with shape {(size_n, size_k // MXFP8_GROUP_SIZE)}, "
+            f"got {scales.dtype} {tuple(scales.shape)}"
+        )
+    if size_k % MXFP8_GROUP_SIZE != 0:
+        raise ValueError(f"MXFP8 needs in_features divisible by {MXFP8_GROUP_SIZE}, got {size_k}")
+
+    qweight = gptq_marlin_repack(
+        pack_fp8_to_int32(weight),
+        perm=torch.empty(0, dtype=torch.int32, device=weight.device),
+        size_k=size_k,
+        size_n=size_n,
+        num_bits=8,
+        dtype=torch.bfloat16,
+    )
+    # Permute the raw exponent bytes so no float round trip can touch them.
+    marlin_scales = marlin_permute_scales(
+        scales.view(torch.uint8).T.contiguous(), size_k=size_k, size_n=size_n,
+        group_size=MXFP8_GROUP_SIZE,
+    )
+    marlin_scales = marlin_interleave_8bit_scales(marlin_scales)
+    return qweight, marlin_scales.view(torch.float8_e8m0fnu)
+
+
 def get_scale_perms():
     scale_perm: List[int] = []
     for i in range(8):
