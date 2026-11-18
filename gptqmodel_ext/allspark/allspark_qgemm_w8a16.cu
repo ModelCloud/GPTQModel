@@ -46,12 +46,14 @@ struct GmemTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
         BQ_smem_base_addr(BQ_smem_addr),
         A_smem_stage_stride(A_stage_stride),
         BQ_smem_stage_stride(BQ_stage_stride) {
-    this_block_A_base_ptr = params.A_ptr + blockIdx.x * Mtile * params.K +
-                            blockIdx.z * params.SplitK;
+    this_block_A_base_ptr =
+        params.A_ptr + int64_t(blockIdx.x) * Mtile * params.K +
+        int64_t(blockIdx.z) * params.SplitK;
     // here B is rearranged as N32K16 order, i.e. 4 continuous N-direction
     // 8(N)x16(K) size data blocks are packed together
-    this_block_B_base_ptr = params.B_ptr + blockIdx.y * Ntile * params.K +
-                            blockIdx.z * params.SplitK * 4;
+    this_block_B_base_ptr =
+        params.B_ptr + int64_t(blockIdx.y) * Ntile * params.K +
+        int64_t(blockIdx.z) * params.SplitK * 4;
 
     const int lane_id = threadIdx.x % WARP_SIZE;
 
@@ -59,15 +61,16 @@ struct GmemTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
     // multiple iters, 8x4 warp load/store 8(row) x 32(col) elements per iter
     const int Aldg_row_base_idx = threadIdx.x / 4;
     Aldg_col_idx = (threadIdx.x % 4) * LDG_ELEMENT_CNT_A;
-    const int Aldg_base_offset = Aldg_row_base_idx * params.K + Aldg_col_idx;
+    const int64_t Aldg_base_offset =
+        int64_t(Aldg_row_base_idx) * params.K + Aldg_col_idx;
 
     // For matrix B, a block load/store elements of (Ntile / 4) row x 128 col
     // elements of N32K16 packing in multiple iters, 4x8 warp load/store 4(row)
     // * 128(col) per iter
     Bldg_col_idx = (threadIdx.x % 8) * LDG_ELEMENT_CNT_B;
     const int Bldg_row_base_idx = threadIdx.x / 8;
-    const int Bldg_base_offset =
-        Bldg_row_base_idx * params.K * 4 + Bldg_col_idx;
+    const int64_t Bldg_base_offset =
+        int64_t(Bldg_row_base_idx) * params.K * 4 + Bldg_col_idx;
 
     this_block_A_base_ptr += Aldg_base_offset;
     this_block_B_base_ptr += Bldg_base_offset;
@@ -242,7 +245,8 @@ struct ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
 
     if (EnableFuse) {
       this_block_C_base_ptr =
-          params.C_ptr + blockIdx.x * Mtile * params.N + blockIdx.y * Ntile;
+          params.C_ptr + int64_t(blockIdx.x) * Mtile * params.N +
+          int64_t(blockIdx.y) * Ntile;
     }
     int store_thds_in_row = WARP_NTILE / 8;
     store_c_row_base_idx = lane_id / store_thds_in_row;
@@ -349,7 +353,10 @@ struct ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
   __device__ void fused_splitk_reduce() {
     // need splitk-reduce if enable splitk
     if (gridDim.z > 1) {
-      int blk_red_idx = blockIdx.x * gridDim.y + blockIdx.y;
+      // The padded M*N product can exceed 2^31 elements; every C_tmp/red_count
+      // index has to stay 64-bit or the last tiles wrap.
+      int64_t blk_red_idx =
+          int64_t(blockIdx.x) * int64_t(gridDim.y) + int64_t(blockIdx.y);
       // Wait for all previous blocks in the splitk direction to accumulate the
       // results into C_tmp
       if (threadIdx.x == 0) {
@@ -365,7 +372,8 @@ struct ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
       }
       __syncthreads();
 
-      int C_tmp_base_offset = blk_red_idx * Mtile * Ntile + threadIdx.x * 4;
+      int64_t C_tmp_base_offset =
+          blk_red_idx * Mtile * Ntile + int64_t(threadIdx.x) * 4;
       if (blockIdx.z != 0) {
         // expecting that temporary register here reuses the previous A&B frag
         // register
@@ -374,7 +382,7 @@ struct ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
         for (int m_idx = 0; m_idx < Mtile / 16; ++m_idx) {
   #pragma unroll
           for (int n_idx = 0; n_idx < WARP_NITER; ++n_idx) {
-            int offset =
+            int64_t offset =
                 C_tmp_base_offset + (m_idx * WARP_NITER + n_idx) * BLOCK * 4;
             *reinterpret_cast<int4*>(temp_frag[m_idx][n_idx]) =
                 *reinterpret_cast<int4*>(params.C_tmp_ptr + offset);
@@ -398,7 +406,7 @@ struct ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
         for (int m_idx = 0; m_idx < Mtile / 16; ++m_idx) {
   #pragma unroll
           for (int n_idx = 0; n_idx < WARP_NITER; ++n_idx) {
-            int offset =
+            int64_t offset =
                 C_tmp_base_offset + (m_idx * WARP_NITER + n_idx) * BLOCK * 4;
             asm volatile(
                 "{st.global.cg.v4.b32 [%0], {%1, %2, %3, %4};}\n"
@@ -432,8 +440,11 @@ struct ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
             const int col = blockIdx.y * Ntile + warp_id * WARP_NTILE +
                 ni * 8 +
                 (lane_id % 4) * 2 + ri % 2;
-            if (row < params.M && col < params.N)
-              params.C_split_ptr[(blockIdx.z * params.M + row) * params.N + col] = C_frag[mi][ni][ri];
+            if (row < params.M && col < params.N) {
+              const int64_t c_split_idx =
+                  (int64_t(blockIdx.z) * params.M + row) * params.N + col;
+              params.C_split_ptr[c_split_idx] = C_frag[mi][ni][ri];
+            }
           }
         }
       }
@@ -709,11 +720,21 @@ void ampere_hgemm_W8A16_perc_f16_f16_MtilexNtilex32_mma16816_multistage_AN_BTN32
   bool enable_fuse = fused_gemm_params.EnableFuse;
   bool has_zp = B_zero != nullptr;
   if (enable_fuse) {
-    float* C_tmp = reinterpret_cast<float*>(workspace);
-    uint32_t* red_count = reinterpret_cast<uint32_t*>(
-        (char*)workspace + grid_x * Mtile * grid_y * Ntile * sizeof(float));
-    CHECK_CUDA(cudaMemsetAsync(red_count, 0, grid_x * grid_y * sizeof(uint32_t),
-                               stream));
+    // The fused reduce only runs for gridDim.z > 1. With a single k-slice the
+    // C_tmp/red_count buffers are never touched, so the workspace sizing
+    // function returns 0 for that case and these pointers stay null.
+    float* C_tmp = nullptr;
+    uint32_t* red_count = nullptr;
+    if (grid_z > 1) {
+      C_tmp = reinterpret_cast<float*>(workspace);
+      red_count = reinterpret_cast<uint32_t*>(
+          reinterpret_cast<char*>(workspace) +
+          size_t(grid_x) * size_t(Mtile) * size_t(grid_y) * size_t(Ntile) *
+              sizeof(float));
+      CHECK_CUDA(cudaMemsetAsync(
+          red_count, 0,
+          size_t(grid_x) * size_t(grid_y) * sizeof(uint32_t), stream));
+    }
     SM8x_GEMM_W8A16_Splitk_Params<FType, QType> params{
         A, B,      B_scale, B_zero, C,       M,     N,
         K, SplitK, 0,       -1,     nullptr, C_tmp, red_count, bias, bias32};
@@ -766,8 +787,10 @@ size_t allspark_qgemm_w8a16_perc_n32k16_ampere_workspace_size(
   int Mtile = m16_times <= 4 ? m16_times * 16 : 64;
   int grid_x = (m + Mtile - 1) / Mtile;
   int Ntile =
-      (float(grid_x * ((n + 127) / 128)) / sm_count > 10) || (Mtile < 64) ? 256
-                                                                          : 128;
+      (float(grid_x) * float((n + 127) / 128) / sm_count > 10) ||
+              (Mtile < 64)
+          ? 256
+          : 128;
   int grid_y = (n + Ntile - 1) / Ntile;
   int grid_z;
 
@@ -775,7 +798,7 @@ size_t allspark_qgemm_w8a16_perc_n32k16_ampere_workspace_size(
   const float SPLIT_THRESHOLD = 0.8;
   int n_slice;
   for (n_slice = 1; n_slice < k / 256; ++n_slice) {
-    int n_block = grid_x * grid_y * n_slice;
+    int64_t n_block = int64_t(grid_x) * grid_y * n_slice;
     if (n_block >= sm_count * SPLIT_THRESHOLD &&
         (n_block % sm_count == 0 || n_block % sm_count >= sm_count * 0.5)) {
       break;
@@ -785,14 +808,24 @@ size_t allspark_qgemm_w8a16_perc_n32k16_ampere_workspace_size(
   int k_slice =
       (k / n_slice) % 32 == 0 ? k / n_slice : k / n_slice / 32 * 32 + 32;
   grid_z = (k + k_slice - 1) / k_slice;
-  bool enable_fuse = float(grid_x * grid_y) / sm_count >= 0.5 ? 1 : 0;
+  bool enable_fuse =
+      float(grid_x) * float(grid_y) / sm_count >= 0.5 ? 1 : 0;
 
   size_t ws_size;
   if (enable_fuse) {
-    ws_size = grid_x * Mtile * grid_y * Ntile * sizeof(float)  // For C_tmp
-              + grid_x * grid_y * sizeof(uint32_t);            // For red_count
+    // The fused C_tmp/red_count buffers are only read or written when the
+    // kernel actually splits K. A single k-slice means the fused reduction is
+    // a no-op, so do not materialize padded M*N FP32 scratch for it: that
+    // product is what overflows 32-bit int once rows x out_features > 2^31.
+    ws_size =
+        grid_z > 1
+            ? size_t(grid_x) * size_t(Mtile) * size_t(grid_y) *
+                      size_t(Ntile) * sizeof(float)     // For C_tmp
+                  + size_t(grid_x) * size_t(grid_y) *
+                        sizeof(uint32_t)                // For red_count
+            : 0;
   } else {
-    ws_size = size_t(grid_z) * m * n * sizeof(float);
+    ws_size = size_t(grid_z) * size_t(m) * size_t(n) * sizeof(float);
   }
 
   fused_gemm_params.Mtile = Mtile;
