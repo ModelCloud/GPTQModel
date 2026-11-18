@@ -16,13 +16,13 @@ from transformers.masking_utils import create_causal_mask
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from transformers.models.llama.modeling_llama import LlamaRMSNorm as InstellaRMSNorm
-from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, repeat_kv
-from transformers.models.qwen2.modeling_qwen2 import Qwen2MLP as InstellaMLP
 from transformers.utils import can_return_tuple
 from transformers.utils.generic import merge_with_config_defaults
 from transformers.utils.output_capturing import capture_outputs
 
+from ..native.llama.modeling_llama import LlamaRMSNorm as InstellaRMSNorm
+from ..native.llama.modeling_llama import apply_rotary_pos_emb, repeat_kv
+from ..native.qwen2.modeling_qwen2 import Qwen2MLP as InstellaMLP
 from .configuration_instella import InstellaConfig
 
 

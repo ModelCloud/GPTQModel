@@ -15,13 +15,13 @@ from tokenizers.models import WordLevel
 from transformers import CodeGenConfig as NativeCodeGenConfig
 from transformers import CodeGenForCausalLM as NativeCodeGenForCausalLM
 from transformers import PreTrainedTokenizerFast
-from transformers.models.codegen.modeling_codegen import CodeGenModel as NativeCodeGenModel
 from transformers.models.codegen.modeling_codegen import create_sinusoidal_positions
 
 from gptqmodel import GPTQModel
 from gptqmodel.models.definitions.codegen import CodeGenQModel
 from gptqmodel.models.ports.codegen.configuration_codegen import CodeGenConfig
 from gptqmodel.models.ports.codegen.modeling_codegen import CodeGen2Model, CodeGenForCausalLM
+from gptqmodel.models.ports.native.codegen.modeling_codegen import CodeGenModel as VendoredCodeGenModel
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 from gptqmodel.utils.security import BYPASS_ENV
 
@@ -201,7 +201,7 @@ def test_full_model_numerics_and_layout_regression(partitions, rotary_dim, n_hea
         expected = oracle_logits(model, ids, partitions, mask)
         actual = model(ids, attention_mask=mask, use_cache=False).logits
     torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-7)
-    assert isinstance(model.transformer, CodeGen2Model if partitions == 8 else NativeCodeGenModel)
+    assert isinstance(model.transformer, CodeGen2Model if partitions == 8 else VendoredCodeGenModel)
     if partitions == 8:
         # The old default native load succeeds with identical key names/shapes,
         # but must fail the numerical oracle: this is the repaired regression.
@@ -301,7 +301,7 @@ def test_postconstruction_cast_save_public_reload_and_cast_back(tmp_path, partit
     for layer, original in zip(model.transformer.h, original_tables):
         torch.testing.assert_close(layer.attn.embed_positions, original, rtol=0, atol=0)
     if partitions == 4:
-        assert type(model.transformer) is NativeCodeGenModel
+        assert type(model.transformer) is VendoredCodeGenModel
     # Restoring only the derived FP32 tables is the independent reference: no
     # trained tensor may be replaced or widened to recover numerical parity.
     for layer, original in zip(restored.transformer.h, original_tables):
