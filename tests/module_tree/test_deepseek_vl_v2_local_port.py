@@ -1,4 +1,4 @@
-import itertools
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,14 +15,32 @@ from gptqmodel.models.ports.deepseek_vl_v2.modeling_deepseek_vl_v2 import Deepse
 from tests.test_deepseek_vl_v2_local_port import tiny_config
 
 
-def test_explicit_registry_case_for_integrator():
-    import gptqmodel.models.ports.deepseek_vl_v2 as port
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "ports" / "deepseek_vl_v2"
 
-    expected = json.loads((Path(port.__file__).parent / "registry_plan.json").read_text())
-    assert DeepSeekVLV2QModel.extract_layers_node() == expected["layers"]
+EXPECTED_BLOCKS = [
+    ["input_layernorm:!"],
+    [
+        "self_attn.q_a_proj", "self_attn.q_a_layernorm:!", "self_attn.q_proj", "self_attn.k_proj",
+        "self_attn.v_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_a_layernorm:!",
+    ],
+    ["self_attn.q_b_proj", "self_attn.kv_b_proj"],
+    ["self_attn.o_proj"],
+    ["post_attention_layernorm:!"],
+    ["mlp.gate_proj", "mlp.up_proj"],
+    ["mlp.down_proj"],
+    ["mlp.gate:!"],
+    ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+    ["mlp.experts.{expert_index}.down_proj"],
+    ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+    ["mlp.shared_experts.down_proj"],
+]
+
+
+def test_explicit_registry_case_for_integrator():
+    assert DeepSeekVLV2QModel.extract_layers_node() == ["language.model.layers"]
     assert (
         DeepSeekVLV2QModel.build_layer_modules(DeepSeekVLV2QModel.module_tree, include_capture_only=True)
-        == expected["blocks"]
+        == EXPECTED_BLOCKS
     )
     assert DeepSeekVLV2QModel.fusable is None
 
@@ -72,15 +90,11 @@ def test_real_layout_weight_owners(mla, q_lora, method):
 
 @pytest.mark.parametrize("variant", ["tiny", "small", "base"])
 def test_pinned_checkpoint_key_inventory_matches_actual_meta_model(variant):
-    import gptqmodel.models.ports.deepseek_vl_v2 as port
-
-    fixture = json.loads((Path(port.__file__).parent / "checkpoint_metadata.json").read_text())[variant]
-    expected = set()
-    for group in fixture["patterns"]:
-        for layer, expert in itertools.product(group.get("layers", [0]), group.get("experts", [0])):
-            expected.add(group["template"].format(layer=layer, expert=expert))
-    assert len(expected) == fixture["key_count"]
+    # Key count + sha256 of the sorted safetensors index keys of the pinned hub revision.
+    fixture = json.loads((FIXTURES / "checkpoints.json").read_text())[variant]
     with torch.device("meta"):
         model = DeepseekVLV2ForCausalLM(DeepseekVLV2Config(**fixture["config"]))
-    assert set(model.state_dict()) == expected
+    keys = sorted(model.state_dict())
+    assert len(keys) == fixture["key_count"]
+    assert hashlib.sha256("\n".join(keys).encode()).hexdigest() == fixture["keys_sha256"]
     assert_owned(model)
