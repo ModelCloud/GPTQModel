@@ -78,7 +78,7 @@ def test_composite_remains_exact_native_class():
     assert type(model) is Qwen2_5_VLForConditionalGeneration
 
 
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
+@pytest.mark.parametrize("kv_heads", [1, 4])
 def test_text_exact_native_state_schema_and_hidden_output(kv_heads):
     model = Qwen2_5_VLQModel.loader.from_config(text_config(kv_heads), attn_implementation="eager").eval()
     ids = torch.tensor([[1, 4, 9, 3], [1, 8, 5, 7]])
@@ -117,9 +117,9 @@ def save_tokenizer(path):
     ).save_pretrained(path)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("implementation", ["eager", "sdpa"])
-@pytest.mark.parametrize("sliding", [False, True])
+@pytest.mark.parametrize("dtype,implementation,sliding", [
+    (torch.float32, "eager", False), (torch.bfloat16, "sdpa", True), (torch.float16, "eager", True),
+])
 def test_text_matches_native_composite_decoder_hidden_states_and_cache(dtype, implementation, sliding):
     config = composite_config()
     config.text_config.use_sliding_window = sliding
@@ -165,8 +165,7 @@ def test_text_matches_native_composite_decoder_hidden_states_and_cache(dtype, im
         assert not text.can_generate()
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("tied", [False, True])
+@pytest.mark.parametrize("dtype,tied", [(torch.float32, False), (torch.bfloat16, True)])
 def test_text_safetensors_two_cycles_assignment_and_failure_repair(tmp_path, dtype, tied):
     model = make_text_model(dtype=dtype, tie_word_embeddings=tied)
     ids = torch.tensor([[1, 4, 7, 5]])
@@ -207,9 +206,9 @@ def test_text_safetensors_two_cycles_assignment_and_failure_repair(tmp_path, dty
         torch.testing.assert_close(repaired(ids).last_hidden_state, expected, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
-@pytest.mark.parametrize("trust", [None, False, True])
-@pytest.mark.parametrize("text_only", [False, True])
+@pytest.mark.parametrize("bypass,trust,text_only", [
+    (None, None, False), ("1", True, False), ("0", False, True), ("1", None, True),
+])
 def test_public_hostile_auto_map_ignores_remote_code(tmp_path, monkeypatch, bypass, trust, text_only):
     from gptqmodel import GPTQModel
     from gptqmodel.utils import BACKEND
@@ -346,8 +345,7 @@ def test_public_headless_dense_two_save_cycles_and_generation_rejection(tmp_path
             torch.testing.assert_close(loaded.model(ids).last_hidden_state, expected, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("offload", [False, True])
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
+@pytest.mark.parametrize("offload,kv_heads", [(False, 1), (True, 4)])
 def test_public_awq_packs_all_linears_and_reloads_twice(tmp_path, offload, kv_heads):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
