@@ -193,12 +193,14 @@ def test_local_brumby_runs_without_legacy_default_rope_init(monkeypatch):
 
 def test_resolve_trust_remote_code_overrides_when_native_support_exists(monkeypatch, caplog, tmp_path):
     monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
-    (tmp_path / "config.json").write_text(json.dumps({"model_type": "phi3"}))
+    # A MODEL_MAP type (e.g. phi3) is owned by its LocalModelLoader and returns
+    # before the Transformers probe; use a native type GPT-QModel does not define.
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "biogpt"}))
     hf_utils._TRUST_REMOTE_CODE_OVERRIDE_WARNED.clear()
     monkeypatch.setattr(
         hf_utils,
         "_detect_native_transformers_causallm_support",
-        lambda model_id_or_path: (True, "phi3", "Phi3ForCausalLM"),
+        lambda model_id_or_path: (True, "biogpt", "BioGptForCausalLM"),
     )
 
     # The warning is emitted through the library logger, whose sink is a logbar

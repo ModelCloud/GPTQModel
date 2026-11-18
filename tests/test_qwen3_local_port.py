@@ -162,7 +162,8 @@ def test_definition_owns_exact_native_qwen3():
     assert type(model) is VendoredQwen3ForCausalLM
     assert type(model.config) is VendoredQwen3Config
     assert not Qwen3QModel.require_trust_remote_code
-    assert Qwen3_5TextQModel.loader is AutoModelForCausalLM
+    assert isinstance(Qwen3_5TextQModel.loader, LocalModelLoader)
+    assert Qwen3_5TextQModel.loader.model_class == "gptqmodel.models.ports.native.auto.NativeForCausalLM"
     assert AutoConfig.for_model("qwen3").__class__ is Qwen3Config
     assert type(AutoModelForCausalLM.from_config(tiny_config())) is Qwen3ForCausalLM
 

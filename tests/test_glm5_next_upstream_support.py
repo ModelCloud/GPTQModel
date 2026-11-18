@@ -1,7 +1,6 @@
 # Adapted upstream regressions for this fork's integrated target+MTP loader.
 from types import SimpleNamespace
 
-import pytest
 import torch
 from defuser.model_registry import MODEL_CONFIG
 from torch import nn
@@ -14,8 +13,19 @@ from gptqmodel.utils.model import find_modules
 from gptqmodel.utils.structure import LazyTurtle
 
 
+def _vendored_glm5_next():
+    from gptqmodel.models.ports.native.glm5_next import configuration_glm5_next, modeling_glm5_next
+
+    return SimpleNamespace(
+        Glm5NextConfig=configuration_glm5_next.Glm5NextConfig,
+        Glm5NextTextConfig=configuration_glm5_next.Glm5NextTextConfig,
+        Glm5NextTextModel=modeling_glm5_next.Glm5NextTextModel,
+        Glm5NextForConditionalGeneration=modeling_glm5_next.Glm5NextForConditionalGeneration,
+    )
+
+
 def _tiny_text_config():
-    glm5_next = pytest.importorskip("transformers.models.glm5_next")
+    glm5_next = _vendored_glm5_next()
     return glm5_next.Glm5NextTextConfig(
         vocab_size=64,
         hidden_size=32,
@@ -106,7 +116,7 @@ def test_glm5_next_quantizes_every_loaded_decoder_layer():
 
 
 def test_glm5_next_defuser_registry_preserves_expert_forward():
-    glm5_next = pytest.importorskip("transformers.models.glm5_next")
+    glm5_next = _vendored_glm5_next()
     assert "glm5_next" in MODEL_CONFIG
     text_model = glm5_next.Glm5NextTextModel(_tiny_text_config()).eval()
 
@@ -157,7 +167,7 @@ def test_glm5_next_defuser_registry_preserves_expert_forward():
 
 
 def test_glm5_next_lazy_turtle_materializes_defused_experts(tmp_path):
-    glm5_next = pytest.importorskip("transformers.models.glm5_next")
+    glm5_next = _vendored_glm5_next()
     config = glm5_next.Glm5NextConfig(
         text_config=_tiny_text_config().to_dict(),
         vision_config={

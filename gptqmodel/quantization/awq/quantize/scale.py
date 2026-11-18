@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import logging
+from importlib import import_module
 from typing import Dict, List, Set, Tuple
 
 import torch
@@ -75,6 +76,20 @@ allowed_act_fns = [
     GELUTanh,
     GELUActivation,
 ]
+
+# Definitions load GPT-QModel's vendored Transformers 5.23 classes, which are
+# distinct types from the Transformers ones above; accept both.
+_VENDORED_FOLD_SOURCES = (
+    ("llama", "LlamaRMSNorm", allowed_norms),
+    ("gemma", "GemmaRMSNorm", allowed_norms),
+    ("gemma2", "Gemma2RMSNorm", allowed_norms),
+    ("gemma4", "Gemma4RMSNorm", allowed_norms),
+    ("cohere_compass", "CohereCompassLayerNorm", allowed_norms),
+    ("cohere2_moe", "Cohere2MoeLayerNorm", allowed_norms),
+    ("bloom", "BloomGelu", allowed_act_fns),
+)
+for _family, _name, _allowed in _VENDORED_FOLD_SOURCES:
+    _allowed.append(getattr(import_module(f"gptqmodel.models.ports.native.{_family}.modeling_{_family}"), _name))
 
 
 def is_foldable_source(prev_op: nn.Module) -> bool:

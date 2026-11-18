@@ -17,6 +17,12 @@ from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.ernie4_5_moe import Ernie4_5_MoeQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.ports.native.ernie4_5_moe.configuration_ernie4_5_moe import (
+    Ernie4_5_MoeConfig as VendoredErnie4_5_MoeConfig,
+)
+from gptqmodel.models.ports.native.ernie4_5_moe.modeling_ernie4_5_moe import (
+    Ernie4_5_MoeForCausalLM as VendoredErnie4_5_MoeForCausalLM,
+)
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
@@ -79,13 +85,13 @@ def test_public_load_ignores_malicious_auto_map_and_preserves_logits(tmp_path, m
     else:
         monkeypatch.delenv(BYPASS_ENV, raising=False)
     assert resolve_trust_remote_code(tmp_path, trust_remote_code=trust) is False
-    assert type(load_model_config(tmp_path, trust_remote_code=trust)) is Ernie4_5_MoeConfig
+    assert type(load_model_config(tmp_path, trust_remote_code=trust)) is VendoredErnie4_5_MoeConfig
     loaded = GPTQModel.load(
         str(tmp_path), trust_remote_code=trust, device="cpu", dtype=torch.float32,
         attn_implementation="eager",
     )
     assert isinstance(loaded, Ernie4_5_MoeQModel)
-    assert type(loaded.model) is Ernie4_5_MoeForCausalLM
+    assert type(loaded.model) is VendoredErnie4_5_MoeForCausalLM
     assert loaded.trust_remote_code is False
     ids = torch.tensor([[1, 7, 8, 9]])
     with torch.inference_mode():
