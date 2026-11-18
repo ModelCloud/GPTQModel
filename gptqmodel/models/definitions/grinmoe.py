@@ -21,10 +21,6 @@ class GrinMoeQModel(BaseQModel):
     # MoE lifecycle hooks for w1/w3/w2 pattern
     moe_lifecycle_hooks = W1W3W2MoELifecycleHooks()
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        """Keep SparseMixer routing unmodified; GRIN-MoE uses plain AWQ only."""
-        return []
-
     module_tree = [
         "model",
         "layers",
