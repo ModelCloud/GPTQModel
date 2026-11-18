@@ -899,7 +899,16 @@ class GPTQProcessor(LoopProcessor):
             # until the processor is torn down. Only the Hessian state is
             # released: the module and quantizer are left intact for the
             # failed-run cleanup (#5026).
-            g.release_hessian_state()
+            release = getattr(g, "release_hessian_state", None)
+            if release is not None:
+                try:
+                    release()
+                except Exception:  # pragma: no cover - teardown must not mask
+                    log.warning(
+                        "GPTQProcessor: releasing the Hessian for '%s' failed after a "
+                        "quantize error; the original exception is re-raised.",
+                        module.full_name,
+                    )
             raise
         gsq_diagnostics = getattr(g, "gsq_diagnostics", None)
         if gsq_diagnostics is not None:
