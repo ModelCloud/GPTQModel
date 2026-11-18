@@ -5,16 +5,17 @@
 # --------------------------------------------------------
 
 import time
-from typing import List, Optional, Tuple, Union
+from typing import Optional
 
 import numpy as np
 import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
+from transformers.cache_utils import Cache
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import add_start_docstrings, is_flash_attn_2_available, logging
+from transformers.utils import add_start_docstrings, can_return_tuple, is_flash_attn_2_available, logging
 
 from .configuration_locateanything import LocateAnythingConfig
 from .generate_utils import (
@@ -54,11 +55,7 @@ class LocateAnythingPreTrainedModel(PreTrainedModel):
     supports_gradient_checkpointing = True
     _no_split_modules = ["Qwen2DecoderLayer"]
     _skip_keys_device_placement = "past_key_values"
-    _supports_flash_attn_2 = False
     _supports_flash_attn = False
-    _supports_cache_class = True
-    _supports_static_cache = False
-    _supports_quantized_cache = False
     _supports_sdpa = True
 
     def _check_and_adjust_attn_implementation(self, attn_implementation, is_init_check=False, **kwargs):
@@ -182,6 +179,7 @@ class LocateAnythingForConditionalGeneration(LocateAnythingPreTrainedModel, Gene
         self.use_llm_lora = True
 
 
+    @can_return_tuple
     def forward(
             self,
             pixel_values: Optional[torch.Tensor] = None,
@@ -190,15 +188,11 @@ class LocateAnythingForConditionalGeneration(LocateAnythingPreTrainedModel, Gene
             position_ids: Optional[torch.LongTensor] = None,
             image_grid_hws: Optional[torch.Tensor] = None,
             image_flags: Optional[torch.Tensor] = None,
-            past_key_values: Optional[List[torch.FloatTensor]] = None,
+            past_key_values: Optional[Cache] = None,
             labels: Optional[torch.LongTensor] = None,
             use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
-
+            **kwargs,
+    ) -> CausalLMOutputWithPast:
         vit_embeds = None
         if pixel_values is not None:
             features = self.extract_feature(pixel_values, image_grid_hws)
@@ -221,8 +215,7 @@ class LocateAnythingForConditionalGeneration(LocateAnythingPreTrainedModel, Gene
             position_ids=position_ids,
             past_key_values=past_key_values,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
+            **kwargs,
         )
         logits = outputs.logits
 
@@ -238,10 +231,6 @@ class LocateAnythingForConditionalGeneration(LocateAnythingPreTrainedModel, Gene
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
-
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
 
         return CausalLMOutputWithPast(
             loss=loss,
