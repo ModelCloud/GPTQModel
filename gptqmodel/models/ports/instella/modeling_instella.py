@@ -19,6 +19,9 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.models.llama.modeling_llama import LlamaRMSNorm as InstellaRMSNorm
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, repeat_kv
 from transformers.models.qwen2.modeling_qwen2 import Qwen2MLP as InstellaMLP
+from transformers.utils import can_return_tuple
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
 
 from .configuration_instella import InstellaConfig
 
@@ -64,6 +67,18 @@ class InstellaRotaryEmbedding(nn.Module):
         return cos.to(x.dtype), sin.to(x.dtype)
 
 
+def eager_attention_forward(module, query, key, value, attention_mask, scaling, dropout=0.0, **kwargs):
+    """AMD's eager equations (scores divided by sqrt(head_dim))."""
+    key = repeat_kv(key, module.num_key_value_groups)
+    value = repeat_kv(value, module.num_key_value_groups)
+    weights = query @ key.transpose(2, 3) / math.sqrt(module.head_dim)
+    if attention_mask is not None:
+        weights = weights + attention_mask[:, :, :, : key.shape[-2]]
+    weights = F.softmax(weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    weights = F.dropout(weights, p=dropout, training=module.training)
+    return (weights @ value).transpose(1, 2).contiguous(), weights
+
+
 class InstellaAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -84,10 +99,7 @@ class InstellaAttention(nn.Module):
         self.k_norm = InstellaRMSNorm(self.num_key_value_heads * self.head_dim, config.rms_norm_eps)
         self.rotary_emb = InstellaRotaryEmbedding(config)
 
-    def forward(
-        self, hidden_states, attention_mask=None, position_ids=None,
-        past_key_values=None, output_attentions=False, cache_position=None, **kwargs,
-    ):
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_values=None, **kwargs):
         bsz, q_len, hidden_size = hidden_states.shape
         # Q/K normalization is over the complete projected width BEFORE splitting heads.
         query = self.q_norm(self.q_proj(hidden_states))
@@ -100,28 +112,15 @@ class InstellaAttention(nn.Module):
         query, key = apply_rotary_pos_emb(query, key, cos, sin)
         if past_key_values is not None:
             key, value = past_key_values.update(key, value, self.layer_idx)
-        dropout = self.attention_dropout if self.training else 0.0
-        weights = None
-        if self.config._attn_implementation == "eager" or output_attentions:
-            # AMD's eager equations; also serves attention outputs for SDPA models.
-            key = repeat_kv(key, self.num_key_value_groups)
-            value = repeat_kv(value, self.num_key_value_groups)
-            mask = attention_mask[:, :, :, :key.shape[-2]] if attention_mask is not None else None
-            weights = query @ key.transpose(2, 3) / math.sqrt(self.head_dim)
-            if mask is not None:
-                if mask.dtype == torch.bool:
-                    weights = weights.masked_fill(~mask, torch.finfo(weights.dtype).min)
-                else:
-                    weights = weights + mask
-            weights = F.softmax(weights, dim=-1, dtype=torch.float32).to(query.dtype)
-            weights = F.dropout(weights, p=dropout, training=self.training)
-            output = (weights @ value).transpose(1, 2)
-        else:
-            output, _ = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation](
-                self, query, key, value, attention_mask, dropout=dropout, scaling=self.scaling, **kwargs,
-            )
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
+        output, weights = attention_interface(
+            self, query, key, value, attention_mask,
+            dropout=self.attention_dropout if self.training else 0.0, scaling=self.scaling, **kwargs,
+        )
         output = output.contiguous().reshape(bsz, q_len, hidden_size)
-        return self.o_proj(output), weights if output_attentions else None
+        return self.o_proj(output), weights
 
 
 class InstellaDecoderLayer(GradientCheckpointingLayer):
@@ -134,10 +133,9 @@ class InstellaDecoderLayer(GradientCheckpointingLayer):
 
     def forward(self, hidden_states, **kwargs):
         residual = hidden_states
-        attn, weights = self.self_attn(self.pre_attention_layernorm(hidden_states), **kwargs)
+        attn, _ = self.self_attn(self.pre_attention_layernorm(hidden_states), **kwargs)
         hidden_states = residual + attn
-        hidden_states = hidden_states + self.mlp(self.pre_feedforward_layernorm(hidden_states))
-        return hidden_states, weights
+        return hidden_states + self.mlp(self.pre_feedforward_layernorm(hidden_states))
 
 
 class InstellaPreTrainedModel(PreTrainedModel):
@@ -147,6 +145,8 @@ class InstellaPreTrainedModel(PreTrainedModel):
     _no_split_modules = ["InstellaDecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
     _supports_sdpa = True
+    _supports_attention_backend = True
+    _can_record_outputs = {"hidden_states": InstellaDecoderLayer, "attentions": InstellaAttention}
 
     @torch.no_grad()
     def _init_weights(self, module):
@@ -165,19 +165,16 @@ class InstellaModel(InstellaPreTrainedModel):
         self.norm = InstellaRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_init()
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(
         self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-        inputs_embeds=None, use_cache=None, output_attentions=None, output_hidden_states=None,
-        return_dict=None, cache_position=None, **kwargs,
+        inputs_embeds=None, use_cache=None, **kwargs,
     ):
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Specify exactly one of input_ids and inputs_embeds")
         if past_key_values is not None and not isinstance(past_key_values, Cache):
-            raise TypeError("Instella requires a Transformers Cache, not a legacy tuple cache")
-        use_cache = self.config.use_cache if use_cache is None else use_cache
-        output_attentions = self.config.output_attentions if output_attentions is None else output_attentions
-        output_hidden_states = self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
-        return_dict = self.config.return_dict if return_dict is None else return_dict
+            raise TypeError("Instella requires a Transformers Cache")
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         if use_cache and past_key_values is None:
@@ -185,33 +182,19 @@ class InstellaModel(InstellaPreTrainedModel):
         if position_ids is None:
             past_seen = past_key_values.get_seq_length() if past_key_values is not None else 0
             position_ids = (torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device) + past_seen).unsqueeze(0)
-        # Request an explicit mask for attention-output eager fallback as well.
         mask = create_causal_mask(
             config=self.config, inputs_embeds=inputs_embeds, attention_mask=attention_mask,
             past_key_values=past_key_values, position_ids=position_ids,
-            allow_is_causal_skip=not output_attentions,
         )
         hidden_states = inputs_embeds
-        all_hidden = () if output_hidden_states else None
-        all_attn = () if output_attentions else None
         for layer in self.layers:
-            if output_hidden_states:
-                all_hidden += (hidden_states,)
-            hidden_states, weights = layer(
+            hidden_states = layer(
                 hidden_states, attention_mask=mask, position_ids=position_ids,
-                past_key_values=past_key_values, output_attentions=output_attentions,
-                use_cache=use_cache, cache_position=cache_position,
+                past_key_values=past_key_values, use_cache=use_cache, **kwargs,
             )
-            if output_attentions:
-                all_attn += (weights,)
-        hidden_states = self.norm(hidden_states)
-        if output_hidden_states:
-            all_hidden += (hidden_states,)
-        output = BaseModelOutputWithPast(
-            last_hidden_state=hidden_states, past_key_values=past_key_values if use_cache else None,
-            hidden_states=all_hidden, attentions=all_attn,
+        return BaseModelOutputWithPast(
+            last_hidden_state=self.norm(hidden_states), past_key_values=past_key_values if use_cache else None,
         )
-        return output if return_dict else output.to_tuple()
 
 
 class InstellaForCausalLM(InstellaPreTrainedModel, GenerationMixin):
@@ -223,28 +206,21 @@ class InstellaForCausalLM(InstellaPreTrainedModel, GenerationMixin):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
 
+    @can_return_tuple
     def forward(
         self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-        inputs_embeds=None, labels=None, use_cache=None, output_attentions=None,
-        output_hidden_states=None, return_dict=None, cache_position=None,
-        logits_to_keep=0, num_logits_to_keep=None, **kwargs,
+        inputs_embeds=None, labels=None, use_cache=None, logits_to_keep=0, **kwargs,
     ):
-        return_dict = self.config.return_dict if return_dict is None else return_dict
         outputs = self.model(
             input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
-            past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache,
-            output_attentions=output_attentions, output_hidden_states=output_hidden_states,
-            return_dict=True, cache_position=cache_position,
+            past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs,
         )
-        if num_logits_to_keep is not None:
-            logits_to_keep = num_logits_to_keep
         indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(outputs.last_hidden_state[:, indices, :])
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
-        output = CausalLMOutputWithPast(
+        return CausalLMOutputWithPast(
             loss=loss, logits=logits, past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states, attentions=outputs.attentions,
         )
-        return output if return_dict else output.to_tuple()
