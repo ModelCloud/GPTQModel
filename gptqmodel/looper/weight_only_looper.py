@@ -21,7 +21,6 @@ from concurrent.futures import as_completed
 from typing import Dict, List, Optional, Tuple
 
 import torch
-from accelerate.utils import find_tied_parameters
 from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEVICE_THREAD_POOL
@@ -79,6 +78,7 @@ from ..utils.offload import (
     restore_offloaded_modules,
 )
 from ..utils.p2p import configure_p2p, enable_for_devices
+from ..utils.tied_weights import lm_head_quantization_is_tied
 from .execution_state import DeviceAssignmentState
 from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 
@@ -1077,10 +1077,10 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         lm_head_name = self.gptq_model.get_output_embeddings_name() or self.gptq_model.lm_head
         if not embed_only and quant_config.lm_head and lm_head_name not in embedding_target_names:
             # The output head may belong to a nested multimodal text model.
-            if any(
-                f"{lm_head_name}.weight" in names
-                for names in find_tied_parameters(self.gptq_model.model)
-            ):
+            # Share the check with `ModuleLooper`: `find_tied_parameters` alone
+            # only sees materialized parameters, so a lazily loaded shell let
+            # the run continue and fail on the head's meta tensor (#5027).
+            if lm_head_quantization_is_tied(self.gptq_model, lm_head_name):
                 raise NotImplementedError(
                     "quantization of `lm_head` layer with tied weights is not supported. "
                     "Untie the model weights before quantization."
