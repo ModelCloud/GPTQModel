@@ -7,14 +7,14 @@ Native Transformers sources: Copyright 2025 The Qwen Team and HuggingFace Inc.
 Those sources are Apache-2.0.
 
 Pinned Qwen3-0.6B metadata and tokenizer fixtures originate with the Qwen Team,
-Alibaba Cloud. Its Apache-2.0 LICENSE is preserved byte-for-byte in LICENSE and
-fixtures/qwen3-LICENSE.gz. The upstream model card is also retained unchanged.
+Alibaba Cloud. Its Apache-2.0 LICENSE and model card are pinned, unchanged,
+as test assets.
 
 Pinned Marin-32B metadata and tokenizer fixtures originate with the Marin
 community. The retained upstream model card declares Apache-2.0 for code and
 model and credits stanford-crfm/marin-tokenizer, whose vocabulary matches Llama 3.
 No separate license file is included in that pinned Marin checkpoint. The
-original model card and all metadata remain unchanged in compressed fixtures.
+original model card and all metadata are pinned, unchanged, as test assets.
 Dataset licenses described in that card are separate from this software binding;
 no training data or trained model payloads are redistributed here.
 
