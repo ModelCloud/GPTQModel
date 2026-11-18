@@ -7,7 +7,7 @@ tokenization_internlm.py is adapted from the Apache-2.0 implementation in
 https://huggingface.co/internlm/internlm-chat-7b
 revision 4e2d2e185058a4cbaa2377ba1bb993eb599ce492.
 The upstream implementation is based on Hugging Face Llama tokenization.
-See LICENSE and TOKENIZERS.md for terms, pinned source/asset hashes and changes.
+See the repository LICENSE (Apache-2.0) for terms.
 
 The shared algorithm is also used by the distinct InternLM2Tokenizer class.
 No upstream weights or SentencePiece vocabulary assets are redistributed.

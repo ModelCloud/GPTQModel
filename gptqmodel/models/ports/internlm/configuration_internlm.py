@@ -1,6 +1,6 @@
 # Copyright (c) The InternLM team and The HuggingFace Inc. team. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""InternLM 1 configuration adapted from the pinned upstream source in README.md."""
+"""InternLM 1 configuration adapted from internlm/internlm-chat-7b."""
 
 from transformers import PreTrainedConfig
 
