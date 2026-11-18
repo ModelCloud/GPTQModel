@@ -179,7 +179,14 @@ def mse_optimal_quant(
     maxshrink: float,
     eps: float = 1e-8,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Ternary search: O(log steps)"""
+    """Ternary search over shrink factors: O(log steps).
+
+    The unshrunk range (``p = 1``) is the plain quantization baseline, so it is
+    scored explicitly and starts as the incumbent. Only a candidate whose
+    measured error is strictly lower replaces it, which keeps the returned grid
+    no worse than that baseline even when the ternary probes and their
+    refinement never reach the right endpoint.
+    """
     block_f = block.float()
     rows = block_f.shape[0]
 
@@ -199,7 +206,16 @@ def mse_optimal_quant(
 
     # Left, Right pointer
     l, r = torch.full((rows, 1), shrink, device=block_f.device, dtype=block_f.dtype), torch.ones((rows, 1), device=block_f.device, dtype=block_f.dtype)
-    best_err, best_p = torch.full((rows,), float('inf'), device=block_f.device), r.clone()
+    # Score both endpoints before searching. The interior probes are computed
+    # from `l`/`r`, so they never equal `p = 1`; seeding an unscored incumbent
+    # let the first interior candidate hide the unshrunk grid entirely.
+    endpoint_err = _eval_mse(
+        block_f, min_val, max_val, base_zero, qcfg, maxq,
+        torch.stack([l, r], dim=1).view(rows, 2, 1), eps,
+    )
+    shrunk_better = endpoint_err[:, 0] < endpoint_err[:, 1]
+    best_err = torch.where(shrunk_better, endpoint_err[:, 0], endpoint_err[:, 1])
+    best_p = torch.where(shrunk_better.unsqueeze(1), l, r)
 
     for _ in range(steps):
         mid1, mid2 = l + (r - l) / 3.0, r - (r - l) / 3.0
@@ -215,7 +231,16 @@ def mse_optimal_quant(
     # Refine
     delta = (r - l) * 0.1
     refinement = torch.stack([torch.clamp(best_p - delta, shrink, 1.0), best_p, torch.clamp(best_p + delta, shrink, 1.0)], dim=1).view(rows, 3, 1)
-    best_p = torch.gather(refinement.squeeze(2), 1, _eval_mse(block_f, min_val, max_val, base_zero, qcfg, maxq, refinement, eps).argmin(dim=1).unsqueeze(1))
+    refine_err = _eval_mse(block_f, min_val, max_val, base_zero, qcfg, maxq, refinement, eps)
+    refine_best_err, refine_index = refine_err.min(dim=1)
+    # Refinement always contains the incumbent, but keep the comparison
+    # explicit so a re-evaluated candidate cannot displace a better endpoint.
+    improved = refine_best_err < best_err
+    best_p = torch.where(
+        improved.unsqueeze(1),
+        torch.gather(refinement.squeeze(2), 1, refine_index.unsqueeze(1)),
+        best_p,
+    )
 
     # Final quantization
     scale_best = torch.clamp((max_val - min_val) * best_p / maxq, min=eps)
