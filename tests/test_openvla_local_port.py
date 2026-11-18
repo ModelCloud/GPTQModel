@@ -21,6 +21,7 @@ from gptqmodel.models.ports.openvla.configuration_prismatic import (
 )
 from gptqmodel.models.ports.openvla.modeling_prismatic import OpenVLAForActionPrediction
 from gptqmodel.models.ports.openvla.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+from gptqmodel.quantization.awq.utils.module import get_op_name
 from tests.port_assets import read_port_asset
 
 
@@ -544,7 +545,7 @@ def test_openvla_action_real_greedy_oracle_and_validation_retry():
 @pytest.mark.parametrize("llm,offload,fused", [
     ("llama2-7b-pure", False, True), ("mistral-v0.1-7b-pure", True, False), ("phi-2-3b", False, False),
 ])
-def test_openvla_public_image_plain_awq_pack_and_two_exact_reloads(tmp_path, monkeypatch, llm, offload, fused):
+def test_openvla_public_image_awq_pack_and_two_exact_reloads(tmp_path, monkeypatch, llm, offload, fused):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -562,8 +563,11 @@ def test_openvla_public_image_plain_awq_pack_and_two_exact_reloads(tmp_path, mon
         "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj",
     }
     expected_paths = {f"language_model.model.layers.{i}.{name}" for i in range(2) for name in linears}
+    # AWQ folds its activation scales into the Llama/Mistral pre-norm gains.
+    folded = set() if phi else {f"language_model.model.layers.{i}.{name}.weight" for i in range(2)
+                                for name in ("input_layernorm", "post_attention_layernorm")}
     dense = {k: v.clone() for k, v in original.state_dict().items()
-             if k.rsplit(".", 1)[0] not in expected_paths}
+             if k.rsplit(".", 1)[0] not in expected_paths and k not in folded}
     config = AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=offload,
                        offload_to_disk_path=str(tmp_path / "offload"))
     wrapper = GPTQModel.load(str(source), quantize_config=config, backend=BACKEND.TORCH, dtype=torch.float16,
@@ -588,7 +592,17 @@ def test_openvla_public_image_plain_awq_pack_and_two_exact_reloads(tmp_path, mon
         return cache
 
     monkeypatch.setattr(StageInputsCapture, "cache_inputs", observe_capture)
-    assert wrapper.awq_get_modules_for_scaling(wrapper.model.language_model.model.layers[0], {}, {}) == []
+    awq_layer = wrapper.model.language_model.model.layers[0]
+    awq_features = {name: torch.zeros(1, 2, module.in_features) for name, module in awq_layer.named_modules()
+                    if name in linears}
+    awq_sources = [get_op_name(awq_layer, node["prev_op"])
+                   for node in wrapper.awq_get_modules_for_scaling(awq_layer, awq_features, {})]
+    # Phi's parallel norm and GELU leave only `v_proj -> dense`; GQA (two KV
+    # heads) narrows it below `dense`'s input, so the processor drops it and
+    # Phi takes the plain AWQ path.
+    assert awq_sources == (["self_attn.v_proj"] if phi else [
+        "input_layernorm", "self_attn.v_proj", "post_attention_layernorm", "mlp.up_proj",
+    ])
     wrapper.quantize(
         CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
         backend=BACKEND.TORCH,

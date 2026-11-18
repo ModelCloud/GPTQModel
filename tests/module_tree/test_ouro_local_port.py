@@ -54,7 +54,7 @@ def test_every_pinned_released_key_and_shape_matches_meta(release):
 @pytest.mark.parametrize("kv_heads", [1, 2, 4])
 @pytest.mark.parametrize("head_dim", [8, 12])
 @pytest.mark.parametrize("sliding", [False, True])
-def test_live_checkpoint_weight_owners_alias_and_plain_policy(kv_heads, head_dim, sliding):
+def test_live_checkpoint_weight_owners_and_alias(kv_heads, head_dim, sliding):
     config = OuroConfig(
         vocab_size=32,
         hidden_size=32,
@@ -83,7 +83,6 @@ def test_live_checkpoint_weight_owners_alias_and_plain_policy(kv_heads, head_dim
         "mlp.down_proj",
     }
     for layer in model.model.layers:
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
         for key in layer.state_dict():
             owner = key.rsplit(".", 1)[0]
             spec = plan.find(owner)

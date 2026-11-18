@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Dict, Optional
 
 from PIL import Image
+from torch import nn
 from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
@@ -208,13 +209,69 @@ class NemotronOmniQModel(NemotronHQModel):
     def monkey_patch(self):
         """Native Transformers owns optional-kernel dispatch; never mutate classes."""
 
+    @classmethod
+    def awq_input_feature_aggregation(cls, module_name):
+        # `norm -> in_proj` replays the whole Mamba mixer, whose chunked scan
+        # carries state along the sequence; packed token rows from different
+        # samples are not a sequence. Keep that one feature sequence-shaped.
+        if module_name == "mixer.in_proj":
+            return None
+        return super().awq_input_feature_aggregation(module_name)
+
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # SSM gates, relu2 and routed/shared branches need joint replay qualification.
-        return []
+        """Generic planner, corrected for the MoE input group.
+
+        Mamba, attention and dense-MLP layers use the generic groups unchanged.
+        On a MoE layer the norm feeds the router, the shared expert and the
+        routed experts (through `fc1_latent_proj` when `moe_latent_size` is set).
+        """
+
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        mixer = getattr(module, "mixer", None)
+        experts = getattr(mixer, "experts", None)
+        if experts is None:
+            return nodes
+        routed = {id(child) for child in experts.modules()}
+        fc1 = getattr(mixer, "fc1_latent_proj", None)
+        latent = isinstance(fc1, nn.Linear)
+        kept = []
+        for node in nodes:
+            layers = list(node.get("layers") or [])
+            if latent and any(layer is fc1 or layer is mixer.fc2_latent_proj for layer in layers):
+                # Tree order hands `fc1_latent_proj` the shared expert's
+                # `down_proj` and `fc2_latent_proj` the last routed `down_proj`;
+                # neither produces their input.
+                continue
+            if node.get("prev_op") is getattr(module, "norm", None):
+                node = dict(node)
+                if latent:
+                    # Routed experts read `fc1_latent_proj(norm(x))`, so the norm
+                    # folds into the shared expert and `fc1_latent_proj` instead.
+                    node["layers"] = [layer for layer in layers if id(layer) not in routed] + [fc1]
+                    node["module2inspect"] = mixer
+                    node.pop("_awq_search_layers", None)
+                    node.pop("_awq_allow_outside_fold", None)
+                    consumers = list(node.get("_scale_consumers") or [])
+                    if "mixer.gate" not in consumers:
+                        consumers.append("mixer.gate")
+                    node["_scale_consumers"] = consumers
+                elif any(id(layer) in routed for layer in layers):
+                    # The nested `mixer.experts` root is not captured, so the
+                    # search reads the shared expert's input, which is the MoE
+                    # block input. Name it as such: native top-k may leave an
+                    # expert unrouted on that sample, and the processor then
+                    # scores the executed members and folds the rest (#4675).
+                    node["_input_feature_name"] = "mixer"
+            kept.append(node)
+        return kept
 
     @classmethod
     def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
         tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
-        tree[-1]["mixer"] = tuple(dict.fromkeys((*tree[-1]["mixer"], "A_log:!", "D:!", "dt_bias:!")))
+        # The SSM parameters belong to the `in_proj` (index 2) stage. Untagged they
+        # joined the attention q/k/v stage, and that stage's last entry, absent on
+        # an attention layer, hid `v_proj` as the `o_proj` source, so the planner
+        # merged `o_proj` into the input-norm group.
+        tree[-1]["mixer"] = tuple(dict.fromkeys((*tree[-1]["mixer"], "A_log:2:!", "D:2:!", "dt_bias:2:!")))
         tree[-1]["mixer.norm"] = ("norm:!",)
         return tree

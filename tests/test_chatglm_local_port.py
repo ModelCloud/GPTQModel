@@ -178,7 +178,7 @@ def test_chatglm_released_literal_special_tokens(tmp_path):
 
 @pytest.mark.cpu
 @pytest.mark.parametrize('release', ['glm2', 'glm3', 'glm4'])
-def test_chatglm_released_tokenizer_plain_awq_roundtrips(tmp_path, monkeypatch, release):
+def test_chatglm_released_tokenizer_awq_roundtrips(tmp_path, monkeypatch, release):
     from tokenicer import Tokenicer
 
     from gptqmodel import BACKEND, GPTQModel
@@ -196,7 +196,6 @@ def test_chatglm_released_tokenizer_plain_awq_roundtrips(tmp_path, monkeypatch, 
     _bypass(monkeypatch, True)
     wrapper = GPTQModel.load(str(tmp_path), quantize_config=AWQConfig(device='cpu', group_size=16, fallback=None),
                             trust_remote_code=True, backend=BACKEND.TORCH, dtype=torch.float16)
-    assert wrapper.awq_get_modules_for_scaling(wrapper.model.transformer.encoder.layers[0], {}, {}) == []
     # Calibrate actual released token IDs produced by the public tokenizer.
     calibration = [wrapper.tokenizer(sample['text'], return_tensors='pt') for sample in contract['texts']]
     wrapper.quantize(
@@ -207,8 +206,12 @@ def test_chatglm_released_tokenizer_plain_awq_roundtrips(tmp_path, monkeypatch, 
     state = {key: value.clone() for key, value in wrapper.model.state_dict().items()}
     dense = model.state_dict()
     for key, value in state.items():
-        if key.startswith(('transformer.embedding.', 'transformer.output_layer.', 'transformer.rotary_pos_emb.')) or 'layernorm' in key:
+        if key.startswith(('transformer.embedding.', 'transformer.output_layer.', 'transformer.rotary_pos_emb.',
+                           'transformer.encoder.final_layernorm.')):
             torch.testing.assert_close(value, dense[key].to(value.dtype), atol=0, rtol=0)
+        elif key.endswith(('input_layernorm.weight', 'post_attention_layernorm.weight')):
+            # AWQ folds its searched activation scales into both pre-norm gains.
+            assert not torch.equal(value, dense[key].to(value.dtype)), key
     with torch.inference_mode():
         expected = wrapper.model(**calibration[0], use_cache=False).logits
     original_load = Tokenicer.load.__func__
@@ -730,7 +733,7 @@ def test_chatglm_prefix_tuning_cache_continuation(rope_ratio, prefix_projection,
 @pytest.mark.parametrize("rope_ratio", [None, 500])
 @pytest.mark.parametrize("post_residual", [False, True])
 @pytest.mark.parametrize("mqa", [False, True])
-def test_chatglm_plain_awq_quantizes_all_linears_and_reloads(tmp_path, rope_ratio, post_residual, mqa):
+def test_chatglm_awq_quantizes_all_linears_and_reloads(tmp_path, rope_ratio, post_residual, mqa):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
@@ -740,7 +743,6 @@ def test_chatglm_plain_awq_quantizes_all_linears_and_reloads(tmp_path, rope_rati
     _write_tokenizer(tmp_path)
     wrapper = GPTQModel.load(str(tmp_path), quantize_config=AWQConfig(device="cpu", group_size=16, fallback=None),
                             backend=BACKEND.TORCH, dtype=torch.float16)
-    assert wrapper.awq_get_modules_for_scaling(wrapper.model.transformer.encoder.layers[0], {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[4, 5, 6, 7, 8, 9, 10, 11]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
     wrapper.quantize(
@@ -749,7 +751,13 @@ def test_chatglm_plain_awq_quantizes_all_linears_and_reloads(tmp_path, rope_rati
     )
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 8
     for name, value in wrapper.model.state_dict().items():
-        if "layernorm" in name:
+        if "layernorm" not in name:
+            continue
+        if not post_residual and name.endswith(("input_layernorm.weight", "post_attention_layernorm.weight")):
+            # AWQ folds its searched activation scales into both pre-norm gains.
+            assert not torch.equal(value, model.state_dict()[name].half()), name
+        else:
+            # Post-layernorm residual mode has no fold source: plain AWQ.
             torch.testing.assert_close(value, model.state_dict()[name].half(), atol=0, rtol=0)
     with torch.inference_mode():
         expected = wrapper.model(**calibration[0], use_cache=False).logits

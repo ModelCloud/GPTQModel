@@ -64,9 +64,6 @@ class OpenVLAQModel(BaseQModel):
             self.pre_lm_head_norm_module = "language_model.model.final_layernorm"
         super().__init__(model, *args, **kwargs)
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        return []
-
     @classmethod
     def extract_layers_node(cls):
         return ["language_model.model.layers"]

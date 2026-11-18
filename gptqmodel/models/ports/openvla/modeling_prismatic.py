@@ -115,14 +115,20 @@ class PrismaticForConditionalGeneration(PreTrainedModel, GenerationMixin):
             config.text_config, attn_implementation=config._attn_implementation,
         )
         if config.text_config.model_type == "phi":
-            attention = ("q_proj:0", "k_proj:0", "v_proj:0", "dense:1")
+            # Phi runs attention and the MLP in parallel from one norm, so the
+            # shared norm cannot absorb a scale for either branch alone, the
+            # attention output never feeds `fc1`, and GELU separates fc1/fc2.
+            # Only `v_proj -> dense` is an AWQ fold (same flags as `phi.py`).
+            attention = ("q_proj:0:in=x", "k_proj:0:in=x", "v_proj:0:in=x", "dense:1:nosrc")
             if config.text_config.qk_layernorm:
-                attention += ("q_layernorm:!", "k_layernorm:!")
+                # Per-head q/k norms are not on the value path; declared first
+                # so they do not interrupt the `v_proj -> dense` fold.
+                attention = ("q_layernorm:!", "k_layernorm:!") + attention
             self.gptqmodel_effective_module_tree = [
                 "language_model", "model", "layers", "#", {
-                    "input_layernorm": ("input_layernorm:!",),
+                    "input_layernorm": ("input_layernorm:!:nosrc",),
                     "self_attn": attention,
-                    "mlp": ("fc1:0", "fc2:1"),
+                    "mlp": ("fc1:0:nosrc", "fc2:1"),
                 },
             ]
         self.vocab_size = config.text_config.vocab_size

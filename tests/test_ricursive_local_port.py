@@ -367,7 +367,7 @@ def test_public_hostile_dispatch_generation_policy_retry_and_dense_reload(tmp_pa
 
 @pytest.mark.parametrize("offload", [False, True])
 @pytest.mark.parametrize("kv_heads,gated,valres", [(4, True, True), (2, False, True), (1, True, False)])
-def test_public_plain_awq_every_linear_dense_owner_and_two_reloads(tmp_path, offload, kv_heads, gated, valres):
+def test_public_awq_every_linear_dense_owner_and_two_reloads(tmp_path, offload, kv_heads, gated, valres):
     from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
@@ -377,11 +377,22 @@ def test_public_plain_awq_every_linear_dense_owner_and_two_reloads(tmp_path, off
     qcfg = AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=offload)
     wrapper = GPTQModel.load(str(tmp_path), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
     assert (wrapper.turtle_model is not None) == offload
-    assert wrapper.awq_get_modules_for_scaling(wrapper.model.model.layers[0], {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[4, 5, 6, 7, 8, 9, 10, 11]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
+    # AWQ scale search folds into these norms; every other dense owner is untouched.
+    fold_norms = ("pre_feedforward_layernorm",) + (() if valres else ("input_layernorm",))
     dense_reference = {k: v.to(torch.float16).clone() for k, v in model.state_dict().items()
-                       if not any(k.endswith("." + name + ".weight") for name in LINEARS)}
+                       if not any(k.endswith("." + name + ".weight") for name in LINEARS | set(fold_norms))}
+    scaling_sources = []
+    plan_scaling = wrapper.awq_get_modules_for_scaling
+
+    def record_scaling(layer, input_feat, module_kwargs):
+        nodes = plan_scaling(layer, input_feat, module_kwargs)
+        names = {id(child): name for name, child in layer.named_modules()}
+        scaling_sources.extend(names.get(id(node["prev_op"])) for node in nodes)
+        return nodes
+
+    wrapper.awq_get_modules_for_scaling = record_scaling
     materializations = []
     materialize = wrapper.shell_module_materialize
 
@@ -404,6 +415,13 @@ def test_public_plain_awq_every_linear_dense_owner_and_two_reloads(tmp_path, off
         hook.remove()
     if offload:
         assert "model.layers.0" in materializations
+    # `ffn_clamp_threshold` keeps `up_proj -> down_proj` out; a GQA `v_proj -> o_proj`
+    # group is emitted but dropped by the processor's width check.
+    expected_sources = {"pre_feedforward_layernorm", "self_attn.v_proj"}
+    if not valres:
+        expected_sources.add("input_layernorm")
+    assert _model().config.ffn_clamp_threshold
+    assert set(scaling_sources) == expected_sources
     assert captured_inputs
     first_expected = F.embedding(calibration[0]["input_ids"], model.model.embed_tokens.weight.to(torch.float16))
     first_expected = first_expected * model.config.embed_scale
