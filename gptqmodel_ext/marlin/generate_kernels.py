@@ -29,7 +29,8 @@ TEMPLATE = ("template __global__ void Marlin<"
             "{{'true' if m_block_size_8 else 'false'}}, "
             "{{stages}}, "
             "{{group_blocks}}, "
-            "{{'true' if is_zp_float else 'false'}}>"
+            "{{'true' if is_zp_float else 'false'}}, "
+            "{{'true' if hybrid else 'false'}}>"
             "( MARLIN_KERNEL_PARAMS );")
 
 SCALAR_TYPES = [
@@ -169,7 +170,12 @@ def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
         elif dtype == "bf16":
             s_type = "vllm::kBFloat16"
 
-        for is_zp_float in is_zp_float_list:
+        # The hybrid schedule (#5222) is prefill only: the host launches it
+        # only for calls with at least 512 rows (MARLIN_HYBRID_MIN_ROWS in
+        # gptq_marlin.cu), which run 64-row tiles, so only m_blocks == 4 gets
+        # a hybrid variant.
+        hybrid_list = [False, True] if m_blocks == 4 else [False]
+        for is_zp_float, hybrid in itertools.product(is_zp_float_list, hybrid_list):
             template_str = jinja2.Template(TEMPLATE).render(
                 scalar_t=c_dtype,
                 w_type_id=scalar_type + ".id()",
@@ -182,6 +188,7 @@ def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
                 stages="pipe_stages",
                 group_blocks=group_blocks,
                 is_zp_float=is_zp_float,
+                hybrid=hybrid,
             )
 
             results.append(template_str)

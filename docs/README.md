@@ -124,6 +124,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Kernel compile and graph-capture matrix](kernel-compile-matrix.md)
 - [Low-precision bias epilogues](low-precision-bias-epilogue.md)
 - [Marlin bias epilogue and storage](marlin-bias-epilogue.md)
+- [Marlin hybrid work schedule](marlin-hybrid-schedule.md)
 - [MLX runtime generation and conversion flow](mlx-runtime.md)
 - [NF12 fallback epilogue](nf12-bias-epilogue.md)
 - [NF12 CUDA dispatch and weight readiness](nf12-cuda-dispatch.md)
