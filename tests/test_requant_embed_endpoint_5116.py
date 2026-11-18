@@ -160,6 +160,44 @@ def test_requantize_input_embedding_keeps_bf16_and_runs_in_session():
     assert torch.isfinite(reloaded_logits).all()
 
 
+@pytest.mark.parametrize(
+    "mode",
+    [QuantizeEmbed.INPUT, QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH],
+    ids=["input", "output", "both"],
+)
+def test_requantized_endpoints_can_be_resaved(mode):
+    """A loaded checkpoint with a quantized endpoint must be savable again (#5207)."""
+
+    checkpoint = _quantized_checkpoint()
+    model = GPTQModel.load(checkpoint, device="cpu", dtype=torch.bfloat16)
+    dynamic = dict(model.quantize_config.dynamic or {})
+    for name in (model.get_input_embeddings_name(), model.get_output_embeddings_name() or model.lm_head):
+        dynamic[name] = {"bits": 4, "group_size": 32, "sym": True, "desc_act": False}
+    model.quantize_config.dynamic = dynamic
+    model.requantize(
+        CalibrationConfig(dataset=_calibration_texts(), batch_size=2),
+        embed_quant_mode=mode,
+    )
+    ids = torch.tensor([[4, 5, 6, 7]])
+
+    first = str(Path(tempfile.mkdtemp(prefix="requant_embed_5116_s1_")) / "first")
+    model.save(first)
+    with torch.inference_mode():
+        expected = model.model(input_ids=ids).logits
+
+    reloaded = GPTQModel.load(first, device="cpu", dtype=torch.bfloat16)
+    # The re-save shell used to rebuild dense endpoints and then fail with
+    # "does not provide tensors for model.embed_tokens.weight / lm_head.weight".
+    second = str(Path(tempfile.mkdtemp(prefix="requant_embed_5116_s2_")) / "second")
+    reloaded.save(second)
+
+    again = GPTQModel.load(second, device="cpu", dtype=torch.bfloat16)
+    with torch.inference_mode():
+        actual = again.model(input_ids=ids).logits
+    assert actual.dtype == torch.bfloat16
+    assert torch.allclose(actual, expected, atol=2e-3, rtol=0)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the placement check")
 def test_requantize_restores_the_endpoint_device():
     """The requantized endpoint runs on the device the loaded model occupies."""
