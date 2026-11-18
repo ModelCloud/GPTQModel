@@ -663,8 +663,7 @@ def test_chatglm_checkpointed_training_disables_cache_and_backpropagates(rope_ra
     model.activation_checkpointing_enable(activation_checkpointing_kwargs={"use_reentrant": False})
     ids = torch.tensor([[3, 4, 5, 6], [7, 8, 9, 4]])
     output = model(ids, labels=ids, use_cache=True)
-    # GradientCheckpointingLayer drops the cache for checkpointed layers.
-    assert output.past_key_values.get_seq_length() == 0
+    assert output.past_key_values is None
     output.loss.backward()
     qkv = model.transformer.encoder.layers[0].self_attention.query_key_value
     assert torch.isfinite(qkv.weight.grad).all() and qkv.weight.grad.norm() > 0
