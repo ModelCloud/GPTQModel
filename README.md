@@ -33,7 +33,7 @@
 
 ## Latest News 🗞️🚀
 
-**7.11.1 (upcoming)**
+**7.11.1**
 
 - **API migration:** Pass datasets and calibration options through [`CalibrationConfig`](docs/quantization-guide.md) instead of the old `quantize()` arguments. Replace `GPTQModel.export()` with [`dequantize_model()`](docs/checkpoint-interop.md#7-dense-dequantization-with-dequantize_model) for dense Transformers checkpoints or [`convert_gptq_to_mlx_weights()`](docs/mlx-runtime.md) for MLX-LM. ParoQuant is now [Paro](docs/paro.md); existing checkpoints still load.
 - **Models:** Added [SenseNova-Loop 9B](docs/supported-models.md) quantization and [Decision Transformer](docs/decision-transformer-calibration.md) quantization from trajectory tensors without a tokenizer. Fixed checkpoint round trips for Qwen2.5-Omni, Qwen3-Omni, and InternVL.
