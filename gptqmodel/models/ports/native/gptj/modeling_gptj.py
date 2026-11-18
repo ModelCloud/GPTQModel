@@ -35,6 +35,7 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutputWithPast,
 )
 from transformers.modeling_utils import PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.utils import auto_docstring, logging
 from transformers.utils.generic import is_flash_attention_requested
 from .configuration_gptj import GPTJConfig
@@ -420,7 +421,7 @@ class GPTJBlock(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class GPTJPreTrainedModel(PreTrainedModel):
+class GPTJPreTrainedModel(NativePreTrainedModel):
     config: GPTJConfig
     base_model_prefix = "transformer"
     supports_gradient_checkpointing = True

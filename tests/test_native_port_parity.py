@@ -63,7 +63,7 @@ ORACLE_UNAVAILABLE = {
 
 
 @pytest.mark.parametrize("family", CASES)
-def test_vendored_family_matches_transformers(family):
+def test_vendored_family_matches_transformers(family, tmp_path):
     if family in ORACLE_UNAVAILABLE:
         if family == "inkling":
             pytest.importorskip("scipy", reason=ORACLE_UNAVAILABLE[family])
@@ -98,6 +98,22 @@ def test_vendored_family_matches_transformers(family):
         assert len(actual) == len(expected), f"{name}: output structure differs"
         for index, (want, got) in enumerate(zip(expected, actual)):
             assert torch.equal(want, got), f"{name}: output {index} differs"
+
+        # A checkpoint written by Transformers must load into the vendored class through the
+        # same conversion mappings (key renames, expert fusion) and give identical outputs.
+        # The oracle is Transformers loading the same checkpoint (some native heads do not
+        # round-trip bit-exactly on their own, e.g. GPT2DoubleHeadsModel).
+        checkpoint = tmp_path / name
+        native.save_pretrained(checkpoint)
+        native_loaded = native_class.from_pretrained(checkpoint).eval()
+        loaded = vendored_class.from_pretrained(checkpoint, config=vendored_config_class.from_pretrained(checkpoint)).eval()
+        assert type(loaded) is vendored_class
+        with torch.no_grad():
+            expected_reload = _flatten(native_loaded(**inputs))
+            reloaded = _flatten(loaded(**inputs))
+        assert len(reloaded) == len(expected_reload), f"{name}: reloaded output structure differs"
+        for index, (want, got) in enumerate(zip(expected_reload, reloaded)):
+            assert torch.equal(want, got), f"{name}: output {index} differs after loading a Transformers checkpoint"
 
 
 def test_every_vendored_family_has_parity_coverage():

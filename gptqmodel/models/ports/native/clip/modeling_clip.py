@@ -28,6 +28,7 @@ from transformers.masking_utils import create_causal_mask
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling, ImageClassifierOutput
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import (
     ModelOutput,
@@ -392,7 +393,7 @@ def _init_child_weight(child: nn.Module, std: float) -> None:
 
 
 @auto_docstring
-class CLIPPreTrainedModel(PreTrainedModel):
+class CLIPPreTrainedModel(NativePreTrainedModel):
     config: CLIPConfig
     base_model_prefix = "clip"
     input_modalities = ("image", "text")

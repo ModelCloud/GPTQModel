@@ -41,6 +41,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import (
     TransformersKwargs,
@@ -626,7 +627,7 @@ class Qwen2VLDecoderLayer(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class Qwen2VLPreTrainedModel(PreTrainedModel):
+class Qwen2VLPreTrainedModel(NativePreTrainedModel):
     config: Qwen2VLConfig
     base_model_prefix = "model"
     input_modalities = ("image", "video", "text")

@@ -30,6 +30,7 @@ from transformers.generation import GenerationMixin
 from transformers.integrations import use_kernel_forward_from_hub
 from transformers.modeling_outputs import BaseModelOutputWithPooling, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, torch_compilable_check
 from ..auto import AutoModel, AutoModelForCausalLM
@@ -76,7 +77,7 @@ class NemotronH_Omni_Reasoning_V3MultiModalProjector(nn.Module):
 
 
 @auto_docstring
-class NemotronH_Omni_Reasoning_V3PreTrainedModel(PreTrainedModel):
+class NemotronH_Omni_Reasoning_V3PreTrainedModel(NativePreTrainedModel):
     config: NemotronH_Omni_Reasoning_V3_Config
     main_input_name = "input_ids"
     input_modalities = ("image", "video", "audio", "text")
