@@ -1,12 +1,13 @@
 # Copyright 2023 Haotian Liu
 # SPDX-License-Identifier: Apache-2.0
-# Transformers 5 adaptation by ModelCloud.ai, 2026; see README.md.
+# Transformers 5 adaptation by ModelCloud.ai, 2026; see NOTICE.
 
 import re
 
 import torch
 from torch import nn
 from transformers import Qwen2ForCausalLM, Qwen2Model
+from transformers import initialization as init
 
 from .configuration_llava_qwen2 import LlavaConfig
 from .multimodal import LlavaMultimodalMixin
@@ -59,7 +60,7 @@ class LlavaQwen2ForCausalLM(LlavaMultimodalMixin, Qwen2ForCausalLM):
     def _init_weights(self, module):
         super()._init_weights(module)
         if isinstance(module, LlavaQwen2Model) and hasattr(module, "image_newline"):
-            nn.init.normal_(module.image_newline, std=self.config.hidden_size ** -0.5)
+            init.normal_(module.image_newline, std=self.config.hidden_size ** -0.5)
 
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
                 inputs_embeds=None, labels=None, images=None, image_sizes=None, **kwargs):

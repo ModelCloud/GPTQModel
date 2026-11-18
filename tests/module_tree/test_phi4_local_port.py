@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The actual legacy phi4mm tensor owners, not the similarly named native layout."""
 
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,7 +16,6 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.phi4.configuration_phi4 import Phi4MMConfig
 from gptqmodel.models.ports.phi4.modeling_phi4 import Phi4MMForCausalLM
-from tests.port_assets import read_port_json
 from tests.test_phi4_local_port import _config
 
 
@@ -73,16 +74,27 @@ def test_real_legacy_decoder_plan_and_excluded_adapters(kv, device):
         assert wrapper.awq_get_modules_for_scaling(layer, {}, {"input_mode": 3}) == []
 
 
+# sha256 of the sorted (name, shape) inventory of all three microsoft/Phi-4-multimodal-instruct
+# safetensors headers at the pinned revision. The tied lm_head alias is not serialized.
+RELEASED_HEADER_SHA256 = "a614e91b7668889a00fc95ba7969b5dfc28fd8d87ee855ec8543e63d1680d4f1"
+
+
 def test_complete_pinned_released_tensor_header_inventory():
-    root = Path(__file__).parents[2] / "gptqmodel/models/ports/phi4"
-    schema = read_port_json(root / "released_schema.json")
-    config = Phi4MMConfig(**schema["config"])
+    released = json.loads((Path(__file__).parents[1] / "fixtures/ports/phi4/released_config.json").read_text())
+    config = Phi4MMConfig(**released["config"])
     config._attn_implementation = "eager"
     with torch.device("meta"):
         model = Phi4MMForCausalLM(config)
-    actual = {key: list(value.shape) for key, value in model.state_dict().items()}
-    assert len(schema["shapes"]) == 2047
-    assert set(actual) - set(schema["shapes"]) == {"lm_head.weight"}
-    for key, shape in schema["shapes"].items():
-        assert actual[key] == shape, key
+    inventory = sorted((key, list(value.shape)) for key, value in model.state_dict().items() if key != "lm_head.weight")
+    assert len(inventory) == 2047
+    assert hashlib.sha256(json.dumps(inventory).encode()).hexdigest() == RELEASED_HEADER_SHA256
     assert model.lm_head.weight is model.model.embed_tokens.weight
+
+
+def test_device_map_no_split_covers_wrapped_legacy_layers():
+    # accelerate matches _no_split_modules by class name; the legacy wrappers replace native layers.
+    model = Phi4MMForCausalLM(_config())
+    classes = {type(module).__name__ for module in model.modules()}
+    for name in ("Phi4MMDecoderLayer", "Phi4MMAudioLayer", "Phi4MultimodalVisionEncoderLayer"):
+        assert name in classes and name in model._no_split_modules
+    assert "Phi4MultimodalDecoderLayer" not in classes

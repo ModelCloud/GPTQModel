@@ -19,10 +19,10 @@
 
 from typing import Dict, List, Optional, Tuple, Union
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 
-class RADIOConfig(PretrainedConfig):
+class RADIOConfig(PreTrainedConfig):
     model_type = "radio"
 
     def __init__(

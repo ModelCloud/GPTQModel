@@ -1,10 +1,8 @@
 # Modifications copyright(c) 2025 Advanced Micro Devices,Inc. All rights reserved.
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: LicenseRef-Instella-Research-Only-RAIL-MS
-# Modified for Transformers 5 by ModelCloud.ai. See LICENSE, NOTICES and PROVENANCE.md.
+# Modified for Transformers 5 by ModelCloud.ai. See LICENSE and NOTICES.
 """Instella configuration adapted from the pinned AMD checkpoint implementation."""
-
-import copy
 
 from transformers import PreTrainedConfig
 
@@ -21,14 +19,16 @@ class InstellaConfig(PreTrainedConfig):
         tie_word_embeddings=False, rope_theta=10000.0, rope_scaling=None,
         attention_bias=False, attention_dropout=0.0, rms_norm_eps=1e-5, **kwargs,
     ):
-        # Transformers 5 serializes legacy rope_scaling through rope_parameters.
-        # Consume that representation before assigning the legacy alias below;
-        # otherwise a save/reload silently resets linear/NTK scaling to default.
+        # Transformers 5 stores RoPE as `rope_parameters` (`rope_scaling` is a
+        # deprecated alias of it). Accept either spelling from the checkpoint.
         rope_parameters = kwargs.pop("rope_parameters", None)
         if rope_parameters is not None:
             rope_theta = rope_parameters.get("rope_theta", rope_theta)
-            if rope_scaling is None and rope_parameters.get("rope_type", rope_parameters.get("type")) != "default":
+            if rope_scaling is None:
                 rope_scaling = rope_parameters
+        kind = rope_scaling.get("rope_type", rope_scaling.get("type")) if isinstance(rope_scaling, dict) else None
+        if kind == "default":
+            rope_scaling = None
         super().__init__(
             pad_token_id=pad_token_id, bos_token_id=bos_token_id,
             eos_token_id=eos_token_id, tie_word_embeddings=tie_word_embeddings, **kwargs,
@@ -44,7 +44,6 @@ class InstellaConfig(PreTrainedConfig):
         self.initializer_range = initializer_range
         self.use_cache = use_cache
         self.rope_theta = rope_theta
-        self.rope_scaling = copy.deepcopy(rope_scaling)
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.rms_norm_eps = rms_norm_eps
@@ -52,10 +51,11 @@ class InstellaConfig(PreTrainedConfig):
             raise ValueError("Instella requires an even head dimension and hidden_size divisible by num_attention_heads")
         if self.num_key_value_heads <= 0 or num_attention_heads % self.num_key_value_heads:
             raise ValueError("num_key_value_heads must divide num_attention_heads")
+        self.rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
         if rope_scaling is not None:
-            kind = rope_scaling.get("type", rope_scaling.get("rope_type")) if isinstance(rope_scaling, dict) else None
             factor = rope_scaling.get("factor") if isinstance(rope_scaling, dict) else None
             if kind not in ("linear", "dynamic") or not isinstance(factor, (float, int)) or factor <= 1:
                 raise ValueError("Instella rope_scaling requires type linear/dynamic and factor > 1")
             if kind == "dynamic" and hidden_size // num_attention_heads <= 2:
                 raise ValueError("Dynamic NTK scaling requires head_dim > 2")
+            self.rope_parameters = {"rope_type": kind, "rope_theta": rope_theta, "factor": factor}

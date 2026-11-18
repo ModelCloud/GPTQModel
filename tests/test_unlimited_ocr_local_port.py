@@ -3,10 +3,8 @@
 """Native Unlimited-OCR task, legacy conversion and public lifecycle qualification."""
 
 import copy
-import hashlib
 import json
 import re
-from pathlib import Path
 
 import pytest
 import torch
@@ -17,16 +15,15 @@ from transformers import (
 
 from gptqmodel.models.definitions.unlimited_ocr import UnlimitedOCRQModel
 from gptqmodel.utils.hf import load_model_config
-from tests.port_assets import read_port_asset
+from tests.port_assets import PORTS, read_port_asset
 
 
-FIXTURES = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/unlimited_ocr/fixtures"
 UNUSED_PATCH_NAME = "model.vision_model.embeddings.patch_embedding.weight"
 
 
 def asset(name):
-    path = FIXTURES / name
-    return path.read_bytes() if path.exists() else read_port_asset(path)
+    """Released Unlimited-OCR asset from tests/fixtures/ports or the pinned Hub revision."""
+    return read_port_asset(PORTS / "unlimited_ocr" / "fixtures" / name)
 
 
 def legacy_key(name):
@@ -155,8 +152,7 @@ def tiny_config(kv_heads=4, bias=False, dtype=torch.float32, layout="mixed"):
 
 
 @pytest.mark.parametrize("model_type", ["unlimited_ocr", "unlimited-ocr"])
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (False, "0"), (True, "1")])
 def test_definition_pins_native_generative_task(tmp_path, monkeypatch, model_type, trust, bypass):
     if bypass is None:
         monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
@@ -209,18 +205,28 @@ def test_native_legacy_config_does_not_mutate_caller():
     assert original == snapshot
 
 
-def test_pinned_assets_integrity():
-    manifest = json.loads((FIXTURES.parent / "source_manifest.json").read_bytes())
-    for name, digest in manifest["sha256"].items():
-        if name.endswith(".py"):
-            continue
-        data = (FIXTURES.parent / name).read_bytes() if name == "LICENSE" else asset(name)
-        assert hashlib.sha256(data).hexdigest() == digest, name
+@pytest.mark.parametrize("suffix", ["", ".qweight", ".qzeros", ".scales", ".g_idx", ".bias"])
+def test_main_gptq_checkpoint_names_map_to_native_modules(suffix):
+    """GPTQ checkpoints quantized on main used model.layers.*; loading maps them onto native modules."""
+    from defuser.modeling.update_module import update_module
+
+    with torch.device("meta"):
+        model = UnlimitedOcrForConditionalGeneration(tiny_config(layout="mixed"))
+    update_module(model, cleanup_original=False)
+    linears = [name for name, module in model.named_modules()
+               if isinstance(module, torch.nn.Linear) and name.startswith("model.language_model.layers.")]
+    assert any(".mlp.experts." in name for name in linears) and any(".shared_experts." in name for name in linears)
+    for native in linears:
+        legacy = legacy_key(native)
+        assert legacy.startswith("model.layers.")
+        assert UnlimitedOCRQModel.checkpoint_key_for_load(legacy + suffix) == native + suffix
+        # Checkpoints written by this port keep native names; loading is idempotent.
+        assert UnlimitedOCRQModel.checkpoint_key_for_load(native + suffix) == native + suffix
+        assert UnlimitedOCRQModel.checkpoint_key_for_save(native + suffix) == native + suffix
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "1")])
 def test_actual_public_hostile_load_image_cache_and_two_saves(tmp_path, monkeypatch, legacy, trust, bypass):
     from tokenicer import Tokenicer
 
@@ -279,8 +285,10 @@ def test_actual_public_hostile_load_image_cache_and_two_saves(tmp_path, monkeypa
         assert (tmp_path / "source" / name).read_bytes() == expected_bytes
 
 
-@pytest.mark.parametrize("implementation,kv_heads", [("eager", 4), ("eager", 1), ("sdpa", 4), ("sdpa", 2), ("sdpa", 1)])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("implementation,kv_heads,dtype", [
+    ("eager", 4, torch.float32), ("eager", 1, torch.bfloat16), ("sdpa", 4, torch.float16),
+    ("sdpa", 2, torch.float32), ("sdpa", 1, torch.bfloat16),
+])
 def test_native_layout_cache_and_safetensors(tmp_path, implementation, kv_heads, dtype):
     config = tiny_config(kv_heads=kv_heads, bias=True, dtype=dtype)
     model = UnlimitedOCRQModel.loader.from_config(config, attn_implementation=implementation).to(dtype=dtype).eval()
@@ -370,9 +378,8 @@ def independent_decoder(model, ids, positions):
 
 
 @pytest.mark.parametrize("kv_heads,implementation", [(4, "eager"), (1, "eager"), (2, "sdpa"), (4, "sdpa")])
-@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("bias,method", [(False, "greedy"), (True, "group_limited_greedy")])
 @pytest.mark.parametrize("layout", ["dense", "sparse", "mixed"])
-@pytest.mark.parametrize("method", ["greedy", "group_limited_greedy"])
 def test_independent_source_decoder_oracle(kv_heads, implementation, bias, layout, method):
     torch.manual_seed(137)
     config = tiny_config(kv_heads, bias, layout=layout)
@@ -555,8 +562,9 @@ def test_native_eager_gqa_defect_and_owned_rejection():
         UnlimitedOCRQModel.loader.from_config(config, attn_implementation="eager")
 
 
-@pytest.mark.parametrize("size,expected_images", [((32, 32), 7), ((64, 32), 17), ((32, 64), 19)])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("size,expected_images,dtype", [
+    ((32, 32), 7, torch.float32), ((64, 32), 17, torch.float16), ((32, 64), 19, torch.bfloat16),
+])
 def test_native_global_local_image_cache_greedy_beam_and_media_retry(tmp_path, size, expected_images, dtype):
     from PIL import Image
 

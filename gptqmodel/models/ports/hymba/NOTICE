@@ -21,5 +21,4 @@ Changes by ModelCloud.ai, 2026: package-owned class selection; Transformers 5
 configuration/generation/cache APIs; portable Torch selective-state recurrence
 and SDPA masks; request-owned hybrid-cache lifecycle; multi-token continuation;
 memory-boundary insertion and output gathering; no checkpoint-code imports or
-optional compiled-kernel imports. See PROVENANCE.md and COVERAGE.md for exact
-source hashes, retained checkpoint layout, behavioral fixes and limits.
+optional compiled-kernel imports. The checkpoint tensor layout is unchanged.

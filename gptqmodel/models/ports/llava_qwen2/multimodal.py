@@ -1,6 +1,6 @@
 # Copyright 2023 Haotian Liu
 # SPDX-License-Identifier: Apache-2.0
-# Adapted from Apple's pinned LLaVA implementation; see README.md.
+# Adapted from Apple's pinned LLaVA implementation; see NOTICE.
 
 import ast
 

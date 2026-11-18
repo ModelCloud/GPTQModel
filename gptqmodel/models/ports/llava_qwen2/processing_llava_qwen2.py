@@ -1,6 +1,6 @@
 # Copyright 2023 Haotian Liu
 # SPDX-License-Identifier: Apache-2.0
-# Package-owned processor adaptation by ModelCloud.ai, 2026; see README.md.
+# Package-owned processor adaptation by ModelCloud.ai, 2026; see NOTICE.
 
 import math
 

@@ -15,6 +15,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from transformers import PreTrainedModel
+from transformers import initialization as init
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache
 from transformers.generation import GenerationMixin
@@ -450,24 +451,13 @@ class HymbaPreTrainedModel(PreTrainedModel):
     _supports_sdpa = True
     _is_stateful = True
 
+    @torch.no_grad()
     def _init_weights(self, module):
+        # Linear/Conv1d/Embedding/RMSNorm use the generic TF5 rules; A_log and
+        # D keep their constructor values (they have no generic initializer).
         super()._init_weights(module)
-        if isinstance(module, (nn.Linear, nn.Conv1d, nn.Embedding)):
-            nn.init.normal_(module.weight, std=self.config.initializer_range)
-            if getattr(module, "bias", None) is not None:
-                nn.init.zeros_(module.bias)
-            if isinstance(module, nn.Embedding) and module.padding_idx is not None:
-                with torch.no_grad():
-                    module.weight[module.padding_idx].zero_()
-        elif isinstance(module, HymbaRMSNorm):
-            nn.init.ones_(module.weight)
-        elif isinstance(module, HymbaBlock):
-            with torch.no_grad():
-                module.A_log[0].copy_(torch.arange(1, module.ssm_state_size + 1,
-                                                  device=module.A_log[0].device).float().log()[None])
-                module.D[0].fill_(1)
-        elif isinstance(module, HymbaModel) and hasattr(module, "memory_tokens"):
-            nn.init.normal_(module.memory_tokens)
+        if isinstance(module, HymbaModel) and hasattr(module, "memory_tokens"):
+            init.normal_(module.memory_tokens)
 
 
 class HymbaModel(HymbaPreTrainedModel):

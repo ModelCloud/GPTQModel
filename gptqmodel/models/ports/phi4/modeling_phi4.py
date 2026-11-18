@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: Microsoft Corporation
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: MIT
-"""Legacy phi4mm checkpoint owners with current Transformers execution APIs.
-
-See README.md and NOTICE for source pins and the native reuse boundary.
-"""
+"""Legacy phi4mm checkpoint owners with current Transformers execution APIs (see NOTICE)."""
 
 import math
 from contextvars import ContextVar
@@ -98,7 +95,7 @@ class ModalityLinear(nn.Module):
         return result
 
 
-class DecoderLayer(native.Phi4MultimodalDecoderLayer):
+class Phi4MMDecoderLayer(native.Phi4MultimodalDecoderLayer):
     def __init__(self, source, config):
         nn.Module.__init__(self)
         self.config = config
@@ -227,7 +224,7 @@ class AudioAttention(native.Phi4MultimodalAudioAttention):
         return self.linear_out(output)
 
 
-class AudioLayer(nn.Module):
+class Phi4MMAudioLayer(nn.Module):
     def __init__(self, source):
         super().__init__()
         self.feed_forward_in = AudioMLP(source.feed_forward_in)
@@ -252,7 +249,7 @@ class AudioEncoder(native.Phi4MultimodalAudioModel):
         self.encoder_embedding = source.encoder_embedding
         self.embed = source.embed
         self.relative_attention_bias_layer = source.relative_attention_bias_layer
-        self.encoders = nn.ModuleList([AudioLayer(layer) for layer in source.encoders])
+        self.encoders = nn.ModuleList([Phi4MMAudioLayer(layer) for layer in source.encoders])
         self.gradient_checkpointing = False
 
     def forward(self, hidden_states, mask=None, **kwargs):
@@ -356,6 +353,8 @@ class FeatureEmbedding(native.Phi4MultimodalFeatureEmbedding):
 
 class Phi4MMForCausalLM(native.Phi4MultimodalForCausalLM):
     config_class = Phi4MMConfig
+    # Device-map splitting matches class names; the wrapped legacy layers replace the native ones.
+    _no_split_modules = ["Phi4MMDecoderLayer", "Phi4MMAudioLayer", "Phi4MultimodalVisionEncoderLayer"]
     _supports_flash_attn = False
     _supports_flex_attn = False
     _can_compile_fullgraph = False
@@ -364,7 +363,7 @@ class Phi4MMForCausalLM(native.Phi4MultimodalForCausalLM):
 
     def __init__(self, config):
         super().__init__(config)
-        self.model.layers = nn.ModuleList([DecoderLayer(layer, config) for layer in self.model.layers])
+        self.model.layers = nn.ModuleList([Phi4MMDecoderLayer(layer, config) for layer in self.model.layers])
         self.model.embed_tokens_extend = FeatureEmbedding(self.model.embed_tokens_extend)
         self.model.rotary_emb = RotaryEmbedding(config)
 

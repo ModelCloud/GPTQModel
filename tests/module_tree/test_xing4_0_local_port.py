@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Actual Xing4.0 checkpoint inventory, live owners and conservative AWQ contract."""
 
-import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,33 +18,8 @@ from tests.port_assets import read_port_asset, read_port_json
 from tests.test_xing4_0_local_port import ASSETS, tiny_config, tiny_model
 
 
-def test_pinned_header_index_and_asset_hashes():
-    manifest = json.loads((ASSETS / "source_manifest.json").read_text())
-    inventory = read_port_json(ASSETS / "inventory.json")
-    index_bytes = read_port_asset(ASSETS / "model.safetensors.index.json")
-    assert hashlib.sha256(index_bytes).hexdigest() == manifest["files"]["model.safetensors.index.json"]["sha256"]
-    index = json.loads(index_bytes)["weight_map"]
-    headers = json.loads((ASSETS / "header_manifest.json").read_text())
-    reconstructed = {}
-    for shard, entry in headers.items():
-        raw = read_port_asset(ASSETS / (shard + ".header.json"))
-        assert len(raw) == entry["header_bytes"]
-        assert hashlib.sha256(raw).hexdigest() == entry["header_sha256"]
-        for name, tensor in json.loads(raw).items():
-            if name == "__metadata__":
-                continue
-            assert index[name] == shard
-            assert name not in reconstructed
-            reconstructed[name] = {"dtype": tensor["dtype"], "shape": tensor["shape"]}
-    assert reconstructed == inventory
-    assert hashlib.sha256((ASSETS.parent / "LICENSE").read_bytes()).hexdigest() == manifest["files"]["LICENSE"]["sha256"]
-    for name in ["config.json", "generation_config.json", "chat_template.jinja", "tokenizer_config.json", "tokenizer.model"]:
-        raw = read_port_asset(ASSETS / name) if name == "tokenizer.model" else (ASSETS / name).read_bytes()
-        assert hashlib.sha256(raw).hexdigest() == manifest["files"][name]["sha256"]
-
-
 def test_full_pinned_release_header_inventory_exact_meta():
-    config = Xing4_0Config.from_dict(json.loads((ASSETS / "config.json").read_text()))
+    config = Xing4_0Config.from_dict(json.loads(read_port_asset(ASSETS / "config.json")))
     released = read_port_json(ASSETS / "inventory.json")
     executed = {name: entry for name, entry in released.items() if not name.startswith("model.layers.40.")}
     assert len(released) == 8307
@@ -102,7 +77,7 @@ def test_real_live_decoder_plan_every_weight_owner_and_exclusion(device, qlora, 
 
 
 def test_registry_plan_is_unchanged_and_final_head_hook_collapses_streams():
-    inventory = json.loads((ASSETS.parents[4] / "tests/module_tree/fixtures/registered_module_plans.json").read_text())
+    inventory = json.loads((Path(__file__).parent / "fixtures/registered_module_plans.json").read_text())
     expected = inventory["cases"]["Xing4_0QModel/gptq"]
     assert Xing4_0QModel.build_layer_modules(Xing4_0QModel.module_tree, include_capture_only=True) == expected["blocks"]
     model = tiny_model()

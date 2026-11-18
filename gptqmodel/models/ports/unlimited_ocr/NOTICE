@@ -6,9 +6,9 @@ Authoritative checkpoint and inspected modeling sources:
   https://huggingface.co/baidu/Unlimited-OCR/tree/8249d20b2822a7d8a4c22c8d8c9069b5ac36bda3
   Copyright (c) 2026 Baidu. MIT license, preserved verbatim in LICENSE.
 
-The fixtures contain release configuration, tokenizer/processor metadata,
-serialized BPE vocabulary, checkpoint index and a safetensors header only.
-They do not contain trained neural-network weight payloads.
+The test fixtures (tests/fixtures/ports/unlimited_ocr) contain release
+configuration and tokenizer/processor metadata only. They do not contain
+trained neural-network weight payloads.
 
 Model/config/vision/text/MoE/cache/generation/media processing are implemented
 by the installed Transformers dependency, not copied checkpoint Python:
@@ -17,5 +17,4 @@ by the installed Transformers dependency, not copied checkpoint Python:
   https://github.com/huggingface/transformers/tree/v5.23.0/src/transformers/models/unlimited_ocr
 
 GPT-QModel-owned loader boundaries, lazy checkpoint aliases and regression
-tests are Apache-2.0. Source hashes and release provenance are recorded in
-source_manifest.json. No checkpoint Python is imported at runtime.
+tests are Apache-2.0. No checkpoint Python is imported at runtime.

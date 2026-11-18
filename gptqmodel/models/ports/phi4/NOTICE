@@ -19,7 +19,5 @@ Modifications and integration: Copyright (c) 2026 ModelCloud.ai.
 Modeling/config/processor adaptation: MIT; repository definition, tests and
 package initializer: Apache-2.0 as identified in their individual files.
 
-provenance.json records inspected source and data SHA-256 hashes. Compressed
-JSON fixtures contain public tokenizer assets and checkpoint header metadata,
-not trained neural-network tensor payloads. They are retained solely for
-offline qualification; runtime loading does not import checkpoint Python.
+No trained neural-network tensor payloads are distributed here; runtime loading
+does not import checkpoint Python.

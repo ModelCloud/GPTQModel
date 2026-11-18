@@ -2,19 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """InternLM 1 on Transformers 5, preserving its unrotated-key NTK cache.
 
-Source and adaptation notes are in README.md. InternLM 1 re-rotates ALL cached
-keys when the dynamic NTK base changes. A Llama cache of already rotated keys
+Adapted from internlm/internlm-chat-7b. InternLM 1 re-rotates ALL cached keys
+when the dynamic NTK base changes. A Llama cache of already rotated keys
 does not implement that computation.
 """
 
 import torch
 from torch import nn
 from transformers import PreTrainedModel
-from transformers.activations import ACT2FN
 from transformers.cache_utils import DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from transformers.models.qwen2.modeling_qwen2 import Qwen2MLP as InternLMMLP
 from transformers.utils import can_return_tuple
 
 from .configuration_internlm import InternLMConfig
@@ -114,6 +115,8 @@ class InternLMAttention(nn.Module):
         self.layer_idx = layer_idx
         self.num_heads = config.num_attention_heads
         self.head_dim = config.head_dim
+        self.scaling = self.head_dim**-0.5
+        self.is_causal = True
         for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
             setattr(self, name, nn.Linear(config.hidden_size, config.hidden_size, bias=config.bias))
         self.rotary_emb = InternLMRotaryEmbedding(config)
@@ -133,27 +136,19 @@ class InternLMAttention(nn.Module):
         k_cos, k_sin = self.rotary_emb(key, key_positions, key.shape[-2])
         query, key = _rotate(query, q_cos, q_sin), _rotate(key, k_cos, k_sin)
         weights = None
-        if self.config._attn_implementation == "sdpa" and not output_attentions:
-            result = nn.functional.scaled_dot_product_attention(query, key, value, attn_mask=attention_mask)
+        if self.config._attn_implementation != "eager" and not output_attentions:
+            # The explicit additive mask covers the raw-key cache; never is_causal.
+            result, _ = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation](
+                self, query, key, value, attention_mask, scaling=self.scaling,
+            )
         else:
+            # Upstream eager: clamp the masked scores at the dtype minimum.
             weights = query @ key.transpose(-1, -2) / self.head_dim ** 0.5
             weights = (weights + attention_mask).clamp_min(torch.finfo(weights.dtype).min)
             weights = weights.softmax(dim=-1, dtype=torch.float32).to(query.dtype)
-            result = weights @ value
-        result = self.o_proj(result.transpose(1, 2).reshape(batch, length, width))
+            result = (weights @ value).transpose(1, 2)
+        result = self.o_proj(result.reshape(batch, length, width))
         return result, weights if output_attentions else None
-
-
-class InternLMMLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
-
-    def forward(self, hidden_states):
-        return self.down_proj(self.act_fn(self.gate_proj(hidden_states)) * self.up_proj(hidden_states))
 
 
 class InternLMDecoderLayer(GradientCheckpointingLayer):

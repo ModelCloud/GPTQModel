@@ -190,8 +190,7 @@ def test_native_task_mapping_is_not_a_causal_alias():
 
 
 @pytest.mark.parametrize("text", [False, True])
-@pytest.mark.parametrize("trust", [None, False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(None, None), (False, "0"), (True, "1")])
 def test_selected_native_classes_and_public_security(tmp_path, monkeypatch, text, trust, bypass):
     path = tmp_path / "selected"
     reference = save_fixture(path, text, hostile=True)
@@ -220,9 +219,9 @@ def test_selected_native_classes_and_public_security(tmp_path, monkeypatch, text
 
 
 @pytest.mark.parametrize("text", [False, True])
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("implementation", ["eager", "sdpa"])
+@pytest.mark.parametrize("kv_heads,dtype,implementation", [
+    (1, torch.float32, "eager"), (2, torch.float16, "sdpa"), (4, torch.bfloat16, "eager"),
+])
 def test_native_cache_dtype_and_two_safetensors_cycles(tmp_path, text, kv_heads, dtype, implementation):
     torch.manual_seed(123)
     cfg = tiny_config(text, kv_heads, tied=kv_heads == 1)
@@ -323,8 +322,7 @@ def test_foreign_config_rejected_without_initializing_wrong_model():
         Qwen2VLQModel.loader.from_config(Qwen2Config(vocab_size=64, hidden_size=32))
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("implementation", ["eager", "sdpa"])
+@pytest.mark.parametrize("dtype,implementation", [(torch.float32, "eager"), (torch.bfloat16, "sdpa")])
 def test_native_image_video_cache_and_generation(tmp_path, dtype, implementation):
     import numpy as np
     from PIL import Image

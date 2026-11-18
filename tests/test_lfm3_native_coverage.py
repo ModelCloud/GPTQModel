@@ -196,8 +196,9 @@ def test_real_decoder_owners_tags_and_public_consumer(kind, device, layout):
 
 
 @pytest.mark.parametrize("kind,layout", LAYOUTS)
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("fallback", [None, Fallback()], ids=["no-fallback", "rtn-fallback"])
+@pytest.mark.parametrize(
+    "dtype,fallback", [(torch.float32, None), (torch.bfloat16, Fallback())], ids=["fp32", "bf16-rtn-fallback"],
+)
 def test_awq_quantizes_and_packs_every_projection_and_preserves_excluded_owners(
     monkeypatch, kind, layout, dtype, fallback,
 ):

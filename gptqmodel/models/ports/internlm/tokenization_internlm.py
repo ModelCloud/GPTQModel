@@ -9,7 +9,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# Adapted from pinned InternLM tokenizer sources; see README.md and NOTICE.
+# Adapted from pinned InternLM tokenizer sources; see NOTICE.
 """Checkpoint-native InternLM SentencePiece tokenization on Transformers 5."""
 
 import json

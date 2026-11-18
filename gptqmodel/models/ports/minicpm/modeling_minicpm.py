@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Scaled MiniCPM decoder and original w1/w2/w3 MoE, using Transformers 5 caches.
 
-Derived from the inspected OpenBMB implementations pinned in README.md. This
+Derived from the OpenBMB implementations pinned in NOTICE. This
 is not MiniCPM3: embeddings, both residuals and the output head have MiniCPM's
 distinct scaling; eager RoPE retains FP32 trig, while SDPA uses V-dtype trig.
 """
@@ -14,6 +14,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from transformers import PreTrainedModel
+from transformers import initialization as init
 from transformers.activations import ACT2FN
 from transformers.cache_utils import DynamicCache
 from transformers.generation import GenerationMixin
@@ -166,6 +167,12 @@ class MiniCPMAttention(nn.Module):
         if eager:
             scores = q @ k.transpose(-1, -2) / math.sqrt(c.head_dim)
             if attention_mask is not None:
+                if attention_mask.dtype == torch.bool:
+                    # An SDPA-configured model returning attention weights
+                    # receives the boolean mask from create_causal_mask.
+                    attention_mask = torch.zeros_like(attention_mask, dtype=scores.dtype).masked_fill(
+                        ~attention_mask, torch.finfo(scores.dtype).min
+                    )
                 scores = scores + attention_mask
             weights = F.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
             weights = F.dropout(weights, p=dropout, training=self.training)
@@ -204,15 +211,17 @@ class MiniCPMPreTrainedModel(PreTrainedModel):
     _skip_keys_device_placement = ["past_key_values"]
     _supports_sdpa = True
 
+    @torch.no_grad()
     def _init_weights(self, module):
         if isinstance(module, (nn.Linear, nn.Embedding)):
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if isinstance(module, nn.Linear) and module.bias is not None:
-                module.bias.data.zero_()
+                init.zeros_(module.bias)
             if isinstance(module, nn.Embedding) and module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
+                if not getattr(module.weight, "_is_hf_initialized", False):
+                    init.zeros_(module.weight[module.padding_idx])
         elif isinstance(module, MiniCPMRMSNorm):
-            module.weight.data.fill_(1.0)
+            init.ones_(module.weight)
 
 
 class MiniCPMModel(MiniCPMPreTrainedModel):
