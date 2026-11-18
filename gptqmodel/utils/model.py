@@ -851,6 +851,16 @@ def create_quant_module(
         **tmp_init_kwargs,
     )
     new_layer.device = ori_layer_device
+    if isinstance(new_layer, TorchQuantEmbeddings):
+        # An embedding returns hidden states, so it must emit the dtype the
+        # model computes in, not the checkpoint dtype its scales keep (#5116).
+        embedding_dtype = dtype
+        if embedding_dtype is None:
+            source_weight = getattr(submodule, "weight", None)
+            if isinstance(source_weight, torch.Tensor) and source_weight.is_floating_point():
+                embedding_dtype = source_weight.dtype
+        if embedding_dtype is not None:
+            new_layer.set_embedding_output_dtype(embedding_dtype)
     if transfer_from is not None:
         # The caller already loaded the checkpoint tensors into the module this
         # one replaces (a load started before the native bridge was installed,
