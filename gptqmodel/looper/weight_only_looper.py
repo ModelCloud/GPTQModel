@@ -78,10 +78,13 @@ from ..utils.offload import (
     is_meta_module,
     materialize_remaining_meta_modules,
     offload_to_disk,
+    rebind_shared_meta_parameters,
     release_private_offload_root,
     replace_inference_parameters,
     restore_disk_offloaded_modules,
     restore_offloaded_modules,
+    shared_meta_parameter_owners,
+    shared_meta_parameter_snapshot,
 )
 from ..utils.p2p import configure_p2p, enable_for_devices
 from ..utils.tied_weights import lm_head_quantization_is_tied
@@ -953,6 +956,9 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
         if not callable(get_base_modules):
             return
         unresolved: List[str] = []
+        # A parameter shared with a module outside the base list (a tied
+        # ``lm_head``) must stay shared once its base owner is filled.
+        shared_meta = shared_meta_parameter_owners(model)
         for name in get_base_modules(model=model):
             module = get_module(model, name)
             if module is None or not is_meta_module(module):
@@ -962,6 +968,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
                 # it with the dense checkpoint tensor.
                 continue
             try:
+                snapshot = shared_meta_parameter_snapshot(module, shared_meta)
                 self.gptq_model.shell_module_materialize(
                     target_submodule=module,
                     device=CPU,
@@ -970,6 +977,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
                 # Keep the in-session model movable with ``model.to()``
                 # (issue #4450).
                 replace_inference_parameters(module)
+                rebind_shared_meta_parameters(snapshot, shared_meta)
             except Exception as exc:  # pragma: no cover - defensive
                 log.warn("Weight-only: failed to materialize base module `%s`: %s", name, exc)
             if is_meta_module(module):

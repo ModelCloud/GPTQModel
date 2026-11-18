@@ -102,6 +102,9 @@ def _fail_load_processor(self):
     )
 
 
+_CALLER_MASK = [1] * 20 + [0] + [1] * 24
+
+
 def _conversation(text):
     return [{"role": "user", "content": [{"type": "text", "text": text}]}]
 
@@ -125,7 +128,9 @@ def test_pretokenized_rows_never_reach_the_processor(cls, monkeypatch):
     model = _make_model(cls)
     rows = [
         {"input_ids": list(range(100, 140)), "attention_mask": [1] * 40},
-        {"input_ids": list(range(200, 245)), "attention_mask": [0] + [1] * 44},
+        # An interior mask zero is a caller-built mask, which the base path
+        # keeps as given; edge zeros are padding it strips (#4889).
+        {"input_ids": list(range(200, 245)), "attention_mask": _CALLER_MASK},
     ]
 
     batches = model.prepare_dataset(rows, batch_size=1)
@@ -134,7 +139,7 @@ def test_pretokenized_rows_never_reach_the_processor(cls, monkeypatch):
         [list(range(100, 140))],
         [list(range(200, 245))],
     ]
-    assert batches[1]["attention_mask"].tolist() == [[0] + [1] * 44]
+    assert batches[1]["attention_mask"].tolist() == [_CALLER_MASK]
 
 
 @pytest.mark.parametrize(
@@ -147,7 +152,7 @@ def test_columnar_mapping_is_unpacked_not_rendered_as_key_names(cls, monkeypatch
     batches = model.prepare_dataset(
         {
             "input_ids": [list(range(100, 140)), list(range(200, 245))],
-            "attention_mask": [[1] * 40, [0] + [1] * 44],
+            "attention_mask": [[1] * 40, _CALLER_MASK],
         },
         batch_size=1,
     )
@@ -193,3 +198,44 @@ def test_batch_size_two_pads_unequal_conversations(cls, monkeypatch):
     assert len(batches) == 1
     assert batches[0]["input_ids"].shape == (2, expected_width)
     assert processor.calls[0]["padding"] is True
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [definitions.UnlimitedOCRQModel, definitions.Ovis2_6_MoeQModel],
+    ids=lambda cls: cls.__name__,
+)
+def test_processor_prepared_rows_are_ready_batches_under_the_contract(cls, monkeypatch):
+    """Rows the model's own processor built pass through, but keep the contract.
+
+    Both definitions used to return any ``input_ids`` dict list untouched, so
+    ``concat_size``/``sort``/``min_length`` were ignored and text-only token
+    rows skipped the base text path entirely.
+    """
+
+    monkeypatch.setattr(cls, "load_processor", _fail_load_processor, raising=False)
+    model = _make_model(cls)
+    rows = [
+        {
+            "input_ids": torch.ones((1, width), dtype=torch.long),
+            "attention_mask": torch.ones((1, width), dtype=torch.long),
+            "pixel_values": torch.zeros((1, 3, 4, 4)),
+        }
+        for width in (3, 9, 6)
+    ]
+
+    batches = model.prepare_dataset(
+        rows, batch_size=1, calibration_dataset_sort="desc", calibration_data_min_length=4
+    )
+
+    assert [batch["input_ids"].shape[-1] for batch in batches] == [9, 6]
+    assert all(batch["pixel_values"] is not None for batch in batches)
+    with pytest.raises(ValueError, match=r"CalibrationConfig\.concat_size"):
+        model.prepare_dataset(rows, batch_size=1, calibration_dataset_concat_size=64)
+
+
+def test_qwen_drive_rejects_chat_conversations_clearly():
+    model = _make_model(definitions.QwenDriveQModel)
+
+    with pytest.raises(ValueError, match="chat conversations are not supported"):
+        model.prepare_dataset([_conversation("hello")], batch_size=1)

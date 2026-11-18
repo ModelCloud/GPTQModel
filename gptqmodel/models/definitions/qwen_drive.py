@@ -17,6 +17,14 @@ from ._vlm_calibration import finalize_conversation_batches, pop_conversation_ca
 from .qwen3_5 import Qwen3_5QModel
 
 
+def _is_chat_conversation(row) -> bool:
+    return (
+        isinstance(row, (list, tuple))
+        and bool(row)
+        and all(isinstance(message, Mapping) and "role" in message for message in row)
+    )
+
+
 class QwenDriveQModel(Qwen3_5QModel):
     """Quantization definition for the ``vlm.*`` part of Qwen-Drive."""
     fusable = None  # No qualified executor for this definition.
@@ -74,6 +82,17 @@ class QwenDriveQModel(Qwen3_5QModel):
         if isinstance(calibration_dataset, (str, bytes)):
             return super().prepare_dataset(calibration_dataset, batch_size=batch_size, **kwargs)
         rows = [calibration_dataset] if isinstance(calibration_dataset, Mapping) else list(calibration_dataset)
+        if any(_is_chat_conversation(row) for row in rows):
+            # No processor is loaded for this definition, so chat conversations
+            # cannot be rendered with their media. Keep the shared VLM contract
+            # (`concat_size` is rejected for conversations) and fail clearly
+            # instead of letting the text path reject role mappings as token ids.
+            pop_conversation_calibration_options(dict(kwargs), label="Qwen-Drive")
+            raise ValueError(
+                "Qwen-Drive calibration accepts text, pre-tokenized rows, or native VLM tensor "
+                "dictionaries (input_ids plus pixel_values/image_grid_thw); chat conversations "
+                "are not supported because this definition loads no processor."
+            )
         if not any(isinstance(row, Mapping) and media_keys.intersection(row) for row in rows):
             return super().prepare_dataset(calibration_dataset if isinstance(calibration_dataset, Mapping) else rows,
                                            batch_size=batch_size, **kwargs)

@@ -16,6 +16,7 @@ from .._const import CPU
 from ..base import BaseQModel
 from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class UnlimitedOCRQModel(BaseQModel):
@@ -136,13 +137,14 @@ class UnlimitedOCRQModel(BaseQModel):
         )]
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        if not isinstance(calibration_dataset, list):
-            calibration_dataset = list(calibration_dataset)
-        if not calibration_dataset or not isinstance(calibration_dataset[0], dict):
-            return super().prepare_dataset(calibration_dataset, batch_size=batch_size, **kwargs)
-        if "input_ids" in calibration_dataset[0]:
-            return calibration_dataset
-        return self._prepare_calibration_batches(calibration_dataset)
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=self._prepare_calibration_batches,
+            accept_processor_rows=True,
+        )
 
     def move_input_capture_example(self, example, data_device):
         example = super().move_input_capture_example(example, data_device)
