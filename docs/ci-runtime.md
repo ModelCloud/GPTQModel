@@ -3,6 +3,8 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # CUDA CI runtime and source release validation
 
+Introduced in [PR #5103](https://github.com/ModelCloud/GPTQModel/pull/5103).
+
 The CUDA unit and source release jobs use a digest-pinned public CUDA 13.2.1
 development image, managed CPython 3.14.10t with `PYTHON_GIL=0`, and PyTorch
 2.15.0+cu132. The release jobs build the source distribution and install it in
