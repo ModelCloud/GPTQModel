@@ -1300,7 +1300,25 @@ class AWQProcessor(LoopProcessor):
                     entry.setdefault("provenance", []).extend((source_index, int(r)) for r in prov_rows)
             return
 
-        # Dynamic / streaming reservoir: routed MoE experts or cache-less runs
+        # Dynamic / streaming reservoir: routed MoE experts or cache-less runs.
+        #
+        # A routed expert keeps a different number of rows per batch, so the
+        # precomputed plan never matches. Bound the capture with a uniform
+        # priority reservoir instead: every captured row gets a deterministic
+        # priority and only the ``budget_cap`` lowest priorities survive.
+        #
+        # Resampling the kept buffer evenly together with each new batch (the
+        # previous behaviour) is *not* a reservoir: once the buffer is full, the
+        # ``budget_cap`` kept rows -- which stand for every earlier batch --
+        # weigh the same as the fresh batch, so each new batch replaces about
+        # ``L / (cap + L)`` of the sample and the surviving share decays
+        # geometrically. On a 128-document calibration set that put 70-87% of
+        # every routed expert's rows in the last quarter of the batches (#5204).
+        #
+        # Keeping the rows with the lowest uniform priority is the deterministic
+        # equivalent of Algorithm R: it is a uniform sample of every row seen, so
+        # a batch keeps a share proportional to its length regardless of where it
+        # falls in the stream, and the memory stays O(cap).
         budget_cap = (
             self._cap_token_rows(int(configured_max_tokens))
             if configured_max_tokens is not None
@@ -1329,29 +1347,54 @@ class AWQProcessor(LoopProcessor):
 
             current_inputs: List[torch.Tensor] = entry.setdefault("inputs", [])
             current_prov: List[Tuple[int, int]] = entry.setdefault("provenance", [])
-            current_rows = sum(int(t.shape[-2]) for t in current_inputs)
+            kept_priorities = entry.get("reservoir_priorities")
 
-            candidate_prov = [(source_idx, r) for r in range(length)]
-            if current_rows + length <= budget_cap:
-                current_inputs.append(feat_2d.unsqueeze(0))
-                current_prov.extend(candidate_prov)
+            kept_rows = (
+                torch.cat([t.reshape(-1, hidden) for t in current_inputs], dim=0)
+                if current_inputs
+                else feat_2d.new_empty((0, hidden))
+            )
+            if kept_priorities is None:
+                kept_priorities = torch.empty((0,), dtype=torch.float64)
+
+            rows = torch.cat([kept_rows, feat_2d], dim=0)
+            priorities = torch.cat(
+                [kept_priorities, self._reservoir_priorities(source_idx, length)],
+                dim=0,
+            )
+            provenance = list(current_prov) + [
+                (source_idx, row_index) for row_index in range(length)
+            ]
+
+            if rows.shape[0] > budget_cap:
+                # Lowest priority wins. Sort the survivors back into capture
+                # order so the replayed rows and their provenance stay grouped.
+                keep = torch.topk(priorities, budget_cap, largest=False).indices.tolist()
+                keep.sort(key=lambda index: provenance[index])
             else:
-                all_tensors = [t.reshape(-1, hidden) for t in current_inputs] + [feat_2d]
-                combined = torch.cat(all_tensors, dim=0)
-                all_prov = current_prov + candidate_prov
-                total_cand = combined.shape[0]
-                M = min(total_cand, budget_cap)
-                if M <= 1:
-                    indices = torch.zeros(1, dtype=torch.int64)
-                else:
-                    indices = (
-                        torch.arange(M, dtype=torch.int64)
-                        * (total_cand - 1)
-                        // (M - 1)
-                    )
-                sampled_tensor = combined.index_select(0, indices).unsqueeze(0)
-                entry["inputs"] = [sampled_tensor]
-                entry["provenance"] = [all_prov[int(i)] for i in indices.tolist()]
+                keep = list(range(rows.shape[0]))
+
+            entry["inputs"] = [rows[keep].unsqueeze(0)]
+            entry["provenance"] = [provenance[index] for index in keep]
+            entry["reservoir_priorities"] = priorities[keep]
+
+    @staticmethod
+    def _reservoir_priorities(source_index: int, count: int) -> torch.Tensor:
+        """Return one deterministic uniform priority per captured row.
+
+        A per-batch seed keeps the priorities independent and identically
+        uniform across batches, which is what makes the lowest-priority
+        survivors a uniform sample of the whole stream. The seed is derived from
+        the capture slot, so the same calibration run always keeps the same
+        rows.
+        """
+
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(
+            (0x9E3779B97F4A7C15 * (int(source_index) + 1) + 0x165667B19E3779F9)
+            & 0x7FFFFFFFFFFFFFFF
+        )
+        return torch.rand(count, generator=generator, dtype=torch.float64)
 
     def _capture_share_key(self, feature: torch.Tensor) -> Optional[Tuple[Any, ...]]:
         """Identity of one captured source tensor, or ``None`` when it cannot be shared.
