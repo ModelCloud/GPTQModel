@@ -26,10 +26,6 @@ class Exaone4QModel(BaseQModel):
     # o_proj must match v_proj shape for AWQ scaling optimizations
     awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj"]
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Post-norm residuals and QK normalization are not qualified fold sources.
-        return []
-
     module_tree = [
         "model",
         "layers",
@@ -70,8 +66,6 @@ class Exaone4_5QModel(BaseQwen3VLGPTQ):
 
     # GQA makes o_proj shape-incompatible with the Q/K/V AWQ scale group.
     awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj"]
-
-    awq_get_modules_for_scaling = Exaone4QModel.awq_get_modules_for_scaling
 
     # EXAONE 4.5 wraps the EXAONE 4 decoder in a multimodal model and keeps
     # the visual tower outside the language-layer quantization tree.
