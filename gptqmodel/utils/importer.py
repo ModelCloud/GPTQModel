@@ -1044,7 +1044,9 @@ def _is_accelerate_offload_target(value: str) -> bool:
     return value.strip().lower() in ACCELERATE_OFFLOAD_TARGETS
 
 
-def _validate_selector_device_families(devices: Sequence[SelectorDevice]) -> None:
+def _validate_selector_device_families(
+    devices: Sequence[SelectorDevice], *, hint: Optional[str] = None
+) -> None:
     families = {_device_family(device) for device in devices if device != DEVICE.ALL}
     if len(families) > 1:
         raise ValueError(
@@ -1064,27 +1066,72 @@ def _validate_selector_device_families(devices: Sequence[SelectorDevice]) -> Non
             for device, capability in device_capabilities
             if capability is not None
         )
+        remedy = hint or (
+            "Place the model on one capability group with `device=\"cuda:N\"`, "
+            "a `max_memory` budget that names one card, or a "
+            "`CUDA_VISIBLE_DEVICES` list."
+        )
         raise ValueError(
             "Quantized kernel selection does not support a device map spanning "
-            f"different GPU compute capabilities: {rendered}. Place the model on "
-            "one capability group with `device=\"cuda:N\"`, a `max_memory` budget "
-            "that names one card, or a `CUDA_VISIBLE_DEVICES` list."
+            f"different GPU compute capabilities: {rendered}. {remedy}"
         )
 
 
-def _accelerate_keyword_device(accelerator) -> SelectorDevice | tuple[SelectorDevice, ...]:
+def _accelerate_keyword_device(
+    accelerator, *, defer_placement: bool = False
+) -> SelectorDevice | tuple[SelectorDevice, ...]:
     if accelerator is None:
         return DEVICE.CPU
 
     family = _device_family(torch.device(accelerator.type))
-    return expand_selector_device_family(family)
+    if not defer_placement:
+        return expand_selector_device_family(family)
+
+    # A homogeneous host keeps the historical expansion, so the selected kernel
+    # stays identical to the one a resolved map would pick. Only a host whose
+    # visible GPUs span capability groups defers to the family: there the
+    # placement is still unknown, and a kernel valid on every visible device is
+    # the only choice that can serve any resolved budget (#5084).
+    if family not in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU):
+        return family
+    runtime_type = "cuda" if family == DEVICE.ROCM else family.type
+    runtime = getattr(torch, runtime_type, None)
+    count_getter = getattr(runtime, "device_count", None)
+    if count_getter is None:
+        return family
+    try:
+        count = count_getter()
+    except Exception:
+        return family
+    if count < 1:
+        return family
+    devices = tuple(torch.device(f"{runtime_type}:{index}") for index in range(count))
+    if len(_compute_capability_group(devices)) == len(devices):
+        return devices[0] if len(devices) == 1 else devices
+    return family
 
 
 def hf_normalize_device_device_map(
     device: Optional[Union[str, torch.device]],
     device_map: Optional[Union[str, Dict]],
 ) -> SelectorDevice | tuple[SelectorDevice, ...]:
-    return normalize_device_device_map(device=device, device_map=device_map, default=DEVICE.CPU)
+    """Normalize the placement a Transformers/Optimum quantizer hook receives.
+
+    Transformers calls ``preprocess_model`` before it resolves the map from
+    ``max_memory``, so an accelerate keyword map (``"auto"``, ``"balanced"``,
+    ``"sequential"``) is not a placement yet. Expanding it to every visible GPU
+    made kernel selection refuse budgets that never touch the other card
+    (#5084). Keep the accelerator *family* instead: a family selector makes
+    every kernel validate against all visible devices, rather than picking a
+    kernel for a card the budget may exclude. The dispatched map is checked by
+    :func:`validate_device_map_capability_groups` once it is known.
+    """
+    return normalize_device_device_map(
+        device=device,
+        device_map=device_map,
+        default=DEVICE.CPU,
+        defer_keyword_placement=True,
+    )
 
 
 def normalize_device_device_map(
@@ -1093,6 +1140,7 @@ def normalize_device_device_map(
     default: Optional[SelectorDevice] = None,
     *,
     validate_families: bool = True,
+    defer_keyword_placement: bool = False,
 ) -> SelectorDevice | tuple[SelectorDevice, ...]:
     """Normalize a public ``device``/``device_map`` pair.
 
@@ -1100,6 +1148,13 @@ def normalize_device_device_map(
     inference kernel selection requires (#4632/#4705/#4734). A quantization load
     selects no inference kernel for its device pool, so its entry points pass
     ``False`` and a pool may span generations (#4875).
+
+    ``defer_keyword_placement`` returns an accelerate keyword map
+    (``"auto"``/``"balanced"``/``"sequential"``) as the accelerator family
+    instead of expanding it to every visible GPU. Callers that receive the map
+    before ``max_memory`` is applied cannot know the placement, so they must
+    not reject it; the family keeps each kernel valid on every visible device
+    (#5084).
     """
 
     normalized_device: Optional[SelectorDevice] = default
@@ -1108,7 +1163,9 @@ def normalize_device_device_map(
         if device_map is not None:
             if isinstance(device_map, str):
                 if _is_accelerate_device_map_keyword(device_map):
-                    return _accelerate_keyword_device(accelerator)
+                    return _accelerate_keyword_device(
+                        accelerator, defer_placement=defer_keyword_placement
+                    )
                 devices = (device_map,)
             else:
                 # Preserve map order and concrete ordinals.  A set here would
@@ -1120,7 +1177,9 @@ def normalize_device_device_map(
                     continue
                 if isinstance(map_device, str):
                     if _is_accelerate_device_map_keyword(map_device) or map_device == "auto":
-                        return _accelerate_keyword_device(accelerator)
+                        return _accelerate_keyword_device(
+                            accelerator, defer_placement=defer_keyword_placement
+                        )
                     if _is_accelerate_offload_target(map_device):
                         continue
                 candidate = _as_selector_device(map_device)
@@ -1220,6 +1279,58 @@ def device_map_uses_cpu(device_map) -> bool:
         except (RuntimeError, ValueError):
             continue
     return False
+
+
+def validate_device_map_capability_groups(device_map) -> None:
+    """Refuse a *resolved* placement that spans GPU compute capabilities.
+
+    Transformers calls the quantizer hooks before it computes the placement
+    from ``max_memory``, so the bridge only keeps kernels that are valid on
+    every visible device and cannot refuse anything up front (#5084). Once
+    Accelerate has dispatched the model, ``model.hf_device_map`` is the real
+    placement: this keeps the single-capability refusal for a map that truly
+    spans generations, while a budget that names one card loads normally.
+    """
+
+    if not isinstance(device_map, dict) or not device_map:
+        return
+    # Resolve the map without validating it, so the refusal below is the only
+    # one and it carries the remedy for this path. CPU and disk entries are
+    # skipped, as in `normalize_device_device_map`; an all-offload map has no
+    # accelerator target to check.
+    accelerator_devices = []
+    for value in device_map.values():
+        if value is None or isinstance(value, int):
+            candidate = _as_selector_device(value) if value is not None else None
+            if candidate is not None:
+                accelerator_devices.append(candidate)
+            continue
+        if isinstance(value, str):
+            if _is_accelerate_device_map_keyword(value) or value == "auto":
+                # An unresolved keyword inside a resolved map: nothing concrete
+                # to validate yet.
+                return
+            if _is_accelerate_offload_target(value):
+                continue
+        candidate = _as_selector_device(value)
+        if _device_family(candidate) != DEVICE.CPU:
+            accelerator_devices.append(candidate)
+    if not accelerator_devices:
+        return
+    resolved = _selector_devices(accelerator_devices)
+    if not resolved:
+        return
+    _validate_selector_device_families(
+        resolved,
+        # The budget already allowed every named card. Suggesting a narrower
+        # `max_memory` here would only repeat the request that just failed.
+        hint=(
+            "This is the placement resolved from the caller's budget, so the "
+            "budget already allowed every named card. Place the model on one "
+            "capability group with an explicit `device_map`/`device` that names "
+            "one card, or a `CUDA_VISIBLE_DEVICES` list."
+        ),
+    )
 
 
 def auto_cpu_offload(backend, device_map) -> bool:

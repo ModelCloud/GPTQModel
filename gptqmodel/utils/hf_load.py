@@ -349,6 +349,10 @@ def hf_gptqmodel_prepare_model_for_load(
         )
     quantized_modules = {name: modules[name] for name in quantized_module_names}
 
+    # Transformers calls this before it applies ``max_memory``, so an accelerate
+    # keyword map has no resolved placement yet. Keep the accelerator family so
+    # the selected kernel is valid on every visible device instead of rejecting
+    # a single-card budget for GPUs it never touches (#5084).
     target_device: DEVICE = hf_normalize_device_device_map(None, device_map)
     qcfg.device = target_device
     if not isinstance(dtype, torch.dtype):
@@ -442,6 +446,13 @@ def hf_gptqmodel_post_init_for_load(
     # opts paged models out of graph capture so ``generate_batch`` /
     # ``init_continuous_batching`` work without a caller-side monkey patch.
     _set_paged_attention_safe_cuda_graphs(model)
+
+    # The placement resolved from ``max_memory`` is known now. Keep the
+    # single-compute-capability refusal for a map that really spans generations
+    # while allowing a budget that names one card (#5084).
+    from .importer import validate_device_map_capability_groups
+
+    validate_device_map_capability_groups(getattr(model, "hf_device_map", None))
     return model
 
 
