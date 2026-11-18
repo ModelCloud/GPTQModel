@@ -1719,14 +1719,6 @@ class LazyTurtle:
                     f"LazyTurtle: `{model_cls.__name__}` does not provide save_pretrained(), "
                     "cannot convert checkpoint via transformers full-model load."
                 )
-            # Older trust_remote_code classes still declare
-            # `_tied_weights_keys = ["lm_head.weight"]`. transformers 5 expects
-            # the `{target: source}` mapping and otherwise raises
-            # `AttributeError: 'list' object has no attribute 'keys'` while
-            # saving. Normalize exactly as the quantized writer does.
-            from .hf import _normalize_legacy_tied_weights_keys
-
-            _normalize_legacy_tied_weights_keys(loaded_model)
             loaded_model.save_pretrained(output_dir, safe_serialization=True)
         finally:
             if loaded_model is not None:

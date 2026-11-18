@@ -82,10 +82,9 @@ from ..utils.hf import (
     has_native_transformers_model_support,
     load_hf_tokenizer,
     load_model_config,
-    normalize_hf_config_compat,
     normalize_model_id_or_path_for_hf_gguf,
     normalize_torch_dtype_kwarg,
-    prepare_remote_model_init_compat,
+    record_construction_dtypes,
     resolve_checkpoint_subfolder,
     resolve_trust_remote_code,
     set_hf_config_dtype,
@@ -1579,6 +1578,11 @@ def _is_broken_transformers_dynamic_module_error(exc: Exception) -> bool:
 
 
 def _hf_loader_from_pretrained_with_dynamic_module_retry(loader, model_local_path: str, **kwargs):
+    with record_construction_dtypes():
+        return _hf_loader_from_pretrained_with_dynamic_module_retry_impl(loader, model_local_path, **kwargs)
+
+
+def _hf_loader_from_pretrained_with_dynamic_module_retry_impl(loader, model_local_path: str, **kwargs):
     try:
         return loader.from_pretrained(model_local_path, **kwargs)
     except Exception as exc:
@@ -2104,12 +2108,6 @@ def ModelLoader(cls):
         config = load_model_config(model_local_path, **model_init_kwargs_without_internal, **hf_gguf_load_kwargs)
 
         defuser.replace_fused_blocks(config.model_type)
-
-        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
-        prepare_remote_model_init_compat(
-            model_local_path, config, trust_remote_code=trust_remote_code,
-            **config_load_kwargs,
-        )
 
         from ..utils.mimo import is_mimo_mixed_source
 
@@ -2736,12 +2734,6 @@ def ModelLoader(cls):
         )
 
         defuser.replace_fused_blocks(config.model_type)
-
-        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
-        prepare_remote_model_init_compat(
-            model_local_path, config, trust_remote_code=trust_remote_code,
-            **get_config_selection_kwargs(cached_file_kwargs), **hf_gguf_load_kwargs,
-        )
 
         if cls.require_dtype:
             dtype = cls.require_dtype

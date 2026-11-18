@@ -362,13 +362,12 @@ def _discover_compressed_tensors_module_schemes(
     apply_quantization_config = deps["apply_quantization_config"]
     map_module_to_scheme = deps["map_module_to_scheme"]
     from ..models.local import local_model_loader
-    from .hf import load_model_config, normalize_hf_config_compat, resolve_trust_remote_code
+    from .hf import load_model_config, resolve_trust_remote_code
 
     trust_remote_code = resolve_trust_remote_code(model_path, trust_remote_code=trust_remote_code)
     config = load_model_config(
         model_path, trust_remote_code=trust_remote_code
     )
-    normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
     # ``from_config`` mutates process-global torch state (default dtype,
     # init hooks); serialize it against loads/saves with the shared lock.

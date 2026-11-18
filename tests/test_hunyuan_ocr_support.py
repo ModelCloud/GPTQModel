@@ -8,7 +8,6 @@ from gptqmodel.models import auto
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions import hunyuan_vl as hunyuan_vl_module
 from gptqmodel.models.definitions.hunyuan_vl import HunYuanVLQModel
-from gptqmodel.utils.hf import normalize_hf_config_compat
 from gptqmodel.utils.model import MODALITY
 
 
@@ -20,7 +19,6 @@ def test_hunyuan_vl_model_type_selects_definition(monkeypatch):
         "resolve_trust_remote_code",
         lambda path, trust_remote_code=False: trust_remote_code,
     )
-    monkeypatch.setattr(auto, "patch_remote_code_before_config_load", lambda path: None)
     monkeypatch.setattr(
         auto.AutoConfig,
         "from_pretrained",
@@ -138,7 +136,7 @@ def test_hunyuan_vl_prepare_dataset_uses_processor_chat_template(monkeypatch):
     ]
 
 
-def test_hunyuan_vl_rope_normalization_stays_in_text_config(tmp_path):
+def test_hunyuan_vl_rope_stays_in_text_config(tmp_path):
     mrope_section = [16, 16, 16, 16]
     config = AutoConfig.for_model(
         "hunyuan_vl",
@@ -153,8 +151,6 @@ def test_hunyuan_vl_rope_normalization_stays_in_text_config(tmp_path):
             },
         },
     )
-
-    normalize_hf_config_compat(config)
 
     assert "rope_parameters" not in config.to_dict()
     assert config.text_config.rope_parameters["mrope_section"] == mrope_section

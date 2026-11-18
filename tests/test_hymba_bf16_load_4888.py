@@ -30,7 +30,7 @@ from transformers import LlamaConfig, PreTrainedModel
 
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.models.definitions.hymba import HymbaQModel
-from gptqmodel.utils.hf import assert_loaded_model_state
+from gptqmodel.utils.hf import assert_loaded_model_state, record_construction_dtypes
 
 
 class _RootBareParameterModel(nn.Module):
@@ -94,9 +94,14 @@ class _GuardModel(PreTrainedModel):
         self.post_init()
 
 
+def _construct(model_cls):
+    with record_construction_dtypes():
+        return model_cls(_GuardConfig())
+
+
 def test_dtype_guard_accepts_fp32_widened_from_bf16():
     assert_loaded_model_state(
-        _GuardModel(_GuardConfig()),
+        _construct(_GuardModel),
         api_name="test",
         expected_dtype=torch.bfloat16,
         require_uniform_dtype=True,
@@ -104,7 +109,7 @@ def test_dtype_guard_accepts_fp32_widened_from_bf16():
 
 
 def test_dtype_guard_still_rejects_corrupted_fp32():
-    model = _GuardModel(_GuardConfig())
+    model = _construct(_GuardModel)
     # The constructor made this bf16; a broken load/cast left it fp32.
     model.decoder_weight.data = model.decoder_weight.data.float()
 
@@ -131,7 +136,7 @@ class _AllFp32ConstructedModel(PreTrainedModel):
 def test_dtype_guard_ignores_an_all_fp32_construction_record():
     """A record taken without a dtype context must not exempt a wrong dtype."""
 
-    model = _AllFp32ConstructedModel(_GuardConfig())
+    model = _construct(_AllFp32ConstructedModel)
 
     assert getattr(model, "_gptqmodel_construction_parameter_dtypes", None) is None
     with pytest.raises(RuntimeError, match="floating parameters are not all torch.bfloat16"):
@@ -172,7 +177,8 @@ def test_real_bf16_load_keeps_the_construction_fp32_parameter(tmp_path):
     )
     _TinyHymbaLikeModel(config).to(torch.bfloat16).save_pretrained(tmp_path)
 
-    loaded = _TinyHymbaLikeModel.from_pretrained(tmp_path, dtype=torch.bfloat16)
+    with record_construction_dtypes():
+        loaded = _TinyHymbaLikeModel.from_pretrained(tmp_path, dtype=torch.bfloat16)
 
     assert loaded.A_log.dtype is torch.float32
     assert loaded.linear.weight.dtype is torch.bfloat16
@@ -182,3 +188,17 @@ def test_real_bf16_load_keeps_the_construction_fp32_parameter(tmp_path):
         expected_dtype=torch.bfloat16,
         require_uniform_dtype=True,
     )
+
+
+def test_construction_dtype_recording_is_scoped_to_the_load():
+    from transformers import PreTrainedModel
+
+    original = PreTrainedModel.post_init
+    with record_construction_dtypes():
+        with record_construction_dtypes():
+            assert PreTrainedModel.post_init is not original
+        assert PreTrainedModel.post_init is not original
+    assert PreTrainedModel.post_init is original
+
+    # Outside a GPT-QModel load nothing is recorded on the model.
+    assert getattr(_GuardModel(_GuardConfig()), "_gptqmodel_construction_parameter_dtypes", None) is None

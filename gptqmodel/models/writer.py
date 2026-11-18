@@ -58,13 +58,10 @@ from ..utils.checkpoint_state import checkpoint_serialization
 from ..utils.exl3_error_ledger import write_exl3_error_ledger
 from ..utils.exllamav3 import build_exllamav3_tensor_storage
 from ..utils.hf import (
-    _normalize_legacy_tied_weights_keys,
     get_hf_config_dtype,
     load_model_config,
-    normalize_hf_config_compat,
     resolve_trust_remote_code,
     sanitize_generation_config_file,
-    sanitize_model_config,
     suspend_hf_weight_init,
 )
 from ..utils.logger import setup_logger
@@ -2367,7 +2364,6 @@ def ModelWriter(cls):
         )
 
         # The config, quantize_config and model may be edited in place in save_quantized.
-        sanitize_model_config(self.model.config)
         config = copy.deepcopy(self.model.config)
 
         quantize_config = copy.deepcopy(self.quantize_config)
@@ -2468,7 +2464,6 @@ def ModelWriter(cls):
             removed_config_attention_attrs = strip_attention_impl_fields(model_for_save.config)
             if generation_config is not None:
                 removed_generation_attention_attrs = strip_attention_impl_fields(generation_config)
-            _normalize_legacy_tied_weights_keys(model_for_save)
 
             # Save model metadata directly. Calling model.save_pretrained with
             # an empty state_dict deletes resumable shards in recent
@@ -2736,7 +2731,6 @@ def ModelWriter(cls):
             trust_remote_code=trust_remote_code,
             **config_load_kwargs,
         )
-        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
         model_dtype = get_hf_config_dtype(config)
 
         with model_load_lock(), suspend_hf_weight_init():

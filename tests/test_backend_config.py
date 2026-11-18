@@ -157,7 +157,6 @@ def test_public_entry_points_forward_typed_selection(monkeypatch, tmp_path, entr
     definition = SimpleNamespace(from_quantized=receive, from_pretrained=receive)
     monkeypatch.setattr(auto, "check_and_get_model_definition", lambda *args, **kwargs: definition)
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda *args, **kwargs: False)
-    monkeypatch.setattr(auto, "patch_remote_code_before_config_load", lambda *args, **kwargs: None)
     monkeypatch.setattr(auto, "native_floatx_source_format", lambda *args, **kwargs: None)
     monkeypatch.setattr(auto, "_kick_quantize_prewarms", lambda *args, **kwargs: None)
     monkeypatch.setattr(auto, "_prebuild_device_thread_pool", lambda *args, **kwargs: None)

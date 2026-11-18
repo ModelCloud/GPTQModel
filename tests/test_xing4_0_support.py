@@ -17,7 +17,6 @@ def test_xing4_0_registry_and_loader_contract(monkeypatch):
         "resolve_trust_remote_code",
         lambda _path, trust_remote_code=False: trust_remote_code,
     )
-    monkeypatch.setattr(auto, "patch_remote_code_before_config_load", lambda _path: None)
     monkeypatch.setattr(
         auto.AutoConfig,
         "from_pretrained",

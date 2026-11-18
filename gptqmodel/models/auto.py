@@ -70,7 +70,6 @@ from ..utils.hf import (  # noqa: E402
     load_model_config,
     normalize_model_id_or_path_for_hf_gguf,
     normalize_torch_dtype_kwarg,
-    patch_remote_code_before_config_load,
     resolve_trust_remote_code,
 )
 from ..utils.hub import list_repo_files  # noqa: E402
@@ -678,7 +677,6 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
             api_name="check_and_get_model_definition",
         )
     trust_remote_code = resolve_trust_remote_code(model_dir, trust_remote_code=trust_remote_code, **config_load_kwargs)
-    patch_remote_code_before_config_load(model_dir)
     config = load_model_config(model_dir, trust_remote_code=trust_remote_code, **config_load_kwargs)
     model_type = config.model_type.lower()
 
@@ -966,7 +964,6 @@ class GPTQModel:
 
         model_cfg = None
         if not (treat_as_local_path and not isdir(model_id_or_path)):
-            patch_remote_code_before_config_load(model_id_or_path)
             model_cfg = load_model_config(
                 model_id_or_path,
                 trust_remote_code=trust_remote_code,

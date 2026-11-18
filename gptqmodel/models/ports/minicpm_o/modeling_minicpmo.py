@@ -164,6 +164,10 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
         self.streaming_window_enabled = True
         self.force_rope_reindex = False  # RoPE reindex testing switch
 
+        # Transformers 5 derives `all_tied_weights_keys` and the other
+        # load-time static properties here.
+        self.post_init()
+
     def init_streaming_processor(self):
         self.prepare_processor(processor=None, tokenizer=None)
 

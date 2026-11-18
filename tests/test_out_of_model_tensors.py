@@ -492,7 +492,6 @@ def _patch_streaming(monkeypatch, shard_count=1):
 def _patch_basic_env(monkeypatch, state_dict_tensor):
     monkeypatch.setattr("gptqmodel.models.writer.get_model_files_size", lambda _: 1)
     monkeypatch.setattr("gptqmodel.models.writer.alias_all_from_turtle_if_meta", lambda *args, **kwargs: None)
-    monkeypatch.setattr("gptqmodel.models.writer.sanitize_model_config", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("gptqmodel.models.writer.sanitize_generation_config_file", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         "gptqmodel.models.writer.get_state_dict_for_save",
