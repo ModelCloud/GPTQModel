@@ -42,13 +42,11 @@ PENDING_NATIVE_DEFINITIONS = frozenset({
 })
 
 PENDING_MODEL_IMPORT_PORTS = frozenset({
-    "agnes", "bailing_moe", "brumby", "chatglm", "codegen", "dbrx_converted", "deepseek_v2", "deepseek_v3",
-    "deepseek_vl_v2", "dream", "ernie4_5_vl_moe", "exaone4", "instella", "intern_s2_preview", "internlm",
-    "interns1", "internvl_chat", "kimi_k25", "kimi_k3", "klear", "lfm3_omni", "lfm3_vl", "llama", "llava_qwen2",
-    "locateanything", "mage_vl", "mimo", "mimo_v2", "minicpm_o", "minicpmv", "minimax_m2", "moss", "nemotron_h",
-    "nemotron_h_puzzle", "nemotron_labs_diffusion", "nemotron_omni", "openvla", "ouro", "ovis", "ovis2_5",
-    "ovis2_6_moe", "phi4", "qwen2_5_vl", "qwen2_vl", "qwen3", "qwen_drive", "rw", "sensenova_loop", "solar_open2",
-    "unlimited_ocr", "xing4_0", "zdtaichu5",
+    "agnes", "brumby", "chatglm", "codegen", "dbrx_converted", "deepseek_v3", "deepseek_vl_v2", "ernie4_5_vl_moe",
+    "exaone4", "instella", "intern_s2_preview", "interns1", "internvl_chat", "kimi_k3", "klear", "lfm3_omni",
+    "lfm3_vl", "llama", "llava_qwen2", "locateanything", "mage_vl", "mimo", "mimo_v2", "minicpm_o", "minimax_m2",
+    "moss", "nemotron_h_puzzle", "nemotron_labs_diffusion", "nemotron_omni", "ouro", "ovis", "ovis2_6_moe", "phi4",
+    "qwen2_vl", "qwen3", "rw", "sensenova_loop", "unlimited_ocr", "xing4_0",
 })
 
 PENDING_STALE_PATTERN_PORTS = frozenset({
