@@ -8,6 +8,10 @@ import threading
 
 import pytest
 
+
+# CustomizedTritonAutoTuner subclasses Triton's autotuner.
+pytest.importorskip("triton")
+
 from gptqmodel.nn_modules.triton_utils.custom_autotune import CustomizedTritonAutoTuner
 from gptqmodel.utils import nogil_patcher
 
