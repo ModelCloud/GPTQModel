@@ -3,10 +3,16 @@
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class HYV3QModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     # HYV3 uses a dense first MLP layer and sparse MoE layers after it.
     fusable = FusableConfig("hy_v3").merge(LlamaFusableConfig(), profiles=("qkv",))
 

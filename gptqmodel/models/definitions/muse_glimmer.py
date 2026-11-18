@@ -6,20 +6,26 @@
 from typing import Dict
 
 import torch
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
 from ...utils.attn_mask import normalize_seq_mask
 from ...utils.model import MODALITY
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class MuseGlimmerQModel(BaseQModel):
     fusable = FusableConfig("muse_glimmer").merge(LlamaFusableConfig())
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
 
     pre_lm_head_norm_module = "model.language_model.norm"
     rotary_embedding = "model.language_model.rotary_emb"
@@ -61,7 +67,8 @@ class MuseGlimmerQModel(BaseQModel):
     awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj"]
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)
+        # BaseQModel already loaded the vendored processor through the loader.
+        return self.processor
 
     @classmethod
     def prepare_inputs_for_conversations(

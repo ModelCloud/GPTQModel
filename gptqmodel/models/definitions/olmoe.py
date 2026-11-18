@@ -5,6 +5,7 @@
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -15,6 +16,11 @@ class OlmoeQModel(BaseQModel):
     them into numbered expert modules before GPTQModel builds this tree, so the
     quantizable leaves are the standard gate/up/down projections below.
     """
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig("olmoe").merge(LlamaFusableConfig(), profiles=("qkv",))
 
 
