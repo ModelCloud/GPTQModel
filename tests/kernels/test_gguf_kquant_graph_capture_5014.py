@@ -26,6 +26,8 @@ attempted here.
 
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 import torch
 import torch.nn as nn
@@ -40,6 +42,23 @@ IN_FEATURES = 512
 OUT_FEATURES = 256
 CAPTURABLE_BITS = ("q4_0", "q8_0", "q4_k", "q5_k", "q6_k")
 HOST_DEQUANT_BITS = ("q2_k", "q3_k")
+
+
+def _host_dequant_skip_reason() -> str | None:
+    """Why the Q2_K/Q3_K nodes cannot build a packed module here.
+
+    ``pack_original`` needs llama.cpp's native quantizer for Q2_K/Q3_K; the
+    in-tree fallback has no block quantizer for them. The declaration itself
+    depends only on the stored format, but these nodes build a real packed
+    instance so the assertion covers the module a checkpoint would load.
+    """
+
+    if importlib.util.find_spec("llama_cpp") is None:
+        return (
+            "Q2_K/Q3_K packing needs llama-cpp-python's native ggml quantizer; "
+            "install llama-cpp-python to run the host-dequant declaration nodes"
+        )
+    return None
 
 
 def _require_cuda() -> None:
@@ -161,25 +180,51 @@ def test_shift_tables_are_reused_device_constants(bits):
     assert module._u8_shift((0, 4), device) is not first
 
 
-def test_graph_capture_declaration_is_per_format():
+@pytest.mark.parametrize(
+    ("bits", "capturable"),
+    [(bits, True) for bits in CAPTURABLE_BITS]
+    + [(bits, False) for bits in HOST_DEQUANT_BITS],
+)
+def test_graph_capture_declaration_is_per_format(bits, capturable):
     """The class declares the device formats; the helper answers per instance."""
+
+    # Q2_K/Q3_K need llama.cpp's native quantizer only to *pack* the module;
+    # the declaration assertion is skipped where that dependency is absent.
+    if not capturable:
+        reason = _host_dequant_skip_reason()
+        if reason is not None:
+            pytest.skip(reason)
 
     _require_cuda()
     assert GGUFTorchLinear.SUPPORTS_GRAPH_CAPTURE is True
     # A class is answered by its declaration: the protocol test needs a bool.
     assert graph_capture_safe(GGUFTorchLinear) is True
 
-    for bits in CAPTURABLE_BITS:
-        module = _build(bits)
+    module = _build(bits)
+    if capturable:
         assert module.supports_graph_capture() is True, bits
         assert graph_capture_safe(module) is True, bits
-
-    for bits in HOST_DEQUANT_BITS:
-        module = _build(bits)
+    else:
         assert module.supports_graph_capture() is False, (
             f"{bits} dequantizes on the host, so it cannot be graph captured"
         )
         assert graph_capture_safe(module) is False, bits
+
+
+def test_host_dequant_nodes_skip_without_llama_cpp(monkeypatch):
+    """The Q2_K/Q3_K nodes fail closed when llama-cpp-python is absent."""
+
+    real_find_spec = importlib.util.find_spec
+
+    def find_spec(name, *args, **kwargs):
+        if name == "llama_cpp":
+            return None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    assert _host_dequant_skip_reason() is not None
+    with pytest.raises(pytest.skip.Exception):
+        test_graph_capture_declaration_is_per_format("q2_k", False)
 
 
 def test_instance_refinement_cannot_widen_a_subclass_declaration():
