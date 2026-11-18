@@ -1,12 +1,22 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Scoped legacy aliases for lazy loading, without reapplying root HF renames."""
+"""Scoped aliases for dense and packed legacy Unlimited-OCR checkpoints."""
 
+import re
+from functools import cache
 from types import SimpleNamespace
 
 from transformers.core_model_loading import Chunk
 
 
+_LEGACY_VISION_QKV = re.compile(r"model\.vision_model\.transformer\.layers\.(\d+)\.self_attn\.qkv_proj\.(weight|bias)")
+_LEGACY_ROOTS = (
+    "model.layers.", "model.embed_tokens.", "model.norm.",
+    "model.sam_model.", "model.vision_model.", "model.projector.layers.",
+)
+
+
+@cache
 def checkpoint_mapping():
     pairs = [
         (r"model\.language_model\.embed_tokens\.", "model.embed_tokens."),
@@ -41,3 +51,22 @@ def checkpoint_mapping():
             operations=[Chunk(dim=0)],
         ))
     return mappings
+
+
+def packed_checkpoint_key(name: str) -> str | tuple[str, ...]:
+    # The old patch embedding is intentionally preserved under its original
+    # key on save. Current packed checkpoints otherwise use native names.
+    if name == "model.vision_model.embeddings.patch_embedding.weight":
+        return name
+    if name != "model.view_seperator" and not name.startswith(_LEGACY_ROOTS):
+        return name
+
+    fused = _LEGACY_VISION_QKV.fullmatch(name)
+    if fused:
+        layer, parameter = fused.groups()
+        root = f"model.vision_tower.vision_encoder.encoder.layers.{layer}.self_attn"
+        return tuple(f"{root}.{projection}_proj.{parameter}" for projection in "qkv")
+
+    from ....utils.structure import LazyTurtle
+
+    return LazyTurtle.convert_hf_checkpoint_key(name, checkpoint_mapping(), to_runtime=True)

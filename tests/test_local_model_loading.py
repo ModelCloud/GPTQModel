@@ -16,6 +16,7 @@ from gptqmodel.models.auto import MODEL_MAP_CASEFOLD, check_and_get_model_defini
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.utils.hf import (
     has_native_transformers_model_support,
+    load_hf_tokenizer,
     load_model_config,
     normalize_hf_config_compat,
     prepare_remote_model_init_compat,
@@ -41,6 +42,24 @@ def test_disabled_trust_defers_config_errors_and_allows_repair(tmp_path, model_t
     config = load_model_config(path, trust_remote_code=False)
     assert config.model_type == model_type
     assert type(config).__module__.startswith(("transformers.", "gptqmodel."))
+
+
+def test_native_model_with_custom_tokenizer_reports_missing_bypass(tmp_path, monkeypatch):
+    monkeypatch.delenv(BYPASS_ENV, raising=False)
+    (tmp_path / "config.json").write_text('{"model_type":"mpt"}')
+    tokenizer_config = tmp_path / "tokenizer_config.json"
+    tokenizer_config.write_text(json.dumps({
+        "tokenizer_class": "UnregisteredTokenizer",
+        "auto_map": {"AutoTokenizer": ["tokenization_fixture.UnregisteredTokenizer", None]},
+    }))
+    config = load_model_config(tmp_path)
+    with pytest.raises(RemoteCodeSecurityError, match=BYPASS_ENV):
+        load_hf_tokenizer(tmp_path, model_config=config, trust_remote_code=True, local_files_only=True)
+
+    from tests.test_internlm_local_port import _write_tokenizer
+
+    _write_tokenizer(tmp_path)
+    assert load_hf_tokenizer(tmp_path, model_config=config, trust_remote_code=True, local_files_only=True)
 
 
 @pytest.mark.parametrize("subfolder", ["", "selected"])

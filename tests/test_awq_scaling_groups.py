@@ -456,7 +456,8 @@ def _worst_relative_change(hf_model, ids, layer, groups):
 # Families whose decoder layer has no foldable AWQ group and is quantized plainly.
 PLAIN_QUANTIZATION_FAMILIES = {
     "exaone", "falcon", "gpt_pangu", "grinmoe", "hymba", "internlm2", "internvl_chat", "k2_horizon",
-    "afmoe", "agnes", "apertus", "codegen", "deepseek_v2", "deepseek_v3", "deepseek_v4", "deepseek_vl_v2", "exaone4", "gpt2", "instella", "minimax", "minimax_m2", "nemotron_h"
+    "afmoe", "agnes", "apertus", "codegen", "deepseek_v3", "deepseek_v4",
+    "deepseek_vl_v2", "exaone4", "gpt2", "instella", "minimax", "minimax_m2", "nemotron_h",
 }
 
 # Hybrid SSM families whose decoder forward resolves Mamba-2 scan kernels through
@@ -547,7 +548,7 @@ def test_scaling_groups_preserve_decoder_layer_output(family):
         worst = max(worst, _worst_relative_change(hf_model, ids, layer, groups))
 
     if family in PLAIN_QUANTIZATION_FAMILIES:
-        assert worst < 1e-5, f"{family}: AWQ scaling changed the layer output by {worst:.3e}"
+        assert not saw_group, f"{family}: expected plain quantization"
         return
     assert saw_group, f"{family}: no AWQ scaling groups were built"
     assert worst < 1e-5, f"{family}: AWQ scaling changed the layer output by {worst:.3e}"
@@ -560,6 +561,7 @@ MOE_SHARED_FAMILIES = [
     "glm_moe_dsa",
     "hy_v3",
     "solar_open",
+    "deepseek_v2",
     "qwen2_moe",
 ]
 

@@ -71,13 +71,6 @@ class Qwen2_5_VLQModel(BaseQwen2VLGPTQ):
             return BaseQModel.run_input_capture(self, example, use_cache=use_cache, data_device=data_device)
         return super().run_input_capture(example, use_cache=use_cache, data_device=data_device)
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        if self._is_text_model(self.model):
-            # Separate task binding: scaling/search/replay has not been
-            # qualified. The AWQ processor still packs every decoder linear.
-            return []
-        return super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
-
     def generate(self, inputs=None, **kwargs):
         if self._is_text_model(self.model):
             raise NotImplementedError(

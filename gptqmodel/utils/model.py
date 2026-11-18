@@ -3188,6 +3188,8 @@ def validate_checkpoint_qweights(
     checkpoint_keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
     if checkpoint_keys is None:
         return
+    if callable(key_converter):
+        checkpoint_keys = {name for key in checkpoint_keys for name in _converted_safetensors_names(key, key_converter)}
 
     # A shared quantized module can be saved under any one of its aliases.
     module_keys = collections.defaultdict(set)
@@ -3195,14 +3197,8 @@ def validate_checkpoint_qweights(
         required = getattr(module, "CHECKPOINT_REQUIRED_BUFFERS", ())
         if not required:
             continue
-        aliases = [name]
-        if callable(key_converter):
-            aliases.append(key_converter(name))
         for suffix in required:
-            for alias in aliases:
-                module_keys[(id(module), suffix)].add(
-                    f"{alias}.{suffix}" if alias else suffix
-                )
+            module_keys[(id(module), suffix)].add(f"{name}.{suffix}" if name else suffix)
     missing = sorted(
         min(keys) for keys in module_keys.values() if not keys & checkpoint_keys
     )
@@ -3242,7 +3238,7 @@ def _unmaterialized_checkpoint_parameters(
         # that path to Accelerate's own reporting.
         return []
     if callable(key_converter):
-        checkpoint_keys = {key_converter(key) for key in checkpoint_keys}
+        checkpoint_keys = {name for key in checkpoint_keys for name in _converted_safetensors_names(key, key_converter)}
 
     loaded_parameter_ids = {
         id(parameter)
@@ -3316,7 +3312,7 @@ def _tie_weights_after_checkpoint_load(
         checkpoint_keys = _checkpoint_tensor_keys(checkpoint)
         if checkpoint_keys is not None:
             if callable(key_converter):
-                checkpoint_keys = {key_converter(key) for key in checkpoint_keys}
+                checkpoint_keys = {name for key in checkpoint_keys for name in _converted_safetensors_names(key, key_converter)}
             if extra_keys:
                 # Accelerate may have received a temporary checkpoint without
                 # some tensors the loader restored itself; they were present
@@ -3334,6 +3330,28 @@ def _tie_weights_after_checkpoint_load(
         model.tie_weights()
 
 
+def _converted_safetensors_names(name: str, key_converter) -> tuple[str, ...]:
+    converted = key_converter(name) if callable(key_converter) else name
+    return (converted,) if isinstance(converted, str) else converted
+
+
+def _split_safetensors_tensor_info(name, info, parts):
+    """Split equal contiguous groups of rows without changing the payload bytes."""
+    if parts == 1:
+        return (info,)
+    rows, *columns = info["shape"]
+    start, end = info["data_offsets"]
+    if rows % parts or (end - start) % parts:
+        raise ValueError(f"Checkpoint tensor {name!r} cannot be split into {parts} equal row groups")
+    rows_per_part = rows // parts
+    bytes_per_part = (end - start) // parts
+    return tuple(
+        {**info, "shape": [rows_per_part, *columns],
+         "data_offsets": [start + index * bytes_per_part, start + (index + 1) * bytes_per_part]}
+        for index in range(parts)
+    )
+
+
 def _convert_safetensors_header_keys(
     header: dict, key_converter, exclude_names=frozenset(),
 ) -> Tuple[dict, bool, bool]:
@@ -3344,19 +3362,17 @@ def _convert_safetensors_header_keys(
         if name == "__metadata__":
             converted_header[name] = tensor_info
             continue
-        converted_name = key_converter(name) if callable(key_converter) else name
-        if converted_name in exclude_names:
-            # The caller owns these tensors (for example packed FP8 weights)
-            # and loads them directly from the source checkpoint. Keeping
-            # them out of this file also keeps accelerate from reading the
-            # packed bytes into its per-shard staging buffer.
-            changed = True
-            excluded = True
-            continue
-        if converted_name in converted_header:
-            raise ValueError(f"Checkpoint key conversion produced duplicate tensor name: {converted_name}")
-        converted_header[converted_name] = tensor_info
-        changed |= converted_name != name
+        names = _converted_safetensors_names(name, key_converter)
+        changed |= names != (name,)
+        for converted_name, info in zip(names, _split_safetensors_tensor_info(name, tensor_info, len(names))):
+            if converted_name in exclude_names:
+                # The restore pass reads owned buffers from the source.
+                changed = True
+                excluded = True
+                continue
+            if converted_name in converted_header:
+                raise ValueError(f"Checkpoint key conversion produced duplicate tensor name: {converted_name}")
+            converted_header[converted_name] = info
     return converted_header, changed, excluded
 
 
@@ -3448,14 +3464,15 @@ def _remap_safetensors_index(
     converted_weight_map = {}
     changed = False
     for name, shard in weight_map.items():
-        converted_name = key_converter(name) if callable(key_converter) else name
-        if converted_name in exclude_names:
-            changed = True
-            continue
-        if converted_name in converted_weight_map:
-            raise ValueError(f"Checkpoint key conversion produced duplicate tensor name: {converted_name}")
-        converted_weight_map[converted_name] = shard
-        changed |= converted_name != name
+        names = _converted_safetensors_names(name, key_converter)
+        changed |= names != (name,)
+        for converted_name in names:
+            if converted_name in exclude_names:
+                changed = True
+                continue
+            if converted_name in converted_weight_map:
+                raise ValueError(f"Checkpoint key conversion produced duplicate tensor name: {converted_name}")
+            converted_weight_map[converted_name] = shard
     if not changed:
         return None
 
@@ -3741,6 +3758,9 @@ def _checkpoint_runtime_to_source_keys(
     mapping: dict[str, str] = {}
     for key in keys:
         runtime = key_converter(key)
+        if not isinstance(runtime, str):
+            # Tensor slices are available only in the converted checkpoint.
+            continue
         existing = mapping.get(runtime)
         if existing is not None and existing != key:
             raise ValueError(
@@ -4109,6 +4129,9 @@ def _load_key_converted_safetensors(
                     return False
                 for source_name in keys:
                     runtime_name = key_converter(source_name)
+                    if not isinstance(runtime_name, str):
+                        # Fused tensors need new per-slice shapes and offsets.
+                        return False
                     changed |= runtime_name != source_name
                     if runtime_name in seen:
                         raise ValueError(
@@ -4201,7 +4224,6 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
         kwargs.pop("restore_checkpoint_buffer_dtypes", False)
     )
     fp8_weight_names = set(packed_fp8_buffer_dtypes)
-    device_map = kwargs.get("device_map")
     if isinstance(device_map, dict):
         # Read every shard with the int ordinal so the checkpoint read does not
         # initialize a context on cuda:0 for a `cuda:N` placement (#4863).
@@ -4221,7 +4243,10 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
         ]
         tied_groups.extend(accelerate.utils.modeling.find_tied_parameters(model))
         _keep_tied_groups_on_one_device(device_map, tied_groups)
-        kwargs["device_map"] = device_map
+        if len(args) > 1:
+            args = (args[0], device_map, *args[2:])
+        else:
+            kwargs["device_map"] = device_map
     converted_checkpoint = None
     restore_checkpoint = checkpoint
     restore_name_map = None
@@ -4397,7 +4422,7 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
         )
         _raise_on_unmaterialized_checkpoint_parameters(
             model,
-            kwargs.get("checkpoint", checkpoint),
+            load_checkpoint,
             key_converter=key_converter if lazy_loaded else None,
         )
     finally:

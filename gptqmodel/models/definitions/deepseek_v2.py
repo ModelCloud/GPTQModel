@@ -10,6 +10,17 @@ from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 # Both DeepSeek-v2 and DeepSeek-v2-lite are supported in this model def
 class DeepSeekV2QModel(BaseQModel):
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Attention replay takes hidden states, not normalized MLA latents.
+        # Keep the original input-norm fold and leave latent/attention output
+        # folds to plain quantization.
+        excluded = (module.self_attn.q_a_layernorm, module.self_attn.kv_a_layernorm)
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        return [
+            node for node in nodes
+            if node["prev_op"] not in excluded and module.self_attn.o_proj not in node["layers"]
+        ]
+
     loader = LocalModelLoader(
         config_class="gptqmodel.models.ports.deepseek_v2.configuration_deepseek_v2.DeepseekV2Config",
         model_class="gptqmodel.models.ports.deepseek_v2.modeling_deepseek_v2.DeepseekV2ForCausalLM",
@@ -52,9 +63,3 @@ class DeepSeekV2QModel(BaseQModel):
             },
         }
     ]
-
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # MLA normalizes/splits low-rank states before expanding K/V; MoE has
-        # an unquantized router and shared consumers. Their complete folding
-        # and replay objective is unqualified: use AWQ's plain-quantization path.
-        return []

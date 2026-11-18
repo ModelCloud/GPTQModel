@@ -86,7 +86,7 @@ def test_real_checkpoint_owners_and_module_plan(q_rank, device, implementation):
     assert looper._extract_moe_group_key("mlp.experts.3.up_proj") == "mlp.experts.3"
 
 
-def test_awq_is_explicitly_unqualified_even_with_complete_features():
+def test_awq_folds_use_input_norms_with_complete_features():
     model = DeepseekV2ForCausalLM(tiny_config()).eval()
     _convert_model_with_defuser(DeepSeekV2QModel, model, cleanup_original=True)
     wrapper = DeepSeekV2QModel(model, quantized=False, quantize_config=QuantizeConfig())
@@ -96,7 +96,10 @@ def test_awq_is_explicitly_unqualified_even_with_complete_features():
             for name, module in layer.named_modules() if isinstance(module, torch.nn.Linear)
         }
         features["mlp"] = torch.randn(2, 5, model.config.hidden_size)
-    assert wrapper.awq_get_modules_for_scaling(layer, features, {}) == []
+        nodes = wrapper.awq_get_modules_for_scaling(layer, features, {})
+        assert any(node["prev_op"] is layer.input_layernorm for node in nodes)
+        excluded = (layer.self_attn.q_a_layernorm, layer.self_attn.kv_a_layernorm)
+        assert all(node["prev_op"] not in excluded and layer.self_attn.o_proj not in node["layers"] for node in nodes)
 
 
 def test_independent_registry_case_and_fusion_exclusion():

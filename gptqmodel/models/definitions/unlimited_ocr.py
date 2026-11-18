@@ -71,9 +71,9 @@ class UnlimitedOCRQModel(BaseQModel):
 
     @staticmethod
     def checkpoint_key_for_load(name):
-        # GPT-QModel writes native keys; native HF's unanchored `model.layers`
-        # pattern also matches the suffix of `model.language_model.layers`.
-        return name
+        from ..ports.unlimited_ocr.checkpoint import packed_checkpoint_key
+
+        return packed_checkpoint_key(name)
 
     @staticmethod
     def checkpoint_key_for_save(name):

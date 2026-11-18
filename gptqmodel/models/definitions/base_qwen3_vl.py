@@ -25,7 +25,7 @@ from ._vlm_calibration import (
 
 QWEN_VL_UTILS_INSTALL_HINT = (
     "qwen_vl_utils is required for Qwen3-VL video inputs. "
-    "Install it with `pip install qwen-vl-utils`."
+    "Install it with `pip install 'gptqmodel[video]'`."
 )
 
 

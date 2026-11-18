@@ -615,7 +615,6 @@ CONFIG_SELECTION_KWARGS = (
     # (#5007).
     "token",
     "use_auth_token",
-    "token",
     "force_download",
     "resume_download",
     "proxies",
@@ -2802,19 +2801,20 @@ def load_hf_tokenizer(
 
     from ..models.local import local_model_loader
 
-    trust_remote_code = bool(trust_remote_code and safety_checks_bypassed())
     loader = local_model_loader(getattr(model_config, "model_type", None))
+    checkpoint_path = isinstance(tokenizer_or_path, (str, os.PathLike))
+    # Native tokenizers can load even if a caller supplied the trust flag.
+    # Keep the request separate from permission so a remote-only tokenizer
+    # can report the missing consent without enabling Python to detect it.
+    requested_remote_code = bool(trust_remote_code and checkpoint_path and loader is None)
+    trust_remote_code = requested_remote_code and safety_checks_bypassed()
     tokenicer_option_names = {"normalize_sentencepiece"}
     if loader is not None:
         for key, value in loader.tokenicer_options:
             kwargs.setdefault(key, value)
             tokenicer_option_names.add(key)
-    if isinstance(tokenizer_or_path, (str, os.PathLike)):
+    if checkpoint_path:
         tokenizer_or_path = os.fspath(tokenizer_or_path)
-        if loader is not None:
-            # A package-owned model never delegates tokenizer Python to its
-            # checkpoint, including when it uses an ordinary native tokenizer.
-            trust_remote_code = False
         if loader is not None and loader.tokenizer_class is not None:
             # Class selection belongs to the definition, including when two
             # checkpoints declare the same tokenizer class name. Tokenicer
@@ -2831,12 +2831,19 @@ def load_hf_tokenizer(
         # already selected by our policy so tokenizer initialization cannot
         # import checkpoint AutoConfig code behind a definition-owned port.
         kwargs["config"] = model_config
-    tokenicer = Tokenicer.load(
-        tokenizer_or_path,
-        model_config=model_config,
-        trust_remote_code=trust_remote_code,
-        **kwargs,
-    )
+    try:
+        tokenicer = Tokenicer.load(
+            tokenizer_or_path,
+            model_config=model_config,
+            trust_remote_code=trust_remote_code,
+            **kwargs,
+        )
+    except ValueError as exc:
+        # Tokenicer and Transformers both include this option in their
+        # remote-code-required errors and expose no dedicated exception type.
+        if requested_remote_code and not trust_remote_code and "`trust_remote_code=True`" in str(exc):
+            require_remote_code_permission(requested_remote_code)
+        raise
     # Internal model loads retain the normalized wrapper through construction.
     # Direct callers keep the native-tokenizer return contract by default.
     return tokenicer if return_tokenicer else tokenicer.tokenizer

@@ -78,8 +78,8 @@ flowchart TD
     B -->|yes| D["Root layers tree; embed_tokens/norm/rotary_emb base modules"]
     D --> E["BaseQModel.prepare_dataset and run_input_capture"]
     E --> F["Native text forward and per-layer replay"]
-    F --> G["awq_get_modules_for_scaling returns empty list"]
-    G --> H["Plain AWQ; fallback=None permitted"]
+    F --> G["BaseQModel.awq_get_modules_for_scaling selects decoder groups"]
+    G --> H["AWQProcessor searches and folds scales"]
     H --> I{"Torch pack dimensions supported?"}
     I -->|yes| J["Pack decoder linears; retain dense exclusions"]
     I -->|no| X["Existing pack constraint error; no geometry rewrite"]
@@ -95,7 +95,7 @@ flowchart TD
 | Standalone task gap | No causal-LM AutoModel mapping | Preserve the published headless backbone; reject generation explicitly |
 | Text weight tree (`BaseQwen2VLGPTQ.module_tree`) | Composite `model.language_model.layers` assumption | Separate root `layers` tree without mutating the class tree |
 | Text calibration (`BaseQwen2VLGPTQ.prepare_dataset/run_input_capture`) | Media processor/capture assumptions | Base text preparation and capture; no media processor |
-| Text AWQ grouping (`BaseQwen2VLGPTQ.awq_get_modules_for_scaling`) | Composite path relationships | Explicit empty groups and measured plain quantization |
+| Text AWQ grouping | Explicit empty groups in the initial port | Shared decoder groups and real native text replay |
 | Tokenizer dispatch | Selected config alone could still permit remote tokenizer code with trust+bypass | Canonical parent HF helper forces checkpoint tokenizer trust False |
 
 The parent owns shared loader/security code, central docs and PR diagrams.
@@ -131,10 +131,10 @@ hardware cases and three absent DeciLM/EXAONE/Nanbeige fixtures). No owned test
 is skipped. Full `format/check.sh`, port Pyright, compileall, fixture hashes,
 package discovery and `git diff --check` pass.
 
-Six actual public plain-AWQ cases cover MHA/GQA/MQA and disk-offload False/True
-with `fallback=None`: all 14 decoder linears pack, embeddings/norms stay dense,
-and every packed/dense tensor and hidden output matches through TWO saves and
-public reloads. No fold/search/replay relationship is claimed from shape alone.
+Six public AWQ cases cover MHA/GQA/MQA and both disk-offload modes with
+`fallback=None`. All 14 decoder linears pack. The decoder input norms change
+through folding, and every packed and dense tensor and the hidden output match
+through two saves and public reloads.
 
 The actual published tiny payload independently passed exact public/native
 hidden-state parity and TWO native dense saves with public reloads, preserving

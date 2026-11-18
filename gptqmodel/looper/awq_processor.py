@@ -2758,7 +2758,9 @@ class AWQProcessor(LoopProcessor):
 
         if not module_config:
             log.warning(
-                "AWQProcessor: no module configuration generated for layer index %s; falling back to plain quantization.",
+                "AWQProcessor: %s produced no scaling groups for layer %s. "
+                "AWQ scale search is disabled for this layer; using plain quantization.",
+                type(self.gptq_model).__name__,
                 layer_index,
             )
             self._quantize_layer_fallback(

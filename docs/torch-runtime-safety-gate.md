@@ -107,19 +107,9 @@ pre-release of the *patched* release counts as affected:
 An unparseable version raises rather than passing: an unidentifiable runtime
 cannot be cleared for checkpoint loading.
 
-## Python 3.10
+## Supported Python versions
 
-There is no patched Torch for CPython 3.10. `2.14.x` is inside the
-`weights_only` range and `2.15.0` publishes no `cp310` wheel, so `requirements.txt`
-pins the only release that both installs on 3.10 and clears the gate:
-
-```text
-torch>=2.13.0,<2.14.0; python_version < "3.11"
-torch>=2.15.0; python_version >= "3.11"
-```
-
-Python 3.11 and newer install the patched `2.15.0` line. Dropping 3.10 would
-remove the ceiling; until then the ceiling is the honest declaration.
+GPT-QModel requires Python 3.11 or newer and installs `torch>=2.15.0`.
 
 ## Failure contract
 

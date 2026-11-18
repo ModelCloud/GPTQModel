@@ -418,6 +418,31 @@ def test_traditional_codec_missing_dependency_and_failed_job_retry(tmp_path, mon
     assert replay["out_dir"] == payload["out_dir"]
 
 
+def test_checkpoint_codec_settings_only_supply_processing_options(tmp_path):
+    _processor_assets(tmp_path)
+    config_path = tmp_path / "preprocessor_config.json"
+    payload = json.loads(config_path.read_text())
+    payload["codec"] = {
+        "target_canvas": 24,
+        "cache_root": str(tmp_path / "checkpoint-cache"),
+        "timeout_seconds": 1,
+    }
+    config_path.write_text(json.dumps(payload))
+
+    processor = MageVLProcessor.from_pretrained(tmp_path)
+    assert processor._codec_config_defaults == {"target_canvas": 24}
+
+    caller_cache = tmp_path / "caller-cache"
+    processor = MageVLProcessor.from_pretrained(
+        tmp_path, codec_config={"target_canvas": 20, "cache_root": caller_cache, "timeout_seconds": 15},
+    )
+    assert processor._codec_config_defaults["cache_root"] == caller_cache
+    assert processor._codec_config_defaults["timeout_seconds"] == 15
+    saved = tmp_path / "saved"
+    processor.save_pretrained(saved)
+    assert json.loads((saved / "preprocessor_config.json").read_text())["codec"] == {"target_canvas": 20}
+
+
 def test_codec_defaults_ignore_environment_and_accept_explicit_api_paths(tmp_path, monkeypatch):
     from gptqmodel.models.ports.mage_vl import codec_video_processing_mage_vl as codec
 

@@ -237,26 +237,31 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
             return ConditionalChatTTS(self.config.tts_config)
         return MiniCPMTTS(config=self.config.tts_config, audio_tokenizer=None)
 
-    def _ensure_asset_dir(self, asset_subpath: str, model_dir: Optional[str] = None) -> str:
-        """Resolve explicitly installed codec assets; never download model code or weights."""
-        model_dir = model_dir or os.path.join(self.config._name_or_path, asset_subpath)
+    def init_tts(self, model_dir=None, enable_float16=False, n_timesteps=10, *, trust_remote_code=False):
+        """Initialize the external StepAudio codec from caller-selected, trusted assets."""
+        from ....utils.security import BYPASS_ENV, RemoteCodeSecurityError, require_remote_code_permission
+
+        if not require_remote_code_permission(trust_remote_code):
+            raise RemoteCodeSecurityError(
+                "StepAudio codec loading requires trust_remote_code=True and "
+                f"{BYPASS_ENV}=1 because its assets are interpreted by an external loader."
+            )
+        if not model_dir:
+            raise ValueError("Set model_dir to the local directory containing trusted StepAudio codec assets.")
         if not os.path.isdir(model_dir):
             raise FileNotFoundError(f"Install MiniCPM-o codec assets locally: {model_dir}")
-        return model_dir
-
-    def init_tts(self, model_dir=None, enable_float16=False, n_timesteps=10, **kwargs):
-        if self.config.tts_config.audio_tokenizer_type != "s3tokenizer_step_audio":
-            logger.warning("audio tokenizer type is set to s3tokenizer_step_audio")
-            self.tts.config.audio_tokenizer_type = "s3tokenizer_step_audio"
 
         try:
             from stepaudio2 import Token2wav
         except ImportError:
             raise ImportError("Please install Token2wav via: pip install minicpmo-utils[all]")
 
-        model_dir = self._ensure_asset_dir("assets/token2wav", model_dir)
-        self.tts.audio_tokenizer = Token2wav(model_dir, float16=enable_float16, n_timesteps=n_timesteps)
-        return self.tts.audio_tokenizer
+        audio_tokenizer = Token2wav(os.fspath(model_dir), float16=enable_float16, n_timesteps=n_timesteps)
+        if self.config.tts_config.audio_tokenizer_type != "s3tokenizer_step_audio":
+            logger.warning("audio tokenizer type is set to s3tokenizer_step_audio")
+            self.tts.config.audio_tokenizer_type = "s3tokenizer_step_audio"
+        self.tts.audio_tokenizer = audio_tokenizer
+        return audio_tokenizer
 
     def get_input_embeddings(self):
         return self.llm.get_input_embeddings()
@@ -2473,6 +2478,9 @@ class MiniCPMODuplex:
         cls,
         model: "MiniCPMO",
         device: Optional[str] = None,
+        *,
+        model_dir=None,
+        trust_remote_code=False,
         **kwargs,
     ) -> "MiniCPMODuplex":
         """Create MiniCPMODuplex from an existing MiniCPMO instance."""
@@ -2527,10 +2535,14 @@ class MiniCPMODuplex:
         # Ensure model has processor reference (same as __init__)
         instance.model.processor = instance.processor
 
-        # Initialize TTS (same as __init__)
-        enable_float16 = get_param("enable_float16")
-        n_timesteps = get_param("n_timesteps")
-        instance.model.init_tts(enable_float16=enable_float16, n_timesteps=n_timesteps)
+        codec = getattr(getattr(model, "tts", None), "audio_tokenizer", None)
+        if instance.generate_audio and (model_dir is not None or codec is None):
+            model.init_tts(
+                model_dir=model_dir,
+                enable_float16=get_param("enable_float16"),
+                n_timesteps=get_param("n_timesteps"),
+                trust_remote_code=trust_remote_code,
+            )
 
         instance.break_event = threading.Event()
         instance.session_stop_event = threading.Event()

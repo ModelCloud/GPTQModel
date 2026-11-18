@@ -44,10 +44,26 @@ dependencies = { file = ["requirements.txt"] }
 
 [project.optional-dependencies]
 vision = [
+    "torchvision>=0.29.2",
     "timm>=1.0.22",
     "einops>=0.8.1",
 ]
+video = [
+    "torchvision>=0.29.2",
+    "opencv-python-headless>=4.10.0.84",
+    "qwen-vl-utils>=0.0.14",
+]
+decord = [
+    "decord>=0.6.0",
+]
+audio = [
+    "librosa>=0.11.0",
+    "scipy>=1.15.0",
+    "soundfile>=0.13.1",
+]
 minicpm-o = [
+    "librosa>=0.11.0",
+    "soundfile>=0.13.1",
     "vector-quantize-pytorch>=1.27.15",
 ]
 pangu-alpha = [
@@ -65,17 +81,14 @@ quality = [
 ]
 # Engine extras carry their own torch/transformers pins; use a dedicated environment.
 vllm = [
-    "vllm>=0.31.0; python_version < \"3.11\"",
-    "vllm>=0.32.0; python_version >= \"3.11\" and python_version < \"3.15\"",
+    "vllm>=0.32.0; python_version < \"3.15\"",
 ]
 sglang = [
-    "sglang[srt]>=0.5.21; python_version < \"3.11\"",
-    "sglang[srt]>=0.5.22; python_version >= \"3.11\"",
+    "sglang[srt]>=0.5.22",
 ]
 bitblas = [
     "bitblas==0.1.0.post1",
-    "numpy>=2.2.6; python_version < \"3.11\"",
-    "numpy>=2.4.6; python_version >= \"3.11\" and python_version < \"3.12\"",
+    "numpy>=2.4.6; python_version < \"3.12\"",
     "numpy>=2.5.4; python_version >= \"3.12\"",
 ]
 bitsandbytes = [
@@ -89,8 +102,7 @@ bitsandbytes = [
 # it is no longer a base requirement.
 gguf = [
     "llama-cpp-python>=0.3.37",
-    "numpy>=2.2.6; python_version < \"3.11\"",
-    "numpy>=2.4.6; python_version >= \"3.11\" and python_version < \"3.12\"",
+    "numpy>=2.4.6; python_version < \"3.12\"",
     "numpy>=2.5.4; python_version >= \"3.12\"",
 ]
 hf = [
@@ -121,10 +133,8 @@ openai = [
 ]
 mlx = [
     "mlx>=0.32.4",
-    "mlx_lm>=0.31.3; python_version < \"3.11\"",
-    "mlx_lm>=0.32.2; python_version >= \"3.11\"",
-    "numpy>=2.2.6; python_version < \"3.11\"",
-    "numpy>=2.4.6; python_version >= \"3.11\" and python_version < \"3.12\"",
+    "mlx_lm>=0.32.2",
+    "numpy>=2.4.6; python_version < \"3.12\"",
     "numpy>=2.5.4; python_version >= \"3.12\"",
 ]
 

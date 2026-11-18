@@ -208,6 +208,37 @@ similar model names. Do not replace an architecture with a lookalike.
 
 ## Load, save, export and retry boundaries
 
+MiniCPM-o 4.5's `init_tts` checks remote-code permission before loading the
+external StepAudio codec. The caller supplies a local `model_dir` for trusted
+codec assets. `MiniCPMODuplex.from_existing_model` reuses an initialized codec
+or forwards the caller's explicit directory and trust flag. Image, audio and
+video URLs handled by MiniCPM-o use the shared bounded download helpers.
+
+Legacy packed Unlimited-OCR checkpoints are validated against their translated
+runtime keys before weight placement. Dense vision QKV tensors in the legacy
+layout have three contiguous row ranges. The safetensors remapper publishes
+each range as a separate tensor in the temporary header and index.
+
+```mermaid
+flowchart TD
+    A["validate_checkpoint_qweights"] --> B["packed_checkpoint_key maps packed names"]
+    B --> C{"Required runtime keys present?"}
+    C -->|No| X["Raise missing-weight error"]
+    C -->|Yes| D["load_checkpoint_in_model_then_tie_weights"]
+    D --> E{"Converter yields multiple names?"}
+    E -->|No| F["Lazy key conversion when supported"]
+    E -->|Yes| G["_remap_safetensors_checkpoint_keys"]
+    G --> H["_split_safetensors_tensor_info assigns row ranges and offsets"]
+    H --> I["Load remapped safetensors and clean up temporary files"]
+    classDef failure fill:#fdd,stroke:#b00
+    class X failure
+```
+
+| Boundary | Previous behavior | Current behavior |
+| --- | --- | --- |
+| StepAudio assets | `MiniCPMO.init_tts` inferred the codec directory from the model checkpoint | Explicit caller-selected local assets and both trust permissions are required |
+| Unlimited-OCR packed layout | The definition returned disk keys unchanged | `packed_checkpoint_key` translates legacy keys and `_split_safetensors_tensor_info` splits recorded shapes and offsets |
+
 The public dispatchers, ordinary and quantized loaders, quantized re-save shell,
 and compressed-tensors dequantizer use `load_model_config`. The dequantizer
 also selects the definition's local model loader for shell construction.

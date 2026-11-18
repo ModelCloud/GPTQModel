@@ -16,14 +16,14 @@ import numpy as np
 from PIL import Image
 from tokenizers import AddedToken, Tokenizer
 
-from ....utils.hf import load_hf_tokenizer
-from .configuration_ovis2_5 import Ovis2_5_Config
-from .processing_ovis2_5 import Ovis2_5Processor
+from gptqmodel.models.ports.ovis2_5.configuration_ovis2_5 import Ovis2_5_Config
+from gptqmodel.models.ports.ovis2_5.processing_ovis2_5 import Ovis2_5Processor
+from gptqmodel.utils.hf import load_hf_tokenizer
 
 
 def verify(assets):
     assets = Path(assets)
-    port = Path(__file__).parent
+    port = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/ovis2_5"
     reference = json.loads((port / "released_tokenizer_evidence.json").read_text())
     for filename, sha256 in reference["assets"].items():
         assert hashlib.sha256((assets / filename).read_bytes()).hexdigest() == sha256, filename

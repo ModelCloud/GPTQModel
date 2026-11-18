@@ -50,7 +50,7 @@ class Kimi_K25Model(NativeKimiModel):
     def __init__(self, config):
         Kimi_K25PreTrainedModel.__init__(self, config)
         self.vision_tower = Kimi_K25VisionModel._from_config(config.vision_config)
-        self.language_model = AutoModel.from_config(config.text_config)
+        self.language_model = AutoModel.from_config(config.text_config, trust_remote_code=False)
         self.mm_projector = Kimi_K25MultimodalProjection(config)
         self.post_init()
 

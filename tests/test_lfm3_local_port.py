@@ -61,13 +61,16 @@ def test_native_definition_does_not_require_checkpoint_code():
     assert type(model) is Lfm3ForCausalLM
 
 
-def test_awq_is_explicitly_plain_quantization_for_every_hybrid_layer():
+def test_awq_search_uses_only_verified_hybrid_norms():
     model = Lfm3ForCausalLM(tiny_config()).eval()
     wrapper = shell(model)
     for layer in model.model.layers:
         features = {name: torch.randn(2, 5, module.in_features)
                     for name, module in layer.named_modules() if isinstance(module, nn.Linear)}
-        assert wrapper.awq_get_modules_for_scaling(layer, features, {}) == []
+        expected = {layer.ffn_norm}
+        if not layer.is_attention_layer:
+            expected.add(layer.operator_norm)
+        assert {node["prev_op"] for node in wrapper.awq_get_modules_for_scaling(layer, features, {})} == expected
 
 
 def save_checkpoint(path, config=None, *, legacy_gate=True):
@@ -229,7 +232,7 @@ def test_hybrid_replay_matches_native_context_across_batches(dtype, explicit_pos
 @pytest.mark.parametrize("kv_heads", [1, 2, 4], ids=["mqa", "gqa", "mha"])
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("gate_and_sandwich", [False, True])
-def test_public_plain_awq_quantizes_every_linear_and_roundtrips(tmp_path, kv_heads, bias, gate_and_sandwich):
+def test_public_awq_quantizes_every_linear_and_roundtrips(tmp_path, kv_heads, bias, gate_and_sandwich):
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
     from gptqmodel.utils.backend import BACKEND
@@ -254,8 +257,14 @@ def test_public_plain_awq_quantizes_every_linear_and_roundtrips(tmp_path, kv_hea
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj"])}
     expected |= {f"model.layers.{i}.feed_forward.w{j}" for i in range(3) for j in (1, 2, 3)}
     assert quantized == expected
+    scaled_norms = {f"model.layers.{index}.ffn_norm.weight" for index in range(3)}
+    scaled_norms.add("model.layers.0.operator_norm.weight")
     for key, tensor in excluded.items():
-        torch.testing.assert_close(wrapper.model.state_dict()[key], tensor, rtol=0, atol=0)
+        actual = wrapper.model.state_dict()[key]
+        if key in scaled_norms:
+            assert not torch.equal(actual, tensor), key
+        else:
+            torch.testing.assert_close(actual, tensor, rtol=0, atol=0)
     with torch.inference_mode():
         logits = wrapper.model(**calibration[0], use_cache=False).logits
     assert torch.isfinite(logits).all()

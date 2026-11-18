@@ -40,6 +40,13 @@ VISION_END = "<|vision_end|>"
 IMAGE_PAD = "<|image_pad|>"
 VIDEO_PAD = "<|video_pad|>"
 
+# Checkpoint metadata describes the input representation. Execution policy,
+# including cache locations and timeouts, is supplied by the caller.
+_CHECKPOINT_CODEC_KEYS = frozenset({
+    "target_canvas", "group_size", "images_per_group", "patch", "max_pixels",
+    "min_group_frames", "max_group_frames", "spatial_mask_mode",
+})
+
 
 def _format_seconds_tag(seconds: float) -> str:
     """Match training format: ``<X.X seconds>`` (one decimal place)."""
@@ -128,7 +135,11 @@ class MageVLProcessor:
         if config_path is None:
             raise FileNotFoundError("Mage-VL requires preprocessor_config.json.")
         with open(config_path, encoding="utf-8") as source:
-            codec_defaults = json.load(source).get("codec", {}) or {}
+            codec_defaults = json.load(source).get("codec")
+        codec_defaults = {
+            key: codec_defaults[key] for key in _CHECKPOINT_CODEC_KEYS
+            if isinstance(codec_defaults, dict) and key in codec_defaults
+        }
         video_path = cached_file(pretrained_model_name_or_path, "video_preprocessor_config.json",
                                  _raise_exceptions_for_missing_entries=False, **hub_kwargs)
         video_kwargs = {}
@@ -163,7 +174,10 @@ class MageVLProcessor:
         config_path = path / "preprocessor_config.json"
         config = json.loads(config_path.read_text())
         config["processor_class"] = type(self).__name__
-        config["codec"] = self._codec_config_defaults
+        config["codec"] = {
+            key: value for key, value in self._codec_config_defaults.items()
+            if key in _CHECKPOINT_CODEC_KEYS
+        }
         config_path.write_text(json.dumps(config, indent=2) + "\n")
         if self.video_processor is not None:
             video_config = {key: getattr(self.video_processor, key)

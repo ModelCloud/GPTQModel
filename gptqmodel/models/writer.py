@@ -73,6 +73,7 @@ from ..utils.model import (
     TensorSource,
     _atomic_shard_path,
     _checkpoint_tensor_keys,
+    _converted_safetensors_names,
     _validate_offload_sources_outside_save_dir,
     convert_loaded_qzeros_for_format_change,
     copy_py_files,
@@ -168,7 +169,7 @@ def _validate_export_shell_quantized_slots(model, checkpoint, key_converter=None
     if checkpoint_keys is None:
         return
     if callable(key_converter):
-        checkpoint_keys = {key_converter(key) for key in checkpoint_keys}
+        checkpoint_keys = {name for key in checkpoint_keys for name in _converted_safetensors_names(key, key_converter)}
 
     shell_keys = set(model.state_dict().keys())
     dropped = sorted(

@@ -34,39 +34,32 @@ flowchart TD
     class X failure;
 ```
 
-`Qwen3Tokenizer` is an alias to native `TokenizersBackend`, also known as
-`PreTrainedTokenizerFast`. Both inspected releases use its serialized BPE
-format. Direct native selection prevents hostile tokenizer `auto_map` from
-overriding the definition when both trust and the security bypass are enabled.
-No tokenization or normalization algorithm is implemented here. Released
-Tokenicer 0.0.19 supplies normalization. Qwen3.5 text inherits the projection
-definition but retains its own native model selection.
+`Qwen3Tokenizer` selects native `TokenizersBackend` for serialized BPE and
+native `Qwen2Tokenizer` for checkpoints that ship only vocabulary and merge files.
+Package selection takes precedence over tokenizer `auto_map`. Released Tokenicer
+supplies normalization. Qwen3.5 text retains its own native model selection.
 
 ```mermaid
 flowchart TD
-    A["Qwen3QModel.awq_get_modules_for_scaling"] --> B{"Exact Qwen3QModel?"}
-    B -->|yes| C["Empty scaling groups: conservative plain policy"]
-    B -->|derived definition| D["Existing superclass AWQ policy"]
-    C --> E["ModulePlan still owns all seven decoder projections"]
-    E --> F["Public AWQ quantize with fallback=None"]
+    A["BaseQModel.awq_get_modules_for_scaling"] --> E["Qwen3 ModulePlan binds seven decoder projections"]
+    E --> F["AWQProcessor searches and folds decoder scales"]
     F --> G["14 packed linears in a two-layer fixture"]
     G --> H["AwqTorchLinear inference"]
     H --> I["Safetensors save / reload / second save / reload"]
-    E --> J["Q/K norms, sandwich norms, embeddings and head remain dense"]
+    E --> J["Q/K norms, embeddings and head remain dense"]
 ```
 
-Q/K per-head normalization occurs after Q/K projection. A projection tree does
-not establish fold/search/replay safety. This change deliberately performs no
-AWQ scale search or folding for this definition. All seven projections remain
-quantizable. Native Qwen3 fusion declarations and registry module ordering are
-unchanged; this work does not add a fusion qualification.
+Q/K per-head normalization occurs after Q/K projection. AWQ folds the decoder
+input norm into Q/K/V and the MLP input norm into gate/up, alongside the
+inherited projection folds. The public AWQ tests check the adjusted decoder
+norms, byte-exact per-head Q/K norm weights, and two exact packed reloads.
 
 | Mechanism | Before (base 22bea1201) | After |
 | --- | --- | --- |
 | `definitions/qwen3.py:10` model loader | Inherited AutoModel path; checkpoint metadata participates in selection | Definition-owned exact native classes |
 | `utils/hf.py:1017` raw `marin` dispatch | No verified native mapping; remote trust policy may be reached | Explicit schema failure before checkpoint Python |
 | `utils/hf.py:2958` tokenizer selection | Ordinary AutoTokenizer may honor hostile tokenizer mapping under trust+bypass | Native serialized BPE class selected by definition, normalized by Tokenicer |
-| Qwen3 AWQ grouping | Inherited generic grouping | Explicit plain quantization; seven projections retained |
+| Qwen3 AWQ grouping | Explicit empty groups in the initial port | Inherited grouping and real CPU search with seven packed projections per layer |
 | Derived Qwen3.5 loader | Native AutoModel | Native AutoModel, pinned by regression |
 
 ## Provenance and fixture ownership
@@ -104,7 +97,7 @@ FP32/FP16/BF16 eager/SDPA, causal suffix isolation, cache continuation in
 policy fields, Latin/CJK token IDs and Qwen chat templates, exact dense state
 and two safetensors cycles. Public native loads cover both releases with trust
 False/True and bypass unset/0/1, hostile config/model/tokenizer/custom-generate
-files, and raw-Marin failure followed by repair/retry. Twelve public plain-AWQ
+files, and raw-Marin failure followed by repair/retry. Twelve public AWQ
 cases cover both releases, MHA/GQA/MQA+bias and disk-offload False/True, actual
 packing/inference, all fourteen projections, every excluded dense tensor and
 two exact packed-state safetensors reloads.

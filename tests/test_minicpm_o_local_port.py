@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 import json
+import sys
 from importlib.util import find_spec
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -20,6 +22,7 @@ from gptqmodel.models.ports.minicpm_o.processing_minicpmo import (
     MiniCPMVImageProcessor,
 )
 from gptqmodel.models.ports.minicpm_o.tokenization_minicpmo_fast import MiniCPMOTokenizerFast
+from gptqmodel.utils.security import BYPASS_ENV, RemoteCodeSecurityError
 
 
 PORT = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/minicpm_o"
@@ -95,6 +98,39 @@ def tiny_model(dtype=torch.float32, **kwargs):
     model = MiniCPMO._from_config(tiny_config(**kwargs), dtype=dtype).eval()
     torch.nn.init.normal_(model.resampler.query, std=0.1)
     return model
+
+
+@pytest.mark.parametrize("bypass,trust", [(None, False), ("1", False), (None, True), ("1", True)])
+def test_stepaudio_codec_requires_explicit_permission_and_asset_path(tmp_path, monkeypatch, bypass, trust):
+    monkeypatch.delenv(BYPASS_ENV, raising=False)
+    if bypass is not None:
+        monkeypatch.setenv(BYPASS_ENV, bypass)
+    model = tiny_model(tts=True)
+    model.config._name_or_path = str(tmp_path)
+    checkpoint_assets = tmp_path / "assets" / "token2wav"
+    checkpoint_assets.mkdir(parents=True)
+    explicit_assets = tmp_path / "installed-codec"
+    explicit_assets.mkdir()
+    calls = []
+    codec = object()
+
+    def load_codec(location, **kwargs):
+        calls.append((Path(location), kwargs))
+        return codec
+
+    monkeypatch.setitem(sys.modules, "stepaudio2", SimpleNamespace(Token2wav=load_codec))
+    if not (trust and bypass):
+        with pytest.raises(RemoteCodeSecurityError, match=BYPASS_ENV):
+            model.init_tts(model_dir=explicit_assets, trust_remote_code=trust)
+    else:
+        with pytest.raises(ValueError, match="model_dir"):
+            model.init_tts(trust_remote_code=True)
+    assert calls == []
+    assert model.tts.audio_tokenizer is None
+
+    if trust and bypass:
+        assert model.init_tts(model_dir=explicit_assets, trust_remote_code=True) is codec
+        assert calls == [(explicit_assets, {"float16": False, "n_timesteps": 10})]
 
 
 def tiny_tokenizer():
@@ -397,6 +433,26 @@ def test_tts_native_llama_state_cache_and_safetensors(tmp_path, version):
         torch.testing.assert_close(loaded.state_dict()[key], value, atol=0, rtol=0)
     with torch.no_grad():
         torch.testing.assert_close(loaded.tts.model(inputs_embeds=hidden).last_hidden_state, expected, atol=0, rtol=0)
+
+
+def test_downloaded_media_is_removed_on_decoder_failure(monkeypatch):
+    from gptqmodel.models.ports.minicpm_o import utils
+
+    url = "https://example.invalid/media.wav"
+    calls = []
+
+    def download(path, **kwargs):
+        calls.append((path, kwargs))
+        return b"test media"
+
+    monkeypatch.setattr(utils, "load_bytes_from_url", download)
+    with pytest.raises(ValueError, match="decode failed"):
+        with utils._local_media_path(url, ".wav", timeout=60) as filename:
+            temporary = Path(filename)
+            assert temporary.read_bytes() == b"test media"
+            raise ValueError("decode failed")
+    assert calls == [(url, {"total_timeout": 60})]
+    assert not temporary.parent.exists()
 
 
 def test_legacy_tts_missing_dependency_identifies_optional_extra(monkeypatch):

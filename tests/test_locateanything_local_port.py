@@ -4,12 +4,10 @@
 
 import json
 import sys
-from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import requests
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -21,14 +19,18 @@ from transformers.cache_utils import DynamicCache
 from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.locateanything import LocateAnythingQModel
 from gptqmodel.models.local import LocalModelLoader
+from gptqmodel.models.ports.locateanything import processing_locateanything
 from gptqmodel.models.ports.locateanything.configuration_locateanything import LocateAnythingConfig
 from gptqmodel.models.ports.locateanything.generate_utils import decode_bbox_avg, handle_pattern
 from gptqmodel.models.ports.locateanything.image_processing_locateanything import LocateAnythingImageProcessor
 from gptqmodel.models.ports.locateanything.modeling_locateanything import LocateAnythingForConditionalGeneration
 from gptqmodel.models.ports.locateanything.processing_locateanything import LocateAnythingProcessor
+from gptqmodel.utils.image import ImageFetchError, load_image_from_url
+from tests import test_image_fetch
 
 
 PORT = Path(__file__).parents[1] / "gptqmodel/models/ports/locateanything"
+image_server = test_image_fetch.image_server
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -291,45 +293,24 @@ def test_processor_patches_video_and_reload(tmp_path):
                                batch["pixel_values"])
 
 
-def test_processor_http_image_failure_closes_response_then_retries(tmp_path, monkeypatch):
+def test_processor_http_image_failure_then_retry(tmp_path, monkeypatch, image_server):
     processor = LocateAnythingProcessor(LocateAnythingImageProcessor(patch_size=2), write_tokenizer(tmp_path))
-    buffer = BytesIO()
-    Image.new("RGB", (4, 4), (23, 74, 131)).save(buffer, format="PNG")
-    calls, responses = [], []
-
-    class Response:
-        content = buffer.getvalue()
-
-        def __init__(self, failed):
-            self.failed, self.closed = failed, False
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            self.closed = True
-
-        def raise_for_status(self):
-            if self.failed:
-                raise requests.HTTPError("image unavailable")
-
-    def get(url, **kwargs):
-        calls.append((url, kwargs))
-        response = Response(failed=len(calls) == 1)
-        responses.append(response)
-        return response
-
-    monkeypatch.setattr(requests, "get", get)
-    url = "https://example.com/image.png"
-    messages = [{"role": "user", "content": [{"type": "image", "image": url}]}]
-    with pytest.raises(requests.HTTPError, match="image unavailable"):
+    base, _ = image_server
+    message = {"type": "image", "image": f"{base}/http-error"}
+    messages = [{"role": "user", "content": [message]}]
+    with pytest.raises(ImageFetchError, match="private or loopback"):
         processor.process_vision_info(messages)
-    assert responses[0].closed
+
+    def fetch_from_test_server(url):
+        return load_image_from_url(url, allow_private_addresses=True)
+
+    monkeypatch.setattr(processing_locateanything, "load_image_from_url", fetch_from_test_server)
+    with pytest.raises(ImageFetchError, match="HTTP 404"):
+        processor.process_vision_info(messages)
+    message["image"] = f"{base}/ok"
     images, videos = processor.process_vision_info(messages)
     assert videos is None
-    assert images[0].getpixel((0, 0)) == (23, 74, 131)
-    assert responses[1].closed
-    assert calls == [(url, {"stream": True, "timeout": (10, 30)})] * 2
+    assert images[0].getpixel((0, 0)) == (17, 34, 51)
 
 
 def test_processor_missing_lmdb_preserves_path_and_can_retry_with_pil(tmp_path, monkeypatch):

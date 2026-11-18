@@ -15,6 +15,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     GenerationConfig,
+    Qwen2Tokenizer,
     Qwen3Config,
     Qwen3ForCausalLM,
 )
@@ -29,6 +30,24 @@ from gptqmodel.utils.hf import load_model_config
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/qwen3/fixtures"
+
+
+def test_native_qwen_bpe_assets_without_tokenizer_json(tmp_path):
+    source = tmp_path / "nested"
+    source.mkdir()
+    write_assets(source, "qwen3")
+    serialized = source / "tokenizer.json"
+    model = json.loads(serialized.read_text())["model"]
+    (source / "vocab.json").write_text(json.dumps(model["vocab"]))
+    merges = [" ".join(merge) if isinstance(merge, list) else merge for merge in model["merges"]]
+    (source / "merges.txt").write_text("#version: 0.2\n" + "\n".join(merges) + "\n")
+    serialized.unlink()
+
+    expected = Qwen2Tokenizer.from_pretrained(source)
+    actual = Qwen3QModel.loader.load_tokenizer(tmp_path, subfolder="nested")
+    phrases = ["  Qwen learns café 你好!", "newline\nand\twhitespace", "A different sequence: 42, seven, moon!"]
+    assert actual(phrases).input_ids == expected(phrases).input_ids
+    assert actual.all_special_tokens == expected.all_special_tokens
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -265,7 +284,7 @@ def test_raw_marin_public_fail_repair_retry_same_checkpoint(tmp_path, monkeypatc
 @pytest.mark.parametrize("family", ["marin", "qwen3"])
 @pytest.mark.parametrize("offload", [False, True])
 @pytest.mark.parametrize("kv_heads,bias", [(4, False), (2, True), (1, False)])
-def test_public_plain_awq_pack_infer_two_exact_reloads(tmp_path, family, offload, kv_heads, bias):
+def test_public_awq_scaling_pack_infer_two_exact_reloads(tmp_path, family, offload, kv_heads, bias):
     source = source_fixture(tmp_path / "source", family, num_key_value_heads=kv_heads, attention_bias=bias)
     qcfg = AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=offload)
     loaded = GPTQModel.load(
@@ -275,7 +294,6 @@ def test_public_plain_awq_pack_infer_two_exact_reloads(tmp_path, family, offload
         dtype=torch.float16,
         attn_implementation="eager",
     )
-    assert loaded.awq_get_modules_for_scaling(loaded.model.model.layers[0], {}, {}) == []
     dense = {
         key: value.detach().to(torch.float16).clone()
         for key, value in source.state_dict().items()
@@ -293,8 +311,17 @@ def test_public_plain_awq_pack_infer_two_exact_reloads(tmp_path, family, offload
         backend=BACKEND.TORCH,
     )
     assert sum(isinstance(m, AwqTorchLinear) for m in loaded.model.modules()) == 14
+    scaled_norms = {
+        f"model.layers.{index}.{name}.weight"
+        for index in (0, 1)
+        for name in ("input_layernorm", "post_attention_layernorm")
+    }
     for key, value in dense.items():
-        torch.testing.assert_close(loaded.model.state_dict()[key], value, rtol=0, atol=0)
+        actual = loaded.model.state_dict()[key]
+        if key in scaled_norms:
+            assert not torch.equal(actual, value), key
+        else:
+            torch.testing.assert_close(actual, value, rtol=0, atol=0)
     packed = {key: value.detach().clone() for key, value in loaded.model.state_dict().items()}
     assert sum(key.endswith("qweight") for key in packed) == 14
     assert sum(key.endswith("qzeros") for key in packed) == 14

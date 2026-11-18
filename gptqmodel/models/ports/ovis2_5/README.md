@@ -163,7 +163,7 @@ The native tokenizer/processor also saved and reloaded offline. This verifier
 requires only the six listed pinned data files, never model weights or checkpoint Python:
 
 ```bash
-PYTHON_GIL=0 python -m gptqmodel.models.ports.ovis2_5.verify_released_assets /path/to/pinned/data/assets
+PYTHON_GIL=0 python -m scripts.verify_ovis2_5_released_assets /path/to/pinned/data/assets
 ```
 
 All six 9B tokenizer/image data files were independently fetched at its pinned

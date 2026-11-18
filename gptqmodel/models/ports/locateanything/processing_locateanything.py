@@ -27,7 +27,6 @@ from io import BytesIO
 from typing import Any, List, Optional, Union
 
 import numpy as np
-import requests
 import torch
 import torchvision
 from packaging import version
@@ -45,6 +44,8 @@ except ImportError:
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.utils import logging
+
+from ....utils.image import load_image_from_url
 
 
 logger = logging.get_logger(__name__)
@@ -111,9 +112,7 @@ def fetch_image(ele: dict[str, str | Image.Image]) -> Image.Image:
     elif isinstance(image, dict) and 'lmdb_file' in image:
         image_obj = parse_lmdb_image_data(image)
     elif image.startswith("http://") or image.startswith("https://"):
-        with requests.get(image, stream=True, timeout=(10, 30)) as response:
-            response.raise_for_status()
-            image_obj = Image.open(BytesIO(response.content))
+        image_obj = load_image_from_url(image)
     elif image.startswith("file://"):
         image_obj = Image.open(image[7:])
     elif image.startswith("data:image"):

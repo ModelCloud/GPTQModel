@@ -55,9 +55,10 @@ package does not add new attention kernels or distributed expert execution.
 
 The module plan declares both low-rank norms and the router as nonquantized,
 and declares Q/K/V/O and gate/up/down roles. No projection fusion is qualified.
-AWQ always uses the existing **plain quantization** fallback: MLA crosses
-low-rank normalization and split/expanded attention states, while the MoE router
-and shared experts add consumers. No scale-search/folding safety is claimed.
+AWQ uses the decoder input norm for the upstream MLA projections and the MLP
+input norm for dense or shared/routed consumers. The two latent norms and the
+attention output projection stay outside scale search because attention replay
+consumes hidden states rather than normalized low-rank latents.
 
 ```mermaid
 flowchart TD
@@ -72,7 +73,7 @@ flowchart TD
     H --> J[Native fused experts and optional shared experts]
     B --> K[Native checkpoint conversion map]
     K --> L[Defuser: per-expert modules for quantization]
-    L --> M[AWQ: empty scaling groups, plain quantization]
+    L --> M["AWQ: decoder input and MLP norm folds"]
 ```
 
 Previously the definition required remote trust and relied on checkpoint model
@@ -166,7 +167,7 @@ MoE schedules, optional shared experts, YaRN configuration, actual Defuser,
 checkpoint tensor ownership and native conversion mappings, exact lazy-shell
 materialization, safetensors round trips, malicious `auto_map` under both trust
 values and both bypass states, corrupted-load/corrected-retry transitions, and
-actual AWQ plain quantization with router/norm preservation. The independent
+actual AWQ quantization with decoder norm folding and latent norm preservation. The independent
 model-specific registry case pins all nonquantized paths and fusion exclusion.
 
 Initial port qualification used Python 3.14.6 free-threaded, Transformers 5.23.0 and CPU Torch
@@ -180,7 +181,7 @@ also failed all five initial ownership/AWQ tests before the plan/policy fix.
 
 The affected registry/AWQ suite with proposed integrator-owned expectation
 updates passed **583 tests, 6 skipped** in 15.01 seconds in that checkout. This
-includes `test_mla_awq_quantization_completes`, which runs public plain AWQ
+includes `test_mla_awq_quantization_completes`, which runs public AWQ
 quantization. Without the proposed shared updates, four assertions still expect
 the previous DeepSeek plan/folding policy. No shared fixture or AWQ test changes
 are part of this port's commit.

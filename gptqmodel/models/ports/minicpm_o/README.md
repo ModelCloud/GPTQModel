@@ -78,6 +78,9 @@ flowchart TD
   `transformers.cache_utils.Cache` or `DynamicCache`.
 - Use local relative imports, including processor setup in chat/duplex helpers.
   Optional external codec/audio dependencies are imported only on demand.
+  StepAudio initialization requires a caller-selected local `model_dir`,
+  `trust_remote_code=True`, and `GPTQ_BYPASS_SAFETY_CHECKS=1`. Audio duplex
+  setup accepts the same arguments or reuses an explicitly initialized codec.
 - Rebuild deterministic nonpersistent resampler positions after materialization.
   FSQ layers retain constructor levels so LazyTurtle can rebuild their
   nonpersistent buffers after offload; shared loading code is unchanged.

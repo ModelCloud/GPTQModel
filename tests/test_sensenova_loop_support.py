@@ -12,6 +12,7 @@ sets below are copied from that checkpoint's `model.safetensors.index.json`;
 they are what proves the declared tree resolves against real weight names.
 """
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,7 @@ from gptqmodel.models.definitions.qwen3_5 import Qwen3_5QModel
 from gptqmodel.models.definitions.sensenova_loop import SenseNovaLoopQModel
 from gptqmodel.models.fusable import require_fusable_config
 from gptqmodel.utils.model import find_modules
+from gptqmodel.utils.security import BYPASS_ENV, RemoteCodeSecurityError
 
 
 # Every tensor of a full-attention layer (`layer_types[i] == "full_attention"`).
@@ -83,19 +85,27 @@ def _strip_flags(entry):
     return entry.split(":", 1)[0]
 
 
-def test_sensenova_loop_model_type_selects_definition(monkeypatch):
-    checkpoint = "/monster/data/model/SenseNova-Loop-9B"
+def test_sensenova_loop_model_type_selects_definition_only_with_explicit_bypass(tmp_path, monkeypatch):
+    checkpoint = str(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({
+        "model_type": "sensenova_loop",
+        "auto_map": {"AutoConfig": "configuration_sensenova_loop.SenseNovaLoopConfig"},
+    }))
+    monkeypatch.delenv(BYPASS_ENV, raising=False)
 
     def load_config(model_dir, *, trust_remote_code):
         assert model_dir == checkpoint
         assert trust_remote_code is True
         return SimpleNamespace(model_type="sensenova_loop")
 
-    monkeypatch.setattr(
-        auto,
-        "resolve_trust_remote_code",
-        lambda path, trust_remote_code=False: trust_remote_code,
-    )
+    with pytest.raises(RemoteCodeSecurityError, match=BYPASS_ENV):
+        auto.check_and_get_model_definition(checkpoint, trust_remote_code=True)
+
+    monkeypatch.setenv(BYPASS_ENV, "1")
+    with pytest.raises(ValueError, match="trust_remote_code"):
+        auto.check_and_get_model_definition(checkpoint, trust_remote_code=False)
+
+    # Check dispatch with both consents, without loading checkpoint Python.
     monkeypatch.setattr(auto, "load_model_config", load_config)
 
     assert (

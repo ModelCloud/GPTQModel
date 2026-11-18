@@ -506,7 +506,7 @@ def test_real_pinned_tokenizer_and_media_processor(tmp_path, text):
 
 @pytest.mark.parametrize("text,legacy", [(False, False), (False, True), (True, False)])
 @pytest.mark.parametrize("offload", [False, True])
-def test_public_plain_awq_pack_and_two_reloads(tmp_path, text, legacy, offload):
+def test_public_awq_pack_and_two_reloads(tmp_path, text, legacy, offload):
     from gptqmodel import BACKEND
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
@@ -523,7 +523,6 @@ def test_public_plain_awq_pack_and_two_reloads(tmp_path, text, legacy, offload):
     wrapper = GPTQModel.load(
         str(source), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16, attn_implementation="eager"
     )
-    assert wrapper.awq_get_modules_for_scaling(None, {}, {}) == []
     calibration = [
         {"input_ids": torch.tensor([[1, 4, 7, 13, 9, 12, 6, 8]]), "attention_mask": torch.ones(1, 8, dtype=torch.long)}
         for _ in range(2)
@@ -570,7 +569,9 @@ def test_public_plain_awq_pack_and_two_reloads(tmp_path, text, legacy, offload):
     assert sum(isinstance(m, AwqTorchLinear) for m in wrapper.model.modules()) == 14
     for name, value in reference.state_dict().items():
         if name in wrapper.model.state_dict():
-            assert torch.equal(wrapper.model.state_dict()[name], value), name
+            actual = wrapper.model.state_dict()[name]
+            expect_fold = name.endswith((".input_layernorm.weight", ".post_attention_layernorm.weight"))
+            assert torch.equal(actual, value) is not expect_fold, name
     ids = calibration[0]["input_ids"]
     with torch.no_grad():
         media = {} if text else {k: v for k, v in calibration[0].items() if k not in ("input_ids", "attention_mask")}

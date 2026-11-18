@@ -2095,7 +2095,9 @@ def ModelLoader(cls):
         tokenizer_trust_remote_code = model_init_kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
         config_load_kwargs = {**get_config_selection_kwargs(model_init_kwargs_without_internal), **hf_gguf_load_kwargs}
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs_without_internal)
-        trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code, **get_config_selection_kwargs(model_init_kwargs_without_internal), **hf_gguf_load_kwargs)
+        trust_remote_code = resolve_trust_remote_code(
+            model_local_path, trust_remote_code=trust_remote_code, **config_load_kwargs
+        )
 
         model_init_kwargs_without_internal["trust_remote_code"] = trust_remote_code
 
@@ -2106,7 +2108,7 @@ def ModelLoader(cls):
         normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
         prepare_remote_model_init_compat(
             model_local_path, config, trust_remote_code=trust_remote_code,
-            **get_config_selection_kwargs(model_init_kwargs_without_internal), **hf_gguf_load_kwargs,
+            **config_load_kwargs,
         )
 
         from ..utils.mimo import is_mimo_mixed_source
@@ -2615,13 +2617,16 @@ def ModelLoader(cls):
 
         config_load_kwargs = {**get_config_selection_kwargs(kwargs_without_internal), **hf_gguf_load_kwargs}
         model_local_path = get_model_local_path(model_id_or_path, **kwargs_without_internal)
-        trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code, **get_config_selection_kwargs(kwargs_without_internal), **hf_gguf_load_kwargs)
-        native_support = has_native_transformers_model_support(
-            model_local_path, cls.loader, **get_config_selection_kwargs(kwargs_without_internal), **hf_gguf_load_kwargs
+        trust_remote_code = resolve_trust_remote_code(
+            model_local_path, trust_remote_code=trust_remote_code, **config_load_kwargs
         )
 
         """load quantized model from local disk"""
-        if cls.require_trust_remote_code and not trust_remote_code and not native_support:
+        if (
+            cls.require_trust_remote_code
+            and not trust_remote_code
+            and not has_native_transformers_model_support(model_local_path, cls.loader, **config_load_kwargs)
+        ):
             raise ValueError(
                 f"{model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
@@ -3271,7 +3276,7 @@ def ModelLoader(cls):
             model,
             model_save_name,
             format_code,
-            key_converter=_checkpoint_key_converter(cls, model, to_runtime=False),
+            key_converter=_checkpoint_key_converter(cls, model, to_runtime=True),
         )
 
         if isinstance(requested_device_map, str) and requested_device_map not in [

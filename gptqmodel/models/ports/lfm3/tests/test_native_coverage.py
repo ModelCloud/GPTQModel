@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Native LFM3/VL and package-owned Omni consumer and plain-AWQ regressions."""
+"""Native LFM3/VL and package-owned Omni consumer and AWQ regressions."""
 
 from typing import cast
 
@@ -198,7 +198,7 @@ def test_real_decoder_owners_tags_and_public_consumer(kind, device, layout):
 @pytest.mark.parametrize("kind,layout", LAYOUTS)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("fallback", [None, Fallback()], ids=["no-fallback", "rtn-fallback"])
-def test_plain_awq_quantizes_and_packs_every_projection_without_mutating_dense_owners(
+def test_awq_quantizes_and_packs_every_projection_and_preserves_excluded_owners(
     monkeypatch, kind, layout, dtype, fallback,
 ):
     model, wrapper, layers, config = _fixture(kind, layout=layout, dtype=dtype, fallback=fallback)
@@ -229,7 +229,11 @@ def test_plain_awq_quantizes_and_packs_every_projection_without_mutating_dense_o
                 handle.remove()
         assert {f"{prefix}.{name}" for name in QUANTIZED[layer_type]} <= features.keys()
         local_features = {name.removeprefix(prefix + "."): value for name, value in features.items()}
-        assert wrapper.awq_get_modules_for_scaling(layer, local_features, {}) == []
+        fold_sources = {"ffn_norm"} if kind == "lfm3" else set()
+        if kind == "lfm3" and layer_type == "conv":
+            fold_sources.add("operator_norm")
+        groups = wrapper.awq_get_modules_for_scaling(layer, local_features, {})
+        assert {node["prev_op"] for node in groups} == {layer.get_submodule(name) for name in fold_sources}
         before = {key: value.clone() for key, value in layer.state_dict().items()}
         state = processor._get_layer_state(index)
         state.layer_module = layer
@@ -264,8 +268,9 @@ def test_plain_awq_quantizes_and_packs_every_projection_without_mutating_dense_o
             assert isinstance(packed.qweight, torch.Tensor) and isinstance(packed.qzeros, torch.Tensor)
             assert packed.qweight.dtype == packed.qzeros.dtype == torch.int32
             assert packed.qweight.numel() * 8 == module.weight.numel()
+        mutable_weights = {f"{name}.weight" for name in QUANTIZED[layer_type] | fold_sources}
         for key, value in before.items():
-            if key not in {f"{name}.weight" for name in QUANTIZED[layer_type]}:
+            if key not in mutable_weights:
                 torch.testing.assert_close(layer.state_dict()[key], value, rtol=0, atol=0)
                 assert layer.state_dict()[key].dtype == dtype
         after = {key: value.clone() for key, value in layer.state_dict().items()}

@@ -455,13 +455,14 @@ def test_lfm3_sandwich_post_norms_are_not_fold_sources():
     qmodel = _bare_lfm3_qmodel()
 
     nodes = qmodel.awq_get_modules_for_scaling(layer, _lfm3_features(), {})
-    # LFM3's convolution, sigmoid gate and shared nonlinear paths have no
-    # qualified scale folds. The current policy quantizes all linears plainly.
-    assert nodes == []
+    conv = next(node for node in nodes if layer.conv.in_proj in node["layers"])
+    ffn = next(node for node in nodes if layer.feed_forward.w1 in node["layers"])
+    assert conv["prev_op"] is layer.operator_norm
+    assert ffn["prev_op"] is layer.ffn_norm
 
 
 @pytest.mark.parametrize("layer_type", ["conv", "full_attention", "sliding_attention"])
-def test_lfm3_native_sandwich_layers_select_plain_quantization(layer_type):
+def test_lfm3_native_sandwich_norm_fold_is_output_neutral(layer_type):
     from transformers import Lfm3Config, Lfm3ForCausalLM
 
     torch.manual_seed(0)
@@ -469,7 +470,7 @@ def test_lfm3_native_sandwich_layers_select_plain_quantization(layer_type):
         vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=1,
         num_attention_heads=4, num_key_value_heads=2, head_dim=8,
         layer_types=[layer_type], conv_L_cache=3, sliding_window=8,
-        max_position_embeddings=32, use_sandwich_norm=True,
+        max_position_embeddings=32, use_sandwich_norm=True, use_attention_gate=True,
         pad_token_id=0, bos_token_id=1, eos_token_id=2,
     )
     model = Lfm3ForCausalLM(config).eval()
@@ -478,12 +479,18 @@ def test_lfm3_native_sandwich_layers_select_plain_quantization(layer_type):
     ids = torch.tensor([[1, 3, 8, 5]])
     with torch.no_grad():
         before = model(ids, use_cache=False).logits
-        assert qmodel.awq_get_modules_for_scaling(layer, {}, {}) == []
+        features = {name: torch.randn(4, submodule.in_features)
+                    for name, submodule in layer.named_modules() if isinstance(submodule, nn.Linear)}
+        nodes = qmodel.awq_get_modules_for_scaling(layer, features, {})
+        expected_sources = {layer.ffn_norm}
+        if layer_type == "conv":
+            expected_sources.add(layer.operator_norm)
+        assert {node["prev_op"] for node in nodes} == expected_sources
+        for node in nodes:
+            scale_ln_fcs(node["prev_op"], node["layers"], torch.rand(32) + 0.5)
         after = model(ids, use_cache=False).logits
     assert torch.isfinite(after).all()
-    torch.testing.assert_close(after, before, rtol=0, atol=0)
-    # Actual quantization, every packed projection, excluded-owner identity and
-    # rollback/retry are covered by ports/lfm3/tests/test_native_coverage.py.
+    assert _relative_error(after, before) < 1e-5
 
 
 def _scaled_before_norm_class():

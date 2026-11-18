@@ -74,8 +74,3 @@ class Qwen2VLQModel(BaseQwen2VLGPTQ):
                 "generation requires a qwen2_vl conditional-generation checkpoint with its trained LM head."
             )
         return super().generate(inputs=inputs, **kwargs)
-
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Native decoder ownership is qualified; architecture-specific scale
-        # search/replay is not. Empty groups retain actual plain AWQ packing.
-        return []

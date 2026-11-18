@@ -19,16 +19,6 @@ class Qwen3QModel(LlamaQModel):
 
     loader = Qwen3Loader()
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Q/K have per-head RMSNorm after their projections. The shared
-        # projection tree is an ownership contract, not fold/search/replay
-        # qualification. Keep every projection quantizable without guessing
-        # scale sources from this ordering. Derived definitions keep their
-        # own native AWQ policy.
-        if type(self) is Qwen3QModel:
-            return []
-        return super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
-
     shared_input_verified_model_types = frozenset({"qwen3"})
 
     module_tree = [

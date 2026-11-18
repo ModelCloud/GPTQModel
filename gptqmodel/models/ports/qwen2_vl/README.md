@@ -52,9 +52,9 @@ is imported, including with explicit trust and the safety bypass together.
 | Headless alias reached a task family without a mapping | Native feature extraction loads with the real headless parameter schema; generation rejects explicitly |
 | `BaseQwen2VLGPTQ` assumed `model.language_model.layers` / visual modules | Definition-scoped text tree is `layers.#`; text capture, dataset handling and materialization use existing `BaseQModel` behavior |
 | Conversation calibration rediscovered a processor/tokenizer | `Qwen2VLQModel.load_processor` reuses the processor already bound to the normalized tokenizer |
-| Inherited architecture scale groups could imply unproved folds | Explicit empty scaling groups retain plain AWQ for every declared decoder linear |
+| Empty scaling groups in the initial port | Shared decoder scale search uses the native capture for both aliases |
 
-## Capture and plain AWQ
+## Capture and AWQ
 
 ```mermaid
 flowchart TD
@@ -66,19 +66,18 @@ flowchart TD
     F --> G["BaseQwen2VLGPTQ.run_input_capture: merged visual decoder inputs"]
     C --> H["ModulePlan: layer-relative Q/K/V/O and gate/up/down projections"]
     G --> H
-    H --> I["awq_get_modules_for_scaling returns empty groups"]
-    I --> J["Existing AWQProcessor plain packing; fallback=None remains valid"]
-    J --> K["Fourteen tiny-decoder AwqTorchLinear modules; exclusions unchanged"]
+    H --> I["BaseQModel.awq_get_modules_for_scaling selects decoder groups"]
+    I --> J["AWQProcessor searches and folds scales"]
+    J --> K["Fourteen tiny-decoder AwqTorchLinear modules"]
     K --> L["save safetensors; GPTQModel.load; second exact round trip"]
     D --> M["Pretokenized rows carrying media columns: existing explicit rejection"]
     style M fill:#ffcdd2,stroke:#b71c1c
 ```
 
-This is **plain quantization only**: no architecture-specific source/consumer
-fold or scale-search objective is qualified. The real public AWQ tests pass
+The public AWQ tests pass
 `fallback=None`, calibrate composite models from source PIL-image conversations,
 compare captured first-decoder inputs against the native dense model, pack all
-fourteen decoder linears, retain every excluded tensor, and compare every
+fourteen decoder linears, confirm the input norms were folded, and compare every
 packed/dense tensor after **two** reloads. Both disk-offload settings and legacy
 composite `model.*`/`visual.*` keys with the omitted tied-head alias are covered.
 No shared AWQ implementation is modified.
@@ -163,7 +162,7 @@ flows and task distinction into the central coverage docs/PR and link from the
 main README. Package LICENSE, NOTICE, provenance JSON and compressed fixtures.
 No generic AWQ family-set change is required.
 
-This unit qualifies CPU native execution and plain quantization, not trained
+This unit qualifies CPU native execution and AWQ scale search on tiny fixtures, not trained
 weight quality, full trained payload loading, GPU/FlashAttention/fused kernels,
 multi-GPU, concurrent PyTorch execution, compile/training, extended context,
 foreign/static/offloaded/quantized caches, or media-container decoding. Video

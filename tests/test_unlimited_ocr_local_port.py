@@ -51,20 +51,25 @@ def source_state(model):
     from defuser.modeling.update_module import update_module
 
     update_module(model, cleanup_original=False)
+    output = legacy_state(model.state_dict())
+    encoder = model.config.vision_config.encoder_config
+    shape = (encoder.hidden_size, encoder.num_channels, encoder.patch_size, encoder.patch_size)
+    output[UNUSED_PATCH_NAME] = torch.arange(torch.tensor(shape).prod()).float().reshape(shape) / 100
+    return output
+
+
+def legacy_state(state):
     output = {}
-    for name, value in model.state_dict().items():
+    for name, value in state.items():
         key = legacy_key(name)
         if key.startswith("model.vision_model.") and re.search(r"[qkv]_proj\.(weight|bias)$", key):
             if ".q_proj." not in key:
                 continue
             output[key.replace(".q_proj.", ".qkv_proj.")] = torch.cat([
-                model.state_dict()[name.replace(".q_proj.", f".{p}_proj.")] for p in "qkv"
+                state[name.replace(".q_proj.", f".{p}_proj.")] for p in "qkv"
             ]).clone()
         else:
             output[key] = value.detach().clone()
-    encoder = model.config.vision_config.encoder_config
-    shape = (encoder.hidden_size, encoder.num_channels, encoder.patch_size, encoder.patch_size)
-    output[UNUSED_PATCH_NAME] = torch.arange(torch.tensor(shape).prod()).float().reshape(shape) / 100
     return output
 
 
@@ -443,6 +448,33 @@ def test_public_image_plain_awq_pack_infer_two_reloads(tmp_path, layout, offload
                 if UNUSED_PATCH_NAME in tensors.keys():
                     extra[UNUSED_PATCH_NAME] = tensors.get_tensor(UNUSED_PATCH_NAME)
         torch.testing.assert_close(extra[UNUSED_PATCH_NAME], source_state(source)[UNUSED_PATCH_NAME], rtol=0, atol=0)
+        if cycle == 0 and layout == "dense":
+            from safetensors.torch import save_file
+
+            # Simulate a checkpoint written by main, where decoder tensors
+            # are packed under model.layers and the excluded vision QKV
+            # projection is one dense tensor. Cover both checkpoint layouts.
+            target = tmp_path / "legacy-packed"
+            import shutil
+
+            shutil.copytree(tmp_path / "packed0", target, ignore=shutil.ignore_patterns("*.safetensors", "*.index.json"))
+            state = {**legacy_state(packed), **extra}
+            config_path = target / "config.json"
+            config = json.loads(config_path.read_bytes())
+            config["language_config"] = config.pop("text_config")
+            config["model_type"] = "unlimited-ocr"
+            config_path.write_text(json.dumps(config))
+            if offload:
+                dense_file = "model-00001-of-00002.safetensors"
+                decoder_file = "model-00002-of-00002.safetensors"
+                weight_map = {name: decoder_file if name.startswith("model.layers.") else dense_file for name in state}
+                for shard_file in (dense_file, decoder_file):
+                    save_file({name: value.contiguous() for name, value in state.items() if weight_map[name] == shard_file},
+                              target / shard_file, metadata={"format": "pt"})
+                (target / "model.safetensors.index.json").write_text(json.dumps({"metadata": {}, "weight_map": weight_map}))
+            else:
+                save_file({name: value.contiguous() for name, value in state.items()},
+                          target / "model.safetensors", metadata={"format": "pt"})
         loaded = GPTQModel.load(str(target), device="cpu", backend=BACKEND.TORCH,
                                 dtype=torch.float16, attn_implementation="eager")
         assert set(loaded.model.state_dict()) == set(packed)

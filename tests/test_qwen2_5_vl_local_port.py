@@ -348,7 +348,7 @@ def test_public_headless_dense_two_save_cycles_and_generation_rejection(tmp_path
 
 @pytest.mark.parametrize("offload", [False, True])
 @pytest.mark.parametrize("kv_heads", [1, 2, 4])
-def test_public_plain_awq_packs_all_linears_and_reloads_twice(tmp_path, offload, kv_heads):
+def test_public_awq_packs_all_linears_and_reloads_twice(tmp_path, offload, kv_heads):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization import AWQConfig
@@ -399,7 +399,9 @@ def test_public_plain_awq_packs_all_linears_and_reloads_twice(tmp_path, offload,
         )
     }
     for key, value in excluded.items():
-        torch.testing.assert_close(wrapped.model.state_dict()[key], value, atol=0, rtol=0)
+        actual = wrapped.model.state_dict()[key]
+        expect_fold = key.endswith((".input_layernorm.weight", ".post_attention_layernorm.weight"))
+        assert torch.equal(actual, value) is not expect_fold, key
     with torch.inference_mode():
         expected = wrapped.model(**calibration[0], use_cache=False).last_hidden_state
         assert torch.isfinite(expected).all()

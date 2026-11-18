@@ -82,7 +82,6 @@ def test_actual_native_weight_owners_and_layout_isolation(text_only, kv_heads, d
         assert not any("visual" in key or "language_model" in key for key in model.state_dict())
         assert len(model.state_dict()) == 26
         assert not hasattr(model, "lm_head")
-        assert wrapper.awq_get_modules_for_scaling(layers[0], {}, {}) == []
     assert MODEL_MAP[config.model_type] is Qwen2_5_VLQModel
 
 

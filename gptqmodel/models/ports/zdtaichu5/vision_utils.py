@@ -53,9 +53,10 @@ from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
-import requests
 import torch
 from PIL import Image
+
+from ....utils.image import load_image_from_url
 
 
 logger = logging.getLogger(__name__)
@@ -115,9 +116,7 @@ def fetch_image(ele: Dict[str, Any]) -> Image.Image:
     if isinstance(image, Image.Image):
         image_obj = image
     elif image.startswith("http://") or image.startswith("https://"):
-        with requests.get(image, stream=True, timeout=30) as resp:
-            resp.raise_for_status()
-            image_obj = copy.deepcopy(Image.open(BytesIO(resp.content)))
+        image_obj = load_image_from_url(image)
     elif image.startswith("file://"):
         image_obj = Image.open(image[7:])
     elif image.startswith("data:image"):

@@ -305,7 +305,8 @@ def test_kimi_full_group_routing_matches_published_score_rule(tmp_path, n_group)
     torch.testing.assert_close(actual_weights, weights, rtol=0, atol=0)
 
 
-def test_published_non_decoder_mtp_tensors_survive_safetensors_writer(tmp_path, monkeypatch):
+@pytest.mark.parametrize("layer_count,mtp_count", [(61, 1), (63, 2), (27, None), (61, 0)])
+def test_published_non_decoder_mtp_tensors_survive_safetensors_writer(tmp_path, monkeypatch, layer_count, mtp_count):
     from safetensors import safe_open
 
     from tests.test_out_of_model_tensors import (
@@ -317,21 +318,27 @@ def test_published_non_decoder_mtp_tensors_survive_safetensors_writer(tmp_path, 
 
     source = tmp_path / "source"
     source.mkdir()
-    expected = {
-        "model.layers.61.enorm.weight": torch.tensor([1.25, -2.5]),
-        "model.layers.61.self_attn.q_b_proj.weight": torch.arange(6).reshape(2, 3).float(),
-    }
-    save_file(expected, str(source / "model.safetensors"))
-    writer = _build_writer_with_out_of_model_file(
-        str(source), out_of_model_tensor_files=DeepSeekV3QModel.out_of_model_tensors,
-    )
-    state = {"model.weight": _tensor_source("model.weight", torch.tensor([3.5]))}
+    expected = {f"model.layers.{index}.enorm.weight": torch.tensor([1.25, -2.5])
+                for index in range(layer_count, layer_count + (mtp_count or 0))}
+    packed_name = f"model.layers.{layer_count - 1}.self_attn.q_a_proj.qweight"
+    save_file({
+        **expected,
+        "model.layers.61.self_attn.q_a_proj.weight": torch.ones(2),
+    }, str(source / "model.safetensors"))
+    writer = _build_writer_with_out_of_model_file(str(source))
+    writer.model.config.num_hidden_layers = layer_count
+    if mtp_count is not None:
+        writer.model.config.num_nextn_predict_layers = mtp_count
+    type(writer).out_of_model_tensors = DeepSeekV3QModel.out_of_model_tensors
+    if layer_count == 61 and mtp_count:
+        expected["model.layers.61.self_attn.q_a_proj.weight"] = torch.ones(2)
+    state = {packed_name: _tensor_source(packed_name, torch.tensor([3], dtype=torch.int32))}
     _patch_basic_env(monkeypatch, state)
     _patch_streaming(monkeypatch)
     saved = tmp_path / "saved"
     writer.save_quantized(save_dir=str(saved))
     with safe_open(saved / "model.safetensors", framework="pt", device="cpu") as handle:
-        assert set(handle.keys()) == {*expected, "model.weight"}
+        assert set(handle.keys()) == {*expected, packed_name}
         for name, value in expected.items():
             torch.testing.assert_close(handle.get_tensor(name), value, rtol=0, atol=0)
 

@@ -15,13 +15,17 @@
 # limitations under the License.
 
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
 import torch.nn.utils.parametrize as P
 
+from ....utils.image import load_bytes_from_url, load_image_from_url
 from .cache import DynamicCache
 
 
@@ -2211,28 +2215,17 @@ class StreamDecoder:
         return next_token_id
 
 
-def _download_url_to_tempfile(url: str, suffix: str = "", timeout: int = 60) -> str:
-    """
-    Download a URL to a temporary file and return the path.
-
-    Args:
-        url: HTTP/HTTPS URL to download
-        suffix: File suffix (e.g., ".jpg", ".wav", ".mp4")
-        timeout: Download timeout in seconds
-
-    Returns:
-        Path to the downloaded temporary file
-    """
-    import tempfile
-
-    import requests
-
-    response = requests.get(url, timeout=timeout)
-    response.raise_for_status()
-
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-        f.write(response.content)
-        return f.name
+@contextmanager
+def _local_media_path(path: str, suffix: str, timeout: int):
+    """Keep a downloaded media file available only for the decoder call."""
+    if not _is_url(path):
+        yield path
+        return
+    data = load_bytes_from_url(path, total_timeout=timeout)
+    with TemporaryDirectory() as directory:
+        temp_path = Path(directory) / f"media{suffix}"
+        temp_path.write_bytes(data)
+        yield str(temp_path)
 
 
 def _is_url(path: str) -> bool:
@@ -2264,8 +2257,6 @@ def normalize_content_item(item) -> Union[str, Any, List[Any]]:
     Raises:
         ValueError: If content type is unknown or unsupported
     """
-    import os
-
     import numpy as np
     from PIL import Image
 
@@ -2286,29 +2277,16 @@ def normalize_content_item(item) -> Union[str, Any, List[Any]]:
             image_url_obj = item.get("image_url", {})
             url = image_url_obj.get("url", "") if isinstance(image_url_obj, dict) else image_url_obj
 
-            if _is_url(url):
-                # Download to temp file
-                temp_path = _download_url_to_tempfile(url, suffix=".jpg", timeout=30)
-                img = Image.open(temp_path)
-                os.unlink(temp_path)
-                return img
-            else:
-                return Image.open(url)
+            return load_image_from_url(url) if _is_url(url) else Image.open(url)
         elif item_type == "audio_url":
             import librosa
 
             audio_url_obj = item.get("audio_url", {})
             url = audio_url_obj.get("url", "") if isinstance(audio_url_obj, dict) else audio_url_obj
 
-            if _is_url(url):
-                # Download to temp file
-                temp_path = _download_url_to_tempfile(url, suffix=".wav", timeout=60)
-                audio_np, _ = librosa.load(temp_path, sr=16000, mono=True)
-                os.unlink(temp_path)
-                return audio_np
-            else:
-                audio_np, _ = librosa.load(url, sr=16000, mono=True)
-                return audio_np
+            with _local_media_path(url, ".wav", timeout=60) as audio_path:
+                audio_np, _ = librosa.load(audio_path, sr=16000, mono=True)
+            return audio_np
         elif item_type == "video_url":
             # Video processing - returns a LIST of items (frames + audio segments)
             # Note: Unlike image_url/audio_url which return single items,
@@ -2326,22 +2304,11 @@ def normalize_content_item(item) -> Union[str, Any, List[Any]]:
                 use_ffmpeg = False
                 use_audio = True
 
-            # Handle HTTP/HTTPS URL - download to temp file
-            temp_video_path = None
-            if _is_url(video_url):
-                temp_video_path = _download_url_to_tempfile(video_url, suffix=".mp4", timeout=120)
-                video_path = temp_video_path
-            else:
-                video_path = video_url
-
             # Extract frames and audio segments
-            video_frames, audio_segments, stacked_frames = get_video_frame_audio_segments(
-                video_path, stack_frames=stack_frames, use_ffmpeg=use_ffmpeg, use_audio=use_audio
-            )
-
-            # Clean up temp file if downloaded
-            if temp_video_path is not None:
-                os.unlink(temp_video_path)
+            with _local_media_path(video_url, ".mp4", timeout=120) as video_path:
+                video_frames, audio_segments, stacked_frames = get_video_frame_audio_segments(
+                    video_path, stack_frames=stack_frames, use_ffmpeg=use_ffmpeg, use_audio=use_audio
+                )
 
             # Build omni_contents (interleaved frames and audio, or frames only)
             omni_contents = []

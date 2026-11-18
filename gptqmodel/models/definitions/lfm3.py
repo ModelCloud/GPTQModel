@@ -76,9 +76,16 @@ class LFM3QModel(BaseQModel):
     ]
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Convolution, sigmoid gates and sandwich norms need qualified folds.
-        # Keep every declared projection on AWQ's plain-quantization path.
-        return []
+        # The FFN input norm feeds both gate and up projections. The operator
+        # norm can fold into the convolution's input projection, which is its
+        # only consumer. Attention can have an excluded sigmoid-gate consumer.
+        sources = [module.ffn_norm]
+        if getattr(module, "conv", None) is not None:
+            sources.append(module.operator_norm)
+        return [
+            node for node in super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+            if node["prev_op"] in sources
+        ]
 
     def _language_model(self):
         return self.model.model

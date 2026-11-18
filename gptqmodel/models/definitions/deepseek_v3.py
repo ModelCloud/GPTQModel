@@ -29,8 +29,16 @@ class DeepSeekV3QModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
     rotary_embedding = "model.rotary_emb"
 
-    # The published DeepSeek-V3 checkpoint includes its non-decoder MTP layer.
-    out_of_model_tensors = {"prefixes": ["model.layers.61"]}
+    @property
+    def out_of_model_tensors(self):
+        # Auxiliary MTP layers are stored after the decoder in DeepSeek's
+        # checkpoint layout. The aliases have different decoder depths.
+        config = self.model.config
+        count = getattr(config, "num_nextn_predict_layers", 0)
+        if not count:
+            return None
+        start = config.num_hidden_layers
+        return {"prefixes": [f"model.layers.{index}" for index in range(start, start + count)]}
 
     # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()

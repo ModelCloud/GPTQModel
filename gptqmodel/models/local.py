@@ -6,11 +6,27 @@ from dataclasses import dataclass
 from importlib import import_module
 
 
+_OPTIONAL_MODULE_EXTRAS = {
+    "torchvision": "vision",
+    "cv2": "video",
+    "qwen_vl_utils": "video",
+    "soundfile": "audio",
+    "scipy": "audio",
+    "librosa": "audio",
+}
+
+
 def _local_class(path: str):
     module, _, name = path.rpartition(".")
     if not module.startswith("gptqmodel.") or not name.isidentifier():
         raise ValueError(f"Local model classes must belong to gptqmodel: {path!r}")
-    return getattr(import_module(module), name)
+    try:
+        return getattr(import_module(module), name)
+    except ModuleNotFoundError as exc:
+        extra = _OPTIONAL_MODULE_EXTRAS.get(exc.name)
+        if extra is None:
+            raise
+        raise ImportError(f"{name} requires {exc.name}. Install it with `pip install 'gptqmodel[{extra}]'`.") from exc
 
 
 @dataclass(frozen=True)

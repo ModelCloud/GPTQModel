@@ -77,10 +77,3 @@ def test_native_layout_live_owners_and_alias_contract(kv_heads, bias, device, he
     ]
     assert plan.find("self_attn.q_projection") is None
     assert plan.find("self_attn.q_norm.undeclared") is None
-
-
-def test_explicit_plain_awq_policy_preserves_quantizable_inventory():
-    wrapper = Qwen3QModel.__new__(Qwen3QModel)
-    model = Qwen3ForCausalLM(tiny_config())
-    assert wrapper.awq_get_modules_for_scaling(model.model.layers[0], {}, {}) == []
-    assert len(QUANTIZED) == 7

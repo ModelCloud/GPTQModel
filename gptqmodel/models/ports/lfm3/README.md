@@ -39,7 +39,7 @@ operators, distinct rotary configurations, and the width-7 convolution.
 | Definition trust | `lfm3.py:38-45` claimed remote code was required | Inherited native default; no remote requirement |
 | Trained-model test | `tests/models/test_lfm3.py:10-13` enabled remote trust | Explicit `TRUST_REMOTE_CODE = False` |
 | Checkpoint gate | Checkpoint calls its gate `gate_proj` | Native conversion to `g_proj` verified through public loading |
-| Existing ownership/AWQ | Explicit depthwise owner, both excluded gate names, no scaling groups | Unchanged; real public checkpoint and AWQ coverage added |
+| Decoder AWQ | Explicit depthwise and gate owners, empty scaling groups | Search folds the convolution-input and feed-forward input norms |
 
 ```mermaid
 flowchart TD
@@ -50,8 +50,8 @@ flowchart TD
     loader --> rename["Transformers converts gate_proj to g_proj"]
     rename --> check{"Checkpoint shapes match?"}
     check -->|yes| native["Native hybrid decoder: conv.conv and gates excluded"]
-    native --> awq["awq_get_modules_for_scaling returns empty list"]
-    awq --> plain["AWQProcessor plain quantization packs all declared linears"]
+    native --> awq["awq_get_modules_for_scaling filters to native input norm sources"]
+    awq --> pack["AWQProcessor searches eligible groups and packs all declared linears"]
     check -->|no| error["Native mismatch error propagates; checkpoint Python never runs"]
     error --> repair["Correct safetensors; retry same checkpoint path"]
     repair --> api
@@ -73,16 +73,14 @@ tokenizer config forwarding fix is required and owned centrally.
 | `test_public_native_load_ignores_auto_map_and_converts_gate` | Six trust/bypass combinations; exact loaded state/logits; two live loaded convolution layers' weight/bias owners bound through `wrapper.module_plan()` and real `nn.Conv1d`; no hostile Python |
 | `test_native_cache_continuation_generation_and_safetensors` | FP32/FP16/BF16 and MQA/GQA/MHA; padded 3/2/3/1 chunk continuation across convolution/sliding windows; greedy generation; valid-token causality; exact safetensors reload |
 | `test_hybrid_replay_matches_native_context_across_batches` | Fresh padding/positions across batches; default/explicit positions; native masks, RoPE and outputs in all three dtypes |
-| `test_public_plain_awq_quantizes_every_linear_and_roundtrips` | Twelve public CPU quantize/pack/infer/save/reload cases: head layout, bias, gate/sandwich toggles; `fallback=None`; all 19 decoder linears packed; dense gates/convolution/non-unit norms unchanged |
+| `test_public_awq_quantizes_every_linear_and_roundtrips` | Twelve public CPU quantize/pack/infer/save/reload cases with head, bias, gate and sandwich variants. All 19 decoder linears pack. Folded norms change while the gates, convolution and other dense tensors retain their values. |
 | `test_public_native_load_failure_then_retry_does_not_execute_checkpoint_code` | Malformed gate shape fails natively; corrected same path reloads exactly without Python execution |
 
-**AWQ is plain quantization only**, not scale-search/folding qualified.
-`operator_norm` also feeds a non-quantized gate; convolution splits B/C/x,
-convolves B*x, and multiplies C before its output projection; sandwich
-post-norms sit before residual additions. No safe folds are inferred from
-widths or declared order. No shared AWQ math is changed. The existing
-`gate_proj:!` compatibility alias remains excluded; native state owns only
-`g_proj`, independently checked against the checkpoint metadata.
+AWQ folds `ffn_norm` into gate and up projections. On convolution layers it
+also folds `operator_norm` into its sole consumer, `conv.in_proj`. Attention
+can feed the dense sigmoid gate from the same operator norm, so its operator
+norm stays out of scale search. Sandwich post-norm gains sit before residual
+additions and stay unchanged.
 
 ## Detection evidence and limits
 
@@ -90,7 +88,7 @@ Reintroducing the original text definition from `22bea1201` yields three
 intended failures, not collection/import errors:
 
 1. `test_native_definition_does_not_require_checkpoint_code`: stale required trust.
-2. `test_awq_is_explicitly_plain_quantization_for_every_hybrid_layer`: inherited scaling groups.
+2. `test_awq_search_uses_only_verified_hybrid_norms`: inherited scaling groups include unsupported sources.
 3. `test_native_state_dict_owners_and_quantization_plan[False-False-False-False-mqa]`: unowned `0.conv.conv.weight`.
 
 The first defect is repaired here; the other two were repaired by the prior
