@@ -40,6 +40,7 @@ class RunExitRecovery:
         *,
         fence: _ExitStep = None,
         release_processors: _ExitStep = None,
+        restore_deferred: _ExitStep = None,
         restore_inflight: _ExitStep = None,
         restore_offloaded: Optional[Callable[..., None]] = None,
         materialize_unreached: _ExitStep = None,
@@ -53,6 +54,7 @@ class RunExitRecovery:
     ) -> None:
         self._fence = fence
         self._release_processors = release_processors
+        self._restore_deferred = restore_deferred
         self._restore_inflight = restore_inflight
         self._restore_offloaded = restore_offloaded
         self._materialize_unreached = materialize_unreached
@@ -132,6 +134,13 @@ class RunExitRecovery:
         self._best_effort("fence submitted work", self._fence)
         if self._release_processors_before_restore:
             self._best_effort("release processor resources", self._release_processors)
+        # A processor may hold packed results that only its next replay would
+        # have installed as runnable modules. Publish them before the in-flight
+        # layer is rehomed and before the remaining-meta verdict, or that layer
+        # keeps placeholder parameters and the model cannot forward (#5083).
+        self._best_effort(
+            "finalize deferred runtime weights", self._restore_deferred
+        )
         self._best_effort("restore the in-flight layer", self._restore_inflight)
         self._best_effort(
             "restore offloaded base modules",
