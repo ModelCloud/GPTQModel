@@ -688,6 +688,19 @@ class GPTQ:
         self, device: torch.device | str | None
     ) -> None:
         target = None if device is None else torch.device(device)
+        if (
+            target is not None
+            and target.type != "cpu"
+            and target.index is None
+        ):
+            raise ValueError(
+                f"GPTQ module `{getattr(self, 'name', '<unknown>')}`: the "
+                "Hessian accumulator device "
+                f"must name a concrete ordinal, got `{target}`. An index-less "
+                "accelerator device resolves to the calling thread's current "
+                "device, so data-parallel workers would key different GPUs "
+                "under the same accumulator entry (#5093)."
+            )
         current = self._hessian_accumulator_device
         if current is not None and target is not None and current != target:
             raise RuntimeError("shared Hessian accumulator ownership changed")
