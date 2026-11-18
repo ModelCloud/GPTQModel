@@ -481,8 +481,12 @@ def test_cpp_unsupported_native_types_always_fall_back(alias, override, dtype, m
     # CPU fused execution accumulates the full-precision reconstructed weight.
     monkeypatch.setattr(cpp, "_should_use_fused_k_forward", lambda _: False)
     expected = x @ weight.T
+    # The fused reference rounds once at the output dtype. A bf16 output has a
+    # one-ULP step of 2**-7 at unit magnitude, so fp16/fp32 keep the tighter
+    # 2e-3 absolute bound while bf16 allows exactly one dtype ULP.
+    atol = max(2e-3, torch.finfo(dtype).eps)
     for _ in range(2):
-        torch.testing.assert_close(cpp(x), expected, rtol=2e-3, atol=2e-3)
+        torch.testing.assert_close(cpp(x), expected, rtol=2e-3, atol=atol)
         assert cpp._use_ggml_cpu_matmul(x.reshape(-1, width)) is False
         assert cpp.qweight.dtype == torch.uint8
         assert all(not isinstance(v, torch.Tensor) for v in vars(cpp).values())
