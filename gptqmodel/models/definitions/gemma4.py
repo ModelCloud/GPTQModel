@@ -11,6 +11,7 @@ from ...utils.device import get_device
 from ...utils.model import get_module_by_name_prefix, move_to, nested_move_to
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from . import LlamaQModel
 
 
@@ -204,6 +205,10 @@ def _restore_gemma4_per_layer_input_capture(model_def):
 
 class Gemma4TextQModel(LlamaQModel):
     """Quantization definition for text-only Gemma 4 checkpoints."""
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
     fusable = FusableConfig("gemma4_text").merge(LlamaFusableConfig(), profiles=("gate_up",))
 
     # q/k/v share the post-norm hidden state and gate/up share the MLP input.
@@ -265,6 +270,10 @@ class Gemma4TextQModel(LlamaQModel):
 
 class Gemma4ForConditionalGenerationGPTQ(BaseQModel):
     """Quantization definition for composite Gemma 4 checkpoints."""
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
     fusable = FusableConfig("gemma4").merge(Gemma4TextQModel.fusable)
 
 

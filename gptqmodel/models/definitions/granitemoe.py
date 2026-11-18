@@ -4,6 +4,7 @@
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 class GraniteMoeQModel(BaseQModel):
@@ -12,6 +13,10 @@ class GraniteMoeQModel(BaseQModel):
     Defuser expands Granite's packed expert projections into numbered expert
     containers exposing ``gate_proj``/``up_proj``/``down_proj`` leaves.
     """
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
     fusable = FusableConfig("granitemoe").merge(LlamaFusableConfig(), profiles=("qkv",))
 
 
