@@ -3762,3 +3762,64 @@ def test_norm_dim0_error_feedback_uses_channel_scaled_hessian(monkeypatch):
         * channel_scale.unsqueeze(1)
     )
     assert torch.allclose(captured[0], expected, rtol=1e-5, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# free-threaded compilation
+# ---------------------------------------------------------------------------
+def _compile_probe_config():
+    return VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 4],
+        num_res_centroids=[-1, -1],
+        kmeans_iters=2,
+        enable_norm=False,
+        enable_perm=False,
+        group_num=4,
+    )
+
+
+def test_vptq_per_layer_compile_is_skipped_when_the_gil_is_disabled(monkeypatch):
+    """#5228: one code object traced per layer is not safe under free-threading.
+
+    A per-module wrapper of ``VPTQLinear.dequantize`` makes dynamo trace and
+    guard the same code object once per layer; a compiled call on one layer can
+    then read the cache entry another thread is tracing and return silently
+    wrong tensors. The eager method must stay reachable and ``optimize()`` must
+    still report success.
+    """
+
+    calls = []
+
+    def fake_compile(fn, **kwargs):
+        calls.append(fn)
+        return fn
+
+    monkeypatch.setattr(vptq_torch_module, "has_gil_disabled", lambda: True)
+    monkeypatch.setattr(vptq_torch_module, "torch_compile", fake_compile)
+
+    module = build_module(_compile_probe_config(), 64, 8, dtype=torch.float32)
+    module.optimize()
+
+    assert module.optimized is True
+    assert calls == []
+    assert module.dequantize.__func__ is VPTQLinear.dequantize
+
+
+def test_vptq_per_layer_compile_runs_when_the_gil_is_enabled(monkeypatch):
+    """The skip is scoped to free-threaded processes; a GIL build still compiles."""
+
+    calls = []
+
+    def fake_compile(fn, **kwargs):
+        calls.append(fn)
+        return fn
+
+    monkeypatch.setattr(vptq_torch_module, "has_gil_disabled", lambda: False)
+    monkeypatch.setattr(vptq_torch_module, "torch_compile", fake_compile)
+
+    module = build_module(_compile_probe_config(), 64, 8, dtype=torch.float32)
+    module.optimize()
+
+    assert module.optimized is True
+    assert len(calls) == 1
