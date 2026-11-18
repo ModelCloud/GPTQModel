@@ -1,5 +1,6 @@
 # Vendored from huggingface/transformers v5.23.0 (Apache-2.0) by GPT-QModel.
 # Do not edit by hand except to keep it on the 5.23 ABI; see docs/transformers5-model-ports.md.
+# GPT-QModel: modernized to Transformers 5.23 conventions (no legacy return paths).
 # Copyright 2025 The LLAMA4 and HuggingFace Inc. team. All rights reserved.
 #
 #
@@ -849,14 +850,14 @@ class Llama4VisionEncoderLayer(GradientCheckpointingLayer):
         hidden_state: torch.Tensor,
         freqs_ci: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
-        output_attentions: bool | None = None,
-    ):
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> torch.Tensor:
         # Self Attention
         residual = hidden_state
 
         hidden_state = self.input_layernorm(hidden_state)
 
-        hidden_state, attn_weights = self.self_attn(
+        hidden_state, _ = self.self_attn(
             hidden_state,
             freqs_ci=freqs_ci,
             attention_mask=attention_mask,
@@ -868,13 +869,7 @@ class Llama4VisionEncoderLayer(GradientCheckpointingLayer):
         hidden_state = self.post_attention_layernorm(hidden_state)
         hidden_state = self.mlp(hidden_state)
         hidden_state = residual + hidden_state
-
-        outputs = (hidden_state,)
-
-        if output_attentions:
-            outputs += (attn_weights,)
-
-        return outputs
+        return hidden_state
 
 
 class Llama4VisionEncoder(nn.Module):
@@ -898,65 +893,18 @@ class Llama4VisionEncoder(nn.Module):
         hidden_states: torch.Tensor,
         freqs_ci: torch.Tensor,  # TODO move this to an attribute instead of keeping it around
         attention_mask: torch.Tensor | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-    ) -> tuple | BaseModelOutput:
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> BaseModelOutput:
         r"""
         Args:
-            inputs_embeds (`torch.Tensor` of shape `(batch_size, sequence_length, hidden_size)`):
-                Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation.
-                This is useful if you want more control over how to convert `input_ids` indices into associated vectors
-                than the model's internal embedding lookup matrix.
+            hidden_states (`torch.Tensor` of shape `(batch_size, sequence_length, hidden_size)`):
+                Embedded patches fed to the first encoder layer.
             attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
-
-                - 1 for tokens that are **not masked**,
-                - 0 for tokens that are **masked**.
-
-                [What are attention masks?](../glossary#attention-mask)
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-            output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
-                for more detail.
-            return_dict (`bool`, *optional*):
-                Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+                Mask to avoid performing attention on padding token indices.
         """
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
-
-        encoder_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
-
         for encoder_layer in self.layers:
-            if output_hidden_states:
-                encoder_states = encoder_states + (hidden_states,)
-
-            layer_outputs = encoder_layer(
-                hidden_state=hidden_states,
-                attention_mask=attention_mask,
-                output_attentions=output_attentions,
-                freqs_ci=freqs_ci,
-            )
-
-            if output_attentions:
-                all_attentions = all_attentions + (layer_outputs[1],)
-
-            hidden_states = layer_outputs[0]
-
-        if output_hidden_states:
-            encoder_states = encoder_states + (hidden_states,)
-
-        if not return_dict:
-            return tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
-        return BaseModelOutput(
-            last_hidden_state=hidden_states, hidden_states=encoder_states, attentions=all_attentions
-        )
+            hidden_states = encoder_layer(hidden_states, freqs_ci=freqs_ci, attention_mask=attention_mask, **kwargs)
+        return BaseModelOutput(last_hidden_state=hidden_states)
 
 
 class Llama4UnfoldConvolution(nn.Module):
@@ -1015,6 +963,10 @@ class Llama4VisionModel(Llama4PreTrainedModel):
     input_modalities = ("image",)
     _no_split_modules = ["Llama4VisionEncoderLayer"]
     config: Llama4VisionConfig
+    _can_record_outputs = {
+        "hidden_states": Llama4VisionEncoderLayer,
+        "attentions": OutputRecorder(Llama4VisionAttention, index=1),
+    }
 
     def __init__(self, config: Llama4VisionConfig):
         super().__init__(config)
@@ -1047,15 +999,13 @@ class Llama4VisionModel(Llama4PreTrainedModel):
         """
         return self.patch_embedding
 
+    @capture_outputs(tie_last_hidden_states=False)
     def forward(
         self,
         pixel_values: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        **kwargs,
-    ) -> BaseModelOutputWithPooling | tuple[torch.Tensor, ...]:
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> BaseModelOutputWithPooling:
         r"""
 
         Example:
@@ -1081,12 +1031,6 @@ class Llama4VisionModel(Llama4PreTrainedModel):
         torch.Size([1, 1, 4, 1025, 7680])
         ```
         """
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
-
         # num_concurrent_media and num_chunks are both currently 1
         batch_size_times_num_tiles, num_channels, height, width = pixel_values.shape
         num_concurrent_media = 1
@@ -1114,13 +1058,7 @@ class Llama4VisionModel(Llama4PreTrainedModel):
         hidden_state = hidden_state.view(batch_size_times_num_tiles, -1, hidden_dim)
         freqs_ci = self.rotary_embedding(pixel_values)
 
-        output = self.model(
-            hidden_state,
-            attention_mask=None,
-            output_hidden_states=output_hidden_states,
-            output_attentions=output_attentions,
-            freqs_ci=freqs_ci,
-        )
+        output = self.model(hidden_state, attention_mask=None, freqs_ci=freqs_ci)
 
         hidden_state = output.last_hidden_state
 
@@ -1131,21 +1069,7 @@ class Llama4VisionModel(Llama4PreTrainedModel):
         # now, we use Llama4VisionPixelShuffle + mlp to project embeddings
         hidden_state = self.vision_adapter(hidden_state)
 
-        hidden_states = output.hidden_states if output_hidden_states else None
-
-        if output_attentions:
-            attentions = output[2]
-        else:
-            attentions = None
-
-        if not return_dict:
-            return tuple(v for v in [hidden_state, hidden_states, attentions] if v is not None)
-
-        return BaseModelOutputWithPooling(
-            last_hidden_state=hidden_state,
-            hidden_states=hidden_states,
-            attentions=attentions,
-        )
+        return BaseModelOutputWithPooling(last_hidden_state=hidden_state)
 
 
 class Llama4ForConditionalGeneration(Llama4PreTrainedModel, GenerationMixin):
@@ -1228,11 +1152,10 @@ class Llama4ForConditionalGeneration(Llama4PreTrainedModel, GenerationMixin):
         use_cache: bool | None = None,
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         mm_encoder_outputs: dict[str, BaseModelOutputWithPooling] | None = None,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> tuple | Llama4CausalLMOutputWithPast:
+    ) -> Llama4CausalLMOutputWithPast:
         r"""
         Example:
 
@@ -1262,7 +1185,6 @@ class Llama4ForConditionalGeneration(Llama4PreTrainedModel, GenerationMixin):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
@@ -1280,7 +1202,7 @@ class Llama4ForConditionalGeneration(Llama4PreTrainedModel, GenerationMixin):
 
         mm_encoder_outputs = mm_encoder_outputs if mm_encoder_outputs is not None else {}
         if mm_encoder_outputs.get("image") is None and pixel_values is not None:
-            mm_encoder_outputs["image"] = self.get_image_features(pixel_values=pixel_values, return_dict=True)
+            mm_encoder_outputs["image"] = self.get_image_features(pixel_values=pixel_values)
 
         if mm_encoder_outputs.get("image") is not None:
             image_features = mm_encoder_outputs["image"].last_hidden_state
@@ -1301,22 +1223,17 @@ class Llama4ForConditionalGeneration(Llama4PreTrainedModel, GenerationMixin):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
             logits_to_keep=logits_to_keep,
             **kwargs,
         )
 
-        logits = outputs[0]
+        logits = outputs.logits
 
         loss = None
         if labels is not None:
             loss = self.loss_function(
                 logits=logits, labels=labels, vocab_size=self.config.text_config.vocab_size, **kwargs
             )
-
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
 
         return Llama4CausalLMOutputWithPast(
             loss=loss,
