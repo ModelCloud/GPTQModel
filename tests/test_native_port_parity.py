@@ -168,7 +168,7 @@ def _llama4_inputs(model_name):
 @pytest.mark.parametrize("model_name", [
     "Llama4TextModel", "Llama4ForCausalLM", "Llama4VisionModel", "Llama4ForConditionalGeneration",
 ])
-def test_vendored_llama4_matches_transformers(model_name):
+def test_vendored_llama4_matches_transformers(model_name, tmp_path):
     native_config_module = importlib.import_module("transformers.models.llama4.configuration_llama4")
     vendored_config_module = importlib.import_module("gptqmodel.models.ports.native.llama4.configuration_llama4")
     config_name = "Llama4TextConfig" if model_name in {"Llama4TextModel", "Llama4ForCausalLM"} else "Llama4Config"
@@ -199,3 +199,15 @@ def test_vendored_llama4_matches_transformers(model_name):
         assert expected and len(actual) == len(expected), variant
         for index, (want, got) in enumerate(zip(expected, actual)):
             assert torch.equal(want, got), f"{model_name} {variant}: output {index} differs"
+
+    # A Transformers-saved checkpoint must load into the vendored class with identical outputs.
+    checkpoint = tmp_path / model_name
+    native.save_pretrained(checkpoint)
+    native_loaded = native_class.from_pretrained(checkpoint).eval()
+    loaded = vendored_class.from_pretrained(checkpoint, config=type(vendored_config).from_pretrained(checkpoint)).eval()
+    assert type(loaded) is vendored_class
+    with torch.no_grad():
+        expected, actual = _flatten(native_loaded(**inputs)), _flatten(loaded(**inputs))
+    assert expected and len(actual) == len(expected)
+    for index, (want, got) in enumerate(zip(expected, actual)):
+        assert torch.equal(want, got), f"{model_name}: output {index} differs after loading a Transformers checkpoint"
