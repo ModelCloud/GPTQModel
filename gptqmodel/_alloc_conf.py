@@ -20,7 +20,8 @@ On ROCm 10.1 / gfx1201 ``expandable_segments:True`` combined with
 ``torch.cuda.empty_cache()`` corrupts ordinary Torch results (wrong rows, or
 ``hipErrorIllegalAddress``) while the VMM segments are released and remapped.
 GPT-QModel empties the cache throughout quantization, so ROCm gets a default
-without ``expandable_segments``; the other two knobs are unchanged.
+that only disables ``expandable_segments`` and leaves every other allocator
+setting at Torch's default.
 
 On CUDA ``expandable_segments`` is the knob that removes the fragmentation
 cliff, and it is the only one that survives: pinning ``max_split_size_mb`` to
@@ -58,8 +59,7 @@ from ._rocm_env import running_on_rocm
 #: for OOMs.
 DEFAULT_ALLOC_CONF = "expandable_segments:True"
 
-#: ROCm default: the historical fragmentation knobs, but never
-#: ``expandable_segments``.
+#: ROCm default: Torch's own settings plus the one exclusion below.
 #:
 #: The ROCm/Torch VMM path releases and remaps segments on ``empty_cache()``,
 #: and a subsequent kernel can read stale/incorrect pages. Measured on a
@@ -67,10 +67,18 @@ DEFAULT_ALLOC_CONF = "expandable_segments:True"
 #: with ``empty_cache()`` between reps returned up to 4.5M wrong rows with
 #: ``expandable_segments:True`` and 0 with ``False``.
 #:
-#: Kept as-is for #4389: #4313's regression tests pin this exact value and the
-#: ROCm path already mitigates the 256 MiB split cap with a per-layer
-#: ``empty_cache()``. Changing it is a separate ROCm decision.
-ROCM_DEFAULT_ALLOC_CONF = "max_split_size_mb:256,garbage_collection_threshold:0.7"
+#: Nothing else is pinned. ``max_split_size_mb:256`` used to be here, and it
+#: has the same effect as on CUDA (#4389): a request below the cap cannot be
+#: served from a free block at or above it, so a layer whose working set churns
+#: around the cap maps a new segment instead of reusing the freed one. The
+#: per-layer ``empty_cache()`` that #4313 added only runs between layers, so it
+#: cannot reclaim the waste inside one layer, and MACaQ never calls it. One
+#: 14336x4096 MACaQ layer peaked at 5258 MiB reserved with the cap and 4466 MiB
+#: without it, for the same 4224 MiB peak allocated and identical tensors
+#: (issue #5072). ``garbage_collection_threshold`` is dropped too: it is a
+#: ratio of the device's total memory and never fires without a memory
+#: fraction, so it only looked like it helped; the cap was the whole effect.
+ROCM_DEFAULT_ALLOC_CONF = "expandable_segments:False"
 
 # ``PYTORCH_CUDA_ALLOC_CONF`` is the historical name; ``PYTORCH_ALLOC_CONF`` is
 # the generic alias understood by newer releases. Set both so the default holds

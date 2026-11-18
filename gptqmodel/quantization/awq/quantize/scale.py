@@ -135,15 +135,16 @@ def _release_rocm_layer_cache(module: nn.Module) -> None:
 
     AWQ's clip search pre-allocates a ``scratch_prod`` buffer per clip-eligible
     module sized from the GPU MSE budget (256 MiB by default). PyTorch rounds
-    those 255 MiB requests up to 256 MiB segments, and the ROCm default
-    ``max_split_size_mb:256`` makes the allocator refuse to serve any request
-    below 256 MiB from a free block of at least that size (see
-    ``get_free_block``'s "Do not return an oversized block for a large
-    request"). Consecutive modules therefore cannot reuse each other's
+    those 255 MiB requests up to 256 MiB segments. Under a configured
+    ``max_split_size_mb:256`` - the ROCm default until #5072 - the allocator
+    refuses to serve any request below 256 MiB from a free block of at least
+    that size (see ``get_free_block``'s "Do not return an oversized block for a
+    large request"). Consecutive modules then cannot reuse each other's
     segments: Qwen3-0.6B adds four 256 MiB plus one 250 MiB segment per decoder
     layer, and the reserved cache grows by ~1 GiB per layer while active memory
-    stays flat. ``garbage_collection_threshold`` does not help because it is
-    inert without a memory fraction.
+    stays flat. The default no longer pins the cap, but a caller can, and this
+    release bounds that case too. ``garbage_collection_threshold`` does not
+    help because it is inert without a memory fraction.
 
     ``apply_clip`` runs once per AWQ layer, after the clip search has released
     all of those scratch tensors and before the next layer allocates its own.
