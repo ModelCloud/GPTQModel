@@ -8,6 +8,7 @@ import threading
 import pytest
 import torch
 from torch.nn import functional as F
+from transformers.cache_utils import Cache, CacheLayerMixin
 
 from gptqmodel.models.definitions.hymba import HymbaQModel
 from gptqmodel.models.local import LocalModelLoader
@@ -301,10 +302,13 @@ def test_short_prefill_multitoken_and_decode_continuation_match_full_forward(opt
     actual = torch.cat(chunks, dim=1)
     torch.testing.assert_close(actual, expected, rtol=3e-5, atol=4e-7)
     assert cache.user_seq_length == ids.shape[1]
+    assert isinstance(cache, Cache)
     for i, source in enumerate(model.config.kv_sources):
-        assert (cache.key_cache[i] is not None) == (source == i)
-        assert cache.conv_states[i].shape[-1] == model.config.mamba_d_conv
-        assert cache.ssm_states[i].abs().sum() > 0
+        layer = cache.layers[i]
+        assert isinstance(layer, CacheLayerMixin) == (source == i)
+        assert (layer.get_seq_length() == cache.get_seq_length()) if source == i else True
+        assert layer.conv_states[0].shape[-1] == model.config.mamba_d_conv
+        assert layer.recurrent_states[0].abs().sum() > 0
     memory_bands = (ids.shape[1] - 1) // model.config.memory_tokens_interspersed_every + 1 if model.config.memory_tokens_interspersed_every else 1
     assert cache.get_seq_length() == ids.shape[1] + memory_bands * model.config.num_memory_tokens
 
@@ -318,7 +322,7 @@ def test_low_precision_continuation_retains_dtype_and_fp32_oracle(dtype):
     expected = base(ids, use_cache=False).logits
     prefill = model(ids[:, :2], use_cache=True)
     output = model(ids[:, 2:], past_key_values=prefill.past_key_values, use_cache=True)
-    assert output.past_key_values.conv_states[0].dtype == dtype
+    assert output.past_key_values.layers[0].conv_states[0].dtype == dtype
     torch.testing.assert_close(output.logits, expected[:, 2:], rtol=0.08, atol=0.004)
 
 
@@ -335,14 +339,16 @@ def test_generate_greedy_and_beam_cache_reordering():
     beams = model.generate(ids, max_new_tokens=3, do_sample=False, num_beams=2)
     assert beams.shape == expected.shape
     cache = model(torch.cat((ids, ids + 1), 0), use_cache=True).past_key_values
-    saved = [[None if value is None else value.clone() for value in states]
-             for states in (cache.key_cache, cache.value_cache, cache.conv_states, cache.ssm_states)]
+    def states():
+        return [getattr(layer, name)[0] if name.endswith("states") else getattr(layer, name)
+                for layer in cache.layers for name in ("keys", "values", "conv_states", "recurrent_states")
+                if hasattr(layer, name)]
+    saved = [value.clone() for value in states()]
     indices = torch.tensor([1, 0, 1])
     cache.reorder_cache(indices)
-    for states, before in zip((cache.key_cache, cache.value_cache, cache.conv_states, cache.ssm_states), saved):
-        for value, old in zip(states, before):
-            if old is not None:
-                torch.testing.assert_close(value, old[indices], rtol=0, atol=0)
+    assert len(saved) == len(states()) > 0
+    for value, old in zip(states(), saved):
+        torch.testing.assert_close(value, old[indices], rtol=0, atol=0)
     assert cache.batch_size == 3
 
 
@@ -352,7 +358,7 @@ def test_partial_failure_invalidates_cache_and_reset_allows_exact_retry(monkeypa
     model = tiny_model()
     ids = torch.tensor([[1, 8, 6, 11, 4]])
     cache = model(ids[:, :2], use_cache=True).past_key_values
-    old_state = cache.ssm_states[0].clone()
+    old_state = cache.layers[0].recurrent_states[0].clone()
     if failure in ("layer", "head"):
         target = model.model.layers[1] if failure == "layer" else model.lm_head
         original = target.forward
@@ -365,7 +371,7 @@ def test_partial_failure_invalidates_cache_and_reset_allows_exact_retry(monkeypa
     else:
         with pytest.raises((IndexError, RuntimeError)):
             model(ids[:, 2:], labels=torch.full_like(ids[:, 2:], 999), past_key_values=cache, use_cache=True)
-    assert not torch.equal(old_state, cache.ssm_states[0]), "must mutate a real prior layer before failing"
+    assert not torch.equal(old_state, cache.layers[0].recurrent_states[0]), "must mutate a real prior layer before failing"
     with pytest.raises(RuntimeError, match="incomplete.*reset"):
         model(ids[:, 2:], past_key_values=cache, use_cache=True)
     cache.reset()
@@ -432,8 +438,6 @@ def test_cache_rejects_cross_request_ownership_and_unsupported_rollback():
     other(ids, past_key_values=cache, use_cache=True)
     with pytest.raises(NotImplementedError, match="cannot be cropped"):
         cache.crop(1)
-    with pytest.raises(NotImplementedError, match="no legacy"):
-        cache.to_legacy_cache()
     assert torch.isfinite(other(ids, past_key_values=cache, use_cache=True).logits).all()
 
 
@@ -573,3 +577,16 @@ def test_actual_calibration_worker_preserves_native_layer_masks_and_shared_kv(so
             torch.testing.assert_close(hidden, native[i][batch:batch + 1], rtol=2e-5, atol=2e-6)
         bank = kwargs.get("_hymba_kv_sources", {})
         assert set(bank) <= {0}  # the only source with a future consumer
+
+
+@torch.no_grad()
+def test_recorded_outputs_and_tuple_return():
+    model = tiny_model(num_experts=3, num_experts_per_tok=2)
+    ids = torch.tensor([[1, 8, 6, 11]])
+    output = model(ids, use_cache=False, output_hidden_states=True, output_router_logits=True)
+    layers = model.config.num_hidden_layers
+    assert len(output.hidden_states) == layers + 1 and len(output.router_logits) == layers
+    torch.testing.assert_close(output.hidden_states[-1], model.model(ids, use_cache=False).last_hidden_state)
+    as_tuple = model(ids, use_cache=False, return_dict=False)
+    assert isinstance(as_tuple, tuple)
+    torch.testing.assert_close(as_tuple[0], output.logits, rtol=0, atol=0)
