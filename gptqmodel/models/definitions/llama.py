@@ -20,6 +20,9 @@ class LlamaQModel(BaseQModel):
     loader = _LlamaAliasLoader(
         config_class="gptqmodel.models.ports.llama.dispatch.LlamaAliasConfig",
         model_class="gptqmodel.models.ports.llama.dispatch.LlamaAliasForCausalLM",
+        # Original Yi (YiTokenizer) and StableLM Epoch (Arcade100k) tokenizers
+        # were released only as checkpoint Python.
+        remote_tokenizer_model_types=("yi", "stablelm_epoch"),
     )
 
     @classmethod

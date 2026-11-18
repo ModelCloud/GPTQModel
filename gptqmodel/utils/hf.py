@@ -74,7 +74,7 @@ except ImportError:
     from transformers import PretrainedConfig as PreTrainedConfig
 
 from ..utils.logger import setup_logger
-from ..utils.security import require_remote_code_permission, safety_checks_bypassed
+from ..utils.security import RemoteCodeSecurityError, require_remote_code_permission, safety_checks_bypassed
 
 
 __all__ = [
@@ -2789,6 +2789,24 @@ def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):
     return Tokenicer.load(tokenizer_or_path, model_config=model_config, **kwargs)
 
 
+_REMOTE_ONLY_TOKENIZER_WARNED: set[tuple[str, str]] = set()
+
+
+def _remote_only_tokenizer_message(model_type: str) -> str:
+    return (
+        f"`{model_type}` checkpoints ship a customized tokenizer that exists only as checkpoint Python "
+        "(tokenizer_config.json auto_map). Loading it is unsafe and requires both trust_remote_code=True "
+        "and GPTQ_BYPASS_SAFETY_CHECKS=1. The model itself always uses GPT-QModel's package-owned implementation."
+    )
+
+
+def _warn_remote_only_tokenizer(model_type: str, tokenizer_path) -> None:
+    key = (model_type, os.fspath(tokenizer_path))
+    if key not in _REMOTE_ONLY_TOKENIZER_WARNED:
+        _REMOTE_ONLY_TOKENIZER_WARNED.add(key)
+        log.warning(_remote_only_tokenizer_message(model_type))
+
+
 def load_hf_tokenizer(
         tokenizer_or_path,
         *,
@@ -2801,12 +2819,21 @@ def load_hf_tokenizer(
 
     from ..models.local import local_model_loader
 
-    loader = local_model_loader(getattr(model_config, "model_type", None))
+    model_type = str(getattr(model_config, "model_type", None) or "").lower()
+    loader = local_model_loader(model_type)
     checkpoint_path = isinstance(tokenizer_or_path, (str, os.PathLike))
+    # Some package-owned models were released with a tokenizer that exists only
+    # as checkpoint Python. The model stays package-owned; the tokenizer alone
+    # may use checkpoint code under the same two-flag consent as any other.
+    remote_tokenizer = bool(
+        loader is not None and checkpoint_path and model_type in loader.remote_tokenizer_model_types
+    )
+    if remote_tokenizer:
+        _warn_remote_only_tokenizer(model_type, tokenizer_or_path)
     # Native tokenizers can load even if a caller supplied the trust flag.
     # Keep the request separate from permission so a remote-only tokenizer
     # can report the missing consent without enabling Python to detect it.
-    requested_remote_code = bool(trust_remote_code and checkpoint_path and loader is None)
+    requested_remote_code = bool(trust_remote_code and checkpoint_path and (loader is None or remote_tokenizer))
     trust_remote_code = requested_remote_code and safety_checks_bypassed()
     tokenicer_option_names = {"normalize_sentencepiece"}
     if loader is not None:
@@ -2843,6 +2870,8 @@ def load_hf_tokenizer(
         # remote-code-required errors and expose no dedicated exception type.
         if requested_remote_code and not trust_remote_code and "`trust_remote_code=True`" in str(exc):
             require_remote_code_permission(requested_remote_code)
+        if remote_tokenizer and not trust_remote_code and "trust_remote_code" in str(exc):
+            raise RemoteCodeSecurityError(_remote_only_tokenizer_message(model_type)) from exc
         raise
     # Internal model loads retain the normalized wrapper through construction.
     # Direct callers keep the native-tokenizer return contract by default.

@@ -48,6 +48,11 @@ class LocalModelLoader:
     # Immutable, package-declared normalization defaults, consumed by Tokenicer
     # after class selection. Explicit caller options take precedence.
     tokenicer_options: tuple[tuple[str, object], ...] = ()
+    # Model types whose released tokenizer exists only as checkpoint Python
+    # (tokenizer_config.json ``auto_map``). Model and config stay package-owned;
+    # only the tokenizer may run checkpoint code, and only with both
+    # ``trust_remote_code=True`` and the safety bypass.
+    remote_tokenizer_model_types: tuple[str, ...] = ()
 
     def __post_init__(self):
         if not isinstance(self.tokenicer_options, tuple) or any(
@@ -57,6 +62,10 @@ class LocalModelLoader:
             for option in self.tokenicer_options
         ) or len(dict(self.tokenicer_options)) != len(self.tokenicer_options):
             raise ValueError("Local tokenicer_options must be unique normalization option pairs")
+        if not isinstance(self.remote_tokenizer_model_types, tuple) or any(
+            not isinstance(name, str) or not name or name != name.lower() for name in self.remote_tokenizer_model_types
+        ):
+            raise ValueError("Local remote_tokenizer_model_types must be a tuple of lowercase model types")
         if not isinstance(self.config_architectures, tuple) or any(
             not isinstance(name, str) or not name.isidentifier() for name in self.config_architectures
         ):

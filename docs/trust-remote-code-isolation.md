@@ -206,6 +206,17 @@ real-model module-plan ownership, and the model's explicit AWQ policy. Native
 support must be verified against the checkpoint layout, not inferred from
 similar model names. Do not replace an architecture with a lookalike.
 
+### Remote-only tokenizers
+
+Original Yi (`model_type: "Yi"`) and StableLM Epoch (`stablelm_epoch`) checkpoints
+load with the package-owned model, but their released tokenizers (`YiTokenizer`,
+`Arcade100kTokenizer`) exist only as checkpoint Python. A definition lists such
+model types in `LocalModelLoader.remote_tokenizer_model_types`. Loading one always
+logs that the tokenizer is unsafe checkpoint code and requires both
+`trust_remote_code=True` and `GPTQ_BYPASS_SAFETY_CHECKS=1`; without both it raises
+`RemoteCodeSecurityError`. No other package-owned model loads tokenizer Python from
+the checkpoint.
+
 ## Load, save, export and retry boundaries
 
 MiniCPM-o 4.5's `init_tts` checks remote-code permission before loading the
