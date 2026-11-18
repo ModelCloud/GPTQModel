@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,7 +19,32 @@ from gptqmodel.models.ports.llava_qwen2.modeling_llava_qwen2 import LlavaQwen2Fo
 from tests.test_llava_qwen2_local_port import _config
 
 
-PORT = Path(__file__).resolve().parents[2] / "gptqmodel/models/ports/llava_qwen2"
+# Released apple/FastVLM config.json fields that differ between sizes; the rest are shared.
+FASTVLM_BASE = {
+    "hidden_act": "silu", "image_aspect_ratio": "pad", "max_position_embeddings": 32768,
+    "mm_hidden_size": 3072, "mm_patch_merge_type": "flat", "mm_projector_type": "mlp2x_gelu",
+    "mm_vision_select_feature": "patch", "mm_vision_select_layer": -2, "mm_vision_tower": "mobileclip_l_1024",
+    "rms_norm_eps": 1e-06, "rope_theta": 1000000.0, "tokenizer_model_max_length": 8192,
+    "torch_dtype": "bfloat16", "use_sliding_window": False, "unfreeze_mm_vision_tower": True, "bos_token_id": 151643, "eos_token_id": 151645,
+}
+FASTVLM = {
+    "0.5B": dict(hidden_size=896, intermediate_size=4864, num_attention_heads=14, num_hidden_layers=24, max_window_layers=24,
+                 num_key_value_heads=2, tie_word_embeddings=True, vocab_size=151936),
+    "1.5B": dict(hidden_size=1536, intermediate_size=8960, num_attention_heads=12, num_hidden_layers=28, max_window_layers=28,
+                 num_key_value_heads=2, tie_word_embeddings=True, vocab_size=151936),
+    "7B": dict(hidden_size=3584, intermediate_size=18944, num_attention_heads=28, num_hidden_layers=28, max_window_layers=28,
+               num_key_value_heads=4, tie_word_embeddings=False, vocab_size=152064),
+}
+# sha256 of the sorted (name, shape) inventory read from the apple/FastVLM-0.5B safetensors
+# header (revision 16375720c2d673fa583e57e9876afde27549c7d0): all 924 tensors, and the 629 vision ones.
+FASTVLM_05B_SHA256 = "4024f327788efc53db0b9484d6ff5669e692670e74dcc575315b111ba7dfb1d8"
+FASTVLM_VISION_SHA256 = "797aacb57a603f383e545381a43cd54265183334c6de2933d9ab3113bb7d0444"
+
+
+def _inventory_sha256(items):
+    return hashlib.sha256(json.dumps(sorted((name, list(shape)) for name, shape in items)).encode()).hexdigest()
+
+
 LINEARS = {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
            "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"}
 EXPECTED_PLAN = {
@@ -39,19 +65,17 @@ def test_exact_native_mapping_is_absent_and_all_registered_aliases_select_owned_
 
 @pytest.mark.parametrize("size", ["0.5B", "1.5B", "7B"])
 def test_pinned_real_checkpoint_config_has_exact_flat_vision_and_decoder_owners_on_meta(size):
-    payload = json.loads((PORT / f"FastVLM-{size}.json").read_text())
-    config = LlavaConfig(**payload)
+    config = LlavaConfig(**FASTVLM_BASE, **FASTVLM[size])
     with torch.device("meta"):
         model = LlavaQwen2ForCausalLM(config)
     _convert_model_with_defuser(LlavaQwen2QModel, model, cleanup_original=False)
     state = model.state_dict()
-    original = json.loads((PORT / "checkpoint_shapes.json").read_text())["tensors"]
-    vision = {name: tuple(shape) for name, shape in original.items() if name.startswith("model.vision_tower.")}
+    vision = [(name, value.shape) for name, value in state.items() if name.startswith("model.vision_tower.")]
     assert len(vision) == 629
-    assert {name: tuple(value.shape) for name, value in state.items() if name.startswith("model.vision_tower.")} == vision
+    assert _inventory_sha256(vision) == FASTVLM_VISION_SHA256
     if size == "0.5B":
-        assert {name: list(value.shape) for name, value in state.items()} == original
         assert len(state) == 924
+        assert _inventory_sha256((name, value.shape) for name, value in state.items()) == FASTVLM_05B_SHA256
     plan = ModulePlan.from_tree(LlavaQwen2QModel.module_tree)
     declared = {name for block in LlavaQwen2QModel.simple_layer_modules(config, SimpleNamespace(dynamic=None)) for name in block}
     assert declared == LINEARS
