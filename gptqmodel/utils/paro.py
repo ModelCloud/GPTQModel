@@ -288,7 +288,12 @@ def apply_paro_rotation_vectorized(
             & (local_i < group_size)
             & (local_j < group_size)
         )
-        if not bool(valid.any()):
+        if not torch.compiler.is_compiling() and not bool(valid.any()):
+            # A fully padded rotation row is a no-op below: every slot keeps its
+            # value, so skipping it is only an eager speedup. Reading the mask on
+            # the host is a data-dependent branch dynamo cannot trace, and the
+            # padding layouts are fixed by the checkpoint, so the traced graph
+            # runs the row and stays graph-safe (#5115).
             continue
 
         # Gather padding slots from a harmless index, then restore their
