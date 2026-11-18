@@ -6,9 +6,10 @@ import math
 
 import torch
 from PIL import Image
-from transformers import CLIPImageProcessor, ProcessorMixin
 from transformers.feature_extraction_utils import BatchFeature
+from transformers.processing_utils import ProcessorMixin
 
+from ..native.clip.image_processing_clip import CLIPImageProcessor
 from .configuration_llava_qwen2 import LlavaConfig
 from .multimodal import IMAGE_TOKEN_INDEX, select_best_resolution
 

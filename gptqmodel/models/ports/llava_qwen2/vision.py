@@ -9,7 +9,10 @@ from functools import partial
 import torch
 from torch import nn
 from torch.nn import functional as F
-from transformers import CLIPImageProcessor, CLIPVisionConfig, CLIPVisionModel
+
+from ..native.clip.configuration_clip import CLIPVisionConfig
+from ..native.clip.image_processing_clip import CLIPImageProcessor
+from ..native.clip.modeling_clip import CLIPVisionModel
 
 
 class MCi(nn.Module):

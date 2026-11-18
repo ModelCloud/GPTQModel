@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Flat Qwen2 configuration with the original LLaVA multimedia metadata."""
 
-from transformers import Qwen2Config
+from ..native.qwen2.configuration_qwen2 import Qwen2Config
 
 
 _DEFAULT_VISION_TOWER = object()

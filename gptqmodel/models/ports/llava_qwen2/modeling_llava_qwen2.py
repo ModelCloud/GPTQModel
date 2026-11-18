@@ -6,9 +6,9 @@ import re
 
 import torch
 from torch import nn
-from transformers import Qwen2ForCausalLM, Qwen2Model
 from transformers import initialization as init
 
+from ..native.qwen2.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Model
 from .configuration_llava_qwen2 import LlavaConfig
 from .multimodal import LlavaMultimodalMixin
 from .vision import build_vision_tower
