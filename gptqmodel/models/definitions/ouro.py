@@ -61,6 +61,9 @@ class OuroQModel(LoopedLayerCaptureMixin, BaseQModel):
                 del self
                 return ROPE_INIT_FUNCTIONS["default"](config)
 
+            # The precedence wrapper in `gptqmodel.utils.hf` must not hide the
+            # shim this bridge resolves at call time (#5259).
+            compute_default_rope_parameters._gptqmodel_rope_bridge = True
             rotary_cls.compute_default_rope_parameters = compute_default_rope_parameters
 
         remote_module = import_module(rotary_cls.__module__)
