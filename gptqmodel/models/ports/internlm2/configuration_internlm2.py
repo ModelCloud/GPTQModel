@@ -36,6 +36,7 @@ class InternLM2Config(PreTrainedConfig):
         self.pretraining_tp = pretraining_tp
         self.bias = bias
         self.rope_theta = rope_theta
+        # Released InternLM2 config.json files spell RoPE as ``rope_scaling``; convert it once at parse time.
         self.rope_parameters = copy.deepcopy(rope_parameters if rope_parameters is not None else rope_scaling)
         super().__init__(
             pad_token_id=pad_token_id, bos_token_id=bos_token_id, eos_token_id=eos_token_id,
@@ -49,8 +50,8 @@ class InternLM2Config(PreTrainedConfig):
             raise ValueError("InternLM2 rotary head dimension must be even")
         if pretraining_tp < 1 or hidden_size % pretraining_tp or vocab_size % pretraining_tp:
             raise ValueError("pretraining_tp must divide hidden_size and vocab_size")
-        if self.rope_parameters is not None:
-            kind = self.rope_parameters.get("rope_type", self.rope_parameters.get("type", "default"))
+        if self.rope_parameters:
+            kind = self.rope_parameters["rope_type"]
             if kind not in ("default", "linear", "dynamic"):
                 raise ValueError(f"Unsupported InternLM2 rope type: {kind}")
             factor = self.rope_parameters.get("factor", 1.0)
