@@ -29,8 +29,12 @@ quantizes, runs inference and trains **only** on the Transformers 5.23 ABI.
   unmodified Transformers 5.23 without compatibility shims. See
   [implementation selection](trust-remote-code-isolation.md).
 - **Enforced.** `tests/test_model_port_policy.py` fails on a definition
-  without a `LocalModelLoader`, a `transformers.models.*` import in a port, or
-  a stale pre-5.23 pattern. The porting procedure is in the
+  without a `LocalModelLoader`, a `transformers.models.*` import (or top-level
+  model-family re-export such as `AutoConfig`) anywhere in `gptqmodel/` outside
+  its commented unsupported-model exceptions, or a stale pre-5.23 pattern in a
+  port. Defuser sees vendored classes under their `transformers.models` class
+  path during conversion, so they get exactly Defuser's native treatment
+  without GPT-QModel patching Transformers. The porting procedure is in the
   [model-porting skill](../.agents/skills/gptqmodel-model-porting/SKILL.md).
 
 Ports keep the copyright headers of the sources they derive from. Port

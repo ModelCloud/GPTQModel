@@ -6,6 +6,8 @@
 2. Ports import Transformers framework infrastructure only, never
    ``transformers.models.*`` (directly or through a top-level re-export).
 3. Ports contain no pre-5.23 compatibility patterns.
+4. Nothing else in ``gptqmodel/`` imports ``transformers.models.*`` either,
+   except the commented ``PACKAGE_MODEL_IMPORT_EXCEPTIONS``.
 
 The ``PENDING_*`` sets list today's violators. They may only shrink: an entry
 that no longer violates fails the test so it gets removed. They must be empty
@@ -22,7 +24,8 @@ from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.local import LocalModelLoader
 
 
-PORTS = Path(__file__).resolve().parents[1] / "gptqmodel" / "models" / "ports"
+PACKAGE = Path(__file__).resolve().parents[1] / "gptqmodel"
+PORTS = PACKAGE / "models" / "ports"
 
 PENDING_NATIVE_DEFINITIONS = frozenset()
 
@@ -146,3 +149,69 @@ def test_policy_detects_violations(tmp_path, monkeypatch):
     assert len(found) == 2
     assert STALE_PATTERNS.search("def forward(self, x, cache_position=None):")
     assert not STALE_PATTERNS.search("def forward(self, x, past_key_values=None, position_ids=None):")
+
+
+# Package code outside the ports that may still name a Transformers model-family
+# class, keyed by file relative to gptqmodel/ -> the exact imports allowed. Only
+# two kinds qualify; each site carries an inline comment.
+PACKAGE_MODEL_IMPORT_EXCEPTIONS = {
+    # Unsupported models (no MODEL_MAP definition): BaseQModel's default loader
+    # and processor run Transformers' own or checkpoint code, never a port.
+    "models/base.py": {
+        "transformers.AutoModelForCausalLM (transformers.models.auto.modeling_auto)",
+        "transformers.AutoProcessor (transformers.models.auto.processing_auto)",
+    },
+    # Unsupported models: config fallback and native-support probe.
+    "utils/hf.py": {
+        "transformers.AutoConfig (transformers.models.auto.configuration_auto)",
+        "transformers.AutoModelForCausalLM (transformers.models.auto.modeling_auto)",
+    },
+    # Unsupported models: dequantizing a compressed-tensors checkpoint that has
+    # no definition; supported ones build through their LocalModelLoader.
+    "utils/model_dequant.py": {
+        "transformers.AutoConfig (transformers.models.auto.configuration_auto)",
+        "transformers.AutoModel (transformers.models.auto.modeling_auto)",
+        "transformers.AutoModelForCausalLM (transformers.models.auto.modeling_auto)",
+        "transformers.AutoModelForSeq2SeqLM (transformers.models.auto.modeling_auto)",
+    },
+}
+
+# Files still importing a model family that Transformers 5.23 does not ship, so
+# it cannot be vendored: DeepSeek V4.1 (``transformers.models.deepseek_v41``)
+# is an unregistered calibration API that needs a package-owned port. May only
+# shrink.
+PENDING_PACKAGE_MODEL_IMPORTS = frozenset({
+    "models/definitions/deepseek_v41.py",
+    "utils/v41_native.py",
+    "utils/v41_source.py",
+})
+
+
+def _package_model_imports():
+    found = {}
+    for path in sorted(PACKAGE.rglob("*.py")):
+        if "__pycache__" in path.parts or PORTS in path.parents:
+            continue
+        imports = set(_model_family_imports(path))
+        if imports:
+            found[path.relative_to(PACKAGE).as_posix()] = imports
+    return found
+
+
+def test_package_never_imports_transformers_model_families():
+    found = _package_model_imports()
+    violations = {
+        path: sorted(imports - PACKAGE_MODEL_IMPORT_EXCEPTIONS.get(path, set()))
+        for path, imports in found.items()
+        if path not in PENDING_PACKAGE_MODEL_IMPORTS and imports - PACKAGE_MODEL_IMPORT_EXCEPTIONS.get(path, set())
+    }
+    assert not violations, f"gptqmodel/ imports transformers.models.* outside the policy exceptions: {violations}"
+    stale = {
+        path: sorted(allowed - found.get(path, set()))
+        for path, allowed in PACKAGE_MODEL_IMPORT_EXCEPTIONS.items()
+        if allowed - found.get(path, set())
+    }
+    assert not stale, f"exception no longer used; remove it: {stale}"
+    assert not PENDING_PACKAGE_MODEL_IMPORTS - set(found), (
+        f"now framework-only; remove from pending: {sorted(PENDING_PACKAGE_MODEL_IMPORTS - set(found))}"
+    )
