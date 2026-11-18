@@ -3039,6 +3039,83 @@ class BaseQModel(nn.Module):
             self._model_free_weight_only_replacements_only = True
         return stats
 
+    @staticmethod
+    def _embedding_endpoint_state(module) -> Tuple[Optional[torch.device], Optional[torch.dtype]]:
+        """The device and floating dtype a replaced embedding endpoint occupied."""
+
+        weight = getattr(module, "weight", None)
+        dtype = None
+        if isinstance(weight, torch.Tensor) and weight.is_floating_point():
+            dtype = weight.dtype
+        return get_device(module), dtype
+
+    def _snapshot_module_placement(self) -> Dict[str, torch.device]:
+        """Record the device of every leaf module that owns tensors."""
+
+        placement: Dict[str, torch.device] = {}
+        model = getattr(self, "model", None)
+        if model is None:
+            return placement
+        for name, module in model.named_modules():
+            if not name:
+                continue
+            owns_tensors = any(
+                True for _ in module.parameters(recurse=False)
+            ) or any(True for _ in module.buffers(recurse=False))
+            if not owns_tensors:
+                continue
+            placement[name] = get_device(module)
+        return placement
+
+    def _rehome_requantized_endpoints(
+        self,
+        endpoint_state: Dict[str, Tuple],
+        placement: Optional[Dict[str, torch.device]] = None,
+    ) -> None:
+        """Place requantized endpoints back on the device and dtype they replaced.
+
+        The looper packs on CPU and a quantized embedding's scales keep the
+        checkpoint dtype, so without this the in-session model cannot run a
+        forward and a BF16 checkpoint reloads with FP16 embeddings (#5116).
+        Layers the loop returned to CPU are also moved back to where they were.
+        """
+
+        if not endpoint_state and not placement:
+            return
+        live_model = getattr(self, "model", None)
+        if live_model is None:
+            return
+
+        model_dtype = getattr(live_model, "dtype", None)
+        if not isinstance(model_dtype, torch.dtype) or not model_dtype.is_floating_point:
+            model_dtype = None
+
+        # Restore the pre-run placement of the modules the loop offloaded. The
+        # endpoints are handled below with their dtype, so skip them here.
+        for name, device in (placement or {}).items():
+            if name in endpoint_state:
+                continue
+            if device is None or device.type == "meta":
+                continue
+            module = get_module(live_model, key=name)
+            if module is None:
+                continue
+            if get_device(module) != device:
+                safe_module_to(module, device)
+
+        for name, (device, dtype) in endpoint_state.items():
+            module = get_module(live_model, key=name)
+            if module is None:
+                continue
+            setter = getattr(module, "set_embedding_output_dtype", None)
+            target_dtype = dtype if dtype is not None else model_dtype
+            if callable(setter) and target_dtype is not None:
+                setter(target_dtype)
+            if device is None or device.type == "meta":
+                continue
+            if get_device(module) != device:
+                safe_module_to(module, device)
+
     def _requantize_embeddings(
         self,
         *,
@@ -3060,6 +3137,33 @@ class BaseQModel(nn.Module):
                 endpoint_device = CPU
             quantize_config.device = normalize_device(endpoint_device)
 
+        # A requantized endpoint is rebuilt on CPU during packing, and its
+        # scales keep the checkpoint dtype (FP16 for GPTQ). Record what each
+        # replaced endpoint occupied so it can be placed back afterwards; the
+        # first in-session forward otherwise fails on a device mismatch, and a
+        # BF16 model receives FP16 embeddings (#5116).
+        mode = embed_quant_config.embed_quant_mode
+        # The loop returns every processed layer to CPU (`post_quantize`), which
+        # is right for a fresh quantize but leaves a requantized *loaded* model
+        # unrunnable on the device it came from. Record the placement of the
+        # whole model so it can be restored after the run.
+        placement = self._snapshot_module_placement()
+        endpoint_state = {}
+        live_model = getattr(self, "model", None)
+        if live_model is not None:
+            if mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
+                input_name = self.get_input_embeddings_name()
+                if input_name:
+                    input_module = get_module(live_model, key=input_name)
+                    if input_module is not None:
+                        endpoint_state[input_name] = self._embedding_endpoint_state(input_module)
+            if mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH):
+                output_name = self.get_output_embeddings_name() or getattr(self, "lm_head", None)
+                if output_name:
+                    output_module = get_module(live_model, key=output_name)
+                    if output_module is not None:
+                        endpoint_state[output_name] = self._embedding_endpoint_state(output_module)
+
         result = self.quantize(
             calibration=calibration,
             tokenizer=tokenizer,
@@ -3068,12 +3172,13 @@ class BaseQModel(nn.Module):
             embed_quant_config=embed_quant_config,
         )
 
+        self._rehome_requantized_endpoints(endpoint_state, placement)
+
         # A loaded quantized model may contain inference-repacked or fused
         # modules that cannot safely be serialized as a complete checkpoint.
         # Preserve the source checkpoint and let the module-replacement writer
         # replace only the shards owned by the requested endpoints.
         prefixes = set(getattr(self, "_module_replacement_prefixes", set()))
-        mode = embed_quant_config.embed_quant_mode
         if mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
             input_name = self.get_input_embeddings_name()
             if input_name:

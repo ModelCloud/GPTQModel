@@ -1282,6 +1282,23 @@ class TorchQuantEmbeddings(TorchLinear):
     EMBEDDING_ROW_DECODE_LIMIT = 1024
     EMBEDDING_ROW_DECODE_MIN_TABLE_BYTES = 64 * 1024 * 1024
 
+    #: Dtype the forward returns. A quantized embedding's stored ``scales`` keep
+    #: the checkpoint dtype (FP16 for GPTQ), which is not the model's compute
+    #: dtype; returning it promoted a BF16 residual stream to FP32 and made a
+    #: bf16 ``lm_head`` reject the activations (#5116). Set from the embedding
+    #: the module replaced, or from the model dtype on a requantize.
+    _embedding_output_dtype: Optional[torch.dtype] = None
+
+    def set_embedding_output_dtype(self, dtype: Optional[torch.dtype]) -> None:
+        """Record the dtype this embedding must return to the residual stream."""
+
+        self._embedding_output_dtype = dtype
+
+    def embedding_output_dtype(self) -> torch.dtype:
+        """The dtype ``forward`` returns: the recorded one, else the scale dtype."""
+
+        return self._embedding_output_dtype or self.scales.dtype
+
     def _embedding_row_decode_state(self):
         """Per-vocabulary index metadata for row decode, derived from packed tensors.
 
@@ -1408,10 +1425,11 @@ class TorchQuantEmbeddings(TorchLinear):
         return scales * (codes - zeros)
 
     def forward(self, input_ids: torch.Tensor):
+        output_dtype = self.embedding_output_dtype()
         if input_ids.numel() == 0:
             return torch.empty(
                 (*input_ids.shape, self.out_features),
-                dtype=self.scales.dtype,
+                dtype=output_dtype,
                 device=self.scales.device,
             )
         if (
@@ -1425,8 +1443,8 @@ class TorchQuantEmbeddings(TorchLinear):
             and self._embedding_row_decode_state() is not None
         ):
             rows = self._dequantize_embedding_rows(input_ids)
-            return rows.reshape(*input_ids.shape, self.out_features)
-        return F.embedding(input_ids, self.dequantize_weight())
+            return rows.to(output_dtype).reshape(*input_ids.shape, self.out_features)
+        return F.embedding(input_ids, self.dequantize_weight()).to(output_dtype)
 
 
 __all__ = ["TorchLinear", "TorchQuantEmbeddings", "dequantize_model"]
