@@ -24,9 +24,7 @@ from gptqmodel.models.local import LocalModelLoader
 
 PORTS = Path(__file__).resolve().parents[1] / "gptqmodel" / "models" / "ports"
 
-PENDING_NATIVE_DEFINITIONS = frozenset({
-   
-})
+PENDING_NATIVE_DEFINITIONS = frozenset()
 
 PENDING_MODEL_IMPORT_PORTS = frozenset({
     "internvl_chat", "lfm3_vl", "llama", "unlimited_ocr",
