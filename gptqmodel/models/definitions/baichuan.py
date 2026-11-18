@@ -29,6 +29,17 @@ class BaiChuanQModel(BaseQModel):
     ]
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Plain quantization only. Fused QKV plus RoPE/ALiBi replay has not
-        # passed the model-specific AWQ fold/search qualification gate.
-        return []
+        # `o_proj` reads the attention output and the packed 3x-wide W_pack
+        # output can never fold into it, so it has no scale source. ALiBi layers
+        # own no `rotary_emb`, which leaves the generic planner's last-module
+        # fallback on `input_layernorm` (same width) and merges `o_proj` into the
+        # norm -> W_pack group. Keep every other group and quantize `o_proj`
+        # plainly.
+        o_proj = getattr(getattr(module, "self_attn", None), "o_proj", None)
+        nodes = []
+        for node in super().awq_get_modules_for_scaling(module, input_feat, module_kwargs):
+            layers = [layer for layer in node.get("layers") or [] if layer is not o_proj]
+            if layers:
+                node["layers"] = layers
+                nodes.append(node)
+        return nodes

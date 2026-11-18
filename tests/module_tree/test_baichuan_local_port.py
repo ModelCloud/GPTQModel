@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Checkpoint ownership and conservative AWQ policy on real Baichuan layers."""
+"""Checkpoint ownership and AWQ scale-fold policy on real Baichuan layers."""
 
 import json
 from pathlib import Path
@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.loop_processor import CalibrationConfig
@@ -18,7 +19,9 @@ from gptqmodel.models.definitions.baichuan import BaiChuanQModel
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.baichuan.configuration_baichuan import BaichuanConfig
 from gptqmodel.models.ports.baichuan.modeling_baichuan import BaichuanForCausalLM
+from gptqmodel.quantization.awq.utils.module import get_op_name
 from gptqmodel.quantization.config import AWQConfig
+from tests.test_baichuan_local_port import tiny_model
 
 
 VARIANTS = [(p, n) for p in ("rope", "alibi") for n in (False, True)]
@@ -78,8 +81,30 @@ def test_real_state_dict_owners_match_definition_and_checkpoint_layout(position,
     assert BaiChuanQModel.fusable is None
 
 
+EXPECTED_GROUPS = [
+    ("input_layernorm", ["self_attn.W_pack"]),
+    ("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"]),
+    ("mlp.up_proj", ["mlp.down_proj"]),
+]
+
+
 @pytest.mark.parametrize("position,normalized", VARIANTS)
-def test_awq_plain_quantization_retains_all_five_real_projections(position, normalized, monkeypatch):
+def test_awq_scale_folds_preserve_rope_and_alibi_layer_output(position, normalized):
+    model = tiny_model(position, normalized)
+    ids = torch.tensor([[1, 3, 4, 5], [1, 7, 8, 9]])
+
+    def forward():
+        return model(ids, use_cache=False).logits
+
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(BaiChuanQModel, model, layer, forward)
+        # `o_proj` reads the attention output; neither the input norm (the
+        # stale fallback on ALiBi layers) nor the 3x-wide W_pack may feed it.
+        assert [(source, targets) for source, targets, _consumers in checked] == EXPECTED_GROUPS
+
+
+@pytest.mark.parametrize("position,normalized", VARIANTS)
+def test_awq_scaled_quantization_retains_all_five_real_projections(position, normalized, monkeypatch):
     torch.manual_seed(44)
     model = build(position, normalized)
     wrapper = BaiChuanQModel(model=model, quantized=False, quantize_config=None)
@@ -95,7 +120,9 @@ def test_awq_plain_quantization_retains_all_five_real_projections(position, norm
         for handle in handles:
             handle.remove()
     assert set(features) == QUANTIZED
-    assert wrapper.awq_get_modules_for_scaling(layer, features, {}) == []
+    nodes = wrapper.awq_get_modules_for_scaling(layer, features, {})
+    assert [(get_op_name(layer, node["prev_op"]), [get_op_name(layer, target) for target in node["layers"]])
+            for node in nodes] == EXPECTED_GROUPS
     before = {name: value.clone() for name, value in layer.state_dict().items()}
     processor = AWQProcessor(tokenizer=None, qcfg=AWQConfig(device="cpu", group_size=8, fallback=None),
                              calibration=CalibrationConfig(), gptq_model=wrapper, model=model,
@@ -108,7 +135,7 @@ def test_awq_plain_quantization_retains_all_five_real_projections(position, norm
     named = {name: NamedModule(layer.get_submodule(name), name, "model.layers.0." + name, 0) for name in QUANTIZED}
     state.modules = dict(named)
     # Supply actual native-captured features without the full calibration
-    # scheduler. The real no-group branch and apply_quant run unmocked.
+    # scheduler. The real scale search, fold and apply_quant run unmocked.
     monkeypatch.setattr(processor, "_layer_input_features", lambda state: features)
     with torch.no_grad():
         processor._quantize_layer(0, state)
@@ -116,8 +143,9 @@ def test_awq_plain_quantization_retains_all_five_real_projections(position, norm
     for name, module in named.items():
         assert "q_scales" in module.state and "q_zeros" in module.state
         assert not torch.equal(module.module.weight, before[name + ".weight"])
+    # The searched scales are folded into both pre-norm gains.
     for name in ("input_layernorm.weight", "post_attention_layernorm.weight"):
-        torch.testing.assert_close(layer.state_dict()[name], before[name], rtol=0, atol=0)
+        assert not torch.equal(layer.state_dict()[name], before[name]), name
     # Idempotent completion cannot double-quantize or fold a norm on retry.
     once = {name: value.clone() for name, value in layer.state_dict().items()}
     processor._quantize_layer(0, state)
