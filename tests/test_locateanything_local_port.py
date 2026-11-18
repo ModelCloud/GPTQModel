@@ -670,3 +670,16 @@ def test_definition_selects_owned_loader():
     # Regression: the previous definition selected AutoModel and checkpoint Python.
     assert isinstance(LocateAnythingQModel.loader, LocalModelLoader)
     assert not LocateAnythingQModel.require_trust_remote_code
+
+
+@pytest.mark.parametrize("architecture", ["Qwen2ForCausalLM", "Qwen3ForCausalLM"])
+def test_decoder_uses_vendored_qwen_classes(architecture):
+    from gptqmodel.models.ports.native.qwen2.configuration_qwen2 import Qwen2Config
+    from gptqmodel.models.ports.native.qwen3.configuration_qwen3 import Qwen3Config
+
+    config = tiny_config(architecture)
+    expected = Qwen2Config if architecture == "Qwen2ForCausalLM" else Qwen3Config
+    assert type(config.text_config) is expected
+    model = LocateAnythingForConditionalGeneration(config)
+    for owner in type(model.language_model).__mro__:
+        assert not owner.__module__.startswith("transformers.models."), owner

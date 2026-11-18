@@ -7,7 +7,10 @@
 # accompanying NVIDIA LICENSE applies in addition to this preserved header.
 """Composition config without checkpoint class discovery."""
 
-from transformers import PretrainedConfig, Qwen2Config, Qwen3Config
+from transformers.configuration_utils import PretrainedConfig
+
+from ..native.qwen2.configuration_qwen2 import Qwen2Config
+from ..native.qwen3.configuration_qwen3 import Qwen3Config
 
 
 class MoonViTConfig(PretrainedConfig):
