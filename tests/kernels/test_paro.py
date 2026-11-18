@@ -1551,6 +1551,54 @@ def test_paro_triton_prefill_reads_activations_above_int32_row_stride_product():
     )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or ROCm GPU required")
+@pytest.mark.cuda
+def test_paro_rotation_addresses_rows_above_int32_element_count():
+    """Issue #5196: the fused rotation must index ``row * h`` in 64 bits.
+
+    ``rotation.cuh`` computed the activation and output addresses from an int
+    ``row``, so once ``rows * in_features`` passed 2^31 a long prefill wrapped
+    to a negative element offset and faulted the device before the GEMM ran.
+    """
+    from gptqmodel.utils.paro import apply_paro_rotation, prewarm_paro_rotation_extension
+
+    if not prewarm_paro_rotation_extension(fused_rotation=True, group_size=128, krot=1):
+        pytest.skip("the fused Paro rotation extension is not available")
+
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    if properties.total_memory < 16 * 1024**3:
+        pytest.skip("the overflow regression needs at least 16 GiB of device memory")
+
+    in_features = 8192
+    group_size = 128
+    tail = 8
+    rows = 2**31 // in_features + 1
+    assert rows * in_features > 2**31
+
+    pairs, theta, scales = build_identity_rotation_buffers(
+        in_features=in_features, group_size=group_size, krot=1, dtype=torch.float16
+    )
+    pairs, scales = pairs.cuda(), scales.cuda()
+    # A non-identity rotation, as in any real Paro checkpoint, so the fused
+    # rotation kernel runs instead of the identity shortcut.
+    theta = torch.rand(theta.shape).mul(3).half().cuda()
+
+    x = torch.zeros(rows, in_features, dtype=torch.float16, device="cuda")
+    x[-tail:] = torch.randn(tail, in_features, dtype=torch.float16, device="cuda")
+
+    with torch.inference_mode():
+        out = apply_paro_rotation(x, pairs, theta, scales=scales, group_size=group_size)
+        torch.cuda.synchronize()
+        expected = apply_paro_rotation_reference(
+            x[-tail:].contiguous(), pairs, theta, scales=scales, group_size=group_size
+        )
+
+    assert out.shape == x.shape
+    assert torch.isfinite(out[-tail:]).all()
+    # Only the tail carries data; a wrapped address leaves it zero or garbage.
+    torch.testing.assert_close(out[-tail:], expected, rtol=0, atol=1e-2)
+
+
 def _paro_module(in_features: int, out_features: int, group_size: int, dtype: torch.dtype) -> ParoLinear:
     """A Paro layer holding real packed codes, zero points, scales and a bias."""
     module = ParoLinear(

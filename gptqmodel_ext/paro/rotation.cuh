@@ -41,7 +41,8 @@ template <> struct RotateAccess<float> {
 
   template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE, bool USE_SCALE>
   __device__ static void load_group(float *__restrict__ x_grp, const float *__restrict__ x,
-                                    const float *__restrict__ scales, const int s, const int h,
+                                    const float *__restrict__ scales, const int64_t s,
+                                    const int64_t h,
                                     const int j, const int g, const int t) {
     const int base0 = g * GROUP_SIZE + t;
     const int base1 = base0 + GROUP_SIZE / 2;
@@ -49,7 +50,7 @@ template <> struct RotateAccess<float> {
     float scale1 = USE_SCALE ? scales[base1] : float(1);
 #pragma unroll
     for (int i = 0; i < CTA_M; i++) {
-      int row = j * CTA_M + i;
+      const int64_t row = static_cast<int64_t>(j) * CTA_M + i;
       if (row < s) {
         x_grp[t * ROW_STRIDE + i] = x[row * h + base0] * scale0;
         x_grp[(t + GROUP_SIZE / 2) * ROW_STRIDE + i] = x[row * h + base1] * scale1;
@@ -60,7 +61,7 @@ template <> struct RotateAccess<float> {
   template <int KROT, int GROUP_SIZE>
   __device__ static void
   load_coeffs(float reg_theta[KROT], int reg_idx[KROT], const int16_t *__restrict__ idx_ij,
-              const float *__restrict__ theta, const int h, const int g, const int t) {
+              const float *__restrict__ theta, const int64_t h, const int g, const int t) {
 #pragma unroll
     for (int r = 0; r < KROT; r++) {
       reg_theta[r] = theta[r * h / 2 + g * GROUP_SIZE / 2 + t];
@@ -88,13 +89,13 @@ template <> struct RotateAccess<float> {
 
   template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE>
   __device__ static void store_group(float *__restrict__ out, const float *__restrict__ x_grp,
-                                     const int s, const int h, const int j, const int g,
+                                     const int64_t s, const int64_t h, const int j, const int g,
                                      const int t) {
     const int base0 = g * GROUP_SIZE + t;
     const int base1 = base0 + GROUP_SIZE / 2;
 #pragma unroll
     for (int i = 0; i < CTA_M; i++) {
-      int row = j * CTA_M + i;
+      const int64_t row = static_cast<int64_t>(j) * CTA_M + i;
       if (row < s) {
         out[row * h + base0] = x_grp[t * ROW_STRIDE + i];
         out[row * h + base1] = x_grp[(t + GROUP_SIZE / 2) * ROW_STRIDE + i];
@@ -108,7 +109,8 @@ template <typename HalfT, typename Half2T, typename Traits> struct RotateAccessH
 
   template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE, bool USE_SCALE>
   __device__ static void load_group(HalfT *__restrict__ x_grp, const HalfT *__restrict__ x,
-                                    const HalfT *__restrict__ scales, const int s, const int h,
+                                    const HalfT *__restrict__ scales, const int64_t s,
+                                    const int64_t h,
                                     const int j, const int g, const int t) {
     static_assert((ROW_STRIDE % 2) == 0, "ROW_STRIDE must be even for vectorized half access");
     const int offset = GROUP_SIZE * g + 2 * t;
@@ -124,7 +126,7 @@ template <typename HalfT, typename Half2T, typename Traits> struct RotateAccessH
 
 #pragma unroll
     for (int i = 0; i < CTA_M; i++) {
-      int row = j * CTA_M + i;
+      const int64_t row = static_cast<int64_t>(j) * CTA_M + i;
       if (row < s) {
         Half2T x2 = *reinterpret_cast<const Half2T *>(x + row * h + offset);
         HalfT lo = Traits::hmul(Traits::low(x2), scale_i);
@@ -138,7 +140,7 @@ template <typename HalfT, typename Half2T, typename Traits> struct RotateAccessH
   template <int KROT, int GROUP_SIZE>
   __device__ static void
   load_coeffs(float reg_theta[KROT], int reg_idx[KROT], const int16_t *__restrict__ idx_ij,
-              const HalfT *__restrict__ theta, const int h, const int g, const int t) {
+              const HalfT *__restrict__ theta, const int64_t h, const int g, const int t) {
 #pragma unroll
     for (int r = 0; r < KROT; r++) {
       reg_theta[r] = Traits::to_float(theta[r * h / 2 + g * GROUP_SIZE / 2 + t]);
@@ -175,13 +177,13 @@ template <typename HalfT, typename Half2T, typename Traits> struct RotateAccessH
 
   template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE>
   __device__ static void store_group(HalfT *__restrict__ out, const HalfT *__restrict__ x_grp,
-                                     const int s, const int h, const int j, const int g,
+                                     const int64_t s, const int64_t h, const int j, const int g,
                                      const int t) {
     static_assert((ROW_STRIDE % 2) == 0, "ROW_STRIDE must be even for vectorized half access");
     const int base = GROUP_SIZE * g + 2 * t;
 #pragma unroll
     for (int i = 0; i < CTA_M; i++) {
-      int row = j * CTA_M + i;
+      const int64_t row = static_cast<int64_t>(j) * CTA_M + i;
       if (row < s) {
         Half2T out2;
         out2.x = x_grp[(2 * t) * ROW_STRIDE + i];
@@ -235,8 +237,8 @@ struct RotateAccessBFloat16FloatWorkspace {
   template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE, bool USE_SCALE>
   __device__ static void load_group(float *__restrict__ x_grp,
                                     const __nv_bfloat16 *__restrict__ x,
-                                    const __nv_bfloat16 *__restrict__ scales, const int s,
-                                    const int h, const int j, const int g, const int t) {
+                                    const __nv_bfloat16 *__restrict__ scales, const int64_t s,
+                                    const int64_t h, const int j, const int g, const int t) {
     static_assert((ROW_STRIDE % 2) == 0, "ROW_STRIDE must be even for vectorized access");
     const int offset = GROUP_SIZE * g + 2 * t;
     float2 scale_pair;
@@ -247,7 +249,7 @@ struct RotateAccessBFloat16FloatWorkspace {
     }
 #pragma unroll
     for (int i = 0; i < CTA_M; i++) {
-      int row = j * CTA_M + i;
+      const int64_t row = static_cast<int64_t>(j) * CTA_M + i;
       if (row < s) {
         float2 x_pair =
             __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(x + row * h + offset));
@@ -260,7 +262,7 @@ struct RotateAccessBFloat16FloatWorkspace {
   template <int KROT, int GROUP_SIZE>
   __device__ static void load_coeffs(float reg_theta[KROT], int reg_idx[KROT],
                                      const int16_t *__restrict__ idx_ij,
-                                     const __nv_bfloat16 *__restrict__ theta, const int h,
+                                     const __nv_bfloat16 *__restrict__ theta, const int64_t h,
                                      const int g, const int t) {
 #pragma unroll
     for (int r = 0; r < KROT; r++) {
@@ -299,13 +301,14 @@ struct RotateAccessBFloat16FloatWorkspace {
 
   template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE>
   __device__ static void store_group(__nv_bfloat16 *__restrict__ out,
-                                     const float *__restrict__ x_grp, const int s, const int h,
+                                     const float *__restrict__ x_grp, const int64_t s,
+                                     const int64_t h,
                                      const int j, const int g, const int t) {
     static_assert((ROW_STRIDE % 2) == 0, "ROW_STRIDE must be even for vectorized access");
     const int base = GROUP_SIZE * g + 2 * t;
 #pragma unroll
     for (int i = 0; i < CTA_M; i++) {
-      int row = j * CTA_M + i;
+      const int64_t row = static_cast<int64_t>(j) * CTA_M + i;
       if (row < s) {
         *reinterpret_cast<__nv_bfloat162 *>(out + row * h + base) =
             __floats2bfloat162_rn(x_grp[(2 * t) * ROW_STRIDE + i],
