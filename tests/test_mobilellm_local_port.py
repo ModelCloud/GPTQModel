@@ -556,7 +556,7 @@ def test_low_precision_rotary_frequency_stays_fp32_after_move_and_reload(tiny_co
 @pytest.mark.parametrize("sharing,shared_embedding,offload,kv,bias", [
     (False, False, False, 2, False), (True, False, True, 1, True),
     (False, True, True, 4, True), (True, True, False, 2, False)])
-def test_public_plain_awq_pack_infer_two_safetensors_cycles(tiny_config, tmp_path, sharing, shared_embedding, offload, kv, bias):
+def test_public_awq_scale_search_pack_infer_two_safetensors_cycles(tiny_config, tmp_path, sharing, shared_embedding, offload, kv, bias):
     from gptqmodel import GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
@@ -598,7 +598,10 @@ def test_public_plain_awq_pack_infer_two_safetensors_cycles(tiny_config, tmp_pat
         torch.testing.assert_close(continued.logits, expected[:, 3:], rtol=0.002, atol=0.002)
     snapshot = {key: value.clone() for key, value in wrapper.model.state_dict().items()}
     dense_keys = {key for key in native_state if not any(key.startswith(name + ".") for name in packed)}
-    for key in dense_keys:
+    # Scale search folds the q/k/v and gate/up input scales into the decoder norms.
+    folded = {key for key in dense_keys if key.startswith("model.layers.") and "layernorm" in key}
+    assert any(not torch.equal(snapshot[key], native_state[key]) for key in folded)
+    for key in dense_keys - folded:
         torch.testing.assert_close(snapshot[key], native_state[key], atol=0, rtol=0)
     for cycle in range(2):
         destination = tmp_path / f"quantized-{cycle}"
