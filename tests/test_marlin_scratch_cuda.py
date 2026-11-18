@@ -19,7 +19,7 @@ def require_dtype(dtype, method="gptq"):
     if torch.version.hip is not None:
         pytest.skip("Marlin has no ROCm kernel")
     major, minor = torch.cuda.get_device_capability()
-    if (major, minor) < (7, 5) or ((dtype == torch.bfloat16 or method == "awq") and major < 8):
+    if major < 8:
         pytest.skip("Unsupported Marlin device/dtype combination")
     if not marlin_utils.marlin_runtime_available(dtype):
         pytest.fail(marlin_utils.marlin_runtime_error(dtype))

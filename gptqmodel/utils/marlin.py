@@ -46,7 +46,7 @@ _MARLIN_REQUIRED_CUDA_HEADERS = (
 
 
 def _marlin_capability_supported(major: int, minor: int) -> bool:
-    return major > 7 or (major == 7 and minor >= 5)
+    return major >= 8
 
 
 def _marlin_all_visible_devices_supported(min_capability: Tuple[int, int]) -> bool:
@@ -105,7 +105,7 @@ def _marlin_environment_error() -> str:
     except Exception as exc:  # pragma: no cover - depends on host CUDA runtime
         return f"Marlin kernel failed to query CUDA device capability: {exc}"
     if not _marlin_capability_supported(major, minor):
-        return f"Marlin kernel requires compute capability >= 7.5, got {major}.{minor}."
+        return f"Marlin kernel requires compute capability >= 8.0, got {major}.{minor}."
     return ""
 
 

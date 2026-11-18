@@ -59,9 +59,7 @@ from ._compile_support import COMPILE_LEVEL
 
 log = setup_logger()
 
-# SM 7.5 is supported through the FP16-only Turing path.
-_MARLIN_SM75_CAPABILITY = (7, 5)
-_MARLIN_MIN_CAPABILITY = _MARLIN_SM75_CAPABILITY
+_MARLIN_MIN_CAPABILITY = (8, 0)
 
 
 def _g_idx_is_contiguous(g_idx: Optional[torch.Tensor], in_features: int, group_size: int) -> bool:
@@ -313,22 +311,6 @@ class MarlinLinear(GPTQQuantLinear):
         out_features = args.get("out_features")
         desc_act = args.get("desc_act", False)
         group_size = args.get("group_size", -1)
-        device = args.get("device")
-        dtype = args.get("dtype")
-        if dtype == torch.bfloat16 and not IS_ROCM:
-            if isinstance(device, torch.device) and device.type == "cuda":
-                capabilities = (torch.cuda.get_device_capability(device),)
-            elif device == DEVICE.CUDA:
-                capabilities = tuple(
-                    torch.cuda.get_device_capability(index)
-                    for index in range(torch.cuda.device_count())
-                )
-            else:
-                capabilities = ()
-            if _MARLIN_SM75_CAPABILITY in capabilities:
-                return False, NotImplementedError(
-                    "GPTQ Marlin on compute capability 7.5 requires dtype=torch.float16."
-                )
         if in_features is None or out_features is None:
             return True, None
 
@@ -361,7 +343,7 @@ class MarlinLinear(GPTQQuantLinear):
                 raise NotImplementedError("Marlin kernel is not supported on ROCm.")
             if isinstance(device, DEVICE):
                 if not _marlin_all_visible_devices_supported(_MARLIN_MIN_CAPABILITY):
-                    raise NotImplementedError("Marlin kernel only supports compute capability >= 7.5.")
+                    raise NotImplementedError("Marlin kernel only supports compute capability >= 8.0.")
                 return
             target = device if isinstance(device, torch.device) else device.to_torch_device()
             try:
@@ -375,15 +357,11 @@ class MarlinLinear(GPTQQuantLinear):
 
     def post_init(self):
         device = self.qweight.device
-        capability = marlin_validate_runtime_device(
+        marlin_validate_runtime_device(
             device,
             min_capability=_MARLIN_MIN_CAPABILITY,
             backend_name="GPTQ Marlin",
         )
-        if capability == _MARLIN_SM75_CAPABILITY and self.compute_dtype != torch.float16:
-            raise ValueError(
-                "GPTQ Marlin on compute capability 7.5 requires dtype=torch.float16."
-            )
 
         if not marlin_runtime_available(self.compute_dtype):
             raise ModuleNotFoundError(
