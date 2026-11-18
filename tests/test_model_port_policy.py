@@ -60,8 +60,8 @@ PENDING_STALE_PATTERN_PORTS = frozenset({
     "native/gemma4_unified", "native/gpt_neo", "native/gpt_neox", "native/gptj", "native/hunyuan_vl",
     "native/llama4", "native/minimax_m3_vl", "native/mpt", "native/nemotron_h", "native/nemotron_h_omni",
     "native/olmo3", "native/ovis2", "native/phi3", "native/phi4_multimodal", "native/qwen2_5_vl", "native/qwen2_vl",
-    "native/voxtral", "native/zamba", "native/zamba2", "nemotron_labs_diffusion", "ovis2_6_moe", "phi4",
-    "ricursive", "telechat2", "xing4_0", "xverse",
+    "native/timm_wrapper", "native/voxtral", "native/zamba", "native/zamba2", "nemotron_labs_diffusion",
+    "ovis2_6_moe", "phi4", "ricursive", "telechat2", "xing4_0", "xverse",
 })
 
 STALE_PATTERNS = re.compile(
