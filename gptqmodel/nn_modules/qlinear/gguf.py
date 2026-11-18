@@ -1201,7 +1201,21 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     # Q6_K, i.e. the default `q_k_m`). Q2_K/Q3_K and the remaining codebook
     # formats dequantize through numpy on the host, so they cannot be captured;
     # `supports_graph_capture()` answers that per instance (#5014).
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    #
+    # Compile level: CPU, torch 2.16.0.dev20261021+cpu: eager=True,
+    # graph_breaks=0, dynamo/aot_eager/inductor all reach it after two fixes --
+    # the AVX512-BF16/oneDNN capability probes now publish a process-constant
+    # bool instead of reading `/proc/cpuinfo` (`open()`) and mutating the global
+    # matmul precision under an `RLock` inside the traced region, and
+    # `cpu_bf16x3_matmul()` no longer enters that scope while tracing (the
+    # compiled path runs IEEE FP32, which is the more accurate direction and far
+    # inside the 4-bit quantization error).
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for this kernel in this change; the INDUCTOR level is opt-in via "
+        "optimize() (#4984 policy unchanged)."
+    )
     SUPPORTS_GRAPH_CAPTURE = True
 
     #: GGUF tensor types whose eager forward is safe under an explicit

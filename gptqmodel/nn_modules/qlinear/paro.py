@@ -95,10 +95,23 @@ def awq_gemm_bf16_supported(device: torch.device) -> bool:
 class ParoLinear(AwqTorchLinear):
     """Run Paro inference by rotating inputs and reusing AWQ packed GEMM."""
 
-    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
-    # ``torch.cuda.graph`` capture both run with matching output. The rotation
-    # buffers are validated in ``post_init``; dynamo stops at EAGER on
-    # ``tensor.is_inference()``.
+    # Eager and an explicit ``torch.cuda.graph`` capture both run with matching
+    # output (measured on sm_80, torch 2.15.0.dev20260928+cu130); the rotation
+    # buffers are validated in ``post_init``.
+    #
+    # CPU stays ``EAGER`` (measured on torch 2.16.0.dev20261021+cpu). The CPU
+    # paths (`_forward_cpu_avx512`, `_forward_cpu_aten`) enter
+    # ``self._cpu_transform_lock`` -- an ``RLock`` dynamo cannot enter, a hard
+    # graph break -- because ``_ensure_cpu_layout`` rewrites the packed
+    # ``qweight``/``qzeros``/``scales_and_zeros`` buffers in place and must not
+    # interleave with a concurrent ``state_dict()``/``load_state_dict()``
+    # (#4885). Unlike the GPTQ/AWQ fused kernels, Paro picks the CPU layout
+    # lazily per activation dtype on the first forward and falls back to dense
+    # dequantization when the layout is absent, so there is no
+    # ``post_init()``-built layout a traced graph could read instead: skipping
+    # the lock would silently change which kernel runs. Making this compilable
+    # needs a ``post_init()``-built CPU layout per supported dtype, which the
+    # kernel does not have today.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
     SUPPORTS_GRAPH_CAPTURE = True
 

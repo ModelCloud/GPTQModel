@@ -49,6 +49,10 @@ class VPTQLinear(WeightOnlyQuantLinear):
     # inductor and reduce-overhead pass, and an explicit torch.cuda.graph
     # capture succeeds with output matching eager.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all pass. CUDA-graph capture is CUDA-only, so
+    # the portable CPU forward's ceiling is INDUCTOR.
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
     SUPPORTS_GRAPH_CAPTURE = True
     # No measured static-cache win yet: AUTO selects the VPTQ CUDA kernel, and
     # the issue's sweep found the forced compile there slower than eager

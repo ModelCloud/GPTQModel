@@ -459,6 +459,10 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
     # packing branch is never taken on a device. (The old static `data_ptr()`
     # hit came from a comment, not an executed call.)
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    # CPU, torch 2.16.0.dev20261021+cpu: the CPU forward is plain tensor
+    # math and reaches ``INDUCTOR`` (dynamo/aot_eager/inductor pass); only
+    # the CUDA path is capture-safe, so the base stays ``CUDAGRAPH``.
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
     SUPPORTS_GRAPH_CAPTURE = True
     # ... and the #4669 policy flag follows the capability: a static-cache
     # `generate()` compiles this forward to one graph with zero breaks and the
