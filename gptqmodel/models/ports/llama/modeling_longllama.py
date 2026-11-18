@@ -17,60 +17,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PyTorch LongLLaMA model."""
+"""PyTorch LongLLaMA (Focused Transformer) model."""
 
 import math
-from dataclasses import dataclass
 from functools import partial
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Tuple
 
 import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from transformers import initialization as init
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache
+from transformers.cache_utils import Cache, CacheLayerMixin
 from transformers.generation import GenerationMixin
-from transformers.modeling_outputs import (
-    BaseModelOutputWithPast,
-    CausalLMOutputWithPast,
-)
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import (
-    logging,
-)
+from transformers.utils import can_return_tuple, logging
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import OutputRecorder, capture_outputs
 
 from .configuration_longllama import LongLlamaConfig
 from .longllama_utils import LongLlamaMemCache, LongLlamaMemConfig, mem_apply_update
 
 
 logger = logging.get_logger(__name__)
-
-
-@dataclass
-class LongLlamaModelOutputWithPast(BaseModelOutputWithPast):
-    mem_caches: Optional[LongLlamaMemCache] = None
-
-
-def _make_causal_mask(
-    input_ids_shape: torch.Size, dtype: torch.dtype, device: torch.device, past_key_values_length: int = 0
-):
-    bsz, tgt_len = input_ids_shape
-    mask = torch.full((tgt_len, tgt_len), torch.tensor(torch.finfo(dtype).min, device=device), device=device)
-    mask_cond = torch.arange(mask.size(-1), device=device)
-    mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
-    mask = mask.to(dtype)
-    if past_key_values_length > 0:
-        mask = torch.cat([torch.zeros(tgt_len, past_key_values_length, dtype=dtype, device=device), mask], dim=-1)
-    return mask[None, None, :, :].expand(bsz, 1, tgt_len, tgt_len + past_key_values_length)
-
-
-def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] = None):
-    bsz, src_len = mask.size()
-    tgt_len = tgt_len if tgt_len is not None else src_len
-    expanded_mask = mask[:, None, None, :].expand(bsz, 1, tgt_len, src_len).to(dtype)
-    inverted_mask = 1.0 - expanded_mask
-    return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
 
 
 class LongLlamaRMSNorm(nn.Module):
@@ -161,15 +131,21 @@ class LongLlamaAttention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        output_attentions: bool = False,
+        cache_layer: Optional["LongLlamaCacheLayer"] = None,
         use_cache: bool = False,
-        mem_cache: Optional[LongLlamaMemCache] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional["LongLlamaCacheLayer"]]:
+        """FoT attention over the local window plus (optionally) the layer's memory.
+
+        Reads the incoming ``cache_layer`` without mutating it and returns the successor layer state: the local
+        window (only when ``use_cache``) and the memory after any eviction/insertion.
+        """
+        past_local = cache_layer.local if cache_layer is not None else None
+        mem_cache = cache_layer.memory if cache_layer is not None else None
         if attention_mask is None:
             tgt_seq_len = hidden_states.shape[-2]
-            if past_key_value is not None:
-                src_seq_len = past_key_value[0].shape[-2] + tgt_seq_len
+            if past_local is not None:
+                src_seq_len = past_local[0].shape[-2] + tgt_seq_len
             else:
                 src_seq_len = tgt_seq_len
             attention_mask = torch.zeros(
@@ -187,7 +163,7 @@ class LongLlamaAttention(nn.Module):
         position_ids = position_ids[:, None, :, None]
         if position_ids.shape != (key_states.shape[0], 1, key_states.shape[-2], 1):
             raise ValueError("position_ids should match batch and seq_len of the input")
-        mem_no_local_cache = self.mem_config is not None and past_key_value is None and (not use_cache)
+        mem_no_local_cache = self.mem_config is not None and past_local is None and (not use_cache)
         mem_and_local_cache = self.mem_config is not None and use_cache
         use_positionals = self.mem_config is None or self.mem_config.positionals
         if mem_no_local_cache:
@@ -200,11 +176,12 @@ class LongLlamaAttention(nn.Module):
                 values=value_states.to(self.mem_config.cache_dtype),
                 masks=attention_mask[..., -1, :, None],
             )
-        if past_key_value is not None:
-            past_local_cache_size = past_key_value[0].shape[-2]
-            key_states = torch.cat([past_key_value[0], key_states], dim=-2)
-            value_states = torch.cat([past_key_value[1], value_states], dim=-2)
-            position_ids = torch.cat([past_key_value[2], position_ids], dim=-2)
+        if past_local is not None:
+            past_keys, past_values, past_positions = past_local
+            past_local_cache_size = past_keys.shape[-2]
+            key_states = torch.cat([past_keys, key_states], dim=-2)
+            value_states = torch.cat([past_values, value_states], dim=-2)
+            position_ids = torch.cat([past_positions, position_ids], dim=-2)
             if attention_mask.shape[-1] != key_states.shape[-2] and attention_mask.shape[-2] != query_states.shape[-2]:
                 raise ValueError("attention_mask should be provided for all key_states in local context")
             if key_states.shape[-2] > self.max_cache:
@@ -233,7 +210,7 @@ class LongLlamaAttention(nn.Module):
                 value_states = value_states[:, :, num_elems_to_drop:, :]
                 position_ids = position_ids[:, :, num_elems_to_drop:, :]
                 attention_mask = attention_mask[..., num_elems_to_drop:]
-        past_key_value = (key_states, value_states, position_ids) if use_cache else None
+        new_local = (key_states, value_states, position_ids) if use_cache else None
         kv_seq_len = key_states.shape[-2]
         if use_positionals:
             cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
@@ -253,7 +230,7 @@ class LongLlamaAttention(nn.Module):
             attn_output_q = []
             for beg_q in range(0, q_len, attn_grouping_q):
                 end_q = min(beg_q + attn_grouping_q, q_len)
-                if self.config.torch_attention and not output_attentions:
+                if self.config.torch_attention:
                     if mem_cache is not None:
                         attn_keys = torch.concat(
                             [key_states[:, beg_h:end_h], mem_cache.keys[:, beg_h:end_h].to(key_states.dtype)], dim=-2
@@ -340,7 +317,7 @@ class LongLlamaAttention(nn.Module):
         attn_output = attn_output.transpose(1, 2)
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
         attn_output = self.o_proj(attn_output)
-        if not output_attentions:
+        if self.config.torch_attention:
             attn_weights = None
         if mem_no_local_cache:
             if mem_cache is not None:
@@ -349,7 +326,9 @@ class LongLlamaAttention(nn.Module):
                 )
             else:
                 mem_cache = mem_update
-        return (attn_output, attn_weights, past_key_value, mem_cache)
+        if new_local is None and mem_cache is None:
+            return attn_output, attn_weights, None
+        return attn_output, attn_weights, LongLlamaCacheLayer(new_local, mem_cache)
 
 
 class LongLlamaDecoderLayer(nn.Module):
@@ -368,33 +347,127 @@ class LongLlamaDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        output_attentions: Optional[bool] = False,
+        cache_layer: Optional["LongLlamaCacheLayer"] = None,
         use_cache: Optional[bool] = False,
-        mem_cache: Optional[LongLlamaMemCache] = None,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional["LongLlamaCacheLayer"]]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states, self_attn_weights, present_key_value, mem_cache = self.self_attn(
+        hidden_states, _, cache_layer = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
+            cache_layer=cache_layer,
             use_cache=use_cache,
-            mem_cache=mem_cache,
         )
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-        outputs = (hidden_states,)
-        if output_attentions:
-            outputs += (self_attn_weights,)
-        if use_cache:
-            outputs += (present_key_value,)
-        return outputs + (mem_cache,)
+        return residual + hidden_states, cache_layer
+
+
+class LongLlamaCacheLayer(CacheLayerMixin):
+    """One layer of Focused-Transformer state: an unrotated local K/V window with its absolute positions,
+    plus the layer's FoT memory (rotated-as-if-first keys, values and additive padding masks).
+
+    States are replaced, never written in place, so a cache handed to the model stays valid for reuse.
+    """
+
+    def __init__(self, local=None, memory: Optional[LongLlamaMemCache] = None):
+        super().__init__()
+        self.keys, self.values, self.positions = local if local is not None else (None, None, None)
+        self.memory = memory
+        self.is_initialized = local is not None or memory is not None
+
+    @property
+    def local(self):
+        return None if self.keys is None else (self.keys, self.values, self.positions)
+
+    def tensors(self):
+        state = [] if self.keys is None else [self.keys, self.values, self.positions]
+        if self.memory is not None:
+            state += [self.memory.keys, self.memory.values, self.memory.masks]
+        return tuple(state)
+
+    def _map(self, fn):
+        if self.keys is not None:
+            self.keys, self.values, self.positions = (fn(t) for t in (self.keys, self.values, self.positions))
+        if self.memory is not None:
+            self.memory = LongLlamaMemCache(*(fn(t) for t in (self.memory.keys, self.memory.values, self.memory.masks)))
+
+    def lazy_initialization(self, key_states, value_states):
+        raise NotImplementedError("LongLLaMA layers are produced by FoT attention, not by generic K/V updates")
+
+    def update(self, key_states, value_states, *args, **kwargs):
+        raise NotImplementedError("LongLLaMA layers are produced by FoT attention, not by generic K/V updates")
+
+    def get_local_length(self) -> int:
+        return 0 if self.keys is None else self.keys.shape[-2]
+
+    def get_seq_length(self) -> int:
+        if self.positions is not None and self.positions.numel():
+            return int(self.positions.max().item()) + 1
+        return 0 if self.memory is None else self.memory.keys.shape[-2]
+
+    def get_mask_sizes(self, query_length: int) -> tuple[int, int]:
+        return self.get_local_length() + query_length, 0
+
+    def get_max_length(self) -> int:
+        return -1
+
+    @property
+    def batch_size(self) -> int:
+        if self.keys is not None:
+            return self.keys.shape[0]
+        return -1 if self.memory is None else self.memory.keys.shape[0]
+
+    def reset(self) -> None:
+        self.keys = self.values = self.positions = None
+        self.memory = None
+        self.is_initialized = False
+
+    def reorder_cache(self, beam_idx: torch.LongTensor) -> None:
+        self._map(lambda t: t.index_select(0, beam_idx.to(t.device)))
+
+    def batch_repeat_interleave(self, repeats: int) -> None:
+        self._map(lambda t: t.repeat_interleave(repeats, dim=0))
+
+    def batch_select_indices(self, indices: torch.Tensor) -> None:
+        self._map(lambda t: t[indices.to(t.device)])
+
+    def crop(self, tokens_to_remove: int) -> None:
+        raise ValueError("LongLLaMA memory eviction cannot be rolled back by cropping a local cache")
+
+
+class LongLlamaCache(Cache):
+    """Per-layer FoT local window + memory. Not an ordinary rotated-K/V cache: local keys are stored unrotated
+    and re-rotated with window-relative positions on every step, and overflow is moved into memory."""
+
+    def __init__(self, layers: list[LongLlamaCacheLayer]):
+        super().__init__(layers=list(layers))
+
+    @property
+    def is_compileable(self):
+        return False
+
+    @property
+    def is_croppable(self):
+        return False
+
+    @property
+    def is_initialized(self):
+        return bool(self.layers) and self.get_seq_length() > 0
+
+    @property
+    def batch_size(self):
+        return self.layers[0].batch_size if self.layers else -1
+
+    def get_local_length(self) -> int:
+        return self.layers[0].get_local_length() if self.layers else 0
+
+    def crop(self, tokens_to_remove: int) -> None:
+        raise ValueError("LongLLaMA memory eviction cannot be rolled back by cropping a local cache")
 
 
 class LongLlamaPreTrainedModel(PreTrainedModel):
@@ -405,6 +478,10 @@ class LongLlamaPreTrainedModel(PreTrainedModel):
     _no_split_modules = ["LongLlamaDecoderLayer"]
     _skip_keys_device_placement = "past_key_values"
     _keys_to_ignore_on_load_unexpected = ["decoder\\.version"]
+    _can_record_outputs = {
+        "hidden_states": LongLlamaDecoderLayer,
+        "attentions": OutputRecorder(LongLlamaAttention, index=1),
+    }
 
     @torch.no_grad()
     def _init_weights(self, module):
@@ -419,18 +496,42 @@ class LongLlamaPreTrainedModel(PreTrainedModel):
 
 
 def _prepare_pos_ids(past_key_values, batch_size, input_length, device):
-    if past_key_values is not None:
-        if past_key_values[0][2].shape[0] != batch_size:
+    """Continue absolute positions after the local window (FoT keeps no positions for memory)."""
+    if past_key_values is not None and past_key_values.get_local_length():
+        positions = past_key_values.layers[0].positions
+        if positions.shape[0] != batch_size:
             raise ValueError(
-                f"first dimension of past_key_values should match batch size: {batch_size}but got {past_key_values[0][2].shape[0]}"
+                f"first dimension of past_key_values should match batch size: {batch_size}but got {positions.shape[0]}"
             )
-        next_pos = torch.max(past_key_values[0][2].view(batch_size, -1), dim=-1)[0] + 1
+        next_pos = torch.max(positions.view(batch_size, -1), dim=-1)[0] + 1
         next_pos = next_pos.view(batch_size, 1)
     else:
         next_pos = torch.zeros(batch_size, 1, device=device, dtype=torch.long)
     position_ids = torch.arange(0, input_length, dtype=torch.long, device=device).view(1, input_length)
-    position_ids = position_ids + next_pos
-    return position_ids
+    return position_ids + next_pos
+
+
+def _fot_attention_mask(attention_mask, batch_size, query_length, inputs_embeds, past_length):
+    """Additive [bsz, 1, q, past + q] mask: causal over the local window plus 2D key padding.
+
+    FoT attention adds this to scores and then clamps at -1e6, so masked entries are summed (not saturated)
+    exactly as in the source checkpoints' code.
+    """
+    dtype, device = inputs_embeds.dtype, inputs_embeds.device
+    min_value = torch.finfo(dtype).min
+    mask = None
+    if query_length > 1:
+        causal = torch.full((query_length, query_length), min_value, device=device)
+        index = torch.arange(query_length, device=device)
+        causal.masked_fill_(index < (index + 1).view(query_length, 1), 0)
+        causal = causal.to(dtype)
+        if past_length > 0:
+            causal = torch.cat([torch.zeros(query_length, past_length, dtype=dtype, device=device), causal], dim=-1)
+        mask = causal[None, None].expand(batch_size, 1, query_length, query_length + past_length)
+    padding = attention_mask[:, None, None, :].expand(batch_size, 1, query_length, attention_mask.shape[-1])
+    inverted = 1.0 - padding.to(dtype)
+    padding = inverted.masked_fill(inverted.to(torch.bool), min_value).to(device)
+    return padding if mask is None else padding + mask
 
 
 class LongLlamaModel(LongLlamaPreTrainedModel):
@@ -450,14 +551,12 @@ class LongLlamaModel(LongLlamaPreTrainedModel):
                 raise ValueError(
                     f"Memory layer ids should be between 0 and {config.num_hidden_layers}, got {mem_layer_id}"
                 )
-        layers = []
-        for layer_id in range(config.num_hidden_layers):
-            if layer_id in self.mem_layers:
-                layer = LongLlamaDecoderLayer(config, mem_config=self.mem_config)
-            else:
-                layer = LongLlamaDecoderLayer(config, mem_config=None)
-            layers.append(layer)
-        self.layers = nn.ModuleList(layers)
+        self.layers = nn.ModuleList(
+            [
+                LongLlamaDecoderLayer(config, mem_config=self.mem_config if layer_id in self.mem_layers else None)
+                for layer_id in range(config.num_hidden_layers)
+            ]
+        )
         self.norm = LongLlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.gradient_checkpointing = False
         self.post_init()
@@ -468,265 +567,74 @@ class LongLlamaModel(LongLlamaPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    def _prepare_decoder_attention_mask(self, attention_mask, input_shape, inputs_embeds, past_key_values_length):
-        combined_attention_mask = None
-        if input_shape[-1] > 1:
-            combined_attention_mask = _make_causal_mask(
-                input_shape,
-                inputs_embeds.dtype,
-                device=inputs_embeds.device,
-                past_key_values_length=past_key_values_length,
-            )
-        if attention_mask is not None:
-            expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(
-                inputs_embeds.device
-            )
-            combined_attention_mask = (
-                expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
-            )
-        return combined_attention_mask
-
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(
         self,
-        input_ids: torch.LongTensor = None,
+        input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        past_key_values: Optional[LongLlamaCache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        mem_caches: Optional[Tuple[Optional[LongLlamaMemCache]]] = None,
-    ) -> Union[Tuple, LongLlamaModelOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
-        if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")
-        elif input_ids is not None:
-            batch_size, seq_length = input_ids.shape
-        elif inputs_embeds is not None:
-            batch_size, seq_length, _ = inputs_embeds.shape
-        else:
-            raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
-        seq_length_with_past = seq_length
-        past_key_values_length = 0
-        if past_key_values is not None:
-            past_key_values_length = past_key_values[0][0].shape[-2]
-            seq_length_with_past = seq_length_with_past + past_key_values_length
-        if position_ids is None:
-            device = input_ids.device if input_ids is not None else inputs_embeds.device
-            position_ids = _prepare_pos_ids(past_key_values, batch_size, seq_length, device)
-        else:
-            position_ids = position_ids.view(-1, seq_length).long()
+        **kwargs,
+    ) -> BaseModelOutputWithPast:
+        """One FoT window. Returns a *new* `LongLlamaCache` (local window when `use_cache`, plus memory) or
+        `None` when no layer holds state; the incoming cache is left untouched."""
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+        if past_key_values is not None and not isinstance(past_key_values, LongLlamaCache):
+            raise ValueError("LongLLaMA requires its own six-tensor memory/local cache")
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+        batch_size, seq_length = inputs_embeds.shape[:2]
+        past_length = past_key_values.get_local_length() if past_key_values is not None else 0
+        if position_ids is None:
+            position_ids = _prepare_pos_ids(past_key_values, batch_size, seq_length, inputs_embeds.device)
+        else:
+            position_ids = position_ids.view(-1, seq_length).long()
         if attention_mask is None:
             attention_mask = torch.ones(
-                (batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device
+                (batch_size, seq_length + past_length), dtype=torch.bool, device=inputs_embeds.device
             )
-        attention_mask = self._prepare_decoder_attention_mask(
-            attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
-        )
+        attention_mask = _fot_attention_mask(attention_mask, batch_size, seq_length, inputs_embeds, past_length)
         hidden_states = inputs_embeds
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-                )
-                use_cache = False
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
-        next_decoder_cache = ()
-        next_mem_caches = ()
+        if self.gradient_checkpointing and self.training and use_cache:
+            logger.warning_once("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.")
+            use_cache = False
+        next_layers = []
         for idx, decoder_layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-            past_key_value = past_key_values[idx] if past_key_values is not None else None
-            mem_cache = mem_caches[idx] if mem_caches else None
-            if mem_cache is not None and idx not in self.mem_layers:
+            cache_layer = past_key_values.layers[idx] if past_key_values is not None else None
+            if cache_layer is not None and cache_layer.memory is not None and idx not in self.mem_layers:
                 raise ValueError("Memory cache provided for a non-memory leayer")
             if (
                 self.gradient_checkpointing
                 and self.training
-                and (mem_cache is None)
+                and (cache_layer is None or cache_layer.memory is None)
                 and (idx % self.config.gradient_checkpoint_every_ith == 0)
             ):
-
-                # TF5 installs `_gradient_checkpointing_func` (explicit use_reentrant).
-                layer_outputs = self._gradient_checkpointing_func(
-                    partial(decoder_layer.__call__, output_attentions=output_attentions, use_cache=None, mem_cache=None),
+                # FoT checkpoints every `gradient_checkpoint_every_ith` layer that has no incoming memory, so the
+                # layer itself is not a GradientCheckpointingLayer; use the function Transformers installs.
+                hidden_states, cache_layer = self._gradient_checkpointing_func(
+                    partial(decoder_layer.__call__, cache_layer=None, use_cache=False),
                     hidden_states,
                     attention_mask,
                     position_ids,
-                    None,
                 )
             else:
-                layer_outputs = decoder_layer(
+                hidden_states, cache_layer = decoder_layer(
                     hidden_states,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
-                    past_key_value=past_key_value,
-                    output_attentions=output_attentions,
+                    cache_layer=cache_layer,
                     use_cache=use_cache,
-                    mem_cache=mem_cache,
                 )
-            new_mem_cache = layer_outputs[-1]
-            layer_outputs = layer_outputs[:-1]
-            next_mem_caches += (new_mem_cache,)
-            hidden_states = layer_outputs[0]
-            if use_cache:
-                next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
-            else:
-                next_decoder_cache += (None,)
-            if output_attentions:
-                all_self_attns += (layer_outputs[1],)
+            next_layers.append(cache_layer)
         hidden_states = self.norm(hidden_states)
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
-        next_cache = next_decoder_cache if use_cache else None
-        mem_cache_returned = False
-        for mem_cache in next_mem_caches:
-            if mem_cache is not None:
-                mem_cache_returned = True
-        next_mem_caches = next_mem_caches if mem_cache_returned else None
-        if not return_dict:
-            return tuple(
-                (
-                    v
-                    for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, next_mem_caches]
-                    if v is not None
-                )
-            )
-        return LongLlamaModelOutputWithPast(
-            last_hidden_state=hidden_states,
-            past_key_values=next_cache,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attns,
-            mem_caches=next_mem_caches,
-        )
-
-
-class LongLlamaCache(Cache):
-    """FoT's six tensors per layer, not an ordinary rotated-K/V cache.
-
-    Local K/V are unrotated; memory K/V and padding masks have independent
-    ownership. Updates return a new cache, leaving caller-owned caches intact.
-    """
-
-    def __init__(self, entries):
-        super().__init__(layers=[])
-        self.entries = tuple(entries)
-
-    def __len__(self):
-        return len(self.entries)
-
-    def __iter__(self):
-        return iter(self.entries)
-
-    def __getitem__(self, index):
-        return self.entries[index]
-
-    @property
-    def is_compileable(self):
-        return False
-
-    @property
-    def is_croppable(self):
-        return False
-
-    @property
-    def is_initialized(self):
-        return bool(self.entries) and self.get_seq_length() > 0
-
-    @property
-    def batch_size(self):
-        return self.entries[0][0].shape[0] if self.entries else -1
-
-    def get_seq_length(self, layer_idx=0):
-        positions = self.entries[layer_idx][2]
-        if positions.numel():
-            return int(positions.max().item()) + 1
-        return self.entries[layer_idx][3].shape[-2]
-
-    def reorder_cache(self, beam_idx):
-        self.entries = tuple(tuple(t.index_select(0, beam_idx.to(t.device)) for t in layer) for layer in self.entries)
-
-    def batch_repeat_interleave(self, repeats):
-        self.entries = tuple(tuple(t.repeat_interleave(repeats, dim=0) for t in layer) for layer in self.entries)
-
-    def batch_select_indices(self, indices):
-        self.reorder_cache(indices)
-
-    def reset(self):
-        self.entries = tuple(tuple(t[..., :0, :] for t in layer) for layer in self.entries)
-
-    def crop(self, tokens_to_remove):
-        raise ValueError("LongLLaMA memory eviction cannot be rolled back by cropping a local cache")
-
-
-def _handle_output_of_past_key_values(outputs):
-    batch_size = outputs.last_hidden_state.shape[0]
-    if outputs.past_key_values is None and outputs.mem_caches is None:
-        return None
-    if outputs.past_key_values is None:
-        out_past_key_values = (None,) * len(outputs.mem_caches)
-    else:
-        out_past_key_values = outputs.past_key_values
-    if outputs.mem_caches is None:
-        out_mem_caches = (None,) * len(outputs.past_key_values)
-    else:
-        out_mem_caches = outputs.mem_caches
-    device = outputs.last_hidden_state.device
-    past_key_values = ()
-    for local_cache, mem_cache in zip(out_past_key_values, out_mem_caches):
-        layer = ()
-        if local_cache is not None:
-            assert len(local_cache) == 3
-            layer += local_cache
-        else:
-            layer += (torch.empty(batch_size, 0, 0, 0, device=device),) * 3
-        if mem_cache is not None:
-            layer += (mem_cache.keys, mem_cache.values, mem_cache.masks)
-        else:
-            layer += (torch.empty(batch_size, 0, 0, 0, device=device),) * 3
-        assert len(layer) == 6
-        past_key_values += (layer,)
-    return LongLlamaCache(past_key_values)
-
-
-def _split_past_key_values(past_key_values):
-    if past_key_values is not None and not isinstance(past_key_values, (LongLlamaCache, tuple, list)):
-        raise ValueError("LongLLaMA requires its own six-tensor memory/local cache")
-    local_cache_preset = False
-    mem_caches_present = False
-    if past_key_values is not None:
-        local_caches = ()
-        mem_caches = ()
-        for layer in past_key_values:
-            if len(layer) != 6:
-                raise ValueError(
-                    f"Expected elements of past_key_values to contain 6 elements.First 3 describing local cache and last 3 describing memory cache.Instead got {len(layer)} elements"
-                )
-            else:
-                lk, lv, li, memk, memv, memm = layer
-                if lk.shape[-2] != 0:
-                    local_cache_preset = True
-                    local_caches += ((lk, lv, li),)
-                else:
-                    local_caches += (None,)
-                if memk.shape[-2] != 0:
-                    mem_caches_present = True
-                    mem_caches += (LongLlamaMemCache(keys=memk, values=memv, masks=memm),)
-                else:
-                    mem_caches += (None,)
-    local_caches = local_caches if local_cache_preset else None
-    mem_caches = mem_caches if mem_caches_present else None
-    return (local_caches, mem_caches)
+        next_cache = None
+        if any(layer is not None for layer in next_layers):
+            next_cache = LongLlamaCache([layer or LongLlamaCacheLayer() for layer in next_layers])
+        return BaseModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=next_cache)
 
 
 def _handle_long_input(
@@ -737,23 +645,16 @@ def _handle_long_input(
     past_key_values,
     inputs_embeds,
     use_cache,
-    output_attentions,
-    output_hidden_states,
-    return_dict,
     context_window_length,
     last_context_length,
+    **kwargs,
 ):
-    if output_attentions:
-        logger.warning(
-            "Outputing attentions is not supported in LongLlamaForCausalLM. Attention of the last window will be returned"
-        )
-    past_key_values, mem_caches = _split_past_key_values(past_key_values)
-    if past_key_values is not None and use_cache is False:
+    """Feed all but the last `last_context_length` tokens through FoT memory in context-window chunks."""
+    if past_key_values is not None and not isinstance(past_key_values, LongLlamaCache):
+        raise ValueError("LongLLaMA requires its own six-tensor memory/local cache")
+    local_length = past_key_values.get_local_length() if past_key_values is not None else 0
+    if local_length and use_cache is False:
         raise ValueError("past_key_values it not None should imply use_cache == True")
-    if past_key_values is not None:
-        initial_past_key_values_length = past_key_values[0][0].shape[-2]
-    else:
-        initial_past_key_values_length = 0
     if input_ids is not None:
         batch_size, input_length = input_ids.shape
     else:
@@ -764,94 +665,58 @@ def _handle_long_input(
     if position_ids.shape != (batch_size, input_length):
         raise ValueError(f"Shape of position_ids [{position_ids}] should match [{(batch_size, input_length)}]")
     if attention_mask is not None:
-        attention_mask = attention_mask[..., -(initial_past_key_values_length + input_length) :]
-        if attention_mask is not None and attention_mask.shape != (
-            batch_size,
-            initial_past_key_values_length + input_length,
-        ):
+        attention_mask = attention_mask[..., -(local_length + input_length) :]
+        if attention_mask.shape != (batch_size, local_length + input_length):
             raise ValueError(
                 "Attention mask should be provided for both the local cache and the input",
-                f"Expected shape {(batch_size, initial_past_key_values_length + input_length)},got {attention_mask.shape}.",
+                f"Expected shape {(batch_size, local_length + input_length)},got {attention_mask.shape}.",
             )
     mem_input_length = max(input_length - last_context_length, 0)
     outputs_list = []
-    attn_offset = initial_past_key_values_length
-    if mem_input_length > 0:
-        for i in range(0, mem_input_length, context_window_length):
-            beg, end = (i, min(mem_input_length, i + context_window_length))
-            if attention_mask is not None:
-                if past_key_values is not None:
-                    local_cache_size = past_key_values[0][0].shape[-2]
-                else:
-                    local_cache_size = 0
-                attn_length = attention_mask.shape[-1]
-                attn_beg = beg + attn_offset - local_cache_size
-                attn_end = end + attn_offset
-                assert attn_end <= attn_length
-                assert attn_beg >= 0 and attn_end > attn_beg
-            outputs = model(
-                input_ids=input_ids[..., beg:end] if input_ids is not None else None,
-                attention_mask=attention_mask[..., attn_beg:attn_end] if attention_mask is not None else None,
-                position_ids=position_ids[..., beg:end],
-                past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds[..., beg:end, :] if inputs_embeds is not None else None,
-                use_cache=False if past_key_values is None else use_cache,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=True,
-                mem_caches=mem_caches,
-            )
-            mem_caches = outputs.mem_caches
-            outputs.mem_caches = None
-            past_key_values = outputs.past_key_values
-            outputs.past_key_values = None
-            outputs_list.append(outputs)
-    remaining_input_length = input_length - mem_input_length
+    attn_offset = local_length
+    cache = past_key_values
+    for beg in range(0, mem_input_length, context_window_length):
+        end = min(mem_input_length, beg + context_window_length)
+        local_size = cache.get_local_length() if cache is not None else 0
+        if attention_mask is not None:
+            attn_beg = beg + attn_offset - local_size
+            attn_end = end + attn_offset
+            assert attn_end <= attention_mask.shape[-1]
+            assert attn_beg >= 0 and attn_end > attn_beg
+        outputs = model(
+            input_ids=input_ids[..., beg:end] if input_ids is not None else None,
+            attention_mask=attention_mask[..., attn_beg:attn_end] if attention_mask is not None else None,
+            position_ids=position_ids[..., beg:end],
+            past_key_values=cache,
+            inputs_embeds=inputs_embeds[..., beg:end, :] if inputs_embeds is not None else None,
+            use_cache=use_cache if local_size else False,
+            **kwargs,
+        )
+        cache = outputs.past_key_values
+        outputs_list.append(outputs)
     beg = mem_input_length
-    attn_length = remaining_input_length
-    if past_key_values is not None:
-        attn_length += past_key_values[0][0].shape[-2]
-    attention_mask = attention_mask[..., -attn_length:] if attention_mask is not None else None
+    attn_length = input_length - mem_input_length
+    if cache is not None:
+        attn_length += cache.get_local_length()
     outputs = model(
         input_ids=input_ids[..., beg:] if input_ids is not None else None,
-        attention_mask=attention_mask,
+        attention_mask=attention_mask[..., -attn_length:] if attention_mask is not None else None,
         position_ids=position_ids[..., beg:],
-        past_key_values=past_key_values,
+        past_key_values=cache,
         inputs_embeds=inputs_embeds[..., beg:, :] if inputs_embeds is not None else None,
         use_cache=use_cache,
-        output_attentions=output_attentions,
-        output_hidden_states=output_hidden_states,
-        return_dict=True,
-        mem_caches=mem_caches,
+        **kwargs,
     )
     outputs_list.append(outputs)
-    past_key_values = _handle_output_of_past_key_values(outputs_list[-1])
-    if output_hidden_states:
-        hidden_states = ()
-        for hd in zip(*[x.hidden_states for x in outputs_list]):
-            hidden_states += (torch.cat(hd, dim=-2),)
-    else:
-        hidden_states = None
-    outputs = BaseModelOutputWithPast(
+    hidden_states = None
+    if outputs.hidden_states is not None:
+        hidden_states = tuple(torch.cat(hd, dim=-2) for hd in zip(*[x.hidden_states for x in outputs_list]))
+    return BaseModelOutputWithPast(
         last_hidden_state=torch.concat([x.last_hidden_state for x in outputs_list], dim=-2),
-        past_key_values=past_key_values,
+        past_key_values=outputs.past_key_values,
         hidden_states=hidden_states,
-        attentions=outputs_list[-1].attentions,
+        attentions=outputs.attentions,
     )
-    if not return_dict:
-        outputs = tuple(
-            (
-                v
-                for v in [
-                    outputs.last_hidden_state,
-                    outputs.past_key_values,
-                    outputs.hidden_states,
-                    outputs.attentions,
-                ]
-                if v is not None
-            )
-        )
-    return outputs
 
 
 class LongLlamaForCausalLM(LongLlamaPreTrainedModel, GenerationMixin):
@@ -886,37 +751,25 @@ class LongLlamaForCausalLM(LongLlamaPreTrainedModel, GenerationMixin):
     def get_decoder(self):
         return self.model
 
-    def _has_generation_cache(self, past_key_values):
-        if past_key_values is not None:
-            assert len(past_key_values[0]) == 6
-            return past_key_values[0][0].shape[-2] != 0
-        return False
-
+    @can_return_tuple
     def forward(
         self,
-        input_ids: torch.LongTensor = None,
+        input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        past_key_values: Optional[LongLlamaCache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
         last_context_length: Optional[int] = None,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+        **kwargs,
+    ) -> CausalLMOutputWithPast:
         use_cache = self.config.use_cache if use_cache is None else use_cache
         last_context_length = (
             last_context_length if last_context_length is not None else self.config.last_context_length
         )
         if not 0 < last_context_length <= self.context_window_length:
             raise ValueError("last_context_length must be positive and no larger than the context window")
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
         outputs = _handle_long_input(
             model=self.model,
             input_ids=input_ids,
@@ -925,26 +778,16 @@ class LongLlamaForCausalLM(LongLlamaPreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
             context_window_length=self.context_window_length,
             last_context_length=last_context_length,
+            **kwargs,
         )
-        hidden_states = outputs[0]
-        logits = self.lm_head(hidden_states)
+        logits = self.lm_head(outputs.last_hidden_state)
         loss = None
         if labels is not None:
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
+            shift_logits = logits[..., :-1, :].contiguous().view(-1, self.config.vocab_size)
+            shift_labels = labels[..., 1:].contiguous().view(-1).to(shift_logits.device)
+            loss = CrossEntropyLoss()(shift_logits, shift_labels)
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
@@ -963,7 +806,10 @@ class LongLlamaForCausalLM(LongLlamaPreTrainedModel, GenerationMixin):
         next_sequence_length=None,
         **kwargs,
     ):
-        if self._has_generation_cache(past_key_values):
+        # FoT positions continue the local window and the attention mask must span local cache + input, so the
+        # generic slicing/position logic does not apply.
+        has_local = past_key_values is not None and past_key_values.get_local_length() != 0
+        if has_local:
             if next_sequence_length is not None:
                 input_ids = input_ids[:, -next_sequence_length:]
             elif input_ids.shape[1] > past_key_values.get_seq_length():
@@ -971,7 +817,6 @@ class LongLlamaForCausalLM(LongLlamaPreTrainedModel, GenerationMixin):
         position_ids = kwargs.get("position_ids", None)
         if attention_mask is not None and position_ids is None:
             position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill(position_ids < 0, 0)
         if position_ids is not None:
             position_ids = position_ids[:, -input_ids.shape[1] :].expand(input_ids.shape[0], -1)
         if inputs_embeds is not None and past_key_values is None:

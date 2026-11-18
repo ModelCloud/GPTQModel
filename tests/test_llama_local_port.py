@@ -178,6 +178,7 @@ def _rotate_oracle(states, positions, base=10000):
 @pytest.mark.parametrize("grouping", [None, (1, 2)])
 def test_longllama_attention_memory_eviction_independent_oracle(positionals, sdpa, grouping):
     from gptqmodel.models.ports.llama.longllama_utils import LongLlamaMemCache
+    from gptqmodel.models.ports.llama.modeling_longllama import LongLlamaCacheLayer
 
     torch.manual_seed(247)
     model = local_model(mem_positionals=positionals, torch_attention=sdpa, mem_attention_grouping=grouping).double()
@@ -214,20 +215,21 @@ def test_longllama_attention_memory_eviction_independent_oracle(positionals, sdp
     total_mask = torch.cat((mask[..., 6:], mem_mask.expand(-1, -1, 3, -1)), dim=-1)
     probs = torch.softmax(((q @ keys.transpose(-1, -2)) / 8**0.5 + total_mask).float(), dim=-1).to(x.dtype)
     expected = F.linear((probs @ values).transpose(1, 2).reshape(2, 3, 32), attention.o_proj.weight)
+    incoming = LongLlamaCacheLayer((old_k, old_v, old_pos), memory)
     with torch.inference_mode():
-        actual, _, local, new_memory = attention(
+        actual, _, successor = attention(
             x,
             attention_mask=mask,
             position_ids=positions,
-            past_key_value=(old_k, old_v, old_pos),
+            cache_layer=incoming,
             use_cache=True,
-            mem_cache=memory,
         )
     torch.testing.assert_close(actual, expected, atol=1e-7, rtol=1e-6)
-    torch.testing.assert_close(local[0], k, atol=0, rtol=0)
-    torch.testing.assert_close(new_memory.keys, mem_k.float(), atol=0, rtol=0)
-    assert local[0].shape[-2] == 3 and new_memory.keys.shape[-2] == 8
+    torch.testing.assert_close(successor.keys, k, atol=0, rtol=0)
+    torch.testing.assert_close(successor.memory.keys, mem_k.float(), atol=0, rtol=0)
+    assert successor.keys.shape[-2] == 3 and successor.memory.keys.shape[-2] == 8
     assert memory.keys.shape[-2] == 2, "caller-owned memory must not be changed"
+    assert incoming.keys is old_k and incoming.memory is memory, "caller-owned cache layer must not be changed"
 
 
 @pytest.mark.parametrize("positionals", [False, True])
@@ -248,7 +250,7 @@ def test_long_memory_continuation_generation_and_failure_retry(positionals, cont
         assert isinstance(first.past_key_values, LongLlamaCache)
         assert len(first.hidden_states) == 3 and first.hidden_states[0].shape == (2, 12, 32)
         assert first.past_key_values.get_seq_length() == 12
-        snapshots = [[tensor.clone() for tensor in layer] for layer in first.past_key_values]
+        snapshots = [[tensor.clone() for tensor in layer.tensors()] for layer in first.past_key_values.layers]
         suffix = torch.tensor([[5, 4, 8, 6], [9, 3, 4, 7]])[:, :continuation]
         full_mask = torch.cat((mask, torch.ones_like(suffix)), dim=-1)
         with pytest.raises(ValueError, match="Attention mask"):
@@ -256,8 +258,8 @@ def test_long_memory_continuation_generation_and_failure_retry(positionals, cont
         reference = eager(suffix, attention_mask=full_mask, past_key_values=first.past_key_values).logits
         observed = sdpa(suffix, attention_mask=full_mask, past_key_values=first.past_key_values).logits
         torch.testing.assert_close(observed, reference, atol=2e-6, rtol=3e-5)
-        for actual_layer, expected_layer in zip(first.past_key_values, snapshots):
-            for actual, expected in zip(actual_layer, expected_layer):
+        for actual_layer, expected_layer in zip(first.past_key_values.layers, snapshots, strict=True):
+            for actual, expected in zip(actual_layer.tensors(), expected_layer, strict=True):
                 torch.testing.assert_close(actual, expected, atol=0, rtol=0)
         assert eager.generate(ids[:1], max_new_tokens=3, num_beams=2, eos_token_id=None).shape == (1, 15)
         manual = ids[:1].clone()
@@ -398,8 +400,8 @@ def test_longllama_cache_batch_ownership_reset_and_crop_rejection():
         cache.batch_repeat_interleave(2)
         assert cache.batch_size == 4
         cache.batch_select_indices(torch.tensor([2, 0]))
-        for old, new in zip(first, cache):
-            for a, b in zip(old, new):
+        for old, new in zip(first.layers, cache.layers, strict=True):
+            for a, b in zip(old.tensors(), new.tensors(), strict=True):
                 torch.testing.assert_close(b, a.flip(0), atol=0, rtol=0)
         token = torch.tensor([[6], [5]])
         torch.testing.assert_close(
