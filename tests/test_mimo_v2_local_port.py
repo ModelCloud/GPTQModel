@@ -513,8 +513,9 @@ def test_public_awq_packs_every_decoder_linear_and_two_roundtrips(tmp_path, layo
     # AWQ folds its scales into the decoder input/post-attention norms and
     # compensates the router weight; everything else outside the linears is dense.
     folded = (".input_layernorm.", ".post_attention_layernorm.", ".mlp.gate.weight")
+    dense = ("norm", "mlp.gate.", "sink_bias")
     before = {name: value.clone() for name, value in source.state_dict().items()
-              if (not name.startswith("model.layers.") or any(key in name for key in ("norm", "mlp.gate.", "sink_bias")))
+              if (not name.startswith("model.layers.") or any(key in name for key in dense))
               and not any(key in name for key in folded)}
     norms = {name: value.clone() for name, value in source.state_dict().items()
              if name.startswith("model.layers.") and any(key in name for key in folded[:2])}

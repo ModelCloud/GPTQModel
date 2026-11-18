@@ -99,7 +99,8 @@ def test_awq_scale_folds_preserve_real_dense_moe_and_swa_layers(layout, kv):
     def forward():
         return model(input_ids=ids, use_cache=False).logits
 
-    qkv = ("self_attn.qkv_proj",) if layout == "fused_qkv" else ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")
+    split = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")
+    qkv = ("self_attn.qkv_proj",) if layout == "fused_qkv" else split
     for index, layer in enumerate(model.model.layers):
         # AWQProcessor captures the MoE root input for the routed gate/up group.
         root = {}

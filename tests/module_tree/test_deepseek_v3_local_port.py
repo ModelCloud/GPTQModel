@@ -160,15 +160,15 @@ def test_awq_scale_folds_preserve_real_mla_dense_and_moe_layers(tmp_path, model_
                 ("mlp.up_proj", ("mlp.down_proj",), ()),
             }
         else:
-            routed = [f"mlp.experts.{e}" for e in range(config.n_routed_experts)]
+            owners = [*(f"mlp.experts.{e}" for e in range(config.n_routed_experts)), "mlp.shared_experts"]
             # Routed and shared experts read one norm and fold as one group;
             # the router reads it too and is compensated.
             expected.add((
                 "post_attention_layernorm",
-                tuple(f"{owner}.{proj}_proj" for owner in [*routed, "mlp.shared_experts"] for proj in ("gate", "up")),
+                tuple(f"{owner}.{proj}_proj" for owner in owners for proj in ("gate", "up")),
                 ("mlp.gate",),
             ))
-            expected |= {(f"{owner}.up_proj", (f"{owner}.down_proj",), ()) for owner in [*routed, "mlp.shared_experts"]}
+            expected |= {(f"{owner}.up_proj", (f"{owner}.down_proj",), ()) for owner in owners}
         assert groups == expected
         folded = {target for _, targets, _ in checked for target in targets}
         assert not folded & {"self_attn.q_b_proj", "self_attn.kv_b_proj", "self_attn.o_proj"}
