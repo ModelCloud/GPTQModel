@@ -8,13 +8,14 @@ from pathlib import Path
 import pytest
 import torch
 from awq_neutrality import assert_awq_folds_neutral
-from transformers import FalconConfig, FalconForCausalLM
 
 from gptqmodel.models.auto import MODEL_MAP_CASEFOLD
 from gptqmodel.models.definitions.rw import FalconQModel, RwgQModel
 from gptqmodel.models.fusable import require_fusable_config
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.ports.native.falcon.configuration_falcon import FalconConfig
+from gptqmodel.models.ports.native.falcon.modeling_falcon import FalconForCausalLM
 from gptqmodel.models.ports.rw import RWConfig
 from tests.port_assets import read_port_json
 

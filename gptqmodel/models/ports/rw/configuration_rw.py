@@ -3,7 +3,7 @@
 # Historical RW config semantics: TII, BigScience and Hugging Face (Apache-2.0).
 """Translate the two historical RW layouts to native Falcon, without auto_map."""
 
-from transformers.models.falcon.configuration_falcon import FalconConfig
+from ..native.falcon.configuration_falcon import FalconConfig
 
 
 class RWConfig(FalconConfig):

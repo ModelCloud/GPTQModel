@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Use native Falcon, correcting only its eager ALiBi double-bias boundary."""
 
-from transformers.models.falcon.modeling_falcon import FalconAttention, FalconForCausalLM
+from ..native.falcon.modeling_falcon import FalconAttention, FalconForCausalLM
 
 
 class RWAlibiAttention(FalconAttention):
