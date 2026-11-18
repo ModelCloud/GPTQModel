@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Behavioral qualification for the owned LocateAnything port."""
 
+import ipaddress
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,7 +29,6 @@ from gptqmodel.utils.image import ImageFetchError, load_image_from_url
 from tests import test_image_fetch
 
 
-PORT = Path(__file__).parents[1] / "gptqmodel/models/ports/locateanything"
 image_server = test_image_fetch.image_server
 
 
@@ -178,6 +177,22 @@ def test_decoder_matches_independent_equations(implementation, kv_heads, mtp):
         assert (actual - causal).abs().max() > 1e-3
 
 
+def test_sliding_window_follows_native_layer_types():
+    ids = torch.tensor([[1, 7, 9, 11, 4]])
+    model = tiny_model()
+    full = decoder_oracle(model, ids, torch.ones(1, 5, 5, dtype=torch.bool).tril())
+    text = model.language_model.config
+    text.sliding_window = 2
+    text.layer_types = ["full_attention"] * 2  # use_sliding_window=False / max_window_layers >= depth
+    torch.testing.assert_close(model.language_model(ids).logits, full, atol=6e-7, rtol=2e-5)
+    text.layer_types = ["sliding_attention"] * 2
+    banded = torch.ones(1, 5, 5, dtype=torch.bool).tril().triu(-1)
+    torch.testing.assert_close(model.language_model(ids).logits, decoder_oracle(model, ids, banded), atol=6e-7, rtol=2e-5)
+    text.layer_types = ["full_attention", "sliding_attention"]
+    with pytest.raises(NotImplementedError, match="mixed"):
+        model.language_model(ids)
+
+
 @pytest.mark.parametrize("implementation", ["sdpa", "eager"])
 def test_vision_and_image_injection_match_independent_equations(implementation):
     model = tiny_model(implementation=implementation)
@@ -301,8 +316,8 @@ def test_processor_http_image_failure_then_retry(tmp_path, monkeypatch, image_se
     with pytest.raises(ImageFetchError, match="private or loopback"):
         processor.process_vision_info(messages)
 
-    def fetch_from_test_server(url):
-        return load_image_from_url(url, allow_private_addresses=True)
+    def fetch_from_test_server(url, **kwargs):
+        return load_image_from_url(url, allow_private_addresses=True, **kwargs)
 
     monkeypatch.setattr(processing_locateanything, "load_image_from_url", fetch_from_test_server)
     with pytest.raises(ImageFetchError, match="HTTP 404"):
@@ -313,23 +328,88 @@ def test_processor_http_image_failure_then_retry(tmp_path, monkeypatch, image_se
     assert images[0].getpixel((0, 0)) == (17, 34, 51)
 
 
-def test_processor_missing_lmdb_preserves_path_and_can_retry_with_pil(tmp_path, monkeypatch):
-    processor = LocateAnythingProcessor(LocateAnythingImageProcessor(patch_size=2), write_tokenizer(tmp_path))
+def test_processor_remote_media_uses_bounded_fetch(tmp_path, monkeypatch):
+    calls = []
 
-    def unexpected_open(*args, **kwargs):
-        raise AssertionError("a missing LMDB path was rewritten and opened")
+    def fake_image(url, **kwargs):
+        calls.append((url, kwargs))
+        return Image.new("RGBA", (4, 4), (10, 20, 30, 255))
 
-    monkeypatch.setitem(sys.modules, "cv2", SimpleNamespace())
-    monkeypatch.setitem(sys.modules, "lmdb", SimpleNamespace(open=unexpected_open))
-    path = "/home/zhidingy/workspace/libs/eagle/Eagle2/missing.lmdb"
-    record = {"lmdb_file": path, "lmdb_key": "image"}
-    messages = [{"role": "user", "content": [{"type": "image", "image": record}]}]
-    with pytest.raises(ValueError, match="LMDB file .* does not exist"):
-        processor.process_vision_info(messages)
-    assert record == {"lmdb_file": path, "lmdb_key": "image"}
-    image = Image.new("RGB", (4, 4), (23, 74, 131))
-    images, _ = processor.process_vision_info([{"role": "user", "content": [{"type": "image", "image": image}]}])
-    assert images[0].getpixel((0, 0)) == (23, 74, 131)
+    def fake_bytes(url, **kwargs):
+        calls.append((url, kwargs))
+        return b"video-bytes"
+
+    def fake_reader(ele):
+        path = Path(ele["video"])
+        assert path.suffix == ".mp4" and path.read_bytes() == b"video-bytes"
+        return torch.zeros(2, 3, 4, 4, dtype=torch.uint8), 2.0, [0.0, 0.5]
+
+    monkeypatch.setattr(processing_locateanything, "load_image_from_url", fake_image)
+    monkeypatch.setattr(processing_locateanything, "load_bytes_from_url", fake_bytes)
+    monkeypatch.setitem(processing_locateanything.VIDEO_READER_BACKENDS, "torchvision", fake_reader)
+    cap = processing_locateanything.REMOTE_MEDIA_MAX_BYTES
+    image = processing_locateanything.fetch_image({"image": "https://example.com/a.png"})
+    assert image.mode == "RGB" and image.getpixel((0, 0)) == (10, 20, 30)
+    video, fps, stamps = processing_locateanything.fetch_video(
+        {"video": "https://example.com/v.mp4?x=1"}, return_video_sample_fps=True)
+    assert video.shape == (2, 3, 4, 4) and fps == 2.0 and stamps == [0.0, 0.5]
+    assert calls == [("https://example.com/a.png", {"max_bytes": cap}),
+                     ("https://example.com/v.mp4?x=1", {"max_bytes": cap})]
+
+
+def test_remote_fetch_streams_with_byte_cap_and_revalidates_redirects(monkeypatch):
+    from gptqmodel.utils import image as image_utils
+
+    class FakeResponse:
+        def __init__(self, status=200, headers=None, chunks=0):
+            self.status_code, self.headers, self.reason = status, headers or {}, "OK"
+            self.is_redirect = status in (301, 302)
+            self.chunks, self.read = chunks, 0
+
+        def iter_content(self, chunk_size):
+            for _ in range(self.chunks):
+                self.read += 1
+                yield b"\0" * chunk_size
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    responses, requests_seen = [], []
+
+    def fake_get(url, **kwargs):
+        requests_seen.append((url, kwargs["stream"], kwargs["allow_redirects"]))
+        return responses.pop(0)
+
+    monkeypatch.setattr(image_utils.requests, "get", fake_get)
+    monkeypatch.setattr(image_utils, "_resolve_host_addresses",
+                        lambda host, port: [ipaddress.ip_address("93.184.216.34" if host == "example.com" else host)])
+    cap = 4 * 64 * 1024
+    download = lambda url: image_utils._download_image_bytes_in_worker(  # noqa: E731
+        url, timeout=(1.0, 1.0), max_bytes=cap, deadline=float("inf"), total_timeout=1.0)
+
+    body = FakeResponse(chunks=1000)  # no Content-Length: the cap must stop the stream itself
+    responses.append(body)
+    with pytest.raises(image_utils._FetchFailure, match="byte limit"):
+        download("https://example.com/big.png")
+    assert body.read == 5 and requests_seen == [("https://example.com/big.png", True, False)]
+
+    responses.append(FakeResponse(headers={"Content-Length": str(cap + 1)}, chunks=1))
+    with pytest.raises(image_utils._FetchFailure, match="byte limit"):
+        download("https://example.com/declared.png")
+
+    responses.append(FakeResponse(302, {"Location": "http://169.254.169.254/latest"}))
+    with pytest.raises(image_utils._FetchFailure, match="link-local"):
+        download("https://example.com/redirect.png")
+    assert requests_seen[-1] == ("https://example.com/redirect.png", True, False) and not responses
+
+    with pytest.raises(image_utils._FetchFailure, match="scheme"):
+        download("ftp://example.com/a.png")
 
 
 def test_localization_sampler_patterns_and_weighted_coordinate_selection():

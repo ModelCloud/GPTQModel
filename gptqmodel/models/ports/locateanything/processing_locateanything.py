@@ -16,20 +16,17 @@
 Processor class for LocateAnything.
 """
 
-import base64
 import math
 import os
 import re
+import tempfile
 import time
-import warnings
 from functools import lru_cache
-from io import BytesIO
 from typing import Any, List, Optional, Union
+from urllib.parse import urlsplit
 
 import numpy as np
 import torch
-import torchvision
-from packaging import version
 from PIL import Image
 from torchvision import io, transforms
 from torchvision.transforms import InterpolationMode
@@ -45,7 +42,8 @@ from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpa
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.utils import logging
 
-from ....utils.image import load_image_from_url
+from ....utils.image import fetch_image as _fetch_local_image
+from ....utils.image import load_bytes_from_url, load_image_from_url
 
 
 logger = logging.get_logger(__name__)
@@ -53,80 +51,30 @@ logger = logging.get_logger(__name__)
 FPS = 2.0
 MAX_FRAMES = 64
 VIDEO_TOTAL_PIXELS = 25913856  # Override per video via video_total_pixels, never environment.
-logger.info(f"set VIDEO_TOTAL_PIXELS: {VIDEO_TOTAL_PIXELS}")
+# Upper bound for one remote image or video download.
+REMOTE_MEDIA_MAX_BYTES = 64 * 1024 * 1024
 
 
 def to_rgb(pil_image: Image.Image) -> Image.Image:
-      if pil_image.mode == 'RGBA':
-          white_background = Image.new("RGB", pil_image.size, (255, 255, 255))
-          white_background.paste(pil_image, mask=pil_image.split()[3])  # Use alpha channel as mask
-          return white_background
-      else:
-          return pil_image.convert("RGB")
-
-def read_img_from_lmdb_v2(image_data):
-    # Pickle-backed training records are not a media decoding format.
-    raise ValueError("Pickled LMDB records are not supported; provide decoded images")
+    if pil_image.mode == "RGBA":
+        white_background = Image.new("RGB", pil_image.size, (255, 255, 255))
+        white_background.paste(pil_image, mask=pil_image.split()[3])  # Use alpha channel as mask
+        return white_background
+    return pil_image.convert("RGB")
 
 
-def parse_lmdb_image_data(image_data):
-    lmdb_file = image_data['lmdb_file']
-    if not os.path.exists(lmdb_file):
-        raise ValueError(f"LMDB file {lmdb_file} does not exist")
-    import cv2
-    import lmdb
-    # special case for AgiBotWorld
-    if 'AgiBotWorld' in image_data['lmdb_file']:
-        return read_img_from_lmdb_v2(image_data)
+def _is_remote(path) -> bool:
+    return isinstance(path, str) and path.startswith(("http://", "https://"))
 
-    try:
-        env = lmdb.open(image_data['lmdb_file'], readonly=True, lock=False, max_readers=10240)
-    except Exception as e:
-        print(f"Failed to open lmdb file {image_data['lmdb_file']}. Error message: {e}", flush=True)
-        raise e
-
-    with env.begin(write=False) as txn:
-        try:
-            image_bin = txn.get(image_data['lmdb_key'].encode('ascii'))
-            buf = BytesIO(image_bin)
-        except Exception as e:
-            print(f"Failed to get image from lmdb file {image_data['lmdb_file']}. Error message: {e}", flush=True)
-            raise e
-    try:
-        image = Image.open(buf)
-    except Exception:
-        image_np = np.frombuffer(image_bin, dtype=np.uint8)
-        image_bgr = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
-        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        image = Image.fromarray(image_rgb)
-    return image
 
 def fetch_image(ele: dict[str, str | Image.Image]) -> Image.Image:
-    if "image" in ele:
-        image = ele["image"]
+    image = ele["image"] if "image" in ele else ele["image_url"]
+    if _is_remote(image):
+        # Streamed, byte-capped, SSRF-filtered fetch; every redirect hop is re-validated.
+        image_obj = load_image_from_url(image, max_bytes=REMOTE_MEDIA_MAX_BYTES)
     else:
-        image = ele["image_url"]
-    image_obj = None
-    if isinstance(image, Image.Image):
-        image_obj = image
-    elif isinstance(image, dict) and 'lmdb_file' in image:
-        image_obj = parse_lmdb_image_data(image)
-    elif image.startswith("http://") or image.startswith("https://"):
-        image_obj = load_image_from_url(image)
-    elif image.startswith("file://"):
-        image_obj = Image.open(image[7:])
-    elif image.startswith("data:image"):
-        if "base64," in image:
-            _, base64_data = image.split("base64,", 1)
-            data = base64.b64decode(base64_data)
-            image_obj = Image.open(BytesIO(data))
-    else:
-        image_obj = Image.open(image)
-    if image_obj is None:
-        raise ValueError(f"Unrecognized image input, support local path, http url, base64 and PIL.Image, got {image}")
-    image = to_rgb(image_obj)
-
-    return image
+        image_obj = _fetch_local_image({"image": image})
+    return to_rgb(image_obj)
 
 
 def get_video_frame_indices(
@@ -160,11 +108,6 @@ def _read_video_torchvision(
 ) -> (torch.Tensor, float, list):
     """read video using torchvision.io.read_video and return also per-frame timestamps"""
     video_path = ele["video"]
-    if version.parse(torchvision.__version__) < version.parse("0.19.0"):
-        if "http://" in video_path or "https://" in video_path:
-            warnings.warn("torchvision < 0.19.0 does not support http/https video path, please upgrade to 0.19.0.")
-        if "file://" in video_path:
-            video_path = video_path[7:]
     st = time.time()
 
     video, audio, info = io.read_video(
@@ -233,7 +176,17 @@ def fetch_video(ele: dict, return_video_sample_fps: bool = False, video_reader_b
     """
     Fetches video, samples frames, resizes based on video_total_pixels, and returns as Tensor (TCHW).
     """
+    if _is_remote(ele["video"]):
+        # Readers would otherwise stream an unbounded URL themselves.
+        data = load_bytes_from_url(ele["video"], max_bytes=REMOTE_MEDIA_MAX_BYTES)
+        suffix = os.path.splitext(urlsplit(ele["video"]).path)[1]
+        with tempfile.NamedTemporaryFile(suffix=suffix) as handle:
+            handle.write(data)
+            handle.flush()
+            return fetch_video({**ele, "video": handle.name}, return_video_sample_fps, video_reader_backend)
     if isinstance(ele["video"], str):
+        if ele["video"].startswith("file://"):
+            ele = {**ele, "video": ele["video"][7:]}
         video_reader_backend = video_reader_backend if video_reader_backend is not None else get_video_reader_backend()
         try:
             video, sample_fps, timestamps = VIDEO_READER_BACKENDS[video_reader_backend](ele)

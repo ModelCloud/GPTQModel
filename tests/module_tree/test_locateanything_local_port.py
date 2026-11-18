@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real decoder owners and the pinned 770-tensor released checkpoint inventory."""
 
+import hashlib
 import json
+from pathlib import Path
 
 import pytest
 import torch
-from test_locateanything_local_port import PORT, tiny_config
+from test_locateanything_local_port import tiny_config
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from gptqmodel.models.auto import MODEL_MAP
@@ -17,6 +19,9 @@ from gptqmodel.models.ports.locateanything.modeling_locateanything import Locate
 from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.utils.model import get_layers_with_prefixes
 
+
+FIXTURES = Path(__file__).parents[1] / "fixtures/ports/locateanything"
+RELEASED_INVENTORY_SHA256 = "ad24aadd8935a6853b5cb17c1b0c1daf8a4a895764ab8c44ae34781aba7aeca1"
 
 EXPECTED_PLAN = {
     "layers": ["language_model.model.layers"],
@@ -66,18 +71,19 @@ def test_real_plan_covers_every_decoder_weight_and_concrete_consumer(architectur
 
 
 def test_full_released_checkpoint_keys_shapes_and_alias_ownership_on_meta():
-    config = LocateAnythingConfig(**json.loads((PORT / "checkpoint_config.json").read_text()))
+    config = LocateAnythingConfig(**json.loads((FIXTURES / "checkpoint_config.json").read_text()))
     with torch.device("meta"):
         model = LocateAnythingForConditionalGeneration(config)
-    inventory = json.loads((PORT / "checkpoint_shapes.json").read_text())
     actual = model.state_dict()
-    assert len(inventory) == 770
-    assert set(actual) == set(inventory)
+    # sha256 of the released safetensors index ("name:shape" lines, sorted; 770 BF16 tensors).
+    inventory = "\n".join(f"{name}:{','.join(map(str, actual[name].shape))}" for name in sorted(actual))
+    assert len(actual) == 770
+    assert hashlib.sha256(inventory.encode()).hexdigest() == RELEASED_INVENTORY_SHA256
+    assert tuple(actual["language_model.model.embed_tokens.weight"].shape) == (152681, 2048)
     assert model.language_model.lm_head.weight is model.language_model.model.embed_tokens.weight
-    assert {name: list(actual[name].shape) for name in inventory} == {name: value["shape"] for name, value in inventory.items()}
     wrapper = LocateAnythingQModel(model=model, quantized=False, quantize_config=QuantizeConfig())
     plan = wrapper.module_plan()
-    for name in inventory:
+    for name in actual:
         if name.startswith("language_model.model.layers."):
             owner = '.'.join(name.split('.')[4:-1])
             assert plan.find(owner) is not None, name

@@ -26,7 +26,7 @@ Preserved source-file attributions:
 - modeling_qwen2.py: Copyright 2024 The Qwen team, Alibaba Group and the
   HuggingFace Inc. team. All rights reserved. Original Apache-2.0 notice
   retained verbatim. The native Transformers Qwen components are imported
-  under their own Apache-2.0 license. LICENSE-APACHE-2.0 reproduces that text.
+  under their own Apache-2.0 license, reproduced in the repository root LICENSE.
 - processing_locateanything.py: Copyright 2024 The HuggingFace Inc. team;
   original Apache-2.0 notice retained verbatim.
 - modeling_vit.py, image_processing_locateanything.py, generate_utils.py,
@@ -34,13 +34,12 @@ Preserved source-file attributions:
   reserved. Original NVIDIA proprietary-rights notices retained verbatim.
 
 The source-file MIT/Apache notices do not override the accompanying NVIDIA
-repository license. Source hashes and derivation details are in
-SOURCE_MANIFEST.json and README.md. ModelCloud's changes adapt these files to
+repository license. ModelCloud's changes adapt these files to
 Transformers 5, package-owned resolution, current cache APIs and safe media
 metadata serialization. No checkpoint Python is imported or downloaded at
 runtime. Optional third-party media/kernel packages retain their own licenses.
 
 Integration handoff: preserve this NOTICE and the full NVIDIA LICENSE in source
 and binary distributions; identify the noncommercial research/evaluation
-restriction in the central port coverage table, README and PR description.
+restriction in the central port coverage table and PR description.
 Do not describe LocateAnything as unqualified Apache-2.0 support.
