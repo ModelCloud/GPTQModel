@@ -24,6 +24,7 @@ from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCudaKernel, _GGMLBridge
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.utils.marlin_scratch import MarlinScratchContext
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 @pytest.mark.parametrize(
@@ -267,6 +268,9 @@ def test_gemv_fast_rejects_unaligned_shapes_before_packing():
     assert isinstance(error, NotImplementedError)
 
 
+@pytest.mark.skipif(
+    not requires_nvidia_cuda(), reason="the native AWQ GEMM contract is CUDA-only"
+)
 def test_awq_gemm_validation_matches_native_width_and_group_contract(monkeypatch):
     monkeypatch.setattr(gemm_awq, "awq_runtime_available", lambda: True)
     gemm_awq.AwqGEMMLinear.cached_validate_once.cache_clear()
@@ -332,6 +336,9 @@ def test_awq_gemm_validation_matches_native_width_and_group_contract(monkeypatch
     assert not ok
 
 
+@pytest.mark.skipif(
+    not requires_nvidia_cuda(), reason="Machete is CUDA-only"
+)
 def test_machete_validation_checks_extension_availability(monkeypatch):
     monkeypatch.setattr(machete, "machete_extension_available", lambda: False)
     monkeypatch.setattr(

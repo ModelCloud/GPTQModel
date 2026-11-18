@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from gptqmodel import extension
+from tests.accelerator_gates import requires_nvidia_cuda
 from tests.kernels import test_asymmetric_real_models as real_models
 
 
@@ -72,6 +73,10 @@ def test_gate_checks_hardware_without_loading_extensions(
             real_models._require_candidate_backend(case)
 
 
+@pytest.mark.skipif(
+    not requires_nvidia_cuda(),
+    reason="the CUDA-only candidates refuse before extension loading on ROCm",
+)
 @pytest.mark.parametrize("case", _CASES, ids=lambda case: case.name)
 def test_generation_propagates_extension_build_failure(monkeypatch, case):
     _mock_device(monkeypatch)

@@ -24,6 +24,14 @@ callers never guess from a class name:
   data-dependent branch. Independent of dynamo: a custom op without a fake
   implementation can be capture-safe yet untraceable.
 
+A class declaration answers for the kernel's default runtime state. Where one
+kernel class serves several stored formats, an instance may refine it through
+`supports_graph_capture()`, and `graph_capture_safe(instance)` returns that
+answer. `GGUFTorchLinear` is the one case today: its device-side dequantizers
+(`Q4_0`, `Q8_0`, `Q4_K`, `Q5_K`, `Q6_K` - including the default `q_k_m`) are
+capturable, while `Q2_K`, `Q3_K` and the remaining codebook types dequantize
+through numpy on the host and cannot be captured (#5014).
+
 The levels are the `torch.compile` API surface of torch 2.13+ (the project's
 floor is 2.13 for Python < 3.11 and 2.15 otherwise): `backend="eager"`,
 `backend="aot_eager"`, `backend="inductor"`, and `mode="reduce-overhead"`.

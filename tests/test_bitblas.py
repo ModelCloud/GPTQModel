@@ -18,6 +18,12 @@ from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 from gptqmodel.quantization import FORMAT, METHOD, QuantizeConfig
 from gptqmodel.utils.importer import get_kernel_for_backend
 from gptqmodel.utils.logger import render_table
+from tests.accelerator_gates import requires_nvidia_cuda
+
+
+pytestmark = pytest.mark.skipif(
+    not requires_nvidia_cuda(), reason="BitBLAS emits NVIDIA TensorCore code and has no ROCm backend"
+)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for BitBLAS")

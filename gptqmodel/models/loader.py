@@ -94,6 +94,7 @@ from ..utils.hf import (
 from ..utils.importer import (
     _selector_devices,
     auto_select_device,
+    device_map_uses_cpu,
     expand_selector_device_family,
     get_kernel_for_backend,
     normalize_device_device_map,
@@ -684,18 +685,14 @@ def _normalize_max_memory(max_memory, device) -> List[tuple[str, int]]:
 
 
 def _device_map_uses_cpu(device_map) -> bool:
-    """Whether a placement map contains a CPU-resident entry."""
-    if not isinstance(device_map, dict):
-        return False
-    for value in device_map.values():
-        if value is None or isinstance(value, int):
-            continue
-        try:
-            if torch.device(value).type == "cpu":
-                return True
-        except (RuntimeError, ValueError):
-            continue
-    return False
+    """Whether a placement map contains a CPU-resident entry.
+
+    The HF bridge derives the same contract from the map Transformers hands it
+    (`utils.importer.device_map_uses_cpu`), so both loaders agree on which
+    kernels may serve an offloaded map (#5022).
+    """
+
+    return device_map_uses_cpu(device_map)
 
 
 def _assign_greedy_device_ids(

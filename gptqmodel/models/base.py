@@ -421,6 +421,26 @@ def _module_weight_dtype(module: object) -> Optional[torch.dtype]:
     return None
 
 
+def _cast_floating_inputs(example: Dict[str, Any], dtype: Optional[torch.dtype]) -> Dict[str, Any]:
+    """Cast floating rows to ``dtype``; integers keep their dtype.
+
+    Only used for definitions that declare ``calibration_inputs = "tensor_kwargs"``,
+    where the rows are the user's own tensors rather than token ids.
+    """
+
+    if dtype is None:
+        return example
+    for key, value in example.items():
+        if isinstance(value, list):
+            example[key] = [
+                item.to(dtype) if torch.is_tensor(item) and item.is_floating_point() else item
+                for item in value
+            ]
+        elif torch.is_tensor(value) and value.is_floating_point() and value.dtype != dtype:
+            example[key] = value.to(dtype)
+    return example
+
+
 class _CompiledModelForward:
     """Call a compiled unbound ``forward`` without pinning the model (#4937).
 
@@ -3516,6 +3536,13 @@ class BaseQModel(nn.Module):
                     value = value.unsqueeze(0)
 
                 example[key] = move_to(value, device=data_device)
+
+        if getattr(self, "calibration_inputs", None) == "tensor_kwargs":
+            # These rows are the user's own tensors; a bf16 model fed fp32 rows
+            # fails inside the first matmul, far from the mistake.
+            example = _cast_floating_inputs(
+                example, _module_weight_dtype(getattr(self, "model", None))
+            )
 
         return self.finalize_input_capture_example(example)
 

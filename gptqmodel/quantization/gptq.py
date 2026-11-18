@@ -3264,15 +3264,27 @@ class GPTQ:
         self._borrow_workspace_stage_dtype = None
         self._borrow_workspace_last_chunk_rows = None
 
-    def free(self):
-        # A shared capture stays live until the final projection releases it.
-        # Factor-cache ownership remains projection-local.
+    def release_hessian_state(self) -> None:
+        """Drop the accumulated Hessian and its staging state (idempotent).
+
+        The accumulator is the largest per-module allocation (one fp32
+        ``[columns, columns]`` tensor). :meth:`free` calls this as part of the
+        full success-path teardown, and a failing :meth:`quantize` calls it
+        directly so a failure does not pin the accumulator until the processor
+        is destroyed (#5026). A shared capture stays live until the final
+        projection releases it; factor-cache ownership remains
+        projection-local.
+        """
+
         with self.lock:
             self._shared_hessian_cache = None
             self._shared_hessian_cache_disabled = False
         if not self._hessian_state_released:
             self._hessian_state.release()
             self._hessian_state_released = True
+
+    def free(self):
+        self.release_hessian_state()
         if hasattr(self, "_H_diag"):
             del self._H_diag
         self._device_embedding_counts.clear()

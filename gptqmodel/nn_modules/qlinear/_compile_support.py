@@ -32,6 +32,14 @@ ask a kernel what it is safe under instead of guessing from its class name:
     can be capture-safe and still fail to trace, and a traceable kernel can
     still sync the host inside ``forward``.
 
+    The class attribute answers for the kernel's default runtime state. A
+    kernel that serves several stored formats may refine it per instance
+    through ``supports_graph_capture()``: ``graph_capture_safe(instance)``
+    returns that answer while ``graph_capture_safe(cls)`` keeps returning the
+    declaration. ``GGUFTorchLinear`` is the current case -- its device-side
+    dequantizers are capturable, the host-dequantized Q2_K/Q3_K formats are
+    not (#5014).
+
 The declaration describes the **default runtime state** on the kernel's
 primary device: a freshly loaded model, with no opt-in beyond what loading
 already does. A kernel that only reaches a higher level after an explicit
@@ -132,9 +140,24 @@ def compile_level(kernel: Any) -> COMPILE_LEVEL:
 
 
 def graph_capture_safe(kernel: Any) -> bool:
-    """Whether the eager forward may run inside a ``torch.cuda.CUDAGraph``."""
+    """Whether the eager forward may run inside a ``torch.cuda.CUDAGraph``.
 
-    return bool(getattr(kernel, "SUPPORTS_GRAPH_CAPTURE", False))
+    A class declaration answers for its default runtime state. An *instance*
+    may refine it through ``supports_graph_capture()`` when only some of its
+    runtime formats are capturable -- GGUF's host-dequantized Q2_K/Q3_K layers
+    declare the class-level ``True`` for the device formats (#5014).
+
+    The refinement may only *narrow* the declaration: a subclass that declares
+    ``False`` (``GGUFCppKernel``, ``GGUFCudaKernel``) keeps answering ``False``
+    even though it inherits the hook from ``GGUFTorchLinear``.
+    """
+
+    declared = bool(getattr(kernel, "SUPPORTS_GRAPH_CAPTURE", False))
+    if not isinstance(kernel, type) and declared:
+        refine = getattr(kernel, "supports_graph_capture", None)
+        if callable(refine):
+            return bool(refine())
+    return declared
 
 
 def reaches_level(kernel: Any, level: COMPILE_LEVEL) -> bool:

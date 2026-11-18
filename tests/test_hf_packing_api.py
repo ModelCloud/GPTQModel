@@ -40,6 +40,7 @@ from gptqmodel.utils.packing import (
     hf_post_init,
     hf_repack_layer,
 )
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 pytestmark = [pytest.mark.cpu]
@@ -916,8 +917,8 @@ def _cuda_device(index: int = 0) -> str:
 
 @pytest.mark.cuda
 def test_gpu_feasibility_and_best_format():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for GPU feasibility checks")
+    if not requires_nvidia_cuda():
+        pytest.skip("an NVIDIA CUDA device is required for GPU feasibility checks")
 
     device = _cuda_device()
     # Marlin has no raw-weight packer; it is a repack target that consumes

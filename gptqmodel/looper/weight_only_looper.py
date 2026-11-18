@@ -21,10 +21,10 @@ from concurrent.futures import as_completed
 from typing import Dict, List, Optional, Tuple
 
 import torch
-from accelerate.utils import find_tied_parameters
 from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEVICE_THREAD_POOL
+from ..looper.inflight_layer import InflightLayerTracker
 from ..looper.loop_processor import record_quant_log, rehome_failed_run_kernels
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.module_preprocessor import ModulePreProcessor
@@ -79,6 +79,7 @@ from ..utils.offload import (
     restore_offloaded_modules,
 )
 from ..utils.p2p import configure_p2p, enable_for_devices
+from ..utils.tied_weights import lm_head_quantization_is_tied
 from .execution_state import DeviceAssignmentState
 from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 
@@ -86,7 +87,7 @@ from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 log = setup_logger()
 
 
-class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
+class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignmentState):
     """Run the simplified per-layer lifecycle for weight-only quantization."""
 
     def __init__(
@@ -986,9 +987,28 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
         try:
             result = self._loop_impl(**kwargs)
+            # The success tail turns the lazy offloaded shell back into a
+            # usable in-session model, and every step can fail (a Ctrl-C, an
+            # OOM, an I/O error). Keep it inside the guard so a failure here
+            # runs the same best-effort recovery instead of leaving
+            # `embed_tokens`/`norm`/`rotary_emb` on meta (#5023).
+            self._restore_offloaded_base_modules(strict=True)
+            self._restore_disk_offloaded_modules()
+            self._materialize_meta_base_modules(strict=True)
+            self._materialize_remaining_meta_modules()
+            # Unquantized layers keep the parameters `pre_quantize` materialized
+            # under inference mode, and `post_quantize`'s `param.data =` move
+            # leaves them without a version counter (issue #4572).
+            ensure_version_counters(self.gptq_model.model)
         except BaseException:
-            # A failed run must not leave the base modules stranded on meta.
             try:
+                # The success path moves the layer back to its home device only
+                # in ``post_quantize``, which the exception skipped. Without
+                # this the in-flight layer keeps accelerator tensors while the
+                # rest of the model is on CPU, and every later forward raises a
+                # device-mismatch error (#5011).
+                self._restore_inflight_layer()
+                # A failed run must not leave the base modules stranded on meta.
                 self._restore_offloaded_base_modules(strict=False)
             finally:
                 # The loop never materialized the layers past the cancel point;
@@ -997,6 +1017,20 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 # A weight-only kernel can be accelerator-only too (GGUF
                 # Triton); leave the finished layers runnable (#4947).
                 rehome_failed_run_kernels(self.gptq_model)
+                # A cancelled run must return the same ordinary tensors a
+                # completed one does: the norms, biases and buffers
+                # `pre_quantize` materialized under inference mode otherwise
+                # stay inference tensors, and a plain grad-mode forward raises
+                # "Inference tensors cannot be saved for backward" (#5012).
+                # Best-effort so it can never mask the run failure.
+                try:
+                    ensure_version_counters(self.gptq_model.model)
+                except Exception:
+                    log.warning(
+                        "failed to repair tensor version counters while failing "
+                        "the weight-only run",
+                        exc_info=True,
+                    )
                 # ``finalize()`` is the only other place the processor closes
                 # its Device-SMI handles, and a failed run never reaches it
                 # (#4813). The release is idempotent and must not mask the run
@@ -1023,14 +1057,6 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 else:
                     release_private_offload_root(self.gptq_model)
             raise
-        self._restore_offloaded_base_modules(strict=True)
-        self._restore_disk_offloaded_modules()
-        self._materialize_meta_base_modules(strict=True)
-        self._materialize_remaining_meta_modules()
-        # Unquantized layers keep the parameters `pre_quantize` materialized
-        # under inference mode, and `post_quantize`'s `param.data =` move
-        # leaves them without a version counter (issue #4572).
-        ensure_version_counters(self.gptq_model.model)
         return result
 
     def _loop_impl(self, **kwargs):
@@ -1063,10 +1089,10 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         lm_head_name = self.gptq_model.get_output_embeddings_name() or self.gptq_model.lm_head
         if not embed_only and quant_config.lm_head and lm_head_name not in embedding_target_names:
             # The output head may belong to a nested multimodal text model.
-            if any(
-                f"{lm_head_name}.weight" in names
-                for names in find_tied_parameters(self.gptq_model.model)
-            ):
+            # Share the check with `ModuleLooper`: `find_tied_parameters` alone
+            # only sees materialized parameters, so a lazily loaded shell let
+            # the run continue and fail on the head's meta tensor (#5027).
+            if lm_head_quantization_is_tied(self.gptq_model, lm_head_name):
                 raise NotImplementedError(
                     "quantization of `lm_head` layer with tied weights is not supported. "
                     "Untie the model weights before quantization."
@@ -1226,7 +1252,19 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     pb.current_iter_step = progress_index
                     pb.title(layer_title).subtitle("").draw()
 
+                # Capture the layer's pre-stage home before anything moves it,
+                # so a cancelled or failed run restores this placement instead
+                # of leaving the layer pinned on the compute device (#5011).
+                inflight_home = get_device(module)
+                if getattr(inflight_home, "type", None) == "meta":
+                    inflight_home = CPU
+                self._track_inflight_layer(module, inflight_home)
+
                 module = self.gptq_model.pre_quantize(module)
+                # ``pre_quantize`` moves a CPU layer to the quantize device and
+                # may return a materialized shell, so track the object that is
+                # actually staged as well as the pre-call one.
+                self._track_inflight_layer(module, inflight_home)
                 if not is_lm_head_module:
                     # Preserve existing module conversion behavior so the new
                     # lifecycle stays compatible with model-specific wrappers.
@@ -1234,6 +1272,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     if model_type in MODULE_CONVERTER_MAP:
                         converter = MODULE_CONVERTER_MAP[model_type]
                         module = converter(module, self.gptq_model.model.config)
+                        self._track_inflight_layer(module, inflight_home)
                     layers[layer_index] = module
 
                 # Resolve concrete submodules after any pre-quantization
@@ -1303,6 +1342,9 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     self.gptq_model.post_quantize(module)
                 else:
                     layers[layer_index] = self.gptq_model.post_quantize(module)
+                # The layer is back on its home device; a later failure must not
+                # try to restore it again (it may already be a packed module).
+                self._clear_inflight_layer()
                 self.extensions.publish(plan.steps[layer_index])
                 if pb is not None:
                     pb.current_iter_step = progress_index + 1

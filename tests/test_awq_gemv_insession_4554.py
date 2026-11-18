@@ -33,6 +33,7 @@ from gptqmodel.nn_modules.qlinear.gemv_fast_awq import (
 )
 from gptqmodel.quantization import FORMAT
 from gptqmodel.quantization.config import AWQConfig
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 HIDDEN_SIZE = 64
@@ -166,6 +167,10 @@ def test_awq_gemv_cpu_reader_matches_the_gemm_reader_numerics():
     torch.testing.assert_close(gemv_out, gemm_out, rtol=2e-2, atol=2e-2)
 
 
+@pytest.mark.skipif(
+    not requires_nvidia_cuda(),
+    reason="the AWQ GEMV pack step needs the native CUDA AWQ extension",
+)
 def test_awq_gemv_quantize_save_and_reload_on_cpu(tmp_path):
     source = tmp_path / "source"
     _write_tiny_llama(source)

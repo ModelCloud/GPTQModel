@@ -3,9 +3,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import pytest
 from models.model_test import ModelTest
 
 from gptqmodel.quantization.config import GPTAQConfig
+from tests.accelerator_gates import requires_nvidia_cuda
+
+
+pytestmark = pytest.mark.skipif(
+    not requires_nvidia_cuda(),
+    reason="GPTAQ evaluation drives the CUDA-only Marlin kernel",
+)
 
 
 class TestQwen2_5_GPTAQ(ModelTest):

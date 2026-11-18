@@ -25,6 +25,7 @@ from parameterized import parameterized  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
+from tests.accelerator_gates import requires_nvidia_cuda  # noqa: E402
 
 
 class Test(ModelTest):
@@ -53,6 +54,8 @@ class Test(ModelTest):
         # # (BACKEND.BITBLAS, <-- not tested yet
     ])
     def test_load(self, backend: BACKEND):
+        if backend == BACKEND.MARLIN and not requires_nvidia_cuda():
+            self.skipTest("Marlin has no ROCm kernel")
         model = GPTQModel.load(
             self.NATIVE_MODEL_ID,
             adapter=self.adapter,
@@ -73,6 +76,8 @@ class Test(ModelTest):
         BACKEND.MARLIN,
     ])
     def test_download(self, backend: BACKEND):
+        if backend == BACKEND.MARLIN and not requires_nvidia_cuda():
+            self.skipTest("Marlin has no ROCm kernel")
         adapter = Lora(path="sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc", rank=128)
 
         model = GPTQModel.load(
@@ -98,6 +103,8 @@ class Test(ModelTest):
             raise AssertionError(" `paris` not found in `result`")
 
     def test_evalution_from_path(self):
+        if not requires_nvidia_cuda():
+            self.skipTest("this checkpoint loads the CUDA-only Marlin kernel on ROCm")
         adapter = Lora(path=self.lora_path, rank=128)
         task_results = self.evaluate_model(self.NATIVE_MODEL_ID, extra_args={"adapter": adapter.to_dict()}) # "backend":"exllama_v2",
         self.check_results(task_results)

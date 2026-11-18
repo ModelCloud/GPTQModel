@@ -14,6 +14,7 @@ from inference_speed import InferenceSpeed  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 from gptqmodel.utils import BACKEND  # noqa: E402
+from tests.accelerator_gates import requires_nvidia_cuda  # noqa: E402
 
 
 '''
@@ -44,6 +45,8 @@ class TestInferenceSpeed(InferenceSpeed):
         ]
     )
     def test_inference_speed(self, model_path, backend, tokens_per_second, optimize, fullgraph):
+        if backend == BACKEND.MARLIN and not requires_nvidia_cuda():
+            pytest.skip("Marlin has no ROCm kernel")
         # There are differences between the results of the first and second runs of bitblas
         # (there is a cache when running bitblas for the second time),
         # so only the results of the second run of bitblas are asserted.

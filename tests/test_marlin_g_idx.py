@@ -16,6 +16,7 @@ import torch
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 _MODEL = "/monster/data/model/Qwen2-1.5B-Instruct-GPTQ-4bits-gp32"
@@ -23,7 +24,7 @@ _LAYER = "model.layers.0.self_attn.q_proj"
 
 
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available() or not Path(_MODEL).is_dir(),
+    not requires_nvidia_cuda() or not Path(_MODEL).is_dir(),
     reason="requires CUDA and the local Qwen2 non-contiguous g_idx checkpoint",
 )
 

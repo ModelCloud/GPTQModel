@@ -20,7 +20,9 @@ oracle is a pure-Python bit writer and the reconstruction oracle walks the
 codebooks with explicit element indexing.
 """
 
+import gc
 import math
+import sys
 import threading
 from pathlib import Path
 
@@ -1006,6 +1008,77 @@ def test_vptq_pack_rejects_index_streams_wider_than_a_word():
     assert torch.equal(unpacked, indices)
     with pytest.raises(ValueError):
         unpack_vptq_indices(packed, 33, 2)
+
+
+def _peak_rss_kib(field: str) -> int:
+    with open("/proc/self/status", encoding="utf-8") as handle:
+        for line in handle:
+            if line.startswith(field + ":"):
+                return int(line.split()[1])
+    raise KeyError(field)
+
+
+def _reset_peak_rss() -> bool:
+    # Writing 5 to clear_refs resets VmHWM to the current RSS (Linux >= 4.0).
+    try:
+        with open("/proc/self/clear_refs", "w", encoding="ascii") as handle:
+            handle.write("5")
+    except OSError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="needs /proc/self peak-RSS reset")
+def test_vptq_pack_streams_words_without_per_bit_expansion():
+    """Packing must not materialize one int64 per index bit (#5034).
+
+    Expanding every index into `total_bits` int64 lanes allocates
+    `2 * 8 * total_bits` bytes per index (256 B at the default 12+4 bits), and
+    VPTQ finalizers run concurrently on the CPU worker pool, so a 8B
+    `down_proj` crossed 5 GiB host RSS. The word-at-a-time packer needs a
+    couple of int64 words per index instead; this bounds the peak so the
+    regression cannot come back silently.
+    """
+
+    index_bits, res_bits = 12, 4
+    total_bits = index_bits + res_bits
+    # 4.2M indices: the shape of a 8B `down_proj` index set at vector_len 8,
+    # scaled down so the test stays cheap once the fix is in place.
+    rows, num_elements = 4096, 1024
+    generator = torch.Generator().manual_seed(5034)
+    indices = torch.randint(
+        0, 1 << index_bits, (rows, num_elements), generator=generator, dtype=torch.int64
+    )
+    res_indices = torch.randint(
+        0, 1 << res_bits, (rows, num_elements), generator=generator, dtype=torch.int64
+    )
+
+    gc.collect()
+    if not _reset_peak_rss():
+        pytest.skip("/proc/self/clear_refs is not writable")
+    before = _peak_rss_kib("VmRSS")
+    packed = pack_vptq_indices(
+        indices, index_bits, res_indices=res_indices, res_bits=res_bits
+    )
+    extra = (_peak_rss_kib("VmHWM") - before) * 1024
+
+    output_bytes = packed.numel() * packed.element_size()
+    # The per-bit expansion needed ~1.1 GiB here (2 * 8 * total_bits per index);
+    # the streaming packer measures ~76 MiB, dominated by its int64 accumulator.
+    # 384 MiB keeps ~5x headroom over the streaming path and still fails the
+    # expansion by 3x.
+    assert extra < 384 * 2**20, (
+        f"pack_vptq_indices raised peak RSS by {extra / 2**20:.1f} MiB for a "
+        f"{output_bytes / 2**20:.1f} MiB output over {rows * num_elements} "
+        f"indices at {total_bits} bits"
+    )
+
+    # The memory bound is only meaningful if the words are still correct.
+    unpacked, unpacked_res = unpack_vptq_indices(
+        packed, index_bits, num_elements, res_bits=res_bits
+    )
+    assert torch.equal(unpacked, indices)
+    assert torch.equal(unpacked_res, res_indices)
 
 
 def test_vptq_group_layout():

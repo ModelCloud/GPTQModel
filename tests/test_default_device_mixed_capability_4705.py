@@ -30,6 +30,13 @@ from gptqmodel.utils.importer import (
 
 pytestmark = [pytest.mark.cpu]
 
+# Selector validation deliberately ignores the CUDA capability tuple on ROCm
+# (``utils/importer.py``), so a fake capability pair cannot group or refuse.
+requires_nvidia_capability = pytest.mark.skipif(
+    torch.version.hip is not None,
+    reason="ROCm ignores the CUDA capability tuple used by these fakes",
+)
+
 
 def _gpu_capabilities(monkeypatch, capabilities):
     monkeypatch.setattr("torch.cuda.is_available", lambda: True)
@@ -51,6 +58,7 @@ def _default_targets():
     return targets
 
 
+@requires_nvidia_capability
 def test_default_load_stays_inside_one_capability_group(monkeypatch):
     _gpu_capabilities(monkeypatch, [(12, 0), (8, 9)])
 
@@ -70,6 +78,7 @@ def test_a_single_visible_gpu_is_unaffected(monkeypatch):
     assert _default_targets() == (torch.device("cuda:0"),)
 
 
+@requires_nvidia_capability
 def test_explicit_mixed_placement_is_refused_with_the_remedy(monkeypatch):
     """An explicit span is a user choice, so it keeps failing closed."""
 
@@ -91,6 +100,7 @@ def test_explicit_single_device_is_unaffected(monkeypatch):
     ) == (torch.device("cuda:1"),)
 
 
+@requires_nvidia_capability
 def test_mixed_capability_refusal_names_a_way_forward(monkeypatch):
     _gpu_capabilities(monkeypatch, [(12, 0), (8, 9)])
 

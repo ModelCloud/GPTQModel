@@ -8,10 +8,11 @@ import torch
 
 from gptqmodel.nn_modules import exllamav3 as exl3_bridge
 from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 requires_cuda = pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not requires_nvidia_cuda(),
     reason="the native EXL3 dispatch needs a CUDA device",
 )
 
@@ -124,6 +125,7 @@ def test_exllamav3_half_inputs_keep_native_dispatch(rows):
     assert calls == [(torch.float16, torch.float16, rows)]
 
 
+@requires_cuda
 @pytest.mark.parametrize("rows, branch", [(32, "bc"), (33, "hgemm")])
 def test_native_exl3_row_boundary_uses_expected_half_kernel(monkeypatch, rows, branch):
     from gptqmodel.exllamav3.modules.quant import exl3 as native_exl3
