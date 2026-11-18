@@ -25,13 +25,10 @@ from gptqmodel.models.local import LocalModelLoader
 PORTS = Path(__file__).resolve().parents[1] / "gptqmodel" / "models" / "ports"
 
 PENDING_NATIVE_DEFINITIONS = frozenset({
-    "afmoe", "apertus", "cohere2_moe", "cohere_compass", "deepseek_ocr2", "deepseek_v32", "diffusion_gemma",
-    "dots1", "ernie4_5_moe", "exaone4_5", "flint", "gemma2", "gemma4", "gemma4_text", "gemma4_unified",
-    "gemma4_unified_text", "glm4v", "glm5_next", "glmasr", "gpt2", "gpt_neox", "gpt_oss", "granitemoe",
-    "granitemoe_swa", "hunyuan_v1_dense", "hunyuan_v1_moe", "inkling_mm_model", "internvl", "lfm2", "lfm2_moe",
-    "llama4", "llama4_text", "llava", "longcat_flash", "minicpmv4_6", "minimax_m2", "mistral3", "mixtral", "mllama",
-    "mllama_text_model", "olmo2", "olmo3", "opt", "ovis2", "qwen2_5_omni", "qwen2_audio", "qwen3_5_moe",
-    "qwen3_next", "qwen3_omni_moe", "qwen4_exp", "qwen4_exp_text", "starcoder2", "voxtral",
+    "afmoe", "apertus", "cohere_compass", "deepseek_v32", "dots1", "exaone4_5", "gemma2", "gemma4_unified",
+    "gemma4_unified_text", "glm5_next", "gpt2", "gpt_oss", "granitemoe_swa", "hunyuan_v1_moe", "internvl",
+    "lfm2_moe", "longcat_flash", "minimax_m2", "mixtral", "mllama", "mllama_text_model", "olmo3", "ovis2",
+    "qwen2_audio", "qwen3_omni_moe", "voxtral",
 })
 
 PENDING_MODEL_IMPORT_PORTS = frozenset({
