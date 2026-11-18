@@ -871,6 +871,13 @@ class GPTQProcessor(LoopProcessor):
                 assert torch.device(g.H.device) == expected_device, (
                     f"GPTQ Hessian tensor for '{module.full_name}' lives on {g.H.device}, expected {expected_device}."
                 )
+                # Drop the local before `quantize()`. GPTAQ/FOEM release the
+                # task Hessian themselves and then rebind `H` to the
+                # permutation, so a surviving reference keeps the original
+                # unpermuted [C, C] fp32 copy alive across the whole quantize
+                # -- including the peak, where `H`, `dXXT` and the inverse are
+                # all live (#5026). 784 MiB for an 8B down_proj.
+                del g_h
 
             if expected_device.type == "cuda" and torch.cuda.is_available():
                 current_cuda_device = torch.device("cuda", torch.cuda.current_device())
