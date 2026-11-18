@@ -1084,6 +1084,26 @@ def _warn_remote_only_tokenizer(model_type: str, tokenizer_path) -> None:
         log.warning(_remote_only_tokenizer_message(model_type))
 
 
+_VENDORED_TOKENIZER_PREFIX = "gptqmodel.models.ports.native."
+
+
+def _register_vendored_tokenizer(tokenizer) -> None:
+    """Tell Tokenicer a vendored 5.23 tokenizer class is Transformers' own class.
+
+    Tokenicer gates normalization (SentencePiece handling for
+    ``LlamaTokenizer``, serialized ``tokenizer.json`` preference) on the
+    Transformers class. A class in ``gptqmodel.models.ports.native`` is an exact
+    copy of ``transformers.<same name>``, so declare that equivalence explicitly
+    instead of handing Tokenicer a ``transformers.models`` class.
+    """
+
+    from tokenicer import register_transformers_equivalent
+
+    tokenizer_class = type(tokenizer)
+    if (getattr(tokenizer_class, "__module__", "") or "").startswith(_VENDORED_TOKENIZER_PREFIX):
+        register_transformers_equivalent(tokenizer_class)
+
+
 def load_hf_tokenizer(
         tokenizer_or_path,
         *,
@@ -1129,6 +1149,7 @@ def load_hf_tokenizer(
                 and key not in tokenicer_option_names
             }
             tokenizer_or_path = loader.load_tokenizer(tokenizer_or_path, **tokenizer_kwargs)
+    _register_vendored_tokenizer(tokenizer_or_path)
     if isinstance(model_config, PreTrainedConfig):
         # Tokenicer's model_config controls normalization; AutoTokenizer uses
         # the separate `config` argument for class selection. Reuse the config

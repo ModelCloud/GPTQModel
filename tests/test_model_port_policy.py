@@ -26,13 +26,9 @@ PORTS = Path(__file__).resolve().parents[1] / "gptqmodel" / "models" / "ports"
 
 PENDING_NATIVE_DEFINITIONS = frozenset()
 
-PENDING_MODEL_IMPORT_PORTS = frozenset({
-    "internvl_chat", "lfm3_vl", "llama", "unlimited_ocr",
-})
+PENDING_MODEL_IMPORT_PORTS = frozenset()
 
-PENDING_STALE_PATTERN_PORTS = frozenset({
-    "native/falcon_h1", "native/nemotron_h", "native/zamba2",
-})
+PENDING_STALE_PATTERN_PORTS = frozenset()
 
 STALE_PATTERNS = re.compile(
     r"\bcache_position\b|\bpast_key_value\b|use_return_dict|if not return_dict|from_legacy_cache|to_legacy_cache"
@@ -89,7 +85,7 @@ def _model_import_ports():
 
 # A released config.json may still spell a field the old way; configuration
 # modules may read it once at parse time and convert it. Nothing else may.
-PARSE_TIME_FIELDS = frozenset({"rope_scaling", "torch_dtype"})
+PARSE_TIME_FIELDS = frozenset({"rope_scaling", "torch_dtype", "num_logits_to_keep"})
 
 
 def _stale_hits(path):

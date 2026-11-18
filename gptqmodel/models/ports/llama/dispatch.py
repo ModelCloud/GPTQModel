@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Allowlisted selection, never checkpoint AutoConfig/AutoModel dispatch."""
 
-from transformers import AutoConfig, AutoModelForCausalLM, LlamaConfig, PretrainedConfig, StableLmConfig
+from transformers.configuration_utils import PreTrainedConfig
 
+from ..native.auto import CONFIG_MAPPING, MODEL_FOR_CAUSAL_LM_MAPPING
+from ..native.llama.configuration_llama import LlamaConfig
+from ..native.stablelm.configuration_stablelm import StableLmConfig
 from .configuration_longllama import LongLlamaConfig
 
 
@@ -81,7 +84,7 @@ def _config_class(model_type):
     if model_type == "yi":
         return YiConfig
     if model_type in NATIVE_TYPES:
-        return type(AutoConfig.for_model(model_type))
+        return CONFIG_MAPPING[model_type]
     raise ValueError(f"Unsupported Llama definition model_type: {model_type!r}")
 
 
@@ -94,20 +97,20 @@ def _model_class(config):
 
         return LongLlamaForCausalLM
     if expected is StableLMEpochConfig:
-        from transformers import StableLmForCausalLM
+        from ..native.stablelm.modeling_stablelm import StableLmForCausalLM
 
         return StableLmForCausalLM
     if expected is YiConfig:
-        from transformers import LlamaForCausalLM
+        from ..native.llama.modeling_llama import LlamaForCausalLM
 
         return LlamaForCausalLM
-    return AutoModelForCausalLM._model_mapping[expected]
+    return MODEL_FOR_CAUSAL_LM_MAPPING[config.model_type]
 
 
 class LlamaAliasConfig:
     @classmethod
     def from_pretrained(cls, model_id_or_path, **kwargs):
-        payload, remaining = PretrainedConfig.get_config_dict(model_id_or_path, **kwargs)
+        payload, remaining = PreTrainedConfig.get_config_dict(model_id_or_path, **kwargs)
         config_class = _config_class(payload.get("model_type"))
         payload["model_type"] = config_class.model_type
         return config_class.from_dict(payload, **remaining)

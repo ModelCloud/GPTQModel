@@ -400,3 +400,27 @@ def test_text_stack_uses_vendored_qwen3_classes(moe):
         assert owner.__module__.startswith("gptqmodel.models.ports."), owner
         assert not owner.__module__.startswith("transformers.")
     assert InternS1Config.sub_configs["text_config"].__module__ == "gptqmodel.models.ports.native.auto"
+
+
+def test_per_expert_moe_checkpoint_reloads_with_no_missing_or_unexpected_keys(tmp_path):
+    """Released Intern-S1 MoE checkpoints store one tensor per expert projection.
+
+    The text stack subclasses the vendored ``Qwen3MoeModel``, so Transformers
+    attaches the ``qwen3_moe`` expert-fusion conversion while loading. It must
+    stay a no-op: every per-expert key loads into the same module, bit for bit.
+    """
+
+    from safetensors.torch import save_file
+
+    torch.manual_seed(5)
+    original = InternS1ForConditionalGeneration(tiny_config(moe=True)).eval()
+    state = {key: value.contiguous() for key, value in original.state_dict().items()}
+    assert any(".mlp.experts.0.gate_proj.weight" in key for key in state)
+    original.config.save_pretrained(tmp_path)
+    save_file(state, tmp_path / "model.safetensors", {"format": "pt"})
+
+    loaded, info = InternS1QModel.loader.from_pretrained(tmp_path, output_loading_info=True)
+    assert not info["missing_keys"] and not info["unexpected_keys"] and not info["mismatched_keys"]
+    assert loaded.state_dict().keys() == state.keys()
+    for key, value in state.items():
+        torch.testing.assert_close(loaded.state_dict()[key], value, rtol=0, atol=0)

@@ -47,9 +47,9 @@ def expected_tokenizer_module(architecture):
     if architecture == "InternLM2ForCausalLM":
         return "gptqmodel.models.ports.internlm2"
     if architecture in {"LlamaForCausalLM", "Phi3ForCausalLM"}:
-        # Kept on Transformers' LlamaTokenizer: Tokenicer's SentencePiece
-        # normalization identifies that exact class.
-        return "transformers."
+        # The vendored LlamaTokenizer, registered with Tokenicer as
+        # Transformers' own class by load_hf_tokenizer.
+        return "gptqmodel.models.ports.native.llama."
     return "gptqmodel.models.ports.native.qwen2."
 
 

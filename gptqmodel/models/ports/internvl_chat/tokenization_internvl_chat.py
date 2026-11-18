@@ -71,11 +71,9 @@ class InternVLTokenizerFactory:
         elif architecture in {"LlamaForCausalLM", "Phi3ForCausalLM"}:
             if _asset(path, "tokenizer.json", hub_kwargs) is None:
                 _asset(path, "tokenizer.model", hub_kwargs, required=True)
-            # Tokenicer's SentencePiece normalization recognizes only Transformers'
-            # own LlamaTokenizer (`type(tok) is transformers.LlamaTokenizer`); the
-            # vendored class would silently change token IDs until Tokenicer
-            # accepts it.
-            from transformers import LlamaTokenizer
+            # load_hf_tokenizer registers the vendored class with Tokenicer as
+            # Transformers' LlamaTokenizer, so normalization is unchanged.
+            from ..native.llama.tokenization_llama import LlamaTokenizer
 
             tokenizer_class = LlamaTokenizer
         else:

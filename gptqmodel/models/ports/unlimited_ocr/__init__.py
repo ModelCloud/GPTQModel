@@ -1,11 +1,16 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Exact native generative task; the package path also binds the legacy alias."""
+"""Vendored Transformers 5.23 generative task; the package path also binds the legacy alias."""
 
-from transformers import PreTrainedConfig, UnlimitedOcrConfig, UnlimitedOcrImageProcessor
+from transformers import PreTrainedConfig
 from transformers import TokenizersBackend as UnlimitedOcrTokenizer
-from transformers import UnlimitedOcrForConditionalGeneration as NativeUnlimitedOcrForConditionalGeneration
-from transformers import UnlimitedOcrProcessor as NativeUnlimitedOcrProcessor
+
+from ..native.unlimited_ocr.configuration_unlimited_ocr import UnlimitedOcrConfig
+from ..native.unlimited_ocr.image_processing_unlimited_ocr import UnlimitedOcrImageProcessor
+from ..native.unlimited_ocr.modeling_unlimited_ocr import (
+    UnlimitedOcrForConditionalGeneration as NativeUnlimitedOcrForConditionalGeneration,
+)
+from ..native.unlimited_ocr.processing_unlimited_ocr import UnlimitedOcrProcessor as NativeUnlimitedOcrProcessor
 
 
 class UnlimitedOcrConfigLoader:
@@ -33,7 +38,7 @@ class UnlimitedOcrProcessor:
 
 
 class UnlimitedOcrForConditionalGeneration:
-    """Loader boundary only; successful construction returns the exact native class."""
+    """Loader boundary only; successful construction returns the vendored 5.23 class."""
 
     @staticmethod
     def _validate_attention(config, kwargs):
