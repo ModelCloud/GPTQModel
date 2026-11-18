@@ -12,8 +12,8 @@ device supports them — and no longer writes a checkpoint of its own.
 The previous FP8 export was a GPT-QModel-only format: `FP8Config` quantized
 weights with an inverse scale (`weight = fp8 / weight_scale_inv`), published a
 `gptqmodel_fp8` alias, and could not be read by any other runtime. That layout
-is removed, including the calibrated GSQ-FP8 path, the MLX encoder, and the
-`TorchFP8Linear.pack*` encode entry points. Legacy checkpoints that store the
+is removed, including the calibrated GSQ-FP8 path, the MLX encoder and its
+Metal decode kernels, and the `TorchFP8Linear.pack*` encode entry points. Legacy checkpoints that store the
 inverse convention still load when they declare
 `weight_scale_semantics="inverse"`.
 
@@ -46,6 +46,8 @@ flowchart TD
     D --> F["_build_fp8_forward_module"]
     E --> F
     F --> G["TorchFP8Linear.forward<br/>W8A16 dequant tile"]
+    B --> M["MLX backend requested"]
+    M --> N["ValueError: FP8 Metal kernels removed"]
     B --> H["BaseQModel.quantize"]
     H --> I{"quantize_config.is_load_only()?"}
     I -- yes --> J["ValueError: FP8 is load-only"]
@@ -54,7 +56,7 @@ flowchart TD
     classDef ok fill:#d1e7dd,stroke:#0f5132,color:#111;
     classDef failure fill:#f8d7da,stroke:#b42318,color:#111;
     class L ok
-    class J failure
+    class J,N failure
 ```
 
 ## Removed surface
@@ -66,7 +68,7 @@ flowchart TD
 | `TorchFP8Linear.pack*` | wrote FP8 codes and inverse scales | `_refuse_fp8_encode` raises `ValueError` |
 | `quant_method` alias | published `gptqmodel_fp8` | removed; `_serialize_export_quant_method` returns `fp8` and never writes FP8 |
 | Calibrated GSQ-FP8 | `FP8GSQProcessor`, `gsq_fp8`, `gsq_fp8_task`, `gsq_calibration` | deleted; GSQ remains for GPTQ, AWQ, RTN, QQQ and Paro |
-| MLX FP8 encoder | `quantization/mlx_fp8.py` | deleted; the MLX decode runtime in `nn_modules/qlinear/mlx_fp8.py` remains |
+| MLX FP8 runtime | `quantization/mlx_fp8.py` encoder and `nn_modules/qlinear/mlx_fp8.py` Metal decode kernels | both deleted; the MLX backend rejects `FORMAT.FP8` and FP8 loads use the Torch backend |
 | HF save warning | warned that `FineGrainedFP8` misreads GPT-QModel scales | removed with the export |
 
 ## Failure and ambiguity contract
@@ -74,6 +76,7 @@ flowchart TD
 | Situation | Result |
 | --- | --- |
 | `model.quantize()` with `FP8Config` | `ValueError` naming the production layouts to load instead |
+| FP8 checkpoint with `backend="mlx"` | `ValueError` naming the removed Metal kernels and directing the load to the Torch backend |
 | `TorchFP8Linear.pack_original` / `pack_block` / `pack_gpu` | `ValueError: FP8 is load-only` |
 | `quant_method: "gptqmodel_fp8"` in a checkpoint | not recognized; load the production FP8 checkpoint |
 | Legacy inverse-scale checkpoint with `weight_scale_semantics="inverse"` | loads; the scale convention is honoured |
@@ -88,6 +91,7 @@ flowchart TD
 | `tests/test_fp8.py::test_quantize_refuses_load_only_fp8` | `BaseQModel.quantize()` refuses FP8 before any calibration |
 | `tests/test_fp8.py::test_weight_only_fp8_export_is_rejected` | the weight-only FP8 config class resolution raises |
 | `tests/test_fp8.py::test_torch_fp8_pack_entry_points_refuse` | every `pack*` entry point raises |
+| `tests/test_mlx_fp8_removed.py` | no MLX FP8 kernel or holder exists, the MLX loader rejects `FORMAT.FP8`, and Torch still selects `TorchFP8Linear` |
 | `tests/test_checkpoint_modules.py::test_checkpoint_persists_effective_dynamic_fp8_settings` | the multiplier default round-trips and legacy `inverse` is still accepted |
 | `tests/kernels/test_fp8_kernel.py` | production W8A16 decode still matches an FP64 oracle |
 

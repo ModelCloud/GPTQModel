@@ -50,7 +50,7 @@ OTHER_KERNELS = set("""
     GGUFCppKernel MlxQuantLinear GPTQMarlinMlxQuantLinear GPTQBitBLASMlxQuantLinear
     AwqMlxQuantLinear AWQMarlinMlxQuantLinear AWQBitBLASMlxQuantLinear
     AwqGemvMlxQuantLinear AwqGemvFastMlxQuantLinear LLMAwqMlxQuantLinear
-    ParoMlxQuantLinear QQQMlxQuantLinear GGUFMlxQuantLinear FP8MlxQuantLinear
+    ParoMlxQuantLinear QQQMlxQuantLinear GGUFMlxQuantLinear
     BitsAndBytesMlxQuantLinear
     XLALinear
     TTNNLinear TTNNBlockFloat8Linear

@@ -2,7 +2,7 @@
 
 Fusion preserves the optimized backend selected by AUTO. This report qualifies
 **23 exact native GPTQ/AWQ kernel classes** on Zen 5, RTX 4090 and Radeon AI PRO
-R9700. Fusion remains opt-in. [All 57 registry classes and the EXL3/FP4 loaders](fusion-kernel-inventory.md)
+R9700. Fusion remains opt-in. [All 56 registry classes and the EXL3/FP4 loaders](fusion-kernel-inventory.md)
 are inventoried; unavailable kernels and other quantization formats are not
 reported as validated fusion implementations.
 

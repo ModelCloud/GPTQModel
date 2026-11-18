@@ -131,7 +131,6 @@ ended up trace-clean and forced eager at the same time (#4984).
 | `VPTQLinear` | `True` | the portable torch forward adds 1 model graph with 0 breaks (the layer-local `dequantize` compile exists on both paths); static-cache decode 0.70 s -> 0.14 s (5.1x) on Qwen2.5-0.5B VPTQ fp16, RTX 4090, 4 prompts x 32 greedy tokens (#5102). AUTO selects it on ROCm |
 | `MarlinLinear`, `MarlinAwqLinear`, ExLlamaV2, `TorchLinear`, `TritonV2Linear`, `QQQLinear`, EXL3, `ParoLinear` | `False` | custom op without a fake impl, or host-side `data_ptr()`/`id()`/`._version` guards in `forward` |
 | `VPTQCudaLinear` | `False` | inherits from `VPTQLinear`, so it re-declares the opt-out rather than inheriting it: its static-cache decode recompiles the lazy op loader (23 graphs, 33 breaks) and is 0.60 s -> 1.69 s (1.7x slower) on the RTX 4090 above (#5102) |
-| `FP8MlxQuantLinear` | `False` | native Metal MXFP8 kernels on MPS; never traced or timed, so it does not inherit the Torch FP8 opt-in |
 
 A kernel whose `SUPPORTS_COMPILE_LEVEL` is `INDUCTOR` or higher has a traceable,
 lowerable forward, which is the same bar as the policy question above. Opting
