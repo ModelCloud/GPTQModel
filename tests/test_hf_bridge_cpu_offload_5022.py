@@ -88,12 +88,18 @@ def hf_bridge_environment(tmp_path_factory):
     # imported too early would leave that name undefined and fail later with
     # `NameError: name 'QuantizeConfig' is not defined`.
     monkey.syspath_prepend(str(dist_root))
-    from optimum.utils import import_utils as optimum_import_utils
-
-    monkey.setattr(optimum_import_utils, "_gptqmodel_available", True, raising=False)
-    quantizer = sys.modules.get("optimum.gptq.quantizer")
-    if quantizer is not None and not hasattr(quantizer, "QuantizeConfig"):
-        importlib.reload(quantizer)
+    try:
+        from optimum.utils import import_utils as optimum_import_utils
+    except ImportError:
+        # Optimum is optional. The end-to-end nodes then skip at the load
+        # itself (`Transformers' GPTQ quantizer requires optimum`), and the
+        # unit nodes below do not need it.
+        optimum_import_utils = None
+    if optimum_import_utils is not None:
+        monkey.setattr(optimum_import_utils, "_gptqmodel_available", True, raising=False)
+        quantizer = sys.modules.get("optimum.gptq.quantizer")
+        if quantizer is not None and not hasattr(quantizer, "QuantizeConfig"):
+            importlib.reload(quantizer)
     from transformers.utils import import_utils as transformers_import_utils
 
     transformers_import_utils.is_gptqmodel_available.cache_clear()
@@ -106,7 +112,17 @@ def hf_bridge_environment(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def checkpoints(tmp_path_factory):
-    """One tiny base model quantized to each format the bridge must load."""
+    """One tiny base model quantized to each format the bridge must load.
+
+    The two end-to-end nodes are the only consumers, and both need CUDA plus
+    Optimum. Skipping here (rather than inside the test bodies) keeps a
+    CPU-only lane from building checkpoints it will never use, and keeps the
+    portable unit nodes in this file running there.
+    """
+
+    if not torch.cuda.is_available():
+        pytest.skip("a CPU-offload device map needs an accelerator for the resident layers")
+    pytest.importorskip("optimum", reason="Transformers' GPTQ quantizer needs optimum")
 
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.quantization import FORMAT, AWQConfig, GPTQConfig, RTNConfig
@@ -183,6 +199,12 @@ def _require_cuda():
         pytest.skip("a CPU-offload device map needs an accelerator for the resident layers")
 
 
+def _require_hf_quantizers():
+    """Transformers' GPTQ path needs Optimum; skip cleanly without it."""
+
+    pytest.importorskip("optimum", reason="Transformers' GPTQ quantizer needs optimum")
+
+
 def _materialized_device(model):
     """The device of the first non-meta parameter (an offloaded layer has none)."""
 
@@ -203,6 +225,7 @@ def test_hf_from_pretrained_loads_an_offloaded_map(checkpoints):
     """Every format must load through Transformers with CPU entries in the map."""
 
     _require_cuda()
+    _require_hf_quantizers()
     from transformers import AutoModelForCausalLM
 
     from gptqmodel import GPTQModel
@@ -399,6 +422,20 @@ def _stub_marlin_runtime(monkeypatch):
     monkeypatch.setattr(marlin_module, "marlin_permute_bias", lambda bias: bias)
 
 
+def _marlin_layer_or_skip():
+    """Build the fixture layer, or skip when the Marlin kernel is absent.
+
+    A CPU-only torch build has no Marlin extension, so the class raises
+    `ImportError: Marlin kernel requires CUDA` at construction. These nodes
+    exercise the offload map, not the kernel, so skipping is the honest result.
+    """
+
+    try:
+        return _marlin_layer()
+    except (ImportError, ModuleNotFoundError) as exc:
+        pytest.skip(f"the Marlin kernel cannot be constructed in this runtime: {exc}")
+
+
 @pytest.mark.parametrize("disk_backed", [False, True])
 def test_offloaded_weights_loader_map_is_repacked_in_place(monkeypatch, disk_backed):
     """A real `OffloadedWeightsLoader` map is refreshed, a disk entry is refused."""
@@ -410,7 +447,7 @@ def test_offloaded_weights_loader_map_is_repacked_in_place(monkeypatch, disk_bac
 
     _stub_marlin_runtime(monkeypatch)
 
-    resident = _marlin_layer()
+    resident = _marlin_layer_or_skip()
     expected = copy.deepcopy(resident)
     expected.post_init()
     expected_state = expected.state_dict()
