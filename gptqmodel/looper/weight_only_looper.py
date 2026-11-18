@@ -24,6 +24,7 @@ import torch
 from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEVICE_THREAD_POOL
+from ..looper.inflight_layer import InflightLayerTracker
 from ..looper.loop_processor import record_quant_log, rehome_failed_run_kernels
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.module_preprocessor import ModulePreProcessor
@@ -86,7 +87,7 @@ from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 log = setup_logger()
 
 
-class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
+class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignmentState):
     """Run the simplified per-layer lifecycle for weight-only quantization."""
 
     def __init__(
@@ -1000,8 +1001,14 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             # leaves them without a version counter (issue #4572).
             ensure_version_counters(self.gptq_model.model)
         except BaseException:
-            # A failed run must not leave the base modules stranded on meta.
             try:
+                # The success path moves the layer back to its home device only
+                # in ``post_quantize``, which the exception skipped. Without
+                # this the in-flight layer keeps accelerator tensors while the
+                # rest of the model is on CPU, and every later forward raises a
+                # device-mismatch error (#5011).
+                self._restore_inflight_layer()
+                # A failed run must not leave the base modules stranded on meta.
                 self._restore_offloaded_base_modules(strict=False)
             finally:
                 # The loop never materialized the layers past the cancel point;
@@ -1245,7 +1252,19 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     pb.current_iter_step = progress_index
                     pb.title(layer_title).subtitle("").draw()
 
+                # Capture the layer's pre-stage home before anything moves it,
+                # so a cancelled or failed run restores this placement instead
+                # of leaving the layer pinned on the compute device (#5011).
+                inflight_home = get_device(module)
+                if getattr(inflight_home, "type", None) == "meta":
+                    inflight_home = CPU
+                self._track_inflight_layer(module, inflight_home)
+
                 module = self.gptq_model.pre_quantize(module)
+                # ``pre_quantize`` moves a CPU layer to the quantize device and
+                # may return a materialized shell, so track the object that is
+                # actually staged as well as the pre-call one.
+                self._track_inflight_layer(module, inflight_home)
                 if not is_lm_head_module:
                     # Preserve existing module conversion behavior so the new
                     # lifecycle stays compatible with model-specific wrappers.
@@ -1253,6 +1272,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     if model_type in MODULE_CONVERTER_MAP:
                         converter = MODULE_CONVERTER_MAP[model_type]
                         module = converter(module, self.gptq_model.model.config)
+                        self._track_inflight_layer(module, inflight_home)
                     layers[layer_index] = module
 
                 # Resolve concrete submodules after any pre-quantization
@@ -1322,6 +1342,9 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     self.gptq_model.post_quantize(module)
                 else:
                     layers[layer_index] = self.gptq_model.post_quantize(module)
+                # The layer is back on its home device; a later failure must not
+                # try to restore it again (it may already be a packed module).
+                self._clear_inflight_layer()
                 self.extensions.publish(plan.steps[layer_index])
                 if pb is not None:
                     pb.current_iter_step = progress_index + 1

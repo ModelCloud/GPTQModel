@@ -73,6 +73,7 @@ jobs:
                 tests/test_calibration_tools_formats_4934.py \
                 tests/test_awq_hybrid_moe_root_4903.py \
                 tests/test_awq_deepseek_v4_hash_moe_4880.py \
+                tests/test_weight_only_failed_run_device_5011.py \
                 tests/test_awq_torch_fused_mode_5018.py \
                 tests/test_awq_hash_moe_kept_rows_5015.py \
                 tests/test_awq_cohere2_moe_parallel_norm_4898.py \
