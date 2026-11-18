@@ -19,6 +19,7 @@ on:
       - 'gptqmodel/nn_modules/qlinear/torch_cpu_avx512_awq.py'
       - 'docs/**'
       - 'tests/test_awq_*.py'
+      - 'tests/test_hf_bridge_*.py'
       - 'tests/test_hymba_awq_*.py'
       - 'tests/test_calibration_*.py'
       - 'tests/test_docs_contract_refs.py'
