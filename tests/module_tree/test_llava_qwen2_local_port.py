@@ -28,12 +28,12 @@ FASTVLM_BASE = {
     "torch_dtype": "bfloat16", "use_sliding_window": False, "unfreeze_mm_vision_tower": True, "bos_token_id": 151643, "eos_token_id": 151645,
 }
 FASTVLM = {
-    "0.5B": dict(hidden_size=896, intermediate_size=4864, num_attention_heads=14, num_hidden_layers=24, max_window_layers=24,
-                 num_key_value_heads=2, tie_word_embeddings=True, vocab_size=151936),
-    "1.5B": dict(hidden_size=1536, intermediate_size=8960, num_attention_heads=12, num_hidden_layers=28, max_window_layers=28,
-                 num_key_value_heads=2, tie_word_embeddings=True, vocab_size=151936),
-    "7B": dict(hidden_size=3584, intermediate_size=18944, num_attention_heads=28, num_hidden_layers=28, max_window_layers=28,
-               num_key_value_heads=4, tie_word_embeddings=False, vocab_size=152064),
+    "0.5B": {"hidden_size": 896, "intermediate_size": 4864, "num_attention_heads": 14, "num_hidden_layers": 24, "max_window_layers": 24,
+                 "num_key_value_heads": 2, "tie_word_embeddings": True, "vocab_size": 151936},
+    "1.5B": {"hidden_size": 1536, "intermediate_size": 8960, "num_attention_heads": 12, "num_hidden_layers": 28, "max_window_layers": 28,
+                 "num_key_value_heads": 2, "tie_word_embeddings": True, "vocab_size": 151936},
+    "7B": {"hidden_size": 3584, "intermediate_size": 18944, "num_attention_heads": 28, "num_hidden_layers": 28, "max_window_layers": 28,
+               "num_key_value_heads": 4, "tie_word_embeddings": False, "vocab_size": 152064},
 }
 # sha256 of the sorted (name, shape) inventory read from the apple/FastVLM-0.5B safetensors
 # header (revision 16375720c2d673fa583e57e9876afde27549c7d0): all 924 tensors, and the 629 vision ones.

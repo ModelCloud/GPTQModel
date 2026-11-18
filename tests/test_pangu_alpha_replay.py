@@ -19,7 +19,6 @@ from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.pangu_alpha import PanguAlphaQModel
 
 
-
 class _PanguTransformer(nn.Module):
     def __init__(self, layers: int = 3, dim: int = 16, vocab: int = 64):
         super().__init__()

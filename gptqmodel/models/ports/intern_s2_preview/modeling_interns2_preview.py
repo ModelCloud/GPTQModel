@@ -22,7 +22,6 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, EncoderDecoderCache
 from transformers.generation import GenerationMixin
@@ -30,16 +29,16 @@ from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPooling, ModelOutput
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoePreTrainedModel
-from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTextModel as InternS2PreviewTextModel
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
-    Qwen3_5MoeVisionModel as InternS2PreviewVisionModel,
-)
-from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+    Qwen3_5MoePreTrainedModel,
     eager_attention_forward,
     load_balancing_loss_func,
     torch_chunk_gated_delta_rule,  # noqa: F401 - re-exported kernel reference
     torch_recurrent_gated_delta_rule,  # noqa: F401 - re-exported kernel reference
+)
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTextModel as InternS2PreviewTextModel
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+    Qwen3_5MoeVisionModel as InternS2PreviewVisionModel,
 )
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, logging, torch_compilable_check
