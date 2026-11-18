@@ -9,10 +9,11 @@ in the automatic quantization dispatcher.
 import torch
 from torch import nn
 from torch.nn import functional as F
-from transformers.models.deepseek_v41.modeling_deepseek_v41 import DeepseekV41DecoderLayer, DeepseekV41RotaryEmbedding
 
 from ...utils.ple_mmap import MappedPLETable
 from ..base import BaseQModel
+from ..local import LocalModelLoader
+from ..ports.deepseek_v41.modeling_deepseek_v41 import DeepseekV41DecoderLayer, DeepseekV41RotaryEmbedding
 
 
 class DeepSeekV41RotaryEmbedding(DeepseekV41RotaryEmbedding):
@@ -155,6 +156,13 @@ class DeepSeekV41Experts(nn.ModuleList):
 class DeepSeekV41QModel(BaseQModel):
     """V4.1 definition; registration awaits the stateful calibration adapter."""
 
+    # Package-owned Transformers 5.23 port. The definition stays out of MODEL_MAP:
+    # released checkpoints keep DeepSeek's FP8/FP4 key layout and are read through
+    # V41Source, not through from_pretrained.
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.deepseek_v41.configuration_deepseek_v41.DeepseekV41Config",
+        model_class="gptqmodel.models.ports.deepseek_v41.modeling_deepseek_v41.DeepseekV41ForCausalLM",
+    )
     require_trust_remote_code = False
     dynamic_expert_index = "n_routed_experts"
     pre_lm_head_norm_module = "model.norm"
@@ -167,7 +175,7 @@ class DeepSeekV41QModel(BaseQModel):
 
     @staticmethod
     def convert_model_structure(model, cleanup_original=False):
-        from transformers.models.deepseek_v41.modeling_deepseek_v41 import DeepseekV41Experts
+        from ..ports.deepseek_v41.modeling_deepseek_v41 import DeepseekV41Experts
 
         converted = False
         for block in model.model.layers:
