@@ -20,7 +20,6 @@ from transformers import (
     Qwen2VLImageProcessor,
     Qwen2VLVideoProcessor,
 )
-
 from transformers.models.exaone4.configuration_exaone4 import Exaone4Config as NativeExaone4Config
 from transformers.models.exaone4.modeling_exaone4 import Exaone4ForCausalLM as NativeExaone4ForCausalLM
 
