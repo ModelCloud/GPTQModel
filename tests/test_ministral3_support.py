@@ -2,15 +2,13 @@ from types import SimpleNamespace
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.ministral3 import Ministral3GPTQ
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 
 
-def test_ministral3_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="ministral3")
+def test_ministral3_model_type_selects_definition(tmp_path):
+    CONFIG_MAPPING["ministral3"]().save_pretrained(tmp_path)
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
-
-    assert auto.check_and_get_model_definition("/tmp/ministral3") is Ministral3GPTQ
+    assert auto.check_and_get_model_definition(str(tmp_path)) is Ministral3GPTQ
 
 
 def test_ministral3_module_tree_matches_text_only_layout():
