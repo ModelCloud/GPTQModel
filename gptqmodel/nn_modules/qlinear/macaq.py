@@ -63,6 +63,11 @@ class MacaqLinear(WeightOnlyQuantLinear):
     and released immediately.
     """
 
+    # Packed E2M1 weights and E8M0 scales are always stored; the activation
+    # transforms (`BH`, fitted `pre_scale`) are registered only for the
+    # configured rotation/pre-scale mode, so an absent one is skipped.
+    CHECKPOINT_REQUIRED_BUFFERS = ("W_packed", "W_scales", "BH", "pre_scale")
+
     # Measured on GB10 (sm_121), torch 2.11.0+cu130: every compile level passes,
     # but explicit capture fails because `dequantize_mxfp4` copies the CPU
     # `E2M1_MAGNITUDES` table to the device on each call.

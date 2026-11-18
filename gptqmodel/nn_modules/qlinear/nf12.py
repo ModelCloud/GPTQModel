@@ -127,6 +127,13 @@ class NF12Linear(WeightOnlyQuantLinear):
     weights apart from the kernel's accumulation order.
     """
 
+    # The packed mantissas, the escape table and the exponent base are the
+    # complete NF12 payload. A layer with no escapes still publishes an empty
+    # `nf12_escapes` (the writer keeps named empty buffers), so the table is
+    # required even when it has zero rows: the live module's placeholder is
+    # always empty, and only the checkpoint knows whether escapes were used.
+    CHECKPOINT_REQUIRED_BUFFERS = ("nf12_packed", "nf12_escapes", "nf12_exp_base")
+
     # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0, and
     # dynamo/aot_eager/inductor all pass. Two fixes got there: ``post_init()``
     # now resolves the exponent base to a Python int (the buffer stays a tensor

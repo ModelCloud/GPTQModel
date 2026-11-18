@@ -276,6 +276,10 @@ def quantize_fp8_weight(
 
 
 class TorchFP8Linear(WeightOnlyQuantLinear):
+    # FP8 stores the scaled weight and its inverse scale; either one missing
+    # decodes to zeros or a wrong scale (the issue measured a 20.2 logit diff).
+    CHECKPOINT_REQUIRED_BUFFERS = ("weight", "weight_scale_inv")
+
     # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager, dynamo, aot_eager,
     # inductor and reduce-overhead pass, and an explicit torch.cuda.graph
     # capture succeeds with output matching eager.

@@ -106,6 +106,18 @@ def awq_gemm_bf16_supported(device: torch.device) -> bool:
 class ParoLinear(AwqTorchLinear):
     """Run Paro inference by rotating inputs and reusing AWQ packed GEMM."""
 
+    # The inherited AWQ payload plus the per-layer rotation state. A checkpoint
+    # missing any of these loads a wrong rotation or a zero placeholder (the
+    # issue measured 1.16-3.99 logit diffs).
+    CHECKPOINT_REQUIRED_BUFFERS = (
+        "qweight",
+        "qzeros",
+        "scales",
+        "theta",
+        "pairs",
+        "channel_scales",
+    )
+
     # Eager and an explicit ``torch.cuda.graph`` capture both run with matching
     # output (measured on sm_80, torch 2.15.0.dev20260928+cu130); the rotation
     # buffers are validated in ``post_init``.

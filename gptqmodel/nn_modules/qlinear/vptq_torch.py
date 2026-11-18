@@ -45,6 +45,21 @@ def _as_pair(value: Any, name: str) -> List[int]:
 class VPTQLinear(WeightOnlyQuantLinear):
     """Weight-only VPTQ linear layer with the portable Torch implementation."""
 
+    # Packed codebook indices plus the codebooks that decode them. The
+    # residual/outlier codebooks, their indices, the norm scales and the
+    # permutation exist only when the layer was configured with them, so the
+    # validator skips a suffix whose live tensor is absent.
+    CHECKPOINT_REQUIRED_BUFFERS = (
+        "indices",
+        "centroids.weight",
+        "res_centroids.weight",
+        "outlier_centroids.weight",
+        "outlier_indices",
+        "weight_scale",
+        "weight_bias",
+        "perm",
+    )
+
     # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager, dynamo, aot_eager,
     # inductor and reduce-overhead pass, and an explicit torch.cuda.graph
     # capture succeeds with output matching eager.

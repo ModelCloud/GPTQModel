@@ -54,6 +54,20 @@ def _torch_dtype(value: Any) -> torch.dtype:
 
 class ExllamaV3Linear(nn.Module):
     QUANT_TYPE = "exl3"
+    # The trellis codes and sign vectors are the EXL3 payload. The sign
+    # vectors are stored either unpacked (`suh`/`svh`) or packed (`su`/`sv`),
+    # and the codebook is `mcg` on one recipe and `mul1` on another. A module
+    # built for a recipe owns only one side of each pair, and the validator
+    # skips the absent suffix.
+    CHECKPOINT_REQUIRED_BUFFERS = (
+        "trellis",
+        "suh",
+        "svh",
+        "su",
+        "sv",
+        "mcg",
+        "mul1",
+    )
     # Every floating EXL3 buffer (the fp16 `suh`/`svh` sign vectors and the
     # bias) loads at its checkpoint dtype; the Hadamard kernels require fp16.
     MODEL_DTYPE_BUFFERS = ()

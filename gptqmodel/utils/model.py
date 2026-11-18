@@ -3181,29 +3181,62 @@ def _checkpoint_tensor_keys(
     )
 
 
+def _checkpoint_suffix_tensor(module: nn.Module, suffix: str) -> Optional[torch.Tensor]:
+    """Resolve one declared checkpoint suffix on a live module.
+
+    A suffix is a dotted path because some kernels keep their payload in a
+    submodule (VPTQ's codebooks are ``nn.Embedding`` weights, so
+    ``centroids.weight``). ``None`` means this module instance does not own the
+    tensor at all: the kernel is conditionally configured without it (an
+    AllSpark layer has no ``qzeros``, a VPTQ layer without residuals has no
+    ``res_centroids``, a BnB checkpoint without compressed statistics has no
+    ``weight_nested_absmax``), so there is nothing for the checkpoint to
+    restore and the suffix must not be required.
+    """
+
+    target: Any = module
+    for part in suffix.split("."):
+        if not isinstance(target, nn.Module):
+            return None
+        child = target._modules.get(part)
+        target = child if child is not None else getattr(target, part, None)
+        if target is None:
+            return None
+    return target if isinstance(target, torch.Tensor) else None
+
+
 def validate_checkpoint_qweights(
     model: nn.Module, checkpoint: str | os.PathLike, format: FORMAT, key_converter=None,
 ) -> None:
     """Fail a load whose checkpoint lacks a kernel's required payload.
 
     Every quantized kernel declares the checkpoint tensors it cannot rebuild
-    (``BaseQuantLinear.CHECKPOINT_REQUIRED_BUFFERS``): ``qweight`` for the
-    GPTQ/AWQ/Marlin/BitBLAS family, ``B``/``s_group``/``s_channel`` for QQQ.
-    AWQ producers (AutoAWQ, llm-compressor) and shared Marlin/BitBLAS
-    checkpoints expose the same ``qweight`` key as GPTQ, so the declaration
-    replaces the old format allow-list.
+    (``CHECKPOINT_REQUIRED_BUFFERS``): the packed ``qweight``/``scales``/
+    ``qzeros`` for the GPTQ/AWQ/Marlin/BitBLAS/Paro family, ``B``/``s_group``/
+    ``s_channel`` for QQQ, ``weight``/``weight_scale_inv`` for FP8,
+    ``nf12_packed``/``nf12_escapes``/``nf12_exp_base`` for NF12, ``qweight``
+    for GGUF, the quant-state buffers for BitsAndBytes, ``indices`` plus the
+    codebooks for VPTQ, ``W_packed``/``W_scales`` for MACaQ, and
+    ``trellis``/``suh``/``svh`` plus a codebook for EXL3.
 
     Without this, a module whose checkpoint tensor was never loaded kept its
-    zero-filled placeholder and produced silent NaN output, and a QQQ
-    checkpoint saved after an in-session forward (which had dropped its
-    buffers, #4856) loaded into uninitialized buffers -- a CUDA
-    illegal-address fault or all-NaN logits (#5010). A truncated checkpoint
-    must raise, not corrupt the context.
+    zero-filled placeholder and produced silent NaN output, wrong logits, a
+    BnB CUDA illegal-memory-access that poisoned the context, or a device
+    mismatch at the first forward. A truncated checkpoint must raise, not
+    corrupt the context (#5010, #5218).
+
+    Only a suffix the live module actually owns is required. Kernels declare
+    the union of the payload they may store, and conditionally disabled
+    buffers (``None`` or absent) are skipped: AllSpark has no ``qzeros``, a
+    plain MXFP4 MACaQ layer has no ``BH``/``pre_scale``, a VPTQ layer without
+    residuals has no ``res_centroids``. This keeps a kernel from refusing a
+    checkpoint that never contained the tensor by design.
 
     A suffix listed in ``CHECKPOINT_OPTIONAL_EMPTY_BUFFERS`` is not required
     when the live module's buffer is empty: there is no data to restore, and
-    per-channel QQQ derives its empty ``s_group`` from ``s_channel`` (#5126).
-    A non-empty buffer of the same name stays required.
+    per-channel QQQ derives its empty ``s_group`` from ``s_channel`` (#5126),
+    NF12 derives an empty escape table, and a symmetric BitBLAS layer has no
+    zero points. A non-empty buffer of the same name stays required.
 
     ``format`` is kept for the call-site signature; the per-kernel declaration
     is the source of truth.
@@ -3216,7 +3249,10 @@ def validate_checkpoint_qweights(
     # A shared quantized module can be saved under any one of its aliases.
     module_keys = collections.defaultdict(set)
     for name, module in model.named_modules(remove_duplicate=False):
-        required = getattr(module, "CHECKPOINT_REQUIRED_BUFFERS", ())
+        # A kernel may make the payload conditional on its configuration
+        # (GPTQ `desc_act` needs `g_idx`), so ask the instance first.
+        resolve = getattr(module, "checkpoint_required_buffers", None)
+        required = resolve() if callable(resolve) else getattr(module, "CHECKPOINT_REQUIRED_BUFFERS", ())
         if not required:
             continue
         optional_empty = getattr(module, "CHECKPOINT_OPTIONAL_EMPTY_BUFFERS", ())
@@ -3224,10 +3260,12 @@ def validate_checkpoint_qweights(
         if callable(key_converter):
             aliases.append(key_converter(name))
         for suffix in required:
-            if suffix in optional_empty:
-                buffer = getattr(module, suffix, None)
-                if isinstance(buffer, torch.Tensor) and buffer.numel() == 0:
-                    continue
+            tensor = _checkpoint_suffix_tensor(module, suffix)
+            if tensor is None:
+                # Conditional payload this kernel instance does not own.
+                continue
+            if suffix in optional_empty and tensor.numel() == 0:
+                continue
             for alias in aliases:
                 module_keys[(id(module), suffix)].add(
                     f"{alias}.{suffix}" if alias else suffix
