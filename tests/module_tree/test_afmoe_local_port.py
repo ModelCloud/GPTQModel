@@ -20,7 +20,7 @@ from tests.test_afmoe_local_port import split_expert_checkpoint, tiny_config
 
 
 SCHEMA = json.loads(
-    (Path(__file__).resolve().parents[2] / "gptqmodel/models/ports/afmoe/checkpoint-schema.json").read_text()
+    (Path(__file__).resolve().parents[1] / "fixtures/ports/afmoe/checkpoint-schema.json").read_text()
 )
 
 

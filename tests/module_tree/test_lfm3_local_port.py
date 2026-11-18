@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real native decoder ownership, including nonquantized convolution/gate weights."""
 
+import hashlib
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -65,23 +65,44 @@ def test_native_state_dict_owners_and_quantization_plan(kv_heads, sandwich, gate
     assert plan.find("self_attn.g_proj_suffix") is None
 
 
+# LiquidAI/LFM3-1.7B @ 1da06bec6a819da10b54c67e5c90972b46d81871 (config.json, auto_map dropped).
+RELEASED_CONFIG = {
+    "bos_token_id": 124894, "conv_L_cache": 7, "conv_bias": False, "dtype": "bfloat16",
+    "eos_token_id": 124900, "head_dim": 128, "hidden_size": 2048, "intermediate_size": 7680,
+    "layer_types": ["conv", "conv"] + ["full_attention", "conv", "sliding_attention", "conv"] * 5
+    + ["full_attention", "conv"],
+    "max_position_embeddings": 262144, "model_type": "lfm3", "norm_eps": 1e-05, "num_attention_heads": 16,
+    "num_hidden_layers": 24, "num_key_value_heads": 4, "pad_token_id": 124893,
+    "rope_parameters": {
+        "full_attention": {"partial_rotary_factor": 0.5, "rope_theta": 1000000, "rope_type": "default"},
+        "sliding_attention": {"rope_theta": 10000, "rope_type": "default"},
+    },
+    "sliding_window": 256, "tie_word_embeddings": True, "use_cache": True, "use_sandwich_norm": True,
+    "vocab_size": 128000,
+}
+# sha256 of the released safetensors index inventory: json of sorted [key, shape] pairs.
+RELEASED_INVENTORY_SHA256 = "6b6b33dc9b8c4bb47f4fabc8f20c6b8012d25a863545220121df8afac5a8e3e5"
+
+
 def test_pinned_checkpoint_shapes_and_conversion_owners():
-    manifest = json.loads((Path(__file__).parents[2] /
-                           "gptqmodel/models/ports/lfm3/checkpoint_manifest.json").read_text())
-    config = Lfm3Config.from_dict(manifest["config"])
+    config = Lfm3Config.from_dict(RELEASED_CONFIG)
     with torch.device("meta"):
         model = Lfm3ForCausalLM(config)
     wrapper = shell(model)
-    expected = {key.replace(".gate_proj.", ".g_proj."): tuple(shape)
-                for key, shape in manifest["checkpoint_shapes"].items()}
-    assert len(expected) == 286
     assert model.lm_head.weight is model.model.embed_tokens.weight
-    assert {key: tuple(value.shape) for key, value in model.state_dict().items()} == {
-        **expected, "lm_head.weight": expected["model.embed_tokens.weight"]}
-    for key in expected:
+    # Native g_proj is the checkpoint's self_attn.gate_proj; lm_head is tied and not serialized.
+    released = {key.replace(".g_proj.", ".gate_proj."): list(value.shape)
+                for key, value in model.state_dict().items() if key != "lm_head.weight"}
+    assert len(released) == 286
+    canonical = json.dumps(sorted(released.items()), separators=(",", ":"))
+    assert hashlib.sha256(canonical.encode()).hexdigest() == RELEASED_INVENTORY_SHA256
+    assert released["model.layers.0.conv.conv.weight"] == [2048, 1, 7]
+    assert released["model.layers.2.self_attn.gate_proj.weight"] == [16, 2048]
+    assert released["model.layers.2.self_attn.k_proj.weight"] == [512, 2048]
+    for key in released:
         if not key.startswith("model.layers."):
             continue
-        owner = key.split(".", 3)[3].rsplit(".", 1)[0]
+        owner = key.split(".", 3)[3].rsplit(".", 1)[0].replace(".gate_proj", ".g_proj")
         spec = wrapper.module_plan().find(owner)
         assert spec is not None, f"unowned checkpoint tensor: {key}"
         if not spec.quantize:
