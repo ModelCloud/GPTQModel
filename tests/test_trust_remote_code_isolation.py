@@ -224,8 +224,8 @@ def test_dequantize_uses_local_model_implementation(tmp_path, monkeypatch):
                    num_local_experts=2, num_experts_per_tok=1, head_dim=8, rotary_dim=8)
     (checkpoint / "config.json").write_text(json.dumps(payload))
     loader = LocalModelLoader(
-        "gptqmodel.hf_minimax_m2.configuration_minimax_m2.MiniMaxM2Config",
-        "gptqmodel.hf_minimax_m2.modeling_minimax_m2.MiniMaxM2ForCausalLM",
+        "gptqmodel.models.ports.minimax_m2.configuration_minimax.MiniMaxText01Config",
+        "gptqmodel.models.ports.minimax_m2.modeling_minimax.MiniMaxText01ForCausalLM",
     )
     monkeypatch.setitem(MODEL_MAP_CASEFOLD, "minimax", SimpleNamespace(loader=loader))
     monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")

@@ -10,7 +10,7 @@ from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 class MiniMaxM2GPTQ(BaseQModel):
     """
-    Native Transformers 5 MiniMax-M2 (not the legacy hf_minimax_m2 package):
+    Native Transformers 5 MiniMax-M2:
       - Per-layer RMSNorm before/after attention
       - Standard attention with q/k normalization parameters
       - Sparse MoE block (MiniMaxM2SparseMoeBlock) with up to 256 experts

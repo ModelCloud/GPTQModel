@@ -195,8 +195,8 @@ def test_local_config_and_loader_win_over_auto_map_even_with_bypass(tmp_path, mo
     path = tmp_path / "local"
     marker = checkpoint(path, "minimax")
     loader = LocalModelLoader(
-        "gptqmodel.hf_minimax_m2.configuration_minimax_m2.MiniMaxM2Config",
-        "gptqmodel.hf_minimax_m2.modeling_minimax_m2.MiniMaxM2ForCausalLM",
+        "gptqmodel.models.ports.minimax_m2.configuration_minimax.MiniMaxText01Config",
+        "gptqmodel.models.ports.minimax_m2.modeling_minimax.MiniMaxText01ForCausalLM",
     )
     definition = SimpleNamespace(loader=loader)
     monkeypatch.setitem(MODEL_MAP_CASEFOLD, "minimax", definition)
@@ -282,8 +282,8 @@ def test_public_dispatch_uses_local_definition_and_disables_checkpoint_model_cod
     path = tmp_path / "local"
     marker = checkpoint(path, "minimax")
     loader = LocalModelLoader(
-        "gptqmodel.hf_minimax_m2.configuration_minimax_m2.MiniMaxM2Config",
-        "gptqmodel.hf_minimax_m2.modeling_minimax_m2.MiniMaxM2ForCausalLM",
+        "gptqmodel.models.ports.minimax_m2.configuration_minimax.MiniMaxText01Config",
+        "gptqmodel.models.ports.minimax_m2.modeling_minimax.MiniMaxText01ForCausalLM",
     )
     captured = []
     sentinel = SimpleNamespace(log_kv_cache_estimate=lambda: None)
@@ -365,8 +365,8 @@ def test_native_config_is_not_changed_by_local_definition_selection(tmp_path, mo
     checkpoint(path, "minimax")
     original = type(AutoConfig.from_pretrained(path, trust_remote_code=False))
     monkeypatch.setitem(MODEL_MAP_CASEFOLD, "minimax", SimpleNamespace(loader=LocalModelLoader(
-        "gptqmodel.hf_minimax_m2.configuration_minimax_m2.MiniMaxM2Config",
-        "gptqmodel.hf_minimax_m2.modeling_minimax_m2.MiniMaxM2ForCausalLM",
+        "gptqmodel.models.ports.minimax_m2.configuration_minimax.MiniMaxText01Config",
+        "gptqmodel.models.ports.minimax_m2.modeling_minimax.MiniMaxText01ForCausalLM",
     )))
     assert type(load_model_config(path)) is not original
     assert type(AutoConfig.from_pretrained(path, trust_remote_code=False)) is original
@@ -462,8 +462,8 @@ def test_ambiguous_package_architecture_rejects_before_checkpoint_code(legacy_ow
     root, _, _, marker, _ = legacy_owned_checkpoint
     loader = MODEL_MAP_CASEFOLD["internlm"].loader
     monkeypatch.setitem(MODEL_MAP_CASEFOLD, "architecture_conflict_fixture", SimpleNamespace(loader=type(loader)(
-        "gptqmodel.hf_minimax_m2.configuration_minimax_m2.MiniMaxM2Config",
-        "gptqmodel.hf_minimax_m2.modeling_minimax_m2.MiniMaxM2ForCausalLM",
+        "gptqmodel.models.ports.minimax_m2.configuration_minimax.MiniMaxText01Config",
+        "gptqmodel.models.ports.minimax_m2.modeling_minimax.MiniMaxText01ForCausalLM",
     )))
     monkeypatch.setenv(BYPASS_ENV, "1")
     with pytest.raises(ValueError, match="package.*architectures"):
