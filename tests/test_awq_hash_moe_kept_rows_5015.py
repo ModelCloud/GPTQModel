@@ -85,8 +85,8 @@ def _run_awq(tmp_path, monkeypatch, *, batch_size, exclude_sinks=False):
     seen = {"rows": 0, "mismatch": 0, "calls": 0, "packed": []}
     original = AWQProcessor._pack_token_aligned_kwargs
 
-    def spy(self, provenance, batch_indices, *rest):
-        out = original(self, provenance, batch_indices, *rest)
+    def spy(self, provenance, batch_indices, *rest, **kwargs):
+        out = original(self, provenance, batch_indices, *rest, **kwargs)
         ids = out.get("input_ids")
         if ids is not None:
             truth = _kept_grid_truth(self, provenance, batch_indices)

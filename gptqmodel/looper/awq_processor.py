@@ -533,6 +533,7 @@ class AWQProcessor(LoopProcessor):
         self._capture_host_cache: Dict[Tuple[Any, int, int], Tuple[Any, torch.Tensor]] = {}
         self._capture_sampled_cache: Dict[Any, torch.Tensor] = {}
         self._token_row_plans: Dict[Tuple[int, Optional[int]], _TokenRowPlan] = {}
+        self._reservoir_locks: Dict[str, threading.Lock] = {}
         self._capture_host_batch: Any = None
         self._rotary_lock = threading.Lock()
         self._rotary_cache: Dict[str, nn.Module] = {}
@@ -1344,39 +1345,29 @@ class AWQProcessor(LoopProcessor):
             entry["raw_tokens"] = entry.get("raw_tokens", 0) + length
             entry["max_tokens"] = budget_cap
             entry.setdefault("batch_indices", []).append(batch_index)
+            reservoir_locks = getattr(self, "_reservoir_locks", None)
+            if reservoir_locks is None:
+                reservoir_locks = {}
+                self._reservoir_locks = reservoir_locks
+            module_lock = reservoir_locks.get(module_name)
+            if module_lock is None:
+                module_lock = threading.Lock()
+                reservoir_locks[module_name] = module_lock
 
-            current_inputs: List[torch.Tensor] = entry.setdefault("inputs", [])
-            current_prov: List[Tuple[int, int]] = entry.setdefault("provenance", [])
-            kept_priorities = entry.get("reservoir_priorities")
-
-            kept_rows = (
-                torch.cat([t.reshape(-1, hidden) for t in current_inputs], dim=0)
-                if current_inputs
-                else feat_2d.new_empty((0, hidden))
+        # The priority draw and the slot merge are per-module work. Holding the
+        # processor-wide lock across them serialized every routed expert's
+        # capture on one lock, which dominated AWQ quantize time on MoE models
+        # (#5233). ``self.lock`` is not reentrant, so only the O(1) bookkeeping
+        # above runs under it.
+        new_priorities = self._reservoir_priorities(source_idx, length)
+        with module_lock:
+            self._merge_reservoir_rows(
+                entry,
+                feat_2d,
+                new_priorities,
+                source_index=source_idx,
+                budget_cap=budget_cap,
             )
-            if kept_priorities is None:
-                kept_priorities = torch.empty((0,), dtype=torch.float64)
-
-            rows = torch.cat([kept_rows, feat_2d], dim=0)
-            priorities = torch.cat(
-                [kept_priorities, self._reservoir_priorities(source_idx, length)],
-                dim=0,
-            )
-            provenance = list(current_prov) + [
-                (source_idx, row_index) for row_index in range(length)
-            ]
-
-            if rows.shape[0] > budget_cap:
-                # Lowest priority wins. Sort the survivors back into capture
-                # order so the replayed rows and their provenance stay grouped.
-                keep = torch.topk(priorities, budget_cap, largest=False).indices.tolist()
-                keep.sort(key=lambda index: provenance[index])
-            else:
-                keep = list(range(rows.shape[0]))
-
-            entry["inputs"] = [rows[keep].unsqueeze(0)]
-            entry["provenance"] = [provenance[index] for index in keep]
-            entry["reservoir_priorities"] = priorities[keep]
 
     @staticmethod
     def _reservoir_priorities(source_index: int, count: int) -> torch.Tensor:
@@ -1395,6 +1386,151 @@ class AWQProcessor(LoopProcessor):
             & 0x7FFFFFFFFFFFFFFF
         )
         return torch.rand(count, generator=generator, dtype=torch.float64)
+
+    def _merge_reservoir_rows(
+        self,
+        entry: Dict[str, Any],
+        rows: torch.Tensor,
+        priorities: torch.Tensor,
+        *,
+        source_index: int,
+        budget_cap: int,
+    ) -> None:
+        """Merge one capture into the module's priority reservoir.
+
+        The buffer holds exactly ``budget_cap`` slots and is deliberately not
+        kept in capture order: every surviving row carries its
+        ``(source_index, row)`` provenance, which ``_layer_input_features``
+        materializes once per layer. A capture therefore copies only the new
+        rows that displace kept rows instead of concatenating, re-sorting and
+        re-listing the whole buffer under the processor-wide lock (#5233).
+        """
+
+        buffer = entry.get("reservoir_buffer")
+        if (
+            buffer is None
+            or buffer.shape[0] != budget_cap
+            or buffer.shape[1] != rows.shape[1]
+        ):
+            buffer = rows.new_empty((budget_cap, rows.shape[1]))
+            entry["reservoir_buffer"] = buffer
+            entry["reservoir_priorities"] = torch.empty((budget_cap,), dtype=torch.float64)
+            entry["reservoir_sources"] = torch.empty((budget_cap,), dtype=torch.int64)
+            entry["reservoir_rows"] = torch.empty((budget_cap,), dtype=torch.int64)
+            entry["reservoir_used"] = 0
+            # A module can capture a plan-matched batch first and fall out of
+            # the plan later (for example a row shorter than the planned
+            # length). Keep those rows instead of starting from empty.
+            self._seed_reservoir_from_captures(entry, budget_cap)
+
+        priority_buffer = entry["reservoir_priorities"]
+        source_buffer = entry["reservoir_sources"]
+        row_buffer = entry["reservoir_rows"]
+        used = int(entry.get("reservoir_used", 0))
+        count = int(rows.shape[0])
+
+        if used + count <= budget_cap:
+            buffer[used:used + count] = rows
+            priority_buffer[used:used + count] = priorities
+            source_buffer[used:used + count] = source_index
+            row_buffer[used:used + count] = torch.arange(count)
+            used += count
+        else:
+            combined = torch.cat([priority_buffer[:used], priorities])
+            keep = torch.topk(combined, budget_cap, largest=False).indices
+            kept_old = keep[keep < used]
+            kept_new = keep[keep >= used] - used
+            kept_old_mask = torch.zeros((used,), dtype=torch.bool)
+            kept_old_mask[kept_old] = True
+            # Free slots are the never-filled tail plus the kept rows this batch
+            # displaced; the new survivors go straight into them.
+            slots = torch.cat(
+                [
+                    (~kept_old_mask).nonzero(as_tuple=False).flatten(),
+                    torch.arange(used, budget_cap),
+                ]
+            )
+            buffer[slots] = rows.index_select(0, kept_new)
+            priority_buffer[slots] = priorities.index_select(0, kept_new)
+            source_buffer[slots] = source_index
+            row_buffer[slots] = kept_new
+            used = budget_cap
+
+        entry["reservoir_used"] = used
+        # ``inputs`` stays a cheap view of the live buffer so capture-time
+        # coverage checks see the rows; provenance is materialized at replay.
+        entry["inputs"] = [buffer[:used].unsqueeze(0)]
+        entry.pop("provenance", None)
+
+    def _seed_reservoir_from_captures(self, entry: Dict[str, Any], budget_cap: int) -> None:
+        """Fold rows captured before the module switched to the reservoir.
+
+        Dense modules and MoE roots use the precomputed token-row plan; a batch
+        that does not match it falls through to the reservoir. Seeding keeps
+        the plan rows instead of silently dropping the earlier batches.
+        """
+
+        inputs = entry.get("inputs") or []
+        provenance = entry.get("provenance") or []
+        if not inputs or not provenance:
+            return
+        rows = torch.cat([t.reshape(-1, t.shape[-1]) for t in inputs], dim=0)
+        if rows.shape[0] != len(provenance):
+            # Unaligned capture state cannot be relabelled safely; drop it.
+            entry["inputs"] = []
+            entry.pop("provenance", None)
+            return
+
+        counts = entry.get("batch_row_counts") or []
+        priorities = torch.empty((rows.shape[0],), dtype=torch.float64)
+        per_source: Dict[int, torch.Tensor] = {}
+        for index, (source, row) in enumerate(provenance):
+            source = int(source)
+            row = int(row)
+            if source not in per_source:
+                count = int(counts[source]) if source < len(counts) else row + 1
+                per_source[source] = self._reservoir_priorities(source, max(count, row + 1))
+            priorities[index] = per_source[source][row]
+
+        if rows.shape[0] > budget_cap:
+            keep = torch.topk(priorities, budget_cap, largest=False).indices
+            rows = rows.index_select(0, keep)
+            priorities = priorities[keep]
+            provenance = [provenance[int(index)] for index in keep.tolist()]
+
+        used = int(rows.shape[0])
+        entry["reservoir_buffer"][:used] = rows
+        entry["reservoir_priorities"][:used] = priorities
+        entry["reservoir_sources"][:used] = torch.tensor(
+            [int(source) for source, _row in provenance], dtype=torch.int64
+        )
+        entry["reservoir_rows"][:used] = torch.tensor(
+            [int(row) for _source, row in provenance], dtype=torch.int64
+        )
+        entry["reservoir_used"] = used
+
+    def _materialize_reservoir_provenance(self, entry: Dict[str, Any]) -> None:
+        """Expose the reservoir's rows and provenance in the replay layout."""
+
+        buffer = entry.get("reservoir_buffer")
+        if buffer is None:
+            return
+        used = int(entry.get("reservoir_used", 0))
+        entry["inputs"] = [buffer[:used].unsqueeze(0)]
+        entry["provenance"] = list(
+            zip(
+                entry["reservoir_sources"][:used].tolist(),
+                entry["reservoir_rows"][:used].tolist(),
+            )
+        )
+        for key in (
+            "reservoir_buffer",
+            "reservoir_priorities",
+            "reservoir_sources",
+            "reservoir_rows",
+            "reservoir_used",
+        ):
+            entry.pop(key, None)
 
     def _capture_share_key(self, feature: torch.Tensor) -> Optional[Tuple[Any, ...]]:
         """Identity of one captured source tensor, or ``None`` when it cannot be shared.
@@ -2784,6 +2920,8 @@ class AWQProcessor(LoopProcessor):
         # Iterate over a snapshot since quantization may mutate state.modules concurrently
         for name in feature_names:
             entry = self.tasks.get(name) or {}
+            if entry.get("reservoir_buffer") is not None:
+                self._materialize_reservoir_provenance(entry)
             tensors: List[torch.Tensor] = entry.get("inputs", [])  # type: ignore[arg-type]
             batch_indices: List[Optional[int]] = entry.get("batch_indices", [])  # type: ignore[arg-type]
             if not tensors:
@@ -2986,6 +3124,7 @@ class AWQProcessor(LoopProcessor):
                 task_entry = self.tasks.pop(name, None)
                 if task_entry and "inputs" in task_entry:
                     task_entry["inputs"].clear()
+                getattr(self, "_reservoir_locks", {}).pop(name, None)
 
         self._feature_task_names = set()
         self._feature_stats = {}
