@@ -12,13 +12,18 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
+import pytest  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from tests import accelerator_gates  # noqa: E402
 
 
 NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/gptq_4bits_01-07_14-18-11_maxlen1024_ns1024_descFalse_damp0.1/"
+_METAL_SKIP_REASON = accelerator_gates.mlx_metal_skip_reason()
 
+
+@pytest.mark.skipif(_METAL_SKIP_REASON is not None, reason=_METAL_SKIP_REASON or "MLX Metal backend is unavailable")
 class TestMlxGenerate(ModelTest):
     def test_mlx_generate(self):
         mlx_model = GPTQModel.load(
