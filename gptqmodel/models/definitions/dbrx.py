@@ -15,18 +15,3 @@ class DbrxQModel(BaseQModel):
 
     info = {"notes": "Use a defused `dbrx_converted` checkpoint from https://hf.co/ModelCloud with the package-owned loader."}
 
-    @classmethod
-    def after_defuser_conversion(cls, model):
-        """Defuse the vendored ``DbrxExperts`` exactly as Defuser does the native class.
-
-        Defuser selects its runtime patches by ``transformers.models`` class
-        path, so the vendored class needs the same patch applied explicitly.
-        """
-
-        from defuser.modeling.runtime_defusion import patch_dbrx_experts
-
-        from ..ports.native.dbrx.modeling_dbrx import DbrxExperts
-
-        for module in list(model.modules()):
-            if type(module) is DbrxExperts:
-                patch_dbrx_experts(module)

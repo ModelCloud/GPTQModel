@@ -26,23 +26,6 @@ class GlmQModel(BaseQModel):
 
     pre_lm_head_norm_module = "model.norm"
 
-    @classmethod
-    def after_defuser_conversion(cls, model):
-        """Split the vendored ``GlmMLP``/``Glm4MLP`` ``gate_up_proj`` like Defuser.
-
-        Defuser selects its split-MLP patch by ``transformers.models`` class
-        path, so the vendored classes need the same runtime patch explicitly.
-        """
-
-        from defuser.modeling.runtime_defusion import patch_split_gate_up_mlp
-
-        from ..ports.native.glm.modeling_glm import GlmMLP
-        from ..ports.native.glm4.modeling_glm4 import Glm4MLP
-
-        for module in list(model.modules()):
-            if type(module) in (GlmMLP, Glm4MLP):
-                patch_split_gate_up_mlp(module, variant="standard")
-
     module_tree = [
         "model",
         "layers",

@@ -330,7 +330,7 @@ def test_phi3_vendored_fused_mlp_is_split_with_the_native_forward():
     # specs miss and strict resolution would raise during quantization.
     assert plan.find("mlp.gate_up_proj") is None
 
-    Phi3QModel.after_defuser_conversion(model)
+    _convert_model_with_defuser(Phi3QModel, model, cleanup_original=False)
     mlp = model.model.layers[0].mlp
     assert not hasattr(mlp, "gate_up_proj")
     assert mlp.gate_proj.weight.shape == mlp.up_proj.weight.shape == (32, 16)

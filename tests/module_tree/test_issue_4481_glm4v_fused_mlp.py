@@ -12,11 +12,11 @@ patch, so the fused weight survives conversion and strict resolution raises on
 """
 
 import torch
-from transformers import AutoConfig
 
 from gptqmodel.models.definitions.glm4v import Glm4vGPTQ
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.ports.native.auto import AutoConfig
 
 
 def _tiny_config():
@@ -74,5 +74,5 @@ def test_glm4v_fused_mlp_is_split_and_owned_by_the_plan():
 
     # A second conversion pass (for example after a later Defuser version
     # already defused the class) must be a no-op.
-    Glm4vGPTQ.after_defuser_conversion(model)
+    _convert_model_with_defuser(Glm4vGPTQ, model, cleanup_original=False)
     assert torch.equal(mlp.gate_proj.weight, fused_weight[:half])

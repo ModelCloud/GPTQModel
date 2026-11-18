@@ -291,8 +291,6 @@ def hf_gptqmodel_prepare_model_for_load(
             f"`{packed_suffix}` tensors in its checkpoint manifest."
         )
 
-    import defuser
-
     from ..models.auto import MODEL_MAP_CASEFOLD
     from ..models.base import BaseQModel
     from .importer import auto_cpu_offload, hf_normalize_device_device_map
@@ -300,7 +298,6 @@ def hf_gptqmodel_prepare_model_for_load(
         _module_has_meta_tensors,
         _prepare_variable_quant_buffers,
         find_modules,
-        get_module_by_name_prefix,
         make_quant,
     )
 
@@ -321,15 +318,11 @@ def hf_gptqmodel_prepare_model_for_load(
             sorted({key_converter(name) for name in quantized_module_names})
         )
 
-    defuser.replace_fused_blocks(model_type)
+    from ..models.loader import _convert_model_with_defuser
 
     # Rebuild fused model structures before matching serialized module names.
     def convert_fused_modules():
-        defuser.convert_model(model, cleanup_original=True)
-        for module_path in getattr(model_definition, "defuser_module_paths", ()) or ():
-            module, _ = get_module_by_name_prefix(model, module_path)
-            if module is not None:
-                defuser.convert_model(module, cleanup_original=True)
+        _convert_model_with_defuser(model_definition, model, cleanup_original=True)
 
     # Expand MoE experts on meta to avoid materializing dense expert weights.
     if _module_has_meta_tensors(model):
