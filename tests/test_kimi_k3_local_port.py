@@ -430,22 +430,25 @@ def test_multimodal_bad_cached_mask_is_transactional_and_retry_matches_full(mask
         tokens = torch.tensor([[5, 9], [6, 10]])
         with pytest.raises(ValueError, match="cached prefix"):
             model(tokens, past_key_values=cache, attention_mask=torch.ones(2, 2))
-        assert cache.seen_tokens == before.seen_tokens == 7
+        assert cache.get_seq_length() == before.get_seq_length() == 7
         torch.testing.assert_close(cache.multimodal_attention_mask, before.multimodal_attention_mask)
-        for key in ("key_cache", "value_cache", "conv_states", "recurrent_states"):
-            for actual, expected in zip(getattr(cache, key), getattr(before, key)):
-                if isinstance(actual, tuple):
-                    for a, b in zip(actual, expected):
-                        torch.testing.assert_close(a, b)
-                elif actual is not None:
-                    torch.testing.assert_close(actual, expected)
+        for actual, expected in zip(cache.layers, before.layers):
+            assert actual.get_seq_length() == expected.get_seq_length() == 7
+            for key in ("keys", "values", "conv_states", "recurrent_states"):
+                states, previous = getattr(actual, key, None), getattr(expected, key, None)
+                if isinstance(states, dict):
+                    for index in states:
+                        if states[index] is not None:
+                            torch.testing.assert_close(states[index], previous[index])
+                elif states is not None:
+                    torch.testing.assert_close(states, previous)
         raw = F.pad(mask, (0, 2), value=1)
         expanded = F.pad(before.multimodal_attention_mask, (0, 2), value=1)
         full = model(torch.cat((ids, tokens), -1), attention_mask=raw, **media, use_cache=False).logits
         attention = {"raw": raw, "expanded": expanded, "none": None}[mask_kind]
         result = model(tokens, past_key_values=cache, attention_mask=attention).logits
         torch.testing.assert_close(result, full[:, -2:], atol=2e-6, rtol=2e-6)
-        assert cache.seen_tokens == 9
+        assert cache.get_seq_length() == 9
         torch.testing.assert_close(cache.multimodal_attention_mask, expanded)
         permutation = torch.tensor([1, 0, 1])
         cache.reorder_cache(permutation)
@@ -653,7 +656,7 @@ def test_real_forward_cache_chunks_generation_and_mask_retry(mode, dtype):
         before = copy.deepcopy(cache)
         with pytest.raises(ValueError, match="cached prefix"):
             model(ids[:, 2:3], past_key_values=cache, attention_mask=torch.ones(2, 1))
-        assert cache.seen_tokens == before.seen_tokens == 2
+        assert cache.get_seq_length() == before.get_seq_length() == 2
         suffix = model(ids[:, 2:], past_key_values=cache).logits
         tolerance = 2e-6 if dtype == torch.float32 else 0.002
         torch.testing.assert_close(suffix, full[:, 2:], rtol=tolerance, atol=tolerance)
@@ -901,7 +904,7 @@ def test_processor_real_pixels_multimodal_forward_cache_and_safetensors(tmp_path
         result = model(ids, **media, use_cache=True)
         assert result.logits.shape == (1, 6, 32)
         assert torch.isfinite(result.logits).all()
-        assert result.past_key_values.seen_tokens == 6
+        assert result.past_key_values.get_seq_length() == 6
         features = model.mm_projector(model._extract_image_features(**media))
         embedding = model.get_input_embeddings()(ids)
         merged = torch.cat((embedding[:, :1], features[0][None], embedding[:, 2:]), 1)
@@ -1133,3 +1136,28 @@ def test_tf5_output_contract_logits_to_keep_and_mask_sizes(monkeypatch):
         last = model.language_model(ids, use_cache=False, logits_to_keep=1).logits
     assert last.shape[1] == 1
     torch.testing.assert_close(last, full.logits[:, -1:], rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("mode", ["mla", "hybrid", "kda"])
+def test_cache_is_native_cache_and_incremental_greedy_matches_full_forward(mode):
+    from transformers.cache_utils import Cache, DynamicLayer
+
+    from gptqmodel.models.ports.kimi_k3.modeling_kimi_linear import KimiDeltaCacheLayer, KimiDynamicCache
+
+    model = KimiLinearForCausalLM(tiny_config(mode)).eval()
+    ids = torch.tensor([[1, 4, 6], [1, 3, 5]])
+    with torch.no_grad():
+        generated = model.generate(ids, max_new_tokens=4, do_sample=False, eos_token_id=None,
+                                   output_logits=True, return_dict_in_generate=True)
+        cache = generated.past_key_values
+        assert isinstance(cache, KimiDynamicCache) and isinstance(cache, Cache)
+        assert all(isinstance(layer, KimiDeltaCacheLayer if model.config.is_kda_layer(index) else DynamicLayer)
+                   for index, layer in enumerate(cache.layers))
+        assert cache.get_seq_length() == generated.sequences.shape[1] - 1
+        full = model(generated.sequences[:, :-1], use_cache=False).logits[:, ids.shape[1] - 1:]
+        torch.testing.assert_close(torch.stack(generated.logits, 1), full, atol=2e-6, rtol=2e-5)
+        assert torch.equal(full.argmax(-1), generated.sequences[:, ids.shape[1]:])
+        beams = model.generate(ids, max_new_tokens=3, num_beams=2, do_sample=False, eos_token_id=None)
+        assert beams.shape == (2, 6)
+        cache.reset()
+        assert cache.get_seq_length() == 0

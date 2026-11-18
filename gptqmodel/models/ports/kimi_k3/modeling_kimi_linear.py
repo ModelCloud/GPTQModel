@@ -23,14 +23,13 @@
 # limitations under the License.
 import math
 from collections.abc import Callable
-from typing import Any
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import initialization as init
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache
+from transformers.cache_utils import Cache, DynamicLayer, LinearAttentionLayer
 from transformers.generation import GenerationMixin
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
@@ -98,100 +97,78 @@ def pad_input(
     return out.view(batch_size, seq_len, *hidden_states.shape[1:])
 
 
-class KimiDynamicCache:
-    """
-    Dynamic cache for Kimi model.
-    Inspired by Qwen3-Next
+class KimiDeltaCacheLayer(LinearAttentionLayer):
+    """KDA cache layer: q/k/v short-convolution states plus the delta-rule recurrent state.
+
+    The states are the eager FLA kernels' own final states, stored as-is. The layer also counts the sequence
+    positions it has consumed, because Kimi stacks may contain no attention layer to derive a length from.
     """
 
-    is_compileable = False
+    def __init__(self):
+        super().__init__(number_of_states=3)
+        self.cumulative_length = 0
+
+    def get_kda_states(self):
+        """Return ``((conv_q, conv_k, conv_v), recurrent)`` or ``(None, None)`` before the first update."""
+        if not self.has_previous_state[0]:
+            return None, None
+        return (self.conv_states[0], self.conv_states[1], self.conv_states[2]), self.recurrent_states[0]
+
+    def set_kda_states(self, conv_states, recurrent_state, num_tokens: int):
+        for index, state in enumerate(conv_states):
+            self.conv_states[index] = state
+            self.is_conv_states_initialized[index] = state is not None
+            self.has_previous_state[index] = True
+        self.recurrent_states[0] = recurrent_state
+        self.is_recurrent_states_initialized[0] = recurrent_state is not None
+        self.device = recurrent_state.device if recurrent_state is not None else self.device
+        self.cumulative_length += num_tokens
+
+    def get_seq_length(self) -> int:
+        return self.cumulative_length
+
+    def reset(self) -> None:
+        super().reset()
+        self.cumulative_length = 0
+
+
+class KimiDynamicCache(Cache):
+    """Hybrid K3 cache: ``DynamicLayer`` for MLA layers and ``KimiDeltaCacheLayer`` for KDA layers.
+
+    It also carries the merged multimodal attention/input masks so cached continuations can extend them.
+    """
 
     def __init__(self, config: KimiLinearConfig):
-        super().__init__()
-        self.config = config
-        self.seen_tokens = 0
+        layers = [
+            KimiDeltaCacheLayer() if config.is_kda_layer(index) else DynamicLayer()
+            for index in range(config.num_hidden_layers)
+        ]
+        super().__init__(layers=layers)
         self.multimodal_attention_mask = None
         self.multimodal_input_mask = None
 
-        if config.linear_attn_config is not None:
-            self.layer_types = []
-            for i in range(config.num_hidden_layers):
-                if config.is_kda_layer(i):
-                    self.layer_types.append("linear_attention")
-                else:
-                    self.layer_types.append("full_attention")
-        else:
-            self.layer_types = ["full_attention"] * config.num_hidden_layers
+    def get_seq_length(self, layer_idx: int = 0) -> int:
+        if layer_idx >= len(self.layers):
+            return 0
+        return self.layers[layer_idx].get_seq_length()
 
-        self.transformer_layers = [
-            i for i in range(config.num_hidden_layers) if self.layer_types[i] == "full_attention"
-        ]
-
-        linear_layers = [i for i in range(config.num_hidden_layers) if self.layer_types[i] == "linear_attention"]
-        self.last_linear_layer = linear_layers[-1] if linear_layers else -1
-
-        self.conv_states = [None for _ in range(config.num_hidden_layers)]
-        self.recurrent_states = [None for _ in range(config.num_hidden_layers)]
-        self.key_cache = [None for _ in range(config.num_hidden_layers)]
-        self.value_cache = [None for _ in range(config.num_hidden_layers)]
-
-    def __len__(self):
-        return len(self.layer_types)
-
-    def update(
-        self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        layer_idx: int,
-        cache_kwargs: dict[str, Any] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.key_cache[layer_idx] is None:
-            self.key_cache[layer_idx] = key_states
-            self.value_cache[layer_idx] = value_states
-        else:
-            self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_states], dim=2)
-            self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=2)
-
-        return self.key_cache[layer_idx], self.value_cache[layer_idx]
+    def get_mask_sizes(self, query_length: int, layer_idx: int = 0) -> tuple[int, int]:
+        return self.get_seq_length(layer_idx) + query_length, 0
 
     def reorder_cache(self, beam_idx: torch.LongTensor):
-        """Reorders the cache for beam search, given the selected beam indices."""
         for name in ("multimodal_attention_mask", "multimodal_input_mask"):
             mask = getattr(self, name)
             if mask is not None:
                 setattr(self, name, mask.index_select(0, beam_idx.to(mask.device)))
-        for layer_idx in range(len(self.key_cache)):
-            if self.key_cache[layer_idx] is not None:
-                device = self.key_cache[layer_idx].device
-                beam_idx = beam_idx.to(device)
-                self.key_cache[layer_idx] = self.key_cache[layer_idx].index_select(0, beam_idx)
-                self.value_cache[layer_idx] = self.value_cache[layer_idx].index_select(0, beam_idx)
+        super().reorder_cache(beam_idx)
 
-            if self.conv_states[layer_idx] is not None:
-                device = self.conv_states[layer_idx][0].device
-                beam_idx = beam_idx.to(device)
-                q_conv, k_conv, v_conv = self.conv_states[layer_idx]
-                self.conv_states[layer_idx] = (
-                    q_conv.index_select(0, beam_idx),
-                    k_conv.index_select(0, beam_idx),
-                    v_conv.index_select(0, beam_idx),
-                )
-                self.recurrent_states[layer_idx] = self.recurrent_states[layer_idx].index_select(0, beam_idx)
+    def reset(self):
+        super().reset()
+        self.multimodal_attention_mask = None
+        self.multimodal_input_mask = None
 
-    def get_seq_length(self, layer_idx: int | None = 0) -> int:
-        """Returns the sequence length of the cached states. A layer index can be optionally passed."""
-        return self.seen_tokens
-
-    def get_mask_sizes(self, query_length: int, layer_idx: int = 0) -> tuple[int, int]:
-        """TF5 ``Cache.get_mask_sizes`` contract: ``(kv_length, kv_offset)`` for ``query_length`` new tokens."""
-        return self.get_seq_length(layer_idx) + query_length, 0
-
-    @property
-    def has_previous_state(self):
-        """We have a previous state if the last linear (conv) layer was already updated."""
-        if self.last_linear_layer == -1:
-            return False
-        return self.conv_states[self.last_linear_layer] is not None
+    def crop(self, tokens_to_remove: int) -> None:
+        raise ValueError("Kimi K3 recurrent cache cannot be cropped")
 
 
 class KimiBlockSparseMLP(nn.Module):
@@ -480,9 +457,9 @@ class KimiDeltaAttention(nn.Module):
         conv_state_q, conv_state_k, conv_state_v = None, None, None
         recurrent_state = None
         if cache_params is not None:
-            if cache_params.conv_states[self.layer_idx] is not None:
-                conv_state_q, conv_state_k, conv_state_v = cache_params.conv_states[self.layer_idx]
-            recurrent_state = cache_params.recurrent_states[self.layer_idx]
+            conv_states, recurrent_state = cache_params.layers[self.layer_idx].get_kda_states()
+            if conv_states is not None:
+                conv_state_q, conv_state_k, conv_state_v = conv_states
 
         q_proj_states = self.q_proj(hidden_states)
         k_proj_states = self.k_proj(hidden_states)
@@ -525,8 +502,9 @@ class KimiDeltaAttention(nn.Module):
             cu_seqlens=cu_seqlens,
         )
         if cache_params is not None:
-            cache_params.recurrent_states[self.layer_idx] = recurrent_state
-            cache_params.conv_states[self.layer_idx] = (conv_state_q, conv_state_k, conv_state_v)
+            cache_params.layers[self.layer_idx].set_kda_states(
+                (conv_state_q, conv_state_k, conv_state_v), recurrent_state, q_len
+            )
 
         if self.use_full_rank_gate:
             g = self.g_proj(hidden_states)
@@ -798,8 +776,7 @@ class KimiDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
-        past_key_values: tuple[torch.Tensor] | None = None,
-        output_attentions: bool | None = False,
+        past_key_values: Cache | None = None,
         use_cache: bool | None = False,
         block_residual: torch.Tensor | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
@@ -810,7 +787,6 @@ class KimiDecoderLayer(nn.Module):
                 attention_mask,
                 position_ids,
                 past_key_values,
-                output_attentions,
                 use_cache,
                 block_residual,
                 **kwargs,
@@ -827,7 +803,6 @@ class KimiDecoderLayer(nn.Module):
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
-                output_attentions=output_attentions,
                 use_cache=use_cache,
                 **kwargs,
             )
@@ -836,7 +811,6 @@ class KimiDecoderLayer(nn.Module):
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
                 cache_params=past_key_values,
-                output_attentions=output_attentions,
                 use_cache=use_cache,
                 **kwargs,
             )
@@ -858,8 +832,7 @@ class KimiDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
-        past_key_values: tuple[torch.Tensor] | None = None,
-        output_attentions: bool | None = False,
+        past_key_values: Cache | None = None,
         use_cache: bool | None = False,
         block_residual: torch.Tensor | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
@@ -888,7 +861,6 @@ class KimiDecoderLayer(nn.Module):
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
-                output_attentions=output_attentions,
                 use_cache=use_cache,
                 **kwargs,
             )
@@ -897,7 +869,6 @@ class KimiDecoderLayer(nn.Module):
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
                 cache_params=past_key_values,
-                output_attentions=output_attentions,
                 use_cache=use_cache,
                 **kwargs,
             )
@@ -989,7 +960,7 @@ class KimiLinearModel(KimiPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def _update_linear_attn_mask(self, attention_mask, cache_position):
+    def _update_linear_attn_mask(self, attention_mask):
         """
         NOTE: Left-padding is used for linear attention mask.
         No need for zeroing states when
@@ -1009,10 +980,9 @@ class KimiLinearModel(KimiPreTrainedModel):
         position_ids: torch.LongTensor | None = None,
         past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
-        cache_position: torch.LongTensor | None = None,
         use_cache: bool | None = None,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> tuple | BaseModelOutputWithPast:
+    ) -> BaseModelOutputWithPast:
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         if (input_ids is None) == (inputs_embeds is None):
@@ -1027,30 +997,16 @@ class KimiLinearModel(KimiPreTrainedModel):
         if use_cache and past_key_values is None:
             past_key_values = KimiDynamicCache(config=self.config)
 
-        if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position: torch.Tensor = torch.arange(
-                past_seen_tokens,
-                past_seen_tokens + inputs_embeds.shape[1],
-                device=inputs_embeds.device,
-            )
-
+        past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
         if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
+            position_ids = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            ).unsqueeze(0)
 
-        causal_mask = _causal_mask(
-            config=self.config,
-            input_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            cache_position=cache_position,
-            past_key_values=past_key_values,
-            position_ids=position_ids,
-        )
-        linear_attn_mask = self._update_linear_attn_mask(attention_mask, cache_position)
+        causal_mask = _causal_mask(inputs_embeds, attention_mask, past_seen_tokens)
+        linear_attn_mask = self._update_linear_attn_mask(attention_mask)
 
         hidden_states = inputs_embeds
-        if past_key_values is not None:
-            assert isinstance(past_key_values, KimiDynamicCache)
 
         block_residual = None
         if self.use_attn_residuals:
@@ -1066,7 +1022,6 @@ class KimiLinearModel(KimiPreTrainedModel):
                     hidden_states,
                     attention_mask=layer_mask,
                     past_key_values=past_key_values,
-                    cache_position=cache_position,
                     block_residual=block_residual,
                     **kwargs,
                 )
@@ -1075,7 +1030,6 @@ class KimiLinearModel(KimiPreTrainedModel):
                     hidden_states,
                     attention_mask=layer_mask,
                     past_key_values=past_key_values,
-                    cache_position=cache_position,
                     **kwargs,
                 )
 
@@ -1083,8 +1037,6 @@ class KimiLinearModel(KimiPreTrainedModel):
             hidden_states = self._apply_output_attn_res(hidden_states, block_residual)
 
         hidden_states = self.norm(hidden_states)
-        if past_key_values is not None:
-            past_key_values.seen_tokens += inputs_embeds.shape[1]
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -1127,7 +1079,6 @@ class KimiLinearForCausalLM(KimiPreTrainedModel, GenerationMixin):
         inputs_embeds: torch.FloatTensor | None = None,
         labels: torch.LongTensor | None = None,
         use_cache: bool | None = None,
-        cache_position: torch.LongTensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPast:
@@ -1138,7 +1089,6 @@ class KimiLinearForCausalLM(KimiPreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            cache_position=cache_position,
             **kwargs,
         )
 
@@ -1153,13 +1103,13 @@ class KimiLinearForCausalLM(KimiPreTrainedModel, GenerationMixin):
         return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=outputs.past_key_values)
 
 
-def _causal_mask(config, input_embeds, attention_mask, cache_position, past_key_values, position_ids):
+def _causal_mask(input_embeds, attention_mask, past):
     length = input_embeds.shape[1]
-    past = past_key_values.get_seq_length() if past_key_values is not None else 0
     if attention_mask is not None and attention_mask.ndim == 4:
         return attention_mask
     keys = torch.arange(past + length, device=input_embeds.device)
-    allowed = keys[None, :] <= cache_position[:, None]
+    queries = torch.arange(past, past + length, device=input_embeds.device)
+    allowed = keys[None, :] <= queries[:, None]
     allowed = allowed[None, None].expand(input_embeds.shape[0], 1, length, -1)
     if attention_mask is not None:
         if attention_mask.shape != (input_embeds.shape[0], past + length):
