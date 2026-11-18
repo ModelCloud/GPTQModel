@@ -683,15 +683,25 @@ Issue #4121 item coverage:
 | `tests/module_tree/test_nemotron_h_model_tree.py` | the Omni definition shares the Nemotron-H declaration, and its fold preserves the real remote decoder layer to `1e-5` relative |
 | `tests/test_awq_vl_rotary_resolution.py` | `_get_root_rotary` finds `model.language_model.rotary_emb`, never the vision tower, ignores per-layer rotaries, and `_prepare_module_forward` rebuilds cos/sin for a nested rotary; tiny Qwen2-VL quantizes with AWQ and GPTQ |
 
-### Real-checkpoint CPU CI
+### On-demand CPU test suites
 
-The `AWQ CPU` pull-request workflow runs the offline regressions plus
-`tests/test_awq_hf_cpu.py` against revision-pinned, trained SmolLM2-135M and
-TinyMoE-100M checkpoints from Hugging Face. The integration tests download real
+From the repository root, use the [CPU test runner](../tests/run_awq_cpu.sh)
+with the project dependencies (including CPU-capable PyTorch), `pytest`,
+`pytest-timeout`, and `parameterized` installed:
+
+```bash
+bash tests/run_awq_cpu.sh unit   # Offline regressions
+bash tests/run_awq_cpu.sh dense  # SmolLM2-135M
+bash tests/run_awq_cpu.sh moe    # TinyMoE-100M
+```
+
+These suites do not run automatically on pull requests. The optional
+checkpoint tests in `tests/test_awq_hf_cpu.py` use revision-pinned models from
+Hugging Face. They download real
 safetensors, compare held-out logits and next-token loss before/after 4-bit AWQ,
 check all expected packed projections and unquantized MoE routers, then save,
 reload with the same activation dtype, and check logits and greedy generation.
-Network/download failures fail the integration job rather than silently skip it.
+Network or download errors fail the test rather than silently skipping it.
 The MoE test permits configured fallback when calibration does not execute all
 experts and records how many groups used it. These short deterministic checks
 guard against catastrophic drift; they are not a corpus-level perplexity or
