@@ -3,12 +3,18 @@
 from ...utils.logger import setup_logger
 from ...utils.model import move_to
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 log = setup_logger()
 
 
 class ZambaQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     layer_modules_strict = False
     require_monkeypatch = True
     require_pkgs = ["mamba_ssm>=2.3.1", "causal_conv1d>=1.2.0"]
@@ -59,7 +65,7 @@ class ZambaQModel(BaseQModel):
         return additional_inputs
 
     def monkey_patch(self):
-        from transformers.models.zamba import modeling_zamba
+        from ..ports.native.zamba import modeling_zamba
 
         def forward(
             self,

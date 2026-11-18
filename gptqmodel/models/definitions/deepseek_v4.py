@@ -17,7 +17,6 @@ from typing import Any, Callable, Iterable, Sequence
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import AutoModelForCausalLM
 
 from ...utils.exl3_error_ledger import (
     ZERO_ROUTE_RECOVERY_MODE_IDENTITY,
@@ -26,6 +25,7 @@ from ...utils.exl3_error_ledger import (
     zero_route_recovery_recipe,
 )
 from ...utils.exl3_router_candidates import has_learned_router_recovery, learned_router_ranked_choices
+from ..local import LocalModelLoader
 from .deepseek_v3 import DeepSeekV3QModel
 
 
@@ -273,7 +273,8 @@ class DeepSeekV4MTPAuxiliaryShell(nn.Module):
     def __init__(self, config, *, device: torch.device | str = "meta"):
         super().__init__()
         from transformers.modeling_utils import local_torch_dtype
-        from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+
+        from ..ports.native.deepseek_v4.modeling_deepseek_v4 import (
             DeepseekV4DecoderLayer,
             DeepseekV4HyperHead,
             DeepseekV4RMSNorm,
@@ -944,7 +945,8 @@ class DeepSeekV4MTPReplay:
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
     ):
         from transformers.cache_utils import DynamicCache
-        from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+
+        from ..ports.native.deepseek_v4.modeling_deepseek_v4 import (
             apply_rotary_pos_emb,
         )
 
@@ -977,7 +979,7 @@ class DeepSeekV4MTPReplay:
     ) -> DeepSeekV4MTPReplayState:
         """Prepare the one shared target window and five proposal rows once."""
 
-        from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+        from ..ports.native.deepseek_v4.modeling_deepseek_v4 import (
             DeepseekV4RotaryEmbedding,
         )
 
@@ -1341,7 +1343,7 @@ def patch_deepseek_v4_checkpoint_precision(model) -> dict[str, int]:
     in their native packed source format.
     """
 
-    from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+    from ..ports.native.deepseek_v4.modeling_deepseek_v4 import (
         DeepseekV4Attention,
         DeepseekV4CSACompressor,
         DeepseekV4HCACompressor,
@@ -1434,9 +1436,12 @@ def deepseek_v4_mtp_source_projection_prefix(runtime_prefix: str) -> str:
 
 
 class DeepSeekV4QModel(DeepSeekV3QModel):
-    # V3 owns a package config/model bridge for Kimi-K2. V4 is natively
-    # registered in Transformers 5 and must not inherit the V3 local loader.
-    loader = AutoModelForCausalLM
+    # V3 owns a package config/model bridge for Kimi-K2. V4 loads the vendored
+    # Transformers 5.23 port and must not inherit the V3 local loader.
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
     require_trust_remote_code = False
 
     @classmethod

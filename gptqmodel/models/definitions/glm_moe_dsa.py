@@ -13,10 +13,16 @@ import torch
 from ...utils.exl3_router_candidates import bind_sigmoid_grouped_router_recovery
 from ...utils.model import move_to
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class GlmMoeDsaQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     # GLM-5 and GLM-5.1 currently share the same modeling config and both resolve
     # to transformers model_type `glm_moe_dsa`.
     # The first three decoder blocks are dense MLPs, with later blocks switching
