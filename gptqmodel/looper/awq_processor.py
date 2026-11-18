@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import copy
+import functools
 import inspect
 import math
 import re
@@ -3376,6 +3377,11 @@ class AWQProcessor(LoopProcessor):
 
         original_forward = moe_block.forward
 
+        # Keep the block's own signature visible: the replay filters and
+        # promotes kwargs by `inspect.signature(module.forward)`, and a bare
+        # `**kwargs` wrapper would be read as a Hymba-style catch-all that wants
+        # synthesized `position_ids` the wrapped block cannot accept.
+        @functools.wraps(original_forward)
         def all_experts_forward(hidden_states, **kwargs):
             if hidden_states.dim() == 3:
                 hidden_states_2d = hidden_states.reshape(-1, hidden_states.shape[-1])

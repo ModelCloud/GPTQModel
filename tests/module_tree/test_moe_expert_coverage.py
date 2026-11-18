@@ -29,7 +29,7 @@ from packaging.version import InvalidVersion, Version
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from gptqmodel.models.auto import MODEL_MAP, select_model_definition
-from gptqmodel.models.local import LocalModelLoader
+from gptqmodel.models.local import LocalModelLoader, _local_class
 from gptqmodel.models.ports.native.auto import AutoConfig as NativeAutoConfig
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
 
@@ -43,6 +43,10 @@ def _auto_config(model_type, **kwargs):
         # The package-owned Bailing loader routes vendored native hybrid configs
         # to the vendored Transformers 5.23 hybrid model.
         return NativeAutoConfig.for_model(model_type, **kwargs)
+    if isinstance(loader, LocalModelLoader):
+        # Package-owned ports parse their own config class; a native
+        # Transformers config would silently drop port-only fields.
+        return _local_class(loader.config_class)(**kwargs)
     return transformers.AutoConfig.for_model(model_type, **kwargs)
 
 
@@ -123,8 +127,17 @@ def _shrink_lfm2_moe(cfg):
     cfg.layer_types = ["conv", "conv", "full_attention", "full_attention"]
 
 
+def _shared_minimax_mlp(cfg):
+    """MiniMax-Text-01 checkpoints with ``shared_intermediate_size`` own a
+    ``shared_mlp`` beside the routed experts; the default config has none."""
+
+    cfg.num_hidden_layers = 2
+    cfg.shared_intermediate_size = cfg.intermediate_size
+
+
 CONFIG_OVERRIDES = {
     "granitemoehybrid": _mix_granitemoehybrid_layers,
+    "minimax": _shared_minimax_mlp,
     "jamba": _mix_jamba_layers,
     "lfm2_moe": _shrink_lfm2_moe,
 }
@@ -221,8 +234,10 @@ def _resolved_module_names(layers):
 # lets each checkpoint resolve only the branch it owns. A spec under an
 # alternate branch may therefore match nothing, but only while the alternate
 # branch is absent from every layer *and* the primary branch does resolve.
+# ``eh_proj`` belongs to the package-owned Ling MTP layers; the native Ling
+# 2.5 hybrid model built here has no MTP layer in ``model.layers``.
 ALTERNATE_BRANCHES = {
-    "bailing_hybrid": {"attention": "self_attn"},
+    "bailing_hybrid": {"attention": "self_attn", "eh_proj": "self_attn"},
 }
 
 
