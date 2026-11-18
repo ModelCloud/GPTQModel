@@ -399,7 +399,7 @@ def test_model_is_causal_and_exponential_variant_keeps_sliding_window(use_exp):
 
 @torch.no_grad()
 def test_native_modules_and_init_preserve_partially_loaded_tensors():
-    from transformers.models.qwen3 import modeling_qwen3
+    from gptqmodel.models.ports.native.qwen3 import modeling_qwen3
 
     model = BrumbyForCausalLM(tiny_config(attention_bias=True, tie_word_embeddings=True))
     layer = model.model.layers[0]
