@@ -39,14 +39,17 @@ from torch.nn.utils.parametrizations import weight_norm
 from tqdm import tqdm
 from transformers import LlamaConfig, PreTrainedModel, Qwen3PreTrainedModel
 from transformers.activations import ACT2FN
-from transformers.cache_utils import EncoderDecoderCache
+from transformers.cache_utils import DynamicCache, EncoderDecoderCache
 from transformers.generation.logits_process import TopKLogitsWarper, TopPLogitsWarper
 from transformers.integrations import is_deepspeed_zero3_enabled
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 from transformers.models.whisper.configuration_whisper import WhisperConfig
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
 
-from .cache import DynamicCache
+from .cache import cache_pairs, set_layer_states
 from .configuration_minicpmo import MiniCPMOConfig, MiniCPMTTSConfig
 from .modeling_navit_siglip import SiglipVisionTransformer
 from .native import LlamaModel, Qwen2ForCausalLM, Qwen3ForCausalLM
@@ -58,7 +61,6 @@ from .utils import (
     StreamingWindowConfig,
     TTSSamplingParams,
     TTSStreamingGenerator,
-    as_dynamic_cache,
     config_rope_theta,
     drop_tokens_from_cache,
     get_kv_cache_length,
@@ -570,7 +572,7 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
 
             # whisper's past_key_values management (core)
             if self.audio_past_key_values is not None:
-                cache_length = self.audio_past_key_values[0][0].shape[2]
+                cache_length = self.audio_past_key_values.get_seq_length()
                 apm_max_len = self.apm.embed_positions.weight.shape[0]
                 if cache_length + max_seq_len >= apm_max_len:
                     logger.warning(
@@ -590,7 +592,7 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
                 current_seq_len = current_seq_len - prefix_to_remove - suffix_to_remove
             # calculate history length (if there is KV cache)
             if self.audio_past_key_values is not None:
-                past_len = self.audio_past_key_values[0][0].shape[2]  # get history sequence length
+                past_len = self.audio_past_key_values.get_seq_length()  # get history sequence length
                 total_seq_len = past_len + current_seq_len
             else:
                 past_len = 0
@@ -1430,12 +1432,7 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
         if cache is None:
             return None
 
-        cache = as_dynamic_cache(cache)
-        if isinstance(cache, DynamicCache):
-            self.llm_past_key_values = cache
-            return cache
-
-        return None
+        return cache if isinstance(cache, DynamicCache) else None
 
     def _get_kv_cache_length(self, cache=None):
         cache = cache if cache is not None else self.llm_past_key_values
@@ -1587,52 +1584,22 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
         # get LLM cache information
         llm_cache_length = self._get_kv_cache_length()
         llm_cache_checksum = None
-        if self.llm_past_key_values is not None and hasattr(self.llm_past_key_values, "key_cache"):
-            if len(self.llm_past_key_values.key_cache) > 0:
-                llm_cache_checksum = self.llm_past_key_values.key_cache[0].sum().item()
+        if self.llm_past_key_values is not None and cache_pairs(self.llm_past_key_values):
+            llm_cache_checksum = cache_pairs(self.llm_past_key_values)[0][0].sum().item()
 
         # get audio cache length and clone audio_past_key_values
         audio_cache_length = 0
         audio_cache_checksum = None
         audio_past_key_values_clone = None
         if self.audio_past_key_values is not None:
-            # handle DynamicCache format (Whisper encoder may return this format)
-            if isinstance(self.audio_past_key_values, DynamicCache):
-                if hasattr(self.audio_past_key_values, "key_cache") and len(self.audio_past_key_values.key_cache) > 0:
-                    audio_cache_length = self.audio_past_key_values.key_cache[0].shape[2]
-                    audio_cache_checksum = self.audio_past_key_values.key_cache[0].sum().item()
-                # deep clone DynamicCache
-                cloned_cache = DynamicCache()
-                for k, v in zip(self.audio_past_key_values.key_cache, self.audio_past_key_values.value_cache):
-                    cloned_cache.update(k.clone(), v.clone(), layer_idx=len(cloned_cache.key_cache))
-                audio_past_key_values_clone = cloned_cache
-
-            # handle EncoderDecoderCache format
-            elif isinstance(self.audio_past_key_values, EncoderDecoderCache):
-                self_attn_cache = self.audio_past_key_values.self_attention_cache
-                if hasattr(self_attn_cache, "key_cache") and len(self_attn_cache.key_cache) > 0:
-                    audio_cache_length = self_attn_cache.key_cache[0].shape[2]
-                    audio_cache_checksum = self_attn_cache.key_cache[0].sum().item()
-                # deep clone EncoderDecoderCache
-                cloned_self_attn = DynamicCache()
-                if hasattr(self_attn_cache, "key_cache"):
-                    for k, v in zip(self_attn_cache.key_cache, self_attn_cache.value_cache):
-                        cloned_self_attn.update(k.clone(), v.clone(), layer_idx=len(cloned_self_attn.key_cache))
-                cross_attn_cache = self.audio_past_key_values.cross_attention_cache
-                cloned_cross_attn = DynamicCache()
-                if hasattr(cross_attn_cache, "key_cache"):
-                    for k, v in zip(cross_attn_cache.key_cache, cross_attn_cache.value_cache):
-                        cloned_cross_attn.update(k.clone(), v.clone(), layer_idx=len(cloned_cross_attn.key_cache))
-                audio_past_key_values_clone = EncoderDecoderCache(cloned_self_attn, cloned_cross_attn)
-
-            # handle tuple format (compatible with old format)
-            elif isinstance(self.audio_past_key_values, tuple) and len(self.audio_past_key_values) > 0:
-                audio_cache_length = self.audio_past_key_values[0][0].shape[2]
-                audio_cache_checksum = self.audio_past_key_values[0][0].sum().item()
-                # deep clone audio_past_key_values (tuple of tuples of tensors)
-                audio_past_key_values_clone = tuple(
-                    tuple(t.clone() for t in layer_cache) for layer_cache in self.audio_past_key_values
-                )
+            # The streaming Whisper encoder returns an EncoderDecoderCache (self-attention part used only).
+            audio_cache = self.audio_past_key_values
+            self_attn_cache = audio_cache.self_attention_cache if isinstance(audio_cache, EncoderDecoderCache) else audio_cache
+            self_attn_pairs = cache_pairs(self_attn_cache)
+            if self_attn_pairs:
+                audio_cache_length = self_attn_pairs[0][0].shape[2]
+                audio_cache_checksum = self_attn_pairs[0][0].sum().item()
+            audio_past_key_values_clone = deepcopy(audio_cache)
 
         # get mel processor snapshot
         mel_processor_snapshot = None
@@ -1776,14 +1743,14 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
             return
 
         # truncate each layer of cache
-        for layer_idx in range(len(cache.key_cache)):
-            if cache.key_cache[layer_idx].numel() > 0:
-                cache.key_cache[layer_idx] = cache.key_cache[layer_idx][:, :, :target_length, :].contiguous()
-                cache.value_cache[layer_idx] = cache.value_cache[layer_idx][:, :, :target_length, :].contiguous()
-
-        # update cache metadata
-        cache.crop(target_length)
-        cache._seen_tokens = target_length
+        for layer_idx, (keys, values) in enumerate(cache_pairs(cache)):
+            if keys.numel() > 0:
+                set_layer_states(
+                    cache,
+                    layer_idx,
+                    keys[:, :, :target_length, :].contiguous(),
+                    values[:, :, :target_length, :].contiguous(),
+                )
 
     @torch.inference_mode()
     def streaming_prefill(
@@ -1931,7 +1898,7 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
             return_dict=True,
         )
 
-        self.llm_past_key_values = as_dynamic_cache(outputs["past_key_values"])
+        self.llm_past_key_values = outputs["past_key_values"]
         self._register_chunk(
             seq_len,
             chunk_type,
@@ -3797,7 +3764,7 @@ class Resampler(nn.Module):
         return query.unsqueeze(1).repeat(1, N, 1)
 
 
-class MiniCPMWhisperEncoderLayer(nn.Module):
+class MiniCPMWhisperEncoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: WhisperConfig, layer_idx: int = None):
         super().__init__()
         self.embed_dim = config.d_model
@@ -3823,18 +3790,17 @@ class MiniCPMWhisperEncoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor,
-        layer_head_mask: torch.Tensor,
-        output_attentions: bool = False,
         past_key_values: Optional[EncoderDecoderCache] = None,
         use_cache: Optional[bool] = False,
+        **kwargs,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states, attn_weights = self.self_attn(
+        hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
-            output_attentions=output_attentions,
             past_key_values=past_key_values,
+            **kwargs,
         )
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
         hidden_states = residual + hidden_states
@@ -3853,46 +3819,34 @@ class MiniCPMWhisperEncoderLayer(nn.Module):
             clamp_value = torch.finfo(hidden_states.dtype).max - 1000
             hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
 
-        outputs = (hidden_states,)
-
-        if output_attentions:
-            outputs += (attn_weights,)
-
-        if use_cache:
-            outputs += (past_key_values,)
-
-        return outputs
+        return hidden_states
 
 
 # Copied from from transformers.models.whisper.modeling_whisper.WhisperEncoder and add use_cache for streaming inference
 class MiniCPMWhisperEncoder(WhisperEncoder):
+    # Streaming MiniCPM-o consumes encoder hidden states only; attention probabilities are not recorded.
+    _can_record_outputs = {"hidden_states": MiniCPMWhisperEncoderLayer}
+
     def __init__(self, config: WhisperConfig):
         super().__init__(config)
         self.layers = nn.ModuleList(
             [MiniCPMWhisperEncoderLayer(config, layer_idx=i) for i in range(config.encoder_layers)]
         )
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(
         self,
         input_features,
         attention_mask=None,
-        head_mask=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
         past_key_values: Optional[EncoderDecoderCache] = None,
         use_cache: Optional[bool] = None,
         use_extra_context: Optional[bool] = False,
         prefix_extra_frames: Optional[int] = 1,
         suffix_extra_frames: Optional[int] = 1,
         cnn_min_length: Optional[int] = None,
-    ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
+        **kwargs,
+    ) -> BaseModelOutputWithPast:
         # Ignore copy
         input_features = input_features.to(dtype=self.conv1.weight.dtype, device=self.conv1.weight.device)
 
@@ -3944,12 +3898,8 @@ class MiniCPMWhisperEncoder(WhisperEncoder):
         if use_cache:
             if past_key_values is None:
                 past_key_values = EncoderDecoderCache(DynamicCache(), DynamicCache())
-            elif isinstance(past_key_values, list):
-                past_key_values = EncoderDecoderCache(DynamicCache.from_legacy_cache(past_key_values), DynamicCache())
             elif isinstance(past_key_values, DynamicCache):
                 past_key_values = EncoderDecoderCache(past_key_values, DynamicCache())
-            else:
-                pass
             past_key_values_length = past_key_values.self_attention_cache.get_seq_length()
             if inputs_embeds.shape[1] + past_key_values_length > embed_pos.shape[0]:
                 logger.warning("seems the audio is longer than 30s. repeating the last part of the audio")
@@ -3972,75 +3922,23 @@ class MiniCPMWhisperEncoder(WhisperEncoder):
         hidden_states = inputs_embeds + embed_pos
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
 
-        encoder_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
-
-        # check if head_mask has a correct number of layers specified if desired
-        if head_mask is not None:
-            assert head_mask.size()[0] == (len(self.layers)), (
-                f"The head_mask should be specified for {len(self.layers)} layers, but it is for {head_mask.size()[0]}."
+        for encoder_layer in self.layers:
+            # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
+            if self.training and self.layerdrop > 0.0 and torch.rand([]) < self.layerdrop:
+                continue
+            hidden_states = encoder_layer(
+                hidden_states,
+                attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                **kwargs,
             )
 
-        for idx, encoder_layer in enumerate(self.layers):
-            if output_hidden_states:
-                encoder_states = encoder_states + (hidden_states,)
-            # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
-            to_drop = False
-            if self.training:
-                dropout_probability = torch.rand([])
-                if dropout_probability < self.layerdrop:  # skip the layer
-                    to_drop = True
-
-            # Ignore copy
-            if to_drop:
-                layer_outputs = (None, None)
-            else:
-                if self.gradient_checkpointing and self.training:
-                    layer_outputs = self._gradient_checkpointing_func(
-                        encoder_layer.__call__,
-                        hidden_states,
-                        attention_mask,
-                        (head_mask[idx] if head_mask is not None else None),
-                        output_attentions,
-                        past_key_values,
-                        use_cache,
-                    )
-                else:
-                    layer_outputs = encoder_layer(
-                        hidden_states,
-                        attention_mask,
-                        layer_head_mask=(head_mask[idx] if head_mask is not None else None),
-                        output_attentions=output_attentions,
-                        past_key_values=past_key_values,
-                        use_cache=use_cache,
-                    )
-
-                hidden_states = layer_outputs[0]
-
-            if use_cache:
-                next_encoder_cache = layer_outputs[2 if output_attentions else 1]
-            else:
-                next_encoder_cache = None
-
-            if output_attentions:
-                all_attentions = all_attentions + (layer_outputs[1],)
-
         hidden_states = self.layer_norm(hidden_states)
-
-        if output_hidden_states:
-            encoder_states = encoder_states + (hidden_states,)
-
-        if not return_dict:
-            result = tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
-            return result
-        result = BaseModelOutputWithPast(
+        return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            hidden_states=encoder_states,
-            attentions=all_attentions,
-            past_key_values=next_encoder_cache,
+            past_key_values=past_key_values if use_cache else None,
         )
-
-        return result
 
 
 class MultiModalProjector(nn.Module):
@@ -4378,13 +4276,10 @@ class MiniCPMTTS(PreTrainedModel):
             if self.config.backbone_model == "llama":
                 outputs: BaseModelOutputWithPast = self.model(
                     position_ids=position_ids,
-                    cache_position=position_ids,
                     past_key_values=past_key_values,
                     inputs_embeds=inputs_embeds,
                     attention_mask=causal_mask_4d,
                     use_cache=True,
-                    output_attentions=False,
-                    # return_dict=True,  # Add this to ensure returns dict with past_key_values
                 )
             else:
                 raise ValueError(f"Unsupported backbone model: {self.config.backbone_model}")
@@ -4583,20 +4478,17 @@ class MiniCPMTTS(PreTrainedModel):
                 ]
 
                 # get length of past_key_values
-                past_key_values_length = past_key_values[0][0].shape[2]
+                past_key_values_length = past_key_values.get_seq_length()
 
                 assert causal_mask_4d.shape[-1] == (past_key_values_length + 1)
 
             if self.config.backbone_model == "llama":
                 outputs: BaseModelOutputWithPast = self.model(
                     position_ids=position_ids,
-                    cache_position=position_ids,
                     past_key_values=past_key_values,
                     inputs_embeds=inputs_embeds,
                     attention_mask=causal_mask_4d,
                     use_cache=True,
-                    output_attentions=False,
-                    # return_dict=True,  # Add this to ensure returns dict with past_key_values
                 )
             else:
                 raise ValueError(f"Unsupported backbone model: {self.config.backbone_model}")
@@ -4761,12 +4653,9 @@ class MiniCPMTTS(PreTrainedModel):
 
             outputs: BaseModelOutputWithPast = self.model(
                 position_ids=position_ids,
-                # cache_position=position_ids,
                 past_key_values=past_key_values,
                 inputs_embeds=inputs_embeds_,
                 use_cache=True,
-                output_attentions=False,
-                # return_dict=True,  # Add this to ensure returns dict with past_key_values
             )
 
             del position_ids
