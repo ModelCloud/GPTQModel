@@ -38,9 +38,3 @@ class BrumbyQModel(BaseQModel):
             ),
         },
     ]
-
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # The retention gate consumes the input norm alongside Q/K/V, and the
-        # recurrence is not the standard attention replay objective. Until that
-        # complete relationship is qualified, use the existing plain AWQ path.
-        return []

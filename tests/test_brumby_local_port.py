@@ -445,7 +445,7 @@ def test_invalid_config_fails_explicitly(kwargs, message):
 @pytest.mark.cpu
 @pytest.mark.parametrize("fallback", [None, {}])
 @pytest.mark.parametrize("hidden_size", [80, 160])
-def test_awq_plain_policy_quantizes_and_packs_every_supported_linear(tmp_path, hidden_size, fallback):
+def test_awq_quantizes_and_packs_every_supported_linear(tmp_path, hidden_size, fallback):
     torch.manual_seed(41)
     config = tiny_config(
         hidden_size=hidden_size,
@@ -473,14 +473,10 @@ def test_awq_plain_policy_quantizes_and_packs_every_supported_linear(tmp_path, h
     )
     assert type(model.model) is BrumbyForCausalLM
     layer = model.model.model.layers[0]
-    assert model.awq_get_modules_for_scaling(layer, {}, {}) == []
-    dense_names = [
-        "input_layernorm",
-        "post_attention_layernorm",
-        "self_attn.g_proj",
-        "self_attn.q_norm",
-        "self_attn.k_norm",
-    ]
+    # The input/post-attention norms absorb AWQ scales and the dense retention
+    # gate is compensated for the input-norm fold; the per-head norms stay dense.
+    folded_names = ["input_layernorm", "post_attention_layernorm", "self_attn.g_proj"]
+    dense_names = [*folded_names, "self_attn.q_norm", "self_attn.k_norm"]
     # GPT-QModel loads a meta shell backed by LazyTurtle; compare dense tensors
     # against the actual saved checkpoint, not unmaterialized shell storage.
     dense_before = {
@@ -508,8 +504,14 @@ def test_awq_plain_policy_quantizes_and_packs_every_supported_linear(tmp_path, h
     }
     actual = {name for name, module in layer.named_modules() if isinstance(module, AwqTorchLinear)}
     assert actual == expected
+    folded_changed = False
     for name, state in dense_before.items():
         for key, value in state.items():
-            torch.testing.assert_close(layer.get_submodule(name).state_dict()[key], value, rtol=0, atol=0)
+            current = layer.get_submodule(name).state_dict()[key]
+            if name in folded_names and key == "weight":
+                folded_changed |= not torch.equal(current, value)
+            else:
+                torch.testing.assert_close(current, value, rtol=0, atol=0)
+    assert folded_changed, "AWQ scale search did not fold any scale"
     with torch.inference_mode():
         assert torch.isfinite(model.model(**calibration[0], use_cache=False).logits).all()

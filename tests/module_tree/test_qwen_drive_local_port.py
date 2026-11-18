@@ -38,14 +38,13 @@ def test_explicit_released_plan_proposal_and_input_tags():
 @pytest.mark.parametrize("layout,kv_heads,bias,device", [
     ("hybrid", 2, False, "cpu"), ("hybrid", 4, True, "meta"), ("linear", 1, True, "cpu"), ("full", 1, False, "meta"),
 ])
-def test_live_decoder_owners_plan_tags_aliases_and_plain_awq(layout, kv_heads, bias, device):
+def test_live_decoder_owners_plan_tags_and_aliases(layout, kv_heads, bias, device):
     with torch.device(device):
         model = QwenDriveForConditionalGeneration(tiny_config(layout, kv_heads, bias))
     _convert_model_with_defuser(QwenDriveQModel, model, cleanup_original=False)
     wrapper = QwenDriveQModel(model, quantized=False, quantize_config=AWQConfig(device="cpu", group_size=16))
     plan = wrapper.module_plan()
     assert wrapper.extract_layers_node() == ["vlm.model.language_model.layers"]
-    assert wrapper.awq_get_modules_for_scaling(None, None, None) == []
     assert wrapper.fusable is None
     resolved = set()
     for layer in model.vlm.model.language_model.layers:
@@ -64,3 +63,31 @@ def test_live_decoder_owners_plan_tags_aliases_and_plain_awq(layout, kv_heads, b
     assert plan.find("self_attn.q_proj_extra") is None
     assert plan.find("mlp.down_proj.extra") is None
     assert plan.find("planning_expert") is None
+
+
+@pytest.mark.parametrize("layout,kv_heads", [("hybrid", 2), ("hybrid", 4), ("full", 4), ("linear", 2)])
+def test_awq_scale_folds_preserve_real_media_decoder_output(layout, kv_heads):
+    from awq_neutrality import assert_awq_folds_neutral
+
+    from tests.test_qwen_drive_local_port import media_inputs
+
+    torch.manual_seed(5)
+    model = QwenDriveForConditionalGeneration(tiny_config(layout, kv_heads)).eval()
+    inputs = media_inputs()
+
+    def forward():
+        return model(**inputs, use_cache=False).logits
+
+    mlp = {("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj")), ("mlp.up_proj", ("mlp.down_proj",))}
+    for layer, kind in zip(model.vlm.model.language_model.layers, model.config.vlm_config.text_config.layer_types):
+        checked = assert_awq_folds_neutral(QwenDriveQModel, model, layer, forward)
+        groups = {(source, tuple(targets)) for source, targets, _ in checked}
+        if kind == "full_attention":
+            expected = mlp | {("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"))}
+            if kv_heads == 4:
+                expected.add(("self_attn.v_proj", ("self_attn.o_proj",)))
+        else:
+            # Gated DeltaNet keeps its projections unscaled: conv1d, recurrence
+            # and the gated norm separate them from any foldable source.
+            expected = mlp
+        assert groups == expected

@@ -14,14 +14,14 @@ from gptqmodel.models.definitions.minicpm_o import MiniCPMOQModel
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.minicpm_o.configuration_minicpmo import MiniCPMOConfig
 from gptqmodel.models.ports.minicpm_o.modeling_minicpmo import MiniCPMO
-from tests.test_minicpm_o_local_port import LEGACY_TTS_AVAILABLE, tiny_config
+from tests.test_minicpm_o_local_port import LEGACY_TTS_AVAILABLE, tiny_config, tiny_model
 
 
 EXPECTED_PLAN = {
     "layers": ["llm.model.layers"],
     "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.q_norm:!", "self_attn.k_norm:!"],
+        ["self_attn.q_norm:!", "self_attn.q_proj", "self_attn.k_norm:!", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
@@ -39,7 +39,7 @@ def test_exact_registry_contract():
 
 
 @pytest.mark.parametrize("version,kv_heads,bias", [("4.5", 4, False), ("4.5", 1, True), ("2.6", 2, True)])
-def test_actual_cpu_meta_owners_and_plain_policy(version, kv_heads, bias):
+def test_actual_cpu_meta_owners(version, kv_heads, bias):
     with torch.device("meta"):
         model = MiniCPMO(tiny_config(version=version, kv_heads=kv_heads, bias=bias))
     wrapper = MiniCPMOQModel.__new__(MiniCPMOQModel)
@@ -68,9 +68,32 @@ def test_actual_cpu_meta_owners_and_plain_policy(version, kv_heads, bias):
             if spec.quantize:
                 assert isinstance(layer.get_submodule(owner), nn.Linear)
                 count += key.endswith("weight")
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     assert count == 14
     assert plan.find("self_attn.q_norm.weight.undeclared") is None
+
+
+@pytest.mark.parametrize("version,kv_heads", [("4.5", 4), ("4.5", 2), ("2.6", 4)])
+def test_awq_scale_folds_preserve_real_decoder_output(version, kv_heads):
+    from awq_neutrality import assert_awq_folds_neutral
+
+    model = tiny_model(version=version, kv_heads=kv_heads, bias=version == "2.6")
+    ids = torch.randint(3, 500, (1, 8))
+
+    def forward():
+        return model.llm(input_ids=ids, use_cache=False).logits
+
+    for layer in model.llm.model.layers:
+        checked = assert_awq_folds_neutral(MiniCPMOQModel, model, layer, forward)
+        groups = {(source, tuple(targets)) for source, targets, _ in checked}
+        expected = {
+            ("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),
+            ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj")),
+            ("mlp.up_proj", ("mlp.down_proj",)),
+        }
+        # v_proj -> o_proj is only shape-compatible without GQA.
+        if kv_heads == 4:
+            expected.add(("self_attn.v_proj", ("self_attn.o_proj",)))
+        assert groups == expected
 
 
 # SHA-256 of sorted "key:shape" lines read from the pinned released safetensors

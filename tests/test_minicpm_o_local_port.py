@@ -580,7 +580,7 @@ def test_failed_config_asset_and_payload_repaired_retry(tmp_path, version):
 
 @pytest.mark.parametrize("version", ["4.5", "2.6"])
 @pytest.mark.parametrize("offload", [False, True])
-def test_actual_public_plain_awq_image_capture_pack_infer_and_two_reloads(tmp_path, version, offload):
+def test_actual_public_awq_image_capture_pack_infer_and_two_reloads(tmp_path, version, offload):
     from PIL import Image
 
     from gptqmodel import CalibrationConfig
@@ -599,10 +599,17 @@ def test_actual_public_plain_awq_image_capture_pack_infer_and_two_reloads(tmp_pa
         offload_to_disk_path=str(tmp_path / "offload"),
     )
     wrapper = GPTQModel.load(str(tmp_path), quantize_config=config, backend=BACKEND.TORCH, dtype=torch.float16)
+    # AWQ folds its scales into the decoder input/post-attention norms; every
+    # other non-decoder tensor and the per-head q/k norms stay dense.
+    folded = ("input_layernorm.", "post_attention_layernorm.")
     dense = {
         key: value.clone()
         for key, value in source.state_dict().items()
-        if not key.startswith("llm.model.layers.") or "norm" in key
+        if not key.startswith("llm.model.layers.") or ("norm" in key and not any(name in key for name in folded))
+    }
+    norms = {
+        key: value.clone() for key, value in source.state_dict().items()
+        if key.startswith("llm.model.layers.") and any(name in key for name in folded)
     }
     image = Image.fromarray(np.arange(192, dtype=np.uint8).reshape(8, 8, 3))
     calibration = [
@@ -642,6 +649,7 @@ def test_actual_public_plain_awq_image_capture_pack_infer_and_two_reloads(tmp_pa
     assert all(name.startswith("llm.model.layers.") for name in packed)
     for key, value in dense.items():
         torch.testing.assert_close(wrapper.model.state_dict()[key], value, atol=0, rtol=0)
+    assert any(not torch.equal(wrapper.model.state_dict()[key], value) for key, value in norms.items())
     data = media_inputs(wrapper.processor, "image")
     with torch.no_grad():
         expected = wrapper.model(data=data, use_cache=False).logits

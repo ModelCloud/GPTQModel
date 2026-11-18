@@ -145,3 +145,26 @@ def test_publisher_full_size_meta_checkpoint_inventory(layout, layers, heads, hi
     assert len(expected) == 3 + layers * 12
     assert model.model.layers[0].self_attn.q_proj.weight.shape == (heads * 128, hidden)
     assert model.model.layers[0].self_attn.k_proj.weight.shape == (8 * 128, hidden)
+
+
+@pytest.mark.parametrize("use_exp", [False, True], ids=["retention", "exp_attention"])
+@pytest.mark.parametrize("layout", ["14b", "4b"])
+def test_awq_scale_folds_preserve_real_decoder_output(layout, use_exp):
+    from awq_neutrality import assert_awq_folds_neutral
+
+    torch.manual_seed(11)
+    model = BrumbyForCausalLM(_config(layout, use_exp=use_exp)).eval()
+    ids = torch.randint(3, 32, (1, 8))
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(BrumbyQModel, model, layer, forward)
+        # The dense retention gate reads the input norm, so the input-norm fold
+        # compensates it. GQA (Hkv < Hq) leaves v_proj -> o_proj shape-incompatible.
+        assert checked == [
+            ("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"], ["self_attn.g_proj"]),
+            ("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"], []),
+            ("mlp.up_proj", ["mlp.down_proj"], []),
+        ]
