@@ -22,13 +22,14 @@ def _fake_quantize_config():
     return SimpleNamespace(kernel=None, runtime=None, p2p=None, dynamic=False, preprocessors=None)
 
 
-def _install_fake_dense_load(monkeypatch, captured, pool_sizes):
-    fake_config = SimpleNamespace(model_type="llama", quantization_config=None)
-    monkeypatch.setattr(
-        auto.AutoConfig,
-        "from_pretrained",
-        staticmethod(lambda *args, **kwargs: fake_config),
-    )
+def _install_fake_dense_load(monkeypatch, tmp_path, captured, pool_sizes):
+    """Write a real unquantized llama config.json; stub only the definition load."""
+
+    from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
+
+    CONFIG_MAPPING["llama"](
+        hidden_size=16, intermediate_size=32, num_hidden_layers=1, num_attention_heads=2, vocab_size=32
+    ).save_pretrained(tmp_path)
     monkeypatch.setattr(auto, "native_floatx_source_format", lambda *args, **kwargs: None)
 
     class _Definition:
@@ -39,6 +40,7 @@ def _install_fake_dense_load(monkeypatch, captured, pool_sizes):
             return SimpleNamespace(loaded=True)
 
     monkeypatch.setattr(auto, "check_and_get_model_definition", lambda *args, **kwargs: _Definition)
+    return str(tmp_path)
 
 
 @pytest.fixture
@@ -59,12 +61,12 @@ def isolated_pool(monkeypatch):
             pool.shutdown(wait=True)
 
 
-def test_from_pretrained_installs_runtime_cpu_workers_before_the_pool(isolated_pool, monkeypatch):
+def test_from_pretrained_installs_runtime_cpu_workers_before_the_pool(isolated_pool, monkeypatch, tmp_path):
     captured, pool_sizes = [], []
-    _install_fake_dense_load(monkeypatch, captured, pool_sizes)
+    model_dir = _install_fake_dense_load(monkeypatch, tmp_path, captured, pool_sizes)
 
     auto.GPTQModel.from_pretrained(
-        "fake/model",
+        model_dir,
         quantize_config=_fake_quantize_config(),
         runtime=RuntimeConfig(cpu_workers=2),
         device="cpu",
@@ -77,18 +79,18 @@ def test_from_pretrained_installs_runtime_cpu_workers_before_the_pool(isolated_p
     assert captured[0]["runtime"].cpu_workers == 2
 
 
-def test_second_load_resizes_the_existing_singleton_pool(isolated_pool, monkeypatch):
+def test_second_load_resizes_the_existing_singleton_pool(isolated_pool, monkeypatch, tmp_path):
     captured, pool_sizes = [], []
-    _install_fake_dense_load(monkeypatch, captured, pool_sizes)
+    model_dir = _install_fake_dense_load(monkeypatch, tmp_path, captured, pool_sizes)
 
     auto.GPTQModel.from_pretrained(
-        "fake/model",
+        model_dir,
         quantize_config=_fake_quantize_config(),
         runtime=RuntimeConfig(cpu_workers=2),
         device="cpu",
     )
     auto.GPTQModel.from_pretrained(
-        "fake/model",
+        model_dir,
         quantize_config=_fake_quantize_config(),
         runtime=RuntimeConfig(cpu_workers=5),
         device="cpu",
@@ -98,14 +100,14 @@ def test_second_load_resizes_the_existing_singleton_pool(isolated_pool, monkeypa
     assert len(gptqmodel.get_device_thread_pool()._worker_groups["cpu"]) == 5
 
 
-def test_from_pretrained_forwards_kernel_and_p2p_to_the_definition(isolated_pool, monkeypatch):
+def test_from_pretrained_forwards_kernel_and_p2p_to_the_definition(isolated_pool, monkeypatch, tmp_path):
     captured, pool_sizes = [], []
-    _install_fake_dense_load(monkeypatch, captured, pool_sizes)
+    model_dir = _install_fake_dense_load(monkeypatch, tmp_path, captured, pool_sizes)
     policy = KernelConfig(gguf_cpp_native_matmul=False, gguf_cpp_threads=3)
     p2p = P2PConfig(mode="off")
 
     auto.GPTQModel.from_pretrained(
-        "fake/model",
+        model_dir,
         quantize_config=_fake_quantize_config(),
         kernel=policy,
         p2p=p2p,
