@@ -438,7 +438,7 @@ def test_native_attention_backend_capability_and_numerical_parity(tmp_path, layo
 
 @pytest.mark.parametrize("layout", ["clip-qwen2", "s2-gemma2", "adaptive-llama", "partition-llama"])
 @pytest.mark.parametrize("offload", [False, True])
-def test_public_image_calibrated_plain_awq_pack_infer_and_two_exact_reload_cycles(tmp_path, layout, offload):
+def test_public_image_calibrated_scaled_awq_pack_infer_and_two_exact_reload_cycles(tmp_path, layout, offload):
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
     source = tiny_model(layout).half()
@@ -449,8 +449,12 @@ def test_public_image_calibrated_plain_awq_pack_infer_and_two_exact_reload_cycle
     image = Image.fromarray(np.arange(11 * 13 * 3, dtype=np.uint8).reshape(11, 13, 3))
     calibration = [{"image": image, "conversations": [{"from": "human", "value": "<image> token4 token5 token6"},
                                                        {"from": "gpt", "value": "token7 token8"}]} for _ in range(2)]
+    # AWQ scale search folds into the decoder norms; everything outside the
+    # decoder layers stays bit-exact.
     dense = {name: value.clone() for name, value in source.state_dict().items()
-             if not name.startswith("llm.model.layers.") or "norm" in name}
+             if not name.startswith("llm.model.layers.")}
+    layer_norms = {name: value.clone() for name, value in source.state_dict().items()
+                   if name.startswith("llm.model.layers.") and "norm" in name}
     prepared = wrapper.preprocess_dataset(calibration[0])
     calibration_ids = prepared["input_ids"]
     image_embeddings = vision_oracle(source, prepared["pixel_values"].half()) @ source.vte.weight.double()
@@ -476,8 +480,6 @@ def test_public_image_calibrated_plain_awq_pack_infer_and_two_exact_reload_cycle
             captures.append(hidden.detach().cpu().clone())
 
     handle = wrapper.model.llm.model.layers[0].register_forward_pre_hook(capture, with_kwargs=True)
-    for layer in wrapper.model.llm.model.layers:
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     try:
         wrapper.quantize(
             CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
@@ -492,6 +494,7 @@ def test_public_image_calibrated_plain_awq_pack_infer_and_two_exact_reload_cycle
     assert all(name.startswith("llm.model.layers.") for name in packed)
     for name, value in dense.items():
         torch.testing.assert_close(wrapper.model.state_dict()[name], value, atol=0, rtol=0)
+    assert any(not torch.equal(wrapper.model.state_dict()[name], value) for name, value in layer_norms.items())
     with torch.no_grad():
         expected = wrapper.model(ids, pixel_values=pixels, use_cache=False).logits
     state = {key: value.clone() for key, value in wrapper.model.state_dict().items()}
@@ -507,3 +510,35 @@ def test_public_image_calibrated_plain_awq_pack_infer_and_two_exact_reload_cycle
         assert set(state) == set(wrapper.model.state_dict())
         for name, value in wrapper.model.state_dict().items():
             torch.testing.assert_close(value, state[name], atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("layout", ["clip-llama", "clip-qwen2", "partition-llama", "s2-gemma2", "partition-gemma2"])
+@pytest.mark.parametrize("kv_heads", [2, 4])
+def test_awq_scale_folds_are_neutral_on_every_decoder_variant(layout, kv_heads):
+    from types import SimpleNamespace
+
+    from awq_neutrality import assert_awq_folds_neutral
+
+    model = tiny_model(layout, kv_heads=kv_heads).float()
+    tree = OvisQModel._resolve_effective_module_tree(model, SimpleNamespace(method="awq"))
+    ids = torch.tensor([[1, 4, 5, 6, 7, 8, 9, 10]])
+
+    def forward():
+        return model.llm(input_ids=ids, use_cache=False).logits
+
+    for layer in model.llm.model.layers:
+        checked = assert_awq_folds_neutral(OvisQModel, model, layer, forward, tree=tree)
+        groups = {(source, tuple(targets)) for source, targets, _consumers in checked}
+        mlp_norm = "pre_feedforward_layernorm" if "gemma2" in layout else "post_attention_layernorm"
+        expected = {
+            ("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),
+            (mlp_norm, ("mlp.gate_proj", "mlp.up_proj")),
+            ("mlp.up_proj", ("mlp.down_proj",)),
+        }
+        if kv_heads == 4:
+            # o_proj reads the value width only without grouped KV heads.
+            expected.add(("self_attn.v_proj", ("self_attn.o_proj",)))
+        assert groups == expected
+        # Gemma 2's post-attention norm is a sandwich post-norm on the residual
+        # branch; folding gate/up into it would change the layer output.
+        assert "post_feedforward_layernorm" not in {source for source, _targets in groups}
