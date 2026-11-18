@@ -1123,8 +1123,7 @@ def hf_normalize_device_device_map(
     made kernel selection refuse budgets that never touch the other card
     (#5084). Keep the accelerator *family* instead: a family selector makes
     every kernel validate against all visible devices, rather than picking a
-    kernel for a card the budget may exclude. The dispatched map is checked by
-    :func:`validate_device_map_capability_groups` once it is known.
+    kernel for a card the budget may exclude.
     """
     return normalize_device_device_map(
         device=device,
@@ -1279,58 +1278,6 @@ def device_map_uses_cpu(device_map) -> bool:
         except (RuntimeError, ValueError):
             continue
     return False
-
-
-def validate_device_map_capability_groups(device_map) -> None:
-    """Refuse a *resolved* placement that spans GPU compute capabilities.
-
-    Transformers calls the quantizer hooks before it computes the placement
-    from ``max_memory``, so the bridge only keeps kernels that are valid on
-    every visible device and cannot refuse anything up front (#5084). Once
-    Accelerate has dispatched the model, ``model.hf_device_map`` is the real
-    placement: this keeps the single-capability refusal for a map that truly
-    spans generations, while a budget that names one card loads normally.
-    """
-
-    if not isinstance(device_map, dict) or not device_map:
-        return
-    # Resolve the map without validating it, so the refusal below is the only
-    # one and it carries the remedy for this path. CPU and disk entries are
-    # skipped, as in `normalize_device_device_map`; an all-offload map has no
-    # accelerator target to check.
-    accelerator_devices = []
-    for value in device_map.values():
-        if value is None or isinstance(value, int):
-            candidate = _as_selector_device(value) if value is not None else None
-            if candidate is not None:
-                accelerator_devices.append(candidate)
-            continue
-        if isinstance(value, str):
-            if _is_accelerate_device_map_keyword(value) or value == "auto":
-                # An unresolved keyword inside a resolved map: nothing concrete
-                # to validate yet.
-                return
-            if _is_accelerate_offload_target(value):
-                continue
-        candidate = _as_selector_device(value)
-        if _device_family(candidate) != DEVICE.CPU:
-            accelerator_devices.append(candidate)
-    if not accelerator_devices:
-        return
-    resolved = _selector_devices(accelerator_devices)
-    if not resolved:
-        return
-    _validate_selector_device_families(
-        resolved,
-        # The budget already allowed every named card. Suggesting a narrower
-        # `max_memory` here would only repeat the request that just failed.
-        hint=(
-            "This is the placement resolved from the caller's budget, so the "
-            "budget already allowed every named card. Place the model on one "
-            "capability group with an explicit `device_map`/`device` that names "
-            "one card, or a `CUDA_VISIBLE_DEVICES` list."
-        ),
-    )
 
 
 def auto_cpu_offload(backend, device_map) -> bool:
