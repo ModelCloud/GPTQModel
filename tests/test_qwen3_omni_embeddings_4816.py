@@ -4,7 +4,8 @@
 """Qwen3-Omni must expose the thinker embedding endpoints (issue #4816).
 
 transformers 5.22 leaves ``get_input_embeddings`` unimplemented on
-``Qwen3OmniMoeForConditionalGeneration`` and returns ``None`` from
+``Qwen3OmniMoeForConditionalGeneration`` (vendored unchanged in
+``gptqmodel.models.ports.native.qwen3_omni_moe``, which the definition loads) and returns ``None`` from
 ``get_output_embeddings`` because the getter delegates to it. Both endpoints
 live on the nested ``thinker``, so ``quantize()`` crashed during input capture
 before layer 0. These tests use a meta-device tiny config: no checkpoint and no
@@ -14,11 +15,15 @@ before layer 0. These tests use a meta-device tiny config: no checkpoint and no
 import pytest
 import torch
 from torch import nn
-from transformers import PreTrainedModel, Qwen3OmniMoeConfig, Qwen3OmniMoeForConditionalGeneration
+from transformers import PreTrainedModel
 
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
+from gptqmodel.models.ports.native.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeConfig
+from gptqmodel.models.ports.native.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+    Qwen3OmniMoeForConditionalGeneration,
+)
 from gptqmodel.utils.model import thinker_text_model
 
 
