@@ -37,6 +37,7 @@ from ..looper.loop_processor import (
 )
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.named_module import NamedModule
+from ..looper.run_exit import fence_run_work
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
@@ -1921,22 +1922,14 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
         remaining waits, and nothing here may mask the original exception.
         """
 
-        from ..utils.stream import STREAM_DEVICE_POOL
-
-        waits = (
-            ("device thread pool", DEVICE_THREAD_POOL.wait),
-            ("finalizer watcher threads", self.wait_dangling_threads),
-            ("stream device pool", STREAM_DEVICE_POOL.wait),
+        # The waits and their failure policy are shared with the weight-only
+        # looper, which had drifted and never fenced at all (#5060). The
+        # module-level ``DEVICE_THREAD_POOL`` is passed through rather than
+        # imported by the helper so a substituted pool still takes effect.
+        fence_run_work(
+            DEVICE_THREAD_POOL,
+            wait_dangling_threads=self.wait_dangling_threads,
         )
-        for label, wait in waits:
-            try:
-                wait()
-            except Exception:
-                log.warning(
-                    "failed to drain the %s while failing the quantization run",
-                    label,
-                    exc_info=True,
-                )
 
     def loop(self, fallback=None, **kwargs):
         """Run the quantization loop under the TF32 guard."""

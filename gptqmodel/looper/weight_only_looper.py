@@ -29,6 +29,7 @@ from ..looper.loop_processor import record_quant_log, rehome_failed_run_kernels
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.module_preprocessor import ModulePreProcessor
 from ..looper.named_module import NamedModule
+from ..looper.run_exit import fence_run_work
 from ..looper.weight_only_processor import WeightOnlyProcessor
 from ..models import BaseQModel
 from ..models._const import CPU, SUPPORTS_MODULE_TYPES
@@ -982,6 +983,20 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
             raise RuntimeError(message)
         log.error(message)
 
+    def _fence_run_work(self) -> None:
+        """Fence work this run already submitted before touching its inputs.
+
+        The weight-only stage submits submodule finalizers to
+        ``DEVICE_THREAD_POOL`` (the pack/replace steps), so a failed run has
+        the same obligation the calibrated looper has had since #4595: drain
+        them before restoring the in-flight layer or releasing the run's
+        offload root, or a finalizer keeps mutating modules and re-creates the
+        directory that was just removed. This looper keeps no finalizer watcher
+        threads, so only the pool waits apply (#5060).
+        """
+
+        fence_run_work(DEVICE_THREAD_POOL)
+
     def loop(self, **kwargs):
         """Quantize layers directly from weights without calibration forwards."""
 
@@ -1002,6 +1017,12 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
             ensure_version_counters(self.gptq_model.model)
         except BaseException:
             try:
+                # Fence already-submitted work before restoring anything it may
+                # still be mutating (#4595, #5060). A finalizer that runs after
+                # this teardown re-creates the released run directory and keeps
+                # packing modules after ``quantize()`` has raised. The fence
+                # never raises, so it cannot mask the run failure.
+                self._fence_run_work()
                 # The success path moves the layer back to its home device only
                 # in ``post_quantize``, which the exception skipped. Without
                 # this the in-flight layer keeps accelerator tensors while the
