@@ -36,7 +36,7 @@ from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel
 from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
 from gptqmodel.nn_modules.qlinear.paro import ParoLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
-from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear, TorchQuantEmbeddings
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -403,3 +403,37 @@ def test_nf12_cpu_compiles_after_post_init_without_an_eager_call():
         return module
 
     _compile_first(build)
+
+
+def _pack_embedding(*, force_row_decode: bool) -> TorchQuantEmbeddings:
+    module = TorchQuantEmbeddings(**_gptq_kwargs())
+    groups = IN_FEATURES // GROUP_SIZE
+    module.pack(
+        _dense(),
+        torch.full((OUT_FEATURES, groups), 1 / 128, dtype=DTYPE),
+        torch.full((OUT_FEATURES, groups), 1 << 3, dtype=torch.int32),
+        torch.arange(IN_FEATURES, dtype=torch.int32) // GROUP_SIZE,
+    )
+    module.post_init()
+    if force_row_decode:
+        # The default threshold is 64 MiB; force the row-decode branch so a
+        # small test module exercises it without a huge vocabulary.
+        module.EMBEDDING_ROW_DECODE_MIN_TABLE_BYTES = 0
+    return module.eval()
+
+
+@pytest.mark.parametrize(
+    "force_row_decode", [False, True], ids=["whole_table", "row_decode"]
+)
+def test_torch_quant_embeddings_reaches_declared_cpu_level(force_row_decode):
+    module = _pack_embedding(force_row_decode=force_row_decode)
+    ids = torch.randint(0, IN_FEATURES, (2, 8), dtype=torch.int64)
+    result = probe(module, (ids,), check_cuda_graph=False)
+    declared = compile_level(TorchQuantEmbeddings, device_type="cpu")
+
+    assert declared is COMPILE_LEVEL.INDUCTOR
+    assert result.eager, result.eager_error
+    assert result.reached(declared), (
+        f"TorchQuantEmbeddings ({force_row_decode=}): declared {declared.name} "
+        f"but the probe reported {result.summary()} errors={result.errors}"
+    )
