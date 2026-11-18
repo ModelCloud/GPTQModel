@@ -8,7 +8,7 @@ import os
 import threading
 from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from numbers import Integral
 from pathlib import Path
 from types import MethodType
@@ -1446,26 +1446,6 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
         model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
     )
     require_trust_remote_code = False
-
-    @classmethod
-    def resolve_hf_conversion_map_reversed(cls, target_model=None):
-        mapping = super().resolve_hf_conversion_map_reversed(target_model)
-        if not mapping:
-            return mapping
-
-        # Transformers' generic .norm. alias also matches the native
-        # model.norm.weight in a packed GPT-QModel checkpoint. Only compressor
-        # and indexer norms use the legacy spelling.
-        aliases = []
-        for rule in mapping:
-            if rule.source_patterns == [r"\.kv_norm\."] and rule.target_patterns == [r"\.norm\."]:
-                aliases.extend((
-                    replace(rule, target_patterns=r"(?<=\.compressor)\.norm\."),
-                    replace(rule, target_patterns=r"(?<=\.indexer)\.norm\."),
-                ))
-            else:
-                aliases.append(rule)
-        return aliases
 
     dynamic_expert_index = "n_routed_experts"
     rotary_embedding = "model.rotary_emb"
