@@ -1,23 +1,23 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Task-aware selection of exact native Transformers Qwen2-VL classes.
+"""Task-aware selection of the vendored Transformers 5.23 Qwen2-VL classes.
 
 The text model is headless. No synthetic language-modeling head is created.
 Checkpoint class names and auto_map are never used as import instructions.
 """
 
-from transformers import (
-    PreTrainedConfig,
-    Qwen2Tokenizer,
-    Qwen2VLConfig,
-    Qwen2VLForConditionalGeneration,
-    Qwen2VLProcessor,
-    Qwen2VLTextConfig,
-    Qwen2VLTextModel,
-)
+from transformers import PreTrainedConfig
+
+from ..native.auto import NativeProcessor
+from ..native.qwen2.tokenization_qwen2 import Qwen2Tokenizer
+from ..native.qwen2_vl.configuration_qwen2_vl import Qwen2VLConfig, Qwen2VLTextConfig
+from ..native.qwen2_vl.modeling_qwen2_vl import Qwen2VLForConditionalGeneration, Qwen2VLTextModel
+from ..native.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
 
 
-__all__ = ["Qwen2VLConfigLoader", "Qwen2VLModelLoader", "Qwen2VLProcessor", "Qwen2Tokenizer"]
+__all__ = [
+    "Qwen2VLConfigLoader", "Qwen2VLModelLoader", "Qwen2VLProcessor", "Qwen2VLProcessorLoader", "Qwen2Tokenizer",
+]
 
 
 class Qwen2VLConfigLoader:
@@ -33,6 +33,15 @@ class Qwen2VLConfigLoader:
         return config_class.from_pretrained(model_id_or_path, **kwargs)
 
 
+class Qwen2VLProcessorLoader:
+    """Assemble the vendored processor from vendored image/video processors."""
+
+    @classmethod
+    def from_pretrained(cls, model_id_or_path, **kwargs):
+        kwargs.pop("code_revision", None)
+        return NativeProcessor.from_pretrained(model_id_or_path, **kwargs)
+
+
 class Qwen2VLModelLoader:
     @staticmethod
     def _model_class(config):
@@ -40,7 +49,7 @@ class Qwen2VLModelLoader:
             return Qwen2VLForConditionalGeneration
         if type(config) is Qwen2VLTextConfig:
             return Qwen2VLTextModel
-        raise ValueError("Qwen2-VL requires an exact native composite or standalone text configuration")
+        raise ValueError("Qwen2-VL requires an exact native (vendored) composite or standalone text configuration")
 
     @classmethod
     def _from_config(cls, config, **kwargs):
