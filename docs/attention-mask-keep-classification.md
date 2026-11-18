@@ -14,7 +14,7 @@ Hessian, the user-supplied calibration mask and the AWQ token-row replay:
 | AWQ packed replay kwargs | `gptqmodel/looper/awq_processor.py:2269` |
 | Definition replay hooks | `gptqmodel/models/base.py:3644`, `:3775`, `gptqmodel/models/definitions/*.py` |
 
-Introduced by the fix for issue #5134.
+Introduced by PR #5155 for issue #5134.
 
 ## Why the classifier matters
 
