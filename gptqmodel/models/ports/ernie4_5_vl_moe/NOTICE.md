@@ -2,8 +2,10 @@
 
 The Roboto Regular font is from the Google Roboto Project,
 googlefonts/roboto-2 commit `38062f4b4a0be4346d07a928408da21602545e9e`,
-`src/hinted/Roboto-Regular.ttf`. Its Apache License 2.0 is reproduced in
-`LICENSE-Roboto.txt`; the font is distributed unmodified.
+`src/hinted/Roboto-Regular.ttf`, Apache License 2.0 (text in the GPT-QModel
+repository LICENSE); the font is distributed unmodified. Native ERNIE VL video
+preprocessing draws frame timestamps with it, and the original Baidu checkpoint
+does not ship a font.
 
 Native ERNIE VL is imported from Hugging Face Transformers, copyright the
 Hugging Face team and respective ERNIE contributors, under Apache-2.0.
