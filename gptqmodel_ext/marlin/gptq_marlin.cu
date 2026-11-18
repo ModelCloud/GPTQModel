@@ -975,6 +975,30 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
           num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float,
           stages, max_shared_mem, major_capability, minor_capability, sms);
       thread_tfg = exec_cfg.tb_cfg;
+      // Small grids: when the chosen tile leaves fewer than four output tiles
+      // per SM, most SMs would split K for the same few tiles and then queue
+      // on their reduction locks. Narrow 128x64 tiles double the output
+      // parallelism instead (vllm-project/vllm#24722). The full-SM sm_80
+      // tables and Ada's narrow FP32 AWQ schedule are tuned separately and
+      // keep their own choice.
+      if (thread_tfg.thread_k != -1 && !full_sm80 && !narrow_fp32_awq &&
+          div_ceil(prob_m_split, thread_m_blocks * 16) *
+                  (prob_n / thread_tfg.thread_n) * 4 <=
+              sms) {
+        const thread_config_t small_grid_cfg{128, 64, 128};
+        if (is_valid_config(small_grid_cfg, thread_m_blocks, prob_m_split,
+                            prob_n, prob_k, num_bits, group_size,
+                            has_act_order, is_k_full, has_zp, is_zp_float,
+                            stages, max_shared_mem) &&
+            get_marlin_kernel<scalar_t>(
+                q_type, thread_m_blocks, small_grid_cfg.thread_n / 16,
+                small_grid_cfg.thread_k / 16, m_block_size_8, has_act_order,
+                has_zp, group_blocks, small_grid_cfg.num_threads, is_zp_float,
+                stages) != MarlinDefault) {
+          thread_tfg = small_grid_cfg;
+          exec_cfg = exec_config_t{1, thread_tfg};
+        }
+      }
       if (thread_tfg.thread_k == -1 && force_exact_split) {
         disable_full_sm80_exact_split = true;
         max_thread_m_blocks = 4;

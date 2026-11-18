@@ -64,6 +64,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Quantized-checkpoint redirect](loader-quantized-redirect.md)
 - [MACaQ (MXFP4 W4A4)](macaq.md)
 - [Marlin device-profile validation](marlin-device-profile-validation.md)
+- [Marlin thread-tile selection](marlin-tile-schedule.md)
 - [MoE AWQ scale folding and calibration row ownership](moe-awq-calibration.md)
 - [MoE padding ownership and calibration capture lifetimes](moe-padding-and-awq-dedup.md)
 - [Multimodal calibration replay](multimodal-calibration.md)
