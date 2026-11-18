@@ -536,7 +536,10 @@ def _patch_optimum_gptqmodel_load_bridge():
 
         @wraps(original_convert_model)
         def _convert_model_with_gptqmodel_bridge(self, model, **kwargs):
-            from .utils.hf_load import hf_gptqmodel_prepare_model_for_load
+            from .utils.hf_load import (
+                hf_gptqmodel_prepare_model_for_load,
+                hf_gptqmodel_reselect_context,
+            )
 
             context = hf_gptqmodel_prepare_model_for_load(
                 model,
@@ -552,7 +555,19 @@ def _patch_optimum_gptqmodel_load_bridge():
                 backend=_hf_quantizer_backend(self),
                 dtype=kwargs.get("dtype"),
             )
+            self._gptqmodel_model = model
             if context is None:
+                # Third-party AutoGPTQ checkpoints keep Optimum's own
+                # replacement; publish the minimal context so the resolved
+                # map can still re-select an offload-safe kernel (#5262).
+                fallback = hf_gptqmodel_reselect_context(
+                    model,
+                    checkpoint_files=kwargs.get("checkpoint_files"),
+                    backend=_hf_quantizer_backend(self),
+                    dtype=kwargs.get("dtype"),
+                )
+                if fallback is not None:
+                    model._gptqmodel_hf_reselect_context = fallback
                 return original_convert_model(self, model, **kwargs)
             model._gptqmodel_hf_load_context = context
             return model
@@ -630,8 +645,14 @@ def _reselect_kernels_for_resolved_device_map(quantizer, device_map) -> None:
     if not isinstance(device_map, dict):
         return
     model = getattr(quantizer, "_gptqmodel_model", None)
+    if model is None:
+        return
     context = getattr(model, "_gptqmodel_hf_load_context", None)
-    if model is None or context is None:
+    if context is None:
+        # Third-party checkpoints do not get the native context, but still need
+        # the resolved-map reselection (#5262).
+        context = getattr(model, "_gptqmodel_hf_reselect_context", None)
+    if context is None:
         return
     from .utils.hf_load import hf_gptqmodel_reselect_offloaded_kernels
 
@@ -755,7 +776,10 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
 
         @wraps(original_prepare)
         def _prepare_with_gptqmodel_bridge(self, model, **kwargs):
-            from .utils.hf_load import hf_gptqmodel_prepare_model_for_load
+            from .utils.hf_load import (
+                hf_gptqmodel_prepare_model_for_load,
+                hf_gptqmodel_reselect_context,
+            )
 
             context = hf_gptqmodel_prepare_model_for_load(
                 model,
@@ -769,11 +793,24 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
                 backend=_hf_quantizer_backend(self),
                 dtype=kwargs.get("dtype"),
             )
-            if context is None:
-                return original_prepare(self, model, **kwargs)
-            model._gptqmodel_hf_load_context = context
             # `validate_environment` gets the resolved placement but no model.
             self._gptqmodel_model = model
+            if context is None:
+                # A third-party checkpoint keeps Transformers' own module
+                # replacement, but the map resolved from `max_memory` still has
+                # to re-select an offload-safe kernel (#5262). Keep this
+                # separate from `_gptqmodel_hf_load_context` so the fallback
+                # load also keeps its own post-init path.
+                fallback = hf_gptqmodel_reselect_context(
+                    model,
+                    checkpoint_files=kwargs.get("checkpoint_files"),
+                    backend=_hf_quantizer_backend(self),
+                    dtype=kwargs.get("dtype"),
+                )
+                if fallback is not None:
+                    model._gptqmodel_hf_reselect_context = fallback
+                return original_prepare(self, model, **kwargs)
+            model._gptqmodel_hf_load_context = context
             return model
 
         @wraps(original_post_init)

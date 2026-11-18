@@ -47,6 +47,7 @@ __all__ = [
     "hf_gptqmodel_post_init_for_load",
     "hf_gptqmodel_prepare_model_for_load",
     "hf_gptqmodel_repair_awq_load",
+    "hf_gptqmodel_reselect_context",
     "hf_gptqmodel_reselect_offloaded_kernels",
     "is_native_gptqmodel_checkpoint",
 ]
@@ -60,7 +61,9 @@ class HFGPTQModelLoadContext:
     """State shared between the pre- and post-weight-load hooks."""
 
     quantize_config: QuantizeConfig
-    quant_linear: Type[BaseQuantLinear]
+    # Only the native path installs modules, so the minimal context built for
+    # third-party checkpoints (see `hf_gptqmodel_reselect_context`) has none.
+    quant_linear: Optional[Type[BaseQuantLinear]] = None
     # Needed to rebuild modules once Transformers resolves `device_map="auto"`
     # from `max_memory`; see `hf_gptqmodel_reselect_offloaded_kernels` (#5194).
     backend: Optional[BACKEND] = None
@@ -168,6 +171,89 @@ def _is_native_gptqmodel_config(qcfg: QuantizeConfig) -> bool:
         "gptqmodel" in uri
         or bool(qcfg.dynamic)
         or resolve_quant_format(qcfg.format, qcfg.method) == FORMAT.GPTQ_V2
+    )
+
+
+def _hf_quantization_config_dict(model: nn.Module) -> Optional[Dict[str, Any]]:
+    """Return the HF ``quantization_config`` as a plain dict, if present."""
+
+    raw = getattr(getattr(model, "config", None), "quantization_config", None)
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return dict(raw)
+    to_dict = getattr(raw, "to_dict", None)
+    if not callable(to_dict):
+        return None
+    try:
+        payload = to_dict()
+    except Exception:
+        return None
+    return dict(payload) if isinstance(payload, dict) else None
+
+
+def hf_gptqmodel_reselect_context(
+    model: nn.Module,
+    checkpoint_files=None,
+    backend: Optional[Union[str, BACKEND]] = None,
+    dtype: Optional[torch.dtype] = None,
+) -> Optional[HFGPTQModelLoadContext]:
+    """Build the minimal context needed to re-select offload-safe kernels.
+
+    ``hf_gptqmodel_prepare_model_for_load`` returns ``None`` for third-party
+    AutoAWQ/AutoGPTQ checkpoints, so Transformers/Optimum replace the modules
+    with their own path. Those modules are still built before ``max_memory`` is
+    applied and therefore keep a CUDA-only Marlin kernel; the resolved map is
+    only visible from ``validate_environment`` (#5262).
+
+    This context contains exactly the state
+    :func:`hf_gptqmodel_reselect_offloaded_kernels` reads. It is published under
+    a separate model attribute so the fallback load keeps its own post-init
+    path instead of switching to the native one.
+    """
+
+    raw_config = _hf_quantization_config_dict(model)
+    qcfg: Optional[QuantizeConfig] = None
+    if raw_config is not None:
+        try:
+            qcfg = QuantizeConfig.from_quant_config(raw_config)
+        except (KeyError, TypeError, ValueError):
+            qcfg = None
+    if qcfg is None:
+        checkpoint_path = find_checkpoint_dir(model, checkpoint_files)
+        if checkpoint_path is None:
+            return None
+        try:
+            qcfg = QuantizeConfig.from_pretrained(checkpoint_path)
+        except (KeyError, OSError, TypeError, ValueError):
+            return None
+
+    # The reselection candidates come from GPTQModel's own kernel registry, so
+    # only the two methods the HF bridges cover can be re-routed here.
+    if qcfg.method not in (METHOD.AWQ, METHOD.GPTQ):
+        return None
+
+    try:
+        resolved_backend = _resolve_backend_for_checkpoint(qcfg, backend)
+    except (NotImplementedError, TypeError, ValueError):
+        # An impossible caller choice still belongs to the caller's own load
+        # path; do not turn it into a bridge failure.
+        return None
+
+    if not isinstance(dtype, torch.dtype):
+        config_dtype = get_hf_config_dtype(model.config)
+        dtype = config_dtype if isinstance(config_dtype, torch.dtype) else None
+
+    from ..models.auto import MODEL_MAP_CASEFOLD
+    from ..models.base import BaseQModel
+
+    model_type = str(getattr(model.config, "model_type", "")).lower()
+    model_definition = MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
+    return HFGPTQModelLoadContext(
+        quantize_config=qcfg,
+        backend=resolved_backend,
+        dtype=dtype,
+        lm_head_name=getattr(model_definition, "lm_head", None),
     )
 
 
