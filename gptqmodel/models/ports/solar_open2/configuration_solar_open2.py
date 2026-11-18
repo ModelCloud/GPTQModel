@@ -135,7 +135,7 @@ class SolarOpen2Config(PreTrainedConfig):
     layer_types: list | None = None
 
     def __post_init__(self, **kwargs):
-        # Legacy `rope_theta`/`rope_scaling` are folded into `rope_parameters` by PreTrainedConfig.
+        # Released-checkpoint RoPE fields are converted into `rope_parameters` by PreTrainedConfig at parse time.
         # Full attention is NoPE by default; keep the full rotary dim available when use_rope=True.
         kwargs.setdefault("partial_rotary_factor", 1.0)
 

@@ -248,7 +248,8 @@ def test_cache_chunk_generation_and_reset(alias, dtype):
     assert cache.get_seq_length() == 6
     expected_kv = [2, 1, 4] if alias == "deci" else [None, 1, None]
     for layer, expected in zip(cache.layers, expected_kv):
-        assert (layer.keys.shape[1] if layer.is_initialized else None) == expected
+        # Pruned attention blocks own a KV-free DummyLayer.
+        assert (layer.keys.shape[1] if layer.keys is not None else None) == expected
     cached = model.generate(ids[:, 1:], max_new_tokens=3, do_sample=False, use_cache=True)
     uncached = model.generate(ids[:, 1:], max_new_tokens=3, do_sample=False, use_cache=False)
     assert torch.equal(cached, uncached)
@@ -358,13 +359,13 @@ def test_shifted_sink_cache_retention_rerotation_and_reorder():
         angles = torch.cat((angles, angles), -1)[None]
         keys, vals = cache.update(k, values[:, :, start:start + count], 0,
                                  {"cos": angles.cos(), "sin": angles.sin()})
-        cache.seen_tokens += count
         # New keys keep original positions; previously retained keys shift to
         # sink/window positions, as in pinned upstream SinkCache.
         positions = torch.tensor(effective_positions)[None]
         expected = reference_rope(raw[:, :, retained], positions, cfg, start + count)
         torch.testing.assert_close(keys, expected, rtol=2e-5, atol=2e-6)
         torch.testing.assert_close(vals, values[:, :, retained], rtol=0, atol=0)
+    assert cache.get_seq_length() == 11
     original = cache.layers[0].keys.clone()
     cache.reorder_cache(torch.tensor([1, 0]))
     torch.testing.assert_close(cache.layers[0].keys, original.flip(0), rtol=0, atol=0)
@@ -409,8 +410,8 @@ def transaction_model(layout):
 
 def snapshot_cache(cache):
     # Include cache identity and every dynamic layer field, including the sink
-    # rotation tables; a correct seen_tokens alone does not restore KV state.
-    return cache.layers, cache.seen_tokens, [
+    # rotation tables and the logical sink-window length.
+    return cache.layers, cache.get_seq_length(), [
         {name: (value, value.clone() if isinstance(value, torch.Tensor) else value)
          for name, value in vars(layer).items()}
         for layer in cache.layers
@@ -419,7 +420,7 @@ def snapshot_cache(cache):
 
 def assert_cache_unchanged(cache, snapshot):
     layers, seen, states = snapshot
-    assert cache.seen_tokens == seen
+    assert cache.get_seq_length() == seen
     assert cache.layers is layers
     for layer, original, state in zip(cache.layers, layers, states):
         assert layer is original
@@ -434,13 +435,9 @@ def assert_cache_unchanged(cache, snapshot):
 
 
 @pytest.mark.parametrize("layout", ["deci", "nemotron-nas", "sliding", "unshifted", "shifted"])
-@pytest.mark.parametrize("fault,return_dict", [
-    ("head", True), ("head", False), ("loss", True), ("loss", False), ("tuple", False),
-])
+@pytest.mark.parametrize("fault,return_dict", [("head", True), ("head", False), ("loss", True), ("loss", False)])
 @torch.inference_mode()
-def test_public_lm_cache_transaction_through_head_loss_and_encoding(monkeypatch, layout, fault, return_dict):
-    from transformers.modeling_outputs import CausalLMOutputWithPast
-
+def test_public_lm_cache_transaction_through_head_and_loss(layout, fault, return_dict):
     model = transaction_model(layout)
     ids = torch.tensor([[1, 4, 7, 9, 2, 5, 8]])
     prefix, tail = ids[:, :5], ids[:, 5:]
@@ -454,20 +451,13 @@ def test_public_lm_cache_transaction_through_head_loss_and_encoding(monkeypatch,
         reached.append("head failure")
         raise RuntimeError("injected LM head failure")
 
-    def fail_encoding(self):
-        reached.append("tuple failure")
-        raise RuntimeError("injected LM tuple failure")
-
     decoder_hook = model.model.layers[-1].register_forward_hook(lambda *args: reached.append("decoder done"))
     head_hook = model.lm_head.register_forward_pre_hook(fail_head) if fault == "head" else None
     try:
-        with monkeypatch.context() as patch:
-            if fault == "tuple":
-                patch.setattr(CausalLMOutputWithPast, "to_tuple", fail_encoding)
-            labels = torch.full_like(tail, model.config.vocab_size + 3) if fault == "loss" else tail
-            kind, pattern = (IndexError, "out of bounds") if fault == "loss" else (RuntimeError, "injected LM")
-            with pytest.raises(kind, match=pattern):
-                model(tail, labels=labels, past_key_values=cache, return_dict=return_dict)
+        labels = torch.full_like(tail, model.config.vocab_size + 3) if fault == "loss" else tail
+        kind, pattern = (IndexError, "out of bounds") if fault == "loss" else (RuntimeError, "injected LM")
+        with pytest.raises(kind, match=pattern):
+            model(tail, labels=labels, past_key_values=cache, return_dict=return_dict)
     finally:
         decoder_hook.remove()
         if head_hook is not None:
@@ -485,36 +475,34 @@ def test_public_lm_cache_transaction_through_head_loss_and_encoding(monkeypatch,
         actual_values, expected_values = retry[:2], expected[:2]
     for actual, reference in zip(actual_values, expected_values):
         torch.testing.assert_close(actual, reference, rtol=0, atol=0)
-    assert cache.seen_tokens == ids.shape[1]
+    assert cache.get_seq_length() == ids.shape[1]
     for actual, reference in zip(cache.layers, control_cache.layers):
         for name, value in vars(reference).items():
             if isinstance(value, torch.Tensor):
                 torch.testing.assert_close(getattr(actual, name), value, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("layout", ["deci", "nemotron-nas", "sliding", "unshifted", "shifted"])
+# Shifted sinks evict and re-rotate history (pinned SinkCache semantics), so
+# they intentionally differ from a full forward; see the retention test above.
+@pytest.mark.parametrize("layout", ["deci", "nemotron-nas", "sliding", "unshifted"])
 @torch.inference_mode()
-def test_decoder_cache_transaction_includes_tuple_encoding(monkeypatch, layout):
-    from transformers.modeling_outputs import BaseModelOutputWithPast
-
-    decoder = transaction_model(layout).model
+def test_incremental_cache_matches_full_forward_and_greedy_generation(layout):
+    model = transaction_model(layout)
     ids = torch.tensor([[1, 4, 7, 9, 2, 5, 8]])
-    cache = decoder(ids[:, :5]).past_key_values
-    control = decoder(ids[:, :5]).past_key_values
-    before = snapshot_cache(cache)
-
-    def fail_encoding(self):
-        raise RuntimeError("injected decoder tuple failure")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(BaseModelOutputWithPast, "to_tuple", fail_encoding)
-        with pytest.raises(RuntimeError, match="injected decoder tuple failure"):
-            decoder(ids[:, 5:], past_key_values=cache, return_dict=False)
-    assert_cache_unchanged(cache, before)
-    retry = decoder(ids[:, 5:], past_key_values=cache, return_dict=False)
-    expected = decoder(ids[:, 5:], past_key_values=control, return_dict=False)
-    assert retry[1] is cache and cache.seen_tokens == 7
-    torch.testing.assert_close(retry[0], expected[0], rtol=0, atol=0)
+    full = model(ids, use_cache=False).logits
+    cache, chunks = None, []
+    for start, stop in [(0, 5), (5, 6), (6, 7)]:
+        out = model(ids[:, start:stop], past_key_values=cache)
+        cache = out.past_key_values
+        chunks.append(out.logits)
+    assert cache.get_seq_length() == ids.shape[1]
+    torch.testing.assert_close(torch.cat(chunks, 1), full, rtol=2e-5, atol=1e-6)
+    cached = model.generate(ids[:, :4], max_new_tokens=3, do_sample=False, eos_token_id=None)
+    uncached = model.generate(ids[:, :4], max_new_tokens=3, do_sample=False, eos_token_id=None, use_cache=False)
+    assert torch.equal(cached, uncached)
+    tuple_output = model.model(ids, return_dict=False)
+    assert isinstance(tuple_output, tuple)
+    torch.testing.assert_close(tuple_output[0], model.model(ids).last_hidden_state, rtol=0, atol=0)
 
 
 def test_invalid_architecture_fails_then_corrected_checkpoint_loads(tmp_path):

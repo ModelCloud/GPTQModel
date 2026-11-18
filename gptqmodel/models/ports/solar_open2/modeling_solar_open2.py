@@ -17,12 +17,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import initialization as init
-from transformers.cache_utils import Cache, DynamicCache
+from transformers.cache_utils import Cache, DynamicCache, LinearAttentionLayer
 from transformers.generation import GenerationMixin
 from transformers.masking_utils import create_causal_mask, create_recurrent_attention_mask
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, MoeModelOutputWithPast
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
 from transformers.models.glm4_moe.modeling_glm4_moe import apply_rotary_pos_emb  # partial-rotary aware
 from transformers.models.kimi_linear.modeling_kimi_linear import (
     KimiLinearRMSNormGated,
@@ -324,7 +324,6 @@ class SolarOpen2Attention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: torch.Tensor | None,
         past_key_values: Cache | None = None,
-        cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         input_shape = hidden_states.shape[:-1]
@@ -345,8 +344,7 @@ class SolarOpen2Attention(nn.Module):
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_values is not None:
-            cache_kwargs = {"cache_position": cache_position}
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
 
         attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
             self.config._attn_implementation, eager_attention_forward
@@ -501,22 +499,49 @@ class SolarOpen2PreTrainedModel(PreTrainedModel):
             init.ones_(module.weight)
 
 
-class SolarOpen2DynamicCache(DynamicCache):
-    """Per-generation hybrid state; sequence length also exists for all-KDA layouts."""
+class SolarOpen2LinearAttentionLayer(LinearAttentionLayer):
+    """KDA cache layer that also reports how many tokens its recurrent state has absorbed.
 
-    def __init__(self, config):
-        super().__init__(config=config)
-        self._solar_seen_tokens = 0
+    Pure-KDA layouts have no attention layer from which `Cache.get_seq_length` could read a length, so the
+    layer derives it from the conv inputs it is given, like `StaticLayer.cumulative_length`.
+    """
 
-    def get_seq_length(self, layer_idx=0):
-        return self._solar_seen_tokens
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.cumulative_length = 0
 
-    def reset(self):
+    def update_conv_state(self, conv_states: torch.Tensor, state_idx: int = 0, **kwargs) -> torch.Tensor:
+        if state_idx == 0:
+            if not self.has_previous_state[state_idx]:
+                self.cumulative_length = 0
+            self.cumulative_length += conv_states.shape[-1]
+        return super().update_conv_state(conv_states, state_idx, **kwargs)
+
+    def get_seq_length(self) -> int:
+        return self.cumulative_length
+
+    def reset(self) -> None:
         super().reset()
-        self._solar_seen_tokens = 0
+        self.cumulative_length = 0
 
-    def crop(self, *args, **kwargs):
-        raise NotImplementedError("Solar-Open2 recurrent state cannot be rolled back")
+    def crop(self, tokens_to_remove: int) -> None:
+        super().crop(tokens_to_remove)
+        self.cumulative_length -= abs(tokens_to_remove)
+
+
+class SolarOpen2DynamicCache(DynamicCache):
+    """`DynamicCache` whose KDA layers report a sequence length, so all-KDA layouts work with `generate`."""
+
+    def __init__(self, config, **kwargs):
+        super().__init__(config=config, **kwargs)
+        self.layers = [
+            SolarOpen2LinearAttentionLayer() if type(layer) is LinearAttentionLayer else layer for layer in self.layers
+        ]
+
+    def get_seq_length(self, layer_idx: int = 0) -> int:
+        if layer_idx < len(self.layers) and isinstance(self.layers[layer_idx], SolarOpen2LinearAttentionLayer):
+            return self.layers[layer_idx].get_seq_length()
+        return super().get_seq_length(layer_idx)
 
 
 class SolarOpen2Model(SolarOpen2PreTrainedModel):
@@ -557,8 +582,7 @@ class SolarOpen2Model(SolarOpen2PreTrainedModel):
         if use_cache and past_key_values is None:
             past_key_values = SolarOpen2DynamicCache(config=self.config)
 
-        if past_key_values is not None and not isinstance(past_key_values, SolarOpen2DynamicCache):
-            raise ValueError("Solar-Open2 requires its package-owned SolarOpen2DynamicCache")
+        has_full_attention = "full_attention" in self.config.layer_types
         if position_ids is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
             position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device) + past_seen_tokens
@@ -575,9 +599,7 @@ class SolarOpen2Model(SolarOpen2PreTrainedModel):
             }
             # Create the masks
             causal_mask_mapping = {
-                "full_attention": create_causal_mask(**mask_kwargs)
-                if "full_attention" in self.config.layer_types
-                else None,
+                "full_attention": create_causal_mask(**mask_kwargs) if has_full_attention else None,
                 "linear_attention": create_recurrent_attention_mask(**mask_kwargs),
             }
 
@@ -596,8 +618,6 @@ class SolarOpen2Model(SolarOpen2PreTrainedModel):
             )
 
         hidden_states = self.norm(hidden_states)
-        if past_key_values is not None:
-            past_key_values._solar_seen_tokens += inputs_embeds.shape[1]
 
         return MoeModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -608,6 +628,7 @@ class SolarOpen2Model(SolarOpen2PreTrainedModel):
 class SolarOpen2ForCausalLM(SolarOpen2PreTrainedModel, GenerationMixin):
     @classmethod
     def _supports_default_dynamic_cache(cls):
+        # `generate` would build a plain `DynamicCache`; the model creates `SolarOpen2DynamicCache` on prefill.
         return False
 
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
@@ -647,8 +668,7 @@ class SolarOpen2ForCausalLM(SolarOpen2PreTrainedModel, GenerationMixin):
             **kwargs,
         )
         hidden_states = outputs.last_hidden_state
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
+        logits = self.lm_head(slice_logits_to_keep(hidden_states, logits_to_keep))
 
         loss = None
         if labels is not None:
