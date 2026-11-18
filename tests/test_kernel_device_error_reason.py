@@ -4,7 +4,7 @@
 
 Several kernels raise from ``validate_device`` for reasons that have nothing to
 do with the device family: Machete is Hopper-only, Swordfish only has images for
-sm100/sm103/sm110, Marlin needs compute capability 7.5, the ROCm variants refuse
+sm100/sm103/sm110, Marlin needs compute capability 8.0, the ROCm variants refuse
 outright. The shared validator used to replace all of that with
 "does not support device: cuda:0", which sends the user looking at the wrong
 thing.

@@ -36,7 +36,7 @@
 
 namespace MARLIN_NAMESPACE_NAME {
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
 template <typename scalar_t,  // compute dtype, half or nv_float16
           const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
@@ -275,20 +275,6 @@ __global__ void Marlin(
 
   static constexpr auto w_type = vllm::ScalarType::from_id(w_type_id);
   static constexpr auto s_type = vllm::ScalarType::from_id(s_type_id);
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
-  constexpr auto num_bits = vllm::ScalarType::from_id(w_type_id).size_bits();
-  constexpr bool use_fp16_accum =
-      std::is_same<scalar_t, half>::value &&
-      (!(w_type_id == vllm::kFE2M1f.id() && s_type_id == vllm::kFE4M3fn.id()) &&
-       !(group_blocks == -1 && num_bits == 4));
-#else
-  constexpr bool use_fp16_accum = false;
-#endif
-  if constexpr (std::is_same<scalar_t, nv_bfloat16>::value) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
-    return;
-#endif
-  }
   if constexpr (w_type == vllm::kFE2M1f) {
     static_assert(s_type == vllm::kFE4M3fn && group_blocks == 1 ||
                   s_type == vllm::kFE8M0fnu && group_blocks == 2);
@@ -1211,12 +1197,12 @@ __global__ void Marlin(
   #pragma unroll
       for (int i = 0; i < thread_m_blocks; i++) {
         if constexpr (m_block_size_8) {
-          mma_trans<scalar_t, use_fp16_accum>(
+          mma_trans<scalar_t>(
               frag_a[k2][i], frag_b0, frag_b1, frag_c[i][j][0]);
         } else {
-          mma<scalar_t, use_fp16_accum>(
+          mma<scalar_t>(
               frag_a[k2][i], frag_b0, frag_c[i][j][0]);
-          mma<scalar_t, use_fp16_accum>(
+          mma<scalar_t>(
               frag_a[k2][i], frag_b1, frag_c[i][j][1]);
         }
       }
@@ -1655,21 +1641,6 @@ __global__ void Marlin(
     // While this pattern may not be the most readable, other ways of writing
     // the loop seemed to noticeably worse performance after compilation.
     if (slice_iters == 0) {
-      if constexpr (use_fp16_accum) {
-#pragma unroll
-        for (int i = 0; i < thread_m_blocks * 4 * 2; i++) {
-          float* frag_c_part_float = reinterpret_cast<float*>(frag_c) + i * 4;
-          scalar_t* frag_c_part_half =
-              reinterpret_cast<scalar_t*>(frag_c_part_float);
-
-#pragma unroll
-          for (int j = 3; j >= 0; j--) {
-            frag_c_part_float[j] = ScalarType<scalar_t>::num2float(
-                frag_c_part_half[j]);
-          }
-        }
-      }
-
       cp_async_wait<0>();
       bool last = slice_idx == slice_count - 1;
       // For per-column scales, we only fetch them here in the final step before

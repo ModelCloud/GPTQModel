@@ -51,14 +51,6 @@ GROUP_BLOCKS = [0, 1, -1, 2, 4, 8]
 DTYPES = ["fp16", "bf16"]
 
 
-def _is_4bit_weight(scalar_type: str) -> bool:
-    return scalar_type in {
-        "vllm::kU4",
-        "vllm::kU4B8",
-        "vllm::kFE2M1f",
-    }
-
-
 def remove_old_kernels() -> None:
     root = Path(__file__).parent
     for path in root.glob("kernel_*.cu"):
@@ -119,10 +111,6 @@ def generated_kernels_are_current(root: Path | None = None) -> bool:
 
 def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
     results: list[str] = []
-    stage_values = ["pipe_stages"]
-    if dtype == "fp16":
-        # Turing uses a shorter pipeline depth than Ampere+.
-        stage_values.insert(0, 2)
     for group_blocks, m_blocks, thread_configs in itertools.product(
             GROUP_BLOCKS, THREAD_M_BLOCKS, THREAD_CONFIGS):
 
@@ -182,31 +170,21 @@ def render_templates_for_combo(scalar_type: str, dtype: str) -> list[str]:
             s_type = "vllm::kBFloat16"
 
         for is_zp_float in is_zp_float_list:
-            for stage_value in stage_values:
-                if (
-                    stage_value == 2
-                    and _is_4bit_weight(scalar_type)
-                    and max(m_blocks, 1) * 2 > k_blocks
-                ):
-                    # Our dense Turing kernels need enough B-stage capacity to
-                    # cover the output tile. For 4-bit weights this rules out
-                    # the larger M tiles when thread_k_blocks == 4.
-                    continue
-                template_str = jinja2.Template(TEMPLATE).render(
-                    scalar_t=c_dtype,
-                    w_type_id=scalar_type + ".id()",
-                    s_type_id=s_type + ".id()",
-                    threads=threads,
-                    thread_m_blocks=max(m_blocks, 1),
-                    thread_n_blocks=n_blocks,
-                    thread_k_blocks=k_blocks,
-                    m_block_size_8=m_blocks == 0.5,
-                    stages=stage_value,
-                    group_blocks=group_blocks,
-                    is_zp_float=is_zp_float,
-                )
+            template_str = jinja2.Template(TEMPLATE).render(
+                scalar_t=c_dtype,
+                w_type_id=scalar_type + ".id()",
+                s_type_id=s_type + ".id()",
+                threads=threads,
+                thread_m_blocks=max(m_blocks, 1),
+                thread_n_blocks=n_blocks,
+                thread_k_blocks=k_blocks,
+                m_block_size_8=m_blocks == 0.5,
+                stages="pipe_stages",
+                group_blocks=group_blocks,
+                is_zp_float=is_zp_float,
+            )
 
-                results.append(template_str)
+            results.append(template_str)
 
     return results
 
