@@ -51,12 +51,40 @@ flowchart TD
     style E fill:#ffe9b3,stroke:#b38600
 ```
 
+## Materialization publishes one tensor atomically
+
+A lazy shell owns meta parameters. `LazyTurtle._copy_checkpoint_tensors_into_submodule`
+used to allocate replacement storage, install it on the module with `setattr`,
+and copy the checkpoint values in a second step. A Ctrl-C between the two left
+`torch.empty` weights that are no longer meta, so run-exit recovery (whose only
+"not loaded" test is `is_meta`) treated the module as materialized and the
+in-session model forwarded with uninitialized weights (#5088).
+
+```mermaid
+stateDiagram-v2
+    state "module owns meta parameter" as Meta
+    state "replacement filled off-module" as Filling
+    state "module owns loaded parameter" as Loaded
+    [*] --> Meta
+    Meta --> Filling: allocate storage + copy checkpoint
+    Filling --> Loaded: publish (setattr / register_parameter)
+    Filling --> Meta: interrupt (discard replacement)
+    Loaded --> [*]
+```
+
+`_publish_checkpoint_param_` now fills the replacement before publishing it.
+An interrupt during the copy leaves the old meta parameter in place, which
+`RunExitRecovery` already re-materializes; recovery can no longer observe an
+installed but unfilled tensor. Buffer materialization already copied into a
+local tensor before `register_buffer` and is unchanged.
+
 ## Before and after
 
 Pre-fix locations are from revision `bfbb7a2b4`; the symbols are unchanged.
 
 | Exit window | Before | After |
 | --- | --- | --- |
+| Lazy parameter fill (`gptqmodel/utils/structure.py::_copy_checkpoint_tensors_into_submodule`, both the concatenated and the grouped-shard branch) | `torch.empty_like` was installed on the module with `setattr` and only then filled by `copy_`. A Ctrl-C between them left `torch.empty` weights that are not meta; recovery's `is_meta` test skipped the module and the forward silently returned NaN or wrong logits (#5088). | `gptqmodel/utils/structure.py::_publish_checkpoint_param_` allocates and fills the replacement, then publishes it. An interrupt leaves the old meta parameter, which the recovery re-materializes. |
 | `subset_event_cb(stage="forward_end")` returns `StopMainLoop` (`stage_subset.py:1470` at `bfbb7a2b4`) | Unwound past the success-path release at `:1488`. The in-flight layer kept `HookedLinear.forward_hook` and `forward_hook_last=True`, so **every** later forward raised `StopForward("Forwarding stopped")` (#5009). | The post-forward tail is wrapped in `try/except BaseException` and calls `gptqmodel/looper/stage_subset.py::_release_capture_hooks` before re-raising, so both the inline hook attributes and the registered handles are removed. |
 | A `receive_layer_*` call or a `KeyboardInterrupt` in the same window | Same leak. | Same guard. |
 | Zero-route-recovery callbacks (`zero_route_recovery_start` / `_end`) or any other unwind the stage guard cannot reach | `ModuleLooper.loop()`'s failure branch restored devices, materialized layers and rehomed kernels but never cleared `forward_hook` (#5009). | `gptqmodel/looper/module_looper.py::ModuleLooper._restore_inflight_layer` calls `_clear_layer_capture_hooks` on the in-flight layer before rehoming it. |
@@ -108,6 +136,10 @@ retires its placeholders to zero-sized sentinels and the pending
 fixture for both loopers: a next-layer fault and a final-restore fault with
 disk offload on and off, the calibrated post-forward stop, a secondary repair
 failure that must not replace the primary error, and a successful-run control.
+Two nodes interrupt the first checkpoint copy inside materialization: the
+weight-only post-loop tail and the GPTQ first-capture layer. Both assert every
+floating parameter is finite and the affected weights still match the
+checkpoint (#5088).
 
 `tests/test_exl3_cancelled_run_5083.py` — the EXL3 deferred-weight matrix: a
 `quant_complete` stop in the in-flight layer and in the last layer, raised and
