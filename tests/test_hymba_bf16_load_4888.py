@@ -11,9 +11,11 @@ Two independent generic defects:
   capture forward raised ``Tensor on device cpu is not on the expected device
   meta!``.
 * ``assert_loaded_model_state`` rejected a valid bf16 load because Hymba's
-  remote constructor allocates ``mamba.A_log`` in fp32 from an explicit fp32
-  ``A``. transformers loads the bf16 checkpoint value into that fp32 parameter
-  without changing its dtype; the values are exact.
+  constructor allocates ``mamba.A_log`` in fp32 from an explicit fp32 ``A``.
+  The package-owned port declares ``A_log`` in
+  ``_keep_in_fp32_modules_strict``, so transformers keeps it fp32 and the guard
+  exempts it through that declaration, without GPT-QModel hooking
+  ``PreTrainedModel.post_init``.
 
 The tests use small synthetic fixtures: the real Hymba needs remote code with
 ``mamba_ssm``/``causal_conv1d``/``flash_attn``.
@@ -30,7 +32,7 @@ from transformers import LlamaConfig, PreTrainedModel
 
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.models.definitions.hymba import HymbaQModel
-from gptqmodel.utils.hf import assert_loaded_model_state, record_construction_dtypes
+from gptqmodel.utils.hf import assert_loaded_model_state
 
 
 class _RootBareParameterModel(nn.Module):
@@ -86,6 +88,7 @@ class _GuardModel(PreTrainedModel):
     """One parameter constructed bf16 and one the constructor allocates in fp32."""
 
     config_class = _GuardConfig
+    _keep_in_fp32_modules_strict = ["construction_fp32"]
 
     def __init__(self, config):
         super().__init__(config)
@@ -95,8 +98,7 @@ class _GuardModel(PreTrainedModel):
 
 
 def _construct(model_cls):
-    with record_construction_dtypes():
-        return model_cls(_GuardConfig())
+    return model_cls(_GuardConfig())
 
 
 def test_hymba_checkpoint_flex_hint_loads_with_supported_attention(tmp_path):
@@ -140,23 +142,23 @@ def test_dtype_guard_still_rejects_corrupted_fp32():
         )
 
 
-class _AllFp32ConstructedModel(PreTrainedModel):
-    """Constructed outside transformers' dtype context: the record is uninformative."""
+class _UndeclaredFp32Model(PreTrainedModel):
+    """A constructor-made fp32 parameter that the model never declared."""
 
     config_class = _GuardConfig
 
     def __init__(self, config):
         super().__init__(config)
+        self.decoder_weight = nn.Parameter(torch.ones(8, dtype=torch.bfloat16))
         self.weight = nn.Parameter(torch.ones(8, dtype=torch.float32))
         self.post_init()
 
 
-def test_dtype_guard_ignores_an_all_fp32_construction_record():
-    """A record taken without a dtype context must not exempt a wrong dtype."""
+def test_dtype_guard_rejects_an_undeclared_fp32_parameter():
+    """Only a keep-in-fp32 declaration exempts an fp32 parameter."""
 
-    model = _construct(_AllFp32ConstructedModel)
+    model = _construct(_UndeclaredFp32Model)
 
-    assert getattr(model, "_gptqmodel_construction_parameter_dtypes", None) is None
     with pytest.raises(RuntimeError, match="floating parameters are not all torch.bfloat16"):
         assert_loaded_model_state(
             model,
@@ -174,6 +176,7 @@ class _TinyHymbaLikeModel(PreTrainedModel):
     """A real ``from_pretrained`` load with one construction-time fp32 param."""
 
     config_class = _TinyConfig
+    _keep_in_fp32_modules_strict = ["A_log"]
 
     def __init__(self, config):
         super().__init__(config)
@@ -195,8 +198,7 @@ def test_real_bf16_load_keeps_the_construction_fp32_parameter(tmp_path):
     )
     _TinyHymbaLikeModel(config).to(torch.bfloat16).save_pretrained(tmp_path)
 
-    with record_construction_dtypes():
-        loaded = _TinyHymbaLikeModel.from_pretrained(tmp_path, dtype=torch.bfloat16)
+    loaded = _TinyHymbaLikeModel.from_pretrained(tmp_path, dtype=torch.bfloat16)
 
     assert loaded.A_log.dtype is torch.float32
     assert loaded.linear.weight.dtype is torch.bfloat16
@@ -208,15 +210,14 @@ def test_real_bf16_load_keeps_the_construction_fp32_parameter(tmp_path):
     )
 
 
-def test_construction_dtype_recording_is_scoped_to_the_load():
-    from transformers import PreTrainedModel
+def test_hymba_port_pins_a_log_to_fp32():
+    from gptqmodel.models.ports.hymba.modeling_hymba import HymbaPreTrainedModel
 
+    assert "A_log" in HymbaPreTrainedModel._keep_in_fp32_modules_strict
+
+
+def test_load_never_wraps_pretrained_model_post_init():
     original = PreTrainedModel.post_init
-    with record_construction_dtypes():
-        with record_construction_dtypes():
-            assert PreTrainedModel.post_init is not original
-        assert PreTrainedModel.post_init is not original
+    _construct(_GuardModel)
     assert PreTrainedModel.post_init is original
-
-    # Outside a GPT-QModel load nothing is recorded on the model.
-    assert getattr(_GuardModel(_GuardConfig()), "_gptqmodel_construction_parameter_dtypes", None) is None
+    assert not hasattr(_construct(_GuardModel), "_gptqmodel_construction_parameter_dtypes")

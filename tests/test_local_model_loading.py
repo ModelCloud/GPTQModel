@@ -244,11 +244,9 @@ def _gguf_config(path):
 @pytest.mark.parametrize("decoy_config", [False, True])
 @pytest.mark.parametrize("subfolder", ["", "nested"])
 def test_gguf_policy_reads_selected_metadata_instead_of_json(tmp_path, monkeypatch, trust, decoy_config, subfolder):
-    from gptqmodel.utils.hf import _patch_transformers_prism_gguf_compat
-
-    # This is the runtime installed by the normal public GGUF path; do not
-    # replace the decoder or stub the metadata returned by Transformers.
-    _patch_transformers_prism_gguf_compat(api_name="test")
+    # Transformers' own GGUF reader parses the metadata: do not replace the
+    # decoder or stub the metadata it returns.
+    pytest.importorskip("gguf", reason="Transformers' GGUF loader needs the gguf package")
     root = tmp_path / "checkpoint"
     path = root / subfolder
     if decoy_config:

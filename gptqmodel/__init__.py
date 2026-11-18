@@ -106,7 +106,9 @@ _RETIRED_KERNEL_ENV_VARS = {
     "GPTQMODEL_INTERNAL_GGUF_DEQUANT_DEVICE": "KernelConfig.gguf_dequant_device",
     "GPTQMODEL_INTERNAL_GGUF_DEQUANT_MAX_BYTES": "KernelConfig.gguf_dequant_chunk_bytes",
     "GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER": "KernelConfig.gguf_native_quantized_loader",
-    "GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER": "KernelConfig.gguf_torch_dequant_loader",
+    # The direct-to-Torch dense GGUF import redirected Transformers' loader and
+    # was removed with every other Transformers patch; it has no replacement.
+    "GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER": None,
     "GPTQMODEL_MARLIN_USE_FP32": "KernelConfig.marlin_fp32",
     "GPTQMODEL_MAX_PACKERS": "RuntimeConfig.max_packers",
     "GPTQMODEL_NO_ROCM_LLC": "KernelConfig.rocm_llc",
@@ -150,9 +152,12 @@ def warn_retired_kernel_env_vars() -> list[str]:
         if name not in os.environ or name in _WARNED_RETIRED_KERNEL_ENV_VARS:
             continue
         _WARNED_RETIRED_KERNEL_ENV_VARS.add(name)
-        log.warn(
-            f"ENV: {name} is retired and has no effect; use {replacement} instead."
-        )
+        if replacement is None:
+            log.warn(f"ENV: {name} is retired and has no effect; the feature was removed.")
+        else:
+            log.warn(
+                f"ENV: {name} is retired and has no effect; use {replacement} instead."
+            )
         warned.append(name)
     return warned
 

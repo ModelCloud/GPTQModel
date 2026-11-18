@@ -4,15 +4,12 @@
 
 from __future__ import annotations
 
-import sys
-import types
 from types import SimpleNamespace
 
 import pytest
 
 import gptqmodel
 from gptqmodel.models import auto
-from gptqmodel.utils import internal_gguf
 from gptqmodel.utils.backend_config import RuntimeConfig
 from gptqmodel.utils.kernel import KernelConfig, configure_kernel, reset_kernel_config
 from gptqmodel.utils.p2p import P2PConfig
@@ -158,31 +155,3 @@ def test_each_retired_env_var_warns_exactly_once(monkeypatch):
     text = "\n".join(calls)
     assert "KernelConfig.torch_streaming" in text
     assert "RuntimeConfig.cpu_workers" in text
-
-
-def test_install_runtime_keeps_an_imported_real_gguf(monkeypatch):
-    real = types.ModuleType("gguf")
-    monkeypatch.setitem(sys.modules, "gguf", real)
-
-    assert internal_gguf.install_runtime() is real
-    assert sys.modules["gguf"] is real
-
-
-def test_install_runtime_does_not_shadow_an_installed_gguf(monkeypatch):
-    monkeypatch.delitem(sys.modules, "gguf", raising=False)
-    monkeypatch.setattr(
-        internal_gguf.importlib.util,
-        "find_spec",
-        lambda name: object() if name == "gguf" else None,
-    )
-
-    assert internal_gguf.install_runtime() is None
-    assert "gguf" not in sys.modules
-
-
-def test_install_runtime_installs_the_shim_when_gguf_is_absent(monkeypatch):
-    monkeypatch.delitem(sys.modules, "gguf", raising=False)
-    monkeypatch.setattr(internal_gguf.importlib.util, "find_spec", lambda name: None)
-
-    assert internal_gguf.install_runtime() is internal_gguf
-    assert sys.modules["gguf"] is internal_gguf

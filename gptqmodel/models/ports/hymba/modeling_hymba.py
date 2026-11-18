@@ -410,6 +410,10 @@ class HymbaPreTrainedModel(PreTrainedModel):
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
     _no_split_modules = ["HymbaDecoderLayer"]
+    # The mixer builds `A_log` from an explicit fp32 `A` and reads it back as
+    # fp32; keep it fp32 under every half dtype so the loaded model is exactly
+    # what the constructor intended (#4888).
+    _keep_in_fp32_modules_strict = ["A_log"]
     _skip_keys_device_placement = ["past_key_values"]
     _supports_sdpa = True
     _is_stateful = True

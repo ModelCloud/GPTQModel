@@ -11,7 +11,7 @@ import threading
 import warnings
 from collections import Counter
 from contextlib import contextmanager
-from functools import lru_cache, wraps
+from functools import lru_cache
 from typing import Any, Optional
 
 import torch
@@ -20,39 +20,11 @@ from transformers import (  # Auto*: unsupported-model config/support probes onl
     AutoConfig,
     AutoModelForCausalLM,
     GenerationConfig,
+    PreTrainedConfig,
     PreTrainedModel,
 )
-from transformers.utils import cached_file
-
-from ..utils import _MONKEY_PATCH_LOCK
-
-
-_GGUF_LAZY_ATTRS = frozenset({
-    "PRISM_Q1_0_G128_BLOCK_SIZE",
-    "PRISM_Q1_0_G128_NAME",
-    "PRISM_Q1_0_G128_TYPE_SIZE",
-    "PRISM_Q1_0_G128_VALUE",
-    "_dequantize_prism_q1_0_g128",
-    "_is_prism_q1_0_g128",
-})
-
-
-def __getattr__(name: str):
-    """Resolve GGUF/PRISM names lazily so this module never imports NumPy."""
-    if name in _GGUF_LAZY_ATTRS:
-        from ..nn_modules.qlinear import gguf as gguf_module
-
-        value = getattr(gguf_module, name)
-    elif name == "internal_gguf":
-        from ..utils import internal_gguf as value
-    else:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    globals()[name] = value
-    return value
-
-
-from transformers import PreTrainedConfig
 from transformers.initialization import no_init_weights
+from transformers.utils import cached_file
 
 from ..utils.logger import setup_logger
 from ..utils.security import RemoteCodeSecurityError, require_remote_code_permission, safety_checks_bypassed
@@ -62,7 +34,6 @@ __all__ = [
     "no_init_weights",
     "suspend_hf_weight_init",
     "assert_loaded_model_state",
-    "record_construction_dtypes",
     "get_hf_config_dtype",
     "normalize_torch_dtype_kwarg",
     "has_native_transformers_causallm_support",
@@ -241,52 +212,36 @@ _HF_INIT_SUSPENSION = None
 
 
 def _install_init_suspension():
-    """Patch the process-wide init entry points and return the originals."""
+    """Enter transformers' public ``no_init_weights`` guard for the outer scope.
 
-    def _skip_init(*args, **kwargs):
-        return None
+    GPT-QModel never replaces torch or transformers callables itself.
+    ``no_init_weights`` is transformers' own framework context: it silences the
+    ``torch.nn.init`` initializers and ``PreTrainedModel.init_weights`` and
+    restores them on exit. It is not re-entrant across threads, so it is kept
+    entered for the whole outermost scope: re-entering it per caller is what
+    makes overlapping entries lose the originals.
+    """
 
-    originals = {
-        "kaiming_uniform": torch.nn.init.kaiming_uniform_,
-        "uniform": torch.nn.init.uniform_,
-        "normal": torch.nn.init.normal_,
-    }
-
-    torch.nn.init.kaiming_uniform_ = _skip_init
-    torch.nn.init.uniform_ = _skip_init
-    torch.nn.init.normal_ = _skip_init
-
-    # transformers' own guard patches many more torch initializers and
-    # ``PreTrainedModel.init_weights``. Keep it entered for the whole outermost
-    # scope: re-entering it per caller is what makes overlapping entries lose
-    # the originals.
     no_init = no_init_weights()
     no_init.__enter__()
-    originals["no_init"] = no_init
-    return originals
+    return no_init
 
 
-def _restore_init_suspension(originals):
-    try:
-        originals["no_init"].__exit__(None, None, None)
-    finally:
-        torch.nn.init.kaiming_uniform_ = originals["kaiming_uniform"]
-        torch.nn.init.uniform_ = originals["uniform"]
-        torch.nn.init.normal_ = originals["normal"]
+def _restore_init_suspension(no_init):
+    no_init.__exit__(None, None, None)
 
 
 @contextmanager
 def suspend_hf_weight_init():
     """Disable HF/torch parameter init until the last overlapping entry exits.
 
-    ``transformers``' ``no_init_weights`` patches process-wide initializers and
-    ``PreTrainedModel.init_weights``, and this module also silences three torch
-    initializers. Both are process-global, so overlapping entries are reference
-    counted: the first entry installs the patches, later entries only increment
-    the depth, and the last exit restores the originals. Without the count the
-    first caller to leave restored the real initializers while another thread
-    was still building its model, and the second exit then restored the
-    ``_skip_init`` stubs, disabling weight init for the rest of the process
+    ``transformers``' ``no_init_weights`` swaps process-wide initializers and
+    ``PreTrainedModel.init_weights`` for the duration of its scope, so
+    overlapping entries are reference counted: the first entry enters it, later
+    entries only increment the depth, and the last exit leaves it. Without the
+    count the first caller to leave restored the real initializers while
+    another thread was still building its model, and the second exit then
+    restored the no-op stubs, disabling weight init for the rest of the process
     (issue #4129).
     """
 
@@ -359,88 +314,6 @@ def _compile_keep_in_fp32_matcher(model, attrs=_KEEP_IN_FP32_ATTRS):
     return matches
 
 
-CONSTRUCTION_DTYPES_ATTR = "_gptqmodel_construction_parameter_dtypes"
-
-
-def _record_construction_dtypes(model) -> None:
-    """Remember the dtype each parameter had when the model was constructed.
-
-    ``PreTrainedModel.post_init`` runs after the constructor and before
-    ``from_pretrained`` loads the checkpoint. Recording the dtypes there lets
-    ``assert_loaded_model_state`` distinguish a parameter the model's own code
-    allocated in fp32 (Hymba's ``mamba.A_log``) from one a broken load left in
-    the wrong dtype (issue #4888). Only dtypes are retained, never tensors.
-
-    Parameters matched by ``_keep_in_fp32_modules`` at construction are
-    excluded: the current declaration already governs them, so clearing the
-    declaration must make them reportable again (#4170).
-    """
-
-    named_parameters = getattr(model, "named_parameters", None)
-    if not callable(named_parameters):
-        return
-    try:
-        keep_in_fp32 = _compile_keep_in_fp32_matcher(model)
-        dtypes = {
-            name: parameter.dtype
-            for name, parameter in named_parameters()
-            if parameter.is_floating_point()
-            and not (keep_in_fp32 is not None and keep_in_fp32(name))
-        }
-    except Exception:  # pragma: no cover - defensive: exotic parameter proxies
-        return
-    if not dtypes or all(dtype is torch.float32 for dtype in dtypes.values()):
-        # Constructed entirely in fp32: transformers' dtype context was not
-        # active, so the record says nothing about intent and must not be used
-        # to exempt anything. Keeping the strict check here is what stops a
-        # broken cast from being masked.
-        return
-    object.__setattr__(model, CONSTRUCTION_DTYPES_ATTR, dtypes)
-
-
-_CONSTRUCTION_DTYPES_LOCK = threading.RLock()
-_CONSTRUCTION_DTYPES_DEPTH = 0
-_CONSTRUCTION_DTYPES_ORIGINAL_POST_INIT = None
-
-
-@contextmanager
-def record_construction_dtypes():
-    """Record construction-time parameter dtypes for models built in this scope.
-
-    ``from_pretrained`` constructs and loads in one call, and
-    ``PreTrainedModel.post_init`` is the only point between the two. This
-    scope wraps ``post_init`` so ``_record_construction_dtypes`` runs there,
-    letting ``assert_loaded_model_state`` accept a parameter the model's own
-    constructor allocated in fp32 (#4888). It is a GPT-QModel load-integrity
-    check, not a Transformers compatibility shim, so it is installed only for
-    the duration of a GPT-QModel load. Overlapping entries are reference
-    counted and the last exit restores the original ``post_init``.
-    """
-
-    global _CONSTRUCTION_DTYPES_DEPTH, _CONSTRUCTION_DTYPES_ORIGINAL_POST_INIT
-
-    with _CONSTRUCTION_DTYPES_LOCK:
-        if _CONSTRUCTION_DTYPES_DEPTH == 0:
-            original_post_init = PreTrainedModel.post_init
-
-            @wraps(original_post_init)
-            def post_init(self):
-                original_post_init(self)
-                _record_construction_dtypes(self)
-
-            _CONSTRUCTION_DTYPES_ORIGINAL_POST_INIT = original_post_init
-            PreTrainedModel.post_init = post_init
-        _CONSTRUCTION_DTYPES_DEPTH += 1
-    try:
-        yield
-    finally:
-        with _CONSTRUCTION_DTYPES_LOCK:
-            _CONSTRUCTION_DTYPES_DEPTH -= 1
-            if _CONSTRUCTION_DTYPES_DEPTH == 0:
-                PreTrainedModel.post_init = _CONSTRUCTION_DTYPES_ORIGINAL_POST_INIT
-                _CONSTRUCTION_DTYPES_ORIGINAL_POST_INIT = None
-
-
 def assert_loaded_model_state(
     model,
     *,
@@ -474,13 +347,10 @@ def assert_loaded_model_state(
     in any other dtype is still reported. Pinned parameters are still checked
     for materialization, and undeclared mixed dtypes still fail (issue #4170).
 
-    A model's own constructor may also allocate a parameter in fp32 from an
-    explicit fp32 tensor (Hymba's ``mamba.A_log``), and transformers loads the
-    half-precision checkpoint value into it without changing its dtype. The
-    dtype each parameter had at construction is recorded inside
-    ``post_init`` by ``record_construction_dtypes()``; a parameter that is *still* fp32 after the load is treated
-    as intentional. A parameter the load changed away from its construction
-    dtype is still reported, so a broken cast is never masked (issue #4888).
+    A model whose constructor allocates a parameter in fp32 on purpose (the
+    Hymba port's ``mamba.A_log``) declares it in ``_keep_in_fp32_modules_strict``
+    so transformers keeps it fp32 and this guard exempts it through the same
+    declaration (issue #4888).
     """
 
     problems = []
@@ -498,7 +368,6 @@ def assert_loaded_model_state(
         require_materialized or require_uniform_dtype or expected_dtype is not None
     ):
         keep_in_fp32 = _compile_keep_in_fp32_matcher(model)
-        construction_dtypes = getattr(model, CONSTRUCTION_DTYPES_ATTR, None)
         dtypes = Counter()
         meta = []
         for name, parameter in named_parameters():
@@ -512,16 +381,6 @@ def assert_loaded_model_state(
                 and keep_in_fp32 is not None
                 and keep_in_fp32(name)
             ):
-                continue
-            if (
-                parameter.dtype is torch.float32
-                and construction_dtypes is not None
-                and construction_dtypes.get(name) is torch.float32
-            ):
-                # The constructor allocated this parameter in fp32 and the load
-                # did not change it (Hymba's `mamba.A_log`, #4888). A parameter
-                # constructed in a half dtype and then left/cast to fp32 is
-                # still reported below.
                 continue
             dtypes[parameter.dtype] += 1
 
@@ -716,200 +575,6 @@ def _resolve_hf_gguf_artifact(model_id_or_path: str) -> Optional[tuple[str, str]
     return model_id_or_path, inferred_gguf_file
 
 
-def _transformers_has_native_prism_gguf_support() -> bool:
-    try:
-        import transformers.modeling_gguf_pytorch_utils as gguf_utils
-    except Exception:
-        return False
-
-    return hasattr(gguf_utils, "_dequantize_prism_q1_0_g128")
-
-
-def _internal_gguf_torch_loader_enabled(policy=None) -> bool:
-    """Read the load policy, never the process environment.
-
-    ``None`` resolves the policy this load installed; a direct caller may pass
-    the explicit ``KernelConfig`` it wants the dense import to honour.
-    """
-    from . import internal_gguf
-
-    return internal_gguf.torch_dequant_loader_enabled(policy)
-
-
-def _load_gguf_checkpoint_torch_direct(
-    *,
-    gguf_utils,
-    original_load_gguf_checkpoint,
-    gguf_checkpoint_path,
-    return_tensors: bool = False,
-    model_to_load=None,
-    torch_dtype=None,
-    policy=None,
-):
-    from ..utils import internal_gguf
-
-    if not return_tensors or model_to_load is None or not _internal_gguf_torch_loader_enabled(policy):
-        return original_load_gguf_checkpoint(
-            gguf_checkpoint_path,
-            return_tensors=return_tensors,
-            model_to_load=model_to_load,
-            torch_dtype=torch_dtype,
-        )
-
-    parsed_parameters = original_load_gguf_checkpoint(
-        gguf_checkpoint_path,
-        return_tensors=False,
-        model_to_load=model_to_load,
-        torch_dtype=torch_dtype,
-    )
-    config = parsed_parameters.get("config", {})
-    model_type = config.get("model_type")
-    if model_type != internal_gguf.MODEL_ARCH_QWEN3:
-        return original_load_gguf_checkpoint(
-            gguf_checkpoint_path,
-            return_tensors=True,
-            model_to_load=model_to_load,
-            torch_dtype=torch_dtype,
-        )
-
-    processor_cls = gguf_utils.TENSOR_PROCESSORS.get(model_type, gguf_utils.TensorProcessor)
-    if processor_cls is not gguf_utils.TensorProcessor:
-        return original_load_gguf_checkpoint(
-            gguf_checkpoint_path,
-            return_tensors=True,
-            model_to_load=model_to_load,
-            torch_dtype=torch_dtype,
-        )
-
-    processor = processor_cls(config=config)
-    tensor_key_mapping = gguf_utils.get_gguf_hf_weights_map(model_to_load, processor)
-    target_device = internal_gguf._resolve_torch_dequant_device(policy)
-    dequantize_kwargs = {"device": target_device}
-    if torch_dtype is not None:
-        dequantize_kwargs["dtype"] = torch_dtype
-    reader = internal_gguf.GGUFReader(gguf_checkpoint_path)
-    parsed_parameters["tensors"] = {}
-
-    for tensor in gguf_utils.tqdm(reader.tensors, desc="Converting GGUF tensors directly to torch..."):
-        name = tensor.name
-        weights = internal_gguf.dequantize_to_torch(
-            tensor.data,
-            tensor.tensor_type,
-            **dequantize_kwargs,
-        )
-
-        result = processor.process(
-            weights=weights,
-            name=name,
-            tensor_key_mapping=tensor_key_mapping,
-            parsed_parameters=parsed_parameters,
-        )
-
-        weights = result.weights
-        name = result.name
-        if name not in tensor_key_mapping:
-            continue
-
-        if not torch.is_tensor(weights):
-            # GGUF processors return nested sequences or array-likes. Normalize
-            # through the array's own API so big-endian dtypes and negative
-            # strides become a native C-contiguous buffer, then let Torch own
-            # the copy. No NumPy import is required.
-            dtype = getattr(weights, "dtype", None)
-            newbyteorder = getattr(dtype, "newbyteorder", None)
-            if newbyteorder is not None:
-                weights = weights.astype(newbyteorder("="), order="C", copy=True)
-            weights = torch.as_tensor(weights).clone().contiguous()
-            if target_device is not None:
-                weights = weights.to(device=target_device)
-
-        parsed_parameters["tensors"][tensor_key_mapping[name]] = weights.contiguous()
-
-    return parsed_parameters
-
-
-def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
-    with _MONKEY_PATCH_LOCK:
-        if getattr(gguf_utils, "_GPTQMODEL_GGUF_TORCH_LOADER_PATCHED", False):
-            return
-
-        original_load_gguf_checkpoint = gguf_utils.load_gguf_checkpoint
-
-        def _wrapped_load_gguf_checkpoint(gguf_checkpoint_path, return_tensors=False, model_to_load=None, torch_dtype=None):
-            try:
-                return _load_gguf_checkpoint_torch_direct(
-                    gguf_utils=gguf_utils,
-                    original_load_gguf_checkpoint=original_load_gguf_checkpoint,
-                    gguf_checkpoint_path=gguf_checkpoint_path,
-                    return_tensors=return_tensors,
-                    model_to_load=model_to_load,
-                    torch_dtype=torch_dtype,
-                )
-            except Exception as exc:
-                log.debug(
-                    "HF: internal torch GGUF loader fell back to the stock loader for `%s`: %s",
-                    gguf_checkpoint_path,
-                    exc,
-                )
-                return original_load_gguf_checkpoint(
-                    gguf_checkpoint_path,
-                    return_tensors=return_tensors,
-                    model_to_load=model_to_load,
-                    torch_dtype=torch_dtype,
-                )
-
-        gguf_utils._gptqmodel_original_load_gguf_checkpoint = original_load_gguf_checkpoint
-        gguf_utils.load_gguf_checkpoint = _wrapped_load_gguf_checkpoint
-        gguf_utils._GPTQMODEL_GGUF_TORCH_LOADER_PATCHED = True
-
-
-def _patch_transformers_prism_gguf_compat(*, api_name: str) -> None:
-    from ..nn_modules.qlinear.gguf import (
-        PRISM_Q1_0_G128_BLOCK_SIZE,
-        PRISM_Q1_0_G128_NAME,
-        PRISM_Q1_0_G128_TYPE_SIZE,
-        PRISM_Q1_0_G128_VALUE,
-        _dequantize_prism_q1_0_g128,
-        _is_prism_q1_0_g128,
-    )
-    from ..utils import internal_gguf
-
-    try:
-        import transformers.modeling_gguf_pytorch_utils as gguf_utils
-        from transformers.utils import import_utils as hf_import_utils
-    except Exception:
-        log.debug("prism GGUF compat skipped: transformers GGUF internals unavailable", exc_info=True)
-        return
-
-    with _MONKEY_PATCH_LOCK:
-        internal_gguf.install_runtime()
-        _patch_transformers_internal_gguf_torch_loader(gguf_utils)
-
-        def _is_gguf_available(*_args, **_kwargs) -> bool:
-            return True
-
-        if not gguf_utils.is_gguf_available():
-            gguf_utils.is_gguf_available = _is_gguf_available
-            if hasattr(hf_import_utils, "is_gguf_available"):
-                hf_import_utils.is_gguf_available = _is_gguf_available
-
-        if _transformers_has_native_prism_gguf_support():
-            return
-
-        gguf_utils.PRISM_Q1_0_G128_NAME = PRISM_Q1_0_G128_NAME
-        gguf_utils.PRISM_Q1_0_G128_VALUE = PRISM_Q1_0_G128_VALUE
-        gguf_utils.PRISM_Q1_0_G128_BLOCK_SIZE = PRISM_Q1_0_G128_BLOCK_SIZE
-        gguf_utils.PRISM_Q1_0_G128_TYPE_SIZE = PRISM_Q1_0_G128_TYPE_SIZE
-        gguf_utils._is_prism_q1_0_g128 = _is_prism_q1_0_g128
-        gguf_utils._dequantize_prism_q1_0_g128 = _dequantize_prism_q1_0_g128
-
-        log.warning(
-            "HF: installed transformers lacks native Prism GGUF support; GPT-QModel registered its internal "
-            "GGUF runtime and local Q1_0_g128 compatibility patch for `%s`.",
-            api_name,
-        )
-
-
 def normalize_model_id_or_path_for_hf_gguf(
     model_id_or_path: Optional[str],
     kwargs: dict[str, Any],
@@ -930,7 +595,6 @@ def normalize_model_id_or_path_for_hf_gguf(
         return model_id_or_path
 
     normalized_model_id_or_path, gguf_file = resolved
-    _patch_transformers_prism_gguf_compat(api_name=api_name)
     kwargs[INTERNAL_HF_GGUF_FILE_KWARG] = gguf_file
     return normalized_model_id_or_path
 

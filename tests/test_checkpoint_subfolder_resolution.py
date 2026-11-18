@@ -436,9 +436,7 @@ def test_writer_reads_retained_gguf_metadata_from_pinned_source(tmp_path, monkey
 
     from gptqmodel import GPTQModel
     from gptqmodel.models import writer
-    from gptqmodel.utils.hf import _patch_transformers_prism_gguf_compat
-
-    _patch_transformers_prism_gguf_compat(api_name="test")
+    pytest.importorskip("gguf", reason="Transformers' GGUF loader needs the gguf package")
     source = _tiny_source(tmp_path / "snapshot")
     (source / "nested").mkdir()
     _gguf_config(source / "nested" / "selected.gguf")
