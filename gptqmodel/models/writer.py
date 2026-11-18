@@ -386,19 +386,20 @@ def hf_compat_warnings(
     ):
         scale_method = getattr(quantize_config, "weight_scale_method", None) or "row"
         warnings.append(
-            "This FP8 checkpoint stores GPT-QModel-only weight scales "
-            f"(`weight_scale_method: \"{scale_method}\"`). `transformers` "
-            "registers its own `fp8` loader (`FineGrainedFP8`), which expects a "
-            "2-D block `weight_scale_inv` grid; a per-row 1-D vector or a "
-            "per-tensor scalar makes it broadcast the codes against the scale "
-            "into a multi-billion-element temporary and then fail with a shape "
-            "error that never names GPT-QModel. This checkpoint publishes "
-            f"`quant_method: \"{FP8_EXPORT_QUANT_METHOD}\"`, a GPT-QModel-only "
-            "layout, so `AutoModelForCausalLM.from_pretrained` "
-            "random-initializes every linear layer unless `gptqmodel` is "
-            "imported (which installs a refusing quantizer). Load it with "
-            "`GPTQModel.load`, or re-save it with "
-            "`weight_scale_method=\"block\"` for Transformers."
+            "This FP8 checkpoint stores GPT-QModel's inverse weight scales "
+            f"(`weight_scale_method: \"{scale_method}\"`, "
+            "`weight_scale_semantics: \"inverse\"`). `transformers` registers "
+            "its own `fp8` loader (`FineGrainedFP8`), which reads a 2-D block "
+            "`weight_scale_inv` grid as a multiplier; GPT-QModel's layout "
+            "multiplies where it should divide, so plain transformers either "
+            "broadcasts the codes against the scale and fails with a shape "
+            "error or silently produces a NaN model. This applies to every "
+            "layout, including `block`. This checkpoint publishes "
+            f"`quant_method: \"{FP8_EXPORT_QUANT_METHOD}\"`, so "
+            "`AutoModelForCausalLM.from_pretrained` random-initializes every "
+            "linear layer unless `gptqmodel` is imported (which installs a "
+            "refusing quantizer). Load it with `GPTQModel.load`; MXFP8/NVFP8 "
+            "export is the planned portable replacement."
         )
     method = getattr(quantize_config, "method", None)
     method_name = getattr(method, "value", method)

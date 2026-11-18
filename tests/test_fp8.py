@@ -32,7 +32,7 @@ def test_fp8_quantize_config_round_trip(format_name: str):
 
     payload = cfg.to_dict()
     assert payload["method"] == METHOD.FP8
-    assert payload["quant_method"] == METHOD.FP8
+    assert payload["quant_method"] == FP8_EXPORT_QUANT_METHOD
     assert payload["format"] == format_name
     assert payload["checkpoint_format"] == format_name
     assert payload["weight_scale_method"] == "block"
@@ -81,13 +81,12 @@ def test_detect_format_identifies_fp8_from_checkpoint_or_config(tmp_path, format
 
 # --- #5128: non-block FP8 must not claim transformers' `fp8` quant_method ---
 #
-# transformers registers `fp8` for `FineGrainedFP8`, which expects a 2-D
-# `weight_scale_inv` block grid. GPT-QModel's default `row` layout is a 1-D
-# per-output-row vector and `tensor` is a scalar. Plain transformers used to
-# broadcast those against the codes into a multi-billion-element temporary and
-# then fail with a shape error that never named GPT-QModel. Publishing
-# `gptqmodel_fp8` lets the import-time guard refuse the load immediately; only
-# a block layout that `FineGrainedFP8` can decode keeps the standard name.
+# transformers registers `fp8` for `FineGrainedFP8`, which reads a 2-D
+# `weight_scale_inv` block grid as a multiplier. GPT-QModel writes inverse
+# scales for every layout (`row`, `tensor`, and `block`), so no GPT-QModel FP8
+# checkpoint is readable by plain transformers. Publishing `gptqmodel_fp8`
+# lets the import-time guard refuse the load immediately; `fp8` is only kept
+# for a third-party block/multiplier/e4m3 payload.
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -119,14 +118,70 @@ def test_non_block_fp8_layouts_publish_gptqmodel_only_quant_method(scale_method)
     assert payload["quant_method"] == FP8_EXPORT_QUANT_METHOD
 
 
-def test_block_fp8_layout_keeps_transformers_quant_method():
-    """`FineGrainedFP8` can read a block grid, so that layout keeps `fp8`."""
+def test_block_fp8_layout_publishes_gptqmodel_only_quant_method():
+    """`block` still stores an inverse scale, which `FineGrainedFP8` misreads."""
 
     cfg = FP8Config(weight_scale_method="block", weight_block_size=[128, 128])
 
     payload = cfg.to_dict()
     assert payload["weight_scale_method"] == "block"
-    assert payload["quant_method"] == METHOD.FP8
+    assert payload["weight_scale_semantics"] == "inverse"
+    assert payload["quant_method"] == FP8_EXPORT_QUANT_METHOD
+
+
+def test_fp8_layout_is_hf_readable_requires_block_multiplier_and_e4m3():
+    """Only a third-party block/multiplier/e4m3 payload keeps the `fp8` name."""
+
+    from types import SimpleNamespace
+
+    from gptqmodel.quantization.config import _fp8_layout_is_hf_readable
+
+    readable = SimpleNamespace(
+        weight_scale_method="block",
+        weight_block_size=[128, 128],
+        weight_scale_semantics="multiplier",
+        format="float8_e4m3fn",
+        dynamic=None,
+    )
+    assert _fp8_layout_is_hf_readable(readable) is True
+
+    for field, value in (
+        ("weight_scale_method", "row"),
+        ("weight_block_size", None),
+        ("weight_scale_semantics", "inverse"),
+        ("format", "float8_e5m2"),
+    ):
+        assert _fp8_layout_is_hf_readable(
+            SimpleNamespace(**{**vars(readable), field: value})
+        ) is False
+
+    for override in (
+        {"weight_scale_method": "row"},
+        {"weight_block_size": None},
+        {"weight_scale_semantics": "inverse"},
+        {"format": "float8_e5m2"},
+    ):
+        assert _fp8_layout_is_hf_readable(
+            SimpleNamespace(**{**vars(readable), "dynamic": {"layer": override}})
+        ) is False
+
+    assert _fp8_layout_is_hf_readable(
+        SimpleNamespace(
+            **{
+                **vars(readable),
+                "dynamic": {
+                    "layer": {"weight_scale_method": "block", "weight_block_size": [32, 32]}
+                },
+            }
+        )
+    ) is True
+
+
+def test_fp8_config_rejects_multiplier_scale_semantics():
+    """GPT-QModel cannot write the multiplier convention `FineGrainedFP8` reads."""
+
+    with pytest.raises(ValueError, match="weight_scale_semantics"):
+        FP8Config(weight_scale_semantics="multiplier")
 
 
 @pytest.mark.parametrize(
@@ -181,9 +236,12 @@ def test_hf_compat_warning_for_gptqmodel_only_fp8():
     assert "FineGrainedFP8" in warnings[0]
     assert "GPTQModel.load" in warnings[0]
 
-    # A block layout is readable by transformers, so it needs no warning.
+    # A block layout stores the same inverse scale, so it warns too.
     block = FP8Config(weight_scale_method="block", weight_block_size=[128, 128])
-    assert hf_compat_warnings(block, FORMAT.FP8) == []
+    block_warnings = hf_compat_warnings(block, FORMAT.FP8)
+    assert len(block_warnings) == 1
+    assert FP8_EXPORT_QUANT_METHOD in block_warnings[0]
+    assert "weight_scale_semantics" in block_warnings[0]
 
 
 def _build_tiny_qwen2(target_dir: Path) -> None:
@@ -290,3 +348,35 @@ else:
     # The old path spent minutes broadcasting a multi-billion-element temporary
     # on a real checkpoint; this tiny one must still fail immediately.
     assert elapsed < 60, f"refusal took {elapsed:.1f}s"
+
+
+def test_block_fp8_save_publishes_gptqmodel_quant_method_and_round_trips(tmp_path):
+    """A block save stores inverse scales too, so it must not claim `fp8`."""
+
+    from gptqmodel import GPTQModel
+
+    source = tmp_path / "source"
+    quantized = tmp_path / "quantized"
+    _build_tiny_qwen2(source)
+
+    cfg = FP8Config(
+        weight_scale_method="block",
+        weight_block_size=[32, 32],
+        device="cpu",
+    )
+    model = GPTQModel.load(str(source), quantize_config=cfg)
+    model.quantize(backend="torch")
+    model.save(str(quantized))
+
+    saved = _read_checkpoint_config(quantized)["quantization_config"]
+    assert saved["method"] == METHOD.FP8
+    assert saved["quant_method"] == FP8_EXPORT_QUANT_METHOD
+    assert saved["weight_scale_method"] == "block"
+    assert saved["weight_scale_semantics"] == "inverse"
+
+    # The block layout still loads back through GPT-QModel unchanged.
+    reloaded = GPTQModel.load(str(quantized))
+    assert isinstance(reloaded.quantize_config, FP8Config)
+    assert reloaded.quantize_config.method is METHOD.FP8
+    assert reloaded.quantize_config.weight_scale_method == "block"
+    assert reloaded.quantize_config.weight_block_size == [32, 32]

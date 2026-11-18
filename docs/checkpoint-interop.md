@@ -501,15 +501,16 @@ back to GPTQ.
 Packed GGUF is different: `transformers` owns the `gguf` name and routes it to
 `GgufHfQuantizer`, which expects a `.gguf` file. GPT-QModel publishes
 `gptqmodel_gguf` instead and registers a refusing quantizer for that name.
-FP8 has the same collision. `transformers` registers `fp8` for
-`FineGrainedFP8`, which only reads a 2-D block `weight_scale_inv` grid.
-GPT-QModel's default `row` layout is a 1-D per-output-row vector and `tensor`
-is a scalar, so `to_dict()` publishes `gptqmodel_fp8` for those layouts and
-for any checkpoint whose `dynamic` rules mix in a non-block module. A block
-layout (`weight_scale_method="block"` plus `weight_block_size`) keeps
-`quant_method: "fp8"` because `FineGrainedFP8` can decode it. Both names
-resolve to `METHOD.FP8` on load, so checkpoints already published as `fp8`
-keep loading, and `gptqmodel_fp8` is refused by the import-time guard.
+FP8 has the same collision, but it is total. `transformers` registers `fp8`
+for `FineGrainedFP8`, which reads a 2-D block `weight_scale_inv` grid as a
+*multiplier* (`weight = fp8 * scale`). GPT-QModel always quantizes with
+`weight_scale_semantics="inverse"` (`weight = fp8 / scale`), and the config
+rejects every other value, so no GPT-QModel FP8 layout is readable — not
+`row`, not `tensor`, and not `block`. `to_dict()` therefore publishes
+`gptqmodel_fp8` for every FP8 save, and `fp8` is reserved for third-party
+block/multiplier/e4m3 checkpoints. Both names resolve to `METHOD.FP8` on
+load, so checkpoints already published as `fp8` keep loading, and
+`gptqmodel_fp8` is refused by the import-time guard.
 Introduced by [PR #5181](https://github.com/ModelCloud/GPTQModel/pull/5181),
 which fixes #5128.
 
@@ -531,13 +532,11 @@ flowchart TD
     C -- "METHOD.GGUF" --> D["quant_method: gptqmodel_gguf"]
     C -- "METHOD.AWQ" --> E["quant_method: awq"]
     C -- "METHOD.GPTQ" --> F["quant_method: gptq"]
-    C -- "METHOD.FP8, block layout" --> M["quant_method: fp8"]
-    C -- "METHOD.FP8, row/tensor/mixed" --> N["quant_method: gptqmodel_fp8"]
+    C -- "METHOD.FP8 (every GPT-QModel layout)" --> N["quant_method: gptqmodel_fp8"]
     C -- "METHOD.EXL3 / QQQ / PARO / MACAQ / NF12 / TT_BLOCKFLOAT" --> L["quant_method: exl3, qqq, ..."]
     D --> G["transformers get_hf_quantizer"]
     N --> G
     L --> G
-    M --> P["FineGrainedFP8"]
     G -- "gptqmodel_gguf" --> H["GPTQModelGGUFHfQuantizer.__init__<br/>raise ValueError"]
     G -- "REFUSED_HF_QUANT_METHODS entry" --> K["GPTQModelRefusingHfQuantizer.__init__<br/>raise ValueError"]
     E --> I["AwqHfQuantizer"]
@@ -546,18 +545,17 @@ flowchart TD
     style K fill:#f8d7da,stroke:#b02a37
     style I fill:#d9f2d9,stroke:#2e7d32
     style J fill:#d9f2d9,stroke:#2e7d32
-    style P fill:#d9f2d9,stroke:#2e7d32
 ```
 
 Already-published GGUF checkpoints keep `quant_method: "gguf"` (plus
 `method: "gguf"`) and still load through `GPTQModel.load`; `gguf` remains
 accepted by `_normalize_quant_method`. Likewise an FP8 checkpoint that still
 carries `quant_method: "fp8"` resolves to `METHOD.FP8`, and re-saving it
-publishes `gptqmodel_fp8` unless it is a block layout. Only new checkpoints
-publish the non-colliding names. `hf_compat_warnings` also warns at save time
-that a packed GGUF checkpoint is not loadable by plain Transformers, that a
-non-block FP8 checkpoint would be routed to `FineGrainedFP8` and fail, and
-emits the same save-time warning for every method in
+publishes `gptqmodel_fp8` for every layout. Only new checkpoints publish the
+non-colliding names. `hf_compat_warnings` also warns at save time that a
+packed GGUF checkpoint is not loadable by plain Transformers, that an FP8
+checkpoint stores inverse scales that `FineGrainedFP8` misreads as
+multipliers, and emits the same save-time warning for every method in
 `REFUSED_HF_QUANT_METHODS`.
 
 ## 11. `torch.save(model)` after `optimize()`
