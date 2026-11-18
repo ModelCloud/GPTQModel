@@ -14,16 +14,17 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.ricursive.configuration_ricursive import RicursiveConfig
 from gptqmodel.models.ports.ricursive.modeling_ricursive import RicursiveForCausalLM
-from tests.port_assets import read_port_json
+from tests.port_assets import DATA, read_port_json
 from tests.test_ricursive_local_port import FIXTURES, LINEARS, _config
 
 
 @pytest.mark.parametrize("release", ["preview", "base"])
 def test_released_1203_keys_and_all_shapes_equal_live_meta_owners(release):
-    config = RicursiveConfig.from_pretrained(FIXTURES / release)
+    config = RicursiveConfig.from_pretrained(DATA / "ricursive/fixtures" / release)
     with torch.device("meta"):
         model = RicursiveForCausalLM(config)
-    expected = read_port_json(FIXTURES / f"{release}_header_inventory.json")
+    # Both releases publish the same tensor headers.
+    expected = read_port_json(FIXTURES / "header_inventory.json")
     assert len(expected) == 1203
     assert {k: list(v.shape) for k, v in model.state_dict().items()} == {k: v["shape"] for k, v in expected.items()}
     assert len(model.model.layers) == 80

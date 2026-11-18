@@ -11,10 +11,9 @@ import tempfile
 
 import torch
 import torch.distributed as dist
-from ricursive_test_utils import compatibility_module
+from ricursive_test_utils import make_model
 from ricursive_tp_oracle import oracle as partitioned_oracle
 from test_ricursive_modeling_numerics import oracle
-from test_ricursive_review_regressions import review_model
 from torch.distributed.device_mesh import init_device_mesh
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from transformers import DynamicCache, StaticCache
@@ -22,7 +21,7 @@ from transformers import DynamicCache, StaticCache
 
 def main():
     torch.set_num_threads(1)
-    mode, runtime, dtype_name = sys.argv[1:]
+    runtime, dtype_name = sys.argv[1:]
     local_rank = int(os.environ["LOCAL_RANK"])
     device = torch.device(runtime, local_rank) if runtime == "cuda" else torch.device("cpu")
     if runtime == "cuda":
@@ -32,7 +31,7 @@ def main():
     dist.broadcast_object_list(saved)
     try:
         dtype = getattr(torch, dtype_name)
-        reference = review_model(mode, num_attention_heads=8)
+        reference = make_model(num_attention_heads=8)
         ids = torch.tensor([[3, 5, 6, 8, 9, 2, 4]])
         # Independent CPU FP32 arithmetic establishes the unsharded baseline.
         with torch.no_grad():
@@ -54,8 +53,6 @@ def main():
             )
             .eval()
         )
-        if mode != "native":
-            compatibility_module().apply_ricursive_generate_patch(model)
         with torch.no_grad():
             unsharded = reference(ids, use_cache=False).logits
             trace = {}
@@ -107,7 +104,6 @@ def main():
                     json.dumps(
                         {
                             "dtype": dtype_name,
-                            "mode": mode,
                             "runtime": runtime,
                             "default_unsharded_drift": (default - unsharded).abs().max().item(),
                             "default_projection_error": max(projection_errors),

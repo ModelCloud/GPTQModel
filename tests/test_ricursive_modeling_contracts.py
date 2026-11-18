@@ -7,7 +7,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 import transformers
-from ricursive_test_utils import compatibility_module, make_model
+from ricursive_test_utils import make_model
 
 
 @torch.inference_mode()
@@ -179,15 +179,10 @@ def test_static_cache_is_trimmed_before_kv_head_expansion(monkeypatch):
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("legacy", [False, True])
-def test_gptq_logits_projection_is_bounded_for_every_instance(legacy):
-    _patch_logits_to_keep = compatibility_module()._patch_logits_to_keep
+def test_logits_projection_is_bounded_for_every_instance():
     first = make_model()
-    if legacy:
-        type(first)._ricursive_tf5_native_fix = "2026-11-05"
     second = type(first)(first.config).eval()
     for index, model in enumerate([first, second]):
-        _patch_logits_to_keep(model)
         projected_shapes = []
         handle = model.lm_head.register_forward_hook(lambda _, inp, out: projected_shapes.append(tuple(out.shape)))
         out = model(torch.tensor([[3, 4, 5, 6]]), use_cache=False, logits_to_keep=1)
@@ -197,13 +192,8 @@ def test_gptq_logits_projection_is_bounded_for_every_instance(legacy):
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("legacy", [False, True])
-def test_gptq_logits_to_keep_with_labeled_tuple_output(legacy):
-    _patch_logits_to_keep = compatibility_module()._patch_logits_to_keep
+def test_logits_to_keep_with_labeled_tuple_output():
     model = make_model()
-    if legacy:
-        type(model)._ricursive_tf5_native_fix = "2026-11-05"
-    _patch_logits_to_keep(model)
     ids = torch.tensor([[3, 4, 5, 6]])
     out = model(ids, labels=ids, use_cache=False, logits_to_keep=1, return_dict=False)
     assert torch.isfinite(out[0])
@@ -234,40 +224,9 @@ def test_gradient_checkpointing_recomputes_and_preserves_gradients(use_reentrant
         torch.testing.assert_close(parameter.grad, expected_parameter.grad, atol=2e-6, rtol=2e-5, msg=name)
 
 
-@pytest.mark.parametrize("layout", ["full", "new", "embeddings"])
 @torch.inference_mode()
-def test_compatibility_generation_advances_positions(layout):
-    apply_ricursive_generate_patch = compatibility_module().apply_ricursive_generate_patch
+def test_requested_attention_weights_match_sdpa_and_mask():
     model = make_model()
-    # A historical native marker must not suppress newer generation fixes.
-    type(model)._ricursive_tf5_native_fix = "2026-11-05"
-    assert apply_ricursive_generate_patch(model)
-    ids = torch.arange(3, 13).unsqueeze(0)
-    expected = model.generate(ids, max_new_tokens=3)[:, -3:]
-    if layout == "embeddings":
-        actual = model.generate(
-            inputs_embeds=model.get_input_embeddings()(ids), attention_mask=torch.ones_like(ids), max_new_tokens=3
-        )
-    else:
-        cache = model(ids[:, :4], use_cache=True).past_key_values
-        actual = model.generate(
-            ids if layout == "full" else ids[:, 4:],
-            past_key_values=cache,
-            cache_position=torch.arange(4, 10),
-            attention_mask=torch.ones_like(ids),
-            max_new_tokens=3,
-        )
-    assert torch.equal(actual[:, -3:], expected)
-
-
-@pytest.mark.parametrize("legacy", [False, True])
-@torch.inference_mode()
-def test_requested_attention_weights_match_sdpa_and_mask(legacy):
-    model = make_model()
-    if legacy:
-        apply_ricursive_generate_patch = compatibility_module().apply_ricursive_generate_patch
-        type(model)._ricursive_tf5_native_fix = "2026-11-05"
-        apply_ricursive_generate_patch(model)
     ids = torch.arange(3, 12).unsqueeze(0)
     allowed = torch.ones(1, 1, 9, 9, dtype=torch.bool).tril()
     allowed[..., 1] = False
@@ -284,21 +243,16 @@ def test_requested_attention_weights_match_sdpa_and_mask(legacy):
         torch.testing.assert_close(weights.sum(-1), torch.ones_like(weights.sum(-1)))
 
 
+
+
 @torch.inference_mode()
-def test_legacy_logits_hook_is_removed_on_exception_and_head_replacement():
-    _patch_logits_to_keep = compatibility_module()._patch_logits_to_keep
+def test_default_return_dict_reads_transformers5_config_field(monkeypatch):
     model = make_model()
-    type(model)._ricursive_tf5_native_fix = "2026-11-05"
-    _patch_logits_to_keep(model)
-    head = model.lm_head
-    hook_count = len(head._forward_pre_hooks)
-    with pytest.raises(IndexError):
-        model(torch.tensor([[1000]]), use_cache=False, logits_to_keep=1)
-    assert len(head._forward_pre_hooks) == hook_count
-    model.lm_head = torch.nn.Linear(32, 64, bias=False)
-    shapes = []
-    handle = model.lm_head.register_forward_hook(lambda _, inp, out: shapes.append(tuple(out.shape)))
-    model(torch.tensor([[3, 4, 5]]), use_cache=False, logits_to_keep=1)
-    handle.remove()
-    assert shapes == [(1, 1, 64)]
-    assert not model.lm_head._forward_pre_hooks
+    # `use_return_dict` is deprecated in Transformers 5 and warns on every read.
+    monkeypatch.setattr(type(model.config), "use_return_dict",
+                        property(lambda self: pytest.fail("deprecated use_return_dict was read")))
+    ids = torch.tensor([[3, 4, 5]])
+    assert not isinstance(model(ids, use_cache=False), tuple)
+    model.config.return_dict = False
+    assert isinstance(model(ids, use_cache=False), tuple)
+    assert isinstance(model.model(ids, use_cache=False), tuple)
