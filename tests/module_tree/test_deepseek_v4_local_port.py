@@ -42,7 +42,8 @@ FLASH_NATIVE_KEYS_SHA256 = "dec32ffa8ac3d3e378b37f16474ee281a5bf64e18a2d50be0f1a
 
 
 def test_full_native_meta_inventory_matches_pinned_flash_checkpoint():
-    from transformers import DeepseekV4Config, DeepseekV4ForCausalLM
+    from gptqmodel.models.ports.native.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
+    from gptqmodel.models.ports.native.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM
 
     fixture = Path(__file__).resolve().parents[1] / "fixtures/ports/deepseek_v4/upstream_config.json"
     config = DeepseekV4Config(**json.loads(fixture.read_text()))
