@@ -72,13 +72,12 @@ def test_nanbeige_real_generation_bridge_trims_positions_and_matches_cache_conti
         prepared = model.prepare_inputs_for_generation(
             ids,
             past_key_values=cache,
+            next_sequence_length=1,
             attention_mask=torch.ones_like(ids),
-            cache_position=torch.arange(4),
             position_ids=torch.arange(4).unsqueeze(0),
         )
         assert prepared["input_ids"].tolist() == [[7]]
         assert prepared["position_ids"].tolist() == [[3]]
-        assert prepared["cache_position"].tolist() == [3]
         actual = model(**prepared).logits
         torch.testing.assert_close(actual, model(ids, use_cache=False).logits[:, -1:], atol=1e-7, rtol=1e-5)
         assert len(cache.layers) == 4
