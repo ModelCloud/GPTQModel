@@ -136,6 +136,7 @@ from ..utils.tied_weights import (
 from ..utils.torch import (
     TORCH_HAS_COMPILE,
     as_torch_device,
+    dynamo_is_compiling,
     dynamo_traced_frames,
     model_execution_device_scope,
     release_compile_trace_garbage,
@@ -497,6 +498,13 @@ class _CompiledModelForward:
 
         traced = dynamo_traced_frames()
         if traced == self._traced_frames:
+            return
+        if dynamo_is_compiling():
+            # An outer ``torch.compile`` (transformers' static-cache generate)
+            # is tracing this call. ``gc.collect`` is untraceable, so running it
+            # here is a graph break per model call (#5224), and collecting while
+            # dynamo still holds the trace's trackers is the wrong time. Leave
+            # the count unchanged so the next eager call releases the garbage.
             return
         self._traced_frames = traced
         release_compile_trace_garbage()
