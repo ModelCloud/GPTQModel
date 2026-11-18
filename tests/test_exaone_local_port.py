@@ -166,7 +166,9 @@ def test_generation_cache_causality_safetensors_reload(tmp_path, implementation,
     changed[:, -1] = 12
     torch.testing.assert_close(model(changed).logits[:, :-1], baseline[:, :-1], atol=2e-7, rtol=1e-5)
     attention = model(tokens, output_attentions=True, output_hidden_states=True)
-    assert len(attention.attentions) == 2 and len(attention.hidden_states) == 3
+    # Attention probabilities are only materialized by the eager interface.
+    assert len(attention.attentions) == (2 if implementation == "eager" else 0)
+    assert len(attention.hidden_states) == 3
     for beams in (1, 3):
         args = {"max_new_tokens": 3, "do_sample": False, "num_beams": beams, "eos_token_id": None}
         assert torch.equal(model.generate(tokens, **args), model.generate(tokens, use_cache=False, **args))

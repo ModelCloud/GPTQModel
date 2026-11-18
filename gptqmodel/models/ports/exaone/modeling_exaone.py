@@ -19,6 +19,10 @@ from transformers.masking_utils import create_causal_mask
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from transformers.utils import can_return_tuple
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
 
 from .configuration_exaone import ExaoneConfig
 
@@ -89,9 +93,22 @@ def apply_rotary_pos_emb(q, k, cos, sin):
 
 def repeat_kv(hidden_states, repeats):
     batch, heads, length, dim = hidden_states.shape
+    if repeats == 1:
+        return hidden_states
     return hidden_states[:, :, None].expand(batch, heads, repeats, length, dim).reshape(
         batch, heads * repeats, length, dim,
     )
+
+
+def eager_attention_forward(module, query, key, value, attention_mask, scaling, dropout=0.0, **kwargs):
+    key = repeat_kv(key, module.num_key_value_groups)
+    value = repeat_kv(value, module.num_key_value_groups)
+    weights = torch.matmul(query, key.transpose(2, 3)) * scaling
+    if attention_mask is not None:
+        weights = weights + attention_mask
+    weights = F.softmax(weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    weights = F.dropout(weights, p=dropout, training=module.training)
+    return torch.matmul(weights, value).transpose(1, 2).contiguous(), weights
 
 
 class ExaoneRotaryEmbedding(nn.Module):
@@ -149,13 +166,14 @@ class ExaoneSelfAttention(nn.Module):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.head_dim = config.head_dim
+        self.scaling = self.head_dim**-0.5
+        self.is_causal = True
         self.q_proj = nn.Linear(config.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.out_proj = nn.Linear(self.num_heads * self.head_dim, config.hidden_size, bias=False)
 
-    def forward(self, hidden_states, attention_mask=None, position_embeddings=None,
-                past_key_value=None, output_attentions=False, **kwargs):
+    def forward(self, hidden_states, attention_mask=None, position_embeddings=None, past_key_values=None, **kwargs):
         if position_embeddings is None:
             raise ValueError("EXAONE attention requires rotary position_embeddings")
         batch, length, _ = hidden_states.shape
@@ -163,22 +181,16 @@ class ExaoneSelfAttention(nn.Module):
         k = self.k_proj(hidden_states).view(batch, length, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(hidden_states).view(batch, length, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         q, k = apply_rotary_pos_emb(q, k, *position_embeddings)
-        if past_key_value is not None:
-            k, v = past_key_value.update(k, v, self.layer_idx)
-        k, v = repeat_kv(k, self.num_key_value_groups), repeat_kv(v, self.num_key_value_groups)
-        dropout = self.config.attention_dropout if self.training else 0.0
-        weights = None
-        if self.config._attn_implementation == "sdpa" and not output_attentions:
-            output = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask, dropout_p=dropout)
-        else:
-            weights = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
-            if attention_mask is not None:
-                weights = weights + attention_mask[:, :, :, :k.shape[-2]]
-            weights = F.softmax(weights, dim=-1, dtype=torch.float32).to(q.dtype)
-            weights = F.dropout(weights, p=dropout, training=self.training)
-            output = torch.matmul(weights, v)
-        output = output.transpose(1, 2).contiguous().reshape(batch, length, -1)
-        return self.out_proj(output), weights if output_attentions else None
+        if past_key_values is not None:
+            k, v = past_key_values.update(k, v, self.layer_idx)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
+        output, weights = attention_interface(
+            self, q, k, v, attention_mask,
+            dropout=self.config.attention_dropout if self.training else 0.0, scaling=self.scaling, **kwargs,
+        )
+        return self.out_proj(output.reshape(batch, length, -1).contiguous()), weights
 
 
 class ExaoneAttention(nn.Module):
@@ -211,9 +223,9 @@ class ExaoneBlock(GradientCheckpointingLayer):
         self.mlp = ExaoneGatedMLP(config)
 
     def forward(self, hidden_states, **kwargs):
-        attention, weights = self.attn(self.ln_1(hidden_states), **kwargs)
+        attention, _ = self.attn(self.ln_1(hidden_states), **kwargs)
         hidden_states = hidden_states + attention
-        return hidden_states + self.mlp(self.ln_2(hidden_states)), weights
+        return hidden_states + self.mlp(self.ln_2(hidden_states))
 
 
 class ExaonePreTrainedModel(PreTrainedModel):
@@ -223,6 +235,8 @@ class ExaonePreTrainedModel(PreTrainedModel):
     _no_split_modules = ["ExaoneBlock"]
     _skip_keys_device_placement = ["past_key_values"]
     _supports_sdpa = True
+    _supports_attention_backend = True
+    _can_record_outputs = {"hidden_states": ExaoneBlock, "attentions": ExaoneSelfAttention}
 
     def _init_weights(self, module):
         super()._init_weights(module)
@@ -250,19 +264,14 @@ class ExaoneModel(ExaonePreTrainedModel):
         self.wte = value
 
     @_rollback_cache_on_error
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-                inputs_embeds=None, use_cache=None, output_attentions=None, output_hidden_states=None,
-                return_dict=None, cache_position=None, **kwargs):
+                inputs_embeds=None, use_cache=None, **kwargs) -> BaseModelOutputWithPast:
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Specify exactly one of input_ids and inputs_embeds")
         if past_key_values is not None and not isinstance(past_key_values, Cache):
             raise TypeError("EXAONE requires a Transformers 5 Cache, not legacy tuple past_key_values")
-        use_cache = self.config.use_cache if use_cache is None else use_cache
-        output_attentions = self.config.output_attentions if output_attentions is None else output_attentions
-        output_hidden_states = self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
-        return_dict = self.config.return_dict if return_dict is None else return_dict
-        if self.gradient_checkpointing and self.training:
-            use_cache, past_key_values = False, None
         if inputs_embeds is None:
             inputs_embeds = self.wte(input_ids)
         seen = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -283,9 +292,7 @@ class ExaoneModel(ExaonePreTrainedModel):
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
         if position_ids is None:
-            if cache_position is None:
-                cache_position = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device) + seen
-            position_ids = cache_position.unsqueeze(0)
+            position_ids = (torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device) + seen).unsqueeze(0)
         causal_mask = create_causal_mask(
             config=self.config, inputs_embeds=inputs_embeds, attention_mask=attention_mask,
             past_key_values=past_key_values, position_ids=position_ids,
@@ -293,25 +300,15 @@ class ExaoneModel(ExaonePreTrainedModel):
         )
         hidden_states = self.drop(inputs_embeds)
         position_embeddings = self.rotary(hidden_states, position_ids)
-        all_hidden = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
         for block in self.h:
-            if all_hidden is not None:
-                all_hidden += (hidden_states,)
-            hidden_states, weights = block(
+            hidden_states = block(
                 hidden_states, attention_mask=causal_mask, position_embeddings=position_embeddings,
-                past_key_value=past_key_values, output_attentions=output_attentions,
+                past_key_values=past_key_values, use_cache=use_cache, **kwargs,
             )
-            if all_attentions is not None:
-                all_attentions += (weights,)
         hidden_states = self.ln_f(hidden_states)
-        if all_hidden is not None:
-            all_hidden += (hidden_states,)
-        output = BaseModelOutputWithPast(
+        return BaseModelOutputWithPast(
             last_hidden_state=hidden_states, past_key_values=past_key_values if use_cache else None,
-            hidden_states=all_hidden, attentions=all_attentions,
         )
-        return output if return_dict else output.to_tuple()
 
 
 class ExaoneForCausalLM(ExaonePreTrainedModel, GenerationMixin):
@@ -330,16 +327,12 @@ class ExaoneForCausalLM(ExaonePreTrainedModel, GenerationMixin):
         self.lm_head = new_embeddings
 
     @_rollback_cache_on_error
+    @can_return_tuple
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-                inputs_embeds=None, labels=None, use_cache=None, output_attentions=None,
-                output_hidden_states=None, return_dict=None, cache_position=None,
-                logits_to_keep=0, **kwargs):
-        return_dict = self.config.return_dict if return_dict is None else return_dict
+                inputs_embeds=None, labels=None, use_cache=None, logits_to_keep=0, **kwargs) -> CausalLMOutputWithPast:
         outputs = self.transformer(
             input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
-            past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache,
-            output_attentions=output_attentions, output_hidden_states=output_hidden_states,
-            cache_position=cache_position, return_dict=True,
+            past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs,
         )
         indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(outputs.last_hidden_state[:, indices]).float()
@@ -348,8 +341,7 @@ class ExaoneForCausalLM(ExaonePreTrainedModel, GenerationMixin):
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
             logits = logits.to(outputs.last_hidden_state.dtype)
             loss = loss.to(outputs.last_hidden_state.dtype)
-        output = CausalLMOutputWithPast(
+        return CausalLMOutputWithPast(
             loss=loss, logits=logits, past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states, attentions=outputs.attentions,
         )
-        return output if return_dict else output.to_tuple()

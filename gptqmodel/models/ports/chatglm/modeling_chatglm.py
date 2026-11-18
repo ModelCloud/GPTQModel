@@ -79,6 +79,7 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
             device=device, dtype=config.dtype, **rope_kwargs,
         )
         self.encoder = implementation.GLMTransformer(config, device=device)
+        self.gradient_checkpointing = False
         self.output_layer = nn.Linear(
             config.hidden_size, config.padded_vocab_size, bias=False, device=device, dtype=config.dtype
         )
