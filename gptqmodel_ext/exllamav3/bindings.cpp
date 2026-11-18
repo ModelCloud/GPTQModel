@@ -6,6 +6,7 @@
 
 #include "hadamard.h"
 #include "hgemm.cuh"
+#include "bf16_scale.h"
 
 #include "quant/quantize.cuh"
 #include "quant/pack.cuh"
@@ -95,6 +96,21 @@ void bc_linear_exl3_run_wrapper(
     bc_linear_exl3_run(trellis, suh, svh, K, bias, mcg, mul1, x, y);
 }
 
+std::tuple<torch::Tensor, torch::Tensor> bf16_prescale_wrapper(torch::Tensor x, double bound)
+{
+    return bf16_prescale(x, bound);
+}
+
+torch::Tensor bf16_rescale_wrapper(
+    torch::Tensor result,
+    torch::Tensor scale,
+    std::optional<torch::Tensor> bias_opt,
+    int64_t n_cols)
+{
+    const std::optional<at::Tensor> bias = bias_opt.has_value() ? std::optional<at::Tensor>(bias_opt.value()) : std::nullopt;
+    return bf16_rescale(result, scale, bias, n_cols);
+}
+
 }  // namespace
 
 TORCH_LIBRARY(gptqmodel_exllamav3, m)
@@ -109,6 +125,8 @@ TORCH_LIBRARY(gptqmodel_exllamav3, m)
     m.def("had_r_128(Tensor input, Tensor(a!) output, Tensor? pre_scale, Tensor? post_scale, float scale) -> ()");
     m.def("hgemm(Tensor a, Tensor b, Tensor(a!) c) -> ()");
     m.def("bc_linear_exl3_run(Tensor trellis, Tensor suh, Tensor svh, int K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(b!) y) -> ()");
+    m.def("bf16_prescale(Tensor x, float bound) -> (Tensor, Tensor)");
+    m.def("bf16_rescale(Tensor result, Tensor scale, Tensor? bias, int n_cols) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CPU, m)
@@ -127,4 +145,6 @@ TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CUDA, m)
     m.impl("had_r_128", &had_r_128_wrapper);
     m.impl("hgemm", &hgemm_wrapper);
     m.impl("bc_linear_exl3_run", &bc_linear_exl3_run_wrapper);
+    m.impl("bf16_prescale", &bf16_prescale_wrapper);
+    m.impl("bf16_rescale", &bf16_rescale_wrapper);
 }

@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import math
 import threading
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
@@ -17,6 +16,14 @@ import torch.nn as nn
 
 from ..exllamav3.trellis import validate_trellis_k
 from ..models._const import DEVICE, normalize_device
+from . import exllamav3_bf16_kernels as _bf16_kernels
+
+
+# Module-level names so a test (or a caller) can swap the fused ops for the
+# eager reference; ``forward`` reads them through this module's globals.
+_FP16_SAFE_AMAX = _bf16_kernels.FP16_SAFE_AMAX
+_try_fused_prescale = _bf16_kernels.try_prescale
+_try_fused_rescale = _bf16_kernels.try_rescale
 
 
 if TYPE_CHECKING:
@@ -33,9 +40,8 @@ _EXL3_BUFFER_NAMES = ("trellis", "suh", "svh", "su", "sv", "bias", "mcg", "mul1"
 # through untouched, so ordinary activations are bit-exact with the plain FP16
 # path, and a row that carries one massive activation is divided only by the
 # power of two it needs (#4870): normalizing it to <= 1 would push its own
-# small elements into FP16 subnormals.
-_FP16_MAX = float(torch.finfo(torch.float16).max)
-_FP16_SAFE_AMAX = _FP16_MAX / math.sqrt(128.0)
+# small elements into FP16 subnormals. The bound itself lives with the fused
+# kernel that consumes it (``exllamav3_bf16_kernels``).
 
 
 def _torch_dtype(value: Any) -> torch.dtype:
@@ -403,26 +409,47 @@ class ExllamaV3Linear(nn.Module):
         which used to drain the CUDA stream once per linear per decoded token
         (#4955). The one remaining host read is the ``isfinite`` warmup probe
         below, paid once per module instead of once per forward.
+
+        Once the module is warm, a single fused kernel launch performs the
+        whole mapping (#5148). The eager sequence below stays as the reference
+        and as the fallback for a non-CUDA, non-contiguous or unsupported-dtype
+        input and for a build without the fused ops; both produce
+        bit-identical results.
         """
         if x.numel() == 0:
             # A zero-row batch has no inf-norm identity; LinearEXL3 already
             # returns an empty output for it, so no scaling is needed.
             return x.to(torch.float16), None
-        # ``vector_norm(inf)`` is the max-abs reduction without materializing
-        # an ``abs`` copy, and it is the cheapest form on CUDA. Reducing per row
-        # keeps the decision on the device; a single tensor-wide scalar would
-        # have to be read back to the host to be compared (#4955).
-        row_amax = torch.linalg.vector_norm(
-            x.detach(), ord=float("inf"), dim=-1, keepdim=True
-        ).float()
         if not getattr(self, "_native_bf16_inputs_finite", False):
             # Warmup probe, once per module: a per-forward ``isfinite`` is the
             # same device->host sync this method just stopped doing. A module
             # whose first BF16 activation is non-finite keeps the exact FP32
             # reconstruction and probes again on its next forward.
+            row_amax = self._row_amax(x)
             if not bool(torch.isfinite(row_amax).all()):
                 return None
             self._native_bf16_inputs_finite = True
+            return self._prescale_from_row_amax(x, row_amax)
+
+        fused = _try_fused_prescale(x)
+        if fused is not None:
+            return fused
+        return self._prescale_from_row_amax(x, self._row_amax(x))
+
+    def _row_amax(self, x: torch.Tensor) -> torch.Tensor:
+        """Per-row max-abs of ``x`` as FP32, reduced on the device (#4955)."""
+        # ``vector_norm(inf)`` is the max-abs reduction without materializing
+        # an ``abs`` copy, and it is the cheapest form on CUDA. Reducing per row
+        # keeps the decision on the device; a single tensor-wide scalar would
+        # have to be read back to the host to be compared (#4955).
+        return torch.linalg.vector_norm(
+            x.detach(), ord=float("inf"), dim=-1, keepdim=True
+        ).float()
+
+    def _prescale_from_row_amax(
+        self, x: torch.Tensor, row_amax: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Eager reference/fallback for the fused pre-scale (#5148)."""
         # ``frexp(row_amax / bound)`` yields ``row_amax / bound < 2**exponent``,
         # so the scaled maximum lies in ``(bound / 2, bound]``: still a normal
         # FP16 number, with the most headroom left for the row's small elements.
@@ -438,7 +465,11 @@ class ExllamaV3Linear(nn.Module):
     def _rescale_native_output(
         self, result: torch.Tensor, output_scale: torch.Tensor
     ) -> torch.Tensor:
-        """Undo ``_native_bf16_input``'s pre-scale, keeping the bias unscaled."""
+        """Eager reference/fallback re-scale (#5148).
+
+        Undoes ``_native_bf16_input``'s pre-scale, keeping the bias unscaled.
+        The fused path writes BF16 directly; this returns FP32.
+        """
         bias = getattr(self, "bias", None)
         output = result.to(torch.float32)
         if bias is None:
@@ -474,13 +505,26 @@ class ExllamaV3Linear(nn.Module):
             if prepared is not None:
                 inner = self._ensure_inner()
                 native_input, output_scale = prepared
-                result = inner.forward(
+                native_result = inner.forward(
                     native_input,
                     {},
                     out_dtype=torch.float16,
-                )[..., :self.out_features]
+                )
                 if output_scale is not None:
-                    result = self._rescale_native_output(result, output_scale)
+                    fused = _try_fused_rescale(
+                        native_result,
+                        output_scale,
+                        getattr(self, "bias", None),
+                        self.out_features,
+                    )
+                    if fused is not None:
+                        # Already BF16: the trailing ``.to`` is a no-op.
+                        return fused.to(input_dtype)
+                    result = self._rescale_native_output(
+                        native_result[..., :self.out_features], output_scale
+                    )
+                else:
+                    result = native_result[..., :self.out_features]
                 return result.to(input_dtype)
 
         # FP32 (and non-finite BF16) keep the bounded FP32 reconstruction: a
