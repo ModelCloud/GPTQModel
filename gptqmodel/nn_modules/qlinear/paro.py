@@ -19,6 +19,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
 from ...utils.backend import BACKEND
+from ...utils.cpu_features import has_avx512_bf16
 from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.paro import (
@@ -45,7 +46,10 @@ from .gemm_awq import (
     _awq_cuda_gemm_forward,
     _awq_cuda_gemm_forward_fp32_reduce,
 )
+from .torch_aten_kernel import _has_local_int4pack_cpu_ops
+from .torch_aten_kernel_awq import TorchAtenAwqLinear
 from .torch_awq import AwqTorchLinear
+from .torch_cpu_avx512_awq import TorchCpuAvx512AwqLinear
 
 
 log = setup_logger()
@@ -95,11 +99,30 @@ def awq_gemm_bf16_supported(device: torch.device) -> bool:
 class ParoLinear(AwqTorchLinear):
     """Run Paro inference by rotating inputs and reusing AWQ packed GEMM."""
 
-    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
-    # ``torch.cuda.graph`` capture both run with matching output. The rotation
-    # buffers are validated in ``post_init``; dynamo stops at EAGER on
-    # ``tensor.is_inference()``.
+    # Eager and an explicit ``torch.cuda.graph`` capture both run with matching
+    # output (measured on sm_80, torch 2.15.0.dev20260928+cu130); the rotation
+    # buffers are validated in ``post_init``.
+    #
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all pass for the AVX512-BF16 path (bias
+    # included) and for the bias-free ATen int4pack path. The
+    # ``_cpu_transform_lock`` transforms and ``_ensure_cpu_layout`` rewrites are
+    # skipped while tracing: the eager warmup builds the layout and the traced
+    # graph only reads it (#4885 keeps the lock in eager). The AVX512 extension
+    # op has a registered FakeTensor impl. A biased FP16/BF16 layer that lands
+    # on the ATen path still needs the #4068 FP32 cast, so that case is a
+    # documented eager-only break; compiling before the first eager forward
+    # takes the traceable dense reference instead.
+    #
+    # CUDA keeps ``EAGER``: the native AWQ GEMM entry point was not re-measured
+    # on this CPU-only host, so it does not raise the base declaration.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for this kernel in this change; the INDUCTOR level is opt-in via "
+        "optimize() (#4984 policy unchanged)."
+    )
     SUPPORTS_GRAPH_CAPTURE = True
 
     SUPPORTS_BACKENDS = [BACKEND.PARO_CUDA]
@@ -462,6 +485,15 @@ class ParoLinear(AwqTorchLinear):
 
     def post_init(self) -> None:
         super().post_init()
+        weight = getattr(self, "qweight", None)
+        if isinstance(weight, torch.Tensor) and weight.device.type == "cpu":
+            # Resolve the CPU kernels before any torch.compile trace: their
+            # validators load the JIT extensions through importlib, which dynamo
+            # cannot trace. This only warms the process-wide caches.
+            if self._paro_cpu_avx512 and has_avx512_bf16():
+                TorchCpuAvx512AwqLinear.cached_validate_once()
+            if _has_local_int4pack_cpu_ops():
+                TorchAtenAwqLinear.cached_validate_once()
         # Rotation pairs are checkpoint data used as shared-memory indices by
         # the fused CUDA kernel. Validate them once after the weights load.
         validate_rotation_buffers(
@@ -650,6 +682,18 @@ class ParoLinear(AwqTorchLinear):
         # The dense path dequantizes the checkpoint tensors, so a CPU kernel
         # layout must be returned first.
         if self._live_cpu_layout() is not None:
+            if torch.compiler.is_compiling():
+                # Restoring rewrites the registered buffers, which a traced
+                # graph must not do. A biased FP16/BF16 layer can reach here
+                # because its ATen int4pack product needs the documented #4068
+                # FP32 cast; compiling before the first eager forward keeps the
+                # checkpoint layout live and takes this dense path instead.
+                raise RuntimeError(
+                    f"{type(self).__name__}: a CPU runtime layout is live and no "
+                    "traceable fused path was selected (a biased FP16/BF16 layer "
+                    "needs the #4068 FP32 cast). Compile the layer before its first "
+                    "eager forward, or run this layer eagerly."
+                )
             self._restore_cpu_checkpoint_layout()
         # Keep the reconstructed grid, the reduction and the stored bias in
         # FP32, then round once.  Decoding to the activation dtype first makes
@@ -772,34 +816,51 @@ class ParoLinear(AwqTorchLinear):
         if not enabled or not self._cpu_avx512_eligible(x_flat):
             return None
 
-        from .torch_cpu_avx512_awq import TorchCpuAvx512AwqLinear
-
-        ok, _ = TorchCpuAvx512AwqLinear.cached_validate_once()
         gemm = TorchCpuAvx512AwqLinear.gemm_int4_qzero_group_scaled_cpu_kernel
-        if not ok or gemm is None:
-            return None
+        if gemm is None:
+            ok, _ = TorchCpuAvx512AwqLinear.cached_validate_once()
+            gemm = TorchCpuAvx512AwqLinear.gemm_int4_qzero_group_scaled_cpu_kernel
+            if not ok or gemm is None:
+                return None
 
         original_dtype = x_flat.dtype
         kernel_input = x_flat if x_flat.is_contiguous() else x_flat.contiguous()
-        # The transform rewrites registered buffers, so it must not interleave
-        # with `state_dict()`/`load_state_dict()`, which hold the same lock.
-        # Only the transform and the operand capture need that lock: the GEMM
-        # runs on these locals, so a concurrent save may rebind the module
-        # attributes without tearing this product (issue #4885).
-        with self._cpu_transform_lock:
-            if not self._ensure_cpu_layout("avx512"):
+        if torch.compiler.is_compiling():
+            # The transform rewrites registered buffers and takes the RLock
+            # dynamo cannot enter; a traced graph must not do either. The eager
+            # warmup built this layout, so only read it. Without a warmup, fall
+            # through to the ATen/dense paths.
+            if self._live_cpu_layout() != "avx512":
                 return None
             qweight = self.qweight
             qzeros = self.qzeros
-            # The kernel requires FP32 affine operands. Widen per call so the
-            # checkpoint dtype stays resident instead of a second FP32 copy
-            # (issue #4814).
             scales = self.scales.to(dtype=torch.float32).contiguous()
             bias = (
                 self.bias.to(dtype=torch.float32).contiguous()
                 if self.bias is not None
                 else None
             )
+        else:
+            # The transform rewrites registered buffers, so it must not
+            # interleave with `state_dict()`/`load_state_dict()`, which hold the
+            # same lock. Only the transform and the operand capture need that
+            # lock: the GEMM runs on these locals, so a concurrent save may
+            # rebind the module attributes without tearing this product
+            # (issue #4885).
+            with self._cpu_transform_lock:
+                if not self._ensure_cpu_layout("avx512"):
+                    return None
+                qweight = self.qweight
+                qzeros = self.qzeros
+                # The kernel requires FP32 affine operands. Widen per call so
+                # the checkpoint dtype stays resident instead of a second FP32
+                # copy (issue #4814).
+                scales = self.scales.to(dtype=torch.float32).contiguous()
+                bias = (
+                    self.bias.to(dtype=torch.float32).contiguous()
+                    if self.bias is not None
+                    else None
+                )
         output = gemm(
             kernel_input,
             qweight,
@@ -825,35 +886,54 @@ class ParoLinear(AwqTorchLinear):
         ):
             return None
 
-        from .torch_aten_kernel import _has_local_int4pack_cpu_ops
-
-        if not _has_local_int4pack_cpu_ops():
-            return None
-
-        from .torch_aten_kernel_awq import TorchAtenAwqLinear
-
-        ok, _ = TorchAtenAwqLinear.cached_validate_once()
-        if not ok:
-            return None
-
-        from .torch_fused import _cpu_int4pack_mm
-
-        # The transform rewrites registered buffers, so it must not interleave
-        # with `state_dict()`/`load_state_dict()`, which hold the same lock.
-        # Capture the operands under it, then run the product on those locals:
-        # a concurrent save may rebind the module attributes without tearing
-        # this GEMM (issue #4885).
-        with self._cpu_transform_lock:
-            if not self._ensure_cpu_layout("aten", x_flat.dtype):
+        if torch.compiler.is_compiling():
+            # The transform rewrites registered buffers and takes the RLock
+            # dynamo cannot enter; a traced graph only reads the eager-built
+            # layout. A biased layer needs the FP32 cast path (#4068), which is
+            # a documented eager-only break, so it falls through to the dense
+            # path instead of being traced.
+            if (
+                self._live_cpu_layout() != "aten"
+                or self._cpu_runtime_dtype != x_flat.dtype
+                or self.bias is not None
+            ):
+                return None
+            int4pack_mm = getattr(self, "_paro_int4pack_mm", None)
+            if int4pack_mm is None:
                 return None
             qweight = self.qweight
             scales_and_zeros = self.scales_and_zeros
             bias = self.bias
+        else:
+            # Resolve the entry point at call time: the eager path keeps the
+            # lazy lookup so a test or caller can substitute it, and the
+            # compile path reads the reference captured here.
+            from .torch_fused import _cpu_int4pack_mm as int4pack_mm
+
+            self._paro_int4pack_mm = int4pack_mm
+            if not _has_local_int4pack_cpu_ops():
+                return None
+
+            ok, _ = TorchAtenAwqLinear.cached_validate_once()
+            if not ok:
+                return None
+
+            # The transform rewrites registered buffers, so it must not
+            # interleave with `state_dict()`/`load_state_dict()`, which hold the
+            # same lock. Capture the operands under it, then run the product on
+            # those locals: a concurrent save may rebind the module attributes
+            # without tearing this GEMM (issue #4885).
+            with self._cpu_transform_lock:
+                if not self._ensure_cpu_layout("aten", x_flat.dtype):
+                    return None
+                qweight = self.qweight
+                scales_and_zeros = self.scales_and_zeros
+                bias = self.bias
         try:
             # The layer has no bias: the parent adds it after return. Ask
             # for the wide product so a finite sum is not rounded to
             # infinity before the outer bias epilogue (issue #4471).
-            out = _cpu_int4pack_mm(
+            out = int4pack_mm(
                 x_flat,
                 qweight,
                 self.group_size,

@@ -234,6 +234,12 @@ def _awq_shifts(device: torch.device, bits: int) -> torch.Tensor:
     cached = _AWQ_SHIFTS_CACHE.get(key)
     if cached is not None:
         return cached
+    if torch.compiler.is_compiling():
+        # A traced graph cannot enter the Python lock. The value is a pure
+        # function of device/bits, so derive it without publishing (a state
+        # write); the eager warmup caches the same tensor for later calls.
+        lanes = torch.arange(8, device=device, dtype=torch.int64)
+        return bits * (lanes // 2) + (4 * bits) * (lanes % 2)
     with _AWQ_SHIFTS_LOCK:
         cached = _AWQ_SHIFTS_CACHE.get(key)
         if cached is None:

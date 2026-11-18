@@ -110,10 +110,24 @@ class NF12Linear(WeightOnlyQuantLinear):
     weights apart from the kernel's accumulation order.
     """
 
-    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager only. Dynamo fails on
-    # the `tensor._version` guard, and explicit capture fails because forward
-    # calls `_exp_base()` -> `int(tensor.item())`, a host sync.
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all pass. Two fixes got there: ``post_init()``
+    # now resolves the exponent base to a Python int (the buffer stays a tensor
+    # so a checkpoint round trip keeps it exact), and ``nf12_codec.decode``
+    # selects escaped groups with a static-shape gather instead of
+    # ``bool(escaped.any())`` / ``int(index.max())`` host reads. The decode is
+    # bit-exact against eager, including checkpoints with escape rows.
+    #
+    # CUDA keeps ``EAGER``: the native ``gptqmodel_nf12.linear`` entry point was
+    # not re-measured on this CPU-only host, so it does not raise the base
+    # declaration.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for this kernel in this change; the INDUCTOR level is opt-in via "
+        "optimize() (#4984 policy unchanged)."
+    )
     SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.NF12]
@@ -241,6 +255,18 @@ class NF12Linear(WeightOnlyQuantLinear):
         return weight_to_matrix(linear)
 
     def _exp_base(self) -> int:
+        if torch.compiler.is_compiling():
+            # ``int(tensor.item())`` is a data-dependent host read, a hard
+            # dynamo graph break. ``post_init()`` (and every eager
+            # ``clear_weight_cache()`` caller) resolves the value once, so a
+            # traced graph reads the Python int instead.
+            value = self._exp_base_value
+            if value is None:
+                raise RuntimeError(
+                    "NF12Linear was compiled before its exponent base was resolved; "
+                    "load the checkpoint (post_init) before torch.compile."
+                )
+            return value
         tensor = self.nf12_exp_base
         if self._exp_base_tensor is not tensor:
             self._exp_base_value = None
@@ -539,6 +565,11 @@ class NF12Linear(WeightOnlyQuantLinear):
                 validate_escape_indices(self.nf12_packed, self.nf12_escapes)
             except ValueError as exc:
                 raise ValueError(f"NF12Linear `{self.name}`: {exc}") from exc
+            # Resolve the exponent base now: it is stored as a tensor so a
+            # checkpoint round trip keeps it exact, but every forward needs a
+            # Python int and `int(tensor.item())` cannot run inside a traced
+            # graph.
+            self._exp_base()
 
     def extra_repr(self) -> str:
         exponent = getattr(self, "nf12_exp_base", None)

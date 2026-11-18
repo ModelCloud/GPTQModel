@@ -118,6 +118,13 @@ do not turn a broad numerical tolerance into a blanket code exception.
 Report total mismatches, adjudicated tie mismatches, maximum output drift,
 maximum floating drift away from ties, and the reference precision in the PR.
 
+For integer reductions or offset products, derive the last safe size from
+the operand bounds and intermediate dtype. Test it and the first overflowing
+size against an independently widened oracle (widen **before** multiplying).
+For reductions use same-sign extremal terms so cancellation cannot hide wrap;
+check the scaled public output as well as the [raw sum](../../../tests/test_qqq_jit.py).
+For offsets, probe the index arithmetic without allocating an oversized tensor.
+
 ## Running and reporting
 
 Use representative sizes and supported dtypes. Synchronize asynchronous
@@ -153,6 +160,12 @@ caused by low-precision output rounding.
 Cover each execution path used by the kernel, including native and dense
 fallback paths when both exist. If FP16 or BF16 is unsupported, test its
 explicit rejection and document the limitation instead of omitting that dtype.
+
+For a graph-capture claim, warm up the actual format on device, capture, then
+replay with changed input and compare with eager output. A compile trace alone
+is not capture evidence. Check the negative dispatch case too: a per-format
+probe may narrow support, never re-enable a subclass that opted out. See the
+[GGUF capture tests](../../../tests/kernels/test_gguf_kquant_graph_capture_5014.py).
 
 If an optimized path exceeds a limit, investigate the numerical cause before
 changing it. Fix genuine arithmetic or format errors and rerun the A/B tests.

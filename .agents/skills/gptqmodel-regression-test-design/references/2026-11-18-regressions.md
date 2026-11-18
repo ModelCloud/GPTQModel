@@ -18,9 +18,8 @@ are not additive. No historical hardware failures were rerun for this audit.
 | Bridge guard [#5046](https://github.com/ModelCloud/GPTQModel/pull/5046) → [#5051](https://github.com/ModelCloud/GPTQModel/pull/5051) → [#5052](https://github.com/ModelCloud/GPTQModel/pull/5052) | An optional Optimum import at fixture setup blocked CPU assertions; changing only the bridge test didn't trigger its workflow. Fixing a test and arranging for it to execute are separate obligations. | [CPU job triggers and node selection](../../../../.github/workflows/awq_cpu.yml) |
 | Run exit [#5031](https://github.com/ModelCloud/GPTQModel/pull/5031), [#5039](https://github.com/ModelCloud/GPTQModel/pull/5039), [#5049](https://github.com/ModelCloud/GPTQModel/pull/5049) | Different holes in one caller guarantee: post-forward stop left hooks, a restore-tail failure escaped recovery, and the weight-only path missed the in-flight layer's return home. Success or a single looper's abort test could not cover the other exits. | [Grad-mode forward](../../../../tests/test_failed_run_model_state_5009.py), [tail fault](../../../../tests/test_post_loop_tail_failure_5023.py), [weight-only placement](../../../../tests/test_weight_only_failed_run_device_5011.py) |
 
-**Structural follow-up:** the [run-exit proposal](https://github.com/ModelCloud/GPTQModel/issues/5060)
-would give both loopers one owner for the existing
-[caller guarantee](../../../../docs/cancelled-run-contract.md). The shared
-in-flight layer tracker has already landed; a shared owner for the entire exit
-sequence has not. The other rows above motivate targeted assertions, not a
-claim that those fixes are still broken.
+**After the audit:** [#5066](https://github.com/ModelCloud/GPTQModel/pull/5066)
+implemented the [run-exit proposal](https://github.com/ModelCloud/GPTQModel/issues/5060).
+Both loopers now share one recovery owner; extend the
+[shared conformance suite](../../../../tests/test_run_exit_recovery_contract_5060.py)
+when the [caller guarantee](../../../../docs/cancelled-run-contract.md) changes.

@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear._compile_support import (
     COMPILE_LEVEL,
     COMPILE_POLICY_FLOOR,
@@ -78,6 +79,32 @@ def test_declared_levels_are_compile_levels():
         )
 
 
+def test_cpu_capable_kernels_do_not_declare_a_cuda_graph_cpu_level():
+    """A CPU level above INDUCTOR cannot be measured: CUDA graphs are CUDA-only.
+
+    ``mode="reduce-overhead"`` captures a CUDA graph, which has no CPU
+    equivalent, so a kernel that can run on CPU must record its CPU ceiling as
+    at most ``INDUCTOR`` (or a per-device override). Without this, a
+    CPU-resident caller reads ``CUDAGRAPH`` and asks for a backend that cannot
+    exist on its device.
+    """
+
+    offenders = []
+    for cls in _kernels():
+        devices = getattr(cls, "SUPPORTS_DEVICES", None)
+        if not devices or DEVICE.CPU not in devices:
+            continue
+        level = compile_level(cls, device_type="cpu")
+        if level > COMPILE_LEVEL.INDUCTOR:
+            offenders.append(f"{cls.__name__}={level.name}")
+
+    assert not offenders, (
+        "these CPU-capable kernels declare a CUDA-graph CPU level, which cannot "
+        "be measured on a CPU: " + ", ".join(offenders) + ". Record the CPU "
+        "ceiling in SUPPORTS_COMPILE_LEVEL_BY_DEVICE={'cpu': ...}."
+    )
+
+
 @pytest.mark.parametrize("cls", _kernels(), ids=lambda cls: cls.__name__)
 def test_capture_claims_have_no_host_sync_in_forward(cls):
     claims_capture = graph_capture_safe(cls) or compile_level(cls) >= COMPILE_LEVEL.CUDAGRAPH
@@ -118,7 +145,8 @@ def test_compile_capable_kernels_pair_the_policy_with_a_reason(cls):
     a trace-clean kernel stays 2-9x slower by default.
     """
 
-    if compile_level(cls) < COMPILE_POLICY_FLOOR:
+    level = max(compile_level(cls), compile_level(cls, device_type="cpu"))
+    if level < COMPILE_POLICY_FLOOR:
         pytest.skip("kernel does not reach the compiled-generation policy floor")
 
     reason = compile_policy_reason(cls)
@@ -129,7 +157,7 @@ def test_compile_capable_kernels_pair_the_policy_with_a_reason(cls):
         )
     else:
         assert reason, (
-            f"{cls.__name__} declares {compile_level(cls).name} (>= "
+            f"{cls.__name__} declares {level.name} (>= "
             f"{COMPILE_POLICY_FLOOR.name}) but keeps SUPPORTS_COMPILE=False. "
             "Record the measured loss in SUPPORTS_COMPILE_EAGER_REASON, or opt "
             "the kernel in when a compiled static-cache decode is faster."
@@ -146,9 +174,10 @@ def _matrix_rows():
         kernel = cells[0].strip("`")
         rows[kernel] = {
             "level": cells[2].strip("`"),
-            "graph_capture": cells[3].lower() == "yes",
-            "compiled_generation": cells[4].lower() == "yes",
-            "compiled_generation_reason": None if cells[5] == "-" else cells[5],
+            "level_cpu": cells[3].strip("`"),
+            "graph_capture": cells[4].lower() == "yes",
+            "compiled_generation": cells[5].lower() == "yes",
+            "compiled_generation_reason": None if cells[6] == "-" else cells[6],
         }
     return rows
 
@@ -167,6 +196,10 @@ def test_docs_matrix_matches_the_declarations():
         want = declared[name]
         assert row["level"] == want["compile_level"], (
             f"{name}: docs say {row['level']}, kernel declares {want['compile_level']}"
+        )
+        assert row["level_cpu"] == want["compile_level_cpu"], (
+            f"{name}: docs CPU level is {row['level_cpu']}, kernel declares "
+            f"{want['compile_level_cpu']}"
         )
         assert row["graph_capture"] is want["graph_capture"], (
             f"{name}: docs graph capture is stale"

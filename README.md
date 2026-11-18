@@ -33,6 +33,17 @@
 
 ## Latest News 🗞️🚀
 
+**7.11.2**
+
+- **Inference:** `optimize()` now compiles the forward pass used by generation, and deleting compiled models releases VRAM. [Supported CPU kernels](docs/kernel-compile-matrix.md) compile with Inductor without graph breaks. EXL3 uses native kernels for BF16, and [Paro](docs/paro.md) selects Triton on ROCm.
+- **Models:** Added quantization for [SenseNova-Loop 9B](docs/supported-models.md) and [Decision Transformer](docs/decision-transformer-calibration.md), which calibrates on trajectories without a tokenizer. Fixed checkpoint round trips for Qwen2.5-Omni, Qwen3-Omni, and InternVL.
+- **Quantization:** GPTQ and EXL3 use less GPU memory. NF12 and MACaQ can resume from checkpoints, and models stay runnable after [failed or cancelled runs](docs/cancelled-run-contract.md).
+- **Calibration:** Fixed token positions and masks in padded and multimodal batches. Chat datasets retain tool and document context, and AWQ still scales MoE experts that received tokens when others received none.
+- **GGUF:** Added ggml 1.0 support, including reading and dequantizing FP8 E4M3 tensors. The `gguf` extra requires `llama-cpp-python>=0.3.37`.
+- **Compat:** Fixed GPTQ and AWQ CPU offload in Transformers and added CPU readers for AWQ GEMV_FAST and LLM_AWQ. ParoQuant is now Paro; existing checkpoints still load.
+
+*API note:* Use [`CalibrationConfig`](docs/quantization-guide.md) for calibration options. [`GPTQModel.export()` and public MLX-LM conversion](docs/checkpoint-interop.md#the-gptqmodelexport-and-mlx-conversion-apis-were-removed) were removed.
+
 **7.11.0**
 
 - **[MACaQ](https://github.com/ModelCloud/GPTQModel/blob/main/docs/macaq.md):** Native MXFP4 W4A4 quantization for low-precision weights and activations, with CUDA, ROCm, and Apple silicon inference. Includes packed checkpoints and a portable Torch fallback.

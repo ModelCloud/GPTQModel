@@ -37,6 +37,7 @@ from ..looper.loop_processor import (
 )
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.named_module import NamedModule
+from ..looper.run_exit_recovery import RunExitRecovery
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
@@ -1938,148 +1939,44 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
                     exc_info=True,
                 )
 
-    def loop(self, fallback=None, **kwargs):
-        """Run the quantization loop under the TF32 guard."""
+    def _make_run_exit_recovery(self) -> RunExitRecovery:
+        """Build the one run-scoped owner of this run's exit obligations."""
 
-        with tf32_high_precision_guard():
-            try:
-                result = self._loop_impl(fallback=fallback, **kwargs)
-            except BaseException:
-                # Fence already-submitted work before restoring anything it may
-                # still be mutating. A finalizer that ran after the teardown
-                # re-created the deleted run directory and kept packing modules
-                # after `quantize()` had raised (issue #4595).
-                try:
-                    self._fence_run_work()
-                finally:
-                    # ``finalize()`` is the only other place the processors close
-                    # their Device-SMI handles, and a failed run never reaches it:
-                    # every cancelled attempt would leave its sampler threads
-                    # polling for the life of the process (#4813). Release them
-                    # after the fence drained the workers that use them.
-                    self._release_failed_run_processors()
-                    # A cancelled or failed run must also release the layer that
-                    # was mid-stage: the success path moves it back only after
-                    # post_quantize, which the exception skipped (#4546).
-                    try:
-                        self._restore_inflight_layer()
-                    finally:
-                        # A failed run must not leave the base modules stranded on meta.
-                        try:
-                            self._restore_offloaded_base_modules(strict=False)
-                        finally:
-                            # The loop never materialized the layers past the
-                            # cancel point; fill them before the next forward
-                            # (#4860).
-                            self._materialize_unreached_meta_modules()
-                            # Layers that finished before the cancel keep the
-                            # calibration-time kernel, which can be
-                            # accelerator-only (AWQ GEMM, QQQ, GGUF). Switch
-                            # them to a kernel this device can run before the
-                            # next forward (#4947).
-                            rehome_failed_run_kernels(self.gptq_model)
-                            # A cancelled run must return the same ordinary
-                            # tensors a completed one does: the norms, biases
-                            # and buffers `pre_quantize` materialized under
-                            # inference mode otherwise stay inference tensors,
-                            # and a plain grad-mode forward raises "Inference
-                            # tensors cannot be saved for backward" (#5012).
-                            # The repair is best-effort so it can never mask
-                            # the failure that got us here.
-                            try:
-                                ensure_version_counters(self.gptq_model.model)
-                            except Exception:
-                                log.warning(
-                                    "failed to repair tensor version counters while "
-                                    "failing the quantization run",
-                                    exc_info=True,
-                                )
-                            # Layers that finished before the cancel stay as
-                            # disk-offloaded meta shells pointing into this run's
-                            # private offload root. Deleting that root now would
-                            # make them unrecoverable and break the next forward
-                            # with FileNotFoundError (#4807). A cancelled run must
-                            # also stay cheap: materializing every finished layer
-                            # would defeat the memory bound the default
-                            # ``offload_to_disk=True`` exists for. Keep the root
-                            # instead; ``bind_private_offload_root`` already
-                            # registered a model-lifetime finalizer that removes
-                            # it, and the next run on this model releases it
-                            # (#4368). Only release it eagerly when no module
-                            # still reads from it.
-                            model = getattr(self.gptq_model, "model", None)
-                            if model is not None and has_disk_offloaded_modules(model):
-                                log.debug(
-                                    "Offload: keeping the per-run directory for the "
-                                    "disk-offloaded layers of a cancelled/failed run."
-                                )
-                            else:
-                                release_private_offload_root(self.gptq_model)
-                raise
-            finally:
-                # Process-wide scratch (e.g. EXL3's per-stream tile buffers)
-                # outlives the model unless the run releases it, and a failed
-                # run must release it too.
-                self._release_run_workspace()
-            try:
-                self._restore_offloaded_base_modules(strict=True)
-                self._restore_disk_offloaded_modules()
-                self._materialize_remaining_meta_modules()
-                # Unquantized layers keep the parameters `pre_quantize`
-                # materialized under inference mode, and `post_quantize`'s
-                # `param.data =` move leaves them without a version counter
-                # (issue #4572). Repair every one before the model is returned.
-                ensure_version_counters(self.gptq_model.model)
-            except BaseException:
-                # The tail turns the lazy offloaded shell back into a usable
-                # in-session model, and a Ctrl-C, OOM or I/O error can land in
-                # any of its steps. Recover before re-raising, or the base
-                # modules stay on meta and every later forward fails (#5023).
-                self._recover_post_loop_tail_failure()
-                raise
-            return result
+        return RunExitRecovery(
+            fence=self._fence_run_work,
+            release_processors=self._release_failed_run_processors,
+            restore_inflight=self._restore_inflight_layer,
+            restore_offloaded=self._restore_offloaded_base_modules,
+            materialize_unreached=self._materialize_unreached_meta_modules,
+            rehome_kernels=lambda: rehome_failed_run_kernels(self.gptq_model),
+            repair_counters=lambda: ensure_version_counters(self.gptq_model.model),
+            release_private_root=self._release_or_keep_private_offload_root,
+            restore_disk=self._restore_disk_offloaded_modules,
+            materialize_success=self._materialize_remaining_meta_modules,
+            release_workspace=self._release_run_workspace,
+        )
 
-    def _recover_post_loop_tail_failure(self) -> None:
-        """Best-effort recovery when the post-loop tail itself fails (#5023).
+    def _release_or_keep_private_offload_root(self) -> None:
+        """Keep the per-run root while a disk-offloaded shell still reads it."""
 
-        ``_loop_impl`` already returned, so the layer that was mid-stage and the
-        processors are fine: only the base-module restore and the
-        meta-materialization steps still need to run. Every step is best effort
-        so the recovery can never mask the failure that brought us here.
-        """
-
-        try:
-            self._restore_offloaded_base_modules(strict=False)
-        except Exception:
-            log.warning(
-                "failed to restore the offloaded base modules after a post-loop "
-                "failure",
-                exc_info=True,
-            )
-        try:
-            self._materialize_unreached_meta_modules()
-        except Exception:
-            log.warning(
-                "failed to materialize the meta modules after a post-loop failure",
-                exc_info=True,
-            )
-        try:
-            ensure_version_counters(self.gptq_model.model)
-        except Exception:
-            log.warning(
-                "failed to repair tensor version counters after a post-loop failure",
-                exc_info=True,
-            )
-        # Completed layers stay as disk-offloaded meta shells pointing into this
-        # run's private offload root; keep it while they read from it (#4807).
         model = getattr(self.gptq_model, "model", None)
         if model is not None and has_disk_offloaded_modules(model):
             log.debug(
                 "Offload: keeping the per-run directory for the disk-offloaded "
-                "layers of a post-loop failure."
+                "layers of a cancelled/failed run."
             )
         else:
             release_private_offload_root(self.gptq_model)
+
+    def loop(self, fallback=None, **kwargs):
+        """Run the quantization loop under the TF32 guard."""
+
+        with tf32_high_precision_guard():
+            recovery = self._make_run_exit_recovery()
+            # Exposed for diagnostics and tests: the run, not the exception
+            # handler, owns the exit sequence (#5060).
+            self._run_exit_recovery = recovery
+            return recovery.run(lambda: self._loop_impl(fallback=fallback, **kwargs))
 
     def _materialize_deferred_boundary_prefix(self, checkpoint) -> None:
         """Install a recovered packed prefix only when publication needs it."""

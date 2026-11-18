@@ -1545,8 +1545,15 @@ def _finish_ggml_output(
 
 
 class GGUFCppKernel(GGUFTorchLinear):
-    # `llama-cpp-python` is not installed on this host, so the ggml CPU bridge
-    # cannot build; the CPU-only forward also rejects CUDA input. Static: EAGER.
+    # ``EAGER``: this forward never becomes a torch graph. It branches on
+    # host-side capability (``_use_ggml_cpu_matmul``), wraps the ggml call in
+    # ``try/except`` and records failures in ``_gguf_cpu_autotune_cache`` (a
+    # Python state write dynamo cannot trace), and the matmul itself is a
+    # ``ctypes`` call into ggml's ``ggml_mul_mat`` with no ``torch.ops`` entry
+    # and no fake/meta implementation. The ggml bridge is also built lazily
+    # under a lock on first use. There is no torch op for torch.compile to
+    # lower and no host-sync-free eager path to capture, so
+    # ``SUPPORTS_GRAPH_CAPTURE=False`` for the same reason.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
     SUPPORTS_GRAPH_CAPTURE = False
 

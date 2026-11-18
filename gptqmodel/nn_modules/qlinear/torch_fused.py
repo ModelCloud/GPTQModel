@@ -131,7 +131,6 @@ def pack_scales_and_zeros(scales, zeros):
     )
 
 
-@torch.compiler.disable
 def _cpu_int4pack_mm(x, qweight, group_size, scales_and_zeros, out_dtype=None):
     """Run int4pack with FP32 operands without expanding stored weights.
 
@@ -140,17 +139,52 @@ def _cpu_int4pack_mm(x, qweight, group_size, scales_and_zeros, out_dtype=None):
     until the bias has been added, so the epilogue rounds once instead of
     overflowing or rounding the pre-bias sum.
 
-    Inductor fuses the operand casts into a Pointwise node and then cannot
-    lower ``aten::_weight_int4pack_mm_for_cpu`` on it (#4068). Disabling
-    tracing here keeps the op and its casts eager inside an otherwise
-    compiled model, which is a deliberate graph break rather than a silent
-    fallback to a different kernel.
+    When the operands already carry the compute dtype there is no cast to
+    fuse, the extern op receives real graph inputs, and inductor lowers it
+    (measured on torch 2.16.0.dev CPU). Only the casting case stays a
+    deliberate graph break; see :func:`_cpu_int4pack_mm_cast`.
     """
     compute_dtype = (
         torch.float32
         if x.dtype == torch.bfloat16 or out_dtype == torch.float32
         else scales_and_zeros.dtype
     )
+    if x.dtype is compute_dtype and scales_and_zeros.dtype is compute_dtype:
+        out = torch.ops.aten._weight_int4pack_mm_for_cpu(
+            x, qweight, group_size, scales_and_zeros
+        )
+        return out if out_dtype is None else out.to(out_dtype)
+    return _cpu_int4pack_mm_cast(
+        x,
+        qweight,
+        group_size,
+        scales_and_zeros,
+        compute_dtype,
+        out_dtype,
+    )
+
+
+@torch.compiler.disable
+def _cpu_int4pack_mm_cast(
+    x,
+    qweight,
+    group_size,
+    scales_and_zeros,
+    compute_dtype,
+    out_dtype,
+):
+    """Casting variant of :func:`_cpu_int4pack_mm`; a deliberate graph break.
+
+    Inductor fuses the operand casts into a Pointwise node and then cannot
+    lower ``aten::_weight_int4pack_mm_for_cpu`` on it (#4068). This was
+    re-measured on torch 2.16.0.dev20261021+cpu: with operands already in the
+    compute dtype the extern op lowers, but with a fused cast inductor raises
+    ``LoweringException: AssertionError: <class 'torch._inductor.ir.Pointwise'>``
+    because the extern kernel needs a materialized buffer, not a computed
+    Pointwise layout. Keeping this path eager is a deliberate graph break
+    rather than a silent fallback to a different kernel.
+    """
+
     out = torch.ops.aten._weight_int4pack_mm_for_cpu(
         x.to(compute_dtype), qweight, group_size, scales_and_zeros.to(compute_dtype)
     )
@@ -197,10 +231,22 @@ class TorchFusedLinear(PackableQuantLinear):
 
     REQUIRES_FORMAT_V2 = True
 
-    # GB10/torch 2.11.0+cu130 (CPU forward): eager=True, but dynamo rejects the
-    # `_cpu_transform_lock` RLock context manager, so no compiled level. This
-    # kernel is CPU/XPU-only, so an explicit CUDA-graph capture does not apply.
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0,
+    # dynamo/aot_eager/inductor all reach it. Two things used to break dynamo:
+    # the `_cpu_transform_lock` RLock around the one-time packed-buffer rewrite
+    # (now skipped while tracing; the eager warmup builds the layout) and
+    # `_refresh_fused_op`'s `tensor_cache_key`. The remaining `EAGER` case is a
+    # biased FP16/BF16 layer: it asks for an FP32 product so the pre-bias sum
+    # cannot overflow, and inductor cannot lower
+    # `aten::_weight_int4pack_mm_for_cpu` when its operand cast fuses into a
+    # Pointwise node (#4068, re-measured on this torch). See
+    # `_cpu_int4pack_mm_cast`.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for this kernel in this change; the INDUCTOR level is opt-in via "
+        "optimize() (#4984 policy unchanged)."
+    )
     SUPPORTS_GRAPH_CAPTURE = False
 
     # for transformers/optimum tests compat
@@ -389,6 +435,17 @@ class TorchFusedLinear(PackableQuantLinear):
         return result
 
     def _build_ret_idx(self) -> torch.Tensor:
+        if torch.compiler.is_compiling():
+            # `tensor_cache_key` (`is_inference`/`_version`/`data_ptr`) is a
+            # hard dynamo graph break and publishing ``ret_idx`` is a state
+            # write a graph must not perform. The eager warmup built it for
+            # this constant ``g_idx``, so a traced graph reads it (and only
+            # derives it inline if the cache is still empty).
+            existing = getattr(self, "ret_idx", None)
+            if isinstance(existing, torch.Tensor) and existing.numel() == self.g_idx.shape[0]:
+                return existing
+            return build_group_ret_idx(self.g_idx)
+
         key = tensor_cache_key(self.g_idx)
         existing = getattr(self, "ret_idx", None)
         total = self.g_idx.shape[0]
@@ -541,27 +598,37 @@ class TorchFusedLinear(PackableQuantLinear):
         # The CPU fused op now returns FP32 when a bias is present, so both
         # FP16 and BF16 can add the bias before the single output cast.
         fused_bias_safe = self.bias is None or x.dtype in (torch.bfloat16, torch.float16)
-        with self._cpu_transform_lock:
-            if (
-                not self.training
-                and not x.requires_grad
-                and self.linear_mode is None
-                and TORCH_HAS_FUSED_OPS
-                and fused_bias_safe
-            ):
-                # one-time transform per module for xpu aten fused ops
-                capture_fused_train_state(self)
-                self.transform(x.dtype, x.device.type)
-                self.linear_mode = LinearMode.INFERENCE
-                if x.device.type == "cpu":
-                    self._refresh_fused_op()
-                    # self.torch_fused_op.forward = torch.compile(
-                    #     self.torch_fused_op.forward, options={"max_autotune": True}
-                    # )
-            elif self.linear_mode is None:
-                self.linear_mode = LinearMode.TRAIN
+        if torch.compiler.is_compiling():
+            # `_cpu_transform_lock` is an ``RLock``: dynamo cannot enter it (a
+            # hard graph break), and the one-time ``transform()`` rewrites the
+            # packed ``qweight``/``qzeros`` buffers in place, which a traced
+            # graph must not do. The transform runs on the first eager forward
+            # (and in ``optimize()``'s warmup), so the graph only reads the
+            # resolved ``linear_mode``.
+            linear_mode = self.linear_mode
+        else:
+            with self._cpu_transform_lock:
+                if (
+                    not self.training
+                    and not x.requires_grad
+                    and self.linear_mode is None
+                    and TORCH_HAS_FUSED_OPS
+                    and fused_bias_safe
+                ):
+                    # one-time transform per module for xpu aten fused ops
+                    capture_fused_train_state(self)
+                    self.transform(x.dtype, x.device.type)
+                    self.linear_mode = LinearMode.INFERENCE
+                    if x.device.type == "cpu":
+                        self._refresh_fused_op()
+                        # self.torch_fused_op.forward = torch.compile(
+                        #     self.torch_fused_op.forward, options={"max_autotune": True}
+                        # )
+                elif self.linear_mode is None:
+                    self.linear_mode = LinearMode.TRAIN
+            linear_mode = self.linear_mode
 
-        if self.linear_mode == LinearMode.INFERENCE:
+        if linear_mode == LinearMode.INFERENCE:
             out = self._fused_op_forward(x)
             if self.bias is not None:
                 # BF16 has FP32's range; add its bias before the visible cast.
@@ -595,7 +662,12 @@ class TorchFusedLinear(PackableQuantLinear):
 
     @torch.no_grad
     def _fused_op_forward(self, x):
-        self._refresh_fused_op()
+        if not torch.compiler.is_compiling():
+            # Rebuilds ``scales_and_zeros`` from a ``tensor_cache_key``
+            # (`is_inference`/`_version`/`data_ptr`), which dynamo cannot trace,
+            # and writes module state a graph must not mutate. The eager warmup
+            # already refreshed it for the current packed buffers.
+            self._refresh_fused_op()
         # The identity fast path is CPU-only. The XPU kernel has no coverage for
         # activation views with a non-zero storage offset, so keep the
         # main-branch unconditional gather (and its zero-offset copy) there.

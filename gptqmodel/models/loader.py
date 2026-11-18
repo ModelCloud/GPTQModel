@@ -3750,7 +3750,7 @@ def ModelLoader(cls):
                 from mlx_lm import load
                 from mlx_lm.utils import save_config, save_model
 
-                from ..utils.mlx import convert_gptq_to_mlx_weights, mlx_generate
+                from ..utils.mlx import _convert_gptq_to_mlx_weights, mlx_generate
             except ModuleNotFoundError as exception:
                 raise type(exception)(
                     "GPT-QModel load mlx model required dependencies are not installed.",
@@ -3758,7 +3758,7 @@ def ModelLoader(cls):
                 )
 
             with tempfile.TemporaryDirectory() as temp_dir:
-                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_local_path, model, qcfg.to_dict(), cls.lm_head)
+                mlx_weights, mlx_config = _convert_gptq_to_mlx_weights(model_local_path, model, qcfg.to_dict(), cls.lm_head)
                 if (mlx_config.pop("_gptqmodel_group16_runtime", False)
                         or mlx_config.pop("_gptqmodel_custom_mlx_runtime", False)):
                     model = mlx_weights

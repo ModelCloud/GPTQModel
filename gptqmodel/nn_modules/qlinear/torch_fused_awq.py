@@ -48,10 +48,19 @@ class TorchFusedAwqLinear(AWQuantLinear):
 
     QUANT_TYPE = "torch_fused_awq"
 
-    # Measured on CPU, torch 2.11.0+cu130: dynamo cannot enter the
-    # `_cpu_transform_lock` RLock held in forward. CPU/XPU-only, so no CUDA
-    # graph capture applies.
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    # Measured on CPU, torch 2.16.0.dev20261021+cpu: eager=True,
+    # graph_breaks=0, dynamo/aot_eager/inductor all reach it for an unbiased
+    # layer. The `_cpu_transform_lock` RLock around the one-time packed-buffer
+    # rewrite is skipped while tracing. A biased FP16/BF16 layer asks for an
+    # FP32 product, and inductor cannot lower
+    # `aten::_weight_int4pack_mm_for_cpu` with a fused operand cast (#4068), so
+    # that case stays eager. CPU/XPU-only, so no CUDA graph capture applies.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for this kernel in this change; the INDUCTOR level is opt-in via "
+        "optimize() (#4984 policy unchanged)."
+    )
     SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH_FUSED]
@@ -444,32 +453,43 @@ class TorchFusedAwqLinear(AWQuantLinear):
         self.assert_supported_dtype(input_dtype)
         if input_dtype == torch.float32:
             x_flat = x_flat.to(torch.bfloat16)
-        with self._cpu_transform_lock:
-            if (
-                not self.training
-                and not x_flat.requires_grad
-                and self.linear_mode is None
-                and TORCH_HAS_FUSED_OPS
-                # FP16 can overflow before a cancelling bias. BF16 has FP32's
-                # range, so it can use the fused op and add the bias once. The
-                # CPU fused op returns an FP32 product for a biased FP16 layer,
-                # so it can add the bias before the single visible cast too.
-                and (
-                    self.bias is None
-                    or x_flat.dtype in (torch.bfloat16, torch.float16)
-                )
-            ):
-                capture_fused_train_state(self)
-                self.transform(x_flat.dtype, x_flat.device.type)
-                self.linear_mode = LinearMode.INFERENCE
-                if x_flat.device.type == "cpu":
-                    self.torch_fused_op = Int4PackedOp(
-                        self.qweight, self.scales_and_zeros, self.group_size
-                    ).eval()
-            elif self.linear_mode is None:
-                self.linear_mode = LinearMode.TRAIN
+        if torch.compiler.is_compiling():
+            # ``_cpu_transform_lock`` is an ``RLock``: dynamo cannot enter it (a
+            # hard graph break), and the one-time ``transform()`` rewrites the
+            # packed ``qweight``/``qzeros`` buffers in place, which a traced
+            # graph must not do. The transform runs on the first eager forward
+            # and in ``optimize()``'s warmup, so the graph only reads the
+            # resolved ``linear_mode``.
+            linear_mode = self.linear_mode
+        else:
+            with self._cpu_transform_lock:
+                if (
+                    not self.training
+                    and not x_flat.requires_grad
+                    and self.linear_mode is None
+                    and TORCH_HAS_FUSED_OPS
+                    # FP16 can overflow before a cancelling bias. BF16 has
+                    # FP32's range, so it can use the fused op and add the bias
+                    # once. The CPU fused op returns an FP32 product for a
+                    # biased FP16 layer, so it can add the bias before the
+                    # single visible cast too.
+                    and (
+                        self.bias is None
+                        or x_flat.dtype in (torch.bfloat16, torch.float16)
+                    )
+                ):
+                    capture_fused_train_state(self)
+                    self.transform(x_flat.dtype, x_flat.device.type)
+                    self.linear_mode = LinearMode.INFERENCE
+                    if x_flat.device.type == "cpu":
+                        self.torch_fused_op = Int4PackedOp(
+                            self.qweight, self.scales_and_zeros, self.group_size
+                        ).eval()
+                elif self.linear_mode is None:
+                    self.linear_mode = LinearMode.TRAIN
+            linear_mode = self.linear_mode
 
-        if self.linear_mode == LinearMode.INFERENCE:
+        if linear_mode == LinearMode.INFERENCE:
             # log.debug("awq calling fused op")
             out = self._fused_op_forward(x_flat)
             if self.bias is not None:

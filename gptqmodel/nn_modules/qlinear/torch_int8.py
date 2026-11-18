@@ -356,10 +356,18 @@ class TorchInt8Linear(GPTQQuantLinear):
     REQUIRES_FORMAT_V2 = True
     SUPPORTS_RAW_PACKING = False
 
-    # GB10/torch 2.11.0+cu130 (CPU forward): eager=True, but dynamo rejects
-    # `tensor.is_inference()` in the runtime-cache key, so no compiled level.
-    # The fused path is CPU-only, so an explicit CUDA-graph capture does not apply.
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0,
+    # dynamo/aot_eager/inductor all reach it. `_refresh_int8_runtime` used to
+    # break dynamo on `tensor.is_inference()` in its source signature and on the
+    # module `RLock` in its cold rebuild; a traced forward now reads the
+    # `post_init()`-built INT8 module instead. CPU-only, so no CUDA-graph
+    # capture applies.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for this kernel in this change; the INDUCTOR level is opt-in via "
+        "optimize() (#4984 policy unchanged)."
+    )
     SUPPORTS_GRAPH_CAPTURE = False
 
     QUANT_TYPE = "torch_int8"
@@ -430,6 +438,18 @@ class TorchInt8Linear(GPTQQuantLinear):
     def _refresh_int8_runtime(self):
         if getattr(self, "_int8_fusion_view", False):
             return self.int8_module
+        if torch.compiler.is_compiling():
+            # ``_source_signature`` reads `is_inference`/`_version`/`data_ptr`
+            # (hard dynamo graph breaks), and the cold rebuild takes a module
+            # ``RLock`` and rewrites the derived INT8 buffers, which a graph
+            # must not do. ``post_init()`` already built the runtime module, so
+            # a traced forward only reads it.
+            if self.int8_module is not None:
+                return self.int8_module
+            raise RuntimeError(
+                "TorchInt8Linear was compiled before its INT8 runtime layout was built; "
+                "load the checkpoint (post_init) before torch.compile."
+            )
         signature = self._source_signature()
         if self.int8_module is not None and signature == self._int8_source_signature:
             return self.int8_module

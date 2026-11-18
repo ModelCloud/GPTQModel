@@ -165,11 +165,18 @@ def probe(
         ("inductor", {"backend": "inductor"}),
         ("cudagraph", {"backend": "inductor", "mode": "reduce-overhead"}),
     )
+    cpu_inputs = all(isinstance(arg, torch.Tensor) and arg.device.type == "cpu" for arg in args)
     for name, kwargs in attempts:
-        if not torch.cuda.is_available() and name in ("inductor", "cudagraph"):
-            # Inductor needs device-specific codegen; skip on a CPU-only host.
+        if not torch.cuda.is_available() and name == "cudagraph":
+            # CUDA-graph capture has no CPU equivalent: `mode="reduce-overhead"`
+            # is a CUDA-only graph backend, so this level is CUDA-only by
+            # definition. Inductor *does* codegen for CPU, so it stays probed.
             result.levels[name] = False
-            result.errors[name] = "skipped: no CUDA device"
+            result.errors[name] = "skipped: CUDA graph capture is CUDA-only"
+            continue
+        if name == "inductor" and not torch.cuda.is_available() and not cpu_inputs:
+            result.levels[name] = False
+            result.errors[name] = "skipped: inductor needs a CPU or CUDA device for these inputs"
             continue
         try:
             output = _try_compile(fn, args, **kwargs)

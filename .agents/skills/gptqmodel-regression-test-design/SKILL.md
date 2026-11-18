@@ -138,6 +138,13 @@ Use barriers/events to force contention; do not rely on sleeps or a loop that
 merely submits work sequentially. Count builds/releases and inspect retained
 references/storage after work completes, not just peak allocator reservations.
 
+When a compiled model promises release on last reference, run generation
+(and a retrace if affected), then drop all strong owners. Check that a weak
+reference is dead and compare live allocated device bytes with baseline before
+the test calls `gc.collect()` or clears caches. Disable automatic cyclic GC for
+this probe and restore its prior state in `finally`. Installing a wrapper
+alone cannot expose [trace-owned references](../../../tests/test_optimize_dynamo_release_5020.py).
+
 For shared writable scratch, two live streams must have exclusive storage or
 a proven lease lasting until asynchronous consumption completes. An allocation
 lock does not protect a buffer after the lock is released. Verify same-stream
@@ -174,6 +181,13 @@ Unknown options, unsupported targets, and conflicting forms need explicit
 rejection tests before mutation. Do not silently accept an option the consumer
 ignores. Select runtime behavior through config/API arguments, never retired
 environment switches.
+
+For public signature or config migrations, search for the retired spelling in
+scripts, README/docs and skill examples as well as Python callers. Exercise
+the replacement through the documented public import and call; parsing a
+snippet cannot catch a removed keyword. Check the old form against the stated
+compatibility policy. Extend the [docs contract tests](../../../tests/test_docs_contract_refs.py)
+for affected examples.
 
 For loader placement, feed the same checkpoint and explicit map through native
 load and the supported Transformers bridge. Include integer ordinal `0` (valid

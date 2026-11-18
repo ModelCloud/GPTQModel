@@ -247,10 +247,26 @@ class TorchLinear(PackableQuantLinear):
 
     REQUIRES_FORMAT_V2 = True
 
-    # GB10 (sm_121), torch 2.11.0+cu130: eager=True, graph_breaks=2 (the
-    # tensor `_version` read in the weight-cache key), so dynamo/aot/inductor
-    # all reject it; explicit CUDA-graph capture succeeds and matches eager.
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0,
+    # dynamo/aot_eager/inductor all reach it, so the CPU forward is
+    # ``INDUCTOR``. The weight-cache key (`is_inference`/`_version`/
+    # `data_ptr`) and the `ret_idx` verdict used to break dynamo; both now have
+    # a traced fast path that reads the eager-built state instead of re-keying
+    # it (see `_stream_decode_qzeros`, `_stream_g_idx_long` and
+    # `PackableQuantLinear._ret_idx_is_identity`).
+    #
+    # CUDA stays ``EAGER``: the streaming decode path (`_should_use_streaming`
+    # -> `_stream_get_dequant_stream`) creates a `torch.cuda.Stream` and
+    # enqueues copies on it, which dynamo cannot trace, and it is the default
+    # for 2/4/8-bit CUDA layers. Explicit CUDA-graph capture of the eager
+    # forward succeeds and matches eager.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for the portable Torch decode in this change; the INDUCTOR level is "
+        "opt-in via optimize() (#4984 policy unchanged)."
+    )
     SUPPORTS_GRAPH_CAPTURE = True
 
     # for transformers/optimum tests compat
@@ -845,18 +861,33 @@ class TorchLinear(PackableQuantLinear):
         buffer.narrow(1, 0, width).copy_(dequant.to(dtype))
         return width
 
-    def _stream_decode_qzeros(self):
-        cache_state = (tensor_cache_key(self.qzeros), self.scales.shape)
-        if self._zeros_cache is not None and self._zeros_cache_state == cache_state:
-            return self._zeros_cache
-
+    def _decode_qzeros(self):
         zeros = _right_shift_unpack(
             self.qzeros.unsqueeze(2).expand(-1, -1, self.pack_factor),
             self.wf_unsqueeze_zero,
             self.dequant_dtype,
         )
         zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.qzeros.shape[0], -1)
-        zeros = zeros[:, :self.scales.shape[1]]
+        return zeros[:, :self.scales.shape[1]]
+
+    def _stream_decode_qzeros(self):
+        if torch.compiler.is_compiling():
+            # `tensor_cache_key` reads `is_inference()`/`_version`/`data_ptr()`,
+            # all hard dynamo graph breaks, and publishing a fresh key is an
+            # attribute write a graph must not perform. The decoded zero-points
+            # are runtime metadata derived from a constant buffer, so a traced
+            # graph reads the already-built cache and only decodes directly
+            # when the cache is empty (e.g. compile before any eager call).
+            cached = self._zeros_cache
+            if cached is not None:
+                return cached
+            return self._decode_qzeros()
+
+        cache_state = (tensor_cache_key(self.qzeros), self.scales.shape)
+        if self._zeros_cache is not None and self._zeros_cache_state == cache_state:
+            return self._zeros_cache
+
+        zeros = self._decode_qzeros()
         self._zeros_cache = zeros
         self._zeros_cache_state = cache_state
         return zeros
@@ -867,6 +898,17 @@ class TorchLinear(PackableQuantLinear):
                 target_device = self.qweight.device
             else:
                 target_device = self.g_idx.device
+
+        if torch.compiler.is_compiling():
+            # Same reason as `_stream_decode_qzeros`: the cache key is
+            # untraceable and the cache publication is a state write. A traced
+            # graph reads the eager-built cache, or converts `g_idx` inline.
+            cached = self._g_idx_long_cache
+            if cached is not None and cached.device == target_device:
+                return cached
+            if self.g_idx.device == target_device:
+                return self.g_idx.long()
+            return self.g_idx.to(device=target_device, dtype=torch.long)
 
         cache_state = (tensor_cache_key(self.g_idx), target_device)
         if self._g_idx_long_cache is not None and self._g_idx_long_cache_state == cache_state:
@@ -1185,11 +1227,21 @@ class TorchQuantEmbeddings(TorchLinear):
     # not be discovered as a general backend: their forward contract accepts
     # integer token IDs, not hidden states.
     SUPPORTS_BACKEND_SELECTION = False
-    # The forward branches on host values (`input_ids.numel()` against the
-    # row-decode limit, dtype/device checks) before choosing a dense decode or
-    # `F.embedding`, so dynamo breaks and a CUDA-graph capture cannot cross the
-    # branch. Not probed: the branches are unconditional on every call.
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all pass for both paths: the whole-table
+    # `F.embedding(dequantize_weight())` decode and the row-decode gather once
+    # the eager warmup has built `_embedding_row_decode_state()`. A traced
+    # forward reads that cached metadata instead of re-keying it with
+    # `tensor_cache_key`, whose `is_inference()` is a hard graph break.
+    #
+    # CUDA keeps ``EAGER``: not re-measured on this CPU-only host.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for this kernel in this change; the INDUCTOR level is opt-in via "
+        "optimize() (#4984 policy unchanged)."
+    )
     SUPPORTS_GRAPH_CAPTURE = False
     SUPPORTS_BITS = [2, 3, 4, 5, 6, 7, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 512, 1024]
@@ -1238,6 +1290,15 @@ class TorchQuantEmbeddings(TorchLinear):
         weight is retained. The state is keyed on the packed tensors so a
         replaced or mutated checkpoint invalidates it.
         """
+        if torch.compiler.is_compiling():
+            # `tensor_cache_key` reads `is_inference()`/`_version`/`data_ptr()`,
+            # all hard dynamo graph breaks, and publishing the metadata is a
+            # state write. The eager warmup built it for this constant
+            # checkpoint, so a traced graph reads it; without a warmup it
+            # returns None and the forward takes the whole-table
+            # `F.embedding` path, which is traceable on its own.
+            state = getattr(self, "_embedding_row_state", None)
+            return None if state is None else state[1]
         key = (
             tensor_cache_key(self.qweight),
             tensor_cache_key(self.g_idx),

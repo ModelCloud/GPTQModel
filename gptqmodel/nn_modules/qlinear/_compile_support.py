@@ -23,6 +23,22 @@ ask a kernel what it is safe under instead of guessing from its class name:
       i.e. the compiled forward has no host synchronisation, no CPU-side
       allocation decision and no data-dependent Python control flow.
 
+``SUPPORTS_COMPILE_LEVEL_BY_DEVICE: dict[str, COMPILE_LEVEL]``
+    Optional per-device override, keyed by ``torch.device.type`` (``"cpu"``,
+    ``"cuda"``, ``"xpu"``...). A kernel whose CPU and CUDA forwards have
+    different compile ceilings keeps the base level for the device it was
+    measured on last and records the other here, so neither device
+    over-claims. ``TorchLinear`` is the current case: its CPU forward reaches
+    ``INDUCTOR`` after the cache-key and ``ret_idx`` fixes, while its CUDA
+    streaming path still allocates a ``torch.cuda.Stream`` and stays ``EAGER``.
+
+    Only the dict in the kernel's **own class body** is consulted. A subclass
+    inherits the base level, never another kernel's device answer: the MLX,
+    Triton and embedding subclasses of ``TorchLinear`` do not run its CPU
+    forward, so they must not inherit ``{"cpu": INDUCTOR}``. A
+    ``NOT_APPLICABLE`` kernel (never a torch module) ignores the override
+    entirely.
+
 ``SUPPORTS_GRAPH_CAPTURE: bool``
     Whether the **eager** forward is safe under an explicit
     ``torch.cuda.CUDAGraph`` capture (``torch.cuda.graph(...)``): no
@@ -112,15 +128,7 @@ LEVEL_PROBES: Dict[COMPILE_LEVEL, str] = {
 COMPILE_POLICY_FLOOR = COMPILE_LEVEL.INDUCTOR
 
 
-def compile_level(kernel: Any) -> COMPILE_LEVEL:
-    """The declared level of a kernel class or instance.
-
-    Accepts the ``str`` name too, so a serialized capability can round trip.
-    An unknown or missing declaration is ``EAGER`` (the safe answer: nothing
-    may assume a compiled path works).
-    """
-
-    value = getattr(kernel, "SUPPORTS_COMPILE_LEVEL", COMPILE_LEVEL.EAGER)
+def _coerce_level(kernel: Any, value: Any) -> COMPILE_LEVEL:
     if isinstance(value, COMPILE_LEVEL):
         return value
     if isinstance(value, str):
@@ -137,6 +145,49 @@ def compile_level(kernel: Any) -> COMPILE_LEVEL:
         f"{getattr(kernel, '__name__', kernel)}: SUPPORTS_COMPILE_LEVEL must be a "
         f"COMPILE_LEVEL, got {type(value).__name__}."
     )
+
+
+def kernel_device_type(kernel: Any) -> Optional[str]:
+    """The ``torch.device.type`` an instance is resident on, if it has one."""
+
+    if isinstance(kernel, type):
+        return None
+    for attribute in ("qweight", "scales", "qzeros", "codes"):
+        tensor = getattr(kernel, attribute, None)
+        device = getattr(tensor, "device", None)
+        if device is not None:
+            return device.type
+    return None
+
+
+def compile_level(kernel: Any, device_type: Optional[str] = None) -> COMPILE_LEVEL:
+    """The declared level of a kernel class or instance.
+
+    Accepts the ``str`` name too, so a serialized capability can round trip.
+    An unknown or missing declaration is ``EAGER`` (the safe answer: nothing
+    may assume a compiled path works).
+
+    ``device_type`` selects a ``SUPPORTS_COMPILE_LEVEL_BY_DEVICE`` override.
+    When it is omitted and ``kernel`` is an instance, the device of its packed
+    buffers is used, so a caller never has to repeat what the module already
+    knows. Only an override declared in the kernel's own class body applies;
+    see the module docstring for why inheritance would over-claim.
+    """
+
+    if device_type is None:
+        device_type = kernel_device_type(kernel)
+    base = _coerce_level(
+        kernel, getattr(kernel, "SUPPORTS_COMPILE_LEVEL", COMPILE_LEVEL.EAGER)
+    )
+    if base is COMPILE_LEVEL.NOT_APPLICABLE:
+        # MLX/TTNN/XLA never run as a torch module, so no device can raise the
+        # answer above "not applicable".
+        return base
+    owner = kernel if isinstance(kernel, type) else type(kernel)
+    overrides = owner.__dict__.get("SUPPORTS_COMPILE_LEVEL_BY_DEVICE")
+    if device_type and isinstance(overrides, dict) and device_type in overrides:
+        return _coerce_level(kernel, overrides[device_type])
+    return base
 
 
 def graph_capture_safe(kernel: Any) -> bool:
@@ -178,8 +229,18 @@ def compile_policy_reason(kernel: Any) -> Optional[str]:
     Returns ``None`` when the kernel records no reason. A reason must be a
     non-empty ``str``: the point is to publish *why* a traceable kernel keeps
     the static-cache auto-compile off, not to have a boolean placeholder.
+
+    A ``NOT_APPLICABLE`` kernel (never a torch module) reports no reason: an
+    MLX subclass of a torch kernel must not print the torch parent's CPU reason
+    in the matrix.
     """
 
+    owner = kernel if isinstance(kernel, type) else type(kernel)
+    level = _coerce_level(
+        kernel, getattr(owner, "SUPPORTS_COMPILE_LEVEL", COMPILE_LEVEL.EAGER)
+    )
+    if level is COMPILE_LEVEL.NOT_APPLICABLE:
+        return None
     reason = getattr(kernel, "SUPPORTS_COMPILE_EAGER_REASON", "")
     if reason is None or reason == "":
         return None
@@ -205,9 +266,13 @@ def compile_policy_is_justified(kernel: Any) -> bool:
     Keeping the static-cache auto-compile off from there is allowed, but only
     with a recorded measured loss. Opting in from a level below ``INDUCTOR`` is
     the other drift: the compiled path would pay for graph fragments.
+
+    The higher of the default-device level and the CPU level is used: a kernel
+    that only reaches ``INDUCTOR`` on CPU still has a traceable CPU decode, so
+    opting out of the policy from there needs the same recorded reason.
     """
 
-    level = compile_level(kernel)
+    level = max(compile_level(kernel), compile_level(kernel, device_type="cpu"))
     reason = compile_policy_reason(kernel)
     if level >= COMPILE_POLICY_FLOOR:
         if supports_compiled_generation(kernel):
@@ -228,6 +293,7 @@ def describe_kernel(kernel: Any) -> Dict[str, Optional[str]]:
         "kernel": getattr(kernel, "__name__", type(kernel).__name__),
         "module": getattr(kernel, "__module__", type(kernel).__module__),
         "compile_level": compile_level(kernel).name,
+        "compile_level_cpu": compile_level(kernel, device_type="cpu").name,
         "graph_capture": graph_capture_safe(kernel),
         "compiled_generation": supports_compiled_generation(kernel),
         "compiled_generation_reason": compile_policy_reason(kernel),
@@ -243,6 +309,7 @@ __all__ = [
     "compile_policy_reason",
     "describe_kernel",
     "graph_capture_safe",
+    "kernel_device_type",
     "reaches_level",
     "supports_compiled_generation",
 ]

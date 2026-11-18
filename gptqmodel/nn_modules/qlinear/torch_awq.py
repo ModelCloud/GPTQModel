@@ -47,6 +47,10 @@ class AwqTorchLinear(AWQuantLinear):
     # inductor and reduce-overhead all pass. Eager CUDA-graph capture fails:
     # dequantize_gemm builds its shift table with `torch.tensor([...], cuda)`.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all reach it. CUDA-graph capture is CUDA-only,
+    # so the CPU forward's ceiling is INDUCTOR.
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
     SUPPORTS_GRAPH_CAPTURE = False
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]

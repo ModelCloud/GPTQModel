@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 import torch
 
 from ...extension import op as extension_op
+from ...extension import register_fake
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import dequantize_gemm
@@ -19,7 +20,7 @@ from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import capture_fused_train_state, finalize_fused_train_state
 from ._numerics import matmul_fp32_reduce
 from .torch_aten_kernel import TorchAtenLinear
-from .torch_cpu_avx512 import unpack_hf_int4
+from .torch_cpu_avx512 import _fake_gemm_int4_qzero_group_scaled, unpack_hf_int4
 
 
 log = setup_logger()
@@ -61,11 +62,16 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
 
     QUANT_TYPE = "torch_cpu_avx512_awq"
 
-    # Measured on an x86-64 AVX512-BF16 host (torch 2.15): the extension
-    # builds and the fused BF16 forward runs, but `forward` holds
-    # `_cpu_transform_lock` (RLock), which dynamo cannot enter: EAGER.
-    # CPU-only, so no CUDA-graph capture applies.
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    # Measured on an x86-64 AVX512-BF16 host, torch 2.16.0.dev20261021+cpu:
+    # eager=True, graph_breaks=0, dynamo/aot_eager/inductor all reach it. The
+    # `_cpu_transform_lock` RLock around the one-time layout rewrite is skipped
+    # while tracing. CPU-only, so no CUDA-graph capture applies.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for this kernel in this change; the INDUCTOR level is opt-in via "
+        "optimize() (#4984 policy unchanged)."
+    )
     SUPPORTS_GRAPH_CAPTURE = False
 
     gemm_int4_qzero_group_scaled_cpu_kernel = None
@@ -114,6 +120,11 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
         try:
             cls.gemm_int4_qzero_group_scaled_cpu_kernel = extension_op(
                 "int4_qzero_group_scaled_cpu", "gemm_int4_qzero_group_scaled_cpu_forward"
+            )
+            register_fake(
+                "int4_qzero_group_scaled_cpu",
+                "gemm_int4_qzero_group_scaled_cpu_forward",
+                _fake_gemm_int4_qzero_group_scaled,
             )
             cls.pack_awq_int4_kernel = extension_op("int4_qzero_group_scaled_cpu", "pack_awq_int4")
         except Exception as exc:
@@ -295,22 +306,32 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
-        with self._cpu_transform_lock:
-            if (
-                not self.training
-                and not x_flat.requires_grad
-                and self.linear_mode is None
-                and self._cpu_fused_available()
-                and x_flat.device.type == "cpu"
-                and self._fused_input_dtype(x_flat)
-            ):
-                capture_fused_train_state(self)
-                self.transform("cpu")
-                self.linear_mode = "inference"
-            elif self.linear_mode is None:
-                self.linear_mode = "train"
+        if torch.compiler.is_compiling():
+            # ``_cpu_transform_lock`` is an ``RLock``: dynamo cannot enter it (a
+            # hard graph break), and the one-time ``transform()`` rewrites the
+            # packed ``qweight``/``qzeros`` buffers in place, which a traced
+            # graph must not do. The transform runs on the first eager forward
+            # and in ``optimize()``'s warmup, so the graph only reads the
+            # resolved ``linear_mode``.
+            linear_mode = self.linear_mode
+        else:
+            with self._cpu_transform_lock:
+                if (
+                    not self.training
+                    and not x_flat.requires_grad
+                    and self.linear_mode is None
+                    and self._cpu_fused_available()
+                    and x_flat.device.type == "cpu"
+                    and self._fused_input_dtype(x_flat)
+                ):
+                    capture_fused_train_state(self)
+                    self.transform("cpu")
+                    self.linear_mode = "inference"
+                elif self.linear_mode is None:
+                    self.linear_mode = "train"
+            linear_mode = self.linear_mode
 
-        if self.linear_mode == "inference":
+        if linear_mode == "inference":
             if not self._fused_input_dtype(x_flat):
                 raise RuntimeError(
                     f"{self.__class__.__name__} was transformed for bfloat16 "
