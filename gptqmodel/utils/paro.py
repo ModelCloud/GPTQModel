@@ -726,8 +726,17 @@ def _rotation_autotune_cache_path(device_index: int) -> Path:
 
 
 def _ensure_rotation_autotune_cache_loaded(device_index: int) -> None:
-    """Seed the in-process launch cache from disk once per device."""
+    """Seed the in-process launch cache from disk once per device.
+
+    The device flag is checked before the lock so a warmed process pays no
+    ``threading.Lock`` entry on the steady-state rotation path. That matters
+    for ``torch.compile``: dynamo cannot trace a lock context manager, so the
+    previous unconditional ``with`` graph-broke every non-identity Paro layer
+    even after an eager warmup had already loaded the cache (#5225).
+    """
     if not _rotation_autotune_cache_enabled():
+        return
+    if device_index in _ROTATION_AUTOTUNE_DISK_LOADED:
         return
     with _ROTATION_AUTOTUNE_DISK_LOCK:
         if device_index in _ROTATION_AUTOTUNE_DISK_LOADED:
@@ -870,6 +879,15 @@ def _resolve_rotation_launch(
         requested_row_pad=requested_row_pad,
     )
     device_index = int(cache_key[0])
+    if torch.compiler.is_compiling():
+        # Tracing must stay free of Python locks, on-disk reads and CUDA-only
+        # ops. A warm eager forward has already resolved this shape into the
+        # process-local map; otherwise fall back to the native legacy default,
+        # which the fused op resolves from device properties inside the graph.
+        cached = _ROTATION_LAUNCH_CONFIG_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        return -1, -1
     # Seed from the previous process before measuring anything: a full cold
     # lifecycle autotunes ~18 shapes at ~130ms each.
     _ensure_rotation_autotune_cache_loaded(device_index)
@@ -997,6 +1015,21 @@ def prewarm_paro_rotation_extension(
     return _load_rotation_extension()
 
 
+def _rotation_extension_ready_for_call() -> bool:
+    """Whether the fused rotation may run without loading it inside a trace.
+
+    ``_load_rotation_extension`` consults the shared JIT loader, which takes a
+    build lock and (on a cold cache) compiles the extension. Dynamo cannot
+    trace either, so while compiling a not-yet-loaded extension falls back to
+    the reference rotation instead of graph-breaking. A normal eager warmup or
+    ``optimize()`` loads it first, and the traced forward then uses the fused
+    op.
+    """
+    if torch.compiler.is_compiling() and not _ROTATION_EXTENSION_READY:
+        return False
+    return _load_rotation_extension()
+
+
 def apply_paro_rotation(
     x: torch.Tensor,
     pairs: torch.Tensor,
@@ -1005,7 +1038,7 @@ def apply_paro_rotation(
     group_size: int = 128,
 ) -> torch.Tensor:
     """Apply the fused rotation when available, else fall back to the reference path."""
-    if _rotation_kernel_ready(x, pairs, theta, scales, group_size) and _load_rotation_extension():
+    if _rotation_kernel_ready(x, pairs, theta, scales, group_size) and _rotation_extension_ready_for_call():
         return _apply_fused_rotation(x, pairs, theta, scales, int(group_size))
     return apply_paro_rotation_reference(x, pairs, theta, scales=scales, group_size=group_size)
 
@@ -1184,7 +1217,7 @@ def apply_paro_rotation_autograd(
     group_size: int = 128,
 ) -> torch.Tensor:
     """Apply the fused rotation with custom backward support when available."""
-    if _rotation_kernel_ready(x, pairs, theta, scales, group_size) and _load_rotation_extension():
+    if _rotation_kernel_ready(x, pairs, theta, scales, group_size) and _rotation_extension_ready_for_call():
         return _ParoRotateTensorFunc.apply(x, pairs, theta, scales, int(group_size))
     return apply_paro_rotation_reference(x, pairs, theta, scales=scales, group_size=group_size)
 

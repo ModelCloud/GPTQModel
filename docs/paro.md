@@ -545,3 +545,35 @@ differentiable dense plan through `_needs_dense_autograd`.
 | `test_paro_triton_linear_cuda_training_gradients_match_reference` | The same contract through `ParoTritonLinear`'s dense plan |
 | `test_rotation_dispatch_keeps_the_inference_path` | The autograd wrapper is used only when a gradient is needed; eval and `no_grad` forwards keep the plain and vectorized paths |
 | `test_cuda_awq_gemm_is_reserved_for_inference` | The native AWQ GEMM still serves `no_grad` forwards and is skipped only for a gradient-bearing operand |
+
+## Compiled inference and CUDA graphs
+
+`ParoTritonLinear` declares `COMPILE_LEVEL.CUDAGRAPH`: a non-identity layer
+traces with `torch.compile(fullgraph=True)`, lowers with Inductor and captures
+under `mode="reduce-overhead"`. Two paths used to break that contract (#5225).
+
+- `_resolve_rotation_launch` enters the rotation autotune disk lock and may
+  read the launch cache from disk. Dynamo cannot trace a `threading.Lock`
+  context manager, so the lock is now checked before it is taken and the
+  resolution is trace-safe: while compiling, the process-local launch cache is
+  read without a lock, and a cold shape falls back to the native legacy launch
+  config instead of touching disk.
+- The fused `gptqmodel_paro` rotation ops are CUDA-only. `rotation.cu` now
+  registers Meta implementations for `rotate`, `rotate_pair`,
+  `rotate_pair_grad` and `grad_theta`, so fake-tensor tracing gets output
+  metadata instead of `Operator does not support running with fake tensors`.
+
+A normal eager warmup (or the first eager forward after loading a checkpoint)
+loads the JIT extension and resolves the shape into the process-local cache.
+If a trace starts cold, the extension is not JIT-built inside the graph and the
+reference rotation is used instead, which keeps the trace clean. Measured on
+RTX 5090, torch 2.15.0+cu132: a non-identity layer traces to one graph with
+zero breaks, and a four-layer model under `optimize(backend="inductor")` goes
+from 14 breaks / 4 graphs / 0.47x eager to 0 breaks / 1 graph / 1.34x eager.
+
+| Test | Invariant |
+| --- | --- |
+| `test_nonidentity_layer_traces_with_zero_graph_breaks` | A non-identity rotation traces with zero breaks and matches eager under `eager`, `aot_eager` and `inductor` |
+| `test_nonidentity_layer_reaches_declared_cudagraph_level` | `compile_probe` reaches the declared `CUDAGRAPH` level and captures a CUDA graph |
+| `test_fused_rotate_ops_have_fake_tensor_implementations` | `rotate`, `rotate_pair_grad` run under `FakeTensorMode` and report the CUDA metadata |
+| `test_optimize_compiles_a_tiny_paro_model_without_breaks` | Model-level `optimize()` installs a forward with zero graph breaks |

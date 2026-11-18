@@ -28,6 +28,7 @@ from ...utils.paro import (
     apply_paro_rotation_vectorized,
     build_identity_rotation_buffers,
     is_identity_rotation,
+    prewarm_paro_rotation_extension,
     validate_rotation_buffers,
 )
 from ...utils.rocm import IS_ROCM
@@ -573,6 +574,22 @@ class ParoLinear(AwqTorchLinear):
             krot=self.krot,
             layer_name=f"Paro `{self.name}`",
         )
+
+    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+        """Load the fused rotation before ``torch.compile`` traces this layer.
+
+        ``optimize()`` usually runs right after a checkpoint load, before any
+        eager forward. Loading the JIT extension here keeps the compiled graph
+        on the fused rotation op instead of the slower reference fallback.
+        """
+        weight = getattr(self, "qweight", None)
+        prewarm_paro_rotation_extension(
+            fused_rotation=True,
+            group_size=self.group_size,
+            krot=self.krot,
+            device=weight.device if isinstance(weight, torch.Tensor) else None,
+        )
+        super().optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:

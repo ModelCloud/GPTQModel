@@ -250,6 +250,12 @@ class ParoTritonLinear(ParoLinear):
         if cached is not None:
             return cached
 
+        if torch.compiler.is_compiling():
+            # Benchmarking launches kernels and times them on the host, which a
+            # traced graph cannot contain. A warm eager forward has already
+            # measured this workload class; otherwise keep the default plan.
+            return default_plan
+
         try:
             timings = {plan: self._benchmark_plan(plan, rotated) for plan in self._candidate_plans(kind)}
             best_plan = min(timings, key=timings.get)

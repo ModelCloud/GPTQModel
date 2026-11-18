@@ -1220,6 +1220,59 @@ at::Tensor grad_theta(at::Tensor rot, at::Tensor grad, at::Tensor idx_i, at::Ten
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Fake/meta implementations
+//
+// ``torch.compile`` traces the forward with fake tensors and asks the Meta
+// implementation of each op for its output metadata. The fused rotation ops are
+// CUDA-only, so without a Meta kernel dynamo fails with "Operator does not
+// support running with fake tensors" and graph-breaks every non-identity Paro
+// layer (#5225). These build exactly the metadata the CUDA kernels allocate
+// (``at::empty`` of the operand shape/options) and never touch device memory.
+// ---------------------------------------------------------------------------
+at::Tensor rotate_meta(at::Tensor x, at::Tensor idx, at::Tensor theta,
+                       c10::optional<at::Tensor> scales, int64_t group_size, int64_t cta_m,
+                       int64_t row_pad, int64_t reverse) {
+  (void)idx;
+  (void)theta;
+  (void)scales;
+  (void)group_size;
+  (void)cta_m;
+  (void)row_pad;
+  (void)reverse;
+  return at::empty(x.sizes(), x.options());
+}
+
+std::tuple<at::Tensor, at::Tensor> rotate_pair_meta(at::Tensor x, at::Tensor x2, at::Tensor idx,
+                                                    at::Tensor theta, int64_t group_size,
+                                                    int64_t cta_m, int64_t row_pad) {
+  (void)idx;
+  (void)theta;
+  (void)group_size;
+  (void)cta_m;
+  (void)row_pad;
+  return {at::empty(x.sizes(), x.options()), at::empty(x2.sizes(), x2.options())};
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> rotate_pair_grad_meta(
+    at::Tensor x, at::Tensor g, at::Tensor idx, at::Tensor theta, int64_t group_size, int64_t cta_m,
+    int64_t row_pad) {
+  (void)idx;
+  (void)group_size;
+  (void)cta_m;
+  (void)row_pad;
+  const int64_t krot = theta.size(0);
+  const int64_t half_hidden = x.size(-1) / 2;
+  at::Tensor grad = at::empty({krot, half_hidden}, x.options().dtype(at::kFloat));
+  return {at::empty(x.sizes(), x.options()), at::empty(g.sizes(), g.options()), grad};
+}
+
+at::Tensor grad_theta_meta(at::Tensor rot, at::Tensor grad, at::Tensor idx_i, at::Tensor idx_j) {
+  (void)grad;
+  (void)idx_j;
+  return at::empty({idx_i.size(0)}, rot.options().dtype(at::kFloat));
+}
+
 TORCH_LIBRARY(gptqmodel_paro, m) {
   m.def("rotate(Tensor x, Tensor idx_ij, Tensor theta, Tensor? scales=None, int group_size=128, int cta_m=-1, int row_pad=-1, int reverse=0) -> Tensor");
   m.def("rotate_pair(Tensor x, Tensor x2, Tensor idx_ij, Tensor theta, int group_size=128, int cta_m=-1, int row_pad=-1) -> (Tensor, Tensor)");
@@ -1236,6 +1289,13 @@ TORCH_LIBRARY_IMPL(gptqmodel_paro, CUDA, m) {
   m.impl("rotate_pair_grad", &rotate_pair_grad);
   m.impl("launch_config", &rotate_launch_config);
   m.impl("grad_theta", &grad_theta);
+}
+
+TORCH_LIBRARY_IMPL(gptqmodel_paro, Meta, m) {
+  m.impl("rotate", &rotate_meta);
+  m.impl("rotate_pair", &rotate_pair_meta);
+  m.impl("rotate_pair_grad", &rotate_pair_grad_meta);
+  m.impl("grad_theta", &grad_theta_meta);
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_paro, CatchAll, m) {
