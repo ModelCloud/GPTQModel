@@ -3,6 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import inspect
+
+import torch
+
 from ..base import BaseQModel
 from ..local import LocalModelLoader
 
@@ -34,7 +38,44 @@ class TeleChat2QModel(BaseQModel):
     ]
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Residual modes and interleaved KV/RoPE are not scale-search-qualified.
-        return []
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        # `key_value` interleaves K and V per KV head, so its output rows are not
+        # the `dense` input channels even when the widths happen to match.
+        unsafe = {id(getattr(getattr(module, "self_attention", None), "key_value", None))}
+        if getattr(module, "apply_residual_connection_post_layernorm", False):
+            # The residual is the norm output itself; a norm fold would rescale it.
+            unsafe.update(id(getattr(module, name, None)) for name in ("input_layernorm", "post_attention_layernorm"))
+        return [node for node in nodes if id(node.get("prev_op")) not in unsafe]
+
+    def awq_module_replay_inputs(self, module, x, module_kwargs):
+        """Give TeleChat2's attention replay the arguments its forward requires.
+
+        AWQ scores the ``query``/``key_value`` scaling group by replaying their
+        common parent, ``TelechatAttention``, whose forward signature is
+        ``(hidden_states, residual, attention_mask, ...)``. The residual is an
+        additive constant shared by the reference and candidate outputs, so the
+        block input is enough for the scale search; a full causal bool mask
+        matches the calibration replay (no padding).
+        """
+
+        x, module_kwargs = super().awq_module_replay_inputs(module, x, module_kwargs)
+        try:
+            parameters = inspect.signature(module.forward).parameters
+        except (TypeError, ValueError):
+            return x, module_kwargs
+        if "residual" not in parameters:
+            return x, module_kwargs
+
+        kwargs = dict(module_kwargs)
+        if x.dim() == 2:
+            x = x.unsqueeze(0)
+        if not torch.is_tensor(kwargs.get("residual")):
+            kwargs["residual"] = x
+        if "attention_mask" in parameters and kwargs.get("attention_mask") is None:
+            seq_len = int(x.shape[-2])
+            kwargs["attention_mask"] = torch.ones(
+                seq_len, seq_len, dtype=torch.bool, device=x.device
+            ).triu(1)
+        return x, kwargs
 
 __all__ = ["TeleChat2QModel"]

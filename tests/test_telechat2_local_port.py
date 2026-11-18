@@ -253,7 +253,7 @@ def test_headless_checkpoint_fails_without_inventing_a_language_head(tmp_path):
 
 
 @pytest.mark.parametrize("kvheads,postnorm,offload", [(4, False, False), (2, True, True), (1, False, True)])
-def test_public_plain_awq_all_linears_and_two_exact_reloads(tmp_path, kvheads, postnorm, offload):
+def test_public_awq_scale_search_all_linears_and_two_exact_reloads(tmp_path, kvheads, postnorm, offload):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
@@ -264,7 +264,6 @@ def test_public_plain_awq_all_linears_and_two_exact_reloads(tmp_path, kvheads, p
     qcfg = AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=offload)
     wrapper = GPTQModel.load(str(tmp_path), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16,
                             attn_implementation="eager")
-    assert wrapper.awq_get_modules_for_scaling(wrapper.model.transformer.h[0], {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[4, 25718, 32471, 5, 9, 10, 11, 12]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
     dense = {key: value.to(torch.float16) for key, value in model.state_dict().items()}
@@ -274,9 +273,18 @@ def test_public_plain_awq_all_linears_and_two_exact_reloads(tmp_path, kvheads, p
         "self_attention.query", "self_attention.key_value", "self_attention.dense", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")}
     assert quantized == expected
     state = {name: value.detach().clone() for name, value in wrapper.model.state_dict().items()}
+    folded = set()
     for name, value in state.items():
-        if name in dense:
-            torch.testing.assert_close(value, dense[name], atol=0, rtol=0)
+        if name not in dense:
+            continue
+        if not postnorm and name.endswith("layernorm.weight") and ".h." in name:
+            # Scale search folds the q/kv and gate/up input scales into the decoder norms.
+            if not torch.equal(value, dense[name]):
+                folded.add(name)
+            continue
+        # With post-layernorm residuals no norm fold is emitted, so every norm is untouched.
+        torch.testing.assert_close(value, dense[name], atol=0, rtol=0)
+    assert bool(folded) is not postnorm
     with torch.inference_mode():
         output = wrapper.model(**calibration[0], use_cache=False).logits
     assert torch.isfinite(output).all()
