@@ -42,6 +42,14 @@ CONFIG = {
         "gptqmodel.models.ports.native.codegen.configuration_codegen",
         "CodeGenConfig"
     ],
+    "cohere": [
+        "gptqmodel.models.ports.native.cohere.configuration_cohere",
+        "CohereConfig"
+    ],
+    "cohere2": [
+        "gptqmodel.models.ports.native.cohere2.configuration_cohere2",
+        "Cohere2Config"
+    ],
     "cohere2_moe": [
         "gptqmodel.models.ports.native.cohere2_moe.configuration_cohere2_moe",
         "Cohere2MoeConfig"
@@ -254,6 +262,10 @@ CONFIG = {
         "gptqmodel.models.ports.native.glm4.configuration_glm4",
         "Glm4Config"
     ],
+    "glm46v": [
+        "gptqmodel.models.ports.native.glm46v.configuration_glm46v",
+        "Glm46VConfig"
+    ],
     "glm4_moe": [
         "gptqmodel.models.ports.native.glm4_moe.configuration_glm4_moe",
         "Glm4MoeConfig"
@@ -354,6 +366,10 @@ CONFIG = {
         "gptqmodel.models.ports.native.gptj.configuration_gptj",
         "GPTJConfig"
     ],
+    "granite": [
+        "gptqmodel.models.ports.native.granite.configuration_granite",
+        "GraniteConfig"
+    ],
     "granite_swa": [
         "gptqmodel.models.ports.native.granite_swa.configuration_granite_swa",
         "GraniteSWAConfig"
@@ -369,6 +385,10 @@ CONFIG = {
     "granitemoehybrid": [
         "gptqmodel.models.ports.native.granitemoehybrid.configuration_granitemoehybrid",
         "GraniteMoeHybridConfig"
+    ],
+    "helium": [
+        "gptqmodel.models.ports.native.helium.configuration_helium",
+        "HeliumConfig"
     ],
     "hrm_text": [
         "gptqmodel.models.ports.native.hrm_text.configuration_hrm_text",
@@ -469,6 +489,14 @@ CONFIG = {
     "lfm3": [
         "gptqmodel.models.ports.native.lfm3.configuration_lfm3",
         "Lfm3Config"
+    ],
+    "lfm3_vl": [
+        "gptqmodel.models.ports.native.lfm3_vl.configuration_lfm3_vl",
+        "Lfm3VlConfig"
+    ],
+    "lfm3_vl_vision": [
+        "gptqmodel.models.ports.native.lfm3_vl.configuration_lfm3_vl",
+        "Lfm3VlVisionConfig"
     ],
     "llama": [
         "gptqmodel.models.ports.native.llama.configuration_llama",
@@ -581,6 +609,10 @@ CONFIG = {
     "nemotron_h_omni": [
         "gptqmodel.models.ports.native.nemotron_h_omni.configuration_nemotron_h_omni",
         "NemotronH_Omni_Reasoning_V3_Config"
+    ],
+    "olmo": [
+        "gptqmodel.models.ports.native.olmo.configuration_olmo",
+        "OlmoConfig"
     ],
     "olmo2": [
         "gptqmodel.models.ports.native.olmo2.configuration_olmo2",
@@ -838,6 +870,10 @@ CONFIG = {
         "gptqmodel.models.ports.native.roberta.configuration_roberta",
         "RobertaConfig"
     ],
+    "seed_oss": [
+        "gptqmodel.models.ports.native.seed_oss.configuration_seed_oss",
+        "SeedOssConfig"
+    ],
     "siglip": [
         "gptqmodel.models.ports.native.siglip.configuration_siglip",
         "SiglipConfig"
@@ -862,6 +898,10 @@ CONFIG = {
         "gptqmodel.models.ports.native.siglip.configuration_siglip",
         "SiglipVisionConfig"
     ],
+    "smollm3": [
+        "gptqmodel.models.ports.native.smollm3.configuration_smollm3",
+        "SmolLM3Config"
+    ],
     "smolvlm": [
         "gptqmodel.models.ports.native.smolvlm.configuration_smolvlm",
         "SmolVLMConfig"
@@ -873,6 +913,10 @@ CONFIG = {
     "solar_open": [
         "gptqmodel.models.ports.native.solar_open.configuration_solar_open",
         "SolarOpenConfig"
+    ],
+    "stablelm": [
+        "gptqmodel.models.ports.native.stablelm.configuration_stablelm",
+        "StableLmConfig"
     ],
     "starcoder2": [
         "gptqmodel.models.ports.native.starcoder2.configuration_starcoder2",
@@ -943,6 +987,14 @@ MODEL = {
     "codegen": [
         "gptqmodel.models.ports.native.codegen.modeling_codegen",
         "CodeGenModel"
+    ],
+    "cohere": [
+        "gptqmodel.models.ports.native.cohere.modeling_cohere",
+        "CohereModel"
+    ],
+    "cohere2": [
+        "gptqmodel.models.ports.native.cohere2.modeling_cohere2",
+        "Cohere2Model"
     ],
     "cohere2_moe": [
         "gptqmodel.models.ports.native.cohere2_moe.modeling_cohere2_moe",
@@ -1112,6 +1164,10 @@ MODEL = {
         "gptqmodel.models.ports.native.glm4.modeling_glm4",
         "Glm4Model"
     ],
+    "glm46v": [
+        "gptqmodel.models.ports.native.glm46v.modeling_glm46v",
+        "Glm46VModel"
+    ],
     "glm4_moe": [
         "gptqmodel.models.ports.native.glm4_moe.modeling_glm4_moe",
         "Glm4MoeModel"
@@ -1208,6 +1264,10 @@ MODEL = {
         "gptqmodel.models.ports.native.gptj.modeling_gptj",
         "GPTJModel"
     ],
+    "granite": [
+        "gptqmodel.models.ports.native.granite.modeling_granite",
+        "GraniteModel"
+    ],
     "granite_swa": [
         "gptqmodel.models.ports.native.granite_swa.modeling_granite_swa",
         "GraniteSWAModel"
@@ -1223,6 +1283,10 @@ MODEL = {
     "granitemoehybrid": [
         "gptqmodel.models.ports.native.granitemoehybrid.modeling_granitemoehybrid",
         "GraniteMoeHybridModel"
+    ],
+    "helium": [
+        "gptqmodel.models.ports.native.helium.modeling_helium",
+        "HeliumModel"
     ],
     "hrm_text": [
         "gptqmodel.models.ports.native.hrm_text.modeling_hrm_text",
@@ -1307,6 +1371,14 @@ MODEL = {
     "lfm3": [
         "gptqmodel.models.ports.native.lfm3.modeling_lfm3",
         "Lfm3Model"
+    ],
+    "lfm3_vl": [
+        "gptqmodel.models.ports.native.lfm3_vl.modeling_lfm3_vl",
+        "Lfm3VlModel"
+    ],
+    "lfm3_vl_vision": [
+        "gptqmodel.models.ports.native.lfm3_vl.modeling_lfm3_vl",
+        "Lfm3VlVisionModel"
     ],
     "llama": [
         "gptqmodel.models.ports.native.llama.modeling_llama",
@@ -1395,6 +1467,10 @@ MODEL = {
     "nemotron_h": [
         "gptqmodel.models.ports.native.nemotron_h.modeling_nemotron_h",
         "NemotronHModel"
+    ],
+    "olmo": [
+        "gptqmodel.models.ports.native.olmo.modeling_olmo",
+        "OlmoModel"
     ],
     "olmo2": [
         "gptqmodel.models.ports.native.olmo2.modeling_olmo2",
@@ -1580,6 +1656,10 @@ MODEL = {
         "gptqmodel.models.ports.native.roberta.modeling_roberta",
         "RobertaModel"
     ],
+    "seed_oss": [
+        "gptqmodel.models.ports.native.seed_oss.modeling_seed_oss",
+        "SeedOssModel"
+    ],
     "siglip": [
         "gptqmodel.models.ports.native.siglip.modeling_siglip",
         "SiglipModel"
@@ -1596,6 +1676,10 @@ MODEL = {
         "gptqmodel.models.ports.native.siglip.modeling_siglip",
         "SiglipVisionModel"
     ],
+    "smollm3": [
+        "gptqmodel.models.ports.native.smollm3.modeling_smollm3",
+        "SmolLM3Model"
+    ],
     "smolvlm": [
         "gptqmodel.models.ports.native.smolvlm.modeling_smolvlm",
         "SmolVLMModel"
@@ -1607,6 +1691,10 @@ MODEL = {
     "solar_open": [
         "gptqmodel.models.ports.native.solar_open.modeling_solar_open",
         "SolarOpenModel"
+    ],
+    "stablelm": [
+        "gptqmodel.models.ports.native.stablelm.modeling_stablelm",
+        "StableLmModel"
     ],
     "starcoder2": [
         "gptqmodel.models.ports.native.starcoder2.modeling_starcoder2",
@@ -1665,6 +1753,14 @@ CAUSAL_LM = {
     "codegen": [
         "gptqmodel.models.ports.native.codegen.modeling_codegen",
         "CodeGenForCausalLM"
+    ],
+    "cohere": [
+        "gptqmodel.models.ports.native.cohere.modeling_cohere",
+        "CohereForCausalLM"
+    ],
+    "cohere2": [
+        "gptqmodel.models.ports.native.cohere2.modeling_cohere2",
+        "Cohere2ForCausalLM"
     ],
     "cohere2_moe": [
         "gptqmodel.models.ports.native.cohere2_moe.modeling_cohere2_moe",
@@ -1822,6 +1918,10 @@ CAUSAL_LM = {
         "gptqmodel.models.ports.native.gptj.modeling_gptj",
         "GPTJForCausalLM"
     ],
+    "granite": [
+        "gptqmodel.models.ports.native.granite.modeling_granite",
+        "GraniteForCausalLM"
+    ],
     "granite_swa": [
         "gptqmodel.models.ports.native.granite_swa.modeling_granite_swa",
         "GraniteSWAForCausalLM"
@@ -1837,6 +1937,10 @@ CAUSAL_LM = {
     "granitemoehybrid": [
         "gptqmodel.models.ports.native.granitemoehybrid.modeling_granitemoehybrid",
         "GraniteMoeHybridForCausalLM"
+    ],
+    "helium": [
+        "gptqmodel.models.ports.native.helium.modeling_helium",
+        "HeliumForCausalLM"
     ],
     "hrm_text": [
         "gptqmodel.models.ports.native.hrm_text.modeling_hrm_text",
@@ -1942,6 +2046,10 @@ CAUSAL_LM = {
         "gptqmodel.models.ports.native.nemotron_h.modeling_nemotron_h",
         "NemotronHForCausalLM"
     ],
+    "olmo": [
+        "gptqmodel.models.ports.native.olmo.modeling_olmo",
+        "OlmoForCausalLM"
+    ],
     "olmo2": [
         "gptqmodel.models.ports.native.olmo2.modeling_olmo2",
         "Olmo2ForCausalLM"
@@ -2026,9 +2134,21 @@ CAUSAL_LM = {
         "gptqmodel.models.ports.native.roberta.modeling_roberta",
         "RobertaForCausalLM"
     ],
+    "seed_oss": [
+        "gptqmodel.models.ports.native.seed_oss.modeling_seed_oss",
+        "SeedOssForCausalLM"
+    ],
+    "smollm3": [
+        "gptqmodel.models.ports.native.smollm3.modeling_smollm3",
+        "SmolLM3ForCausalLM"
+    ],
     "solar_open": [
         "gptqmodel.models.ports.native.solar_open.modeling_solar_open",
         "SolarOpenForCausalLM"
+    ],
+    "stablelm": [
+        "gptqmodel.models.ports.native.stablelm.modeling_stablelm",
+        "StableLmForCausalLM"
     ],
     "starcoder2": [
         "gptqmodel.models.ports.native.starcoder2.modeling_starcoder2",
@@ -2092,6 +2212,10 @@ IMAGE_TEXT_TO_TEXT = {
         "gptqmodel.models.ports.native.gemma4_unified.modeling_gemma4_unified",
         "Gemma4UnifiedForConditionalGeneration"
     ],
+    "glm46v": [
+        "gptqmodel.models.ports.native.glm46v.modeling_glm46v",
+        "Glm46VForConditionalGeneration"
+    ],
     "glm4v": [
         "gptqmodel.models.ports.native.glm4v.modeling_glm4v",
         "Glm4vForConditionalGeneration"
@@ -2135,6 +2259,10 @@ IMAGE_TEXT_TO_TEXT = {
     "lfm2_vl": [
         "gptqmodel.models.ports.native.lfm2_vl.modeling_lfm2_vl",
         "Lfm2VlForConditionalGeneration"
+    ],
+    "lfm3_vl": [
+        "gptqmodel.models.ports.native.lfm3_vl.modeling_lfm3_vl",
+        "Lfm3VlForConditionalGeneration"
     ],
     "llama4": [
         "gptqmodel.models.ports.native.llama4.modeling_llama4",
@@ -2258,6 +2386,10 @@ MULTIMODAL_LM = {
         "gptqmodel.models.ports.native.gemma4_unified.modeling_gemma4_unified",
         "Gemma4UnifiedForConditionalGeneration"
     ],
+    "glm46v": [
+        "gptqmodel.models.ports.native.glm46v.modeling_glm46v",
+        "Glm46VForConditionalGeneration"
+    ],
     "glm4v": [
         "gptqmodel.models.ports.native.glm4v.modeling_glm4v",
         "Glm4vForConditionalGeneration"
@@ -2305,6 +2437,10 @@ MULTIMODAL_LM = {
     "lfm2_vl": [
         "gptqmodel.models.ports.native.lfm2_vl.modeling_lfm2_vl",
         "Lfm2VlForConditionalGeneration"
+    ],
+    "lfm3_vl": [
+        "gptqmodel.models.ports.native.lfm3_vl.modeling_lfm3_vl",
+        "Lfm3VlForConditionalGeneration"
     ],
     "llama4": [
         "gptqmodel.models.ports.native.llama4.modeling_llama4",
@@ -2540,6 +2676,10 @@ PROCESSOR = {
         "gptqmodel.models.ports.native.gemma4_unified.processing_gemma4_unified",
         "Gemma4UnifiedProcessor"
     ],
+    "glm46v": [
+        "gptqmodel.models.ports.native.glm46v.processing_glm46v",
+        "Glm46VProcessor"
+    ],
     "glm4v": [
         "gptqmodel.models.ports.native.glm4v.processing_glm4v",
         "Glm4vProcessor"
@@ -2583,6 +2723,10 @@ PROCESSOR = {
     "lfm2_vl": [
         "gptqmodel.models.ports.native.lfm2_vl.processing_lfm2_vl",
         "Lfm2VlProcessor"
+    ],
+    "lfm3_vl": [
+        "gptqmodel.models.ports.native.lfm3_vl.processing_lfm3_vl",
+        "Lfm3VlProcessor"
     ],
     "llama4": [
         "gptqmodel.models.ports.native.llama4.processing_llama4",
@@ -2714,6 +2858,14 @@ TOKENIZER = {
         "gptqmodel.models.ports.native.gpt2.tokenization_gpt2",
         "GPT2Tokenizer"
     ],
+    "cohere": [
+        "gptqmodel.models.ports.native.cohere.tokenization_cohere",
+        "CohereTokenizer"
+    ],
+    "cohere2": [
+        "gptqmodel.models.ports.native.cohere.tokenization_cohere",
+        "CohereTokenizer"
+    ],
     "dbrx": [
         "gptqmodel.models.ports.native.gpt2.tokenization_gpt2",
         "GPT2Tokenizer"
@@ -2814,6 +2966,10 @@ TOKENIZER = {
         "gptqmodel.models.ports.native.gpt2.tokenization_gpt2",
         "GPT2Tokenizer"
     ],
+    "granite": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
     "granitemoe": [
         "transformers.tokenization_utils_tokenizers",
         "TokenizersBackend"
@@ -2883,6 +3039,10 @@ TOKENIZER = {
         "TokenizersBackend"
     ],
     "mpt": [
+        "gptqmodel.models.ports.native.gpt_neox.tokenization_gpt_neox",
+        "GPTNeoXTokenizer"
+    ],
+    "olmo": [
         "gptqmodel.models.ports.native.gpt_neox.tokenization_gpt_neox",
         "GPTNeoXTokenizer"
     ],
@@ -3022,6 +3182,10 @@ TOKENIZER = {
         "transformers.tokenization_utils_tokenizers",
         "TokenizersBackend"
     ],
+    "stablelm": [
+        "transformers.tokenization_utils_tokenizers",
+        "TokenizersBackend"
+    ],
     "starcoder2": [
         "gptqmodel.models.ports.native.gpt2.tokenization_gpt2",
         "GPT2Tokenizer"
@@ -3080,6 +3244,10 @@ IMAGE_PROCESSOR = {
         "gptqmodel.models.ports.native.gemma4_unified.image_processing_gemma4_unified",
         "Gemma4UnifiedImageProcessor"
     ],
+    "glm46v": [
+        "gptqmodel.models.ports.native.glm46v.image_processing_glm46v",
+        "Glm46VImageProcessor"
+    ],
     "glm4v": [
         "gptqmodel.models.ports.native.glm4v.image_processing_glm4v",
         "Glm4vImageProcessor"
@@ -3115,6 +3283,10 @@ IMAGE_PROCESSOR = {
     "lfm2_vl": [
         "gptqmodel.models.ports.native.lfm2_vl.image_processing_lfm2_vl",
         "Lfm2VlImageProcessor"
+    ],
+    "lfm3_vl": [
+        "gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl",
+        "Qwen2VLImageProcessor"
     ],
     "llama4": [
         "gptqmodel.models.ports.native.llama4.image_processing_llama4",
@@ -3234,6 +3406,10 @@ VIDEO_PROCESSOR = {
         "gptqmodel.models.ports.native.gemma4_unified.video_processing_gemma4_unified",
         "Gemma4UnifiedVideoProcessor"
     ],
+    "glm46v": [
+        "gptqmodel.models.ports.native.glm46v.video_processing_glm46v",
+        "Glm46VVideoProcessor"
+    ],
     "glm4v": [
         "gptqmodel.models.ports.native.glm4v.video_processing_glm4v",
         "Glm4vVideoProcessor"
@@ -3249,6 +3425,10 @@ VIDEO_PROCESSOR = {
     "kimi_k25": [
         "gptqmodel.models.ports.native.kimi_k25.video_processing_kimi_k25",
         "Kimi_K25VideoProcessor"
+    ],
+    "lfm3_vl": [
+        "gptqmodel.models.ports.native.qwen3_vl.video_processing_qwen3_vl",
+        "Qwen3VLVideoProcessor"
     ],
     "minicpmv4_6": [
         "gptqmodel.models.ports.native.minicpmv4_6.video_processing_minicpmv4_6",

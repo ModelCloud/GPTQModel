@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Vendor Transformers 5.23 model families into gptqmodel/models/ports/native.
 
-Usage: python scripts/vendor_transformers_ports.py <transformers_src_pkg_dir> <repo_root> <family> [<family> ...]
+Usage: python scripts/vendor_transformers_ports.py <transformers_src_pkg_dir> <repo_root> <family> [<family> ...] [--refresh]\n\nExisting family directories are kept (they carry GPT-QModel modernizations) unless --refresh is given.
 
 Copies configuration/modeling/processing/... modules verbatim, rewrites framework
 imports (`from ...x` -> `from transformers.x`), keeps sibling-family relative imports
@@ -19,7 +19,7 @@ from pathlib import Path
 
 SRC = Path(sys.argv[1])  # .../src/transformers
 REPO = Path(sys.argv[2])
-REQUESTED = sys.argv[3:]
+REQUESTED = [arg for arg in sys.argv[3:] if not arg.startswith("--")]
 MODELS = SRC / "models"
 DEST = REPO / "gptqmodel" / "models" / "ports" / "native"
 
@@ -219,7 +219,12 @@ def main():
         families = closure(sorted(set(families) | extra))
     DEST.mkdir(parents=True, exist_ok=True)
     manifest = {}
+    refresh = "--refresh" in sys.argv
     for family in families:
+        # Existing families carry GPT-QModel's 5.23 modernizations; never clobber them
+        # unless --refresh is given (a deliberate re-vendor from a new Transformers release).
+        if (DEST / family).is_dir() and not refresh:
+            continue
         manifest[family] = vendor(family)
     reg = registry(sorted(p.name for p in DEST.iterdir() if p.is_dir() and p.name not in {"auto", "__pycache__"}))
     (DEST / "auto").mkdir(exist_ok=True)

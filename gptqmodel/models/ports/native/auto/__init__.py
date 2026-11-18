@@ -117,8 +117,44 @@ for _table in (
 
 
 def _by_name(name):
+    """Resolve a class name to a vendored class or a Transformers framework class.
+
+    Model-family classes from ``transformers.models`` are never returned.
+    """
+
     entry = _CLASS_INDEX.get(name)
-    return None if entry is None else getattr(import_module(entry[0]), entry[1])
+    if entry is not None:
+        return getattr(import_module(entry[0]), entry[1])
+    import transformers
+
+    value = getattr(transformers, name, None)
+    module = getattr(value, "__module__", "")
+    if isinstance(value, type) and module.startswith("transformers.") and not module.startswith("transformers.models."):
+        return value
+    return None
+
+
+def _checkpoint_json(model_id_or_path, filename, **kwargs):
+    """Read a checkpoint JSON file (tokenizer/processor config) without importing checkpoint code."""
+
+    import json
+
+    from transformers.utils import cached_file
+
+    selection = {key: kwargs[key] for key in ("revision", "subfolder", "token", "cache_dir", "local_files_only") if key in kwargs}
+    path = cached_file(
+        model_id_or_path,
+        filename,
+        _raise_exceptions_for_missing_entries=False,
+        _raise_exceptions_for_gated_repo=False,
+        _raise_exceptions_for_connection_errors=False,
+        **selection,
+    )
+    if path is None:
+        return {}
+    with open(path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    return payload if isinstance(payload, dict) else {}
 
 
 def _checkpoint_model_type(model_id_or_path, **kwargs):
@@ -193,13 +229,8 @@ class NativeTokenizer:
 
     @classmethod
     def tokenizer_class(cls, model_id_or_path, **kwargs):
-        from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-
-        try:
-            declared = PreTrainedTokenizerBase.get_tokenizer_config(model_id_or_path, **kwargs).get("tokenizer_class")
-        except Exception:  # missing/unreadable tokenizer_config.json: use the model_type default
-            declared = None
-        if declared:
+        declared = _checkpoint_json(model_id_or_path, "tokenizer_config.json", **kwargs).get("tokenizer_class")
+        if isinstance(declared, str) and declared:
             found = _by_name(declared) or _by_name(declared.removesuffix("Fast"))
             if found is not None:
                 return found
@@ -225,7 +256,14 @@ class NativeProcessor:
     def from_pretrained(cls, model_id_or_path, *, config=None, tokenizer=None, **kwargs):
         kwargs.pop("trust_remote_code", None)
         model_type = getattr(config, "model_type", None) or _checkpoint_model_type(model_id_or_path, **kwargs)
-        processor_class = _resolve(_registry.PROCESSOR, model_type, "processor")
+        declared = None
+        for filename in ("processor_config.json", "preprocessor_config.json", "tokenizer_config.json"):
+            declared = _checkpoint_json(model_id_or_path, filename, **kwargs).get("processor_class")
+            if isinstance(declared, str) and declared:
+                break
+        processor_class = _by_name(declared) if declared else None
+        if processor_class is None:
+            processor_class = _resolve(_registry.PROCESSOR, model_type, "processor")
         arguments = []
         for attribute in processor_class.get_attributes():
             if "tokenizer" in attribute:
