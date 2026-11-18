@@ -34,7 +34,8 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
                              // fetch pipeline
           const int group_blocks,  // number of consecutive 16x16 blocks
                                    // with a separate quantization scale
-          const bool is_zp_float   // is zero point of float16 type?
+          const bool is_zp_float,  // is zero point of float16 type?
+          const bool hybrid  // hybrid tile-then-stripe schedule (large M only)
           >
 __global__ void Marlin(MARLIN_KERNEL_PARAMS);
 

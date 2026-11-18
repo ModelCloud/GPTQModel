@@ -68,3 +68,32 @@ each launch against an FP64 oracle.
 
 Source: vllm-project/vllm#24722 (scheduling only; its contiguous-K warp layout
 and single-copy scale fetch are not ported).
+
+## Prefill only: the 512-row gate
+
+The hybrid schedule is a separate compiled kernel (`hybrid=true` template
+argument), generated only for 64-row tiles. The host launches it only when the
+whole call has at least `MARLIN_HYBRID_MIN_ROWS` (512) rows
+(`gptq_marlin.cu`). Every smaller call, including all decode, runs the
+`hybrid=false` kernel, which compiles to the original schedule: no part-1
+state, and the original slice re-init that just advances the B pointers.
+
+Why: a clean A/B on a 124-SM A100 (int4 g128, fp16 and bf16, 7 shapes, M from
+1 to 8192, two runs per build) measured the ungated hybrid kernel at:
+
+| M | hybrid vs original |
+| --- | --- |
+| 1 | ~1 us slower per call on every shape (0.94-0.97x) |
+| 64 | up to 14% slower (0.86x fp16 5120x8192) |
+| 128-256 | neutral in fp16, ~1.05x in bf16 |
+| 512 | 1.04-1.11x in bf16 (6 of 7 shapes), ~1% slower in fp16 |
+| 1024-8192 | 1.06x median, up to 1.20x |
+
+The small-M cost appeared even where no part-1 round runs, so it comes from
+the extra code in the kernel, not from the schedule; a runtime check inside one
+kernel would not remove it, which is why the gate is a compile-time choice.
+
+| Call rows | Kernel | Output bits |
+| --- | --- | --- |
+| < 512 | original (`hybrid=false`) | same as before this PR |
+| >= 512, 64-row tiles | hybrid | may differ from the original (K is split differently); deterministic |

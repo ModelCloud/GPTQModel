@@ -414,6 +414,41 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
   return cache_size + MARLIN_SHARED_MEM_GUARD_BYTES <= max_shared_mem;
 }
 
+// Hybrid tile-then-stripe schedule (#5222, ported from vllm-project/vllm#24722)
+// is a prefill-only kernel. Each config is compiled twice: `hybrid=false` is
+// the original Marlin schedule, and `hybrid=true` (64-row tiles only, see
+// generate_kernels.py) first gives each threadblock whole output tiles over
+// all of K, then stripes only the remainder along K.
+//
+// Limit: the host launches the hybrid kernel only for calls with at least
+// MARLIN_HYBRID_MIN_ROWS (512) rows, i.e. prefill. Measured on a 124-SM A100
+// (int4 g128, fp16/bf16, 7 shapes, 2 runs per build), the hybrid kernel was
+// ~1 us slower per call at M=1 and up to 14% slower at M=64; at M=512 it was
+// 1.04-1.11x faster in bf16 (6 of 7 shapes) and ~1% slower in fp16; at
+// M >= 1024 it was 1.06x median (up to 1.20x) faster. At or below the limit the original kernel runs
+// unchanged, so decode and small batches keep their speed and exact bits. The hybrid
+// kernel sums K in a different order, so its output bits can differ from the
+// original kernel's for the same input; it is deterministic.
+constexpr int MARLIN_HYBRID_MIN_ROWS = 512;
+
+template <typename scalar_t, vllm::ScalarTypeId w_type_id,
+          vllm::ScalarTypeId s_type_id, int threads, int thread_m_blocks,
+          int thread_n_blocks, int thread_k_blocks, bool m_block_size_8,
+          int stages, int group_blocks, bool is_zp_float>
+MarlinFuncPtr marlin_kernel_for_schedule(bool hybrid) {
+  // Only 64-row tile configs have a hybrid instantiation; never name the
+  // hybrid symbol for the others.
+  if constexpr (thread_m_blocks == 4) {
+    if (hybrid)
+      return Marlin<scalar_t, w_type_id, s_type_id, threads, thread_m_blocks,
+                    thread_n_blocks, thread_k_blocks, m_block_size_8, stages,
+                    group_blocks, is_zp_float, true>;
+  }
+  return Marlin<scalar_t, w_type_id, s_type_id, threads, thread_m_blocks,
+                thread_n_blocks, thread_k_blocks, m_block_size_8, stages,
+                group_blocks, is_zp_float, false>;
+}
+
   #define _GET_IF(W_TYPE, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,   \
                   M_BLOCK_SIZE_8, STAGES, GROUP_BLOCKS, NUM_THREADS,           \
                   IS_ZP_FLOAT)                                                 \
@@ -432,9 +467,10 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
                      : (std::is_same<scalar_t, half>::value                    \
                             ? vllm::kFloat16                                   \
                             : vllm::kBFloat16));                               \
-      kernel = Marlin<scalar_t, W_TYPE.id(), S_TYPE.id(), NUM_THREADS,         \
-                      THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,       \
-                      M_BLOCK_SIZE_8, STAGES, GROUP_BLOCKS, IS_ZP_FLOAT>;      \
+      kernel = marlin_kernel_for_schedule<                                     \
+          scalar_t, W_TYPE.id(), S_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS,    \
+          THREAD_N_BLOCKS, THREAD_K_BLOCKS, M_BLOCK_SIZE_8, STAGES,            \
+          GROUP_BLOCKS, IS_ZP_FLOAT>(hybrid);                                  \
     }
 
   // COMMON: cases for (group_blocks in [-1, 2, 4, 8] and is_zp_float == false)
@@ -653,7 +689,8 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
                                 int thread_k_blocks, bool m_block_size_8,
                                 bool has_act_order, bool has_zp,
                                 int group_blocks, int num_threads,
-                                bool is_zp_float, int stages) {
+                                bool is_zp_float, int stages,
+                                bool hybrid = false) {
   int num_bits = q_type.size_bits();
   auto kernel = MarlinDefault;
   if (stages == pipe_stages) {
@@ -991,10 +1028,17 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
         ", has_zp = ", has_zp, ", is_zp_float = ", is_zp_float,
         ", stages = ", stages, ", max_shared_mem_new = ", max_shared_mem_new);
 
+    // Prefill only: the hybrid schedule runs only when the whole call (not
+    // this launch's split) has at least MARLIN_HYBRID_MIN_ROWS rows and
+    // this launch uses 64-row tiles. Any smaller call (decode, small batches)
+    // keeps the original kernel. Keyed on the call's rows so one call never
+    // mixes schedules by row count.
+    const bool use_hybrid =
+        prob_m >= MARLIN_HYBRID_MIN_ROWS && thread_m_blocks == 4;
     auto kernel = get_marlin_kernel<scalar_t>(
         q_type, thread_m_blocks, thread_n_blocks, thread_k_blocks,
         m_block_size_8, has_act_order, has_zp, group_blocks, num_threads,
-        is_zp_float, stages);
+        is_zp_float, stages, use_hybrid);
 
     if (kernel == MarlinDefault) {
       TORCH_CHECK(false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n,

@@ -106,3 +106,67 @@ def test_part2_restart_rebuilds_8bit_scale_rows(size_m, size_k, size_n, fmt):
         f"{fmt} M={size_m} K={size_k} N={size_n}: max err {err.max().item():.4g} "
         f"vs |oracle| max {oracle.abs().max().item():.4g}"
     )
+
+
+# Prefill-only gate: the host launches the hybrid kernel only for calls with at
+# least MARLIN_HYBRID_MIN_ROWS (512) rows. 511 rows runs the original striped
+# kernel and 512 rows the hybrid kernel, on a shape where the hybrid schedule
+# would take part-1 tiles at both sizes (7 or 8 M tiles x 32 N tiles > SMs).
+_GATE_ROWS = 512
+_GATE_SHAPES = ((_GATE_ROWS - 1, 2048, 8192), (_GATE_ROWS, 2048, 8192))
+
+
+def _marlin_root():
+    from pathlib import Path
+
+    return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "marlin"
+
+
+def test_hybrid_kernel_is_prefill_only_in_sources():
+    """The hybrid schedule is compiled only for 64-row tiles and gated at >= 512 rows."""
+
+    import re
+
+    root = _marlin_root()
+    gemm_cu = (root / "gptq_marlin.cu").read_text(encoding="utf-8")
+    template_h = (root / "marlin_template.h").read_text(encoding="utf-8")
+
+    assert f"constexpr int MARLIN_HYBRID_MIN_ROWS = {_GATE_ROWS};" in gemm_cu
+    assert "prob_m >= MARLIN_HYBRID_MIN_ROWS && thread_m_blocks == 4;" in gemm_cu
+    # Without `hybrid` the kernel keeps the original schedule.
+    assert "if (hybrid && global_mn_tiles > gridDim.x) {" in template_h
+    assert "if constexpr (!hybrid) {" in template_h
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_marlin_generate_kernels", root / "generate_kernels.py")
+    generator = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(generator)
+    except ModuleNotFoundError as exc:  # jinja2 is a build-time dependency
+        pytest.skip(f"generator unavailable: {exc}")
+    # Marlin<scalar, w, s, threads, m_blocks, n_blocks, k_blocks, m8, stages, group, zp_float, hybrid>
+    pattern = re.compile(r"Marlin<[^,]+, [^,]+, [^,]+, \d+, (\d+), \d+, \d+, (?:true|false), "
+                         r"pipe_stages, -?\d+, (?:true|false), (true|false)>")
+    hybrid_m_blocks = set()
+    plain = hybrid = 0
+    for text in generator.build_expected_kernels(root).values():
+        for m_blocks, is_hybrid in pattern.findall(text):
+            if is_hybrid == "true":
+                hybrid += 1
+                hybrid_m_blocks.add(int(m_blocks))
+            else:
+                plain += 1
+    assert plain and hybrid
+    assert hybrid_m_blocks == {4}
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("fp32_reduce", [True, False], ids=["fp32-reduce", "fp16-reduce"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+@pytest.mark.parametrize("size_m,size_k,size_n", _GATE_SHAPES, ids=["original-511", "hybrid-512"])
+def test_gate_boundary_matches_oracle(size_m, size_k, size_n, dtype, fp32_reduce):
+    """Both sides of the 512-row gate are correct and deterministic."""
+
+    test_part1_to_part2_transition_matches_oracle(size_m, size_k, size_n, dtype, "gptq", fp32_reduce)

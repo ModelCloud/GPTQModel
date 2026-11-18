@@ -229,7 +229,9 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
                              // fetch pipeline
           const int group_blocks,  // number of consecutive 16x16 blocks
                                    // with a separate quantization scale
-          const bool is_zp_float   // is zero point of float16 type?
+          const bool is_zp_float,  // is zero point of float16 type?
+          const bool hybrid  // hybrid tile-then-stripe schedule (#5222); the
+                             // host enables it only for large M
           >
 __global__ void Marlin(
     const int4* __restrict__ A0,  // fp16 input matrix of shape mxk
@@ -335,7 +337,9 @@ __global__ void Marlin(
   int part1_mn_iters = 0;
   bool in_part2 = false;
 
-  if (global_mn_tiles > gridDim.x) {
+  // Without `hybrid` part 1 is empty and every tile is striped along K from
+  // the start, exactly as in the original Marlin schedule.
+  if (hybrid && global_mn_tiles > gridDim.x) {
     // Keep a striped remainder of at least a third of the grid, so the last
     // round still spreads its K work over enough threadblocks.
     part2_mn_tiles = global_mn_tiles % gridDim.x;
@@ -355,18 +359,30 @@ __global__ void Marlin(
     }
   }
 
-  int slice_row = 0;
   // Part 1 numbers whole tiles from blockIdx.x with a stride of gridDim.x.
-  int slice_col_par = blockIdx.x;
-  int slice_col;
+  // Without `hybrid` the first slice is the block's first K stripe.
+  int slice_row = hybrid ? 0 : (iters * blockIdx.x) % k_tiles;
+  int slice_col_par = hybrid ? blockIdx.x : (iters * blockIdx.x) / k_tiles;
+  int slice_col = slice_col_par;
   int slice_iters = k_tiles;  // number of threadblock tiles in the current slice
   // total number of active threadblocks in the current slice
-  int slice_count = 1;
+  int slice_count = hybrid ? 1 : 0;
   // index of threadblock in current slice; numbered bottom to top
   int slice_idx = 0;
 
   int par_id = 0;
   int locks_off = 0;
+
+  if constexpr (!hybrid) {
+    // We can easily implement parallel problem execution by just remapping
+    // indices and advancing global pointers
+    if (slice_col_par >= n_tiles) {
+      A += (slice_col_par / n_tiles) * 16 * thread_m_blocks * lda / 8;
+      C += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n / 8;
+      slice_col = slice_col_par % n_tiles;
+      par_id = slice_col_par / n_tiles;
+    }
+  }
 
   if (part2_mn_tiles >= gridDim.x) {
     // when part2_mn_tiles >= sms
@@ -379,7 +395,7 @@ __global__ void Marlin(
   // Compute all information about the current part-2 slice which is required
   // for synchronization.
   bool first_init = true;
-  auto init_part2_slice = [&]() {
+  auto init_part2_slice = [&](bool first) {
     slice_iters =
         iters * (blockIdx.x + 1) - (k_tiles * slice_col_par + slice_row);
     if (slice_iters < 0 || slice_col_par >= part2_mn_tiles) slice_iters = 0;
@@ -408,7 +424,7 @@ __global__ void Marlin(
       locks_off++;
     }
 
-    if (first_init && use_atomic_add && slice_count > 1 && slice_idx == 0) {
+    if (first && use_atomic_add && slice_count > 1 && slice_idx == 0) {
       constexpr int threads_per_m = 16 * thread_n_blocks / 8;
       int m_per_thread =
           div_ceil(thread_m_blocks * 16, threads / threads_per_m);
@@ -449,7 +465,12 @@ __global__ void Marlin(
     }
   };
 
-  auto init_slice = [&]() {
+  auto init_slice = [&](bool first = false) {
+    if constexpr (!hybrid) {
+      // Original schedule: every slice is a K stripe.
+      init_part2_slice(first);
+      return;
+    }
     if (!in_part2 && !part1_mn_iters) {
       // Switch to the striped part 2 over the remaining tiles.
       in_part2 = true;
@@ -463,12 +484,12 @@ __global__ void Marlin(
     if (!in_part2) {
       init_part1_slice();
     } else {
-      init_part2_slice();
+      init_part2_slice(first_init);
       first_init = false;
     }
   };
 
-  init_slice();
+  init_slice(true);
 
   // A sizes/strides
 
@@ -1803,7 +1824,7 @@ __global__ void Marlin(
         // only the last block in a slice actually writes the result
         write_result(last);
       slice_row = 0;
-      if (!in_part2) {
+      if (hybrid && !in_part2) {
         slice_col_par += gridDim.x;
       } else {
         slice_col_par++;
@@ -1813,17 +1834,29 @@ __global__ void Marlin(
       init_slice();
 
       if (slice_iters) {
-        // The first part-2 slice may start in the middle of K, so the read
-        // indices are rebuilt from (slice_row, slice_col).
         a_gl_rd = a_gl_stride * (threadIdx.x / a_gl_rd_delta_o) +
                   (threadIdx.x % a_gl_rd_delta_o);
-        a_gl_rd += a_gl_rd_delta_o * slice_row;
-        b_gl_rd = b_gl_stride * (threadIdx.x / b_sh_stride_threads) +
-                  (threadIdx.x % b_sh_stride_threads) * b_thread_vecs;
-        b_gl_rd += b_sh_stride * slice_col + b_gl_rd_delta_o * slice_row;
+        if constexpr (hybrid) {
+          // The first part-2 slice may start in the middle of K, so the read
+          // indices are rebuilt from (slice_row, slice_col).
+          a_gl_rd += a_gl_rd_delta_o * slice_row;
+          b_gl_rd = b_gl_stride * (threadIdx.x / b_sh_stride_threads) +
+                    (threadIdx.x % b_sh_stride_threads) * b_thread_vecs;
+          b_gl_rd += b_sh_stride * slice_col + b_gl_rd_delta_o * slice_row;
   #pragma unroll
-        for (int i = 0; i < b_sh_wr_iters; i++)
-          B_ptr[i] = B + b_gl_rd_delta_i * i + b_gl_rd;
+          for (int i = 0; i < b_sh_wr_iters; i++)
+            B_ptr[i] = B + b_gl_rd_delta_i * i + b_gl_rd;
+        } else {
+          // Original schedule: the next slice starts at K row 0 of the next
+          // column, so the read pointers just advance.
+  #pragma unroll
+          for (int i = 0; i < b_sh_wr_iters; i++)
+            B_ptr[i] += b_sh_stride - b_gl_rd_delta_o * k_tiles;
+          if (slice_col == 0) {
+  #pragma unroll
+            for (int i = 0; i < b_sh_wr_iters; i++) B_ptr[i] -= b_gl_stride;
+          }
+        }
 
         bias_gl_rd = (thread_n_blocks * 16) * slice_col + 8 * threadIdx.x;
         // Update slice k/n for scales loading
@@ -1836,7 +1869,7 @@ __global__ void Marlin(
         } else {
           s_gl_rd = s_sh_stride * slice_col + threadIdx.x;
           zp_gl_rd = zp_sh_stride * slice_col + threadIdx.x;
-          if constexpr (group_blocks != -1) {
+          if constexpr (hybrid && group_blocks != -1) {
             // Same row offsets as the initial s_gl_rd / zp_gl_rd above.
             s_gl_rd += s_gl_stride *
                        ((thread_k_blocks * slice_row) / group_blocks) /
