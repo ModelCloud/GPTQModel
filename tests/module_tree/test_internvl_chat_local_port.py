@@ -71,7 +71,8 @@ def test_prequant_hooks_preserve_embedding_and_rotary_owners(architecture, monke
     qmodel.pre_quantize_generate_hook_end()
     assert model.get_input_embeddings() is visited[0]
     rotary_paths = qmodel._decoder_rotary_paths()
-    assert len(rotary_paths) == (2 if architecture == "InternLM2ForCausalLM" else 1)
+    # Every decoder, including the InternLM2 port, owns one model-level rotary module on 5.23.
+    assert len(rotary_paths) == 1
     assert all(model.get_submodule(path) in visited for path in rotary_paths)
 
 
