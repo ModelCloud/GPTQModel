@@ -2789,10 +2789,17 @@ def ModelLoader(cls):
         # Install the kernel policy before any quantized module is built.
         configure_kernel(kernel)
 
-        # post-quant is safe with GIL=0 and torch.compile/graphs
-
-        import torch._dynamo
-        torch._dynamo.reset()
+        # A load must not reset dynamo's caches: ``torch._dynamo.reset()``
+        # discards every compiled frame in the process, including the graphs of
+        # other models that are already ``optimize()``d and still serving, and
+        # running it while another thread executes one of those frames crashed
+        # dynamo's frame evaluation (#5209). The load's bf16 default-dtype
+        # window is instead serialized with every compiled call through
+        # ``model_load_lock()`` (``gptqmodel/utils/torch.py``), so a concurrent
+        # trace can neither capture nor restore it. Compiled frames that belong
+        # to a discarded model are dropped with it: ``release_compile_trace_garbage``
+        # reclaims the trace cycles that keep a dropped model alive (#5020), so a
+        # load does not need a process-wide reset for them.
         default_dtype_before = torch.get_default_dtype()
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,

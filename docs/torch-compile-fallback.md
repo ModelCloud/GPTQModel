@@ -15,25 +15,39 @@ the first invocation, after `post_init()` has already returned. A failing
 compile worker therefore escaped from a normal forward and aborted the inference
 request.
 
-## First-use compile shares the model-load lock (#5127)
+## Compiled calls share the model-load lock (#5127, #5209)
 
 Model construction serializes the process-global `torch.set_default_dtype`
-through `_MODEL_LOAD_LOCK` (`gptqmodel/models/loader.py:1449`): transformers'
+through `_MODEL_LOAD_LOCK` (`gptqmodel/models/loader.py:1552`): transformers'
 `from_pretrained`/`from_config` saves, sets and restores it. Dynamo's
 `preserve_global_state` does the same save/restore around every trace
-(`torch/_dynamo/convert_frame.py`), including the lazy first trace of
-`TorchLinear.dequantize_weight`. Before this change that trace ran outside the
-lock, so a compile could capture a load's bf16 window and restore bf16 after the
-load restored fp32, leaving the process default dtype wrong for the rest of the
-process; or it could restore bf16 while the load was still asserting its
-invariant, failing a valid load.
+(`torch/_dynamo/convert_frame.py`), and its `GLOBAL_STATE` guard re-reads the
+default dtype on every compiled call. Before #5159 the lazy first trace of
+`TorchLinear.dequantize_weight` ran outside the lock, so a compile could capture
+a load's bf16 window and restore bf16 after the load restored fp32, leaving the
+process default dtype wrong for the rest of the process; or it could restore
+bf16 while the load was still asserting its invariant, failing a valid load.
 
-`model_global_state_lock()` (`gptqmodel/utils/torch.py:432`) resolves the same
-re-entrant loader lock. The callable and module compile proxies hold it only
-for the first (compiling) invocation; `TorchLinear.optimize()`
-(`gptqmodel/nn_modules/qlinear/torch.py:467`) holds it while it constructs the
-dynamo wrapper. Once the first call succeeds, `state["compiled"]` is set and
-steady-state forwards never take the lock.
+#5159 held the lock only for the first invocation. Every later call still ran
+lock-free, and a later call re-enters dynamo tracing whenever a guard changes --
+a load's bf16 window is exactly such a change. Two failures followed (#5209):
+
+- `from_quantized` also called `torch._dynamo.reset()` on every load. That wipes
+  every compiled frame in the process, including another model's `optimize()`d
+  forward and the caller's own `torch.compile` functions, while their threads
+  may be running them. On a GIL build that segfaults inside dynamo's frame
+  evaluation.
+- Without the reset, the later call re-traced inside the bf16 window and
+  restored bf16 after the load restored fp32 (the #5127 failure again), or the
+  load failed its own `assert_loaded_model_state` invariant.
+
+`model_global_state_lock()` (`gptqmodel/utils/torch.py:492`) resolves the same
+re-entrant loader lock. The callable and module compile proxies now hold it for
+**every** call, not just the first, and `from_quantized` no longer resets dynamo
+at all. The lock is uncontended in steady state, so the cost is one re-entrant
+acquire per compiled call; `TorchLinear.optimize()`
+(`gptqmodel/nn_modules/qlinear/torch.py:472`) holds the same lock while it
+constructs the dynamo wrapper.
 
 ```mermaid
 flowchart TD
@@ -43,34 +57,32 @@ flowchart TD
     D --> E["restore fp32; assert_loaded_model_state"]
     E --> F["release lock; load returns"]
 
-    G["thread B: first TorchLinear forward"] --> H["_install_callable_compile_fallback.call"]
-    H --> I{"state.compiled?"}
-    I -- yes --> J["compiled call, lock-free steady state"]
+    G["thread B: any compiled call"] --> H["_install_callable_compile_fallback.call"]
+    H --> I{"outer torch.compile already tracing?"}
+    I -- yes --> J["inline eager body; no lock, no config write (#5224)"]
     I -- no --> K["acquire _MODEL_LOAD_LOCK"]
-    K --> L{"state.compiled? (re-check)"}
-    L -- yes --> J
-    L -- no --> M["compiled call: dynamo preserve_global_state saves/restores dtype"]
-    M --> N{"first call succeeded?"}
-    N -- yes --> O["state.compiled = true; return result"]
-    N -- compiler failure --> P["state.fallback = true; warn once; eager result"]
-    N -- user error --> Q["re-raise; no retry"]
+    K --> L["compiled call: dynamo preserve_global_state saves/restores dtype"]
+    L --> M{"call succeeded?"}
+    M -- yes --> N["release lock; return result"]
+    M -- compiler failure --> O["state.fallback = true; warn once; eager result"]
+    M -- user error --> P["re-raise; no retry"]
 
     B -. "thread B waits here" .-> K
-    style Q fill:#f8d7da,stroke:#b02a37
-    style P fill:#fff3cd,stroke:#997404
+    style P fill:#f8d7da,stroke:#b02a37
+    style O fill:#fff3cd,stroke:#997404
 ```
 
 The lock is an `RLock` and the loader already holds it during
 `TorchLinear.post_init()`, so the nested `optimize()` entry is re-entrant and
-cannot deadlock. A compile that is reached from an ordinary forward waits for
-the in-flight load instead of mutating the dtype under it.
+cannot deadlock. A compiled call that is reached from an ordinary forward waits
+for the in-flight load instead of tracing through its dtype window.
 
-### Failure path without the lock
+### Failure paths without the shared lock
 
 ```mermaid
 flowchart TD
-    A["thread A: load sets default dtype bf16"] --> B["thread B: compile starts"]
-    B --> C["preserve_global_state captures bf16"]
+    A["thread A: load sets default dtype bf16"] --> B["thread B: later compiled call"]
+    B --> C["guard sees bf16; preserve_global_state captures bf16"]
     A --> D["load restores fp32"]
     C --> E["compile restores bf16"]
     D --> F{"load asserts before or after the restore?"}
@@ -78,17 +90,23 @@ flowchart TD
     F -- after --> H["process default dtype stays bf16"]
     H --> I["later torch.ones / nn.Linear silently use bf16"]
     G --> J["valid load fails"]
+
+    K["thread A: load calls torch._dynamo.reset()"] --> L["wipes thread B's compiled frame"]
+    L --> M["thread B is executing or tracing that frame"]
+    M --> N["Segmentation fault in dynamo eval_frame"]
     style G fill:#f8d7da,stroke:#b02a37
     style H fill:#f8d7da,stroke:#b02a37
     style J fill:#f8d7da,stroke:#b02a37
+    style N fill:#f8d7da,stroke:#b02a37
 ```
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| First `TorchLinear` trace vs. load | no shared lock; compile ran from the forward thread while `_MODEL_LOAD_LOCK` was held by a load | `model_global_state_lock()` in `_install_callable_compile_fallback.call` (`utils/torch.py:448`) and `_install_module_compile_fallback.forward` (`utils/torch.py:495`) |
-| `optimize()` wrapper construction | unlocked (`nn_modules/qlinear/torch.py:435` at `e2f9676c6`) | lock held around `torch_compile` and the adapter (`nn_modules/qlinear/torch.py:467`) |
+| Compiled call vs. load | #5159 took the lock for the first call only; later calls could re-trace through a load's dtype window | `model_global_state_lock()` around every call in `_install_callable_compile_fallback.call` and `_install_module_compile_fallback.forward` (`utils/torch.py`) |
+| `from_quantized` dynamo reset | unconditional `torch._dynamo.reset()` discarded every other model's compiled frames and crashed a concurrent forward (#5209) | no reset; a load never discards another model's frames |
+| `optimize()` wrapper construction | unlocked (`nn_modules/qlinear/torch.py:435` at `e2f9676c6`) | lock held around `torch_compile` and the adapter (`nn_modules/qlinear/torch.py:472`) |
 | Dynamo-internal lookup failure | `KeyError` from `get_guard_fail_reason` escaped a plain forward | `LookupError` whose innermost frame is under `torch/_dynamo/` is a compiler failure (`utils/torch.py:338`) |
-| Steady-state forwards | lock-free | still lock-free: `state["compiled"]` short-circuits the lock |
+| Steady-state forwards | lock-free | one uncontended `RLock` acquire per compiled call |
 
 ## Old flow
 

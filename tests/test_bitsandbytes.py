@@ -32,6 +32,7 @@ from gptqmodel.nn_modules.qlinear.bitsandbytes import (
     _cpu_packed_max_rows,
     _dequantize_int8_weight,
     _int8_chunked_fp32_epilogue,
+    _int8_vectorwise_quant_native_chunked,
 )
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import BitsAndBytesConfig
@@ -458,6 +459,181 @@ def test_bitsandbytes_int8_epilogue_above_int32_elements_does_not_terminate_proc
     # The trigger must have been the size limit, not an unrelated reroute.
     assert at_limit["native_epilogue_calls"] == 0
     assert at_limit["max_rel_error"] <= 2e-3
+
+
+@pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the bitsandbytes INT8 input limit is CUDA/HIP-only",
+)
+def test_bitsandbytes_int8_chunked_native_quantizer_matches_single_launch(monkeypatch):
+    """#5205: row chunking must not change the native quantizer's values."""
+
+    from gptqmodel.nn_modules.qlinear.bitsandbytes import import_bitsandbytes
+
+    bnb = import_bitsandbytes()
+    bnb_module = sys.modules[BitsAndBytesLinear.__module__]
+    torch.manual_seed(5205)
+    x = torch.randn(101, 8192, device="cuda", dtype=torch.float16) * 5.0
+    # A huge-magnitude row and an all-zero row exercise both scale branches.
+    x[0] *= 9000.0
+    x[1].zero_()
+
+    expected_codes, expected_stats, expected_outliers = bnb.functional.int8_vectorwise_quant(
+        x,
+        threshold=0.0,
+    )
+    assert expected_outliers is None
+
+    # Force 17-row chunks so the boundary rows are exercised.
+    monkeypatch.setattr(bnb_module, "_INT8_NATIVE_QUANT_MAX_ELEMENTS", 17 * 8192)
+    codes, stats, outliers = _int8_vectorwise_quant_native_chunked(x, in_features=8192)
+
+    assert outliers is None
+    assert torch.equal(codes, expected_codes)
+    assert torch.equal(stats, expected_stats)
+
+
+def _int8_activation_limit_child_script(limit_rows: int, over_limit_rows: int) -> str:
+    """Forward a no-bias FP16 INT8 layer at and just above the 2**31 input limit.
+
+    ``int8_vectorwise_quant`` faults with ``cudaErrorIllegalAddress`` once the
+    flattened activation holds 2**31 elements or more, and the sticky error
+    kills the whole CUDA context, so the forward runs in a child process.
+    """
+
+    return textwrap.dedent(
+        f"""
+        import json
+        import torch
+        import torch.nn as nn
+        from gptqmodel.nn_modules.qlinear.bitsandbytes import (
+            BitsAndBytesLinear,
+            import_bitsandbytes,
+        )
+
+        in_features, out_features = 8192, 128
+        bnb = import_bitsandbytes()
+        native_calls = []
+        native = bnb.functional.int8_vectorwise_quant
+
+        def counted_native(x, *args, **kwargs):
+            native_calls.append(x.numel())
+            return native(x, *args, **kwargs)
+
+        bnb.functional.int8_vectorwise_quant = counted_native
+
+        torch.manual_seed(5205)
+        linear = nn.Linear(in_features, out_features, bias=False).to(torch.float16).eval()
+        kernel = BitsAndBytesLinear(
+            bits=8,
+            group_size=-1,
+            sym=True,
+            desc_act=False,
+            in_features=in_features,
+            out_features=out_features,
+            bias=False,
+            dtype=torch.float16,
+        )
+        kernel.pack_original(linear=linear, scales=None, zeros=None)
+        kernel.post_init()
+        kernel = kernel.eval().cuda()
+
+        results = {{}}
+        for rows in ({limit_rows}, {over_limit_rows}):
+            native_calls.clear()
+            x = torch.zeros(rows, in_features, device="cuda", dtype=torch.float16)
+            x[-4:] = torch.randn(4, in_features, device="cuda", dtype=torch.float16) * 4.0
+            x[0] = torch.randn(in_features, device="cuda", dtype=torch.float16) * 4.0
+            with torch.inference_mode():
+                out = kernel(x)
+            # Independent FP64 A8W8 oracle over the first and last rows: it
+            # quantizes the activation rows itself and never reads a kernel
+            # intermediate.
+            weight64 = kernel.weight.to(torch.float64) * (
+                kernel.weight_scb.to(torch.float64) / 127.0
+            ).unsqueeze(1)
+            probe = torch.cat([x[:1], x[-4:]]).to(torch.float64)
+            absmax = probe.abs().amax(dim=1)
+            scale = (absmax / 127.0).clamp_min(torch.finfo(torch.float64).tiny)
+            codes = (probe / scale[:, None]).round().clamp(-127, 127)
+            expected = (codes * scale[:, None]) @ weight64.t()
+            actual = torch.cat([out[:1], out[-4:]]).to(torch.float64)
+            denom = expected.abs().amax(dim=1).clamp_min(1e-6)
+            error = ((actual - expected).abs().amax(dim=1) / denom).max().item()
+            results[str(rows)] = {{
+                "shape": list(out.shape),
+                "dtype": str(out.dtype),
+                "finite": bool(torch.isfinite(out).all()),
+                "max_rel_error": error,
+                "native_quant_calls": len(native_calls),
+                "max_native_quant_elements": max(native_calls) if native_calls else 0,
+            }}
+            del out, x
+            torch.cuda.empty_cache()
+        print("INT8_ACTIVATION_LIMIT_JSON:" + json.dumps(results))
+        """
+    )
+
+
+@pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the bitsandbytes INT8 input limit is CUDA/HIP-only",
+)
+def test_bitsandbytes_int8_activation_above_int32_elements_does_not_terminate_process():
+    """#5205: rows x in_features >= 2**31 must not reach one native quantizer launch.
+
+    The layer holds 8192 x 128 weights, so M=262143 rows is the last activation
+    that fits the native quantizer's 32-bit indexing and M=262145 is the first
+    row count above it. Pre-fix the native launch faults with
+    ``cudaErrorIllegalAddress``, which poisons the CUDA context and surfaces as
+    ``cublasLt ran into an error!`` from the next call. The forward must stay in
+    a child process and exit cleanly at both sizes.
+    """
+
+    in_features = 8192
+    limit_rows = (2**31 - 1) // in_features
+    over_limit_rows = limit_rows + 2
+    # x (FP16), the INT8 codes, and one native chunk of INT8 codes dominate.
+    needed = over_limit_rows * in_features * (2 + 1 + 1)
+    free_bytes, _ = torch.cuda.mem_get_info()
+    if free_bytes < needed:
+        pytest.skip(
+            f"needs about {needed // 2**30} GiB of free device memory for the "
+            "2**31-element activation"
+        )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _int8_activation_limit_child_script(limit_rows, over_limit_rows)],
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
+    assert completed.returncode == 0, completed.stderr[-4000:]
+
+    markers = [
+        line for line in completed.stdout.splitlines() if line.startswith("INT8_ACTIVATION_LIMIT_JSON:")
+    ]
+    assert markers, completed.stdout[-4000:]
+    results = json.loads(markers[-1].split("INT8_ACTIVATION_LIMIT_JSON:", 1)[1])
+
+    below = results[str(limit_rows)]
+    assert below["shape"] == [limit_rows, 128]
+    assert below["dtype"] == "torch.float16"
+    assert below["finite"]
+    # One launch is the control that the guard is a boundary, not a reroute.
+    assert below["native_quant_calls"] == 1
+    assert below["max_native_quant_elements"] == limit_rows * in_features
+    assert below["max_rel_error"] <= 2e-3
+
+    above = results[str(over_limit_rows)]
+    assert above["shape"] == [over_limit_rows, 128]
+    assert above["dtype"] == "torch.float16"
+    assert above["finite"]
+    assert above["native_quant_calls"] >= 2
+    assert above["max_native_quant_elements"] < 2**31
+    assert above["max_rel_error"] <= 2e-3
 
 
 @pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")

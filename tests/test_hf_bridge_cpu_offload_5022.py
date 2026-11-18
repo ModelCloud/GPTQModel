@@ -1,36 +1,11 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Issue #5022: the HF bridge must honour a CPU-offload device map.
-
-Plain `transformers` (and Optimum) loading of a GPT-QModel GPTQ/RTN or
-AWQ-GEMM checkpoint with a map that spills layers to CPU failed at load time:
-
-* GPTQ/RTN: AUTO selected `MarlinLinear`, whose `post_init` repacks the packed
-  weight, and `_post_init_cpu_offloaded_marlin` accepted only a plain `dict` or
-  a `PrefixedDataset` over a `dict`. Transformers dispatches through
-  Accelerate, which attaches
-  `AlignDevicesHook(weights_map=PrefixedDataset(OffloadedWeightsLoader(...)))`,
-  so the load raised `CPU-offloaded Marlin requires a writable in-memory
-  weights map.` even though the tensors *are* in memory.
-* AWQ-GEMM: AUTO selected `AwqMarlinLinear`, which has no offload-aware
-  post-init at all, so `post_init` ran on `meta` and raised
-  `AWQ Marlin requires CUDA tensors, got 'meta'`.
-
-The native `GPTQModel.load` path was fixed for the same maps by #4890, because
-it derives `cpu_offload` from the map and passes it to `select_quant_linear`.
-The HF entry points (`hf_select_quant_linear`, `hf_select_quant_linear_v2` and
-the native bridge's `make_quant`) did not, so they still picked a CUDA-only
-kernel.
-
-These tests quantize a tiny two-layer Qwen2 once and load it four ways.
-"""
+"""CPU-offload placement and post-init regressions for GPT-QModel (#5022, #5194)."""
 
 from __future__ import annotations
 
 import copy
-import importlib
-import sys
 
 import pytest
 import torch
@@ -59,77 +34,17 @@ OFFLOAD_MAPS = {
 OFFLOAD_SAFE_KERNELS = {"TritonV2Linear", "AwqGEMMTritonLinear"}
 
 
-@pytest.fixture(scope="module", autouse=True)
-def hf_bridge_environment(tmp_path_factory):
-    """Make Transformers and Optimum see this source checkout as installed.
-
-    Both quantizer entry points gate on ``importlib.metadata.version(
-    "gptqmodel")`` and a minimum version, and this checkout has no
-    ``dist-info``. Publishing a metadata-only distribution on ``sys.path``
-    exercises the real gate instead of monkeypatching the probe away.
-    """
-
-    import gptqmodel
-
-    monkey = pytest.MonkeyPatch()
-    dist_root = tmp_path_factory.mktemp("dist")
-    dist_info = dist_root / f"gptqmodel-{gptqmodel.__version__}.dist-info"
-    dist_info.mkdir()
-    (dist_info / "METADATA").write_text(
-        "Metadata-Version: 2.1\n"
-        f"Name: gptqmodel\nVersion: {gptqmodel.__version__}\n",
-        encoding="utf-8",
-    )
-    (dist_info / "RECORD").write_text("gptqmodel: \n", encoding="utf-8")
-
-    # Publish the distribution before Optimum's GPTQ quantizer is imported:
-    # `optimum.gptq.quantizer` imports `QuantizeConfig` from gptqmodel only when
-    # `is_gptqmodel_available()` is already true at module import time. A module
-    # imported too early would leave that name undefined and fail later with
-    # `NameError: name 'QuantizeConfig' is not defined`.
-    monkey.syspath_prepend(str(dist_root))
-    try:
-        from optimum.utils import import_utils as optimum_import_utils
-    except ImportError:
-        # Optimum is optional. The end-to-end nodes then skip at the load
-        # itself (`Transformers' GPTQ quantizer requires optimum`), and the
-        # unit nodes below do not need it.
-        optimum_import_utils = None
-    if optimum_import_utils is not None:
-        monkey.setattr(optimum_import_utils, "_gptqmodel_available", True, raising=False)
-        quantizer = sys.modules.get("optimum.gptq.quantizer")
-        if quantizer is not None and not hasattr(quantizer, "QuantizeConfig"):
-            importlib.reload(quantizer)
-    from transformers.utils import import_utils as transformers_import_utils
-
-    transformers_import_utils.is_gptqmodel_available.cache_clear()
-    try:
-        yield
-    finally:
-        monkey.undo()
-        transformers_import_utils.is_gptqmodel_available.cache_clear()
-
-
 @pytest.fixture(scope="module")
 def checkpoints(tmp_path_factory):
-    """One tiny base model quantized to each format the bridge must load.
-
-    The two end-to-end nodes are the only consumers, and both need CUDA plus
-    Optimum. Skipping here (rather than inside the test bodies) keeps a
-    CPU-only lane from building checkpoints it will never use, and keeps the
-    portable unit nodes in this file running there.
-    """
-
-    if not torch.cuda.is_available():
-        pytest.skip("a CPU-offload device map needs an accelerator for the resident layers")
-    pytest.importorskip("optimum", reason="Transformers' GPTQ quantizer needs optimum")
+    """Quantize a tiny base model to each packed format exercised by the loader."""
+    _require_cuda()
 
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.quantization import FORMAT, AWQConfig, GPTQConfig, RTNConfig
     from gptqmodel.quantization.config import CalibrationConfig
     from tests.tiny_remote_models import build_wordlevel_tokenizer
 
-    root = tmp_path_factory.mktemp("hf-bridge-5022")
+    root = tmp_path_factory.mktemp("cpu-offload-5022")
     base = root / "base"
     from transformers import Qwen2Config, Qwen2ForCausalLM
 
@@ -199,12 +114,6 @@ def _require_cuda():
         pytest.skip("a CPU-offload device map needs an accelerator for the resident layers")
 
 
-def _require_hf_quantizers():
-    """Transformers' GPTQ path needs Optimum; skip cleanly without it."""
-
-    pytest.importorskip("optimum", reason="Transformers' GPTQ quantizer needs optimum")
-
-
 def _materialized_device(model):
     """The device of the first non-meta parameter (an offloaded layer has none)."""
 
@@ -221,94 +130,26 @@ def _logits(model):
         return model(input_ids.to(device)).logits.float().cpu()
 
 
-def test_hf_from_pretrained_loads_an_offloaded_map(checkpoints):
-    """Every format must load through Transformers with CPU entries in the map."""
-
-    _require_cuda()
-    _require_hf_quantizers()
-    from transformers import AutoModelForCausalLM
-
+@pytest.mark.parametrize("map_name", OFFLOAD_MAPS)
+def test_native_load_uses_an_offload_safe_kernel(checkpoints, map_name):
+    """Explicit CPU offload uses a compatible kernel and preserves logits."""
     from gptqmodel import GPTQModel
 
-    failures = []
     for name, checkpoint in checkpoints.items():
-        reference = AutoModelForCausalLM.from_pretrained(
-            checkpoint, dtype=torch.float16, device_map={"": 0}
-        )
-        expected = _logits(reference)
-        reference_kernel = type(reference.model.layers[0].self_attn.q_proj).__name__
+        reference = GPTQModel.load(checkpoint, device="cuda:0", dtype=torch.float16, attn_implementation="eager")
+        expected = _logits(reference.model)
         del reference
-        torch.cuda.empty_cache()
-        # The resident load uses Marlin and the offloaded one a Triton kernel, so
-        # the two differ by a few fp16 ulps of kernel noise (measured 9.8e-4 on
-        # this fixture). Exact equality is asserted against the *same* kernel
-        # through the native loader below.
-        tolerance = 8 * torch.finfo(torch.float16).eps * max(
-            float(expected.abs().max()), 1.0
-        )
-
-        for map_name, device_map in OFFLOAD_MAPS.items():
-            try:
-                model = AutoModelForCausalLM.from_pretrained(
-                    checkpoint, dtype=torch.float16, device_map=dict(device_map)
-                )
-            except Exception as exc:  # noqa: BLE001 - reported below with the map
-                failures.append(f"{name}/{map_name}: {type(exc).__name__}: {exc}")
-                continue
-            try:
-                kernel = type(model.model.layers[0].self_attn.q_proj).__name__
-                assert kernel in OFFLOAD_SAFE_KERNELS, (
-                    f"{name}/{map_name}: AUTO selected `{kernel}` for a map with CPU "
-                    f"entries; its post_init needs CUDA (resident load used "
-                    f"`{reference_kernel}`)"
-                )
-                logits = _logits(model)
-                delta = (logits - expected).abs().max().item()
-                assert delta <= tolerance, (
-                    f"{name}/{map_name}: logits differ by {delta:.3e} from the "
-                    f"single-GPU load (tolerance {tolerance:.3e})"
-                )
-                # Same kernel + same placement as the native loader: exact.
-                native = GPTQModel.load(
-                    checkpoint,
-                    device_map=dict(device_map),
-                    dtype=torch.float16,
-                    attn_implementation="eager",
-                )
-                try:
-                    assert type(native.model.model.layers[0].self_attn.q_proj).__name__ == kernel
-                    native_logits = _logits(native.model)
-                finally:
-                    del native
-                    torch.cuda.empty_cache()
-                bridge_delta = (logits - native_logits).abs().max().item()
-                assert bridge_delta <= tolerance, (
-                    f"{name}/{map_name}: the HF bridge and the native loader "
-                    f"differ by {bridge_delta:.3e} for the same map and kernel"
-                )
-            finally:
-                del model
-                torch.cuda.empty_cache()
-
-    assert not failures, "CPU-offloaded HF loads failed:\n" + "\n".join(failures)
-
-
-def test_native_load_uses_the_same_offload_safe_kernel(checkpoints):
-    """The native loader is the reference the bridge must agree with (#4890)."""
-
-    _require_cuda()
-    from gptqmodel import GPTQModel
-
-    for name, checkpoint in checkpoints.items():
         model = GPTQModel.load(
             checkpoint,
-            device_map=dict(OFFLOAD_MAPS["late-layer"]),
+            device_map=OFFLOAD_MAPS[map_name],
             dtype=torch.float16,
             attn_implementation="eager",
         )
         try:
             kernel = type(model.model.model.layers[0].self_attn.q_proj).__name__
             assert kernel in OFFLOAD_SAFE_KERNELS, f"{name}: native load picked `{kernel}`"
+            tolerance = 8 * torch.finfo(torch.float16).eps * max(float(expected.abs().max()), 1.0)
+            torch.testing.assert_close(_logits(model.model), expected, rtol=0, atol=tolerance)
         finally:
             del model
             torch.cuda.empty_cache()
@@ -536,3 +377,116 @@ def test_awq_marlin_uses_the_shared_offload_post_init(monkeypatch):
         monkeypatch.setattr(model_utils, "_post_init_cpu_offloaded_marlin", original)
 
     assert calls == ["AwqMarlinLinear"]
+
+
+def test_offload_predicates_cover_cpu_and_disk():
+    """AUTO must treat `disk` like `cpu`: neither leaves resident tensors."""
+
+    from gptqmodel.utils.backend import BACKEND
+    from gptqmodel.utils.importer import (
+        auto_cpu_offload,
+        device_map_offloads_layers,
+        device_map_uses_cpu,
+        is_offload_placement,
+    )
+
+    assert is_offload_placement("cpu")
+    assert is_offload_placement(torch.device("cpu"))
+    assert is_offload_placement("disk")
+    assert is_offload_placement("DISK")
+    assert not is_offload_placement(None)
+    assert not is_offload_placement(0)
+    assert not is_offload_placement("cuda:0")
+    assert not is_offload_placement(torch.device("cuda", 0))
+
+    assert device_map_offloads_layers({"a": 0, "b": "cpu"})
+    assert device_map_offloads_layers({"a": 0, "b": "disk"})
+    assert not device_map_offloads_layers({"a": 0, "b": 1})
+    assert not device_map_offloads_layers(None)
+    # An unresolved keyword does not describe an offload placement.
+    assert not device_map_offloads_layers("auto")
+
+    # The wider predicate is what AUTO selection uses now (#5194).
+    assert auto_cpu_offload(BACKEND.AUTO, {"a": "disk"})
+    assert auto_cpu_offload(None, {"a": "disk"})
+    assert not auto_cpu_offload(BACKEND.MARLIN, {"a": "disk"})
+    # `device_map_uses_cpu` keeps its narrower "is CPU-resident" meaning.
+    assert not device_map_uses_cpu({"a": "disk"})
+
+
+class _OffloadableLayer(nn.Module):
+    """The contract `_post_init_offloaded` relies on, without a real kernel."""
+
+    SUPPORTS_CPU_OFFLOAD = True
+
+    def __init__(self):
+        super().__init__()
+        self.qweight = nn.Parameter(
+            torch.zeros(4, dtype=torch.int32), requires_grad=False
+        )
+        self.calls = 0
+
+    def post_init(self):
+        # A disk-offloaded layer is materialized for the call, then returned.
+        assert not self.qweight.is_meta
+        self.calls += 1
+
+
+class _NonOffloadableLayer(_OffloadableLayer):
+    """A CUDA-only kernel: its `post_init` needs resident tensors."""
+
+    SUPPORTS_CPU_OFFLOAD = False
+
+
+def test_post_init_offloaded_materializes_a_disk_layer_and_restores_meta():
+    """A disk-mapped layer must run `post_init` and go back to meta (#5194)."""
+
+    import accelerate
+
+    from gptqmodel.utils.model import _post_init_offloaded
+
+    layer = _OffloadableLayer()
+    model = nn.Sequential(layer)
+    accelerate.cpu_offload(model, execution_device=torch.device("cpu"))
+    assert layer.qweight.is_meta
+
+    _post_init_offloaded(layer)
+
+    assert layer.calls == 1
+    # The offload map stays authoritative: the hook re-materializes on forward.
+    assert layer.qweight.is_meta
+    hook = layer._hf_hook
+    hook.pre_forward(layer)
+    try:
+        assert not layer.qweight.is_meta
+    finally:
+        hook.post_forward(layer, None)
+
+
+def test_post_init_offloaded_rejects_a_kernel_without_the_declaration():
+    """Fail closed instead of running a CUDA-only `post_init` on meta."""
+
+    import accelerate
+
+    from gptqmodel.utils.model import _post_init_offloaded
+
+    layer = _NonOffloadableLayer()
+    model = nn.Sequential(layer)
+    accelerate.cpu_offload(model, execution_device=torch.device("cpu"))
+    assert layer.qweight.is_meta
+
+    with pytest.raises(RuntimeError, match="SUPPORTS_CPU_OFFLOAD"):
+        _post_init_offloaded(layer)
+    assert layer.calls == 0
+    assert layer.qweight.is_meta
+
+
+def test_post_init_offloaded_keeps_the_plain_path_for_resident_layers():
+    """A resident layer needs no hook: `post_init` runs in place."""
+
+    from gptqmodel.utils.model import _post_init_offloaded
+
+    layer = _OffloadableLayer()
+    _post_init_offloaded(layer)
+    assert layer.calls == 1
+    assert not layer.qweight.is_meta

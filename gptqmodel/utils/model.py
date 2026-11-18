@@ -2042,6 +2042,55 @@ def _cpu_offload_writable_storage(weights_map):
     )
 
 
+def _layer_offload_hook(module):
+    """Return the single layer-level Accelerate offload hook that owns `module`."""
+
+    from accelerate.hooks import AlignDevicesHook, SequentialHook
+
+    # An offload hook may be wrapped by other hooks, but it must own this layer.
+    attached = getattr(module, "_hf_hook", None)
+    hooks = attached.hooks if isinstance(attached, SequentialHook) else (attached,)
+    offload_hooks = [
+        hook for hook in hooks if isinstance(hook, AlignDevicesHook) and hook.offload
+    ]
+    if len(offload_hooks) != 1 or offload_hooks[0].place_submodules:
+        raise RuntimeError(
+            "An offloaded quantized layer requires a layer-level Accelerate "
+            "offload hook."
+        )
+    return offload_hooks[0]
+
+
+def _post_init_offloaded(module) -> None:
+    """Run `post_init` for a CPU- or disk-offloaded layer.
+
+    A CPU-mapped layer normally holds real CPU tensors, so the plain call works.
+    A disk-mapped layer is a meta placeholder whose tensors are re-read from the
+    offload map on every forward: materialize it for the call and let the hook
+    return it to meta. Only kernels that declare `SUPPORTS_CPU_OFFLOAD` qualify,
+    because their `post_init` does not rewrite the persistent tensors and the
+    offload map therefore stays authoritative (#5194).
+    """
+    if not module.qweight.is_meta:
+        module.post_init()
+        return
+    if not getattr(type(module), "SUPPORTS_CPU_OFFLOAD", False):
+        raise RuntimeError(
+            f"`{type(module).__name__}` was dispatched to a disk-offloaded layer, "
+            "but its `post_init` needs resident tensors and it does not declare "
+            "`SUPPORTS_CPU_OFFLOAD`. Load with `offload_state_dict=False`, or "
+            "select a backend whose kernel declares `SUPPORTS_CPU_OFFLOAD`."
+        )
+    hook = _layer_offload_hook(module)
+    hook.pre_forward(module)
+    try:
+        module.post_init()
+    finally:
+        # `AlignDevicesHook.post_forward` only returns the tensors to meta; it
+        # does not write the offload map, so the disk copy stays authoritative.
+        hook.post_forward(module, None)
+
+
 def _post_init_cpu_offloaded_marlin(module) -> None:
     """Refresh the writable CPU snapshot after Marlin changes its packed layout.
 
@@ -2055,19 +2104,7 @@ def _post_init_cpu_offloaded_marlin(module) -> None:
         module.post_init()
         return
 
-    from accelerate.hooks import AlignDevicesHook, SequentialHook
-
-    # An offload hook may be wrapped by other hooks, but it must own this layer.
-    attached = getattr(module, "_hf_hook", None)
-    hooks = attached.hooks if isinstance(attached, SequentialHook) else (attached,)
-    offload_hooks = [
-        hook for hook in hooks if isinstance(hook, AlignDevicesHook) and hook.offload
-    ]
-    if len(offload_hooks) != 1 or offload_hooks[0].place_submodules:
-        raise RuntimeError(
-            "CPU-offloaded Marlin requires a layer-level Accelerate offload hook."
-        )
-    hook = offload_hooks[0]
+    hook = _layer_offload_hook(module)
     # CPU offload can keep layer entries in a shared dictionary under a prefix.
     # Transformers' `dispatch_model` attaches
     # `PrefixedDataset(OffloadedWeightsLoader(...))`, whose in-memory
@@ -2096,8 +2133,8 @@ def _post_init_cpu_offloaded_marlin(module) -> None:
             raise RuntimeError(
                 "CPU-offloaded Marlin requires a writable in-memory weights map: "
                 f"{disk_backed} are disk-backed entries that `post_init` cannot "
-                "rewrite. Load with `offload_state_dict=False`, or let AUTO select "
-                "a kernel that declares `SUPPORTS_CPU_OFFLOAD`."
+                "rewrite. Load with `offload_state_dict=False`, or select a "
+                "backend whose kernel declares `SUPPORTS_CPU_OFFLOAD`."
             )
         raise RuntimeError(
             f"CPU-offloaded Marlin is missing weights map entries: {missing}."
@@ -2248,7 +2285,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
         elif isinstance(submodule, (MarlinLinear, AwqMarlinLinear)):
             _post_init_cpu_offloaded_marlin(submodule)
         elif isinstance(submodule, BaseQuantLinear):
-            submodule.post_init()
+            _post_init_offloaded(submodule)
 
     if quantize_config is not None and quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
         from ..nn_modules.qlinear.w4a_llama_stream import install_w4a_llama_stream

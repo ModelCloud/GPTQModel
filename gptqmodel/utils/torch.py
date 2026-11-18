@@ -494,11 +494,12 @@ def model_global_state_lock():
 
     transformers' ``from_pretrained``/``from_config`` saves, sets and restores
     ``torch.set_default_dtype``; dynamo's ``preserve_global_state`` does the
-    same around every trace. The loader serializes model construction with
-    this re-entrant lock, so the lazy first compile must take it too: otherwise
-    a compile that starts inside a load's bf16 window restores bf16 after the
-    load restored fp32 (or trips ``assert_loaded_model_state``). Look the lock
-    up through the loader accessor so tests and callers share one object.
+    same around every trace, and its ``GLOBAL_STATE`` guard re-reads the dtype
+    on every compiled call. The loader serializes model construction with this
+    re-entrant lock, so a compiled call must take it too: otherwise a call that
+    re-traces inside a load's bf16 window restores bf16 after the load restored
+    fp32 (or trips ``assert_loaded_model_state``). Look the lock up through the
+    loader accessor so tests and callers share one object.
     """
     from ..models.loader import model_load_lock
 
@@ -523,7 +524,7 @@ def _install_callable_compile_fallback(original: Callable, compiled: Callable, f
     has executed yet when the compiler fails, so the eager retry is exact.
     """
     label = _compile_label(original)
-    state = {"fallback": False, "compiled": False}
+    state = {"fallback": False}
 
     def call(*args, **kwargs):
         if state["fallback"]:
@@ -546,20 +547,18 @@ def _install_callable_compile_fallback(original: Callable, compiled: Callable, f
                 _warn_compile_fallback(label, exc)
                 return original(*args, **kwargs)
 
-        if state["compiled"]:
-            return run_compiled()
-        # Dynamo saves/restores the process-global default dtype while it
-        # traces, exactly like model construction. Hold the loader's lock only
-        # for the first (compiling) call; steady-state calls stay lock-free.
+        # Dynamo saves/restores the process-global default dtype around every
+        # trace and its GLOBAL_STATE guard re-reads it on every call. Any call
+        # can re-trace when a guard changes -- not just the first -- so every
+        # call is serialized with model construction; otherwise a load's bf16
+        # window is captured by a re-trace and restored after the load restored
+        # fp32, or a guard failure re-traces while the load resets dynamo
+        # (#5127, #5209). The lock is re-entrant, so nested compiled calls are
+        # cheap and cannot deadlock.
         with model_global_state_lock():
             if state["fallback"]:
                 return original(*args, **kwargs)
-            if state["compiled"]:
-                return run_compiled()
-            result = run_compiled()
-            if not state["fallback"]:
-                state["compiled"] = True
-            return result
+            return run_compiled()
 
     functools.update_wrapper(call, original)
     # Keep the dynamo wrapper chain truthful: this proxy really does forward to
@@ -594,7 +593,7 @@ def _install_module_compile_fallback(module: torch.nn.Module, compiled, fullgrap
         return module
     label = _compile_label(module)
     compiled_forward = compiled.forward
-    state = {"fallback": False, "compiled": False}
+    state = {"fallback": False}
 
     def forward(*args, **kwargs):
         if state["fallback"]:
@@ -616,19 +615,14 @@ def _install_module_compile_fallback(module: torch.nn.Module, compiled, fullgrap
                 _warn_compile_fallback(label, exc)
                 return module(*args, **kwargs)
 
-        if state["compiled"]:
-            return run_compiled()
-        # The first model forward is where dynamo traces and mutates the
-        # process-global default dtype; serialize it with model construction.
+        # Every forward can re-trace and mutate the process-global default
+        # dtype (see the callable proxy above); serialize it with model
+        # construction. The loader lock is re-entrant, so a module forward that
+        # reaches this proxy again from the same thread stays cheap.
         with model_global_state_lock():
             if state["fallback"]:
                 return module(*args, **kwargs)
-            if state["compiled"]:
-                return run_compiled()
-            result = run_compiled()
-            if not state["fallback"]:
-                state["compiled"] = True
-            return result
+            return run_compiled()
 
     compiled.forward = forward
     return compiled

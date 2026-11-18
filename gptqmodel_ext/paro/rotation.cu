@@ -32,7 +32,8 @@
 template <typename scalar_t, int CTA_M, int GROUP_SIZE, int KROT, bool USE_SCALE, int ROW_PAD>
 __global__ void rotate_kernel(const scalar_t *__restrict__ x, scalar_t *__restrict__ out,
                               const int16_t *__restrict__ idx_ij, const scalar_t *__restrict__ theta,
-                              const scalar_t *__restrict__ scales, int s, int h, int reverse) {
+                              const scalar_t *__restrict__ scales, int64_t s, int64_t h,
+                              int reverse) {
   constexpr int ROW_STRIDE = CTA_M + ROW_PAD;
   __shared__ scalar_t x_grp[ROW_STRIDE * GROUP_SIZE];
 
@@ -66,8 +67,8 @@ __global__ void rotate_kernel_bf16_float_workspace(const __nv_bfloat16 *__restri
                                                    __nv_bfloat16 *__restrict__ out,
                                                    const int16_t *__restrict__ idx_ij,
                                                    const __nv_bfloat16 *__restrict__ theta,
-                                                   const __nv_bfloat16 *__restrict__ scales, int s,
-                                                   int h, int reverse) {
+                                                   const __nv_bfloat16 *__restrict__ scales,
+                                                   int64_t s, int64_t h, int reverse) {
   constexpr int ROW_STRIDE = CTA_M + ROW_PAD;
   // FP32 workspace: the whole Givens sweep accumulates in FP32 and store_group
   // performs the single BF16 rounding (#4317).  Explicit 16-byte alignment
@@ -122,11 +123,11 @@ torch::Tensor rotate_launcher_bf16_float_workspace(at::Tensor x, at::Tensor idx_
                                                   at::Tensor theta, at::Tensor scales,
                                                   int reverse) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
-  int h = x.size(-1);
+  int64_t h = x.size(-1);
   TORCH_CHECK(h % GROUP_SIZE == 0, "h must be divisible by GROUP_SIZE");
   int groups_per_row = h / GROUP_SIZE;
   constexpr int pn = GROUP_SIZE / 2;
-  int seq_len = x.numel() / x.size(-1);
+  int64_t seq_len = x.numel() / x.size(-1);
   auto options = torch::TensorOptions().dtype(x.dtype()).device(x.device());
   at::Tensor out = torch::empty(x.sizes(), options);
   bool has_scale = scales.defined() && scales.numel() > 0;
@@ -136,7 +137,7 @@ torch::Tensor rotate_launcher_bf16_float_workspace(at::Tensor x, at::Tensor idx_
                      : scales.scalar_type() == at::kBFloat16 ? scales
                                                              : scales.to(at::kBFloat16);
 
-  dim3 grid((seq_len + CTA_M - 1) / CTA_M, groups_per_row);
+  dim3 grid(static_cast<unsigned int>((seq_len + CTA_M - 1) / CTA_M), groups_per_row);
   dim3 block(pn);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   auto *x_p = reinterpret_cast<__nv_bfloat16 *>(x.data_ptr<c10::BFloat16>());
@@ -158,11 +159,11 @@ template <int KROT, int CTA_M, int GROUP_SIZE, int ROW_PAD>
 torch::Tensor rotate_launcher(at::Tensor x, at::Tensor idx_ij, at::Tensor theta,
                               at::Tensor scales, int reverse) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
-  int h = x.size(-1);
+  int64_t h = x.size(-1);
   TORCH_CHECK(h % GROUP_SIZE == 0, "h must be divisible by GROUP_SIZE");
   int groups_per_row = h / GROUP_SIZE;
   constexpr int pn = GROUP_SIZE / 2;
-  int seq_len = x.numel() / x.size(-1);
+  int64_t seq_len = x.numel() / x.size(-1);
   auto options = torch::TensorOptions().dtype(x.dtype()).device(x.device());
   at::Tensor out = torch::empty(x.sizes(), options);
   bool has_scale = scales.defined() && scales.numel() > 0;
@@ -173,7 +174,7 @@ torch::Tensor rotate_launcher(at::Tensor x, at::Tensor idx_ij, at::Tensor theta,
                      : scales.scalar_type() == dtype ? scales
                                                      : scales.to(x.dtype());
 
-  dim3 grid((seq_len + CTA_M - 1) / CTA_M, groups_per_row);
+  dim3 grid(static_cast<unsigned int>((seq_len + CTA_M - 1) / CTA_M), groups_per_row);
   dim3 block(pn);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
@@ -246,7 +247,7 @@ template <typename scalar_t, int CTA_M, int GROUP_SIZE, int KROT, int ROW_PAD>
 __global__ void rotate_pair_kernel(const scalar_t *__restrict__ x, const scalar_t *__restrict__ x2,
                                    scalar_t *__restrict__ out, scalar_t *__restrict__ out2,
                                    const int16_t *__restrict__ idx_ij,
-                                   const scalar_t *__restrict__ theta, int s, int h) {
+                                   const scalar_t *__restrict__ theta, int64_t s, int64_t h) {
   constexpr int ROW_STRIDE = CTA_M + ROW_PAD;
   __shared__ scalar_t x_grp[ROW_STRIDE * GROUP_SIZE];
 
@@ -283,11 +284,11 @@ template <int KROT, int CTA_M, int GROUP_SIZE, int ROW_PAD>
 std::tuple<at::Tensor, at::Tensor> rotate_pair_launcher(at::Tensor x, at::Tensor x2,
                                                         at::Tensor idx_ij, at::Tensor theta) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
-  const int h = static_cast<int>(x.size(-1));
+  const int64_t h = static_cast<int64_t>(x.size(-1));
   TORCH_CHECK(h % GROUP_SIZE == 0, "h must be divisible by GROUP_SIZE");
   const int groups_per_row = h / GROUP_SIZE;
   constexpr int pn = GROUP_SIZE / 2;
-  const int seq_len = static_cast<int>(x.numel() / x.size(-1));
+  const int64_t seq_len = static_cast<int64_t>(x.numel() / x.size(-1));
   auto options = torch::TensorOptions().dtype(x.dtype()).device(x.device());
   at::Tensor out = torch::empty(x.sizes(), options);
   at::Tensor out2 = torch::empty(x.sizes(), options);
@@ -295,7 +296,7 @@ std::tuple<at::Tensor, at::Tensor> rotate_pair_launcher(at::Tensor x, at::Tensor
   const at::ScalarType dtype = x.scalar_type();
   auto theta_cast = theta.scalar_type() == dtype ? theta : theta.to(dtype);
 
-  dim3 grid((seq_len + CTA_M - 1) / CTA_M, groups_per_row * 2);
+  dim3 grid(static_cast<unsigned int>((seq_len + CTA_M - 1) / CTA_M), groups_per_row * 2);
   dim3 block(pn);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
@@ -407,7 +408,7 @@ __global__ void rotate_pair_grad_kernel(const scalar_t *__restrict__ x,
                                         scalar_t *__restrict__ out_g,
                                         const int16_t *__restrict__ idx_ij,
                                         const scalar_t *__restrict__ theta,
-                                        float *__restrict__ partials, int s, int h,
+                                        float *__restrict__ partials, int64_t s, int64_t h,
                                         int granules) {
   constexpr int ROW_STRIDE = CTA_M + ROW_PAD;
   constexpr int HALF_GROUP = GROUP_SIZE / 2;
@@ -544,18 +545,19 @@ template <int KROT, int CTA_M, int GROUP_SIZE, int ROW_PAD>
 std::tuple<at::Tensor, at::Tensor, at::Tensor>
 rotate_pair_grad_launcher(at::Tensor x, at::Tensor g, at::Tensor idx_ij, at::Tensor theta) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
-  const int h = static_cast<int>(x.size(-1));
+  const int64_t h = static_cast<int64_t>(x.size(-1));
   TORCH_CHECK(h % GROUP_SIZE == 0, "h must be divisible by GROUP_SIZE");
   const int groups_per_row = h / GROUP_SIZE;
   constexpr int pn = GROUP_SIZE / 2;
-  const int seq_len = static_cast<int>(x.numel() / x.size(-1));
-  const int row_tiles = std::max(1, (seq_len + CTA_M - 1) / CTA_M);
+  const int64_t seq_len = static_cast<int64_t>(x.numel() / x.size(-1));
+  const int row_tiles = static_cast<int>(std::max<int64_t>(1, (seq_len + CTA_M - 1) / CTA_M));
   constexpr int GRANULE = kRotatePairGradRowGranule;
-  const int granules = std::max(1, (seq_len + GRANULE - 1) / GRANULE);
+  const int granules = static_cast<int>(std::max<int64_t>(1, (seq_len + GRANULE - 1) / GRANULE));
   auto options = torch::TensorOptions().dtype(x.dtype()).device(x.device());
   at::Tensor out_x = torch::empty(x.sizes(), options);
   at::Tensor out_g = torch::empty(x.sizes(), options);
-  at::Tensor partials = at::empty({KROT, granules, h / 2}, x.options().dtype(at::kFloat));
+  at::Tensor partials = at::empty({KROT, granules, static_cast<int64_t>(h) / 2},
+                                  x.options().dtype(at::kFloat));
   at::Tensor grad = at::empty({KROT, h / 2}, x.options().dtype(at::kFloat));
 
   const at::ScalarType dtype = x.scalar_type();
@@ -590,7 +592,8 @@ rotate_pair_grad_launcher(at::Tensor x, at::Tensor g, at::Tensor idx_ij, at::Ten
   const int reduce_block = 256;
   const int reduce_grid = static_cast<int>((total + reduce_block - 1) / reduce_block);
   rotate_grad_reduce_kernel<<<reduce_grid, reduce_block, 0, stream>>>(
-      partials.data_ptr<float>(), grad.data_ptr<float>(), granules, h / 2, total);
+      partials.data_ptr<float>(), grad.data_ptr<float>(), granules,
+      static_cast<int>(h / 2), total);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   return {out_x, out_g, grad};
@@ -1220,6 +1223,59 @@ at::Tensor grad_theta(at::Tensor rot, at::Tensor grad, at::Tensor idx_i, at::Ten
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Fake/meta implementations
+//
+// ``torch.compile`` traces the forward with fake tensors and asks the Meta
+// implementation of each op for its output metadata. The fused rotation ops are
+// CUDA-only, so without a Meta kernel dynamo fails with "Operator does not
+// support running with fake tensors" and graph-breaks every non-identity Paro
+// layer (#5225). These build exactly the metadata the CUDA kernels allocate
+// (``at::empty`` of the operand shape/options) and never touch device memory.
+// ---------------------------------------------------------------------------
+at::Tensor rotate_meta(at::Tensor x, at::Tensor idx, at::Tensor theta,
+                       c10::optional<at::Tensor> scales, int64_t group_size, int64_t cta_m,
+                       int64_t row_pad, int64_t reverse) {
+  (void)idx;
+  (void)theta;
+  (void)scales;
+  (void)group_size;
+  (void)cta_m;
+  (void)row_pad;
+  (void)reverse;
+  return at::empty(x.sizes(), x.options());
+}
+
+std::tuple<at::Tensor, at::Tensor> rotate_pair_meta(at::Tensor x, at::Tensor x2, at::Tensor idx,
+                                                    at::Tensor theta, int64_t group_size,
+                                                    int64_t cta_m, int64_t row_pad) {
+  (void)idx;
+  (void)theta;
+  (void)group_size;
+  (void)cta_m;
+  (void)row_pad;
+  return {at::empty(x.sizes(), x.options()), at::empty(x2.sizes(), x2.options())};
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> rotate_pair_grad_meta(
+    at::Tensor x, at::Tensor g, at::Tensor idx, at::Tensor theta, int64_t group_size, int64_t cta_m,
+    int64_t row_pad) {
+  (void)idx;
+  (void)group_size;
+  (void)cta_m;
+  (void)row_pad;
+  const int64_t krot = theta.size(0);
+  const int64_t half_hidden = x.size(-1) / 2;
+  at::Tensor grad = at::empty({krot, half_hidden}, x.options().dtype(at::kFloat));
+  return {at::empty(x.sizes(), x.options()), at::empty(g.sizes(), g.options()), grad};
+}
+
+at::Tensor grad_theta_meta(at::Tensor rot, at::Tensor grad, at::Tensor idx_i, at::Tensor idx_j) {
+  (void)grad;
+  (void)idx_j;
+  return at::empty({idx_i.size(0)}, rot.options().dtype(at::kFloat));
+}
+
 TORCH_LIBRARY(gptqmodel_paro, m) {
   m.def("rotate(Tensor x, Tensor idx_ij, Tensor theta, Tensor? scales=None, int group_size=128, int cta_m=-1, int row_pad=-1, int reverse=0) -> Tensor");
   m.def("rotate_pair(Tensor x, Tensor x2, Tensor idx_ij, Tensor theta, int group_size=128, int cta_m=-1, int row_pad=-1) -> (Tensor, Tensor)");
@@ -1236,6 +1292,13 @@ TORCH_LIBRARY_IMPL(gptqmodel_paro, CUDA, m) {
   m.impl("rotate_pair_grad", &rotate_pair_grad);
   m.impl("launch_config", &rotate_launch_config);
   m.impl("grad_theta", &grad_theta);
+}
+
+TORCH_LIBRARY_IMPL(gptqmodel_paro, Meta, m) {
+  m.impl("rotate", &rotate_meta);
+  m.impl("rotate_pair", &rotate_pair_meta);
+  m.impl("rotate_pair_grad", &rotate_pair_grad_meta);
+  m.impl("grad_theta", &grad_theta_meta);
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_paro, CatchAll, m) {

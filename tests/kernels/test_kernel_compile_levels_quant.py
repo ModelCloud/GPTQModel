@@ -157,7 +157,12 @@ def _build_nf12():
 
 
 def _build_paro(cls):
-    in_features, out_features, group_size = 128, 64, 32
+    # ``group_size=128`` and a non-identity theta/scales are required to reach
+    # the fused rotation op: the identity shortcut returns the input unchanged,
+    # and the fused kernel only accepts group_size 128 with krot 1/8. A smaller
+    # group or an identity rotation silently measured the reference path and
+    # missed the #5225 graph breaks.
+    in_features, out_features, group_size = 256, 64, 128
     linear = _linear(in_features, out_features)
     module = cls(
         bits=4, group_size=group_size, sym=True, desc_act=False,
@@ -167,6 +172,8 @@ def _build_paro(cls):
     groups = in_features // group_size
     scales = torch.rand(out_features, groups, dtype=torch.float16) * 0.03 + 0.01
     module.pack(linear, scales, torch.full((out_features, groups), 8, dtype=torch.int32))
+    module.theta.fill_(0.2)
+    module.channel_scales.mul_(0.75)
     module.post_init()
     module = module.cuda().eval()
     return module, _input(module), True

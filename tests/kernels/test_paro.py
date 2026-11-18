@@ -16,6 +16,7 @@ from gptqmodel.nn_modules.qlinear.paro import (
     ParoLinear,
     awq_gemm_bf16_supported,
     awq_gemm_shape_supported,
+    paro_awq_dense_min_rows,
 )
 from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -1550,6 +1551,54 @@ def test_paro_triton_prefill_reads_activations_above_int32_row_stride_product():
     )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or ROCm GPU required")
+@pytest.mark.cuda
+def test_paro_rotation_addresses_rows_above_int32_element_count():
+    """Issue #5196: the fused rotation must index ``row * h`` in 64 bits.
+
+    ``rotation.cuh`` computed the activation and output addresses from an int
+    ``row``, so once ``rows * in_features`` passed 2^31 a long prefill wrapped
+    to a negative element offset and faulted the device before the GEMM ran.
+    """
+    from gptqmodel.utils.paro import apply_paro_rotation, prewarm_paro_rotation_extension
+
+    if not prewarm_paro_rotation_extension(fused_rotation=True, group_size=128, krot=1):
+        pytest.skip("the fused Paro rotation extension is not available")
+
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    if properties.total_memory < 16 * 1024**3:
+        pytest.skip("the overflow regression needs at least 16 GiB of device memory")
+
+    in_features = 8192
+    group_size = 128
+    tail = 8
+    rows = 2**31 // in_features + 1
+    assert rows * in_features > 2**31
+
+    pairs, theta, scales = build_identity_rotation_buffers(
+        in_features=in_features, group_size=group_size, krot=1, dtype=torch.float16
+    )
+    pairs, scales = pairs.cuda(), scales.cuda()
+    # A non-identity rotation, as in any real Paro checkpoint, so the fused
+    # rotation kernel runs instead of the identity shortcut.
+    theta = torch.rand(theta.shape).mul(3).half().cuda()
+
+    x = torch.zeros(rows, in_features, dtype=torch.float16, device="cuda")
+    x[-tail:] = torch.randn(tail, in_features, dtype=torch.float16, device="cuda")
+
+    with torch.inference_mode():
+        out = apply_paro_rotation(x, pairs, theta, scales=scales, group_size=group_size)
+        torch.cuda.synchronize()
+        expected = apply_paro_rotation_reference(
+            x[-tail:].contiguous(), pairs, theta, scales=scales, group_size=group_size
+        )
+
+    assert out.shape == x.shape
+    assert torch.isfinite(out[-tail:]).all()
+    # Only the tail carries data; a wrapped address leaves it zero or garbage.
+    torch.testing.assert_close(out[-tail:], expected, rtol=0, atol=1e-2)
+
+
 def _paro_module(in_features: int, out_features: int, group_size: int, dtype: torch.dtype) -> ParoLinear:
     """A Paro layer holding real packed codes, zero points, scales and a bias."""
     module = ParoLinear(
@@ -1590,8 +1639,9 @@ def test_paro_cuda_long_prefill_matches_the_dense_oracle(monkeypatch, dtype):
 
     in_features, out_features, group_size = 896, 4864, 128
     module = _paro_module(in_features, out_features, group_size, dtype)
-    # A prefill row count above the documented large-M threshold (640).
-    rows = 1024
+    # A prefill row count above the shape-aware large-M crossover (2048 for
+    # this 896x4864 layer).
+    rows = 4096
     x = torch.randn(rows, in_features, device="cuda", dtype=dtype)
     rotated = module._rotate_inputs(x)
 
@@ -1630,6 +1680,67 @@ def test_paro_cuda_long_prefill_matches_the_dense_oracle(monkeypatch, dtype):
     assert visible_error <= 2 * eps, (
         f"long-prefill visible relative error {visible_error:.3e} against the FP32 oracle"
     )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="native CUDA Paro kernel required (unavailable on ROCm)",
+)
+@pytest.mark.cuda
+@pytest.mark.parametrize("rows, expected", [(641, "native"), (2048, "native"), (2400, "dense")])
+def test_paro_cuda_dense_dispatch_uses_the_shape_aware_crossover(monkeypatch, rows, expected):
+    """Issue #5210: the 641-2000 row band must stay on the native kernel.
+
+    The previous global 640-row threshold sent every prefill above 640 rows to
+    dequantize + cuBLAS, which is slower than the native split-K GEMM for 7-8B
+    projection shapes until the shape-dependent crossover. Pin both sides of
+    the 4096x4096 contract: 641 and 2048 rows stay native, 2400 rows use dense.
+    """
+
+    in_features, out_features, group_size = 4096, 4096, 128
+    module = _paro_module(in_features, out_features, group_size, torch.float16)
+    x = torch.randn(rows, in_features, device="cuda", dtype=torch.float16)
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError(f"unexpected route for {rows} rows (expected {expected})")
+
+    if expected == "native":
+        monkeypatch.setattr(module, "_forward_dense_batch", _unexpected)
+    else:
+        monkeypatch.setattr(paro_module, "_awq_cuda_gemm_forward", _unexpected)
+        monkeypatch.setattr(paro_module, "_awq_cuda_gemm_forward_fp32_reduce", _unexpected)
+
+    with torch.inference_mode():
+        out = module(x)
+
+    assert out.shape == (rows, out_features)
+
+
+def test_paro_dense_crossover_is_shape_aware():
+    """The dense/split-K crossover must follow the projection shape.
+
+    A single global constant either regresses the 641-2000 row band on 7-8B
+    projections or delays the dense win on small ones. These values are the
+    measured crossovers on SM 12.0 (see docs/paro.md#native-prefill-dispatch),
+    rounded to the dispatch contract.
+    """
+
+    assert paro_awq_dense_min_rows(4096, 4096) == 2400
+    assert paro_awq_dense_min_rows(4096, 14336) == 2048
+    assert paro_awq_dense_min_rows(14336, 4096) == 2896
+    assert paro_awq_dense_min_rows(896, 4864) == 2048
+    assert paro_awq_dense_min_rows(4864, 896) == 4096
+    # A wider output must not lower the threshold below the 4096x4096 anchor,
+    # and a narrow output must raise it.
+    assert paro_awq_dense_min_rows(8192, 8192) == 2400
+    assert paro_awq_dense_min_rows(4864, 896) > paro_awq_dense_min_rows(896, 4864)
+    # Every 7-8B projection keeps the native kernel across the regression band
+    # and switches to dense by 3072 rows (the >2500-row dense win).
+    for shape in ((4096, 4096), (4096, 14336), (14336, 4096)):
+        threshold = paro_awq_dense_min_rows(*shape)
+        assert threshold >= 2048
+        assert all(rows < threshold for rows in (641, 768, 1024, 2000))
+        assert threshold <= 3072
 
 
 @pytest.mark.skipif(
