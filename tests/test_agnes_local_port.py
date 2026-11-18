@@ -317,7 +317,7 @@ def test_cached_chunk_padding_is_masked_in_recurrent_layers(layout):
 
 
 def test_shared_blocks_are_native_qwen3_5_with_safe_init():
-    from transformers.models.qwen3_5 import modeling_qwen3_5 as native
+    from gptqmodel.models.ports.native.qwen3_5 import modeling_qwen3_5 as native
 
     torch.manual_seed(3)
     model = AgnesForConditionalGeneration(tiny_config())

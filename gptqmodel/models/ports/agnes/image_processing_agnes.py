@@ -17,13 +17,14 @@
 from collections.abc import Iterable
 
 from transformers.image_utils import SizeDict
-from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
+from transformers.processing_utils import Unpack
+from transformers.utils import auto_docstring
+
+from ..native.qwen2_vl.image_processing_qwen2_vl import (
     Qwen2VLImageProcessor,
     Qwen2VLImageProcessorKwargs,
     smart_resize,
 )
-from transformers.processing_utils import Unpack
-from transformers.utils import auto_docstring
 
 
 AgnesImageProcessorKwargs = Qwen2VLImageProcessorKwargs
