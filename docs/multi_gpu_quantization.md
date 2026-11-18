@@ -441,6 +441,7 @@ override), two GPUs, default `auto_forward_data_parallel=True`:
 | Routed coverage | Layer 0 aborts | 24 of 24 expert projections captured 128 tokens each |
 | Layer-0 Hessian vs serial capture | Not reached | Normalized error <= 4.3e-8 |
 | Serial and single-GPU controls | Completed | Completed |
+| Same run on a ROCm runtime (two devices) | Same index-less `cuda` owner | Completes; owners `cuda:0`/`cuda:1`; layer-0 normalized error 5.4e-8 |
 
 Introduced in PR #5144.
 
