@@ -1,7 +1,0 @@
-{
-  "registered_module_plans": "UNCHANGED: Qwen2VLQModel/gptq remains the default composite plan. The model-specific tests qualify the separate headless layers.# layout.",
-  "fusable_models": {
-    "models.qwen2_vl_text.reason": "Native Transformers 5 headless Qwen2VLTextModel feature extraction; generation is unsupported and fusion executor has not been qualified."
-  },
-  "awq_scaling_groups": "UNCHANGED: qwen2_vl is not in the generic FAMILIES registry; both tasks have an explicit definition-owned plain-quantization policy."
-}

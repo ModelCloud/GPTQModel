@@ -10,11 +10,10 @@ from transformers import Qwen2VLConfig, Qwen2VLTextConfig
 
 from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 from gptqmodel.models.module_plan import ModulePlan
-from gptqmodel.models.ports import qwen2_vl
-from tests.port_assets import read_port_json
+from tests.port_assets import PORTS, read_port_json
 
 
-PORT = Path(qwen2_vl.__file__).parent
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures/ports/qwen2_vl"
 BLOCKS = [
     ["input_layernorm:!"],
     ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
@@ -28,11 +27,11 @@ BLOCKS = [
 @pytest.mark.parametrize("text", [False, True])
 def test_pinned_checkpoint_shapes_and_live_plan_ownership(text):
     # Sources are headers, not a tree-generated approximation of a checkpoint.
-    shapes = read_port_json(PORT / "checkpoint_shapes.json")[
+    shapes = read_port_json(PORTS / "qwen2_vl" / "checkpoint_shapes.json")[
         "text" if text else "composite"
     ]
     config_class = Qwen2VLTextConfig if text else Qwen2VLConfig
-    config = config_class.from_pretrained(PORT / ("released_text_config.json" if text else "released_config.json"))
+    config = config_class.from_pretrained(FIXTURES / ("released_text_config.json" if text else "released_config.json"))
     with torch.device("meta"):
         model = Qwen2VLQModel.loader.from_config(config)
     actual = {key: list(value.shape) for key, value in model.state_dict().items()}
