@@ -51,7 +51,8 @@ class InternVLChatConfig(PretrainedConfig):
         if raw.get("model_type", config_class.model_type) != config_class.model_type:
             raise ValueError("InternVL decoder architecture/model_type mismatch")
         # Preserve both OpenGVLab Phi3 multipliers using native LongRoPE's
-        # explicit attention_factor, before native config normalization.
+        # explicit attention_factor. Released configs carry the checkpoint field
+        # `rope_scaling`; it is converted to `rope_parameters` here, at parse time.
         legacy_rope = raw.get("rope_scaling")
         if architectures[0] == "Phi3ForCausalLM" and legacy_rope:
             kind = legacy_rope.get("type", legacy_rope.get("rope_type"))
@@ -60,8 +61,9 @@ class InternVLChatConfig(PretrainedConfig):
                 factor = 1.0 if scale <= 1 else (
                     0.1 * math.log(scale) + 1 if kind == "yarn" else
                     math.sqrt(1 + math.log(scale) / math.log(raw.get("original_max_position_embeddings", 4096))))
-                raw["rope_scaling"] = {**legacy_rope, "rope_type": "longrope", "attention_factor": factor}
-                raw["rope_scaling"].pop("type", None)
+                raw.pop("rope_scaling")
+                raw["rope_parameters"] = {**legacy_rope, "rope_type": "longrope", "attention_factor": factor}
+                raw["rope_parameters"].pop("type", None)
         self.llm_config = config_class(**raw)
         if ps_version not in ("v1", "v2"):
             raise ValueError("ps_version must be v1 or v2")

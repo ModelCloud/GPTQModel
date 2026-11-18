@@ -4,7 +4,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 
-from typing import Optional, Tuple, Union
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -15,6 +15,7 @@ from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
+from transformers.utils.output_capturing import capture_outputs
 
 from .configuration_intern_vit import InternVisionConfig
 
@@ -186,7 +187,7 @@ class InternVisionEncoderLayer(GradientCheckpointingLayer):
     def forward(
             self,
             hidden_states: torch.Tensor,
-    ) -> Tuple[torch.FloatTensor, Optional[torch.FloatTensor], Optional[Tuple[torch.FloatTensor]]]:
+    ) -> torch.Tensor:
         """
         Args:
             hidden_states (`Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]`): input to the layer of shape `(batch, seq_len, embed_dim)`
@@ -218,43 +219,11 @@ class InternVisionEncoder(nn.Module):
             InternVisionEncoderLayer(config, dpr[idx]) for idx in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
 
-    def forward(
-            self,
-            inputs_embeds,
-            output_hidden_states: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, BaseModelOutput]:
-        r"""
-        Args:
-            inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
-                Embedded representation of the inputs. Should be float, not int tokens.
-            output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
-                for more detail.
-            return_dict (`bool`, *optional*):
-                Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
-        """
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        encoder_states = () if output_hidden_states else None
+    def forward(self, inputs_embeds: torch.Tensor, **kwargs) -> BaseModelOutput:
         hidden_states = inputs_embeds
-
-        for idx, encoder_layer in enumerate(self.layers):
-            if output_hidden_states:
-                encoder_states = encoder_states + (hidden_states,)
+        for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
-
-        if output_hidden_states:
-            encoder_states = encoder_states + (hidden_states,)
-
-        if not return_dict:
-            return tuple(v for v in [hidden_states, encoder_states] if v is not None)
-        return BaseModelOutput(
-            last_hidden_state=hidden_states, hidden_states=encoder_states
-        )
+        return BaseModelOutput(last_hidden_state=hidden_states)
 
 
 class InternVisionModel(PreTrainedModel):
@@ -262,6 +231,7 @@ class InternVisionModel(PreTrainedModel):
     supports_gradient_checkpointing = True
     config_class = InternVisionConfig
     _no_split_modules = ['InternVisionEncoderLayer']
+    _can_record_outputs = {'hidden_states': InternVisionEncoderLayer}
 
     def __init__(self, config: InternVisionConfig):
         super().__init__(config)
@@ -297,18 +267,13 @@ class InternVisionModel(PreTrainedModel):
     def get_input_embeddings(self):
         return self.embeddings
 
+    @capture_outputs
     def forward(
             self,
             pixel_values: Optional[torch.FloatTensor] = None,
-            output_hidden_states: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
             pixel_embeds: Optional[torch.FloatTensor] = None,
-    ) -> Union[Tuple, BaseModelOutputWithPooling]:
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
+            **kwargs,
+    ) -> BaseModelOutputWithPooling:
         if pixel_values is None and pixel_embeds is None:
             raise ValueError('You have to specify pixel_values or pixel_embeds')
 
@@ -319,20 +284,8 @@ class InternVisionModel(PreTrainedModel):
                 hidden_states = self.embeddings(pixel_values)
             else:
                 raise ValueError(f'wrong pixel_values size: {pixel_values.shape}')
-        encoder_outputs = self.encoder(
-            inputs_embeds=hidden_states,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-        last_hidden_state = encoder_outputs.last_hidden_state
-        pooled_output = last_hidden_state[:, 0, :]
-
-        if not return_dict:
-            return (last_hidden_state, pooled_output) + encoder_outputs[1:]
-
+        last_hidden_state = self.encoder(inputs_embeds=hidden_states).last_hidden_state
         return BaseModelOutputWithPooling(
             last_hidden_state=last_hidden_state,
-            pooler_output=pooled_output,
-            hidden_states=encoder_outputs.hidden_states,
-            attentions=encoder_outputs.attentions,
+            pooler_output=last_hidden_state[:, 0, :],
         )
