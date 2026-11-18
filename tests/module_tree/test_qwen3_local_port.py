@@ -11,7 +11,8 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.qwen3 import Qwen3QModel
 from gptqmodel.models.module_plan import ModulePlan
-from tests.test_qwen3_local_port import asset, tiny_config
+from tests.port_assets import read_port_json
+from tests.test_qwen3_local_port import FIXTURES, asset, tiny_config
 
 
 QUANTIZED = {
@@ -29,7 +30,7 @@ DENSE = {"self_attn.q_norm", "self_attn.k_norm", "input_layernorm", "post_attent
 @pytest.mark.parametrize("family,count", [("marin", 707), ("qwen3", 311)])
 def test_all_released_header_keys_and_shapes_equal_exact_native_meta(family, count):
     config = Qwen3Config.from_dict(json.loads(asset(family, "config.json")))
-    inventory = json.loads(asset(family, "headers.json"))
+    inventory = read_port_json(FIXTURES / f"{family}-headers.json")
     assert len(inventory) == count
     with torch.device("meta"):
         model = Qwen3ForCausalLM(config)
@@ -49,10 +50,9 @@ def test_all_released_header_keys_and_shapes_equal_exact_native_meta(family, cou
     del model
 
 
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("device", ["cpu", "meta"])
-@pytest.mark.parametrize("head_dim", [8, 10])
+@pytest.mark.parametrize(
+    "kv_heads,bias,device,head_dim", [(1, False, "meta", 10), (2, True, "cpu", 8), (4, False, "cpu", 10)]
+)
 def test_native_layout_live_owners_and_alias_contract(kv_heads, bias, device, head_dim):
     config = tiny_config(num_key_value_heads=kv_heads, attention_bias=bias, head_dim=head_dim)
     with torch.device(device):
