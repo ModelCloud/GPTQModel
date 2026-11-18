@@ -247,7 +247,13 @@ def test_fp8_decoded_weight_bound_tracks_reload():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or ROCm runtime required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_fp8_bias_free_cuda_in_range_weights_keep_native_path(monkeypatch, dtype):
-    """In-range decoded weights must not force an FP32 dense GEMM on CUDA."""
+    """In-range decoded weights must take the code-cast + FP32-epilogue GEMM.
+
+    Before #5146 this asserted that ``dequantize_weight`` was called with the
+    activation dtype. The leaner path does not materialise a decoded weight at
+    all: it casts the exact FP8 codes and applies the row scale to the FP32
+    product, so no FP32 dense weight or transpose copy is made.
+    """
     if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
         pytest.skip("BF16 arithmetic unavailable on this device")
     generator = torch.Generator().manual_seed(0)
@@ -255,22 +261,31 @@ def test_fp8_bias_free_cuda_in_range_weights_keep_native_path(monkeypatch, dtype
     module = module.to("cuda")
     x = torch.randn(8, 64, device="cuda", dtype=dtype)
 
-    seen = []
+    dequantized = []
     dequantize = module.dequantize_weight
 
     def tracked(*args, **kwargs):
-        seen.append(kwargs.get("dtype"))
+        dequantized.append(kwargs.get("dtype"))
         return dequantize(*args, **kwargs)
 
+    lean_calls = []
+    lean = module._forward_lean_scaled_matmul
+
+    def counted_lean(value, bias=None):
+        lean_calls.append(value.dtype)
+        return lean(value, bias=bias)
+
     monkeypatch.setattr(module, "dequantize_weight", tracked)
+    monkeypatch.setattr(module, "_forward_lean_scaled_matmul", counted_lean)
     with torch.inference_mode():
         output = module(x)
 
-    assert seen == [dtype]
+    assert lean_calls == [dtype]
+    assert dequantized == []
     assert output.dtype == dtype
     assert torch.isfinite(output).all()
-    decoded = module.weight.float() / module.weight_scale_inv.float().view(-1, 1)
-    oracle = (x.float() @ decoded.T).to(dtype)
+    decoded = module.weight.double() / module.weight_scale_inv.double().view(-1, 1)
+    oracle = (x.double() @ decoded.T).to(dtype)
     torch.testing.assert_close(output, oracle, rtol=2e-3, atol=2e-3)
 
 

@@ -40,10 +40,11 @@ def _weight_only_oracle(kernel: fp8_module.TorchFP8Linear, x: torch.Tensor) -> t
     """Decode the packed FP8 payload with independent FP64 arithmetic.
 
     This does not call ``dequantize_weight`` or any other code under test.
-    The native GEMM narrows the decoded weight to the activation dtype before
-    the FP32-reduced product (#4716), so the oracle applies the same rounding.
-    An un-narrowed FP64 weight would demand precision the activation dtype
-    cannot represent (a full bf16 ulp at |y|~1).
+    For range-safe row/tensor scales the native W8A16 GEMM casts the exact FP8
+    codes and applies the scale to an FP32 output (#5146), so the oracle keeps
+    the decoded weight un-narrowed. Block scales still divide the exact codes
+    into the activation dtype (FP32 opmath, one rounding), so that oracle keeps
+    the same weight narrowing as the kernel.
     """
 
     codes = kernel.weight.to(torch.float64)
@@ -70,8 +71,8 @@ def _weight_only_oracle(kernel: fp8_module.TorchFP8Linear, x: torch.Tensor) -> t
             scale[:, None, :, None],
         ).reshape(kernel.out_features, kernel.in_features)
 
-    # Match the weight narrowing the native GEMM performs for this activation.
-    decoded = decoded.to(x.dtype).to(torch.float64)
+    if kernel.weight_scale_method == "block":
+        decoded = decoded.to(x.dtype).to(torch.float64)
     output = x.to(torch.float64) @ decoded.t()
     if kernel.bias is not None:
         output = output + kernel.bias.to(torch.float64)
