@@ -563,7 +563,7 @@ def test_causality_logits_slice_loss_attention_and_generate_left_padding():
 
 @pytest.mark.parametrize("offload", [False, True])
 @pytest.mark.parametrize("variant", ["gqa", "mha_bias", "mqa", "split_shared", "ngram_fusion", "hc"])
-def test_public_plain_awq_all_physical_owners_capture_pack_two_safetensors_cycles(tmp_path, offload, variant):
+def test_public_awq_all_physical_owners_capture_pack_two_safetensors_cycles(tmp_path, offload, variant):
     options = {
         "gqa": {"head_dim": 16},
         "mha_bias": {"num_key_value_heads": 4, "attention_bias": True, "mlp_bias": True},
@@ -636,11 +636,18 @@ def test_public_plain_awq_all_physical_owners_capture_pack_two_safetensors_cycle
     observed = {name for name, module in wrapped.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert observed == expected
     assert wrapped._looped_per_layer is None
+    # AWQ scale search folds its scales into the two decoder RMSNorm gains;
+    # every other non-quantized owner must be untouched.
+    folded = {
+        f"model.layers.{i}.{norm}.weight"
+        for i in range(source.config.num_hidden_layers)
+        for norm in ("input_layernorm", "post_attention_layernorm")
+    }
     for key, value in original.items():
-        if key.rsplit(".", 1)[0] not in expected:
+        if key.rsplit(".", 1)[0] not in expected and key not in folded:
             torch.testing.assert_close(wrapped.model.state_dict()[key], value, atol=0, rtol=0)
-    for layer in wrapped.model.model.layers:
-        assert wrapped.awq_get_modules_for_scaling(layer, {}, {}) == []
+    # Scale search is active: at least one norm absorbed a non-unit scale.
+    assert any(not torch.equal(wrapped.model.state_dict()[key], original[key]) for key in folded)
     with torch.inference_mode():
         logits = wrapped.model(IDS, use_cache=False).logits
         assert torch.isfinite(logits).all() and logits.std() > 0.04
