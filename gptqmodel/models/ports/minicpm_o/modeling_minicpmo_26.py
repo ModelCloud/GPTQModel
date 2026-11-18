@@ -25,9 +25,9 @@ import numpy as np
 import torch
 from PIL import Image
 from torch import nn
-from transformers import Qwen2Config
 from transformers.modeling_outputs import ModelOutput
 
+from ..native.qwen2.configuration_qwen2 import Qwen2Config
 from .cache import cache_from_pairs, cache_pairs
 from .modeling_minicpmo import MiniCPMO, MiniCPMOPreTrainedModel, MultiModalProjector
 from .native import Qwen2ForCausalLM

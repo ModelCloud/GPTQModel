@@ -230,7 +230,10 @@ def write_checkpoint(path, model=None, hostile=False):
     ("4.5", False, None), ("4.5", True, "1"), ("2.6", True, "0"), ("2.6", False, "1"),
 ])
 def test_public_local_security_policy_and_native_owners(tmp_path, monkeypatch, version, trust, bypass):
-    from transformers import Qwen2ForCausalLM, Qwen3ForCausalLM, cache_utils
+    from transformers import cache_utils
+
+    from gptqmodel.models.ports.native.qwen2.modeling_qwen2 import Qwen2ForCausalLM
+    from gptqmodel.models.ports.native.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 
     originals = cache_utils.Cache, cache_utils.DynamicCache
     if bypass is None:
@@ -371,7 +374,7 @@ def test_vision_padding_mask_matches_unpadded_images():
     ]
     torch.testing.assert_close(padded[0], alone[0], atol=1e-6, rtol=1e-5)
     torch.testing.assert_close(padded[1, :2], alone[1], atol=1e-6, rtol=1e-5)
-    assert type(vpm.encoder.layers[0]).__module__ == "transformers.models.siglip.modeling_siglip"
+    assert type(vpm.encoder.layers[0]).__module__ == "gptqmodel.models.ports.native.siglip.modeling_siglip"
 
 
 def media_inputs(processor, media="both"):
@@ -678,11 +681,11 @@ def test_definition_selects_local_omni_without_global_cache_mutation():
 
 
 def test_streaming_whisper_encoder_and_cache_edits_use_transformers_cache_layers():
-    from transformers import WhisperConfig
     from transformers.cache_utils import DynamicCache, EncoderDecoderCache
 
     from gptqmodel.models.ports.minicpm_o.modeling_minicpmo import MiniCPMWhisperEncoder
     from gptqmodel.models.ports.minicpm_o.utils import drop_tokens_from_cache
+    from gptqmodel.models.ports.native.whisper.configuration_whisper import WhisperConfig
 
     config = WhisperConfig(num_mel_bins=8, d_model=16, encoder_layers=2, encoder_attention_heads=2,
                            encoder_ffn_dim=32, max_source_positions=64, decoder_layers=1,
@@ -714,3 +717,46 @@ def test_streaming_whisper_encoder_and_cache_edits_use_transformers_cache_layers
     for index, key in enumerate(keys):
         torch.testing.assert_close(cache.layers[index].keys[:, :, :2], key[:, :, :2])
         torch.testing.assert_close(cache.layers[index].values[:, :, 2:], key[:, :, 5:] + 1)
+
+
+def test_streaming_cache_edits_read_dynamic_cache_layers_not_tuple_indexing():
+    """Transformers 5.23 ``DynamicCache`` has no ``__getitem__``; TTS/streaming code must use ``layers``."""
+    import ast
+
+    from transformers.cache_utils import DynamicCache
+
+    from gptqmodel.models.ports.minicpm_o import tts_26, utils
+    from gptqmodel.models.ports.minicpm_o.utils import StreamDecoder, TTSStreamingGenerator
+
+    assert not hasattr(DynamicCache, "__getitem__")
+    for module in (tts_26, utils):
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Subscript) and isinstance(node.value, (ast.Name, ast.Attribute)):
+                name = node.value.id if isinstance(node.value, ast.Name) else node.value.attr
+                assert "past_key_values" not in name, f"{module.__name__}:{node.lineno} indexes a cache"
+
+    keys = [torch.arange(2 * 6 * 3, dtype=torch.float32).reshape(1, 2, 6, 3) + 100 * i for i in range(2)]
+
+    def filled():
+        cache = DynamicCache()
+        for index, key in enumerate(keys):
+            cache.update(key.clone(), -key.clone(), index)
+        return cache
+
+    generator = TTSStreamingGenerator.__new__(TTSStreamingGenerator)
+    generator.past_key_values, generator.token_window_size = filled(), 4
+    generator._truncate_kv_cache_sliding_window()
+    assert isinstance(generator.past_key_values, DynamicCache) and generator.past_key_values.get_seq_length() == 4
+    for index, key in enumerate(keys):
+        torch.testing.assert_close(generator.past_key_values.layers[index].keys, key[:, :, -4:], atol=0, rtol=0)
+        torch.testing.assert_close(generator.past_key_values.layers[index].values, -key[:, :, -4:], atol=0, rtol=0)
+
+    decoder = StreamDecoder.__new__(StreamDecoder)
+    decoder.cache = filled()
+    head, tail = decoder._slice_cache(0, 2), decoder._slice_cache(2, None)
+    assert head.get_seq_length() == 2 and tail.get_seq_length() == 4
+    joined = StreamDecoder._concat_caches(head, tail)
+    for index, key in enumerate(keys):
+        torch.testing.assert_close(joined.layers[index].keys, key, atol=0, rtol=0)
+        torch.testing.assert_close(joined.layers[index].values, -key, atol=0, rtol=0)
