@@ -1799,11 +1799,43 @@ def _single_resident_device(model: nn.Module, device_map: Dict[str, Union[str, i
             return None
         if device.index is not None and parameter.device.index != device.index:
             return None
-    # Buffers may legitimately stay on the CPU (a scalar format flag, a rotary
-    # ``inv_freq`` cache), but a meta buffer still has to be materialised.
+    # A meta buffer still has to be materialised; a CPU buffer does not block
+    # the shortcut, because the caller places the buffers no checkpoint entry
+    # covers (``_place_non_persistent_buffers``).
     if any(buffer.device.type == "meta" for buffer in model.buffers()):
         return None
     return device
+
+
+def _place_non_persistent_buffers(model: nn.Module, device: torch.device) -> int:
+    """Move shell-created buffers that no checkpoint entry can place.
+
+    A non-persistent buffer (rotary ``inv_freq``/``cos_cached``, a Paro
+    ``had_K``, ...) is built by the module shell and never appears in the
+    checkpoint, so ``load_checkpoint_in_model`` cannot move it to the mapped
+    device.  ``AlignDevicesHook.init_hook`` normally does, because it walks
+    every module tensor; the single-device shortcut skips the hooks, so it has
+    to place them itself (#5232).  Without this a remote-code family that
+    indexes its cached rotary tables directly crashes on the first forward
+    while the rest of its layer is on the accelerator.
+
+    A buffer shared by two modules is copied once, so sharing is preserved.
+    """
+
+    moved: Dict[int, torch.Tensor] = {}
+    placed = 0
+    for module in model.modules():
+        for name in getattr(module, "_non_persistent_buffers_set", ()):
+            buffer = module._buffers.get(name)
+            if not isinstance(buffer, torch.Tensor) or buffer.device == device:
+                continue
+            replacement = moved.get(id(buffer))
+            if replacement is None:
+                replacement = buffer.to(device)
+                moved[id(buffer)] = replacement
+            module._buffers[name] = replacement
+            placed += 1
+    return placed
 
 
 def has_cpu_offload_hooks(model: nn.Module) -> bool:
@@ -1860,7 +1892,11 @@ def simple_dispatch_model(model, device_map):
     # One device and nothing to materialise: the per-entry hooks would only pin the
     # model in a reference cycle, so place nothing and keep the tensors where the
     # checkpoint loader already put them.
-    if _single_resident_device(model, device_map) is not None:
+    resident_device = _single_resident_device(model, device_map)
+    if resident_device is not None:
+        # The hooks would have placed every module tensor, buffers included.
+        # Skipping them must not leave a shell-created rotary cache on the CPU.
+        _place_non_persistent_buffers(model, resident_device)
         model.hf_device_map = device_map
         return model
 
