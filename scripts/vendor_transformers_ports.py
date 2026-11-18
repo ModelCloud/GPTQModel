@@ -79,8 +79,20 @@ AUTO = re.compile(r"from \.\.auto(?:\.[a-z_]+)? import")
 ABSOLUTE_MODELS = re.compile(r"\btransformers\.models\.([a-z0-9_]+)\.")
 
 
+NATIVE_BASE = re.compile(r"^(class \w+\()PreTrainedModel(\):)", re.M)
+NATIVE_BASE_IMPORT = (
+    "from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code\n"
+)
+
+
 def rewrite(text):
     text = ABSOLUTE_MODELS.sub(lambda m: "gptqmodel.models.ports.native." + m.group(1) + ".", text)
+    if NATIVE_BASE.search(text):
+        # Transformers skips conversion mappings/native init for "custom code" (any class outside
+        # transformers.*); the vendored base reports these classes as library code.
+        text = NATIVE_BASE.sub(r"\1NativePreTrainedModel\2", text)
+        m = re.search(r"^from \.\.\.modeling_utils import[^\n]*(\([^)]*\))?\n", text, re.M | re.S)
+        text = text[: m.end()] + NATIVE_BASE_IMPORT + text[m.end():] if m else NATIVE_BASE_IMPORT + text
     text = FRAMEWORK_BARE.sub(r"\1\2from transformers import", text)
     text = FRAMEWORK.sub(r"\1\2from transformers.", text)
     text = AUTO.sub("from ..auto import", text)

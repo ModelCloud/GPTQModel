@@ -44,6 +44,7 @@ from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPooling, MoeCausalLMOutputWithPast, MoeModelOutputWithPast
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import (
     TransformersKwargs,
@@ -992,7 +993,7 @@ class Qwen3_5MoeDecoderLayer(GradientCheckpointingLayer):
         return hidden_states
 
 
-class Qwen3_5MoePreTrainedModel(PreTrainedModel):
+class Qwen3_5MoePreTrainedModel(NativePreTrainedModel):
     config: Qwen3_5MoeConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True

@@ -7,9 +7,15 @@ Both the running prefix and the complete attention-residual bank are required.
 """
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 
 import torch
+
+
+def attn_res_function(block):
+    """The decoder module's own ``_apply_attn_res``, independent of forward wrappers."""
+    return getattr(sys.modules[type(block).__module__], "_apply_attn_res")
 
 
 @torch.inference_mode()
@@ -20,7 +26,7 @@ def attention_inputs(block, prefix_sum, block_residual):
     hidden = prefix_sum
     batch, length, width = hidden.shape
     if block_residual.shape[1]:
-        hidden = block.forward.__globals__["_apply_attn_res"](
+        hidden = attn_res_function(block)(
             prefix_sum.view(-1, width), block_residual,
             block.self_attention_res_proj, block.self_attention_res_norm,
         ).view(batch, length, width)
@@ -35,7 +41,7 @@ def attention_finish(block, prefix_sum, block_residual, attention_output):
     """Finish attention residuals, then produce the exact normalized FFN input."""
     prefix_sum = attention_output if prefix_sum is None else prefix_sum + attention_output
     batch, length, width = prefix_sum.shape
-    hidden = block.forward.__globals__["_apply_attn_res"](
+    hidden = attn_res_function(block)(
         prefix_sum.view(-1, width), block_residual,
         block.mlp_res_proj, block.mlp_res_norm,
     ).view(batch, length, width)
