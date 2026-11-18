@@ -467,6 +467,57 @@ def _retie_shared_embeddings(model: nn.Module) -> bool:
     return retie_tied_weights(model)
 
 
+def shared_meta_parameter_owners(model: nn.Module) -> dict[int, list[tuple[nn.Module, str]]]:
+    """Map each meta parameter owned by more than one module to its owners.
+
+    A parameter shared by identity (an ``lm_head`` tied to the input embedding
+    in session) is one tensor. Materializing each owner from its own checkpoint
+    key would silently split it into two independent tensors.
+    """
+
+    owners: dict[int, list[tuple[nn.Module, str]]] = {}
+    for submodule in model.modules():
+        for attr, param in submodule.named_parameters(recurse=False):
+            if param.is_meta:
+                owners.setdefault(id(param), []).append((submodule, attr))
+    return {key: value for key, value in owners.items() if len(value) > 1}
+
+
+def shared_meta_parameter_snapshot(
+    module: nn.Module,
+    shared: dict[int, list[tuple[nn.Module, str]]],
+) -> list[tuple[nn.Module, str, nn.Parameter]]:
+    """Record the shared meta parameters ``module`` (recursively) is about to materialize."""
+
+    if not shared:
+        return []
+    return [
+        (submodule, attr, param)
+        for submodule in module.modules()
+        for attr, param in submodule.named_parameters(recurse=False)
+        if id(param) in shared
+    ]
+
+
+def rebind_shared_meta_parameters(
+    snapshot: list[tuple[nn.Module, str, nn.Parameter]],
+    shared: dict[int, list[tuple[nn.Module, str]]],
+) -> None:
+    """Point every other owner of a just-materialized shared parameter at the same tensor.
+
+    The owners that are still on meta would otherwise be filled from their own
+    checkpoint keys later, breaking the identity the caller established.
+    """
+
+    for submodule, attr, old in snapshot:
+        fresh = getattr(submodule, attr, None)
+        if fresh is old or not isinstance(fresh, nn.Parameter) or fresh.is_meta:
+            continue
+        for owner, owner_attr in shared[id(old)]:
+            if getattr(owner, owner_attr, None) is old:
+                setattr(owner, owner_attr, fresh)
+
+
 def materialize_remaining_meta_modules(qmodel, *, device: torch.device = CPU) -> List[str]:
     """Fill non-quantized modules that the lazy shell never materialized.
 
@@ -489,6 +540,7 @@ def materialize_remaining_meta_modules(qmodel, *, device: torch.device = CPU) ->
 
     model = qmodel.model
     materialize = getattr(qmodel, "shell_direct_meta_materialize", None)
+    shared_meta = shared_meta_parameter_owners(model)
     quantized_prefixes: List[str] = []
     unresolved: List[str] = []
     for name, module in model.named_modules():
@@ -501,8 +553,10 @@ def materialize_remaining_meta_modules(qmodel, *, device: torch.device = CPU) ->
             continue
         if callable(materialize):
             try:
+                snapshot = shared_meta_parameter_snapshot(module, shared_meta)
                 materialize(target_submodule=module, device=device)
                 replace_inference_parameters(module)
+                rebind_shared_meta_parameters(snapshot, shared_meta)
             except Exception as exc:  # pragma: no cover - defensive
                 log.warn("Offload: failed to materialize `%s` from the source checkpoint: %s", name, exc)
         if _owns_meta_tensor(module):
