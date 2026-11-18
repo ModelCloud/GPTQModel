@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Checkpoint inventories and real decoder plan owners, without trained payloads."""
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ from gptqmodel.models.ports.minicpmv.modeling_minicpmv import MiniCPMV
 from tests.test_minicpmv_local_port import VERSIONS, tiny_config
 
 
-PORT = Path(__file__).resolve().parents[2] / "gptqmodel/models/ports/minicpmv"
+RELEASES = json.loads((Path(__file__).resolve().parents[1] / "fixtures/ports/minicpmv/release_inventory.json").read_text())
 
 
 class PlanOnlyMiniCPMV(MiniCPMVQModel):
@@ -34,14 +35,15 @@ EXPECTED_PLAN = {
 }
 
 
-@pytest.mark.parametrize("name", ["MiniCPM-V", "MiniCPM-V-2", "MiniCPM-Llama3-V-2_5", "MiniCPM-V-4", "MiniCPM-V-4_5"])
+@pytest.mark.parametrize("name", sorted(RELEASES))
 def test_every_released_checkpoint_key_and_shape(name):
-    entry = json.loads((PORT / "checkpoint_inventory.json").read_text())[name]
-    config = MiniCPMVConfig(**entry["config"])
+    # Digest of the sorted (key, shape) inventory read from each pinned release's safetensors headers.
+    entry = RELEASES[name]
     with torch.device("meta"):
-        model = MiniCPMV(config)
-    actual = {key: list(value.shape) for key, value in model.state_dict().items()}
-    assert actual == entry["shapes"]
+        model = MiniCPMV(MiniCPMVConfig(**entry["config"]))
+    rows = sorted([key, list(value.shape)] for key, value in model.state_dict().items())
+    assert len(rows) == entry["tensors"]
+    assert hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest() == entry["sha256"]
 
 
 @pytest.mark.parametrize("version", VERSIONS)
