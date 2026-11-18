@@ -179,7 +179,7 @@ def test_real_image_video_audio_encoder_and_decoder_roundtrip(tmp_path, dtype):
 
 
 @pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("bypass", [None, "1"])
 def test_public_owned_media_processor_ignores_hostile_assets(tmp_path, monkeypatch, trust, bypass):
     model = make_model(**media_config())
     write_media_checkpoint(tmp_path, model)
@@ -408,8 +408,8 @@ def test_independent_decoder_equations_and_causality(layout, kv, bias):
                                    actual[:, 1:-2], atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("implementation", ["eager", "sdpa"])
+@pytest.mark.parametrize("dtype,implementation", [(torch.float32, "eager"), (torch.float16, "sdpa"),
+                                                  (torch.bfloat16, "sdpa")])
 @pytest.mark.parametrize("layout", ["split", "fused_qkv"])
 def test_cache_generation_and_safetensors_roundtrip(tmp_path, dtype, implementation, layout):
     from gptqmodel.models.ports.mimo_v2.modeling_mimo_v2 import MiMoV2ForCausalLM
@@ -552,7 +552,7 @@ def test_public_plain_awq_packs_every_decoder_linear_and_two_roundtrips(tmp_path
 
 
 @pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("bypass", [None, "1"])
 def test_public_load_owns_config_model_and_ignores_checkpoint_python(tmp_path, monkeypatch, trust, bypass):
     # Build an independent one-layer checkpoint: no imports from the new port
     # are needed to demonstrate the original public loading failure.

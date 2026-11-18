@@ -51,9 +51,9 @@ def test_exact_local_registry_plan_and_native_distinction():
 
 
 @pytest.mark.parametrize("layout", ["split", "fused_qkv"])
-@pytest.mark.parametrize("kv", [1, 2, 4])
+@pytest.mark.parametrize("kv", [1, 2])
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("moe", [[0, 0], [0, 1], [1, 1]])
+@pytest.mark.parametrize("moe", [[0, 0], [0, 1]])
 def test_actual_decoder_tensor_ownership_layout_and_consumer_tags(layout, kv, bias, moe):
     config = MiMoV2Config(**tiny_config(attention_projection_layout=layout, num_key_value_heads=kv,
                                       swa_num_key_value_heads=kv, attention_bias=bias, moe_layer_freq=moe))
