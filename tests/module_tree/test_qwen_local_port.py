@@ -92,12 +92,32 @@ def test_every_cpu_checkpoint_weight_resolves_through_live_plan(no_bias, rotary_
     assert QwenQModel.extract_layers_node() == EXPECTED_PLAN["layers"]
 
 
-def test_plain_awq_definition_policy_preserves_all_five_targets():
+@pytest.mark.parametrize("kwargs", [{}, {"no_bias": True}, {"use_logn_attn": True, "use_dynamic_ntk": True}])
+def test_awq_folds_are_neutral_and_cover_norms_and_linear_mlp_branch(kwargs):
+    from awq_neutrality import assert_awq_folds_neutral
+
+    model = tiny_model(**kwargs)
+    ids = torch.randint(2, 60, (1, 8))
+
+    def forward():
+        return model(input_ids=ids).logits
+
+    for layer in model.transformer.h:
+        checked = assert_awq_folds_neutral(QwenQModel, model, layer, forward)
+        # Fused Q|K|V never folds into c_proj; w2 sits behind SiLU, so the
+        # linear w1 branch is the only producer folded into the MLP c_proj.
+        assert [(source, targets) for source, targets, _consumers in checked] == [
+            ("ln_1", ["attn.c_attn"]),
+            ("ln_2", ["mlp.w1", "mlp.w2"]),
+            ("mlp.w1", ["mlp.c_proj"]),
+        ]
+
+
+def test_awq_definition_declares_all_five_targets():
     model = tiny_model()
     wrapper = QwenQModel.__new__(QwenQModel)
     torch.nn.Module.__init__(wrapper)
     wrapper.__dict__["model"] = model
-    assert wrapper.awq_get_modules_for_scaling(model.transformer.h[0], {}, {}) == []
     assert [
         name for group in wrapper.simple_layer_modules(model.config, SimpleNamespace(method="awq")) for name in group
     ] == ["attn.c_attn", "attn.c_proj", "mlp.w1", "mlp.w2", "mlp.c_proj"]
