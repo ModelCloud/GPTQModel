@@ -585,7 +585,7 @@ def test_sampler_repeated_box_prefix_exercises_real_multiround_cache(architectur
 
 
 @pytest.mark.parametrize("architecture", ["Qwen2ForCausalLM", "Qwen3ForCausalLM"])
-def test_public_plain_awq_media_replay_pack_infer_and_reload(tmp_path, architecture):
+def test_public_scaled_awq_media_replay_pack_infer_and_reload(tmp_path, architecture):
     from gptqmodel import BACKEND
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
@@ -598,8 +598,12 @@ def test_public_plain_awq_media_replay_pack_infer_and_reload(tmp_path, architect
     wrapper = GPTQModel.load(str(tmp_path), quantize_config=cfg, backend=BACKEND.TORCH, dtype=torch.float16)
     # Quantization shells are lazy/meta until capture. The saved source is the
     # independent oracle for every dense tensor after materialization.
+    # AWQ scale search folds into the decoder norms; every tensor outside the
+    # decoder layers stays exact.
     dense = {key: value.half().clone() for key, value in model.state_dict().items()
-             if not (key.startswith("language_model.model.layers.") and "norm" not in key)}
+             if not key.startswith("language_model.model.layers.")}
+    layer_norms = {key: value.half().clone() for key, value in model.state_dict().items()
+                   if key.startswith("language_model.model.layers.") and key.endswith("layernorm.weight")}
     image = Image.new("RGB", (4, 4), (100, 160, 220))
     calibration = [[{"role": "user", "content": [{"type": "image", "image": image},
                      {"type": "text", "text": "Locate object"}]},
@@ -611,6 +615,7 @@ def test_public_plain_awq_media_replay_pack_infer_and_reload(tmp_path, architect
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 14
     for key, value in dense.items():
         torch.testing.assert_close(wrapper.model.state_dict()[key], value, atol=0, rtol=0)
+    assert any(not torch.equal(wrapper.model.state_dict()[key], value) for key, value in layer_norms.items())
     processor = wrapper.load_processor()
     example = processor(text=["<image-1>Locate"], images=[image], return_tensors="pt")
     example["pixel_values"] = example["pixel_values"].half()
@@ -630,6 +635,35 @@ def test_public_plain_awq_media_replay_pack_infer_and_reload(tmp_path, architect
         torch.testing.assert_close(reloaded.model.state_dict()[key], value, atol=0, rtol=0)
     with torch.inference_mode():
         torch.testing.assert_close(reloaded.model(**example).logits, expected, atol=.002, rtol=.02)
+
+
+@pytest.mark.parametrize("architecture", ["Qwen2ForCausalLM", "Qwen3ForCausalLM"])
+@pytest.mark.parametrize("kv_heads", [2, 4])
+@pytest.mark.parametrize("mtp", [False, True])
+def test_awq_scale_folds_are_neutral_under_causal_and_block_diffusion_visibility(architecture, kv_heads, mtp):
+    from awq_neutrality import assert_awq_folds_neutral
+
+    from gptqmodel.quantization import QuantizeConfig
+
+    model = tiny_model(architecture=architecture, kv_heads=kv_heads)
+    tree = LocateAnythingQModel._resolve_effective_module_tree(model, QuantizeConfig(method="awq", group_size=16))
+    # Trailing mask tokens open a bidirectional diffusion block.
+    ids = torch.tensor([[1, 4, 5, 6, 60, 60, 60, 60, 60]]) if mtp else torch.tensor([[1, 7, 9, 11, 4]])
+
+    def forward():
+        return model.language_model(ids, use_cache=mtp).logits
+
+    expected = {
+        ("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),
+        ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj")),
+        ("mlp.up_proj", ("mlp.down_proj",)),
+    }
+    if kv_heads == 4:
+        # o_proj reads the value width only without grouped KV heads.
+        expected.add(("self_attn.v_proj", ("self_attn.o_proj",)))
+    for layer in model.language_model.model.layers:
+        checked = assert_awq_folds_neutral(LocateAnythingQModel, model, layer, forward, tree=tree)
+        assert {(source, tuple(targets)) for source, targets, _consumers in checked} == expected
 
 
 def test_definition_selects_owned_loader():

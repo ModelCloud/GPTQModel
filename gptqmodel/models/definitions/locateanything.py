@@ -81,11 +81,6 @@ class LocateAnythingQModel(BaseQModel):
             tree[-1]["self_attn"] = tuple(dict.fromkeys(("q_norm:!", "k_norm:!", *tree[-1]["self_attn"])))
         return tree
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Block-diffusion visibility and image injection have not been qualified
-        # for AWQ search/folding. Keep every declared linear in plain quantization.
-        return []
-
     def pre_quantize_generate_hook_start(self):
         text_model = self.model.language_model.model
         text_model.embed_tokens = self.pre_quantize(text_model.embed_tokens)
