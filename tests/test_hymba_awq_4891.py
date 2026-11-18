@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hymba AWQ regressions (#4891).
-
-`nvidia/Hymba-1.5B-Base` needs remote code and CUDA-only mamba kernels, and the
-model class is not part of this transformers release, so the cases here are
-synthesised with the exact module names `HymbaQModel.module_tree` declares:
-
-* `input_layernorm` -> `mamba` -> `pre_moe_layernorm` -> `moe`,
-* a `HymbaBlock`-style `forward(self, hidden_states, past_key_value=None, **kwargs)`
-  that reads `attention_mask`, `position_ids` and `kv_last_layer` out of the
-  catch-all.
-"""
+"""Hymba's owned norm and generic sequential AWQ replay regressions (#4891)."""
 
 from types import SimpleNamespace
 
@@ -19,9 +9,11 @@ import torch
 from torch import nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor
+from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.hymba import HymbaQModel
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.quantization.awq.utils.module import get_op_name
+from tests.module_tree.test_hymba_local_port import _config
 from tests.test_awq_scaling_groups import (
     _features,
     _foldable_groups,
@@ -143,15 +135,26 @@ class _HymbaForCausalLM(nn.Module):
         return _Out(self.lm_head(self.model.final_layernorm(hidden)))
 
 
-def _synthetic_hymba():
-    """A tiny Hymba-shaped model plus the definition bound to it."""
+class _SequentialHymbaFixture(BaseQModel):
+    # Preserve the generic sequential-fold regression using its original
+    # replica. The owned hybrid implementation deliberately uses plain AWQ.
+    module_tree = [
+        "model", "layers", "#", {
+            "input_layernorm": ("input_layernorm:!",),
+            "mamba": ("in_proj:0:nosrc", "out_proj:1", "conv1d:!", "x_proj.0:!", "dt_proj.0:!"),
+            "pre_moe_layernorm": ("pre_moe_layernorm:!",),
+            "moe:moe": {"experts": {"0": ("gate_proj:0", "up_proj:0", "down_proj:1")}},
+        },
+    ]
 
+
+def _synthetic_hymba():
     torch.manual_seed(0)
     hf_model = _HymbaForCausalLM().eval()
-    qmodel = HymbaQModel.__new__(HymbaQModel)
+    qmodel = _SequentialHymbaFixture.__new__(_SequentialHymbaFixture)
     nn.Module.__init__(qmodel)
     qmodel.__dict__["model"] = hf_model
-    tree = HymbaQModel._resolve_effective_module_tree(hf_model, None)
+    tree = _SequentialHymbaFixture._resolve_effective_module_tree(hf_model, None)
     qmodel.__dict__["effective_module_tree"] = tree
     qmodel.__dict__["module_tree"] = tree
     return hf_model, qmodel
@@ -235,23 +238,16 @@ def test_prepare_module_forward_promotes_a_var_keyword_block_input():
 
 def test_hymba_tree_declares_the_norm_the_layer_actually_owns():
     plan = ModulePlan.from_tree(HymbaQModel.module_tree)
+    model = HymbaQModel.loader.from_config(_config(num_experts=3, num_experts_per_tok=2))
 
     assert plan.find("post_attention_layernorm") is None, (
         "HymbaDecoderLayer has no post_attention_layernorm; declaring it left the "
         "routed-expert gate/up block without a producer"
     )
     assert plan.find("pre_moe_layernorm") is not None
-
-    layer = _HymbaBlock()
-    missing = []
-    for spec in plan.specs:
-        if "{expert_index}" in spec.template:
-            continue
-        try:
-            layer.get_submodule(spec.template)
-        except AttributeError:
-            missing.append(spec.template)
-    assert not missing, f"Hymba tree declares modules the layer does not own: {missing}"
+    for layer in model.model.layers:
+        assert "pre_moe_layernorm.weight" in layer.state_dict()
+        assert "moe.router.weight" in layer.state_dict()
 
 
 def test_hymba_mixer_declares_its_dense_leaves_and_no_fold_source():

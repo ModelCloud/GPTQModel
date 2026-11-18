@@ -52,6 +52,23 @@ and both hash and score-based expert routing against independent equations.
 
 ## AWQ policy
 
+Transformers 5.23.0 pins the dense compressor and indexer projections to FP32
+when loading in FP16. Their native forwards still pass FP16 activations to
+those projections, which raises a dtype mismatch with both direct and lazy
+checkpoint loading. The GPT-QModel definition adapts the five affected dense
+linears when it wraps the native model. The projection uses its FP32 weights
+and returns FP16 activations to the compressor. BF16, FP32, and packed modules
+retain their existing execution. The public AWQ regression covers CPU
+calibration and packing with and without disk offload.
+
+```mermaid
+flowchart LR
+    A["Native compressor projection"] --> B{"FP32 weight and FP16 input?"}
+    B -->|yes| C["Convert activation to FP32 and evaluate nn.Linear"]
+    C --> D["Return FP16 activation to the compressor"]
+    B -->|no| E["Run the original dense projection dtype path"]
+```
+
 `DeepSeekV4QModel.awq_get_modules_for_scaling()` deliberately returns no
 groups for every layout. Hyper-connections, compressed/indexed attention and
 shared/routed MoE consumers have **not** been qualified together for safe

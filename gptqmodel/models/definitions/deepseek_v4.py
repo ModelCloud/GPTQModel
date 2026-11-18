@@ -1305,6 +1305,31 @@ def patch_deepseek_v4_router_precision(model) -> int:
     return patched
 
 
+def _compressor_projection_forward(self, input: torch.Tensor) -> torch.Tensor:
+    if self.weight.dtype == torch.float32 and input.dtype == torch.float16:
+        return nn.Linear.forward(self, input.float()).to(input.dtype)
+    return nn.Linear.forward(self, input)
+
+
+def _patch_deepseek_v4_compressor_projections(model) -> None:
+    # Transformers 5.23 pins these dense weights to FP32 when loading FP16.
+    # Its compressor still supplies FP16 activations and expects FP16 KV.
+    projections = (
+        "self_attn.compressor.kv_proj",
+        "self_attn.compressor.gate_proj",
+        "self_attn.compressor.indexer.kv_proj",
+        "self_attn.compressor.indexer.gate_proj",
+        "self_attn.compressor.indexer.scorer.weights_proj",
+    )
+    for name, module in model.named_modules():
+        if (
+            type(module) is nn.Linear
+            and name.endswith(projections)
+            and getattr(module.forward, "__func__", None) is nn.Linear.forward
+        ):
+            module.forward = MethodType(_compressor_projection_forward, module)
+
+
 def patch_deepseek_v4_checkpoint_precision(model) -> dict[str, int]:
     """Preserve every V4 checkpoint tensor intentionally stored in FP32.
 
@@ -1745,6 +1770,7 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
 
     def after_model_load(self, model, load_quantized_model=False):
         precision = patch_deepseek_v4_checkpoint_precision(model)
+        _patch_deepseek_v4_compressor_projections(model)
         expected_layers = int(getattr(model.config, "num_hidden_layers", 0))
         if expected_layers <= 0:
             raise RuntimeError(

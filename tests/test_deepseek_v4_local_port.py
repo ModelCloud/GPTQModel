@@ -22,6 +22,7 @@ from gptqmodel import GPTQModel
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.deepseek_v4 import DeepSeekV4QModel
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.quantization.config import FORMAT, AWQConfig, CalibrationConfig
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 
 
@@ -68,6 +69,27 @@ def save_tokenizer(path):
         pad_token="[PAD]", eos_token="[EOS]", bos_token="[BOS]", unk_token="[UNK]",
     )
     tokenizer.save_pretrained(path)
+
+
+@pytest.mark.parametrize("offload", [False, True])
+def test_public_fp16_plain_awq_with_fp32_compressor(tmp_path, offload):
+    model_dir = tmp_path / "source"
+    native_model("compressed_sparse_attention", "hash_moe").save_pretrained(model_dir)
+    save_tokenizer(model_dir)
+    wrapper = GPTQModel.load(
+        str(model_dir),
+        dtype=torch.float16,
+        quantize_config=AWQConfig(
+            device="cpu", format=FORMAT.GEMM, group_size=-1, fallback=None,
+            offload_to_disk=offload, offload_to_disk_path=str(tmp_path / "offload"),
+        ),
+    )
+    ids = [2, 3, 4, 5, 6, 7, 8, 9]
+    wrapper.quantize(CalibrationConfig(dataset=[{"input_ids": ids}], batch_size=1, min_length=1))
+    layer = wrapper.model.model.layers[0]
+    assert layer.self_attn.compressor.kv_proj.weight.dtype == torch.float32
+    assert layer.self_attn.compressor.indexer.scorer.weights_proj.weight.dtype == torch.float32
+    assert layer.mlp.experts[0].gate_proj.qweight.numel() > 0
 
 
 def source_checkpoint(model):

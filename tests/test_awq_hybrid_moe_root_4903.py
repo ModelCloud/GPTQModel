@@ -39,6 +39,8 @@ from transformers import (
 )
 
 from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
+from gptqmodel.models.base import BaseQModel
+from gptqmodel.models.definitions.ernie4_5_moe import Ernie4_5_MoeQModel
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig
 
@@ -46,6 +48,15 @@ from gptqmodel.quantization.config import QuantizeConfig
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 pytestmark = [pytest.mark.cpu]
+
+
+@pytest.fixture
+def generic_awq_planner(monkeypatch):
+    # These regressions exercise the shared planner with the native hybrid
+    # layer and real capture. The shipped ERNIE definition selects plain AWQ.
+    monkeypatch.setattr(
+        Ernie4_5_MoeQModel, "awq_get_modules_for_scaling", BaseQModel.awq_get_modules_for_scaling
+    )
 
 
 _CALIBRATION_TEXTS = [
@@ -152,6 +163,7 @@ def _rows_by_layer_module(model) -> dict[tuple[int, str], dict]:
     }
 
 
+@pytest.mark.usefixtures("generic_awq_planner")
 def test_dense_prefix_layer_keeps_its_norm_gate_up_group(tmp_path: Path, caplog):
     """Layer 0 is dense: its ``mlp.gate_proj/up_proj`` must keep an AWQ scale."""
 
@@ -191,6 +203,7 @@ def test_dense_prefix_layer_keeps_its_norm_gate_up_group(tmp_path: Path, caplog)
     ], messages
 
 
+@pytest.mark.usefixtures("generic_awq_planner")
 def test_moe_layer_keeps_awq_without_lifecycle_hooks(tmp_path: Path, caplog):
     """#4697: the declared MoE root is captured from the module plan.
 

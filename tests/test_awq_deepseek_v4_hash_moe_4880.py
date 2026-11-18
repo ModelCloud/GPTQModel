@@ -25,6 +25,8 @@ import torch.nn as nn
 
 from gptqmodel import GPTQModel
 from gptqmodel.looper.awq_processor import AWQProcessor, _AWQScaleGroupError
+from gptqmodel.models.base import BaseQModel
+from gptqmodel.models.definitions.deepseek_v4 import DeepSeekV4QModel
 from gptqmodel.quantization.config import FORMAT, AWQConfig, CalibrationConfig
 from tests.tiny_remote_models import build_wordlevel_tokenizer
 
@@ -140,7 +142,14 @@ def _calibration():
     return rows
 
 
+def _enable_hash_moe_scale_search(monkeypatch):
+    # The port uses plain AWQ. Exercise generic scale replay explicitly while
+    # still using the native hash router and real inputs captured by the looper.
+    monkeypatch.setattr(DeepSeekV4QModel, "awq_get_modules_for_scaling", BaseQModel.awq_get_modules_for_scaling)
+
+
 def test_awq_quantizes_a_hash_moe_layer_with_aligned_token_rows(tmp_path, monkeypatch):
+    _enable_hash_moe_scale_search(monkeypatch)
     model_dir = tmp_path / "dsv4-hash-moe"
     _build_tiny_model(model_dir)
 

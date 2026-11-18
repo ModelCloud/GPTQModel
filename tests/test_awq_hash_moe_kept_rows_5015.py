@@ -22,7 +22,7 @@ from gptqmodel import GPTQModel
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.quantization.config import FORMAT, AWQConfig, CalibrationConfig
 from gptqmodel.utils.attn_mask import normalize_seq_mask
-from tests.test_awq_deepseek_v4_hash_moe_4880 import _build_tiny_model
+from tests.test_awq_deepseek_v4_hash_moe_4880 import _build_tiny_model, _enable_hash_moe_scale_search
 from tests.tiny_remote_models import build_wordlevel_tokenizer
 
 
@@ -79,6 +79,7 @@ def _kept_grid_truth(processor, provenance, batch_indices):
 
 
 def _run_awq(tmp_path, monkeypatch, *, batch_size, exclude_sinks=False):
+    _enable_hash_moe_scale_search(monkeypatch)
     model_dir = tmp_path / "dsv4-hash-moe"
     _build_tiny_model(model_dir)
 
