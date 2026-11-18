@@ -11,7 +11,7 @@ without a ROCm-built PyTorch can still prove bit-exactness:
     hipcc --offload-arch=gfx1201 -O3 -std=c++17 \
         tt_blockfloat_hip.hip tt_blockfloat_hip_selftest.cpp -o ttbf_selftest
     ./ttbf_selftest --dump /tmp/ttbf_dump
-    python verify_against_torch.py /tmp/ttbf_dump
+    python ../../scripts/verify_tt_blockfloat_hip.py /tmp/ttbf_dump
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import numpy as np
 import torch
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 

@@ -19,7 +19,6 @@ include gptqmodel_nf12/README.md
 recursive-include gptqmodel_ext/nf12_hip *.cuh *.hip *.cpp README.md
 recursive-include gptqmodel_ext/tt_blockfloat_hip *.h *.hip *.cpp *.py README.md
 exclude gptqmodel_ext/tt_blockfloat_hip/tt_blockfloat_hip_selftest.cpp
-exclude gptqmodel_ext/tt_blockfloat_hip/verify_against_torch.py
 recursive-include gptqmodel_ext/gptq_block *.cu *.cpp
 recursive-include gptqmodel_ext/int4_qzero_group_scaled_cpu *.cpp *.hpp NOTICE
 recursive-include gptqmodel_ext/hadamard *.h *.cuh *.cu *.cpp LICENSE
