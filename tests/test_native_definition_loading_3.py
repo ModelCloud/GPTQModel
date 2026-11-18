@@ -140,6 +140,11 @@ def _target_class(loader, config):
     return model_class._model_class(config) if hasattr(model_class, "_model_class") else model_class
 
 
+def _native(vendored_class):
+    native_module = importlib.import_module(vendored_class.__module__.replace(NATIVE, "transformers.models."))
+    return getattr(native_module, vendored_class.__name__)
+
+
 def _logits(model, inputs):
     # Qwen3-Omni's TextToWaveform wrapper generates audio; the thinker owns the logits.
     runner = model.thinker if hasattr(model, "thinker") else model
@@ -159,8 +164,11 @@ def test_definition_loader_builds_vendored_classes(model_type, tmp_path):
     assert config.model_type == model_type
     loader = MODEL_MAP[model_type].loader
 
+    # The checkpoint is written by the *native* Transformers class so loading
+    # exercises the checkpoint conversion mappings (key renames, expert fusion).
     torch.manual_seed(0)
-    _target_class(loader, config)(config).eval().save_pretrained(tmp_path)
+    native_config = _native(type(config)).from_dict(config.to_dict())
+    _native(_target_class(loader, config))(native_config).eval().save_pretrained(tmp_path)
 
     loaded_config = loader.load_config(str(tmp_path))
     assert type(loaded_config) is type(config)
@@ -178,8 +186,7 @@ def test_definition_loader_builds_vendored_classes(model_type, tmp_path):
     })
     assert not offenders, offenders
 
-    native_module = importlib.import_module(type(model).__module__.replace(NATIVE, "transformers.models."))
-    oracle = getattr(native_module, type(model).__name__).from_pretrained(str(tmp_path)).eval()
+    oracle = _native(type(model)).from_pretrained(str(tmp_path)).eval()
     assert not type(oracle).__module__.startswith("gptqmodel")
 
     expected = _logits(oracle, inputs)
