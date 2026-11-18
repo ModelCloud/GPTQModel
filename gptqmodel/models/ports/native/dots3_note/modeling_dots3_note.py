@@ -38,6 +38,7 @@ from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPooling, MoeCausalLMOutputWithPast, MoeModelOutputWithPast
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, torch_compilable_check
 from transformers.utils.generic import (
@@ -653,7 +654,7 @@ class Dots3NoteTextDecoderLayer(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class Dots3NotePreTrainedModel(PreTrainedModel):
+class Dots3NotePreTrainedModel(NativePreTrainedModel):
     config: Dots3NoteConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
@@ -1111,7 +1112,7 @@ class Dots3NoteAudioConvStem(nn.Module):
 
 
 @auto_docstring
-class Dots3NoteAudioPreTrainedModel(PreTrainedModel):
+class Dots3NoteAudioPreTrainedModel(NativePreTrainedModel):
     config: Dots3NoteAudioConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
@@ -1479,7 +1480,7 @@ class Dots3NoteVisionMerger(nn.Module):
 
 
 @auto_docstring
-class Dots3NoteVisionPreTrainedModel(PreTrainedModel):
+class Dots3NoteVisionPreTrainedModel(NativePreTrainedModel):
     config: Dots3NoteVisionConfig
     base_model_prefix = "model"
     input_modalities = ("image", "video")

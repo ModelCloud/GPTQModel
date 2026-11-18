@@ -29,6 +29,7 @@ from transformers.masking_utils import create_bidirectional_mask, create_causal_
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.pytorch_utils import Conv1D
 from transformers.utils import (
@@ -311,7 +312,7 @@ class DecisionTransformerGPT2Block(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class DecisionTransformerGPT2PreTrainedModel(PreTrainedModel):
+class DecisionTransformerGPT2PreTrainedModel(NativePreTrainedModel):
     config: DecisionTransformerConfig
     base_model_prefix = "transformer"
     supports_gradient_checkpointing = True
@@ -485,7 +486,7 @@ class DecisionTransformerOutput(ModelOutput):
     last_hidden_state: torch.Tensor | None = None
 
 
-class DecisionTransformerPreTrainedModel(PreTrainedModel):
+class DecisionTransformerPreTrainedModel(NativePreTrainedModel):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.
