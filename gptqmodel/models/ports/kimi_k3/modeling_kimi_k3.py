@@ -36,9 +36,9 @@ from transformers.activations import GELUTanh as PytorchGELUTanh
 from transformers.configuration_utils import PreTrainedConfig
 from transformers.generation import GenerationMixin
 from transformers.modeling_utils import PreTrainedModel
-from transformers.models.llava.modeling_llava import LlavaCausalLMOutputWithPast
 from transformers.utils import can_return_tuple
 
+from ..native.llava.modeling_llava import LlavaCausalLMOutputWithPast
 from .checkpoint import KimiCheckpointMixin
 from .configuration_kimi_k3 import KimiK3Config
 from .modeling_kimi_linear import KimiDynamicCache, KimiLinearForCausalLM
@@ -964,7 +964,7 @@ class KimiK3ForConditionalGeneration(KimiK3PreTrainedModel, GenerationMixin):
         final_attention_mask |= image_to_overwrite
         position_ids = (final_attention_mask.cumsum(-1) - 1).masked_fill_((final_attention_mask == 0), 1)
 
-        # 6. Mask out the embedding at padding positions, as we later use the past_key_value value to determine the non-attended tokens.
+        # 6. Mask out the embedding at padding positions, as we later use the cached key/value lengths to determine the non-attended tokens.
         batch_indices, pad_indices = torch.where(input_ids == pad_token_id)
         indices_to_mask = new_token_positions[batch_indices, pad_indices]
 

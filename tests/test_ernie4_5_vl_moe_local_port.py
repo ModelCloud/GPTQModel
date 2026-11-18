@@ -9,9 +9,13 @@ from pathlib import Path
 
 import pytest
 import torch
-from transformers import Ernie4_5_VLMoeConfig, Ernie4_5_VLMoeForConditionalGeneration
+from transformers.models.ernie4_5_vl_moe import modeling_ernie4_5_vl_moe as transformers_ernie_vl  # numerical oracle
 
 from gptqmodel.models.definitions.ernie4_5_vl_moe import Ernie4_5_VLMoeQModel
+from gptqmodel.models.ports.native.ernie4_5_vl_moe.configuration_ernie4_5_vl_moe import Ernie4_5_VLMoeConfig
+from gptqmodel.models.ports.native.ernie4_5_vl_moe.modeling_ernie4_5_vl_moe import (
+    Ernie4_5_VLMoeForConditionalGeneration,
+)
 from gptqmodel.utils.hf import load_model_config
 from gptqmodel.utils.security import BYPASS_ENV
 
@@ -295,3 +299,23 @@ def test_native_real_media_forward_and_cache(kind):
         continued = model(torch.tensor([[7]]), past_key_values=output.past_key_values, use_cache=True)
         assert continued.past_key_values.get_seq_length() == 5
         assert torch.isfinite(continued.logits).all()
+
+
+@pytest.mark.parametrize("attention", ["eager", "sdpa"])
+def test_vendored_port_matches_transformers_numerics(attention):
+    torch.manual_seed(7)
+    config = tiny_config()
+    config._attn_implementation = attention
+    model = Ernie4_5_VLMoeQModel.loader.from_config(config).eval()
+    assert type(model).__module__.startswith("gptqmodel.models.ports.native.ernie4_5_vl_moe.")
+    oracle_config = transformers_ernie_vl.Ernie4_5_VLMoeConfig.from_dict(config.to_dict())
+    oracle_config._attn_implementation = attention
+    oracle = transformers_ernie_vl.Ernie4_5_VLMoeForConditionalGeneration(oracle_config).eval()
+    oracle.load_state_dict(model.state_dict(), strict=True)
+    ids = torch.tensor([[3, 5, 8, 12, 7]])
+    with torch.no_grad():
+        torch.testing.assert_close(model(ids).logits, oracle(ids).logits, rtol=0, atol=0)
+        assert torch.equal(
+            model.generate(ids, max_new_tokens=4, do_sample=False),
+            oracle.generate(ids, max_new_tokens=4, do_sample=False),
+        )

@@ -4,8 +4,10 @@
 """Ovis2.6 wrapper with exact native MoE/Next decoders, without checkpoint code."""
 
 import torch
-from transformers import GenerationMixin, PreTrainedModel, Qwen3MoeForCausalLM, Qwen3NextForCausalLM
+from transformers import GenerationMixin, PreTrainedModel
 
+from ..native.qwen3_moe.modeling_qwen3_moe import Qwen3MoeForCausalLM
+from ..native.qwen3_next.modeling_qwen3_next import Qwen3NextForCausalLM
 from .configuration_ovis2_6 import Ovis2_6_Moe_Config, Ovis2_6_Next_Config
 from .vision import INDICATOR_IDS, VISUAL_ATOM_ID, Siglip2NavitModel, VisualEmbedding, VisualTokenizer
 

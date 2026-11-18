@@ -178,10 +178,10 @@ def test_hook_end_skips_absent_optional_modules(tmp_path, offload_to_disk):
 
 
 def _tiny_ernie4_5_vl_moe():
-    from transformers.models.ernie4_5_vl_moe.configuration_ernie4_5_vl_moe import (
+    from gptqmodel.models.ports.native.ernie4_5_vl_moe.configuration_ernie4_5_vl_moe import (
         Ernie4_5_VLMoeConfig,
     )
-    from transformers.models.ernie4_5_vl_moe.modeling_ernie4_5_vl_moe import (
+    from gptqmodel.models.ports.native.ernie4_5_vl_moe.modeling_ernie4_5_vl_moe import (
         Ernie4_5_VLMoeForConditionalGeneration,
     )
 

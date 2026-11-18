@@ -13,8 +13,6 @@ import pytest
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from transformers import KimiLinearConfig as NativeConfig
-from transformers import KimiLinearForCausalLM as NativeModel
 
 from gptqmodel import GPTQModel
 from gptqmodel.models.auto import check_and_get_model_definition
@@ -26,6 +24,8 @@ from gptqmodel.models.ports.kimi_k3.kimi_k3_vision_processing import KimiK3Visio
 from gptqmodel.models.ports.kimi_k3.modeling_kimi_k3 import KimiK3ForConditionalGeneration
 from gptqmodel.models.ports.kimi_k3.modeling_kimi_linear import KimiLinearForCausalLM
 from gptqmodel.models.ports.kimi_k3.tokenization_kimi import TikTokenTokenizer
+from gptqmodel.models.ports.native.kimi_linear.configuration_kimi_linear import KimiLinearConfig as NativeConfig
+from gptqmodel.models.ports.native.kimi_linear.modeling_kimi_linear import KimiLinearForCausalLM as NativeModel
 from gptqmodel.utils.hf import load_hf_tokenizer, load_model_config
 from gptqmodel.utils.security import BYPASS_ENV
 
@@ -1161,3 +1161,22 @@ def test_cache_is_native_cache_and_incremental_greedy_matches_full_forward(mode)
         assert beams.shape == (2, 6)
         cache.reset()
         assert cache.get_seq_length() == 0
+
+
+def test_plain_kimi_linear_dispatch_matches_transformers_numerics():
+    from transformers.models.kimi_linear import modeling_kimi_linear as transformers_kimi  # numerical oracle
+
+    torch.manual_seed(23)
+    config = native_config()
+    model = KimiLinearQModel.loader.from_config(config).eval()
+    assert type(model) is NativeModel
+    assert type(model).__module__.startswith("gptqmodel.models.ports.native.kimi_linear.")
+    oracle = transformers_kimi.KimiLinearForCausalLM(transformers_kimi.KimiLinearConfig.from_dict(config.to_dict())).eval()
+    oracle.load_state_dict(model.state_dict(), strict=True)
+    ids = torch.tensor([[1, 5, 7, 9, 11]])
+    with torch.no_grad():
+        torch.testing.assert_close(model(ids).logits, oracle(ids).logits, rtol=0, atol=0)
+        assert torch.equal(
+            model.generate(ids, max_new_tokens=4, do_sample=False),
+            oracle.generate(ids, max_new_tokens=4, do_sample=False),
+        )

@@ -19,14 +19,14 @@ from transformers.generation.utils import GenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-from transformers.models.nemotron_h.modeling_nemotron_h import (
+from transformers.utils.generic import can_return_tuple, merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
+
+from ..native.nemotron_h.modeling_nemotron_h import (
     NemotronHMamba2Mixer,
     NemotronHPreTrainedModel,
     NemotronHRMSNorm,
 )
-from transformers.utils.generic import can_return_tuple, merge_with_config_defaults
-from transformers.utils.output_capturing import capture_outputs
-
 from .configuration_nemotron_h_puzzle import NemotronHPuzzleConfig
 
 

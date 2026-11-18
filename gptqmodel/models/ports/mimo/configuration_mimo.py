@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 """MiMo configuration (Qwen2 plus the MTP layer count)."""
 
-from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
+from ..native.qwen2.configuration_qwen2 import Qwen2Config
 
 
 class MiMoConfig(Qwen2Config):

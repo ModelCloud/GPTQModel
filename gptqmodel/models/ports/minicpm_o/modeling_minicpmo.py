@@ -37,18 +37,22 @@ from torch import nn
 from torch.nn.init import trunc_normal_
 from torch.nn.utils.parametrizations import weight_norm
 from tqdm import tqdm
-from transformers import LlamaConfig, PreTrainedModel, Qwen3PreTrainedModel
+from transformers import PreTrainedModel
 from transformers.activations import ACT2FN
 from transformers.cache_utils import DynamicCache, EncoderDecoderCache
 from transformers.generation.logits_process import TopKLogitsWarper, TopPLogitsWarper
 from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
-from transformers.models.whisper.configuration_whisper import WhisperConfig
-from transformers.models.whisper.modeling_whisper import WhisperEncoder
 from transformers.utils.generic import merge_with_config_defaults
 from transformers.utils.output_capturing import capture_outputs
 
+from ..native.llama.configuration_llama import LlamaConfig
+from ..native.qwen2.configuration_qwen2 import Qwen2Config
+from ..native.qwen3.configuration_qwen3 import Qwen3Config
+from ..native.qwen3.modeling_qwen3 import Qwen3PreTrainedModel
+from ..native.whisper.configuration_whisper import WhisperConfig
+from ..native.whisper.modeling_whisper import WhisperAttention, WhisperEncoder
 from .cache import cache_pairs, set_layer_states
 from .configuration_minicpmo import MiniCPMOConfig, MiniCPMTTSConfig
 from .modeling_navit_siglip import SiglipVisionTransformer
@@ -105,8 +109,6 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
 
     def __init__(self, config):
         super().__init__(config)
-
-        from transformers import Qwen2Config, Qwen3Config
 
         text_values = config.to_dict()
         for key in (
@@ -3772,8 +3774,6 @@ class MiniCPMWhisperEncoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: WhisperConfig, layer_idx: int = None):
         super().__init__()
         self.embed_dim = config.d_model
-        from transformers.models.whisper.modeling_whisper import WhisperAttention
-
         self.self_attn = WhisperAttention(
             embed_dim=self.embed_dim,
             num_heads=config.encoder_attention_heads,

@@ -3,7 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pinned Ovis2.6 configuration; decoder families are package-selected."""
 
-from transformers import PretrainedConfig, Qwen3MoeConfig, Qwen3NextConfig
+from transformers import PretrainedConfig
+
+from ..native.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
+from ..native.qwen3_next.configuration_qwen3_next import Qwen3NextConfig
 
 
 class Siglip2NavitConfig(PretrainedConfig):
