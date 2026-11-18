@@ -6,10 +6,7 @@ from transformers import PreTrainedConfig
 from .configuration_deepseek import DeepseekV2Config
 
 
-PretrainedConfig = PreTrainedConfig
-
-
-class VisionEncoderConfig(PretrainedConfig):
+class VisionEncoderConfig(PreTrainedConfig):
     model_type: str = "vision"
 
     model_name: str = "siglip_large_patch16_384"
@@ -60,7 +57,7 @@ class VisionEncoderConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
 
-class MlpProjectorConfig(PretrainedConfig):
+class MlpProjectorConfig(PreTrainedConfig):
     model_type = "mlp_projector"
     projector_type: str = "downsample_mlp_gelu"
     input_dim: int = 1152
@@ -90,7 +87,7 @@ class MlpProjectorConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
 
-class DeepseekVLV2Config(PretrainedConfig):
+class DeepseekVLV2Config(PreTrainedConfig):
     model_type = "deepseek_vl_v2"
     sub_configs = {
         "vision_config": VisionEncoderConfig,

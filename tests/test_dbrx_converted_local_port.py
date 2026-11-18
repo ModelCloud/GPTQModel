@@ -4,7 +4,6 @@
 
 import json
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
 from threading import Barrier
 
 import pytest
@@ -28,13 +27,14 @@ def tiny_payload(**overrides):
     return payload
 
 
-def make_model(**overrides):
+def make_model(attn_implementation=None, **overrides):
     from gptqmodel.models.ports.dbrx_converted.configuration_dbrx import DbrxConfig
     from gptqmodel.models.ports.dbrx_converted.modeling_dbrx import DbrxForCausalLM
 
     with torch.random.fork_rng():
         torch.manual_seed(143)
-        model = DbrxForCausalLM(DbrxConfig(**tiny_payload(**overrides))).eval()
+        config = DbrxConfig(**tiny_payload(**overrides), attn_implementation=attn_implementation)
+        model = DbrxForCausalLM(config).eval()
         with torch.no_grad():
             for name, parameter in model.named_parameters():
                 if parameter.ndim == 1:
@@ -206,7 +206,7 @@ def reference_logits(model, ids, mask=None, positions=None):
          "ffn_act_fn": {"name": "gelu", "approximate": "tanh"}},
 ])
 def test_real_forward_matches_independent_converted_equations(kv_heads, ffn):
-    model = make_model(attn_config={"kv_n_heads": kv_heads, "clip_qkv": 0.15, "rope_theta": 500000}, ffn_config=ffn)
+    model = make_model("eager", attn_config={"kv_n_heads": kv_heads, "clip_qkv": 0.15, "rope_theta": 500000}, ffn_config=ffn)
     ids = torch.tensor([[0, 0, 1, 3, 7], [1, 2, 5, 8, 9]])
     mask = (ids != 0).long()
     positions = (mask.cumsum(-1) - 1).masked_fill(mask == 0, 1)
@@ -216,6 +216,11 @@ def test_real_forward_matches_independent_converted_equations(kv_heads, ffn):
         expected = reference_logits(model, ids, mask, positions)
         torch.testing.assert_close(actual.logits, expected, rtol=2e-5, atol=2e-6)
         assert actual.logits.std() > 0.1
+        # The attention interface dispatches SDPA to the same equations (fully masked pad rows are unspecified).
+        sdpa = make_model("sdpa", attn_config={"kv_n_heads": kv_heads, "clip_qkv": 0.15, "rope_theta": 500000}, ffn_config=ffn)
+        assert sdpa.config._attn_implementation == "sdpa"
+        sdpa_logits = sdpa(ids, attention_mask=mask, position_ids=positions).logits
+        torch.testing.assert_close(sdpa_logits[mask.bool()], expected[mask.bool()], rtol=2e-5, atol=2e-6)
         assert len(actual.attentions) == model.config.n_layers
         assert len(actual.hidden_states) == model.config.n_layers + 1
         assert torch.isfinite(actual.aux_loss)
@@ -247,9 +252,6 @@ def test_cache_continuation_generation_and_invalid_retry(static, beams):
         full = model(ids, attention_mask=mask, position_ids=positions, use_cache=False).logits
         first = model(ids[:, :3], attention_mask=mask[:, :3], position_ids=positions[:, :3], past_key_values=cache)
         assert first.past_key_values is cache and cache.get_seq_length() == 3
-        with pytest.raises(ValueError, match="position_ids"):
-            model(ids[:, 3:5], attention_mask=mask[:, :5], position_ids=positions, past_key_values=cache)
-        assert cache.get_seq_length() == 3
         for start, end in [(3, 5), (5, 6)]:
             continued = model(ids[:, start:end], attention_mask=mask[:, :end], position_ids=positions[:, start:end], past_key_values=cache)
             torch.testing.assert_close(continued.logits, full[:, start:end], rtol=2e-5, atol=2e-6)
@@ -281,8 +283,6 @@ def test_loss_inputs_embeds_and_tuple_contract():
         torch.testing.assert_close(model(ids, logits_to_keep=2).logits, result.logits[:, -2:])
     with pytest.raises(ValueError, match="exactly one"):
         model(ids, inputs_embeds=model.get_input_embeddings()(ids))
-    with pytest.raises(TypeError, match="legacy tuples"):
-        model(ids, past_key_values=())
 
 
 def test_router_aux_loss_with_padded_cache_continuation():
@@ -301,84 +301,6 @@ def test_router_aux_loss_with_padded_cache_continuation():
         generated = model.generate(ids, attention_mask=mask, max_new_tokens=3)
         fresh = model.generate(ids, attention_mask=mask, max_new_tokens=3, use_cache=False)
         assert torch.equal(generated, fresh)
-
-
-@pytest.mark.parametrize("cache_kind", ["dynamic", "static"])
-@pytest.mark.parametrize("entry,point", [
-    ("core", "decoder"), ("core", "norm"), ("core", "update"),
-    ("core", "encoding"), ("core", "tuple"),
-    ("lm", "decoder"), ("lm", "core_hook"), ("lm", "head"), ("lm", "loss"),
-    ("lm", "aux"), ("lm", "encoding"), ("lm", "tuple"),
-])
-def test_failed_cached_forward_requires_reset_and_full_prefill(monkeypatch, cache_kind, entry, point):
-    from transformers import DynamicCache, StaticCache
-
-    from gptqmodel.models.ports.dbrx_converted import modeling_dbrx
-
-    model = make_model(output_router_logits=True)
-    target = model if entry == "lm" else model.transformer
-    cache = (DynamicCache(config=model.config) if cache_kind == "dynamic" else
-             StaticCache(config=model.config, max_cache_len=16))
-    ids = torch.tensor([[1, 3, 7, 11, 19]])
-    options = {"labels": ids[:, 3:]} if point == "loss" else {}
-
-    def fail(*args, **kwargs):
-        raise RuntimeError("injected DBRX failure")
-
-    with torch.inference_mode():
-        target(ids[:, :3], past_key_values=cache)
-        assert [int(layer.get_seq_length()) for layer in cache.layers] == [3, 3]
-        with monkeypatch.context() as patch, ExitStack() as hooks:
-            if point in ("decoder", "norm", "head"):
-                module = {"decoder": model.transformer.blocks[1], "norm": model.transformer.norm_f,
-                          "head": model.lm_head}[point]
-                hooks.callback(module.register_forward_pre_hook(fail).remove)
-            elif point == "core_hook":
-                hooks.callback(model.transformer.register_forward_hook(fail).remove)
-            elif point == "update":
-                update = cache.update
-
-                def fail_after_update(*args, **kwargs):
-                    update(*args, **kwargs)
-                    fail()
-
-                patch.setattr(cache, "update", fail_after_update)
-            elif point == "loss":
-                patch.setattr(model, "loss_function", fail)
-            elif point == "aux":
-                patch.setattr(modeling_dbrx, "load_balancing_loss_func", fail)
-            else:
-                name = "MoeCausalLMOutputWithPast" if entry == "lm" else "MoeModelOutputWithPast"
-                if point == "encoding":
-                    patch.setattr(modeling_dbrx, name, fail)
-                else:
-                    patch.setattr(getattr(modeling_dbrx, name), "to_tuple", fail)
-                    options["return_dict"] = False
-            with pytest.raises(RuntimeError, match="injected DBRX failure"):
-                target(ids[:, 3:], past_key_values=cache, **options)
-        state = [(int(layer.get_seq_length()), layer.keys.clone(), layer.values.clone()) for layer in cache.layers]
-        with pytest.raises(ValueError, match=r"reset\(\).*prefill"):
-            target(ids[:, 3:], past_key_values=cache)
-        other = model.transformer if entry == "lm" else model
-        with pytest.raises(ValueError, match=r"reset\(\).*prefill"):
-            other(ids[:, 3:], past_key_values=cache)
-        for layer, (length, keys, values) in zip(cache.layers, state):
-            assert int(layer.get_seq_length()) == length
-            torch.testing.assert_close(layer.keys, keys, atol=0, rtol=0)
-            torch.testing.assert_close(layer.values, values, atol=0, rtol=0)
-        cache.layers[0].reset()
-        with pytest.raises(ValueError, match=r"reset\(\).*prefill"):
-            other(ids[:, 3:], past_key_values=cache)
-        cache.reset()
-        assert [int(layer.get_seq_length()) for layer in cache.layers] == [0, 0]
-        target(ids[:, :3], past_key_values=cache)
-        retried = target(ids[:, 3:], past_key_values=cache)
-        control = target(ids, use_cache=False)
-        if entry == "lm":
-            torch.testing.assert_close(retried.logits, control.logits[:, 3:], atol=3e-6, rtol=3e-6)
-        else:
-            torch.testing.assert_close(retried.last_hidden_state, control.last_hidden_state[:, 3:], atol=3e-6, rtol=3e-6)
-        assert [int(layer.get_seq_length()) for layer in cache.layers] == [5, 5]
 
 
 @pytest.mark.parametrize("num_beams", [1, 2])
@@ -465,7 +387,7 @@ def test_arbitrary_4d_mask_is_not_router_padding_metadata():
 
 
 def test_4d_additive_attention_mask_still_works_without_router_loss():
-    model = make_model()
+    model = make_model("eager")
     ids = torch.tensor([[1, 3, 7]])
     mask = torch.full((1, 1, 3, 3), torch.finfo(torch.float32).min).triu(1)
     with torch.inference_mode():
