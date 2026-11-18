@@ -28,10 +28,6 @@ class LlavaQwen2QModel(BaseQModel):
         sanitized = super()._sanitize_input_ids_for_embeddings(input_ids.masked_fill(image_mask, 0))
         return torch.where(image_mask, IMAGE_TOKEN_INDEX, sanitized)
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # The multimodal replay/folding objective is not qualified.
-        return []
-
     def prepare_dataset(self, calibration_dataset, batch_size=1, **kwargs):
         from ...utils.calibration import batched_conversations
         from ._vlm_calibration import (
