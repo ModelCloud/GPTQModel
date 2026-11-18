@@ -620,6 +620,68 @@ def _gguf_quantize_q6_k(blocks: np.ndarray) -> np.ndarray:
     )
 
 
+_Q8_1_STORED_FIELD_LABELS = ("block scale d", "auxiliary scale-sum s")
+
+
+def _q8_1_unrepresentable_field(
+    field: int, index: int, blocks: int, value: float | None
+) -> ValueError:
+    label = _Q8_1_STORED_FIELD_LABELS[field]
+    source = "" if value is None else f" (block value {value:.7g})"
+    return ValueError(
+        f"GGUF Q8_1 cannot store the {label} in FP16: block {index} of {blocks}{source} "
+        f"falls outside the finite FP16 range +/-{np.finfo(np.float16).max:g}. "
+        "Pack a format whose stored fields cover the block magnitude (for example Q8_0 "
+        "or Q8_K), or keep the block in range."
+    )
+
+
+def _check_q8_1_stored_fields(d: np.ndarray, s: np.ndarray) -> None:
+    """Reject a Q8_1 block whose FP16 fields cannot hold its values.
+
+    ``block_q8_1`` stores ``d`` and ``s = d * sum(qs)`` as FP16. A block of 32
+    values of 3000 has a finite FP16 scale (``d = 23.62``) but a scale-sum of
+    96000, so the cast publishes ``inf`` and any reader that folds ``s`` into
+    the dot product gets a non-finite result. The block dtype is fixed by the
+    format, so the supported input range is narrowed instead of publishing
+    those bytes.
+    """
+
+    for field, value in enumerate((d, s)):
+        with np.errstate(over="ignore", invalid="ignore"):
+            representable = np.isfinite(value.astype(np.float16))
+        if representable.all():
+            continue
+        # d and s are per-block (N, 1), so a flat index is the block index.
+        flat = ~representable.reshape(-1)
+        index = int(np.flatnonzero(flat)[0])
+        raise _q8_1_unrepresentable_field(
+            field, index, int(value.shape[0]), float(value.reshape(-1)[index])
+        )
+
+
+def _check_packed_q8_1_fields(packed: np.ndarray) -> None:
+    """Validate the FP16 header fields of packed Q8_1 bytes.
+
+    ``_quantize_gguf_tensor_numpy`` prefers the installed ``gguf`` reference
+    quantizer or the native ggml bridge before the NumPy fallback, so the same
+    invariant is enforced on the bytes that would be published, not only in the
+    fallback.
+    """
+
+    type_size = _GGUF_TYPE_INFO["Q8_1"]["type_size"]
+    blocks = np.asarray(packed, dtype=np.uint8).reshape(-1, type_size)
+    # The header is the first four bytes of each block: fp16 d, then fp16 s.
+    stored = blocks[:, :4].copy().view(np.float16)
+    unrepresentable = ~np.isfinite(stored)
+    if not unrepresentable.any():
+        return
+    flattened = int(np.flatnonzero(unrepresentable.reshape(-1))[0])
+    index, field = divmod(flattened, 2)
+    # The stored bytes are already non-finite, so no finite value is recoverable.
+    raise _q8_1_unrepresentable_field(field, index, int(blocks.shape[0]), None)
+
+
 def _gguf_quantize_q8_1(blocks: np.ndarray) -> np.ndarray:
     # block_q8_1 = { fp16 d, fp16 s, int8 qs[32] }; s = sum(d * q), used by
     # upstream dot kernels that fold the scale-sum into int8 dot products.
@@ -632,6 +694,7 @@ def _gguf_quantize_q8_1(blocks: np.ndarray) -> np.ndarray:
     # ggml's reference uses roundf (ties away from zero), not nearest-even.
     q = np.copysign(integral + (magnitude - integral >= 0.5), scaled).astype(np.int8)
     s = q.astype(np.float32).sum(axis=1, keepdims=True) * d
+    _check_q8_1_stored_fields(d, s)
     rows = blocks.shape[0]
     out = np.empty((rows, _GGUF_TYPE_INFO["Q8_1"]["type_size"]), dtype=np.uint8)
     out[:, :2] = d.astype(np.float16).view(np.uint8).reshape(rows, 2)
@@ -902,6 +965,15 @@ def _dequantize_prism_q1_0_g128_torch(
 
 def _quantize_gguf_tensor_numpy(weight: np.ndarray, tensor_qtype) -> np.ndarray:
     resolved_qtype = _resolve_gguf_tensor_qtype(tensor_qtype)
+    packed = _pack_gguf_tensor_numpy(weight, resolved_qtype)
+    if resolved_qtype == "Q8_1":
+        # The format stores its auxiliary scale-sum in FP16, which no packer can
+        # widen. Reject unreadable bytes whichever packer produced them.
+        _check_packed_q8_1_fields(packed)
+    return packed
+
+
+def _pack_gguf_tensor_numpy(weight: np.ndarray, resolved_qtype: str) -> np.ndarray:
     if _GGUF_AVAILABLE:
         qtype = getattr(gguf_lib.GGMLQuantizationType, resolved_qtype, None)
         try:

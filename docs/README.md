@@ -53,6 +53,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [GGUF checkpoint load policy](gguf-load-policy.md)
 - [GGUF dense fallback precision](gguf-dense-fallback-precision.md)
 - [GGUF packed scale overflow cache](gguf-k-scale-overflow-cache.md)
+- [GGUF Q8_1 auxiliary-field range](gguf-q8-1-auxiliary-field-range.md)
 - [GPTQ Hessian accumulation](gptq-hessian-accumulation.md)
 - [GPTQ mock quantization group flow](gptq-mock-group-flow.md)
 - [GPTQ scale storage range](gptq-scale-storage-range.md)
