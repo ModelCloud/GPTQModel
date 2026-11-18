@@ -3,6 +3,7 @@
 """Real tiny-model qualification; no checkpoint Python or trained weights."""
 
 import json
+import warnings
 
 import pytest
 import torch
@@ -211,6 +212,18 @@ def test_scaled_rope_matches_reference(kind, params):
     ids = torch.tensor([[1, 4, 5, 6, 7, 8, 9]])
     torch.testing.assert_close(model(ids, use_cache=False).logits, reference_forward(model, ids),
                                rtol=2e-5, atol=1e-6)
+
+
+def test_legacy_rope_metadata_folds_into_rope_parameters_without_deprecation(tmp_path):
+    from gptqmodel.models.ports.decilm.configuration_decilm import DeciLMConfig
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)  # TF5 deprecates the `rope_scaling` alias
+        config = DeciLMConfig(**config_kwargs(rope_theta=5e5, rope_scaling={"type": "dynamic", "factor": 2.0}))
+        expected = {"rope_type": "dynamic", "factor": 2.0, "rope_theta": 5e5}
+        assert config.rope_parameters == expected
+        config.save_pretrained(tmp_path)
+        assert DeciLMConfig.from_pretrained(tmp_path).rope_parameters == expected
 
 
 @pytest.mark.parametrize("alias", ["deci", "nemotron-nas"])

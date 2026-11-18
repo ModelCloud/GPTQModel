@@ -18,7 +18,7 @@ from tests.test_decilm_local_port import config_kwargs, reference_forward, tiny
 
 
 QC = SimpleNamespace(dynamic=None)
-CONTRACT_PATH = Path(__file__).parents[2] / "gptqmodel/models/ports/decilm/checkpoint_contracts.json"
+CONTRACT_PATH = Path(__file__).parents[1] / "fixtures/ports/decilm/checkpoint_contracts.json"
 
 
 def assert_weight_ownership(model):

@@ -47,8 +47,8 @@ class DeciLMConfig(PreTrainedConfig):
         self.pretraining_tp = pretraining_tp
         if not isinstance(pretraining_tp, int) or pretraining_tp < 1:
             raise ValueError("pretraining_tp must be a positive integer")
-        self.rope_theta = rope_theta
-        self.rope_scaling = copy.deepcopy(rope_scaling)
+        # Legacy rope_theta/rope_scaling fold into TF5 rope_parameters; assigning
+        # the deprecated `rope_scaling` alias would warn and clobber them.
         params = copy.deepcopy(rope_parameters or rope_scaling or {})
         params["rope_type"] = params.pop("type", params.get("rope_type", "default"))
         params.setdefault("rope_theta", rope_theta)
