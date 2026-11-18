@@ -10,7 +10,8 @@ resolved, which conflicts are rejected, and why a full subtype is never
 projected to its width-less token before that comparison.
 
 The same resolution feeds the base config, per-module `dynamic` overrides and
-the protocol compiler. Introduced by the PR that fixes
+the protocol compiler. Introduced by
+[#5140](https://github.com/ModelCloud/GPTQModel/pull/5140), which fixes
 [#5106](https://github.com/ModelCloud/GPTQModel/issues/5106).
 
 ## Resolution flow
