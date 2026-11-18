@@ -1,4 +1,5 @@
 # Vendored from huggingface/transformers v5.23.0 (Apache-2.0) by GPT-QModel.
+# GPT-QModel: modernized to Transformers 5.23 conventions (no legacy return paths).
 # Do not edit by hand except to keep it on the 5.23 ABI; see docs/transformers5-model-ports.md.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
 #           This file was automatically generated from src/transformers/models/minimax_m3_vl/modular_minimax_m3_vl.py.
@@ -42,6 +43,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import ModelOutput, TransformersKwargs, auto_docstring, torch_compilable_check
 from transformers.utils.generic import can_return_tuple, get_max_seqlen, is_flash_attention_requested, merge_with_config_defaults
@@ -118,13 +120,13 @@ class MiniMaxM3VLSparseStaticCacheLayer(StaticLayer):
                 torch._dynamo.mark_static_address(self.idx_cumulative_length)
 
         kv_len = idx_k.shape[-2]
-        cache_position = torch.arange(kv_len, device=self.idx_keys.device) + self.idx_cumulative_length
+        write_positions = torch.arange(kv_len, device=self.idx_keys.device) + self.idx_cumulative_length
         self.idx_cumulative_length.add_(kv_len)
         try:
-            self.idx_keys.index_copy_(2, cache_position, idx_k)
+            self.idx_keys.index_copy_(2, write_positions, idx_k)
         except NotImplementedError:
             # Fallback for devices like MPS where index_copy_ might not be supported.
-            self.idx_keys[:, :, cache_position] = idx_k
+            self.idx_keys[:, :, write_positions] = idx_k
         return self.idx_keys
 
     def reset(self) -> None:
@@ -668,7 +670,7 @@ class MiniMaxM3VLDecoderLayer(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class MiniMaxM3VLPreTrainedModel(PreTrainedModel):
+class MiniMaxM3VLPreTrainedModel(NativePreTrainedModel):
     config: MiniMaxM3VLConfig | MiniMaxM3VLTextConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True

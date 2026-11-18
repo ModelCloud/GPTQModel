@@ -39,6 +39,7 @@ from transformers.modeling_outputs import (
     CausalLMOutputWithPast,
 )
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring
 from transformers.utils.generic import can_return_tuple, get_max_seqlen, is_flash_attention_requested, merge_with_config_defaults
@@ -395,7 +396,7 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
         return hidden_state
 
 
-class MiniCPMV4_6VisionPreTrainedModel(PreTrainedModel):
+class MiniCPMV4_6VisionPreTrainedModel(NativePreTrainedModel):
     config: MiniCPMV4_6VisionConfig
     main_input_name = "pixel_values"
     _input_embed_layer = "patch_embedding"
@@ -572,7 +573,7 @@ class MiniCPMV4_6Merger(nn.Module):
         return processed_features
 
 
-class MiniCPMV4_6PreTrainedModel(PreTrainedModel):
+class MiniCPMV4_6PreTrainedModel(NativePreTrainedModel):
     config: MiniCPMV4_6Config
     base_model_prefix = "model"
     input_modalities = ("image", "video", "text")

@@ -29,6 +29,7 @@ from transformers.masking_utils import create_bidirectional_mask
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling, ImageClassifierOutput
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import (
     ModelOutput,
@@ -359,7 +360,7 @@ class SiglipEncoderLayer(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class SiglipPreTrainedModel(PreTrainedModel):
+class SiglipPreTrainedModel(NativePreTrainedModel):
     config: SiglipConfig
     base_model_prefix = "siglip"
     input_modalities = ("image", "text")

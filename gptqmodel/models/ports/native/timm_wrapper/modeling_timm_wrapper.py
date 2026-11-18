@@ -21,6 +21,7 @@ from torch import Tensor
 
 from transformers.modeling_outputs import ImageClassifierOutput, ModelOutput
 from transformers.modeling_utils import PreTrainedModel
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.utils import auto_docstring, is_timm_available, logging, requires_backends
 from .configuration_timm_wrapper import TimmWrapperConfig
 
@@ -81,7 +82,7 @@ def _create_timm_model_with_error_handling(config: "TimmWrapperConfig", **model_
 
 
 @auto_docstring
-class TimmWrapperPreTrainedModel(PreTrainedModel):
+class TimmWrapperPreTrainedModel(NativePreTrainedModel):
     base_model_prefix = "timm_model"
     main_input_name = "pixel_values"
     input_modalities = ("image",)

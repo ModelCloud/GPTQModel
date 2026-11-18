@@ -28,8 +28,10 @@ from torch.nn import functional as F
 from torch.nn.utils.parametrizations import weight_norm
 from tqdm import tqdm
 from transformers import LlamaConfig, LogitsProcessor, PreTrainedModel, TopKLogitsWarper, TopPLogitsWarper
+from transformers.cache_utils import DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 
+from .cache import cache_from_pairs, cache_pairs
 from .native import LlamaModel
 
 
@@ -522,7 +524,7 @@ class ConditionalChatTTS(PreTrainedModel):
     Usage:
     To support streaming generation, two global variables should be maintained outside of the model.
         1. `audio_input_ids`: stores *discrete* audio codes. It is a tensor with shape [1, sequence length+1, num_vq].
-        2. `past_key_values`: stores the KV cache for both text tokens and audio codes. It is a list of tuples, each tuple contains two tensors with shape [1, num_attention_heads, sequence length, hidden_size // num_attention_heads]
+        2. `past_key_values`: a `DynamicCache` storing the KV cache for both text tokens and audio codes. Each layer holds keys/values with shape [1, num_attention_heads, sequence length, hidden_size // num_attention_heads]
 
     where `num_vq` is the number of audio codebooks, in default setting, it is `4`.
 
@@ -531,13 +533,13 @@ class ConditionalChatTTS(PreTrainedModel):
     initial_kv_cache_length = 1 + model.num_spk_embs + model.streaming_text_reserved_len # where `1` denotes the `bos` token
     dtype = model.emb_text.weight.dtype
     device = model.emb_text.weight.device
-    past_key_values = [
+    past_key_values = cache_from_pairs(
         (
             torch.zeros(1, model.config.num_attention_heads, initial_kv_cache_length, model.config.hidden_size // model.config.num_attention_heads, dtype=dtype, device=device),
             torch.zeros(1, model.config.num_attention_heads, initial_kv_cache_length, model.config.hidden_size // model.config.num_attention_heads, dtype=dtype, device=device)
         )
         for _ in range(model.config.num_hidden_layers)
-    ]
+    )
 
     2. At the same time, create an empty `audio_input_ids` with shape [1, sequence length, num_vq], `num_vq` denotes multiple layer audio codebooks. But here we also include text tokens in the sequence, but they will be zeros, and will not be used, just a placeholder.
 
@@ -704,7 +706,7 @@ class ConditionalChatTTS(PreTrainedModel):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.LongTensor,
-        past_key_values: List[Tuple[torch.Tensor, torch.Tensor]],
+        past_key_values: DynamicCache,
         lm_spk_emb_last_hidden_states: Optional[torch.Tensor] = None,
     ):
         """Prefill a chunk of new text tokens in streaming setting.
@@ -713,7 +715,7 @@ class ConditionalChatTTS(PreTrainedModel):
         Args:
             input_ids (Tensor): Tensor of shape [batch_size, seq_len]
             position_ids (LongTensor): Tensor of shape [batch_size, seq_len]
-            past_key_values (List[Tuple[Tensor]]): KV Cache of all layers, each layer is a tuple (Tensor, Tensor) denoting keys and values. Each tensor is of seq_len = `self.streaming_text_reserved_len`. `past_key_values` will be updated.
+            past_key_values (DynamicCache): KV Cache of all layers; each layer holds keys and values. Each tensor is of seq_len = `self.streaming_text_reserved_len`. `past_key_values` will be updated.
             lm_spk_emb_last_hidden_states (Tensor, optional): Tensor of shape [batch_size, num_spk_emb, llm_dim]. Defaults to None.
             lm_last_hidden_states (Tensor, optional): _description_. Defaults to None.
 
@@ -729,14 +731,10 @@ class ConditionalChatTTS(PreTrainedModel):
         )
 
         # Clone KV Cache
-        past_key_values_for_prefill = []
-        for i in range(len(past_key_values)):
-            past_key_values_for_prefill.append(
-                (
-                    past_key_values[i][0][:, :, : position_ids[:, 0], :].clone(),
-                    past_key_values[i][1][:, :, : position_ids[:, 0], :].clone(),
-                )
-            )
+        past_key_values_for_prefill = cache_from_pairs(
+            (keys[:, :, : position_ids[:, 0], :].clone(), values[:, :, : position_ids[:, 0], :].clone())
+            for keys, values in cache_pairs(past_key_values)
+        )
 
         # Model forward
         outputs_prefill: BaseModelOutputWithPast = self.model(
@@ -745,27 +743,18 @@ class ConditionalChatTTS(PreTrainedModel):
             past_key_values=past_key_values_for_prefill,  # `past_key_values` will be updated by the model
             inputs_embeds=inputs_embeds,  # contains text and language model embedding
             use_cache=True,
-            output_attentions=False,
-            cache_position=position_ids,  # which new positions will use this cache, basically the same as position_ids
         )
 
         # Get model updated KV Cache
         past_key_values_for_prefill_updated = outputs_prefill.past_key_values
 
-        # Update generated KV Cache to input `past_key_values`
-        for layer_idx in range(len(past_key_values)):
-            # Update keys
-            past_key_values[layer_idx][0][:, :, position_ids[:, 0] : position_ids[:, -1] + 1, :] = (
-                past_key_values_for_prefill_updated[layer_idx][0][
-                    :, :, position_ids[:, 0] : position_ids[:, -1] + 1
-                ].clone()
-            )
-            # Update values
-            past_key_values[layer_idx][1][:, :, position_ids[:, 0] : position_ids[:, -1] + 1, :] = (
-                past_key_values_for_prefill_updated[layer_idx][1][
-                    :, :, position_ids[:, 0] : position_ids[:, -1] + 1
-                ].clone()
-            )
+        # Update generated KV Cache to input `past_key_values` (in place, inside the reserved text window)
+        start, end = position_ids[:, 0], position_ids[:, -1] + 1
+        for (keys, values), (new_keys, new_values) in zip(
+            cache_pairs(past_key_values), cache_pairs(past_key_values_for_prefill_updated)
+        ):
+            keys[:, :, start:end, :] = new_keys[:, :, start:end].clone()
+            values[:, :, start:end, :] = new_values[:, :, start:end].clone()
 
         # TODO: del past_key_values_for_prefill_updated recursively
         # TODO: del outputs_prefill recursively
@@ -776,7 +765,7 @@ class ConditionalChatTTS(PreTrainedModel):
     def prefill_audio_ids(
         self,
         input_ids: torch.Tensor,
-        past_key_values: List[Tuple[torch.Tensor, torch.Tensor]],
+        past_key_values: DynamicCache,
         streaming_tts_text_mask=None,
         add_audio_bos: bool = True,
     ):
@@ -785,7 +774,7 @@ class ConditionalChatTTS(PreTrainedModel):
 
         Args:
             input_ids (torch.Tensor): (1, seq_len, num_vq) Audio input token ids.
-            past_key_values (List[Tuple[torch.Tensor, torch.Tensor]]): Past key values for attention mechanism.
+            past_key_values (DynamicCache): Past key values for attention mechanism.
         """
         assert input_ids.shape[0] == 1
         assert past_key_values is not None
@@ -800,15 +789,14 @@ class ConditionalChatTTS(PreTrainedModel):
             inputs_embeds = torch.cat([bos_inputs_embeds, inputs_embeds], dim=1)
             input_len += 1
 
-        past_key_values_length = past_key_values[0][0].shape[2]
+        past_key_values_length = past_key_values.get_seq_length()
         position_ids = torch.arange(
             past_key_values_length, past_key_values_length + input_len, dtype=torch.long, device=self.device
         ).unsqueeze(0)
 
-        cache_position = position_ids.clone()
         causal_mask = make_streaming_chunk_mask_generation(
             inputs_embeds=inputs_embeds,
-            past_seen_tokens=past_key_values[0][0].shape[2],
+            past_seen_tokens=past_key_values_length,
             streaming_tts_text_mask=streaming_tts_text_mask,
             streaming_reserved_length=self.streaming_text_reserved_len,
             streaming_text_chunk_size=self.streaming_text_chunk_size,
@@ -821,8 +809,6 @@ class ConditionalChatTTS(PreTrainedModel):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=True,
-            output_attentions=False,
-            cache_position=cache_position,
         )
         past_key_values = outputs.past_key_values
         return past_key_values
@@ -831,7 +817,7 @@ class ConditionalChatTTS(PreTrainedModel):
     def generate(
         self,
         input_ids: torch.Tensor,
-        past_key_values: List[Tuple[torch.Tensor, torch.Tensor]],
+        past_key_values: DynamicCache,
         temperature: torch.Tensor,
         eos_token: Union[int, torch.Tensor],
         streaming_tts_text_mask=None,
@@ -851,7 +837,7 @@ class ConditionalChatTTS(PreTrainedModel):
 
         Args:
             input_ids (torch.Tensor): Input token ids.
-            past_key_values (List[Tuple[torch.Tensor, torch.Tensor]]): Past key values for attention mechanism.
+            past_key_values (DynamicCache): Past key values for attention mechanism.
             temperature (torch.Tensor): Temperature for sampling.
             eos_token (Union[int, torch.Tensor]): End of sequence token.
             streaming_tts_text_mask (Optional[torch.Tensor], optional): Mask for streaming TTS text. Defaults to None.
@@ -912,7 +898,7 @@ class ConditionalChatTTS(PreTrainedModel):
                 audio_bos = True
 
             assert progress == (
-                past_key_values[0][0].shape[2] + 1
+                past_key_values.get_seq_length() + 1
             )  # If you are using according to the guidelines, this should be passed.
 
             if audio_bos:
@@ -927,15 +913,13 @@ class ConditionalChatTTS(PreTrainedModel):
                 inputs_embeds = torch.stack(code_emb, 3).sum(3)
 
             position_ids = torch.tensor(
-                [past_key_values[0][0].shape[2]], dtype=torch.long, device=self.device
+                [past_key_values.get_seq_length()], dtype=torch.long, device=self.device
             ).unsqueeze(0)
-
-            cache_position = position_ids.clone()
 
             # Make causal mask
             causal_mask = make_streaming_chunk_mask_generation(
                 inputs_embeds=inputs_embeds,
-                past_seen_tokens=past_key_values[0][0].shape[2],
+                past_seen_tokens=past_key_values.get_seq_length(),
                 streaming_tts_text_mask=streaming_tts_text_mask,
                 streaming_reserved_length=self.streaming_text_reserved_len,
                 streaming_text_chunk_size=self.streaming_text_chunk_size,
@@ -948,13 +932,10 @@ class ConditionalChatTTS(PreTrainedModel):
                 past_key_values=past_key_values,
                 inputs_embeds=inputs_embeds,
                 use_cache=True,
-                output_attentions=False,
-                cache_position=cache_position,
             )
 
             del position_ids
             del inputs_embeds
-            del cache_position
             del causal_mask
 
             hidden_states = outputs.last_hidden_state

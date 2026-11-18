@@ -1,4 +1,5 @@
 # Vendored from huggingface/transformers v5.23.0 (Apache-2.0) by GPT-QModel.
+# GPT-QModel: modernized to Transformers 5.23 conventions (no legacy return paths).
 # Do not edit by hand except to keep it on the 5.23 ABI; see docs/transformers5-model-ports.md.
 # Copyright 2026 the HuggingFace Team. All rights reserved.
 #
@@ -825,15 +826,14 @@ class DiffusionGemmaGenerationMixin:
         # 2. Finalize and return
         if streamer is not None:
             streamer.end()
-        if not return_dict_in_generate:
-            return input_ids
-
-        tokens_per_forward = self._compute_tokens_per_forward(
-            input_ids, decoder_forward_passes, initial_input_ids_len, generation_config.pad_token_id
-        )
-        return DiffusionGemmaGenerationOutput(
-            sequences=input_ids, tokens_per_forward=tokens_per_forward, past_key_values=past_key_values
-        )
+        if return_dict_in_generate:
+            tokens_per_forward = self._compute_tokens_per_forward(
+                input_ids, decoder_forward_passes, initial_input_ids_len, generation_config.pad_token_id
+            )
+            return DiffusionGemmaGenerationOutput(
+                sequences=input_ids, tokens_per_forward=tokens_per_forward, past_key_values=past_key_values
+            )
+        return input_ids
 
     @staticmethod
     def _compute_tokens_per_forward(
