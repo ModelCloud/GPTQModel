@@ -13,7 +13,7 @@ from transformers.generation import GenerationMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast, MoeModelOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_utils import PreTrainedModel, slice_logits_to_keep
 from transformers.models.qwen3_moe.modeling_qwen3_moe import (
     Qwen3MoeAttention,
     Qwen3MoeMLP,
@@ -21,6 +21,8 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
     Qwen3MoeRotaryEmbedding,
 )
 from transformers.utils import can_return_tuple
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import OutputRecorder, capture_outputs
 
 from .configuration_klear import KlearConfig
 
@@ -90,25 +92,18 @@ class KlearDecoderLayer(GradientCheckpointingLayer):
         self.input_layernorm = KlearRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_attention_layernorm = KlearRMSNorm(config.hidden_size, config.rms_norm_eps)
 
-    def forward(self, hidden_states, attention_mask=None, position_embeddings=None, past_key_values=None,
-                output_attentions=False, output_router_logits=False, **kwargs):
+    def forward(self, hidden_states, attention_mask=None, position_embeddings=None, past_key_values=None, **kwargs):
         residual = hidden_states
-        output, weights = self.self_attn(
+        output, _ = self.self_attn(
             self.input_layernorm(hidden_states), position_embeddings=position_embeddings,
             attention_mask=attention_mask, past_key_values=past_key_values, **kwargs,
         )
         hidden_states = residual + output
         residual = hidden_states
         output = self.mlp(self.post_attention_layernorm(hidden_states))
-        router_logits = None
         if isinstance(output, tuple):
-            output, router_logits = output
-        result = (residual + output,)
-        if output_attentions:
-            result += (weights,)
-        if output_router_logits:
-            result += (router_logits,)
-        return result
+            output = output[0]
+        return residual + output
 
 
 class KlearPreTrainedModel(PreTrainedModel):
@@ -121,6 +116,11 @@ class KlearPreTrainedModel(PreTrainedModel):
     _supports_sdpa = True
     _supports_attention_backend = True
     _can_compile_fullgraph = False
+    _can_record_outputs = {
+        "router_logits": OutputRecorder(KlearSparseMoeBlock, index=1),
+        "hidden_states": KlearDecoderLayer,
+        "attentions": KlearAttention,
+    }
 
     def _init_weights(self, module):
         super()._init_weights(module)  # also covers KlearRMSNorm and KlearRotaryEmbedding
@@ -139,16 +139,12 @@ class KlearModel(KlearPreTrainedModel):
         self.gradient_checkpointing = False
         self.post_init()
 
-    @can_return_tuple
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-                inputs_embeds=None, use_cache=None, output_attentions=None, output_hidden_states=None,
-                output_router_logits=None, cache_position=None, **kwargs):
+                inputs_embeds=None, use_cache=None, **kwargs):
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
-        output_attentions = self.config.output_attentions if output_attentions is None else output_attentions
-        output_hidden_states = self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
-        output_router_logits = self.config.output_router_logits if output_router_logits is None else output_router_logits
-        use_cache = self.config.use_cache if use_cache is None else use_cache
         if past_key_values is not None and not isinstance(past_key_values, Cache):
             raise TypeError("Klear past_key_values must be a Transformers Cache")
         if inputs_embeds is None:
@@ -156,10 +152,8 @@ class KlearModel(KlearPreTrainedModel):
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
         if position_ids is None:
-            if cache_position is None:
-                seen = past_key_values.get_seq_length() if past_key_values is not None else 0
-                cache_position = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device) + seen
-            position_ids = cache_position.unsqueeze(0)
+            seen = past_key_values.get_seq_length() if past_key_values is not None else 0
+            position_ids = (torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device) + seen).unsqueeze(0)
         mask_function = create_causal_mask if self.config.sliding_window is None else create_sliding_window_causal_mask
         if isinstance(attention_mask, dict):
             attention_mask = attention_mask[self.config.layer_types[0]]
@@ -170,30 +164,14 @@ class KlearModel(KlearPreTrainedModel):
             )
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
-        all_hidden = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
-        all_router = () if output_router_logits else None
         for layer in self.layers:
-            if output_hidden_states:
-                all_hidden += (hidden_states,)
-            outputs = layer(
+            hidden_states = layer(
                 hidden_states, attention_mask=attention_mask, position_embeddings=position_embeddings,
-                position_ids=position_ids, past_key_values=past_key_values, use_cache=use_cache,
-                output_attentions=output_attentions, output_router_logits=output_router_logits, **kwargs,
+                position_ids=position_ids, past_key_values=past_key_values, use_cache=use_cache, **kwargs,
             )
-            hidden_states = outputs[0]
-            if output_attentions:
-                all_attentions += (outputs[1],)
-            if output_router_logits:
-                all_router += (outputs[-1],)
         hidden_states = self.norm(hidden_states)
-        if output_hidden_states:
-            all_hidden += (hidden_states,)
-        if all_router and any(logits is not None for logits in all_router):
-            all_router = tuple(logits for logits in all_router if logits is not None)
         return MoeModelOutputWithPast(
-            last_hidden_state=hidden_states, past_key_values=past_key_values,
-            hidden_states=all_hidden, attentions=all_attentions, router_logits=all_router,
+            last_hidden_state=hidden_states, past_key_values=past_key_values if use_cache else None,
         )
 
 
@@ -215,16 +193,12 @@ class KlearMoeForCausalLM(KlearPreTrainedModel, GenerationMixin):
 
     @can_return_tuple
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-                inputs_embeds=None, labels=None, use_cache=None, output_attentions=None,
-                output_hidden_states=None, output_router_logits=None, cache_position=None, logits_to_keep=0, **kwargs):
+                inputs_embeds=None, labels=None, use_cache=None, logits_to_keep=0, **kwargs):
         outputs = self.model(
             input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
-            past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache,
-            output_attentions=output_attentions, output_hidden_states=output_hidden_states,
-            output_router_logits=output_router_logits, cache_position=cache_position, return_dict=True, **kwargs,
+            past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs,
         )
-        indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(outputs.last_hidden_state[:, indices])
+        logits = self.lm_head(slice_logits_to_keep(outputs.last_hidden_state, logits_to_keep))
         loss = self.loss_function(logits, labels, self.vocab_size, **kwargs) if labels is not None else None
         return MoeCausalLMOutputWithPast(
             loss=loss, logits=logits, past_key_values=outputs.past_key_values,

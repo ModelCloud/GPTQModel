@@ -162,14 +162,11 @@ def test_native_forward_matches_independent_equations(kv, layout, bias):
         actual = model(ids, attention_mask=mask, output_router_logits=True, use_cache=False)
         expected, routers = _oracle(model, ids, mask)
     torch.testing.assert_close(actual.logits, expected, atol=2e-6, rtol=2e-5)
-    if any(router is not None for router in routers):
-        routers = [router for router in routers if router is not None]
+    # Router logits are captured only from sparse MoE blocks; dense layers record nothing.
+    routers = [router for router in routers if router is not None]
     assert len(actual.router_logits) == len(routers)
     for actual_router, expected_router in zip(actual.router_logits, routers):
-        if expected_router is None:
-            assert actual_router is None
-        else:
-            torch.testing.assert_close(actual_router, expected_router, atol=2e-6, rtol=2e-5)
+        torch.testing.assert_close(actual_router, expected_router, atol=2e-6, rtol=2e-5)
 
 
 @pytest.mark.parametrize("implementation", ["eager", "sdpa"])
