@@ -48,12 +48,15 @@ class MiniCPMOQModel(BaseQModel):
             # consumes the attention output. Sequential stages made the norm
             # fold into q only and then q into k. The MLP stages were also
             # merged, so `down_proj` shared the gate/up GPTQ subset.
+            # The per-head q/k norms read the q/k outputs, so they precede
+            # their projections here (Qwen3 order): AWQ takes the last entry of
+            # the q/k/v stage as the `o_proj` fold source, which must be v_proj.
             "self_attn": (
+                "q_norm:!",
                 "q_proj:0:in=x",
+                "k_norm:!",
                 "k_proj:0:in=x",
                 "v_proj:0:in=x",
-                "q_norm:!",
-                "k_norm:!",
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
@@ -64,9 +67,18 @@ class MiniCPMOQModel(BaseQModel):
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
     require_load_processor = True
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Omni conditioning and replay have not been qualified for scale folding.
-        return []
+    def awq_module_replay_inputs(self, module, x, module_kwargs):
+        x, module_kwargs = super().awq_module_replay_inputs(module, x, module_kwargs)
+        # Input capture runs the omni `generate` prefill, so the captured decoder
+        # kwargs carry its DynamicCache. Layer replay already drops it; the AWQ
+        # block replay must too, or every scored scale appends K/V to that cache
+        # and the next replay attends over stale keys (mask/key length mismatch).
+        cache_keys = ("past_key_values", "past_key_value")
+        if any(module_kwargs.get(key) is not None for key in cache_keys):
+            module_kwargs = {key: None if key in cache_keys else value for key, value in module_kwargs.items()}
+            if "use_cache" in module_kwargs:
+                module_kwargs["use_cache"] = False
+        return x, module_kwargs
 
     def pre_quantize_generate_hook_start(self):
         self.shell_module_materialize(self.model.llm.model.embed_tokens, self.quantize_config.device)
