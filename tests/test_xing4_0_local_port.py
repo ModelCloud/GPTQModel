@@ -90,7 +90,7 @@ def source_oracle(model, ids, positions=None, keep=None):
     def mlp(x, prefix):
         return linear(F.silu(linear(x, prefix + ".gate_proj")) * linear(x, prefix + ".up_proj"), prefix + ".down_proj")
 
-    freq = c.rope_theta ** (-torch.arange(0, c.qk_rope_head_dim, 2).double() / c.qk_rope_head_dim)
+    freq = c.rope_parameters["rope_theta"] ** (-torch.arange(0, c.qk_rope_head_dim, 2).double() / c.qk_rope_head_dim)
     angle = positions.double().unsqueeze(-1) * freq
     co, si = angle.cos().unsqueeze(1), angle.sin().unsqueeze(1)
 

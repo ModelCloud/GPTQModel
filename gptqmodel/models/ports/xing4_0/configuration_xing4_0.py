@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from the pinned XingChen-AGI release; see NOTICE.
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 from transformers.utils import logging
 
 
 logger = logging.get_logger(__name__)
 
-class Xing4_0Config(PretrainedConfig):
+class Xing4_0Config(PreTrainedConfig):
     model_type = "xing4_0"
     keys_to_ignore_at_inference = ["past_key_values"]
     base_model_tp_plan = {
@@ -75,8 +75,7 @@ class Xing4_0Config(PretrainedConfig):
             bos_token_id=1,
             eos_token_id=2,
             tie_word_embeddings=False,
-            rope_theta=10000.0,
-            rope_scaling=None,
+            rope_parameters=None,
             rope_interleave=True,
             attention_bias=False,
             attention_dropout=0.0,
@@ -131,8 +130,9 @@ class Xing4_0Config(PretrainedConfig):
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
-        self.rope_theta = rope_theta
-        self.rope_parameters = rope_scaling
+        # Released checkpoints serialize `rope_scaling`/`rope_theta`; PreTrainedConfig folds
+        # those kwargs into `rope_parameters` at parse time.
+        self.rope_parameters = rope_parameters
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.hc_mult = hc_mult
