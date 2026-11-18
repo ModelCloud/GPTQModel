@@ -6,7 +6,6 @@ from transformers import AutoConfig
 
 from gptqmodel.models import auto
 from gptqmodel.models.base import BaseQModel
-from gptqmodel.models.definitions import hunyuan_vl as hunyuan_vl_module
 from gptqmodel.models.definitions.hunyuan_vl import HunYuanVLQModel
 from gptqmodel.utils.model import MODALITY
 
@@ -96,7 +95,7 @@ def test_hunyuan_vl_materialize_uses_canonical_device_and_module_path():
     )
 
 
-def test_hunyuan_vl_prepare_dataset_uses_processor_chat_template(monkeypatch):
+def test_hunyuan_vl_prepare_dataset_uses_processor_chat_template():
     calls = []
 
     class FakeProcessor:
@@ -104,15 +103,11 @@ def test_hunyuan_vl_prepare_dataset_uses_processor_chat_template(monkeypatch):
             calls.append((batch, kwargs))
             return {"input_ids": torch.ones((len(batch), 4), dtype=torch.long)}
 
-    monkeypatch.setattr(
-        hunyuan_vl_module.AutoProcessor,
-        "from_pretrained",
-        lambda *args, **kwargs: FakeProcessor(),
-    )
-
     qmodel = object.__new__(HunYuanVLQModel)
     nn.Module.__init__(qmodel)
     qmodel.model_local_path = "tencent/HunyuanOCR"
+    # BaseQModel loads the processor through the definition's LocalModelLoader.
+    qmodel.processor = FakeProcessor()
     samples = [
         [{"role": "user", "content": "first"}],
         [{"role": "user", "content": "second"}],

@@ -93,19 +93,15 @@ def test_gemma3_text_definition_stays_text_only():
     assert Gemma3QModel.require_load_processor is False
 
 
-def test_gemma3_vl_load_processor_uses_model_path(monkeypatch):
-    calls = []
+def test_gemma3_vl_load_processor_reuses_the_loader_processor():
+    loader = Gemma3ForConditionalGenerationGPTQ.loader
+    assert loader.processor_class == "gptqmodel.models.ports.native.auto.NativeProcessor"
+    assert loader.tokenizer_class == "gptqmodel.models.ports.native.auto.NativeTokenizer"
     processor = object()
-
-    def fake_from_pretrained(*args, **kwargs):
-        calls.append((args, kwargs))
-        return processor
-
-    monkeypatch.setattr(gemma3_def.AutoProcessor, "from_pretrained", fake_from_pretrained)
     model = _vl_qmodel()
+    model.processor = processor
 
     assert model.load_processor() is processor
-    assert calls == [(("google/gemma-3-4b-it",), {"trust_remote_code": False})]
 
 
 def test_gemma3_vl_prepare_dataset_renders_conversations_with_processor(monkeypatch):
