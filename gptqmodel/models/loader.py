@@ -168,6 +168,33 @@ def _model_keep_in_fp32_strict_names(model) -> Optional[List[str]]:
     return names or None
 
 
+# A source layout can need several declared renames before a key matches the
+# runtime shell (``deepseek_v4``: ``layers.N.attn.norm.weight`` needs
+# ``\.attn\.`` -> ``.self_attn.`` and then ``\.norm\.`` -> ``.kv_norm.``).
+# Bound the walk so two rules that rename each other cannot cycle.
+_MAX_CHECKPOINT_KEY_RENAMES = 8
+
+
+def _runtime_checkpoint_names(model) -> frozenset[str]:
+    """Names of every parameter and buffer the runtime shell can receive.
+
+    A GPT-QModel writer stores runtime names, so a checkpoint key in this set is
+    already in the layout Accelerate has to load. Tied weights keep both names
+    because ``remove_duplicate=False`` does not collapse them by storage.
+    Config-like stand-ins without modules return an empty set, which leaves the
+    raw Transformers conversion map in charge.
+    """
+
+    named_parameters = getattr(model, "named_parameters", None)
+    named_buffers = getattr(model, "named_buffers", None)
+    if not callable(named_parameters) or not callable(named_buffers):
+        return frozenset()
+
+    names = {name for name, _ in named_parameters(remove_duplicate=False)}
+    names.update(name for name, _ in named_buffers(remove_duplicate=False))
+    return frozenset(names)
+
+
 def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
     """Return the key converter the quantized loader should apply.
 
@@ -175,9 +202,18 @@ def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
     ``checkpoint_key_for_save``. Every other family falls back to its
     Transformers checkpoint conversion map, inferred from the live model, so a
     legacy-layout checkpoint (Transformers 4.x keys such as ``model.layers.*``
-    and ``visual.*``) is remapped to the runtime names. The map is idempotent
-    for checkpoints already written with runtime keys: their names do not match
-    the checkpoint-side patterns and pass through unchanged.
+    and ``visual.*``) is remapped to the runtime names.
+
+    That map describes a *source* layout only, and some families declare
+    patterns wide enough to also match runtime keys. ``deepseek_v4`` renames
+    ``\.norm\.`` -> ``.kv_norm.`` for the source key
+    ``layers.N.attn.norm.weight``, which also matches the runtime
+    ``model.norm.weight``; no runtime parameter is called
+    ``model.kv_norm.weight``, so the renamed final norm was reported missing
+    (#5131). The converter is therefore idempotent on the shell's own names: a
+    key that already names a runtime parameter or buffer is never renamed, and
+    a rename chain is only adopted when it lands on one. Converting a
+    checkpoint written by GPT-QModel is the identity.
     """
 
     explicit = getattr(
@@ -196,8 +232,44 @@ def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
     if mapping is None:
         return None
 
-    def convert(name: str) -> str:
+    # Runtime names only exist for the load direction. The save direction is
+    # asked for checkpoint-side names (for example quantized module aliases),
+    # where a module name is not a parameter name.
+    runtime_names = _runtime_checkpoint_names(model) if to_runtime else frozenset()
+
+    def rename_once(name: str) -> str:
         return LazyTurtle.convert_hf_checkpoint_key(name, mapping, to_runtime=to_runtime)
+
+    def convert(name: str) -> str:
+        renamed = rename_once(name)
+        if name in runtime_names:
+            # Idempotence check: the key already resolves on this shell, so a
+            # matching source-side pattern must not rename it again.
+            if renamed != name:
+                log.debug(
+                    "Loader: keeping runtime checkpoint key `%s`; the HF conversion map "
+                    "would rename it to `%s`, which is not a parameter of this model",
+                    name,
+                    renamed,
+                )
+            return name
+
+        if not to_runtime or renamed == name or renamed in runtime_names:
+            return renamed
+
+        # A source layout can need several renames before it matches the shell.
+        # Adopt the first chain result that resolves on this model; otherwise
+        # keep the single rename so families whose map matches once are
+        # unchanged.
+        current = renamed
+        for _ in range(_MAX_CHECKPOINT_KEY_RENAMES):
+            candidate = rename_once(current)
+            if candidate == current:
+                break
+            if candidate in runtime_names:
+                return candidate
+            current = candidate
+        return renamed
 
     return convert
 
