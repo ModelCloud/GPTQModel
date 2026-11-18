@@ -53,9 +53,8 @@ PENDING_MODEL_IMPORT_PORTS = frozenset({
 
 PENDING_STALE_PATTERN_PORTS = frozenset({
     "ernie4_5_vl_moe", "kimi_k3", "minicpm_o", "native/bloom", "native/codegen", "native/decision_transformer",
-    "native/falcon", "native/falcon_h1", "native/falcon_mamba", "native/gpt_neo", "native/gptj", "native/llama4",
-    "native/mpt", "native/nemotron_h", "native/nemotron_h_omni", "native/timm_wrapper", "native/zamba",
-    "native/zamba2",
+    "native/falcon", "native/falcon_mamba", "native/gpt_neo", "native/gptj", "native/llama4", "native/mpt",
+    "native/nemotron_h", "native/nemotron_h_omni", "native/timm_wrapper", "native/zamba", "native/zamba2",
 })
 
 STALE_PATTERNS = re.compile(
@@ -113,7 +112,7 @@ def _model_import_ports():
 
 # A released config.json may still spell a field the old way; configuration
 # modules may read it once at parse time and convert it. Nothing else may.
-PARSE_TIME_FIELDS = frozenset({"rope_scaling", "torch_dtype"})
+PARSE_TIME_FIELDS = frozenset({"rope_scaling", "torch_dtype", "num_logits_to_keep"})
 
 
 def _stale_hits(path):
