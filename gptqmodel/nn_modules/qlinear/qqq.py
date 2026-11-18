@@ -192,6 +192,11 @@ class QQQLinear(GroupedQuantLinear):
     # (#5010). `s_group` is legitimately empty when `group_size` spans the whole
     # input, so only its presence is checked.
     CHECKPOINT_REQUIRED_BUFFERS = ("B", "s_group", "s_channel")
+    # Per-channel layers (`group_size == in_features`) hold an empty
+    # `s_group`; the kernel builds its own empty operand. Older saves dropped
+    # every such key as shared storage (#5126), so accept a missing empty
+    # entry. A grouped layer's non-empty `s_group` remains required.
+    CHECKPOINT_OPTIONAL_EMPTY_BUFFERS = ("s_group",)
 
     # The native Marlin W4A8 `qqq_gemm` custom op has no fake impl and the
     # per-call reduce scratch/locks allocation is host-side; the JIT extension
