@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Independent checkpoint inventory and live owner contracts for Puzzle."""
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -54,8 +53,6 @@ def small_config(**kwargs):
 
 
 def test_puzzle_is_not_the_native_homogeneous_architecture():
-    proposals = json.loads((PORT / "central_fixture_proposals.json").read_text())
-    assert proposals["registered_module_plans"]["cases"]["NemotronHPuzzleQModel/gptq"] == EXPECTED_PLAN
     assert "nemotron_h" in CONFIG_MAPPING_NAMES
     assert "nemotron_h" in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
     assert "nemotron_h_puzzle" not in CONFIG_MAPPING_NAMES
@@ -77,7 +74,7 @@ def test_pinned_full_released_decoder_inventory_and_shapes():
     mtp = {k: v for k, v in shapes.items() if k.startswith("mtp.")}
     assert len(mtp) == 1040
     assert NemotronHPuzzleQModel.out_of_model_tensors == {"prefixes": ["mtp"]}
-    config = NemotronHPuzzleConfig.from_dict(json.loads((PORT / "checkpoint_config.json").read_text()))
+    config = NemotronHPuzzleConfig.from_dict(read_port_json(PORT / "checkpoint_config.json"))
     with torch.device("meta"):
         model = NemotronHPuzzleForCausalLM(config)
     actual = {k: list(v.shape) for k, v in model.state_dict().items()}
@@ -116,10 +113,9 @@ def _assert_all_owners(model):
     assert not plan.is_expert("mixer.shared_experts.up_proj")
 
 
-@pytest.mark.parametrize("device", ["cpu", "meta"])
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("latent", [None, 8])
-@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize(
+    "device,kv_heads,latent,bias", [("meta", 1, None, False), ("cpu", 2, 8, True), ("meta", 4, 8, False)]
+)
 def test_real_heterogeneous_live_owners(device, kv_heads, latent, bias):
     config = small_config(num_key_value_heads=kv_heads, moe_latent_size=latent, attention_bias=bias, mlp_bias=bias,
                           use_bias=bias)

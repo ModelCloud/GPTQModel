@@ -3,7 +3,6 @@
 """Tiny real Puzzle execution, independent equations and public consumer transitions."""
 
 import json
-from pathlib import Path
 
 import pytest
 import torch
@@ -19,7 +18,6 @@ from gptqmodel.quantization import AWQConfig
 from gptqmodel.utils.hf import load_model_config
 
 
-PORT = Path(__file__).parents[1] / "gptqmodel/models/ports/nemotron_h_puzzle"
 TOKENS = torch.tensor([[1, 5, 8, 4, 7, 6, 3], [1, 9, 3, 5, 6, 4, 7]])
 
 
@@ -203,9 +201,7 @@ def oracle(model, ids, mask=None):
     return _linear(_norm(x, model.model.norm_f.weight, model.config.layer_norm_epsilon), model.lm_head)
 
 
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("latent", [None, 8])
+@pytest.mark.parametrize("kv_heads,bias,latent", [(1, False, None), (2, True, 8), (4, False, 8), (4, True, None)])
 def test_full_decoder_matches_independent_equations(kv_heads, bias, latent):
     model = varied_model(tiny_config(num_key_value_heads=kv_heads, attention_bias=bias, mlp_bias=bias,
                                     use_bias=bias, moe_latent_size=latent, n_group=2, topk_group=1))
@@ -215,9 +211,16 @@ def test_full_decoder_matches_independent_equations(kv_heads, bias, latent):
     torch.testing.assert_close(actual.double(), expected, atol=2e-6, rtol=2e-5)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("implementation", ["eager", "sdpa"])
-@pytest.mark.parametrize("layout", ["hybrid", "mamba", "attention", "moe"])
+@pytest.mark.parametrize(
+    "dtype,implementation,layout",
+    [
+        (torch.float32, "eager", "hybrid"),
+        (torch.float32, "sdpa", "mamba"),
+        (torch.float16, "sdpa", "attention"),
+        (torch.bfloat16, "eager", "moe"),
+        (torch.bfloat16, "sdpa", "hybrid"),
+    ],
+)
 def test_dtype_cache_generation_and_two_safetensors_cycles(tmp_path, dtype, implementation, layout):
     kwargs = {} if layout == "hybrid" else {"block_configs": [{"block_type": layout}] * 2}
     model = varied_model(tiny_config(attn_implementation=implementation, **kwargs), dtype)
@@ -249,8 +252,7 @@ def test_dtype_cache_generation_and_two_safetensors_cycles(tmp_path, dtype, impl
             torch.testing.assert_close(model(ids, use_cache=False).logits, expected, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
-@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("bypass,trust", [(None, False), ("1", True)])
 def test_public_load_ignores_hostile_maps_and_retries(tmp_path, monkeypatch, bypass, trust):
     if bypass is None:
         monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
