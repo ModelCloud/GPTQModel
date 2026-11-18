@@ -52,7 +52,9 @@ class TestPackable(unittest.TestCase):
             (BACKEND.EXLLAMA_V2, {"qweight": False, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TRITON, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TORCH, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
-            (BACKEND.TORCH_FUSED, {"qweight": True, "qzeros": True, "scales": False, "g_idx": True}),
+            # CPU int4pack rewrites qweight/qzeros into its runtime layout but
+            # keeps `scales` in the checkpoint dtype/layout on purpose (#4178).
+            (BACKEND.TORCH_FUSED, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             # (BACKEND.BITBLAS, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.MARLIN, {"qweight": False, "qzeros": False, "scales": False, "g_idx": False}),
         ]

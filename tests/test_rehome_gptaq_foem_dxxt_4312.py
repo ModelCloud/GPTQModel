@@ -148,9 +148,12 @@ def test_quantize_aligns_dxxt_with_rehomed_hessian(kind, monkeypatch):
     moved = []
 
     def fake_safe_move_to(tensor, device, **_kwargs):
-        moved.append((tensor, torch.device(device)))
-        assert isinstance(tensor, _ForeignDeviceTensor)
-        return tensor.tensor.clone()
+        if isinstance(tensor, _ForeignDeviceTensor):
+            moved.append((tensor, torch.device(device)))
+            return tensor.tensor.clone()
+        # quantize() also moves the final quantized tensor to the module's
+        # device; only the H/dXXT/module_copy moves are the rehome contract.
+        return tensor.clone()
 
     monkeypatch.setattr(_MODULES[kind], "safe_move_to", fake_safe_move_to)
 

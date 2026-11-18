@@ -85,7 +85,10 @@ def test_build_group_ret_idx_matches_reference(total, group_size, permute):
 
 @pytest.mark.parametrize("layer_cls", (TorchFusedLinear, TorchAtenLinear))
 def test_layer_ret_idx_matches_reference_and_invalidates(layer_cls):
-    total, group_size = 4100, 32
+    # Both kernels must accept the shape: TorchAtenLinear's CPU int4pack
+    # requires in_features divisible by group_size (4100 is rejected on
+    # purpose). Remainder layouts are covered by the builder test above.
+    total, group_size = 4096, 32
     layer = layer_cls(
         bits=4,
         group_size=group_size,
