@@ -7,6 +7,7 @@ import torch
 from torch import nn
 
 from ...utils.torch import as_torch_device
+from ..base import BaseQModel
 from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from .ovis2_5 import Ovis2_5QModel
@@ -82,8 +83,19 @@ class Ovis2_6_MoeQModel(Ovis2_5QModel):
         self._materialize_missing_vision_post_layernorm(as_torch_device(self.quantize_config.device))
         super().pre_quantize_generate_hook_start()
 
-    def awq_get_modules_for_scaling(self, *args, **kwargs):
-        return []
+    def _layer_type_replay_config(self):
+        # The decoder config lives under `llm_config`, not `text_config`. Qwen3-Next
+        # declares per-layer `layer_types`; replay needs them to hand its
+        # Gated DeltaNet mixers a recurrent [batch, seq] mask, not the
+        # full-attention grid.
+        model = self._replay_root_model()
+        config = getattr(model, "config", None)
+        return getattr(config, "llm_config", None) or super()._layer_type_replay_config()
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Ovis2_5QModel keeps its dense decoder on plain AWQ. These Qwen3-MoE and
+        # Qwen3-Next decoders are qualified for the generic planner directly.
+        return BaseQModel.awq_get_modules_for_scaling(self, module, input_feat, module_kwargs)
 
     def prepare_dataset(self, calibration_dataset, batch_size=1, **kwargs):
         samples = list(calibration_dataset)

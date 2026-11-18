@@ -62,12 +62,19 @@ class OvisQModel(BaseQModel):
         tree = super()._resolve_effective_module_tree(model, quantize_config, detector)
         config = getattr(getattr(model, "config", None), "llm_config", None)
         if getattr(config, "model_type", None) == "gemma2":
-            tree[-1]["pre_feedforward_layernorm"] = ("pre_feedforward_layernorm:!",)
-            tree[-1]["post_feedforward_layernorm"] = ("post_feedforward_layernorm:!",)
+            # Gemma 2 sandwich norms: `post_attention_layernorm` normalizes the
+            # attention output before the residual add, and the MLP reads
+            # `pre_feedforward_layernorm`. Declare the MLP input norm before the
+            # MLP so AWQ folds gate/up into it rather than into the post-norm.
+            blocks = tree[-1]
+            ordered = {}
+            for key, value in blocks.items():
+                if key == "mlp":
+                    ordered["pre_feedforward_layernorm"] = ("pre_feedforward_layernorm:!",)
+                ordered[key] = value
+            ordered["post_feedforward_layernorm"] = ("post_feedforward_layernorm:!",)
+            tree[-1] = ordered
         return tree
-
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        return []
 
     def monkey_patch(self):
         self.model.text_tokenizer = getattr(self.tokenizer, "tokenizer", self.tokenizer)
@@ -205,3 +212,12 @@ class OvisQModel(BaseQModel):
 
     def run_input_capture(self, example, use_cache: bool, data_device):
         return self.model.generate(inputs=example.pop("input_ids"), **example)
+
+    def capture_first_layer_input_kwargs(self, args, kwargs, batch_device, layer_input_kwargs):
+        # Capture runs through generate(), which always threads a live
+        # DynamicCache into the decoder. Replaying the captured kwargs would
+        # append to it on every AWQ scale-search forward of `self_attn`.
+        layer_input_kwargs = super().capture_first_layer_input_kwargs(args, kwargs, batch_device, layer_input_kwargs)
+        if layer_input_kwargs.get("past_key_values") is not None:
+            layer_input_kwargs["past_key_values"] = None
+        return layer_input_kwargs

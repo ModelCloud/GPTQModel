@@ -45,12 +45,16 @@ class MiniCPMVQModel(BaseQModel):
             # fold into q only and then q into k. The MLP stages were also
             # merged, so `down_proj` shared the gate/up GPTQ subset.
             "self_attn": (
+                # Qwen3's per-head Q/K norms read q/k outputs. Declared ahead of
+                # the projections (as Qwen3QModel does) they never sit between
+                # v_proj and o_proj, which hid the v -> o fold and, on layouts
+                # without them, folded o_proj into `input_layernorm`.
+                "q_norm:!",
+                "k_norm:!",
                 "q_proj:0:in=x",
                 "k_proj:0:in=x",
                 "v_proj:0:in=x",
                 "o_proj:1",
-                "q_norm:!",
-                "k_norm:!",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
@@ -60,11 +64,6 @@ class MiniCPMVQModel(BaseQModel):
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
     require_load_processor = True
     require_trust_remote_code = False
-
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # The wrapper spans legacy muP, Llama, Qwen2 and normalized-QK Qwen3.
-        # Fold/search/replay across these variants has not been qualified.
-        return []
 
     def pre_quantize_generate_hook_start(self):
         self.shell_module_materialize(self.model.llm.model.embed_tokens, self.quantize_config.device)
@@ -216,3 +215,12 @@ class MiniCPMVQModel(BaseQModel):
             tokenizer=self.model.tokenizer,
             **generation_config,
         )
+
+    def capture_first_layer_input_kwargs(self, args, kwargs, batch_device, layer_input_kwargs):
+        # Capture runs through generate(), which threads a live DynamicCache into
+        # the decoder even with `use_cache=False`. Replaying the captured kwargs
+        # would append to it on every AWQ scale-search forward of `self_attn`.
+        layer_input_kwargs = super().capture_first_layer_input_kwargs(args, kwargs, batch_device, layer_input_kwargs)
+        if layer_input_kwargs.get("past_key_values") is not None:
+            layer_input_kwargs["past_key_values"] = None
+        return layer_input_kwargs
