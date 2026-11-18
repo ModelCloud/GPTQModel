@@ -196,6 +196,149 @@ def _cpp_from_torch(module):
     return cpp.eval()
 
 
+_Q8_1_HEADER_BYTES = 4
+_Q8_1_OVERFLOW_BLOCKS = [
+    # 32 x 3000: d = 23.62 is finite in FP16, but s = 96000 is not.
+    pytest.param(np.full(32, 3000.0, dtype=np.float32), "auxiliary scale-sum s", id="scale-sum-3000"),
+    # FP16 rounds 65536 up to inf, while its neighbouring 65504 is still finite.
+    pytest.param(np.full(32, 2048.0, dtype=np.float32), "auxiliary scale-sum s", id="scale-sum-2048"),
+    pytest.param(np.full(32, -2048.0, dtype=np.float32), "auxiliary scale-sum s", id="scale-sum-neg-2048"),
+    # 1e7 makes the block scale itself leave the FP16 range.
+    pytest.param(np.full(32, 1e7, dtype=np.float32), "block scale d", id="block-scale-1e7"),
+]
+_Q8_1_ACCEPTED_BLOCKS = [
+    # 2047 * 32 = 65504 exactly: the largest finite FP16 scale-sum.
+    pytest.param(np.full(32, 2047.0, dtype=np.float32), id="scale-sum-max-finite"),
+    pytest.param(np.full(32, -2047.0, dtype=np.float32), id="scale-sum-max-finite-negative"),
+    pytest.param(np.zeros(32, dtype=np.float32), id="zero-block"),
+    pytest.param(np.linspace(-1.0, 1.0, 32, dtype=np.float32), id="ordinary-block"),
+]
+
+
+def _q8_1_fields(packed: np.ndarray):
+    blocks = np.asarray(packed, dtype=np.uint8).reshape(-1, _GGUF_TYPE_INFO["Q8_1"]["type_size"])
+    scale = blocks[:, :2].copy().view(np.float16).reshape(-1)
+    scale_sum = blocks[:, 2:4].copy().view(np.float16).reshape(-1)
+    codes = blocks[:, _Q8_1_HEADER_BYTES:].copy().view(np.int8).reshape(-1, 32)
+    return scale, scale_sum, codes
+
+
+@pytest.mark.parametrize("block,reason", _Q8_1_OVERFLOW_BLOCKS)
+def test_q8_1_rejects_auxiliary_fields_that_overflow_fp16(block, reason):
+    """Q8_1 must not publish an FP16 ``d``/``s`` header that rounds to infinity.
+
+    ``d = max|x| / 127`` is finite for all of these blocks, so checking only the
+    decoded weight or ``d`` accepts them. The auxiliary ``s = d * sum(qs)`` is
+    what leaves FP16 range, and any reader that folds ``s`` into its dot product
+    then produces a non-finite result. The format's header dtype is fixed, so
+    the packer fails closed with the offending field named instead of emitting
+    an unreadable block.
+    """
+
+    _skip_without_quantizer("Q8_1")
+    weight = block.reshape(1, -1)
+
+    with pytest.raises(ValueError) as excinfo:
+        _quantize_gguf_tensor_numpy(weight, "Q8_1")
+
+    message = str(excinfo.value)
+    assert "Q8_1" in message
+    assert reason in message
+    assert "block 0 of 1" in message
+    with np.errstate(over="ignore", invalid="ignore"):
+        expected_scale = np.abs(block).max() / np.float32(127.0)
+        expected_sum = np.float32(sum(np.copysign(
+            np.trunc(np.abs(block / expected_scale))
+            + (np.abs(block / expected_scale) - np.trunc(np.abs(block / expected_scale)) >= 0.5),
+            block,
+        ).astype(np.int32))) * expected_scale
+    assert np.isfinite(expected_scale)
+    if reason == "auxiliary scale-sum s":
+        # The reported trigger is the auxiliary field: d stays finite while the
+        # independently computed scale-sum does not.
+        assert np.isfinite(np.float16(expected_scale))
+        assert not np.isfinite(np.float16(expected_sum))
+    else:
+        assert not np.isfinite(np.float16(expected_scale))
+
+
+def test_q8_1_reports_the_first_unrepresentable_block():
+    """A mixed matrix must name the failing block, not the first accepted one."""
+
+    _skip_without_quantizer("Q8_1")
+    weight = np.zeros((1, 64), dtype=np.float32)
+    weight[0, :32] = 1.0
+    weight[0, 32:] = 3000.0
+
+    with pytest.raises(ValueError) as excinfo:
+        _quantize_gguf_tensor_numpy(weight, "Q8_1")
+
+    message = str(excinfo.value)
+    assert "block 1 of 2" in message
+    assert "scale-sum s" in message
+
+
+def test_q8_1_rejects_packed_bytes_with_a_nonfinite_header():
+    """The shared entry point validates bytes from any packer, not just the fallback."""
+
+    from gptqmodel.nn_modules.qlinear.gguf import _check_packed_q8_1_fields
+
+    packed = np.zeros((1, _GGUF_TYPE_INFO["Q8_1"]["type_size"]), dtype=np.uint8)
+    # block_q8_1 stores fp16 d first, then fp16 s; 0x7C00 is positive infinity.
+    packed[0, :4] = np.array([0x0000, 0x7C00], dtype=np.uint16).view(np.uint8)
+    with pytest.raises(ValueError, match=r"auxiliary scale-sum s.*block 0 of 1"):
+        _check_packed_q8_1_fields(packed)
+
+    packed[0, :4] = np.array([0x7C00, 0x0000], dtype=np.uint16).view(np.uint8)
+    with pytest.raises(ValueError, match=r"block scale d.*block 0 of 1"):
+        _check_packed_q8_1_fields(packed)
+
+    _check_packed_q8_1_fields(
+        _quantize_gguf_tensor_numpy(np.full((1, 32), 2047.0, dtype=np.float32), "Q8_1")
+    )
+
+
+@pytest.mark.parametrize("block", _Q8_1_ACCEPTED_BLOCKS)
+def test_q8_1_in_range_fields_stay_bit_exact(block):
+    """Blocks that fit FP16 must keep the existing ggml bit layout and values."""
+
+    _skip_without_quantizer("Q8_1")
+    weight = block.reshape(1, -1)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        packed = _quantize_gguf_tensor_numpy(weight, "Q8_1")
+
+    overflow_warnings = [
+        str(item.message)
+        for item in caught
+        if issubclass(item.category, RuntimeWarning) and "overflow" in str(item.message)
+    ]
+    assert not overflow_warnings, overflow_warnings
+
+    scale, scale_sum, codes = _q8_1_fields(packed)
+    assert np.isfinite(scale).all()
+    assert np.isfinite(scale_sum).all()
+    float32_scale = np.float32(np.abs(block).max() / np.float32(127.0))
+    assert scale[0] == np.float16(float32_scale)
+    # ``s`` is accumulated in FP32 from the unrounded scale and rounded once to
+    # FP16, so comparing against a product of the stored FP16 scale would hide
+    # the rounding ``ggml`` performs.
+    np.testing.assert_array_equal(
+        scale_sum[0],
+        np.float16(np.float32(codes[0].astype(np.float32).sum()) * float32_scale),
+    )
+    # The scale-sum is a stored field, so the dequantized weight alone cannot
+    # prove it was written correctly.
+    expected = (scale[0].astype(np.float64) * codes[0].astype(np.float64))
+    np.testing.assert_allclose(
+        _dequantize_gguf_tensor_numpy(packed, "Q8_1")[0],
+        expected,
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
 @pytest.mark.parametrize("alias", ALL_ALIASES)
 def test_gguf_quantize_dequantize_roundtrip(alias):
     """Pack every alias and verify dequant stays inside its precision budget."""
