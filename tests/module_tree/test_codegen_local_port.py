@@ -20,7 +20,7 @@ from gptqmodel.models.ports.codegen.modeling_codegen import CodeGenForCausalLM
 from gptqmodel.quantization.config import AWQConfig
 
 
-CONFIGS = json.loads((Path(__file__).parents[2] / "gptqmodel/models/ports/codegen/upstream_configs.json").read_text())
+CONFIGS = json.loads((Path(__file__).parents[1] / "fixtures/ports/codegen/upstream_configs.json").read_text())
 LINEARS = {"attn.qkv_proj", "attn.out_proj", "mlp.fc_in", "mlp.fc_out"}
 LAYER_KEYS = {"ln_1.weight", "ln_1.bias", "attn.qkv_proj.weight", "attn.out_proj.weight",
               "mlp.fc_in.weight", "mlp.fc_in.bias", "mlp.fc_out.weight", "mlp.fc_out.bias"}

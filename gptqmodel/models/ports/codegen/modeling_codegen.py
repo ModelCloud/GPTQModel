@@ -16,7 +16,7 @@
 """CodeGen2 TPU-v3 attention with current Transformers cache/generation APIs.
 
 Adapted from Salesforce/codegen2-1B_P, revision
-47f05cd3c1b357745fbead74202fc1efe87b6d25 (see PROVENANCE.md).
+47f05cd3c1b357745fbead74202fc1efe87b6d25.
 Four-partition checkpoints retain the native Transformers implementation.
 """
 
