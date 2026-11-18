@@ -18,7 +18,7 @@ from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
 from .config import FORMAT, Fallback, FallbackStrategy, RTNConfig, SmoothMSE
-from .fallback_smooth import mse_optimal_quant, smooth_block
+from .fallback_smooth import element_saliency_weights, mse_optimal_quant, smooth_block
 from .gsq_scalar import gsq_enabled_for, refine_affine_scalar
 from .quantizer import HF_OPTIMUM, SCALE_STORAGE_FLOOR, Quantizer
 
@@ -215,6 +215,10 @@ class RTN:
                         steps=mse_steps,
                         maxshrink=mse_maxshrink,
                         eps=SCALE_STORAGE_FLOOR,
+                        # Calibration-free saliency: a large weight dominates
+                        # its row's dot product, so do not let the search clip
+                        # it just because the bulk gets a smaller step.
+                        weights=element_saliency_weights(block),
                     )
                 else:
                     block_mod, scale_factor = smooth_block(

@@ -25,7 +25,14 @@ from ..utils.device import get_device
 from ..utils.kernel import resolve_kernel_config
 from ..utils.p2p import safe_move_to
 from .conv_padding import conv_padding_pairs, pad_mode
-from .fallback_smooth import affine_range_with_zero, mse_optimal_quant, smooth_block, symmetric_range
+from .fallback_smooth import (
+    affine_range_with_zero,
+    element_saliency_weights,
+    hessian_column_weights,
+    mse_optimal_quant,
+    smooth_block,
+    symmetric_range,
+)
 from .gptq import (
     _is_memory_allocation_failure,
     _move_static_groups,
@@ -422,6 +429,15 @@ class QQQ:
                 device=W.device,
             )
             W = torch.cat((W, pad), dim=1)
+        # The Hessian diagonal carries the captured input-channel energy; use
+        # it so SmoothMSE does not clip weights that feed outlier activations.
+        # Without a Hessian, fall back to the weight-magnitude proxy rather
+        # than the uniform mean that rewards clipping a row's largest weight.
+        col_weights = (
+            hessian_column_weights(self.H, self.columns, device=W.device)
+            if isinstance(smooth_method, SmoothMSE)
+            else None
+        )
         Q = torch.empty_like(W)
         scale_chunks = []
         zero_chunks = []
@@ -455,12 +471,14 @@ class QQQ:
             block = W[:, start:end]
 
             if isinstance(smooth_method, SmoothMSE):
+                weights = element_saliency_weights(block) if col_weights is None else col_weights[start:end]
                 dequant, scale, zero = mse_optimal_quant(
                     block,
                     self.qcfg,
                     maxq,
                     steps=mse_steps,
                     maxshrink=mse_maxshrink,
+                    weights=weights,
                 )
             else:
                 block_mod, scale_factor = smooth_block(

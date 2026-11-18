@@ -31,7 +31,14 @@ from ..utils.logger import setup_logger
 from ..utils.p2p import p2p_all_enabled, safe_move_to
 from ..utils.rocm import quant_blas_backend
 from .conv_padding import conv_padding_pairs, pad_mode
-from .fallback_smooth import affine_range_with_zero, mse_optimal_quant, smooth_block, symmetric_range
+from .fallback_smooth import (
+    affine_range_with_zero,
+    element_saliency_weights,
+    hessian_column_weights,
+    mse_optimal_quant,
+    smooth_block,
+    symmetric_range,
+)
 from .gar import (
     compose_final_perm,
     compute_global_perm,
@@ -1919,6 +1926,16 @@ class GPTQ:
         if target_device is None:
             target_device = self.H.device if self.H is not None else self.module.weight.device
         W = self.clone_module(device=target_device)
+        # When the Hessian exists its diagonal is the exact input-channel
+        # importance for the layer's output error, so weight the SmoothMSE
+        # objective with it instead of averaging every channel equally. A
+        # fallback without captured activations uses the weight-magnitude
+        # proxy instead of the harmful uniform mean.
+        col_weights = (
+            hessian_column_weights(self.H, self.columns, device=target_device)
+            if isinstance(smooth_method, SmoothMSE)
+            else None
+        )
         Q = torch.empty_like(W)
         scale_chunks = []
         zero_chunks = []
@@ -1955,6 +1972,7 @@ class GPTQ:
             block = W[:, start:end]
 
             if isinstance(smooth_method, SmoothMSE):
+                weights = element_saliency_weights(block) if col_weights is None else col_weights[start:end]
                 dequant, scale, zero = mse_optimal_quant(
                     block,
                     self.qcfg,
@@ -1962,6 +1980,7 @@ class GPTQ:
                     steps=mse_steps,
                     maxshrink=mse_maxshrink,
                     eps=SCALE_STORAGE_FLOOR,
+                    weights=weights,
                 )
             else:
                 block_mod, scale_factor = smooth_block(
