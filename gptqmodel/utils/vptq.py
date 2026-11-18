@@ -19,6 +19,12 @@ from typing import Optional, Tuple
 import torch
 
 
+# Elements per block for `pack_vptq_indices`. The streaming packer allocates a
+# handful of int64 temporaries per element in a block, so this bounds its peak
+# host memory independently of the layer width (~4 MiB per temporary).
+_PACK_BLOCK_ELEMENTS = 1 << 19
+
+
 def vptq_index_bits(num_centroids: int) -> int:
     """Return the number of bits needed to address `num_centroids` entries."""
 
@@ -168,13 +174,14 @@ def pack_vptq_indices(
     if num_elements == 0:
         return torch.zeros(*indices.shape[:-1], 0, dtype=torch.int32, device=indices.device)
 
-    merged = indices.to(torch.int64)
-    merged_min, merged_max = (
-        int(value) for value in torch.stack(torch.aminmax(merged)).tolist()
+    # Validate on the caller's tensors: an int64 copy would be kept alive for
+    # the whole pack and would double the peak for an int32/int8 source.
+    index_min, index_max = (
+        int(value) for value in torch.stack(torch.aminmax(indices)).tolist()
     )
-    if merged_min < 0:
+    if index_min < 0:
         raise ValueError("pack_vptq_indices: `indices` must be non-negative.")
-    if merged_max >= (1 << index_bits):
+    if index_max >= (1 << index_bits):
         raise ValueError(
             f"pack_vptq_indices: `indices` values exceed the {index_bits}-bit packing range."
         )
@@ -184,9 +191,8 @@ def pack_vptq_indices(
                 f"pack_vptq_indices: residual index shape {tuple(res_indices.shape)} "
                 f"must match index shape {tuple(indices.shape)}."
             )
-        res_merged = res_indices.to(torch.int64)
         res_min, res_max = (
-            int(value) for value in torch.stack(torch.aminmax(res_merged)).tolist()
+            int(value) for value in torch.stack(torch.aminmax(res_indices)).tolist()
         )
         if res_min < 0:
             raise ValueError("pack_vptq_indices: `res_indices` must be non-negative.")
@@ -195,21 +201,52 @@ def pack_vptq_indices(
                 f"pack_vptq_indices: `res_indices` values exceed the "
                 f"{res_bits}-bit packing range."
             )
-        merged = merged | (res_merged << index_bits)
-
-    bit_offsets = torch.arange(total_bits, device=indices.device, dtype=torch.int64)
-    bits = (merged.unsqueeze(-1) >> bit_offsets) & 1
-    bits = bits.reshape(*indices.shape[:-1], num_elements * total_bits)
-
     words = vptq_packed_words(num_elements, total_bits)
-    pad = words * 32 - bits.shape[-1]
-    if pad > 0:
-        bits = torch.nn.functional.pad(bits, (0, pad))
-    bits = bits.reshape(*indices.shape[:-1], words, 32)
+    # Both streams stay separate: the residual occupies the high bits of the
+    # same element, and a shift is linear, so `(index | res << index_bits) << s`
+    # is `(index << s) + ((res << index_bits) << s)`. Scattering them
+    # separately avoids materializing a full-size merged copy of the indices.
+    rows = indices.reshape(-1, num_elements).to(torch.int64)
+    res_rows = None
+    if res_indices is not None:
+        res_rows = res_indices.reshape(-1, num_elements).to(torch.int64)
 
-    word_offsets = torch.arange(32, device=indices.device, dtype=torch.int64)
-    packed = (bits << word_offsets).sum(dim=-1)
-    return packed.to(torch.int32)
+    # Word arithmetic instead of expanding every index into one int64 per bit.
+    # A `total_bits`-wide element starts inside one 32-bit word and spills into
+    # the next, so two scatter-adds per element replace the
+    # `2 * 8 * total_bits` bytes of per-bit temporaries that the expansion
+    # allocated (about 256 B per index at the default 12+4 bits). Fields of
+    # different elements never overlap, so summing equals OR-ing.
+    #
+    # The last column absorbs the spill of the final element; it is dropped
+    # after the accumulation. Blocks of columns keep the per-block temporaries
+    # bounded so the peak does not grow with the layer width.
+    packed = torch.zeros(rows.shape[0], words + 1, dtype=torch.int64, device=rows.device)
+    block = max(1, _PACK_BLOCK_ELEMENTS // max(1, rows.shape[0]))
+    mask = 0xFFFFFFFF
+
+    def add(values, word_offsets, next_word, shifts, spill):
+        # Low 32 bits of `values << shifts`, then the bits that cross into the
+        # next word. `shifts == 0` makes the second term zero.
+        packed.scatter_add_(1, word_offsets.expand_as(values), (values << shifts) & mask)
+        packed.scatter_add_(1, next_word.expand_as(values), values >> spill)
+
+    for start in range(0, num_elements, block):
+        stop = min(start + block, num_elements)
+        positions = torch.arange(start, stop, dtype=torch.int64, device=rows.device)
+        positions.mul_(total_bits)
+        word_offsets = torch.div(positions, 32, rounding_mode="floor")
+        next_word = word_offsets + 1
+        shifts = torch.remainder(positions, 32)
+        # `shifts == 0` for a 32-bit stream; otherwise the values are below
+        # `2**total_bits`, so no shift here can reach the int64 sign bit.
+        spill = 32 - shifts
+
+        add(rows[:, start:stop], word_offsets, next_word, shifts, spill)
+        if res_rows is not None:
+            add(res_rows[:, start:stop] << index_bits, word_offsets, next_word, shifts, spill)
+
+    return packed[:, :words].to(torch.int32).reshape(*indices.shape[:-1], words)
 
 
 def unpack_vptq_indices(

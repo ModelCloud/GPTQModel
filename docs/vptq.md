@@ -160,6 +160,26 @@ on the other. Compare runs on one device when checking a change; a
 cross-platform comparison needs the same starting checkpoint, not the same
 seed.
 
+## Packed index writer
+
+`pack_vptq_indices()` serializes each group's `(residual << index_bits) | index`
+values into a little-endian 32-bit word stream. The writer accumulates word
+fragments instead of expanding every index into one int64 lane per bit: an
+element of `total_bits` bits touches at most two words, so two `scatter_add_`
+passes per element replace the per-bit expansion. Element fields never overlap,
+so the additions are equivalent to OR-ing, and the words stay bitwise identical
+to the per-bit writer (pinned by the pure-Python oracle in `tests/test_vptq.py`).
+
+The per-bit expansion allocated `2 * 8 * total_bits` bytes per index (about
+256 B at the default 12+4 bits) in two full-size temporaries, and
+`submodule_finalize()` runs the packers for gate/up/down concurrently on the CPU
+worker pool. A Llama-3.1-8B `down_proj` index set therefore crossed 5 GiB host
+`RssAnon`. The writer now processes bounded column blocks
+(`_PACK_BLOCK_ELEMENTS`), so its peak host memory no longer grows with the
+layer width: the same 7.34M-index set peaks at ~90 MiB instead of ~1.9 GiB and
+packs about four times faster. `test_vptq_pack_streams_words_without_per_bit_expansion`
+bounds the peak RSS so the expansion cannot return unnoticed (issue #5034).
+
 ## Group layout resolution
 
 `VPTQ.quantize_weight()` and `VPTQLinear.__init__()` share
