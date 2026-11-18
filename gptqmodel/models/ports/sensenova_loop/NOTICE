@@ -1,0 +1,23 @@
+SenseNova-Loop for GPT-QModel
+
+Configuration and modeling adapted from OpenSenseNova's SenseNova-Loop
+remote-code file `modeling_sensenova_loop.py`, as published in
+huggingface.co/sensenova/SenseNova-Loop-9B
+Revision: fa381f7c466739475e172a7d3234e77351e4f613
+Upstream code repository: https://github.com/OpenSenseNova/SenseNova-Loop
+License: Apache License, Version 2.0 (model card and repository); see the
+repository root LICENSE for the license text. The upstream file carries no
+copyright header of its own; authorship remains with the SenseNova-Loop
+authors.
+
+Transformers 5 adaptation, package-owned loading and regression tests:
+Copyright 2026 ModelCloud.ai
+Apache License, Version 2.0.
+
+The exact native Qwen3.5 decoder layers, vision tower, processor and
+tokenizer are imported from Transformers 5; no Transformers modeling source
+is copied. The port adds only the fixed-count Loop execution plan, per-visit
+cache slots and the mHC residual-stream routers.
+
+This distribution contains no trained model weights. Adaptive loop counts
+(`loop_gate`) are not implemented, matching the fixed-count upstream model.
