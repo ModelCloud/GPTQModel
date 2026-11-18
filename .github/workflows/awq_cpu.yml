@@ -21,6 +21,7 @@ on:
       - 'tests/test_awq_*.py'
       - 'tests/test_hf_bridge_*.py'
       - 'tests/test_hymba_awq_*.py'
+      - 'tests/test_gptq_processor_hessian_*.py'
       - 'tests/test_calibration_*.py'
       - 'tests/test_docs_contract_refs.py'
       - 'tests/module_tree/**'
@@ -60,6 +61,8 @@ jobs:
           case "${{ matrix.suite }}" in
             unit)
               python -m pytest tests/test_docs_contract_refs.py \
+                tests/test_gptq_processor_hessian_release_5026.py \
+                tests/test_gptq_processor_hessian_lifetime_5026.py \
                 tests/test_awq_scale_search_safety.py \
                 tests/test_awq_moe_router_scaling.py tests/test_awq_scaling_groups.py \
                 tests/test_awq_scale_folding.py tests/test_awq_empty_groups.py \
