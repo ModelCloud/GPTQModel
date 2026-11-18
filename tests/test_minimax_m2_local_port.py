@@ -359,13 +359,15 @@ def test_original_cache_layouts_beam_reset_and_foreign_cache(layout):
     with torch.inference_mode():
         start = model(IDS[:, :3], use_cache=True)
         cache = start.past_key_values
-        assert cache.get_seq_length() == 3
+        # Only softmax-attention KV layers carry a token count; recurrent-only caches report none.
+        tracked = 0 if layout == "linear" else 1
+        assert cache.get_seq_length() == 3 * tracked
         index = torch.tensor([1, 0, 1])
         cache.reorder_cache(index)
         actual = model(IDS[index, 3:6], past_key_values=cache, use_cache=True).logits
         expected = model(IDS[index, :6], use_cache=False).logits[:, 3:]
         torch.testing.assert_close(actual, expected, rtol=2e-5, atol=3e-7)
-        assert cache.get_seq_length() == 6
+        assert cache.get_seq_length() == 6 * tracked
         cache.reset()
         assert cache.get_seq_length() == 0 and not cache.linear_cache
         retry = model(IDS[:1], past_key_values=cache, use_cache=True).logits
