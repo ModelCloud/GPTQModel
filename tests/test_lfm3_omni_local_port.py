@@ -440,7 +440,7 @@ def test_codec_real_encode_decode_stream_legacy_safetensors_and_processor_reload
 
 
 @pytest.mark.parametrize("kv_heads,bias", [(4, False), (1, True)])
-def test_public_plain_awq_quantizes_only_text_linears_and_reloads(tmp_path, kv_heads, bias):
+def test_public_awq_scales_and_quantizes_only_text_linears_and_reloads(tmp_path, kv_heads, bias):
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
 
@@ -448,11 +448,20 @@ def test_public_plain_awq_quantizes_only_text_linears_and_reloads(tmp_path, kv_h
     write_checkpoint(tmp_path, source)
     wrapper = GPTQModel.load(str(tmp_path), quantize_config=AWQConfig(device="cpu", group_size=16, fallback=None),
                             backend=BACKEND.TORCH, dtype=torch.float16)
+    # Fold sources (ffn_norm, conv-layer operator_norm) absorb AWQ scales; every
+    # other norm, the attention head gate and the depthwise kernel stay exact.
+    folded = ("ffn_norm", "operator_norm")
     before = {key: value.clone() for key, value in source.state_dict().items()
               if not key.startswith("model.language_model.layers.")
-              or any(tag in key for tag in ("norm", "gate_proj", "conv.conv"))}
+              or (any(tag in key for tag in ("norm", "gate_proj", "conv.conv"))
+                  and not any(f".{tag}." in key for tag in folded))}
+    norms = {key: value.clone() for key, value in source.state_dict().items()
+             if key.startswith("model.language_model.layers.") and ".ffn_norm." in key}
     for layer in wrapper.model.model.language_model.layers:
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
+        features = {name: torch.zeros(1, module.in_features) for name, module in layer.named_modules()
+                    if isinstance(module, torch.nn.Linear)}
+        sources = {node["prev_op"] for node in wrapper.awq_get_modules_for_scaling(layer, features, {})}
+        assert layer.ffn_norm in sources
     calibration = [{"input_ids": torch.tensor([[1, 4, 5, 6, 7, 8, 9, 10]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
     wrapper.quantize(
@@ -464,6 +473,7 @@ def test_public_plain_awq_quantizes_only_text_linears_and_reloads(tmp_path, kv_h
     assert all(name.startswith("model.language_model.layers.") for name in packed)
     for key, value in before.items():
         torch.testing.assert_close(wrapper.model.state_dict()[key], value, atol=0, rtol=0)
+    assert any(not torch.equal(wrapper.model.state_dict()[key], value) for key, value in norms.items())
     with torch.inference_mode():
         expected = wrapper.model(**calibration[0], use_cache=False).logits
     assert torch.isfinite(expected).all()

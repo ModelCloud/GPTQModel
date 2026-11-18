@@ -230,8 +230,8 @@ def test_awq_quantizes_and_packs_every_projection_and_preserves_excluded_owners(
                 handle.remove()
         assert {f"{prefix}.{name}" for name in QUANTIZED[layer_type]} <= features.keys()
         local_features = {name.removeprefix(prefix + "."): value for name, value in features.items()}
-        fold_sources = {"ffn_norm"} if kind == "lfm3" else set()
-        if kind == "lfm3" and layer_type == "conv":
+        fold_sources = {"ffn_norm"} if kind in {"lfm3", "lfm3_omni"} else set()
+        if kind in {"lfm3", "lfm3_omni"} and layer_type == "conv":
             fold_sources.add("operator_norm")
         groups = wrapper.awq_get_modules_for_scaling(layer, local_features, {})
         assert {node["prev_op"] for node in groups} == {layer.get_submodule(name) for name in fold_sources}

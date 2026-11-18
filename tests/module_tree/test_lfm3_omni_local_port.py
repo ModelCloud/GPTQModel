@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 
 from gptqmodel.models.definitions.lfm3_omni import LFM3OmniQModel
@@ -18,7 +19,7 @@ from gptqmodel.models.ports.lfm3_omni.configuration_liquid_codec import LiquidCo
 from gptqmodel.models.ports.lfm3_omni.modeling_lfm3_omni import Lfm3OmniForConditionalGeneration
 from gptqmodel.models.ports.lfm3_omni.modeling_liquid_codec import LiquidCodecModel
 from tests.port_assets import DATA
-from tests.test_lfm3_omni_local_port import tiny_config
+from tests.test_lfm3_omni_local_port import tiny_config, tiny_model
 
 
 FIXTURES = DATA / "lfm3_omni"
@@ -78,11 +79,31 @@ def test_real_decoder_weight_owners_quantization_and_plan_tags(kv_heads, bias, s
                 quantized += key.endswith("weight")
             else:
                 assert set(spec.flags) & {"!", "?"}
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     assert quantized == 19
     assert not plan.find("conv.conv").quantize
     assert not plan.find("self_attn.gate_proj").quantize
     assert plan.find("conv.conv.undeclared") is None
+
+
+@pytest.mark.parametrize("kv_heads,bias,sandwich", [(4, False, True), (2, True, False)])
+def test_inherited_lfm3_awq_folds_preserve_every_layer_type(kv_heads, bias, sandwich):
+    # Omni inherits LFM3's fold policy: ffn_norm -> w1/w3 on every layer and
+    # operator_norm -> conv.in_proj on short-conv layers. Sandwich post-norms
+    # are never sources.
+    model = tiny_model(kv_heads=kv_heads, bias=bias, sandwich=sandwich)
+    _convert_model_with_defuser(LFM3OmniQModel, model, cleanup_original=False)
+    language = model.model.language_model
+    ids = torch.tensor([[1, 4, 5, 6, 7, 8, 9, 10]])
+
+    def forward():
+        return language(input_ids=ids).last_hidden_state
+
+    for layer, layer_type in zip(language.layers, language.config.layer_types):
+        checked = assert_awq_folds_neutral(LFM3OmniQModel, model, layer, forward)
+        expected = [("ffn_norm", ["feed_forward.w1", "feed_forward.w3"])]
+        if layer_type == "conv":
+            expected.insert(0, ("operator_norm", ["conv.in_proj"]))
+        assert [(source, targets) for source, targets, _ in checked] == expected
 
 
 def _layout_sha256(model):
