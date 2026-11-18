@@ -20,8 +20,6 @@ import os
 import numpy as np
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput
-from transformers.models.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
-from transformers.models.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoProcessor
 from transformers.processing_utils import MultiModalData, ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.utils import auto_docstring, logging
@@ -29,6 +27,8 @@ from transformers.utils.hub import cached_file
 from transformers.video_utils import VideoInput
 
 from ....utils.hf import load_hf_tokenizer
+from ..native.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
+from ..native.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoProcessor
 from .configuration_interns2_preview import InternS2PreviewConfig
 
 

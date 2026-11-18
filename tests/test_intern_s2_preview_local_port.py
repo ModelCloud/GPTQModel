@@ -10,7 +10,7 @@ import torch
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
-from transformers import DynamicCache, PreTrainedTokenizerFast, Qwen2VLImageProcessor, Qwen3VLVideoProcessor
+from transformers import DynamicCache, PreTrainedTokenizerFast
 
 from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.intern_s2_preview import InternS2PreviewQModel
@@ -19,6 +19,8 @@ from gptqmodel.models.ports.intern_s2_preview.configuration_interns2_preview imp
 from gptqmodel.models.ports.intern_s2_preview.modeling_interns2_preview import InternS2PreviewForConditionalGeneration
 from gptqmodel.models.ports.intern_s2_preview.processing_interns2_preview import InternS2PreviewProcessor
 from gptqmodel.models.ports.intern_s2_preview.tokenization_interns1 import InternS1Tokenizer, bytes_to_unicode
+from gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
+from gptqmodel.models.ports.native.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoProcessor
 
 
 def tiny_config(layer_types=None, **text_overrides):
@@ -439,7 +441,10 @@ def test_delta_math_matches_independent_float64_recurrence(seq):
 
 
 def test_native_qwen3_5_moe_modules_and_device_map_split_names():
-    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTextModel, Qwen3_5MoeVisionModel
+    from gptqmodel.models.ports.native.qwen3_5_moe.modeling_qwen3_5_moe import (
+        Qwen3_5MoeTextModel,
+        Qwen3_5MoeVisionModel,
+    )
 
     model = InternS2PreviewForConditionalGeneration(tiny_config())
     assert type(model.model.language_model) is Qwen3_5MoeTextModel

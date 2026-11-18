@@ -29,20 +29,20 @@ from transformers.masking_utils import create_causal_mask
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling, ModelOutput
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+from transformers.processing_utils import Unpack
+from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, logging, torch_compilable_check
+
+from ..native.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoePreTrainedModel,
     eager_attention_forward,
     load_balancing_loss_func,
     torch_chunk_gated_delta_rule,  # noqa: F401 - re-exported kernel reference
     torch_recurrent_gated_delta_rule,  # noqa: F401 - re-exported kernel reference
 )
-from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTextModel as InternS2PreviewTextModel
-from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+from ..native.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTextModel as InternS2PreviewTextModel
+from ..native.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeVisionModel as InternS2PreviewVisionModel,
 )
-from transformers.processing_utils import Unpack
-from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, logging, torch_compilable_check
-
 from .configuration_interns2_preview import (
     InternS2PreviewConfig,
     InternS2PreviewTextConfig,  # noqa: F401 - re-exported with InternS2PreviewTextModel
