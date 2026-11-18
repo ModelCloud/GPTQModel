@@ -421,10 +421,19 @@ class ParoProcessor(LoopProcessor):
             if not tensors:
                 features[name] = torch.empty(0)
                 continue
-            try:
-                features[name] = torch.cat(tensors, dim=0)
-            except RuntimeError:
-                features[name] = tensors[0]
+            # Join on the row axis, not the batch axis: routed MoE experts (and
+            # any corpus with one short row) capture a different number of rows
+            # per batch, and `torch.cat(tensors, dim=0)` then raised. The old
+            # fallback silently kept `tensors[0]`, so the optimizer trained on
+            # the first calibration batch only (#5198).
+            rows = [
+                tensor.reshape(-1, tensor.shape[-1])
+                for tensor in tensors
+                if tensor.numel() > 0
+            ]
+            features[name] = (
+                torch.cat(rows, dim=0).unsqueeze(0) if rows else torch.empty(0)
+            )
 
             if features[name].numel() > 0 and features[name].reshape(-1, features[name].shape[-1]).shape[0] > target_rows:
                 features[name] = _sample_activation_rows(features[name], max_rows=target_rows).unsqueeze(0)
