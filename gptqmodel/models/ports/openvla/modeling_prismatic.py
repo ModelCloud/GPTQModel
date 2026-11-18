@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: 2024 Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: MIT
-"""OpenVLA vision-language-action model; see PROVENANCE.json for pinned sources."""
+"""OpenVLA vision-language-action model.
+
+Adapted from github.com/openvla/openvla@c8f03f48af692657d3060c19588038c7220e9af9
+(prismatic/extern/hf) for checkpoint openvla/openvla-7b@47a0ec7fc4ec123775a391911046cf33cf9ed83f.
+"""
 
 from copy import deepcopy
 from dataclasses import dataclass
@@ -124,16 +128,6 @@ class PrismaticForConditionalGeneration(PreTrainedModel, GenerationMixin):
         self.vocab_size = config.text_config.vocab_size
         self.pad_token_id = config.pad_token_id
         self.post_init()
-
-    def _init_weights(self, module):
-        std = self.config.text_config.initializer_range
-        if isinstance(module, (nn.Linear, nn.Conv2d, nn.Embedding)):
-            nn.init.normal_(module.weight, mean=0, std=std)
-            if getattr(module, "bias", None) is not None:
-                nn.init.zeros_(module.bias)
-            if isinstance(module, nn.Embedding) and module.padding_idx is not None:
-                with torch.no_grad():
-                    module.weight[module.padding_idx].zero_()
 
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()

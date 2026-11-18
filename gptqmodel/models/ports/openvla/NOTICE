@@ -3,7 +3,8 @@ OpenVLA / Prismatic Transformers 5 port
 Derived from the OpenVLA project, copyright (c) 2024 Moo Jin Kim,
 Karl Pertsch and Siddharth Karamcheti, under the MIT License in LICENSE.
 Package adaptations copyright (c) 2026 ModelCloud.ai.
-Pinned sources and data hashes are listed in PROVENANCE.json.
+Adapted from https://github.com/openvla/openvla at revision
+c8f03f48af692657d3060c19588038c7220e9af9 (prismatic/extern/hf, prismatic/vla).
 
 The source model card labels OpenVLA checkpoints MIT and identifies Llama-2,
 DINOv2 and SigLIP as their underlying components. The bundled released tokenizer

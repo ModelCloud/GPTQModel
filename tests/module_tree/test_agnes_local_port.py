@@ -3,9 +3,6 @@
 """Pinned checkpoint ownership and real quantization for Agnes layouts."""
 
 import hashlib
-import json
-import re
-from pathlib import Path
 
 import pytest
 import torch
@@ -18,30 +15,42 @@ from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.agnes import AgnesQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
-from gptqmodel.models.ports.agnes import configuration_agnes
 from gptqmodel.models.ports.agnes.configuration_agnes import AgnesConfig
 from gptqmodel.models.ports.agnes.modeling_agnes import AgnesForConditionalGeneration
 from gptqmodel.quantization.config import AWQConfig
 from tests.test_agnes_local_port import tiny_config
 
 
-PORT = Path(configuration_agnes.__file__).parent
-
-
-def normalize_key(name):
-    return re.sub(r"\.(layers|blocks)\.\d+\.", r".\1.#.", name)
+# Agnes-AI/Agnes-3.0-Flash @ 891ce4f9ffb89b22888aa7fcc2bb2f3618867684 (config.json geometry).
+RELEASED_CONFIG = {
+    "text_config": {
+        "hidden_size": 5120, "num_hidden_layers": 72, "intermediate_size": 17408,
+        "parallel_ffn_intermediate_size": 2048, "global_attention_interval": 4, "num_attention_heads": 24,
+        "num_key_value_heads": 4, "head_dim": 256, "linear_num_key_heads": 16, "linear_num_value_heads": 48,
+    },
+    "vision_config": {"out_hidden_size": 5120},
+}
+# sha256 of the sorted non-MTP tensor names of the released safetensors index.
+RELEASED_KEYS_SHA256 = "21ba3094422ebda2670d892c502a7778aff4b8650c67c8f1c47b2b5ed22340d1"
+LAYER_KEYS = {
+    "delta_attn": {f"delta_attn.{name}" for name in (
+        "A_log", "conv1d.weight", "dt_bias", "in_proj_a.weight", "in_proj_b.weight", "in_proj_qkv.weight",
+        "in_proj_z.weight", "norm.weight", "out_proj.weight")},
+    "global_attn": {f"global_attn.{name}.weight" for name in ("k_norm", "k_proj", "o_proj", "q_norm", "q_proj", "v_proj")},
+    "common": {"input_layernorm.weight", "post_attention_layernorm.weight",
+               *(f"mlp.{p}{name}.weight" for p in ("", "parallel_ffn.") for name in ("gate_proj", "up_proj", "down_proj"))},
+}
 
 
 def test_released_checkpoint_exact_meta_ownership():
-    manifest = json.loads((PORT / "checkpoint_ownership.json").read_text())
-    config = AgnesConfig(**json.loads((PORT / "upstream_config.json").read_text()))
     with torch.device("meta"):
-        model = AgnesForConditionalGeneration(config)
+        model = AgnesForConditionalGeneration(AgnesConfig(**RELEASED_CONFIG))
     keys = set(model.state_dict())
-    assert hashlib.sha256("\n".join(sorted(keys)).encode()).hexdigest() == manifest["non_mtp_keys_sha256"]
-    expected = {k for k in manifest["normalized_checkpoint_keys"] if not k.startswith("mtp.")}
-    assert {normalize_key(k) for k in keys} == expected
-    assert len(keys) == manifest["tensor_count"] - manifest["mtp_count"] == 1506
+    assert hashlib.sha256("\n".join(sorted(keys)).encode()).hexdigest() == RELEASED_KEYS_SHA256
+    assert len(keys) == 1506
+    assert {"lm_head.weight", "model.visual.pos_embed.weight", "model.visual.merger.linear_fc2.weight",
+            "model.language_model.layers.3.global_attn.q_norm.weight",
+            "model.language_model.layers.70.delta_attn.A_log"} <= keys
     assert len(model.model.language_model.layers) == 72
     assert len(model.model.visual.blocks) == 27
     assert AgnesQModel.out_of_model_tensors == {"prefixes": ["mtp"]}
@@ -59,15 +68,11 @@ def test_all_live_decoder_weight_owners_and_quantization_consumers(parallel, bia
     plan = wrapper.module_plan()
     assert wrapper.extract_layers_node() == ["model.language_model.layers"]
     declared = {name for block in wrapper.simple_layer_modules(model.config, None) for name in block}
-    checkpoint = json.loads((PORT / "checkpoint_ownership.json").read_text())["normalized_checkpoint_keys"]
     for index, layer in enumerate(model.model.language_model.layers):
-        checkpoint_layer = "0" if index == 0 else "3"
-        # Compare with the two native checkpoint layouts, allowing only the
+        # Compare with the two released layer layouts, allowing only the
         # explicitly configured absence of parallel FFN and presence of bias.
-        prefix = "model.language_model.layers.#."
-        kind = "delta_attn" if checkpoint_layer == "0" else "global_attn"
-        expected = {k.removeprefix(prefix) for k in checkpoint if k.startswith(prefix)
-                    and not k.removeprefix(prefix).startswith("global_attn" if index == 0 else "delta_attn")}
+        kind = "delta_attn" if index == 0 else "global_attn"
+        expected = LAYER_KEYS[kind] | LAYER_KEYS["common"]
         if not parallel:
             expected = {k for k in expected if ".parallel_ffn." not in k}
         actual = set(layer.state_dict())

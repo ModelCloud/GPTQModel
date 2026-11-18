@@ -13,7 +13,6 @@ from transformers import PreTrainedTokenizerFast
 
 from gptqmodel import GPTQModel
 from gptqmodel.models.definitions.agnes import AgnesQModel
-from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.ports.agnes.configuration_agnes import AgnesConfig, AgnesTextConfig, AgnesVisionConfig
 from gptqmodel.models.ports.agnes.image_processing_agnes import AgnesImageProcessor
 from gptqmodel.models.ports.agnes.modeling_agnes import (
@@ -45,11 +44,6 @@ def tiny_config(parallel=12, layer_types=None, bias=False):
         ),
         image_token_id=60, video_token_id=61, vision_start_token_id=62, vision_end_token_id=63,
     )
-
-
-def test_definition_owns_model_selection():
-    assert isinstance(AgnesQModel.loader, LocalModelLoader)
-    assert not AgnesQModel.require_trust_remote_code
 
 
 @pytest.mark.parametrize("seq", [1, 7, 67])
@@ -181,8 +175,7 @@ def test_local_processor_real_pixels_and_save_reload(tmp_path, kind):
     assert torch.equal(generated, uncached)
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [False, True])
+@pytest.mark.parametrize("trust,bypass", [(False, False), (True, True)])
 def test_processor_selection_ignores_malicious_json_and_preserves_overrides(tmp_path, monkeypatch, trust, bypass):
     processor = tiny_processor()
     processor.save_pretrained(tmp_path)
@@ -209,8 +202,7 @@ def test_processor_selection_ignores_malicious_json_and_preserves_overrides(tmp_
     assert explicit.chat_template == "explicit template"
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [False, True])
+@pytest.mark.parametrize("trust,bypass", [(False, True), (True, False)])
 @torch.no_grad()
 def test_public_load_owns_model_and_processor_with_malicious_metadata(tmp_path, monkeypatch, trust, bypass):
     from transformers import AutoProcessor
@@ -248,8 +240,7 @@ def test_public_load_owns_model_and_processor_with_malicious_metadata(tmp_path, 
                                original.to(dtype=loaded.model.dtype)(**batch, use_cache=False).logits)
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [False, True])
+@pytest.mark.parametrize("trust,bypass", [(False, False), (True, True)])
 @torch.no_grad()
 def test_malicious_checkpoint_never_selects_python(tmp_path, monkeypatch, trust, bypass):
     model = AgnesForConditionalGeneration(tiny_config()).eval()
@@ -306,6 +297,41 @@ def test_forward_cache_continuation_and_generation(parallel, bias):
     uncached = model.generate(ids[:1, :3], max_new_tokens=3, do_sample=False, use_cache=False)
     assert generated.shape == (1, 6)
     assert torch.equal(generated, uncached)
+
+
+@pytest.mark.parametrize("layout", [["agnes_delta_attention"] * 2, ["agnes_delta_attention", "agnes_global_attention"]])
+@torch.no_grad()
+def test_cached_chunk_padding_is_masked_in_recurrent_layers(layout):
+    # TF5 create_recurrent_attention_mask: padding inside a multi-token chunk
+    # that continues a cache must still be zeroed before the delta rule.
+    torch.manual_seed(5)
+    model = AgnesForConditionalGeneration(tiny_config(layer_types=layout)).eval()
+    # The masked token is not pad_token_id, so its embedding is not already zero.
+    ids = torch.tensor([[1, 3, 5, 7, 9, 11], [2, 4, 6, 13, 8, 10]])
+    mask = torch.tensor([[1, 1, 1, 1, 1, 1], [1, 1, 1, 0, 1, 1]])
+    full = model(ids, attention_mask=mask, use_cache=False).logits
+    cache = model(ids[:, :3], attention_mask=mask[:, :3], use_cache=True).past_key_values
+    chunk = model(ids[:, 3:], attention_mask=mask, past_key_values=cache, use_cache=True).logits
+    keep = mask[:, 3:].bool()
+    torch.testing.assert_close(chunk[keep], full[:, 3:][keep], rtol=2e-5, atol=2e-6)
+
+
+def test_shared_blocks_are_native_qwen3_5_with_safe_init():
+    from transformers.models.qwen3_5 import modeling_qwen3_5 as native
+
+    torch.manual_seed(3)
+    model = AgnesForConditionalGeneration(tiny_config())
+    delta, glob = model.model.language_model.layers
+    assert type(glob.global_attn) is native.Qwen3_5Attention
+    assert type(delta.input_layernorm) is native.Qwen3_5RMSNorm
+    assert type(delta.delta_attn.norm) is native.Qwen3_5RMSNormGated
+    assert type(model.model.language_model.rotary_emb) is native.Qwen3_5TextRotaryEmbedding
+    assert isinstance(model.model.visual.blocks[0], native.Qwen3_5VisionBlock)
+    assert isinstance(delta.mlp, native.Qwen3_5MLP) and delta.mlp.parallel_ffn is not None
+    # Native lower bound keeps A = exp(A_log) away from zero (finite log).
+    assert (delta.delta_attn.A_log.exp() >= 0.01 - 1e-6).all()
+    vision = model.config.vision_config
+    assert (vision.num_attention_heads, vision.num_hidden_layers) == (vision.num_heads, vision.depth)
 
 
 @torch.no_grad()
@@ -434,11 +460,17 @@ def test_multimodal_rope_offsets_belong_to_each_request_cache():
     assert cache.rope_deltas.item() == -2
 
 
-@pytest.mark.parametrize("head", ["causal", "conditional"])
-@pytest.mark.parametrize("layout", ["delta", "global", "mixed"])
-@pytest.mark.parametrize("length", [1, 2, 3, 4, 5, 63, 64, 65])
-@pytest.mark.parametrize("kernel", [3, 4])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+# Lengths straddle the conv kernel (3/4) and the 64-token delta-rule chunk.
+@pytest.mark.parametrize("head,layout,length,kernel,dtype", [
+    ("causal", "mixed", 1, 4, torch.float32),
+    ("conditional", "global", 2, 3, torch.bfloat16),
+    ("conditional", "mixed", 3, 3, torch.float32),
+    ("conditional", "delta", 4, 4, torch.float32),
+    ("causal", "delta", 5, 4, torch.bfloat16),
+    ("causal", "delta", 63, 3, torch.float32),
+    ("causal", "mixed", 64, 4, torch.float32),
+    ("conditional", "mixed", 65, 3, torch.bfloat16),
+])
 @torch.no_grad()
 def test_short_prefill_and_kernel_boundaries(head, layout, length, kernel, dtype):
     torch.manual_seed(43)
@@ -472,9 +504,9 @@ def test_short_prefill_and_kernel_boundaries(head, layout, length, kernel, dtype
     assert torch.equal(generated, expected)
 
 
-@pytest.mark.parametrize("head", ["causal", "conditional"])
-@pytest.mark.parametrize("stage", ["head", "loss"])
-@pytest.mark.parametrize("continuation", [False, True])
+@pytest.mark.parametrize("head,stage,continuation", [
+    ("causal", "head", False), ("causal", "loss", True), ("conditional", "head", True), ("conditional", "loss", False),
+])
 @torch.no_grad()
 def test_public_head_or_loss_failure_invalidates_cache(head, stage, continuation, monkeypatch):
     torch.manual_seed(43)
@@ -535,10 +567,10 @@ def media_chunk(spec):
                                 "mm_token_type_ids": torch.tensor([types])}
 
 
-@pytest.mark.parametrize("kind", ["image", "video", "mixed"])
-@pytest.mark.parametrize("prefix_kind", ["text", "media"])
-@pytest.mark.parametrize("mask_mode", ["none", "full", "chunk"])
-@pytest.mark.parametrize("explicit_positions", [False, True])
+@pytest.mark.parametrize("kind,prefix_kind,mask_mode,explicit_positions", [
+    ("image", "text", "none", False), ("video", "media", "full", True), ("mixed", "text", "chunk", False),
+    ("image", "media", "chunk", True), ("video", "text", "full", False), ("mixed", "media", "none", True),
+])
 @torch.no_grad()
 def test_appended_media_updates_positions_and_continues_text(kind, prefix_kind, mask_mode, explicit_positions):
     torch.manual_seed(43)

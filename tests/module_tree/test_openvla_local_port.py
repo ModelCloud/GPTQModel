@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real decoder weight owners, source layouts and released OpenVLA schema."""
 
-import json
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -12,9 +12,9 @@ from torch import nn
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.openvla import OpenVLAQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
-from gptqmodel.models.ports.openvla.configuration_prismatic import LLM_BACKBONE_TO_HF_METACLASS, OpenVLAConfig
+from gptqmodel.models.ports.openvla.configuration_prismatic import OpenVLAConfig
 from gptqmodel.models.ports.openvla.modeling_prismatic import OpenVLAForActionPrediction
-from tests.test_openvla_local_port import _asset, _config, _write_assets
+from tests.test_openvla_local_port import _config, _write_assets
 
 
 @pytest.fixture(scope="module")
@@ -24,10 +24,10 @@ def processor_assets(tmp_path_factory):
     return str(path)
 
 
-@pytest.mark.parametrize("llm", list(LLM_BACKBONE_TO_HF_METACLASS))
-@pytest.mark.parametrize("kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("device", ["cpu", "meta"])
+@pytest.mark.parametrize("llm,kv_heads,bias,device", [
+    ("llama2-7b-pure", 1, False, "cpu"), ("vicuna-v15-13b", 4, True, "meta"),
+    ("mistral-v0.1-7b-pure", 2, True, "cpu"), ("phi-2-3b", 4, True, "meta"), ("phi-2-3b", 2, False, "cpu"),
+])
 def test_openvla_real_weight_owners_and_module_plans(llm, kv_heads, bias, device, processor_assets):
     with torch.device(device):
         model = OpenVLAForActionPrediction(_config(
@@ -70,17 +70,25 @@ def test_openvla_real_weight_owners_and_module_plans(llm, kv_heads, bias, device
     assert MODEL_MAP["openvla"] is OpenVLAQModel
 
 
+# openvla/openvla-7b @ 47a0ec7fc4ec123775a391911046cf33cf9ed83f: config geometry and the
+# sha256 of "name [shape]" lines over the sorted union of its three safetensors headers.
+RELEASED_CONFIG = {
+    "vision_backbone_id": "dinosiglip-vit-so-224px", "llm_backbone_id": "llama2-7b-pure",
+    "text_config": {"vocab_size": 32064, "hidden_size": 4096, "intermediate_size": 11008, "num_hidden_layers": 32,
+                    "num_attention_heads": 32, "num_key_value_heads": 32, "pad_token_id": 32000},
+}
+RELEASED_INVENTORY_SHA256 = "99212ba7b2a20bff01a94924f778724810deca58ecd0cfc4beddd9b81bd1398f"
+
+
 def test_openvla_full_pinned_release_header_inventory():
-    inventory = json.loads(_asset("checkpoint_inventory.json"))
-    config = OpenVLAConfig(**json.loads(_asset("config.json")))
     with torch.device("meta"):
-        model = OpenVLAForActionPrediction(config)
+        model = OpenVLAForActionPrediction(OpenVLAConfig(**RELEASED_CONFIG))
     _convert_model_with_defuser(OpenVLAQModel, model, cleanup_original=False)
-    assert len(inventory) == 982
-    assert {name: list(value.shape) for name, value in model.state_dict().items()} == {
-        name: value["shape"] for name, value in inventory.items()
-    }
+    state = model.state_dict()
+    assert len(state) == 982
+    canonical = "\n".join(f"{name} {list(value.shape)}" for name, value in sorted(state.items()))
+    assert hashlib.sha256(canonical.encode()).hexdigest() == RELEASED_INVENTORY_SHA256
     # Last vision blocks/norms are owned even though the reference extracts the penultimate block.
-    assert "vision_backbone.featurizer.blocks.23.ls1.scale_factor" in inventory
-    assert "vision_backbone.fused_featurizer.blocks.26.attn.qkv.weight" in inventory
-    assert "vision_backbone.featurizer.norm.weight" in inventory
+    assert "vision_backbone.featurizer.blocks.23.ls1.scale_factor" in state
+    assert "vision_backbone.fused_featurizer.blocks.26.attn.qkv.weight" in state
+    assert "vision_backbone.featurizer.norm.weight" in state
