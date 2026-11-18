@@ -23,8 +23,15 @@ from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, pack_i
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCudaKernel, _GGMLBridge
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.utils.cpp import load_pack_block_extension
+from gptqmodel.utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from gptqmodel.utils.marlin_scratch import MarlinScratchContext
 from tests.accelerator_gates import requires_nvidia_cuda
+
+
+# The AVX512 layers transform through the compiled AVX512-BF16 kernel, which
+# refuses to run on a host without the instruction set.
+requires_avx512_bf16 = pytest.mark.skipif(not has_avx512_bf16(), reason=avx512_bf16_error())
 
 
 @pytest.mark.parametrize(
@@ -383,6 +390,11 @@ def test_torch_linear_rejects_non_int32_three_bit_packing():
 def test_native_pack_block_rejects_partial_output_words():
     from gptqmodel.nn_modules.qlinear.pack_block_ext import pack_block_cpu
 
+    if load_pack_block_extension() is None:
+        # The shape check lives in the C++ op; without a JIT toolchain (ninja)
+        # there is no native op to exercise.
+        pytest.skip("pack_block_cpu native extension could not be built on this host")
+
     weight = torch.zeros((33, 32), dtype=torch.float32)
     scales = torch.ones((1, 33), dtype=torch.float32)
     zeros = torch.zeros((1, 33), dtype=torch.float32)
@@ -633,8 +645,8 @@ def test_exllamav3_wide_inputs_route_to_torch_reconstruction():
         ("TorchAtenAwqLinear", torch.bfloat16),
         ("TorchFusedLinear", torch.bfloat16),
         ("TorchFusedAwqLinear", torch.bfloat16),
-        ("TorchCpuAvx512Linear", torch.bfloat16),
-        ("TorchCpuAvx512AwqLinear", torch.bfloat16),
+        pytest.param("TorchCpuAvx512Linear", torch.bfloat16, marks=requires_avx512_bf16),
+        pytest.param("TorchCpuAvx512AwqLinear", torch.bfloat16, marks=requires_avx512_bf16),
     ),
 )
 def test_cpu_inference_forward_preserves_checkpoint_save_layout(class_name, expected_dtype):
@@ -770,8 +782,8 @@ def _transformed_layer(cls, *, seed=17):
         ("TorchAtenAwqLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq"),
         ("TorchFusedLinear", "gptqmodel.nn_modules.qlinear.torch_fused"),
         ("TorchFusedAwqLinear", "gptqmodel.nn_modules.qlinear.torch_fused_awq"),
-        ("TorchCpuAvx512Linear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512"),
-        ("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq"),
+        pytest.param("TorchCpuAvx512Linear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512", marks=requires_avx512_bf16),
+        pytest.param("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq", marks=requires_avx512_bf16),
     ),
 )
 @pytest.mark.parametrize("assign", (False, True))
@@ -879,8 +891,8 @@ def test_runtime_load_materializes_inference_g_idx():
         ("TorchAtenAwqLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq"),
         ("TorchFusedLinear", "gptqmodel.nn_modules.qlinear.torch_fused"),
         ("TorchFusedAwqLinear", "gptqmodel.nn_modules.qlinear.torch_fused_awq"),
-        ("TorchCpuAvx512Linear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512"),
-        ("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq"),
+        pytest.param("TorchCpuAvx512Linear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512", marks=requires_avx512_bf16),
+        pytest.param("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq", marks=requires_avx512_bf16),
     ),
 )
 def test_checkpoint_layout_gate_uses_discriminating_operands(class_name, module_path):
@@ -923,8 +935,8 @@ def test_checkpoint_layout_gate_uses_discriminating_operands(class_name, module_
         ("TorchAtenAwqLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq"),
         ("TorchFusedLinear", "gptqmodel.nn_modules.qlinear.torch_fused"),
         ("TorchFusedAwqLinear", "gptqmodel.nn_modules.qlinear.torch_fused_awq"),
-        ("TorchCpuAvx512Linear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512"),
-        ("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq"),
+        pytest.param("TorchCpuAvx512Linear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512", marks=requires_avx512_bf16),
+        pytest.param("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq", marks=requires_avx512_bf16),
     ),
 )
 @pytest.mark.parametrize("assign", (False, True))
@@ -1021,8 +1033,8 @@ def test_empty_partial_load_does_not_restore_transformed_layer():
         ("TorchAtenAwqLinear", "gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq"),
         ("TorchFusedLinear", "gptqmodel.nn_modules.qlinear.torch_fused"),
         ("TorchFusedAwqLinear", "gptqmodel.nn_modules.qlinear.torch_fused_awq"),
-        ("TorchCpuAvx512Linear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512"),
-        ("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq"),
+        pytest.param("TorchCpuAvx512Linear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512", marks=requires_avx512_bf16),
+        pytest.param("TorchCpuAvx512AwqLinear", "gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq", marks=requires_avx512_bf16),
     ),
 )
 def test_fused_cpu_group_preserves_checkpoint_save_layout(class_name, module_path):

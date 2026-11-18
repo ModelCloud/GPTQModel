@@ -25,7 +25,6 @@ import torch
 
 from gptqmodel.nn_modules.qlinear import paro as paro_module
 from gptqmodel.nn_modules.qlinear.paro import ParoLinear
-from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.utils.paro import (
     _load_rotation_extension,
@@ -200,6 +199,9 @@ def test_paro_linear_cuda_training_gradients_match_reference(dtype):
 def test_paro_triton_linear_cuda_training_gradients_match_reference():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for the Paro Triton plans")
+    pytest.importorskip("triton")
+    from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
+
     ok, _ = ParoTritonLinear.validate_once()
     if not ok:
         pytest.skip("the Paro Triton kernel is not available on this device")

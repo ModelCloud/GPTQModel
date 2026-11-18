@@ -24,6 +24,7 @@ ROCM = torch.device("cuda:0") # fake cuda
 
 # REQUIREMENT NOTES:
 # `pip install logbar parameterized`
+@unittest.skipUnless(torch.cuda.is_available(), "exercises the CUDA/ROCm linalg (cuSOLVER/MAGMA) backends")
 class Test(unittest.TestCase):
     @parameterized.expand(
         [

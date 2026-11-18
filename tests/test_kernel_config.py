@@ -148,6 +148,7 @@ def test_paro_triton_linear_reads_the_policy():
     the module and assert the symbol resolves before any device work.
     """
 
+    pytest.importorskip("triton")
     from gptqmodel.nn_modules.qlinear import paro_triton
 
     assert paro_triton.resolve_kernel_config is resolve_kernel_config

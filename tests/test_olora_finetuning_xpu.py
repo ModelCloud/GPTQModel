@@ -24,8 +24,13 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 from typing import List  # noqa: E402
 
+import pytest  # noqa: E402
 import torch  # noqa: E402
 import transformers  # noqa: E402
+
+
+pytest.importorskip("peft")
+
 from datasets import load_dataset  # noqa: E402
 from peft import AdaLoraConfig, get_peft_model  # noqa: E402
 from tokenicer import Tokenicer  # noqa: E402
@@ -167,13 +172,23 @@ def generate_prompt(example):
                 ### Response:
                 {example["output"]}"""
 
+
+BASE_MODEL = "/monster/data/model/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4"
+DATA_PATH = "/monster/data/model/dataset/yahma-alpaca-cleaned"
+
+
 class Test(unittest.TestCase):
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="fine-tuning runs with device_map='cuda'")
+    @pytest.mark.skipif(
+        not (os.path.isdir(BASE_MODEL) and os.path.isdir(DATA_PATH)),
+        reason=f"{BASE_MODEL} or {DATA_PATH} not available",
+    )
     def test_peft(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             train(
-                base_model= "/monster/data/model/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4", # "/monster/data/model/Llama-3.1-8B-Instruct", #  #"/monster/data/model/opt-125m",
-                data_path="/monster/data/model/dataset/yahma-alpaca-cleaned",
+                base_model=BASE_MODEL, # "/monster/data/model/Llama-3.1-8B-Instruct", #  #"/monster/data/model/opt-125m",
+                data_path=DATA_PATH,
                 output_dir=tmp_dir,
                 batch_size=16,
                 num_epochs=1,

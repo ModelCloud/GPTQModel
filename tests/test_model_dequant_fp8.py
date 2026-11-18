@@ -501,7 +501,7 @@ def test_finalize_for_save_converts_channels_last_to_default_contiguous():
     assert out.is_contiguous()
 
 
-def test_ignored_layers_are_honored_by_non_fp8_converters(tmp_path):
+def _write_ignored_layer_shard(tmp_path):
     ignored_weight = torch.randn(2, 2, dtype=torch.bfloat16)
     shard_path = tmp_path / "ignored.safetensors"
     save_file(
@@ -520,15 +520,17 @@ def test_ignored_layers_are_honored_by_non_fp8_converters(tmp_path):
         },
         str(shard_path),
     )
+    return shard_path, ignored_weight
+
+
+def test_ignored_layers_are_honored_by_non_fp8_converters(tmp_path):
+    shard_path, ignored_weight = _write_ignored_layer_shard(tmp_path)
 
     with safe_open(shard_path, framework="pt", device="cpu") as reader:
         nvfp4_out = convert_nvfp4_shard(reader, torch.bfloat16, ignored_layers={"ignored"})
-    with safe_open(shard_path, framework="pt", device="cpu") as reader:
-        bnb_out = convert_bitsandbytes_shard(reader, torch.bfloat16, quant_cfg={}, ignored_layers={"ignored"})
 
     converter_outputs = [
         nvfp4_out,
-        bnb_out,
         convert_awq_file(shard_path, torch.bfloat16, "cpu", ignored_layers={"ignored"}),
         convert_gptq_file(shard_path, torch.bfloat16, {}, "cpu", ignored_layers={"ignored"}),
         convert_compressed_pack_file(
@@ -544,6 +546,19 @@ def test_ignored_layers_are_honored_by_non_fp8_converters(tmp_path):
     for tensors in converter_outputs:
         assert set(tensors) == {"ignored.weight"}
         torch.testing.assert_close(tensors["ignored.weight"], ignored_weight)
+
+
+def test_ignored_layers_are_honored_by_bitsandbytes_converter(tmp_path):
+    # ``convert_bitsandbytes_shard`` resolves the optional bitsandbytes runtime
+    # up front, so this converter is checked only where the package exists.
+    pytest.importorskip("bitsandbytes")
+    shard_path, ignored_weight = _write_ignored_layer_shard(tmp_path)
+
+    with safe_open(shard_path, framework="pt", device="cpu") as reader:
+        tensors = convert_bitsandbytes_shard(reader, torch.bfloat16, quant_cfg={}, ignored_layers={"ignored"})
+
+    assert set(tensors) == {"ignored.weight"}
+    torch.testing.assert_close(tensors["ignored.weight"], ignored_weight)
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")

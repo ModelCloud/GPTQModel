@@ -236,7 +236,8 @@ def test_cpu_feature_detection_requires_vbmi(monkeypatch):
     monkeypatch.setattr(cpu_features.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(Path, "read_text", lambda self, *args, **kwargs: flags)
 
-    # The probe result is a module global; monkeypatch restores it afterwards.
+    # The probe result is memoized in a module global; monkeypatch resets it
+    # for this test and restores the host's real answer afterwards.
     monkeypatch.setattr(cpu_features, "_AVX512_BF16", None)
     assert not has_avx512_bf16()
     monkeypatch.setattr(

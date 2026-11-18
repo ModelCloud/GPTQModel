@@ -10,6 +10,7 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
+import importlib.util  # noqa: E402
 import os  # noqa: E402
 import sys  # noqa: E402
 import threading  # noqa: E402
@@ -94,6 +95,8 @@ def get_model_and_tokenizer(
     _TRITON_CUDA_ONLY_SKIP_REASON is not None,
     reason=_TRITON_CUDA_ONLY_SKIP_REASON or "",
 )
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="TritonV2Linear runs on CUDA devices only")
+@pytest.mark.skipif(importlib.util.find_spec("triton") is None, reason="Triton is not installed")
 class TestTriton(unittest.TestCase):
     @parameterized.expand(
         [
