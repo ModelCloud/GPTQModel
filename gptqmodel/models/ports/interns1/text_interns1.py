@@ -5,7 +5,8 @@
 
 import torch
 from torch import nn
-from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeMLP, Qwen3MoeModel
+
+from ..native.qwen3_moe.modeling_qwen3_moe import Qwen3MoeMLP, Qwen3MoeModel
 
 
 class InternS1Experts(nn.ModuleList):

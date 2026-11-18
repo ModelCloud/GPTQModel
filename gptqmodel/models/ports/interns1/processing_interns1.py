@@ -70,9 +70,9 @@ class InternS1Processor(ProcessorMixin):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
-        from transformers import GotOcr2ImageProcessor
         from transformers.utils.hub import cached_file
 
+        from ..native.got_ocr2.image_processing_got_ocr2 import GotOcr2ImageProcessor
         from .configuration_interns1 import InternS1Config
         from .tokenization_interns1 import InternS1Tokenizer
         from .video_processing_interns1 import InternS1VideoProcessor

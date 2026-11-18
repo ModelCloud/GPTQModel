@@ -29,7 +29,6 @@ from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from transformers.models.qwen3.modeling_qwen3 import Qwen3Model
 from transformers.processing_utils import Unpack
 from transformers.utils import (
     ModelOutput,
@@ -40,6 +39,7 @@ from transformers.utils import (
 from transformers.utils.generic import merge_with_config_defaults
 from transformers.utils.output_capturing import capture_outputs
 
+from ..native.qwen3.modeling_qwen3 import Qwen3Model
 from .configuration_interns1 import InternS1Config, InternS1VisionConfig
 from .text_interns1 import InternS1MoeModel
 
