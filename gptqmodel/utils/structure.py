@@ -2344,30 +2344,78 @@ class LazyTurtle:
         model_type: Optional[str] = None,
     ) -> Optional[Any]:
         lookup_keys = cls._hf_conversion_lookup_keys(target_model=target_model, model_type=model_type)
-        if lookup_keys:
+        get_checkpoint_conversion_mapping = None
+        try:
+            conversion_mapping_module = import_module("transformers.conversion_mapping")
+        except Exception:
+            conversion_mapping_module = None
+        if conversion_mapping_module is not None:
+            get_checkpoint_conversion_mapping = getattr(
+                conversion_mapping_module,
+                "get_checkpoint_conversion_mapping",
+                None,
+            )
+        if not callable(get_checkpoint_conversion_mapping):
+            get_checkpoint_conversion_mapping = None
+
+        reversed_map = None
+        if lookup_keys and get_checkpoint_conversion_mapping is not None:
             # Prefer the public transformers conversion registry and fall back to
             # older per-model mappings when needed.
-            try:
-                conversion_mapping_module = import_module("transformers.conversion_mapping")
-            except Exception:
-                conversion_mapping_module = None
-            if conversion_mapping_module is not None:
-                get_checkpoint_conversion_mapping = getattr(
-                    conversion_mapping_module,
-                    "get_checkpoint_conversion_mapping",
-                    None,
-                )
-                if callable(get_checkpoint_conversion_mapping):
-                    for lookup_key in lookup_keys:
-                        reversed_map = cls.reverse_hf_conversion_map(
-                            get_checkpoint_conversion_mapping(lookup_key)
-                        )
-                        if reversed_map is not None:
-                            return reversed_map
+            for lookup_key in lookup_keys:
+                reversed_map = cls.reverse_hf_conversion_map(get_checkpoint_conversion_mapping(lookup_key))
+                if reversed_map is not None:
+                    break
 
         if target_model is None:
-            return None
-        return cls.reverse_hf_conversion_map(getattr(target_model, "_checkpoint_conversion_mapping", None))
+            return reversed_map
+        if reversed_map is None:
+            reversed_map = cls.reverse_hf_conversion_map(getattr(target_model, "_checkpoint_conversion_mapping", None))
+
+        scoped = cls._scoped_submodule_renamings(target_model, get_checkpoint_conversion_mapping)
+        if scoped:
+            # Submodule-scoped rules rewrite runtime names first; the top-level
+            # rules then map the result to the checkpoint namespace.
+            reversed_map = scoped + list(reversed_map or ())
+        return reversed_map
+
+    @classmethod
+    def _scoped_submodule_renamings(cls, target_model: nn.Module, get_checkpoint_conversion_mapping) -> list[_LazyWeightRenaming]:
+        """Reverse the class-keyed renames Transformers applies inside nested submodules.
+
+        Transformers' ``get_model_conversion_mapping`` also applies the map
+        registered for each nested submodule's class, scoped to that submodule
+        (for example ``Qwen2AudioModel`` maps ``language_model.model`` to
+        ``language_model`` under ``model.``). Only anchored 1:1 renames are
+        scoped (the checkpoint side anchored with ``^``); LazyTurtle cannot
+        replay tensor operations per key.
+        """
+
+        if get_checkpoint_conversion_mapping is None or not isinstance(target_model, nn.Module):
+            return []
+        root_class = type(target_model).__name__
+        seen_classes: dict[str, list[tuple[str, str]]] = {}
+        renamings: list[_LazyWeightRenaming] = []
+        for module_name, submodule in target_model.named_modules():
+            class_name = type(submodule).__name__
+            if not module_name or class_name == root_class:
+                continue
+            if class_name not in seen_classes:
+                pairs = []
+                for entry in get_checkpoint_conversion_mapping(class_name) or ():
+                    patterns = cls._extract_weight_renaming_patterns(entry)
+                    if patterns is not None and patterns[0].startswith("^"):
+                        pairs.append(patterns)
+                seen_classes[class_name] = pairs
+            prefix = re.escape(module_name)
+            for checkpoint_pattern, runtime_pattern in seen_classes[class_name]:
+                renamings.append(
+                    _LazyWeightRenaming(
+                        f"^{prefix}\\.{runtime_pattern.removeprefix('^')}",
+                        f"^{module_name}.{checkpoint_pattern[1:]}",
+                    )
+                )
+        return renamings
 
     @staticmethod
     def _parse_module_spec(module_spec: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
