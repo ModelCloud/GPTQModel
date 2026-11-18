@@ -162,9 +162,10 @@ def test_recurrent_decoder_matches_independent_equations(kv_heads, steps, slidin
         # Regression: sdpa boolean masks were once added to eager scores here.
         actual = model(ids, output_hidden_states=True, output_attentions=True)
     torch.testing.assert_close(actual.logits.double(), expected[-1], atol=3e-5, rtol=2e-4)
-    assert len(actual.hidden_states) == steps * 2 + 2
-    assert len(actual.attentions) == steps * 2
-    assert all((weights is None) == (backend == "sdpa") for weights in actual.attentions)
+    # Captured per layer call: the embeddings plus every recurrent layer output (the last one normalized).
+    assert len(actual.hidden_states) == steps * 2 + 1
+    # sdpa returns no attention weights, so nothing is captured for it.
+    assert len(actual.attentions) == (0 if backend == "sdpa" else steps * 2)
     assert len(actual.past_key_values.layers) == steps * 2
     for layer, (k, v) in zip(actual.past_key_values.layers, cache_expected):
         torch.testing.assert_close(layer.keys.double(), k, atol=3e-5, rtol=2e-4)
@@ -419,7 +420,8 @@ def test_config_output_defaults_and_explicit_overrides():
     with torch.inference_mode():
         assert isinstance(model(ids, use_cache=False), tuple)
         output = model(ids, use_cache=False, return_dict=True)
-        assert len(output.hidden_states) == 10 and len(output.attentions) == 8
+        assert len(output.hidden_states) == 9
+        assert len(output.attentions) == (8 if model.config._attn_implementation == "eager" else 0)
         output = model(ids, use_cache=False, return_dict=True, output_hidden_states=False, output_attentions=False)
         assert output.hidden_states is None and output.attentions is None
 

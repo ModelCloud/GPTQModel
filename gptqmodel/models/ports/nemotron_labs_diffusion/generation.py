@@ -231,8 +231,8 @@ class DiffusionGenerationMixin:
         """Autoregressive generation calling the encoder directly (injected by build_hf_tidar_repo).
 
         Bypasses NemotronLabsDiffusionModel.forward() to avoid diffusion-specific
-        code paths. Calls self.encoder (Ministral3Model) with explicit cache_position,
-        position_ids, and use_cache so the KV cache and causal masking behave
+        code paths. Calls self.encoder (Ministral3Model) with explicit
+        position_ids and use_cache so the KV cache and causal masking behave
         identically to MistralForCausalLM / vLLM.
 
         Returns:
@@ -248,15 +248,13 @@ class DiffusionGenerationMixin:
         batch_size, prompt_len = prompt_ids.shape
 
         past_key_values = DynamicCache()
-        cache_position = torch.arange(prompt_len, device=device)
-        position_ids = cache_position.unsqueeze(0).expand(batch_size, -1)
+        position_ids = torch.arange(prompt_len, device=device).unsqueeze(0).expand(batch_size, -1)
 
         enc_out = self.encoder(diffusion_lm=diffusion_lm,
             input_ids=prompt_ids,
             position_ids=position_ids,
             past_key_values=past_key_values,
             use_cache=True,
-            cache_position=cache_position,
         )
         past_key_values = enc_out.past_key_values
         next_logit = self.diffusion_head(enc_out.last_hidden_state[:, -1:, :]).squeeze(1)
@@ -292,15 +290,13 @@ class DiffusionGenerationMixin:
 
             if step < max_new_tokens - 1:
                 cur_pos = prompt_len + step
-                step_cache_pos = torch.tensor([cur_pos], device=device)
-                step_pos_ids = step_cache_pos.unsqueeze(0).expand(batch_size, -1)
+                step_pos_ids = torch.tensor([[cur_pos]], device=device).expand(batch_size, -1)
 
                 enc_out = self.encoder(diffusion_lm=diffusion_lm,
                     input_ids=next_token,
                     position_ids=step_pos_ids,
                     past_key_values=past_key_values,
                     use_cache=True,
-                    cache_position=step_cache_pos,
                 )
                 past_key_values = enc_out.past_key_values
                 next_logit = self.diffusion_head(enc_out.last_hidden_state[:, -1:, :]).squeeze(1)

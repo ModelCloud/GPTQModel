@@ -4,13 +4,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Transformers 5 Ouro port: Qwen2 blocks with sandwich norms, a shared recurrent stack and early exit."""
 
+from dataclasses import dataclass
+
 import torch
 from torch import nn
 from transformers.cache_utils import DynamicCache, DynamicLayer
 from transformers.generation import GenerationMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
 from transformers.models.qwen2.modeling_qwen2 import (
     Qwen2MLP,
     Qwen2RMSNorm,
@@ -18,8 +21,19 @@ from transformers.models.qwen2.modeling_qwen2 import (
     apply_rotary_pos_emb,
     eager_attention_forward,
 )
+from transformers.utils import can_return_tuple
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
 
 from .configuration_ouro import OuroConfig
+
+
+@dataclass
+class OuroModelOutputWithPast(BaseModelOutputWithPast):
+    """Base output plus the normalized hidden state and early-exit gate logits of every recurrent step."""
+
+    step_hidden_states: tuple[torch.FloatTensor, ...] | None = None
+    gate_logits: tuple[torch.FloatTensor, ...] | None = None
 
 
 class UniversalTransformerCache(DynamicCache):
@@ -108,7 +122,7 @@ class OuroAttention(nn.Module):
         return self.o_proj(result.reshape(*input_shape, -1).contiguous()), weights
 
 
-class OuroDecoderLayer(nn.Module):
+class OuroDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.self_attn = OuroAttention(config, layer_idx)
@@ -119,22 +133,24 @@ class OuroDecoderLayer(nn.Module):
 
     def forward(self, hidden_states, position_embeddings=None, attention_mask=None, **kwargs):
         residual = hidden_states
-        attention, weights = self.self_attn(
+        attention, _ = self.self_attn(
             self.input_layernorm(hidden_states), position_embeddings, attention_mask=attention_mask, **kwargs
         )
         hidden_states = residual + self.input_layernorm_2(attention)
         hidden_states = hidden_states + self.post_attention_layernorm_2(
             self.mlp(self.post_attention_layernorm(hidden_states))
         )
-        return hidden_states, weights
+        return hidden_states
 
 
 class OuroPreTrainedModel(PreTrainedModel):
     config_class = OuroConfig
     base_model_prefix = "model"
+    supports_gradient_checkpointing = True
     _no_split_modules = ["OuroDecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
     _supports_sdpa = True
+    _can_record_outputs = {"hidden_states": OuroDecoderLayer, "attentions": OuroAttention}
 
 
 class OuroModel(OuroPreTrainedModel):
@@ -146,8 +162,11 @@ class OuroModel(OuroPreTrainedModel):
         self.rotary_emb = Qwen2RotaryEmbedding(config)
         self.total_ut_steps = config.total_ut_steps
         self.early_exit_gate = nn.Linear(config.hidden_size, 1)
+        self.gradient_checkpointing = False
         self.post_init()
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(
         self,
         input_ids=None,
@@ -156,20 +175,12 @@ class OuroModel(OuroPreTrainedModel):
         position_ids=None,
         past_key_values=None,
         use_cache=None,
-        cache_position=None,
-        output_hidden_states=None,
-        output_attentions=None,
         **kwargs,
     ):
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Specify exactly one of input_ids or inputs_embeds")
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-        use_cache = self.config.use_cache if use_cache is None else use_cache
-        output_hidden_states = (
-            self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
-        )
-        output_attentions = self.config.output_attentions if output_attentions is None else output_attentions
         if past_key_values is not None and (
             not isinstance(past_key_values, DynamicCache)
             or past_key_values.offloading
@@ -189,11 +200,9 @@ class OuroModel(OuroPreTrainedModel):
             UniversalTransformerCache.validate_depth(past_key_values, depth)
         past_length = past_key_values.get_seq_length() if past_key_values is not None else 0
         if position_ids is None:
-            if cache_position is None:
-                cache_position = torch.arange(
-                    past_length, past_length + inputs_embeds.shape[1], device=inputs_embeds.device
-                )
-            position_ids = cache_position.unsqueeze(0)
+            position_ids = torch.arange(
+                past_length, past_length + inputs_embeds.shape[1], device=inputs_embeds.device
+            ).unsqueeze(0)
         if isinstance(attention_mask, dict):
             masks = attention_mask
         else:
@@ -211,38 +220,25 @@ class OuroModel(OuroPreTrainedModel):
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
         step_hidden, gates = [], []
-        all_hidden = (hidden_states,) if output_hidden_states else None
-        all_attentions = () if output_attentions else None
         for current_ut in range(self.total_ut_steps):
             for layer in self.layers:
-                hidden_states, weights = layer(
+                hidden_states = layer(
                     hidden_states,
                     attention_mask=masks[layer.attention_type],
                     position_ids=position_ids,
                     position_embeddings=position_embeddings,
                     past_key_values=past_key_values,
                     current_ut=current_ut,
-                    output_attentions=output_attentions,
                     **kwargs,
                 )
-                if output_hidden_states:
-                    all_hidden += (hidden_states,)
-                if output_attentions:
-                    all_attentions += (weights,)
             hidden_states = self.norm(hidden_states)
             step_hidden.append(hidden_states)
             gates.append(self.early_exit_gate(hidden_states))
-        if output_hidden_states:
-            all_hidden += (hidden_states,)
-        return (
-            BaseModelOutputWithPast(
-                last_hidden_state=hidden_states,
-                past_key_values=past_key_values,
-                hidden_states=all_hidden,
-                attentions=all_attentions,
-            ),
-            step_hidden,
-            gates,
+        return OuroModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=past_key_values,
+            step_hidden_states=tuple(step_hidden),
+            gate_logits=tuple(gates),
         )
 
 
@@ -261,6 +257,7 @@ class OuroForCausalLM(OuroPreTrainedModel, GenerationMixin):
     def _supports_default_dynamic_cache(cls):
         return False
 
+    @can_return_tuple
     def forward(
         self,
         input_ids=None,
@@ -274,21 +271,21 @@ class OuroForCausalLM(OuroPreTrainedModel, GenerationMixin):
         use_weighted_exit=False,
         exit_at_step=None,
         exit_threshold=None,
-        return_dict=None,
         **kwargs,
     ):
-        output, hidden, gates = self.model(
+        output = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
+            return_dict=True,
             **kwargs,
         )
+        hidden, gates = output.step_hidden_states, output.gate_logits
         exit_at_step = self.early_exit_step if exit_at_step is None else exit_at_step
         exit_threshold = self.early_exit_threshold if exit_threshold is None else exit_threshold
-        index = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         remaining = torch.ones_like(gates[0].squeeze(-1))
         probabilities = []
         for i, gate in enumerate(gates):
@@ -300,8 +297,9 @@ class OuroForCausalLM(OuroPreTrainedModel, GenerationMixin):
         if labels is not None or (not valid_exit_step and exit_threshold is None and use_weighted_exit):
             logits = None
             for i, h in enumerate(hidden):
-                step_logits = self.lm_head(h[:, index])
-                weighted = step_logits * pdf[:, index, i, None].to(step_logits.dtype)
+                step_logits = self.lm_head(slice_logits_to_keep(h, logits_to_keep))
+                step_pdf = slice_logits_to_keep(pdf[..., i, None], logits_to_keep)
+                weighted = step_logits * step_pdf.to(step_logits.dtype)
                 logits = weighted if logits is None else logits + weighted
         else:
             selected = hidden[-1]
@@ -313,19 +311,23 @@ class OuroForCausalLM(OuroPreTrainedModel, GenerationMixin):
                 step = torch.where(passed.any(2), step, len(hidden) - 1)
                 states = torch.stack(hidden, dim=2)
                 selected = states.gather(2, step[..., None, None].expand(-1, -1, 1, states.shape[-1])).squeeze(2)
-            logits = self.lm_head(selected[:, index])
+            logits = self.lm_head(slice_logits_to_keep(selected, logits_to_keep))
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
-        result = CausalLMOutputWithPast(
+        return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=output.past_key_values,
             hidden_states=output.hidden_states,
             attentions=output.attentions,
         )
-        return_dict = self.config.return_dict if return_dict is None else return_dict
-        return result if return_dict else result.to_tuple()
 
 
-__all__ = ["OuroPreTrainedModel", "OuroModel", "OuroForCausalLM", "UniversalTransformerCache"]
+__all__ = [
+    "OuroPreTrainedModel",
+    "OuroModel",
+    "OuroModelOutputWithPast",
+    "OuroForCausalLM",
+    "UniversalTransformerCache",
+]
