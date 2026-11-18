@@ -325,3 +325,17 @@ def test_native_init_rebuilds_rope_buffers_after_load_and_checkpointing_matches(
     loaded.model(ids).last_hidden_state.square().sum().backward()
     for name, grad in reference.items():
         torch.testing.assert_close(dict(loaded.named_parameters())[name].grad, grad, rtol=0, atol=0)
+
+
+def test_recorded_outputs_and_tuple_return():
+    config = tiny_config()
+    config._attn_implementation = "eager"
+    model = DreamModel(config).eval()
+    ids = torch.tensor([[1, 2, 3, 4]])
+    with torch.no_grad():
+        output = model(ids, output_hidden_states=True, output_attentions=True)
+        assert len(output.hidden_states) == config.num_hidden_layers + 1
+        assert len(output.attentions) == config.num_hidden_layers
+        assert output.attentions[0].shape == (1, config.num_attention_heads, 4, 4)
+        torch.testing.assert_close(model(ids, return_dict=False)[0], output.logits, atol=0, rtol=0)
+        torch.testing.assert_close(model(ids, logits_to_keep=1).logits, output.logits[:, -1:], atol=1e-6, rtol=1e-6)
