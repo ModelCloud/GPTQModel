@@ -1,0 +1,96 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "attention_dropout": 0.1,
+  "attn_config": {
+   "_name_or_path": "",
+   "alibi": true,
+   "alibi_bias_max": 8,
+   "architectures": null,
+   "attn_impl": "torch",
+   "attn_pdrop": 0,
+   "attn_type": "multihead_attention",
+   "attn_uses_sequence_id": false,
+   "chunk_size_feed_forward": 0,
+   "clip_qkv": null,
+   "dtype": null,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "model_type": "",
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "prefix_lm": false,
+   "problem_type": null,
+   "qk_ln": false,
+   "return_dict": true,
+   "softmax_scale": null
+  },
+  "bos_token_id": 98,
+  "chunk_size_feed_forward": 0,
+  "d_model": 48,
+  "dtype": "float32",
+  "emb_pdrop": 0.0,
+  "embedding_fraction": 1.0,
+  "eos_token_id": 98,
+  "expansion_ratio": 4,
+  "gradient_checkpointing": false,
+  "hidden_dropout": 0.1,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1",
+   "2": "LABEL_2"
+  },
+  "init_device": "cpu",
+  "initializer_range": 0.02,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1,
+   "LABEL_2": 2
+  },
+  "layer_norm_epsilon": 1e-05,
+  "learned_pos_emb": true,
+  "logit_scale": null,
+  "max_seq_len": 2048,
+  "model_type": "mpt",
+  "n_heads": 4,
+  "n_layers": 2,
+  "n_positions": 512,
+  "no_bias": true,
+  "norm_type": "low_precision_layernorm",
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "pad_token_id": 98,
+  "problem_type": null,
+  "resid_pdrop": 0.0,
+  "return_dict": true,
+  "seq_length": 7,
+  "tie_word_embeddings": true,
+  "transformers_version": "5.23.0",
+  "type_vocab_size": 16,
+  "use_cache": true,
+  "vocab_size": 99
+ },
+ "config_class": "MptConfig",
+ "config_module": "configuration_mpt",
+ "extra_inputs": {},
+ "float_inputs": {},
+ "model_classes": [
+  [
+   "modeling_mpt",
+   "MptModel"
+  ],
+  [
+   "modeling_mpt",
+   "MptForCausalLM"
+  ]
+ ]
+}

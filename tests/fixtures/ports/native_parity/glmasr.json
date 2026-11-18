@@ -1,0 +1,129 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "audio_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_dropout": 0.0,
+   "chunk_size_feed_forward": 0,
+   "dtype": null,
+   "hidden_act": "gelu",
+   "hidden_size": 32,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "initializer_range": 0.02,
+   "intermediate_size": 32,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "max_position_embeddings": 512,
+   "model_type": "glmasr_encoder",
+   "num_attention_heads": 2,
+   "num_hidden_layers": 2,
+   "num_key_value_heads": 2,
+   "num_mel_bins": 80,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "problem_type": null,
+   "return_dict": true,
+   "rope_parameters": {
+    "partial_rotary_factor": 0.5,
+    "rope_theta": 10000.0,
+    "rope_type": "default"
+   }
+  },
+  "audio_token_id": 0,
+  "chunk_size_feed_forward": 0,
+  "dtype": null,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "model_type": "glmasr",
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "pad_token_id": 1,
+  "problem_type": null,
+  "projector_hidden_act": "gelu",
+  "return_dict": true,
+  "text_config": {
+   "_name_or_path": "",
+   "architectures": null,
+   "attention_bias": false,
+   "attention_dropout": 0.0,
+   "bos_token_id": 1,
+   "chunk_size_feed_forward": 0,
+   "dtype": null,
+   "eos_token_id": 2,
+   "head_dim": 8,
+   "hidden_act": "gelu",
+   "hidden_size": 32,
+   "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+   },
+   "initializer_range": 0.02,
+   "intermediate_size": 32,
+   "is_encoder_decoder": false,
+   "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+   },
+   "max_position_embeddings": 512,
+   "mlp_bias": false,
+   "model_type": "llama",
+   "num_attention_heads": 2,
+   "num_hidden_layers": 2,
+   "num_key_value_heads": 2,
+   "output_attentions": false,
+   "output_hidden_states": false,
+   "pad_token_id": 1,
+   "pretraining_tp": 1,
+   "problem_type": null,
+   "return_dict": true,
+   "rms_norm_eps": 1e-06,
+   "rope_parameters": {
+    "rope_theta": 10000.0,
+    "rope_type": "default"
+   },
+   "tie_word_embeddings": false,
+   "use_cache": true,
+   "vocab_size": 99
+  },
+  "tie_word_embeddings": true,
+  "transformers_version": "5.23.0"
+ },
+ "config_class": "GlmAsrConfig",
+ "config_module": "configuration_glmasr",
+ "extra_inputs": {},
+ "float_inputs": {
+  "input_features": {
+   "dtype": "float32",
+   "shape": [
+    3,
+    80,
+    128
+   ]
+  }
+ },
+ "model_classes": [
+  [
+   "modeling_glmasr",
+   "GlmAsrModel"
+  ],
+  [
+   "modeling_glmasr",
+   "GlmAsrForConditionalGeneration"
+  ]
+ ]
+}

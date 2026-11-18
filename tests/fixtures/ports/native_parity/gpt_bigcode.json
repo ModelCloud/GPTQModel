@@ -1,0 +1,64 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "activation_function": "relu",
+  "add_cross_attention": false,
+  "architectures": null,
+  "attention_softmax_in_fp32": false,
+  "attn_pdrop": 0.1,
+  "bos_token_id": 98,
+  "chunk_size_feed_forward": 0,
+  "dtype": null,
+  "embd_pdrop": 0.1,
+  "eos_token_id": 97,
+  "gradient_checkpointing": false,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "initializer_range": 0.02,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "layer_norm_epsilon": 1e-05,
+  "model_type": "gpt_bigcode",
+  "multi_query": false,
+  "n_embd": 32,
+  "n_head": 4,
+  "n_inner": 37,
+  "n_layer": 2,
+  "n_positions": 512,
+  "num_key_value_heads": 4,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "pad_token_id": 96,
+  "problem_type": null,
+  "reorder_and_upcast_attn": false,
+  "resid_pdrop": 0.1,
+  "return_dict": true,
+  "scale_attention_softmax_in_fp32": false,
+  "scale_attn_by_inverse_layer_idx": false,
+  "scale_attn_weights": true,
+  "tie_word_embeddings": true,
+  "transformers_version": "5.23.0",
+  "type_vocab_size": 16,
+  "use_cache": true,
+  "vocab_size": 99
+ },
+ "config_class": "GPTBigCodeConfig",
+ "config_module": "configuration_gpt_bigcode",
+ "extra_inputs": {},
+ "float_inputs": {},
+ "model_classes": [
+  [
+   "modeling_gpt_bigcode",
+   "GPTBigCodeModel"
+  ],
+  [
+   "modeling_gpt_bigcode",
+   "GPTBigCodeForCausalLM"
+  ]
+ ]
+}

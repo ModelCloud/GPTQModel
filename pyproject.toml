@@ -143,6 +143,9 @@ mlx = [
 # first-party import detection) no matter which directory it is invoked from.
 [tool.ruff]
 line-length = 119
+# Verbatim Transformers 5.23 sources (scripts/vendor_transformers_ports.py); kept byte-reproducible.
+extend-exclude = ["gptqmodel/models/ports/native/*/"]
+# That glob also excludes the hand-written registry in native/auto; format/check.sh lints it explicitly.
 
 [tool.ruff.lint]
 select = ["C", "E", "F", "I", "W"]

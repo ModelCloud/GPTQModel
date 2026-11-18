@@ -1,0 +1,60 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "activation_function": "gelu_new",
+  "architectures": null,
+  "attention_probs_dropout_prob": 0.0,
+  "attn_pdrop": 0.0,
+  "bos_token_id": 98,
+  "chunk_size_feed_forward": 0,
+  "dtype": null,
+  "embd_pdrop": 0.0,
+  "eos_token_id": 98,
+  "hidden_act": "gelu",
+  "hidden_dropout_prob": 0.0,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "initializer_range": 0.02,
+  "intermediate_size": 37,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "layer_norm_epsilon": 1e-05,
+  "model_type": "gptj",
+  "n_embd": 32,
+  "n_head": 4,
+  "n_inner": null,
+  "n_layer": 2,
+  "n_positions": 512,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "pad_token_id": 98,
+  "problem_type": null,
+  "resid_pdrop": 0.0,
+  "return_dict": true,
+  "rotary_dim": 4,
+  "tie_word_embeddings": false,
+  "transformers_version": "5.23.0",
+  "type_vocab_size": 16,
+  "use_cache": true,
+  "vocab_size": 99
+ },
+ "config_class": "GPTJConfig",
+ "config_module": "configuration_gptj",
+ "extra_inputs": {},
+ "float_inputs": {},
+ "model_classes": [
+  [
+   "modeling_gptj",
+   "GPTJModel"
+  ],
+  [
+   "modeling_gptj",
+   "GPTJForCausalLM"
+  ]
+ ]
+}

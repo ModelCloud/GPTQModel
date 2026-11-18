@@ -1,0 +1,62 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "attention_probs_dropout_prob": 0.1,
+  "bos_token_id": null,
+  "chunk_size_feed_forward": 0,
+  "dtype": null,
+  "eos_token_id": 50279,
+  "hidden_act": "silu",
+  "hidden_dropout_prob": 0.1,
+  "hidden_size": 32,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "initializer_range": 0.02,
+  "intermediate_size": 37,
+  "is_decoder": false,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "max_position_embeddings": 512,
+  "model_type": "olmo2",
+  "num_attention_heads": 4,
+  "num_hidden_layers": 2,
+  "num_key_value_heads": 4,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "pad_token_id": 0,
+  "problem_type": null,
+  "return_dict": true,
+  "rms_norm_eps": 1e-05,
+  "rope_parameters": {
+   "rope_theta": 10000.0,
+   "rope_type": "default"
+  },
+  "tie_word_embeddings": false,
+  "transformers_version": "5.23.0",
+  "type_vocab_size": 16,
+  "use_cache": true,
+  "vocab_size": 99
+ },
+ "config_class": "Olmo2Config",
+ "config_module": "configuration_olmo2",
+ "extra_inputs": {},
+ "float_inputs": {},
+ "model_classes": [
+  [
+   "modeling_olmo2",
+   "Olmo2Model"
+  ],
+  [
+   "modeling_olmo2",
+   "Olmo2ForCausalLM"
+  ]
+ ]
+}

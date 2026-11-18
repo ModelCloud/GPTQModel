@@ -1,0 +1,79 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "architectures": null,
+  "attention_probs_dropout_prob": 0.0,
+  "chunk_size_feed_forward": 0,
+  "drop_path_rate": 0.0,
+  "dtype": null,
+  "hidden_act": "gelu",
+  "hidden_dropout_prob": 0.0,
+  "hidden_size": 16,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "image_size": 32,
+  "initializer_range": 0.02,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "layer_norm_eps": 1e-06,
+  "layerscale_value": 1.0,
+  "max_img_size": 32,
+  "mlp_ratio": 2.0,
+  "model_type": "radio",
+  "norm_mean": [
+   0.48145466,
+   0.4578275,
+   0.40821073
+  ],
+  "norm_std": [
+   0.26862954,
+   0.26130258,
+   0.27577711
+  ],
+  "num_attention_heads": 2,
+  "num_channels": 3,
+  "num_cls_tokens": 2,
+  "num_hidden_layers": 2,
+  "num_registers": 3,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "patch_dim": 48,
+  "patch_size": 4,
+  "problem_type": null,
+  "qkv_bias": true,
+  "return_dict": true,
+  "summary_idxs": [
+   0,
+   1
+  ],
+  "transformers_version": "5.23.0",
+  "use_swiglu_ffn": false,
+  "video_patch_dim": null,
+  "video_temporal_patch_size": null
+ },
+ "config_class": "RadioConfig",
+ "config_module": "configuration_radio",
+ "extra_inputs": {},
+ "float_inputs": {
+  "pixel_values": {
+   "dtype": "float32",
+   "shape": [
+    2,
+    3,
+    32,
+    32
+   ]
+  }
+ },
+ "model_classes": [
+  [
+   "modeling_radio",
+   "RadioModel"
+  ]
+ ]
+}

@@ -1,0 +1,67 @@
+{
+ "config": {
+  "_name_or_path": "",
+  "activation_function": "gelu_new",
+  "add_cross_attention": false,
+  "architectures": null,
+  "attn_pdrop": 0.1,
+  "bos_token_id": 1,
+  "chunk_size_feed_forward": 0,
+  "dtype": null,
+  "embd_pdrop": 0.1,
+  "eos_token_id": 2,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "initializer_range": 0.02,
+  "is_encoder_decoder": false,
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "layer_norm_epsilon": 1e-05,
+  "model_type": "gpt2",
+  "n_embd": 32,
+  "n_head": 2,
+  "n_inner": null,
+  "n_layer": 2,
+  "n_positions": 512,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "pad_token_id": 0,
+  "problem_type": null,
+  "reorder_and_upcast_attn": false,
+  "resid_pdrop": 0.1,
+  "return_dict": true,
+  "scale_attn_by_inverse_layer_idx": false,
+  "scale_attn_weights": true,
+  "summary_activation": null,
+  "summary_first_dropout": 0.1,
+  "summary_proj_to_labels": true,
+  "summary_type": "cls_index",
+  "summary_use_proj": true,
+  "tie_word_embeddings": false,
+  "transformers_version": "5.23.0",
+  "use_cache": true,
+  "vocab_size": 99
+ },
+ "config_class": "GPT2Config",
+ "config_module": "configuration_gpt2",
+ "extra_inputs": {},
+ "float_inputs": {},
+ "model_classes": [
+  [
+   "modeling_gpt2",
+   "GPT2Model"
+  ],
+  [
+   "modeling_gpt2",
+   "GPT2LMHeadModel"
+  ],
+  [
+   "modeling_gpt2",
+   "GPT2DoubleHeadsModel"
+  ]
+ ]
+}
