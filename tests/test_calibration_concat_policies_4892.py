@@ -18,7 +18,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from gptqmodel.utils.calibration import prepare_calibration_dataset
+from gptqmodel.utils.calibration import (
+    _prepare_tensor_kwargs_dataset,
+    prepare_calibration_dataset,
+)
 
 
 class _Tokenizer:
@@ -163,3 +166,50 @@ def test_non_concat_path_keeps_the_per_row_policies():
 
     assert len(prepared) == 1
     assert _real_tokens(prepared) == 64
+
+
+def test_concat_size_errors_name_the_public_config_field():
+    """Every user-facing concat error names ``CalibrationConfig.concat_size``.
+
+    The removed ``calibration_dataset_concat_size`` quantize keyword raises
+    ``TypeError``, so a message that names it sends the user to a dead end
+    (#5121).
+    """
+
+    with pytest.raises(ValueError, match=r"CalibrationConfig\.concat_size=65 exceeds"):
+        prepare_calibration_dataset(
+            _qmodel(max_positions=64),
+            _rows(8),
+            calibration_dataset_concat_size=65,
+            calibration_data_min_length=0,
+        )
+
+    with pytest.raises(ValueError, match=r"`CalibrationConfig\.concat_size` is specified"):
+        prepare_calibration_dataset(
+            SimpleNamespace(
+                tokenizer=None,
+                support_batch_quantize=True,
+                model=SimpleNamespace(
+                    config=SimpleNamespace(max_position_embeddings=128),
+                ),
+            ),
+            _rows(8),
+            calibration_dataset_concat_size=8,
+            calibration_data_min_length=0,
+        )
+
+    with pytest.raises(ValueError, match=r"`CalibrationConfig\.concat_size` must be larger"):
+        prepare_calibration_dataset(
+            _qmodel(),
+            _rows(2),
+            calibration_dataset_concat_size=8,
+            calibration_data_min_length=10,
+        )
+
+    with pytest.raises(ValueError, match=r"`CalibrationConfig\.concat_size` is token-based"):
+        _prepare_tensor_kwargs_dataset(
+            [],
+            calibration_dataset_concat_size=8,
+            batch_size=1,
+            log=SimpleNamespace(warn=lambda *a, **k: None, info=lambda *a, **k: None),
+        )
