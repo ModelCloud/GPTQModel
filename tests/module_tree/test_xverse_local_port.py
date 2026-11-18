@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import _wrapper, assert_awq_folds_neutral
 from torch import nn
 
 from gptqmodel.models.auto import MODEL_MAP
@@ -14,7 +15,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.xverse import XverseConfig, XverseForCausalLM
 from tests.port_assets import read_port_json
-from tests.test_xverse_local_port import PORT, tiny_config
+from tests.test_xverse_local_port import PORT, tiny_config, tiny_model
 
 
 INVENTORIES = read_port_json(PORT / "checkpoint_inventories.json")
@@ -86,7 +87,44 @@ def test_real_every_tensor_deepest_owner_roles_exclusions_and_plan(moe, shared, 
             assert plan.find("mlp.experts.3.down_proj").roles == ("down",)
     assert MODEL_MAP["xverse"] is XverseQModel
     assert XverseQModel.fusable is None
-    assert XverseQModel.awq_get_modules_for_scaling(SimpleNamespace(), None, {}, {}) == []
+
+
+@pytest.mark.parametrize("experts,shared,kv", [(0, None, 4), (0, None, 2), (3, None, 4), (3, 1, 2)])
+def test_awq_scale_folds_preserve_real_dense_routed_and_shared_layers(experts, shared, kv):
+    model = tiny_model(num_experts=experts, moe_top_k=2, num_shared_experts=shared, num_key_value_heads=kv)
+    tree = XverseQModel._resolve_effective_module_tree(model, SimpleNamespace(method="awq"))
+    ids = torch.tensor([[2, 4, 7, 8, 9, 5, 11, 6, 10]])
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    if experts:
+        mlp = [f"mlp.experts.{i}.{name}" for i in range(experts) for name in ("gate_proj", "up_proj")]
+        mlp += ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"] if shared else []
+        down = {f"mlp.experts.{i}.up_proj": [f"mlp.experts.{i}.down_proj"] for i in range(experts)}
+        if shared:
+            down["mlp.shared_experts.up_proj"] = ["mlp.shared_experts.down_proj"]
+    else:
+        mlp, down = ["mlp.gate_proj", "mlp.up_proj"], {"mlp.up_proj": ["mlp.down_proj"]}
+    expected = {
+        "input_layernorm": (["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"], []),
+        "post_attention_layernorm": (mlp, ["mlp.router"] if experts else []),
+        **{source: (targets, []) for source, targets in down.items()},
+    }
+    # GQA makes v_proj narrower than o_proj's input, so that fold only exists for MHA.
+    if kv == model.config.num_attention_heads:
+        expected["self_attn.v_proj"] = (["self_attn.o_proj"], [])
+    # The routed root exists only in the effective tree; AWQ must still capture
+    # its input so the expert gate/up group replays the whole routed block.
+    wrapper = _wrapper(XverseQModel, model, tree)
+    assert wrapper.awq_input_feature_aggregation("mlp") == (
+        {"mode": "token_rows", "capture_root": True} if experts else {"mode": "token_rows"}
+    )
+    for layer in model.model.layers:
+        # The production module plan is compiled from the effective (routed) tree.
+        with XverseQModel._module_tree_context(tree):
+            checked = assert_awq_folds_neutral(XverseQModel, model, layer, forward, tree=tree)
+        assert {source: (targets, consumers) for source, targets, consumers in checked} == expected
 
 
 def test_selection_is_request_local_and_central_proposal_is_exact():

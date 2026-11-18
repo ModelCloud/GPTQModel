@@ -39,9 +39,15 @@ class XverseQModel(LlamaQModel):
             blocks["mlp:moe"] = experts
         return tree
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Dense legacy normalization and routed/shared replay are not fold-qualified.
-        return []
+    def awq_input_feature_aggregation(self, module_name):
+        # `mlp:moe` exists only in the effective tree. Resolve the policy against
+        # it so AWQ captures the routed root input: the expert gate/up group then
+        # replays the whole MoE block, which tolerates experts left unrouted.
+        tree = getattr(self, "effective_module_tree", None)
+        if tree is None:
+            return super().awq_input_feature_aggregation(module_name)
+        with type(self)._module_tree_context(tree):
+            return super().awq_input_feature_aggregation(module_name)
 
     def pre_quantize(self, module):
         if self.model.config.pretraining_tp > 1:
