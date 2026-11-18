@@ -15,6 +15,7 @@ from transformers.masking_utils import (
 from ...utils.device import get_device
 from ...utils.model import get_module_by_name_prefix, move_to, nested_move_to
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 _RAW_ATTENTION_MASK = "__gptqmodel_lfm3_attention_mask"
@@ -38,6 +39,10 @@ class LFM3QModel(BaseQModel):
     Transformers 5 owns the native implementation, including conversion of
     checkpoint `self_attn.gate_proj` weights to native `self_attn.g_proj`.
     """
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
 
     pre_lm_head_norm_module = "model.embedding_norm"
     rotary_embedding = "model.rotary_emb"

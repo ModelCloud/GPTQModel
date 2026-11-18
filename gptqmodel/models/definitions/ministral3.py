@@ -3,9 +3,15 @@
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 class Ministral3GPTQ(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForCausalLM",
+    )
+
     fusable = FusableConfig("ministral3").merge(LlamaFusableConfig())
 
     pre_lm_head_norm_module = "model.norm"

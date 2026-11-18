@@ -4,20 +4,40 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from .base_qwen3_vl import BaseQwen3VLGPTQ
 
 
 class Qwen3_VLQModel(BaseQwen3VLGPTQ):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
+
     fusable = FusableConfig("qwen3_vl").merge(LlamaFusableConfig())
 
-    pass
+    def load_processor(self):
+        # BaseQModel already loaded the vendored processor through the loader.
+        return self.processor
 
 
 class Qwen3_VL_MoeQModel(BaseQwen3VLGPTQ):
     """Qwen3-VL MoE decoder with defused per-expert linear projections."""
+
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
+
     fusable = FusableConfig("qwen3_vl_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
 
+    def load_processor(self):
+        return self.processor
 
     layer_modules_strict = False
     dynamic_expert_index = "num_experts"

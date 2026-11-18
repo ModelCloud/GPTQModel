@@ -6,13 +6,14 @@
 from typing import Any, Dict
 
 import torch
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig
+from ..local import LocalModelLoader
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .llama import LlamaQModel
 
@@ -20,7 +21,13 @@ from .llama import LlamaQModel
 class DeepSeekVLQModel(BaseQModel):
     fusable = FusableConfig("deepseek_vl").merge(LlamaQModel.fusable)
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+        processor_class="gptqmodel.models.ports.native.auto.NativeProcessor",
+        tokenizer_class="gptqmodel.models.ports.native.auto.NativeTokenizer",
+    )
+
     require_load_processor = True
     support_batch_quantize = False
 
@@ -92,7 +99,8 @@ class DeepSeekVLQModel(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)
+        # BaseQModel already loaded the vendored processor through the loader.
+        return self.processor
 
     @classmethod
     def prepare_inputs_for_conversations(

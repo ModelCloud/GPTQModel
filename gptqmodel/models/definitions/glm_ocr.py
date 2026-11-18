@@ -4,10 +4,16 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from .base_qwen3_vl import BaseQwen3VLGPTQ
 
 
 class GlmOCRGPTQ(BaseQwen3VLGPTQ):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.native.auto.NativeConfig",
+        model_class="gptqmodel.models.ports.native.auto.NativeForImageTextToText",
+    )
+
     # GLM-OCR computes multimodal RoPE from `mm_token_type_ids`, so the
     # processor-produced field must reach the model on the calibration path.
     fusable = FusableConfig("glm_ocr").merge(LlamaFusableConfig(), profiles=("qkv",))
