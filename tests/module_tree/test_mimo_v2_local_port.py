@@ -17,7 +17,7 @@ from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.mimo_v2.configuration_mimo_v2 import MiMoV2Config
 from gptqmodel.models.ports.mimo_v2.modeling_mimo_v2 import MiMoV2ForCausalLM
 from tests.port_assets import read_port_json
-from tests.test_mimo_v2_local_port import tiny_config
+from tests.test_mimo_v2_local_port import make_model, tiny_config
 
 
 PORT = Path(__file__).parents[2] / "gptqmodel/models/ports/mimo_v2"
@@ -74,7 +74,6 @@ def test_actual_decoder_tensor_ownership_layout_and_consumer_tags(layout, kv, bi
             else:
                 assert "!" in spec.flags
             assert tensor.device.type == "meta"
-        assert MimoV2QModel.awq_get_modules_for_scaling(None, layer, {}, {}) == []
         a = layer.self_attn
         qdim = config.num_attention_heads * config.head_dim
         if layout == "fused_qkv":
@@ -85,6 +84,53 @@ def test_actual_decoder_tensor_ownership_layout_and_consumer_tags(layout, kv, bi
     assert quantized == 2 * (2 if layout == "fused_qkv" else 4) + sum(12 if is_moe else 3 for is_moe in moe)
     assert "model.rotary_emb.inv_freq" not in model.state_dict()
     assert not any(k.startswith("model.mtp.") for k in model.state_dict())
+
+
+@pytest.mark.parametrize("layout", ["split", "fused_qkv"])
+@pytest.mark.parametrize("kv", [1, 2])
+def test_awq_scale_folds_preserve_real_dense_moe_and_swa_layers(layout, kv):
+    from awq_neutrality import assert_awq_folds_neutral
+
+    # Layer 0: full attention + dense MLP. Layer 1: SWA with sink bias + routed MoE.
+    model = make_model(attention_projection_layout=layout, moe_layer_freq=[0, 1], num_key_value_heads=kv,
+                       swa_num_key_value_heads=kv, num_experts_per_tok=4, topk_group=2)
+    ids = torch.randint(3, 60, (1, 8))
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    split = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")
+    qkv = ("self_attn.qkv_proj",) if layout == "fused_qkv" else split
+    for index, layer in enumerate(model.model.layers):
+        # AWQProcessor captures the MoE root input for the routed gate/up group.
+        root = {}
+        handle = layer.mlp.register_forward_pre_hook(lambda module, args: root.update(mlp=args[0].detach().clone()))
+        with torch.inference_mode():
+            forward()
+        handle.remove()
+
+        def provider(wrapper, module, features, kwargs, root=root):
+            return MimoV2QModel.awq_get_modules_for_scaling(wrapper, module, {**features, **root}, kwargs)
+
+        checked = assert_awq_folds_neutral(MimoV2QModel, model, layer, forward, scaling_provider=provider)
+        groups = {(source, tuple(targets), tuple(consumers)) for source, targets, consumers in checked}
+        expected = {("input_layernorm", qkv, ())}
+        if index == 0:
+            expected |= {
+                ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj"), ()),
+                ("mlp.up_proj", ("mlp.down_proj",), ()),
+            }
+        else:
+            experts = range(model.config.n_routed_experts)
+            # The router reads the same norm output and is compensated, not folded.
+            expected.add((
+                "post_attention_layernorm",
+                tuple(f"mlp.experts.{e}.{proj}_proj" for e in experts for proj in ("gate", "up")),
+                ("mlp.gate",),
+            ))
+            expected |= {(f"mlp.experts.{e}.up_proj", (f"mlp.experts.{e}.down_proj",), ()) for e in experts}
+        # o_proj reads v_head_dim-wide heads, so v_proj -> o_proj never applies.
+        assert groups == expected
 
 
 @pytest.mark.parametrize("variant", ["MiMo-V2.5-Base", "MiMo-V2.5-Pro-Base", "MiMo-V2.6-Pro-RL", "MiMo-V2.6-Flash-RL"])

@@ -423,11 +423,9 @@ def test_mla_matches_pinned_absorbed_weight_equations(q_lora, dtype):
 @pytest.mark.parametrize("method", ["greedy", "group_limited_greedy", "noaux_tc"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("disable_feature_fallback", [False, True])
-def test_awq_plain_policy_packs_or_rejects_missing_features(
+def test_featureless_awq_packs_or_rejects_missing_features(
     mla, method, dtype, disable_feature_fallback, tmp_path
 ):
-    from types import SimpleNamespace
-
     from safetensors.torch import load_file, save_file
 
     from gptqmodel.looper.awq_processor import AWQProcessor
@@ -451,10 +449,11 @@ def test_awq_plain_policy_packs_or_rejects_missing_features(
     config.projector_config.n_embed = 32
     torch.manual_seed(113)
     model = DeepseekVLV2ForCausalLM(config).eval().to(dtype)
-    wrapper = SimpleNamespace(
+    wrapper = DeepSeekVLV2QModel.__new__(DeepSeekVLV2QModel)
+    torch.nn.Module.__init__(wrapper)
+    wrapper.__dict__.update(
         model=model, qlinear_kernel=AwqTorchLinear, rotary_embedding=None, lm_head="language.lm_head"
     )
-    wrapper.awq_get_modules_for_scaling = DeepSeekVLV2QModel.awq_get_modules_for_scaling.__get__(wrapper)
     options = {"fallback": None} if disable_feature_fallback else {}
     qcfg = AWQConfig(device="cpu", group_size=-1, bits=4, sym=False, **options)
     processor = AWQProcessor(
@@ -484,8 +483,8 @@ def test_awq_plain_policy_packs_or_rejects_missing_features(
                 continue
             full = f"language.model.layers.{index}.{name}"
             named[full] = NamedModule(module, name, full, index)
-            # Empty features are intentional: this definition rejects scaling,
-            # so the actual AWQ fallback must quantize without any fold/search.
+            # Empty features are intentional: no scale group can be built
+            # without activations, so the AWQ fallback quantizes without folds.
         state.modules = dict(named)
         assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
         if disable_feature_fallback:

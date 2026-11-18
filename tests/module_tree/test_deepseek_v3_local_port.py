@@ -17,7 +17,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.hf import load_model_config
-from tests.test_deepseek_v3_local_port import checkpoint_state_dict, poison_checkpoint, tiny_payload
+from tests.test_deepseek_v3_local_port import checkpoint_state_dict, poison_checkpoint, tiny_payload, write_checkpoint
 
 
 @pytest.mark.parametrize("model_type", ["deepseek_v3", "kimi_k2"])
@@ -68,7 +68,9 @@ def test_every_checkpoint_owner_is_declared_and_experts_survive_conversion(tmp_p
 @pytest.mark.parametrize("model_type", ["deepseek_v3", "kimi_k2"])
 @pytest.mark.parametrize("q_lora_rank", [None, 16], ids=["dense_q", "split_q"])
 @pytest.mark.parametrize("fallback", [None, {}], ids=["no_fallback", "fallback"])
-def test_plain_awq_quantizes_and_packs_every_real_projection(tmp_path, monkeypatch, model_type, q_lora_rank, fallback):
+def test_featureless_awq_quantizes_and_packs_every_real_projection(
+    tmp_path, monkeypatch, model_type, q_lora_rank, fallback,
+):
     poison_checkpoint(tmp_path, tiny_payload(
         model_type, q_lora_rank, hidden_size=32, intermediate_size=32, moe_intermediate_size=16,
         kv_lora_rank=16, qk_nope_head_dim=8, qk_rope_head_dim=8, v_head_dim=16,
@@ -99,7 +101,8 @@ def test_plain_awq_quantizes_and_packs_every_real_projection(tmp_path, monkeypat
             for name, module in layer.named_modules()
             if isinstance(module, torch.nn.Linear) and wrapper.module_plan().find(name).quantize
         }
-        # Plain quantization has no activation-search dependency, including unobserved experts.
+        # Without captured activations no scale group can be built, so every
+        # projection (including unobserved experts) takes the plain AWQ path.
         monkeypatch.setattr(processor, "_layer_input_features", lambda _: {})
         assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
         named_modules = dict(state.modules)
@@ -126,3 +129,84 @@ def test_plain_awq_quantizes_and_packs_every_real_projection(tmp_path, monkeypat
         torch.testing.assert_close(model.state_dict()[name], expected, rtol=0, atol=0)
     with torch.inference_mode():
         assert torch.isfinite(model(torch.tensor([[1, 3, 6, 9]])).logits).all()
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v3", "kimi_k2"])
+@pytest.mark.parametrize("q_lora_rank", [None, 8], ids=["dense_q", "split_q"])
+def test_awq_scale_folds_preserve_real_mla_dense_and_moe_layers(tmp_path, model_type, q_lora_rank):
+    from awq_neutrality import assert_awq_folds_neutral
+
+    poison_checkpoint(tmp_path, tiny_payload(model_type, q_lora_rank, n_shared_experts=2, num_experts_per_tok=4))
+    config = load_model_config(tmp_path)
+    config._attn_implementation = "eager"
+    torch.manual_seed(3)
+    model = DeepSeekV3QModel.loader.from_config(config).eval()
+    assert _convert_model_with_defuser(DeepSeekV3QModel, model, cleanup_original=True)
+    ids = torch.randint(3, 30, (1, 8))
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    q_in = "self_attn.q_proj" if q_lora_rank is None else "self_attn.q_a_proj"
+    for index, layer in enumerate(model.model.layers):
+        checked = assert_awq_folds_neutral(DeepSeekV3QModel, model, layer, forward)
+        groups = {(source, tuple(targets), tuple(consumers)) for source, targets, consumers in checked}
+        # MLA: only the projections reading the input norm fold into it;
+        # q_b_proj/kv_b_proj read the latents and o_proj the attention output.
+        expected = {("input_layernorm", (q_in, "self_attn.kv_a_proj_with_mqa"), ())}
+        if index < config.first_k_dense_replace:
+            expected |= {
+                ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj"), ()),
+                ("mlp.up_proj", ("mlp.down_proj",), ()),
+            }
+        else:
+            owners = [*(f"mlp.experts.{e}" for e in range(config.n_routed_experts)), "mlp.shared_experts"]
+            # Routed and shared experts read one norm and fold as one group;
+            # the router reads it too and is compensated.
+            expected.add((
+                "post_attention_layernorm",
+                tuple(f"{owner}.{proj}_proj" for owner in owners for proj in ("gate", "up")),
+                ("mlp.gate",),
+            ))
+            expected |= {(f"{owner}.up_proj", (f"{owner}.down_proj",), ()) for owner in owners}
+        assert groups == expected
+        folded = {target for _, targets, _ in checked for target in targets}
+        assert not folded & {"self_attn.q_b_proj", "self_attn.kv_b_proj", "self_attn.o_proj"}
+
+
+def test_public_awq_scale_search_quantizes_mla_and_moe_and_folds_norms(tmp_path):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import PreTrainedTokenizerFast
+
+    from gptqmodel import BACKEND, GPTQModel
+
+    reference, marker = write_checkpoint(tmp_path, tiny_payload(
+        "deepseek_v3", 16, hidden_size=32, intermediate_size=32, moe_intermediate_size=16,
+        kv_lora_rank=16, qk_nope_head_dim=8, qk_rope_head_dim=8, v_head_dim=16,
+    ))
+    PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(WordLevel({"[PAD]": 0, "[BOS]": 1, "[EOS]": 2, "[UNK]": 3}, unk_token="[UNK]")),
+        pad_token="[PAD]", bos_token="[BOS]", eos_token="[EOS]", unk_token="[UNK]",
+    ).save_pretrained(tmp_path)
+    wrapper = GPTQModel.load(
+        str(tmp_path), quantize_config=AWQConfig(device="cpu", group_size=16, fallback=None),
+        backend=BACKEND.TORCH, dtype=torch.float16,
+    )
+    norms = {key: value.half() for key, value in reference.state_dict().items() if key.endswith("layernorm.weight")}
+    ids = torch.tensor([[1, 4, 5, 6, 7, 8, 9, 10, 11, 12]])
+    calibration = [{"input_ids": ids, "attention_mask": torch.ones_like(ids)} for _ in range(2)]
+    wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
+    packed = {name for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
+    for index in range(2):
+        for name in ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj", "o_proj"):
+            assert f"model.layers.{index}.self_attn.{name}" in packed
+    assert {"model.layers.1.mlp.shared_experts.gate_proj", "model.layers.1.mlp.shared_experts.down_proj"} <= packed
+    state = wrapper.model.state_dict()
+    changed = {key for key, value in norms.items() if not torch.equal(state[key].half(), value)}
+    # The input norm absorbs the q_a/kv_a fold; the MLA latent norms are never fold sources.
+    assert {"model.layers.0.input_layernorm.weight", "model.layers.1.input_layernorm.weight"} <= changed
+    assert not {key for key in changed if "_a_layernorm" in key}
+    with torch.inference_mode():
+        assert torch.isfinite(wrapper.model(ids).logits).all()
+    assert not marker.exists()

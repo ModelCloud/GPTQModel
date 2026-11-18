@@ -98,3 +98,63 @@ def test_pinned_checkpoint_key_inventory_matches_actual_meta_model(variant):
     assert len(keys) == fixture["key_count"]
     assert hashlib.sha256("\n".join(keys).encode()).hexdigest() == fixture["keys_sha256"]
     assert_owned(model)
+
+
+@pytest.mark.parametrize("mla,q_lora", [(False, 8), (True, 8), (True, 16), (True, None)])
+def test_awq_scale_folds_preserve_real_text_decoder_output(mla, q_lora):
+    from awq_neutrality import _assert_neutral, assert_awq_folds_neutral
+
+    torch.manual_seed(19)
+    model = DeepseekVLV2ForCausalLM(tiny_config(mla, language={"q_lora_rank": q_lora})).eval()
+    ids = torch.randint(3, 40, (1, 8))
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    if mla:
+        q_in = "self_attn.q_proj" if q_lora is None else "self_attn.q_a_proj"
+        attention = {("input_layernorm", (q_in, "self_attn.kv_a_proj_with_mqa"), ())}
+        if q_lora is None:
+            # Dense-Q MLA: the kv latent norm feeds only kv_b_proj.
+            attention.add(("self_attn.kv_a_layernorm", ("self_attn.kv_b_proj",), ()))
+    else:
+        attention = {("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"), ())}
+    for index, layer in enumerate(model.language.model.layers):
+        # AWQProcessor captures the MoE root input for the routed gate/up group.
+        root = {}
+        handle = layer.mlp.register_forward_pre_hook(lambda module, args: root.update(mlp=args[0].detach().clone()))
+        with torch.inference_mode():
+            forward()
+        handle.remove()
+
+        def provider(wrapper, module, features, kwargs, root=root):
+            return DeepSeekVLV2QModel.awq_get_modules_for_scaling(wrapper, module, {**features, **root}, kwargs)
+
+        checked = assert_awq_folds_neutral(DeepSeekVLV2QModel, model, layer, forward, scaling_provider=provider)
+        groups = {(source, tuple(targets), tuple(consumers)) for source, targets, consumers in checked}
+        expected = set(attention)
+        if index == 0:
+            expected |= {
+                ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj"), ()),
+                ("mlp.up_proj", ("mlp.down_proj",), ()),
+            }
+        else:
+            owners = [*(f"mlp.experts.{e}" for e in range(4)), "mlp.shared_experts"]
+            expected.add((
+                "post_attention_layernorm",
+                tuple(f"{owner}.{proj}_proj" for owner in owners for proj in ("gate", "up")),
+                ("mlp.gate",),
+            ))
+            expected |= {(f"{owner}.up_proj", (f"{owner}.down_proj",), ()) for owner in owners}
+        assert groups == expected
+
+        if mla and q_lora == 8:
+            # Equal q/kv LoRA ranks: the generic planner pairs q_b_proj with
+            # kv_a_layernorm. That fold changes the output, so the port drops it.
+            from gptqmodel.models.base import BaseQModel
+
+            def generic(wrapper, module, features, kwargs, root=root):
+                return BaseQModel.awq_get_modules_for_scaling(wrapper, module, {**features, **root}, kwargs)
+
+            with pytest.raises(AssertionError, match="self_attn.kv_a_layernorm"):
+                _assert_neutral(DeepSeekVLV2QModel, model, layer, forward, scaling_provider=generic)

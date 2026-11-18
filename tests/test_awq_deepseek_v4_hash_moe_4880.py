@@ -143,8 +143,8 @@ def _calibration():
 
 
 def _enable_hash_moe_scale_search(monkeypatch):
-    # The port uses plain AWQ. Exercise generic scale replay explicitly while
-    # still using the native hash router and real inputs captured by the looper.
+    # The port inherits the generic planner; pin it so these hash-MoE replay
+    # regressions keep exercising scale search even if the port narrows it.
     monkeypatch.setattr(DeepSeekV4QModel, "awq_get_modules_for_scaling", BaseQModel.awq_get_modules_for_scaling)
 
 

@@ -1525,11 +1525,6 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
         },
     ]
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Hyper-connections, compressed attention and shared/routed MoE branches
-        # are not jointly qualified for folding/search. Quantize without folds.
-        return []
-
     def exllamav3_checkpoint_module_candidates(
         self,
         runtime_prefix: str,
@@ -2462,6 +2457,11 @@ class DeepSeekV4MTPQuantizationModel(DeepSeekV4QModel):
         "ffn_hc.base",
         "ffn_hc.scale",
     )
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Only routed experts cross this adapter's artifact boundary; the norms,
+        # router and shared experts a fold would rewrite stay native and unsaved.
+        return []
 
     def after_model_load(self, model, load_quantized_model=False):
         del load_quantized_model
