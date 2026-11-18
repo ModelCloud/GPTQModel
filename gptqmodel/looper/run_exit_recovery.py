@@ -42,6 +42,7 @@ class RunExitRecovery:
         release_processors: _ExitStep = None,
         restore_deferred: _ExitStep = None,
         restore_inflight: _ExitStep = None,
+        unwrap_hooked: _ExitStep = None,
         restore_offloaded: Optional[Callable[..., None]] = None,
         materialize_unreached: _ExitStep = None,
         rehome_kernels: _ExitStep = None,
@@ -56,6 +57,7 @@ class RunExitRecovery:
         self._release_processors = release_processors
         self._restore_deferred = restore_deferred
         self._restore_inflight = restore_inflight
+        self._unwrap_hooked = unwrap_hooked
         self._restore_offloaded = restore_offloaded
         self._materialize_unreached = materialize_unreached
         self._rehome_kernels = rehome_kernels
@@ -142,6 +144,9 @@ class RunExitRecovery:
             "finalize deferred runtime weights", self._restore_deferred
         )
         self._best_effort("restore the in-flight layer", self._restore_inflight)
+        self._best_effort(
+            "unwrap the failed run's float projections", self._unwrap_hooked
+        )
         self._best_effort(
             "restore offloaded base modules",
             lambda: self._restore_offloaded(strict=False),

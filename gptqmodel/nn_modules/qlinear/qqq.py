@@ -14,6 +14,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import CPU, DEVICE, PLATFORM
 from ...nn_modules.qlinear import GroupedQuantLinear
 from ...quantization import FORMAT, METHOD
+from ...quantization.qqq_activation import QQQ_ACTIVATION_DTYPES, qqq_activation_quantize
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.qqq import qqq_gemm, qqq_runtime_available, qqq_runtime_error
@@ -192,6 +193,11 @@ class QQQLinear(GroupedQuantLinear):
     # (#5010). `s_group` is legitimately empty when `group_size` spans the whole
     # input, so only its presence is checked.
     CHECKPOINT_REQUIRED_BUFFERS = ("B", "s_group", "s_channel")
+    # Per-channel layers (`group_size == in_features`) hold an empty
+    # `s_group`; the kernel builds its own empty operand. Older saves dropped
+    # every such key as shared storage (#5126), so accept a missing empty
+    # entry. A grouped layer's non-empty `s_group` remains required.
+    CHECKPOINT_OPTIONAL_EMPTY_BUFFERS = ("s_group",)
 
     # The native Marlin W4A8 `qqq_gemm` custom op has no fake impl and the
     # per-call reduce scratch/locks allocation is host-side; the JIT extension
@@ -622,21 +628,21 @@ class QQQLinear(GroupedQuantLinear):
     # activation int8 quantization
     def dynamic_quant(self, x: torch.Tensor):
         if (x.device.type == "cuda" and x.is_contiguous() and 0 < x.shape[-1] <= 32768
-                and x.dtype in (torch.float16, torch.bfloat16, torch.float32)
+                and x.dtype in QQQ_ACTIVATION_DTYPES
                 and not torch.compiler.is_compiling()):
             quantizer = _qqq_gpu_quantizer()
             if quantizer is not None:
                 return quantizer(x)
-        x = x.float()
-        quant_scale = x.abs().amax(dim=-1, keepdim=True).div(127.0)
-        quant_scale = torch.where(quant_scale == 0, torch.ones_like(quant_scale), quant_scale)
-        x = (x / quant_scale).round().clamp(-128, 127).to(torch.int8)
         # The element-wise fallback preserves the input's memory format, so a
         # column-strided activation (``x.t()`` of a ``[K, M]`` buffer) comes back
         # column-major. ``qqq_gemm`` reads the operand row-major with no stride
         # argument, so hand it a packed INT8 buffer (#4740). The copy is int8,
         # i.e. a quarter of the fp16 operand it replaces.
-        return x.contiguous(), quant_scale
+        #
+        # GSQ calibration calls the same helper, so the Hessian and cross moment
+        # describe the codes and FP32 scale this path produces rather than a
+        # separate FP16-narrowed grid.
+        return qqq_activation_quantize(x)
 
     def _split_k_locks(self, device) -> torch.Tensor:
         """A fresh zeroed split-K lock array for one forward call.
@@ -711,15 +717,14 @@ class QQQTorchLinear(QQQLinear):
     # traceable `torch._int_mm` path instead.
     SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
     SUPPORTS_GRAPH_CAPTURE = False
-    # ... and the static-cache `generate()` is still a loss: the QQQ decode
-    # recompiles per step (172 graphs, 24-115 breaks) and measures 1.3-8x
-    # slower than eager on RTX 4090/5090, so the #4669 policy stays off
-    # (#4984). Re-measure the model-level decode before opting in.
-    SUPPORTS_COMPILE = False
-    SUPPORTS_COMPILE_EAGER_REASON = (
-        "static-cache generate recompiles per step (172 graphs, 24-115 breaks) "
-        "and is 1.3-8x slower than eager (#4984)"
-    )
+    # ... and a static-cache `generate()` is a win on this torch kernel:
+    # Qwen2.5-0.5B-Instruct QQQ, bf16, RTX 4090 (sm_89), torch 2.15.0+cu132,
+    # 4 left-padded prompts x 32 greedy tokens: 2.08 s eager -> 0.48 s compiled
+    # (4.3x), 1 dynamo graph, 0 graph breaks (#5102). The 172-graph /
+    # 24-115-break number this declaration used to cite came from the AUTO
+    # `QQQLinear` CUDA kernel, not from this torch kernel; #5075 made the packed
+    # QQQ op traceable, so the copied reason was stale.
+    SUPPORTS_COMPILE = True
 
     SUPPORTS_BACKENDS = [BACKEND.QQQ_TORCH]
     SUPPORTS_METHODS = [METHOD.QQQ]

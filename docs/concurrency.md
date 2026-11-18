@@ -232,6 +232,16 @@ flowchart TD
     I --> D
 ```
 
+The lazy first `torch.compile` of `TorchLinear.dequantize_weight` takes the
+same `_MODEL_LOAD_LOCK` (`gptqmodel/utils/torch.py:432` and
+`gptqmodel/nn_modules/qlinear/torch.py:467`). Dynamo's `preserve_global_state`
+saves and restores `torch.get_default_dtype()` around the first trace, exactly
+like transformers' construction; without the shared lock a compile could
+restore bf16 after a load restored fp32, or fail the load's invariant check
+(#5127). The compile proxy holds the lock only until its first successful call,
+so steady-state forwards stay concurrent. See
+[torch compile fallback](torch-compile-fallback.md).
+
 `quantize()` itself is not serialized: once a model is loaded, overlapping
 quantization stays supported (section 1).
 
@@ -323,6 +333,7 @@ and defaults to 1.
 | Dynamo guard fails on a user frame | exception propagates; no double execution |
 | `fullgraph=True` capture failure | exception propagates; no silent fallback |
 | Two `GPTQModel.load()` calls overlap | the second waits, then builds; both models are consistent |
+| A first `TorchLinear` compile overlaps a load | the compile waits for the load lock, then traces with fp32; steady-state forwards stay lock-free |
 | A load leaves a mixed dtype, a meta tied weight, or a changed default dtype | `RuntimeError`; the corrupted model is never returned |
 | A float32 parameter is declared by `_keep_in_fp32_modules` / `_keep_in_fp32_modules_strict` | exempt from the dtype checks; still must be materialized |
 | A float32 parameter is *not* declared, or a declared module is left in a half dtype | `RuntimeError`; the corrupted model is never returned |

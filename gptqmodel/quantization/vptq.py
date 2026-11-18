@@ -52,6 +52,61 @@ _LOSS_CHUNK_BYTES = 64 * 1024 * 1024
 _EPS = 1e-12
 
 
+@dataclass(frozen=True)
+class _SegmentPlan:
+    """Bucket metadata shared by every reduction over one assignment.
+
+    A k-means iteration reduces the same assignment more than once: the
+    weighted vector sum and the weight sum see identical buckets, so the stable
+    sort, ``bincount`` and non-empty mask only have to be computed once per
+    iteration. ``order`` is ``None`` for an empty assignment, which needs no
+    sorting and produces all-zero buckets.
+    """
+
+    num_buckets: int
+    order: Optional[torch.Tensor]
+    nonzero: Optional[torch.Tensor]
+    lengths: Optional[torch.Tensor]
+
+
+def _segment_plan(num_buckets: int, index: torch.Tensor) -> _SegmentPlan:
+    """Sort ``index`` by bucket once and cache what the reductions need."""
+
+    if index.numel() == 0:
+        return _SegmentPlan(
+            num_buckets=num_buckets, order=None, nonzero=None, lengths=None
+        )
+
+    counts = torch.bincount(index, minlength=num_buckets)
+    nonzero = counts > 0
+    return _SegmentPlan(
+        num_buckets=num_buckets,
+        order=torch.argsort(index, stable=True),
+        nonzero=nonzero,
+        lengths=counts[nonzero],
+    )
+
+
+def _segment_sum_with_plan(plan: _SegmentPlan, source: torch.Tensor) -> torch.Tensor:
+    """Sum ``source`` rows into the plan's buckets, in the plan's fixed order."""
+
+    result = torch.zeros(
+        (plan.num_buckets, *source.shape[1:]),
+        dtype=source.dtype,
+        device=source.device,
+    )
+    if plan.order is None:
+        return result
+
+    sorted_source = source.index_select(0, plan.order)
+    # A float32 reduction over a whole bucket loses low bits, so accumulate in
+    # float64 and round once at the end. The result is still a fixed-order
+    # reduction.
+    totals = torch.segment_reduce(sorted_source.double(), "sum", lengths=plan.lengths)
+    result[plan.nonzero] = totals.to(source.dtype)
+    return result
+
+
 def _deterministic_segment_sum(
     num_buckets: int,
     index: torch.Tensor,
@@ -77,24 +132,9 @@ def _deterministic_segment_sum(
     kernels and can raise for an op that has no deterministic implementation.
     """
 
-    result = torch.zeros(
-        (num_buckets, *source.shape[1:]), dtype=source.dtype, device=source.device
-    )
-    if index.numel() == 0:
-        return result
-
-    order = torch.argsort(index, stable=True)
-    sorted_source = source.index_select(0, order)
-    counts = torch.bincount(index, minlength=num_buckets)
-    nonzero = counts > 0
-    # A float32 reduction over a whole bucket loses low bits, so accumulate in
-    # float64 and round once at the end. The result is still a fixed-order
-    # reduction.
-    totals = torch.segment_reduce(
-        sorted_source.double(), "sum", lengths=counts[nonzero]
-    )
-    result[nonzero] = totals.to(source.dtype)
-    return result
+    # One reduction builds the plan locally. Callers that reduce the same
+    # assignment several times build it once and reuse it (_segment_plan).
+    return _segment_sum_with_plan(_segment_plan(num_buckets, index), source)
 
 
 def _matrix_to_vectors(data: torch.Tensor, vector_len: int) -> Tuple[torch.Tensor, int]:
@@ -215,7 +255,12 @@ def _weighted_kmeans(
         assignment, residual = _chunked_assign(data, centroids)
         inertia = (residual.double() * weights.double()).sum()
 
-        counts = _deterministic_segment_sum(num_centroids, assignment, weights)
+        # Both reductions cover the same assignment, so the stable sort, bucket
+        # lengths and non-empty mask are built once and shared. Computing them
+        # twice per Lloyd iteration was pure duplicated work, and the
+        # reduction order (and therefore the codebook bits) is unchanged.
+        plan = _segment_plan(num_centroids, assignment)
+        counts = _segment_sum_with_plan(plan, weights)
         empty = counts <= 0
         # The centroid is the weighted mean `sum(w * x) / sum(w)`, so a
         # non-empty bucket must divide by its own total weight even when that
@@ -242,7 +287,7 @@ def _weighted_kmeans(
             divisor = divisor * factor
         else:
             weighted = data * weights.unsqueeze(1)
-        sums = _deterministic_segment_sum(num_centroids, assignment, weighted)
+        sums = _segment_sum_with_plan(plan, weighted)
         updated = sums / divisor.unsqueeze(1)
         centroids = torch.where(empty.unsqueeze(1), centroids, updated)
 

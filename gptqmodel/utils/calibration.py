@@ -192,7 +192,7 @@ def _prepare_tensor_kwargs_dataset(
 
     if calibration_dataset_concat_size:
         raise ValueError(
-            "Quantize: `calibration_dataset_concat_size` is token-based and cannot be used "
+            "Quantize: `CalibrationConfig.concat_size` is token-based and cannot be used "
             "with a model that declares `calibration_inputs = 'tensor_kwargs'`."
         )
 
@@ -922,20 +922,9 @@ def prepare_calibration_dataset(
         if mask_tensor.ndim == 1:
             mask_tensor = mask_tensor.unsqueeze(0)
 
-        # An additive/extended mask encodes "attend" as 0 (or a positive bias)
-        # and "masked" as a negative bias. When such a mask is all zeros there
-        # is no padding at all, but ``normalize_seq_mask`` reads 0 as "drop" for
-        # a 0/1 mask and would erase every token. Resolve it here first so only
-        # genuinely masked positions are dropped. A 2-D integer 0/1 mask keeps
-        # the usual meaning: an all-zero row is all padding.
-        if (
-            mask_tensor.dtype != torch.bool
-            and mask_tensor.numel() > 0
-            and torch.count_nonzero(mask_tensor).item() == 0
-            and (mask_tensor.is_floating_point() or mask_tensor.ndim >= 3)
-        ):
-            mask_tensor = torch.ones_like(mask_tensor)
-
+        # ``normalize_seq_mask`` owns the additive-versus-0/1 inference,
+        # including the all-zero unpadded extended mask (#5134), so the
+        # layer-replay and user-calibration paths share one rule.
         try:
             keep_mask = normalize_seq_mask(mask_tensor, seq_len=ids_tensor.shape[-1])
         except ValueError as exc:
@@ -1210,9 +1199,9 @@ def prepare_calibration_dataset(
     concat_mode = bool(calibration_dataset_concat_size)
     if concat_mode and max_positions is not None and calibration_dataset_concat_size > max_positions:
         raise ValueError(
-            f"Quantize: calibration_dataset_concat_size={calibration_dataset_concat_size} exceeds "
+            f"Quantize: CalibrationConfig.concat_size={calibration_dataset_concat_size} exceeds "
             f"{max_positions_source}={max_positions}, so a packed window could never fit the model's "
-            "position budget. Lower `concat_size`."
+            "position budget. Lower `CalibrationConfig.concat_size`."
         )
 
     dropped_padded_row_count = 0
@@ -1402,7 +1391,7 @@ def prepare_calibration_dataset(
         )
 
     if calibration_dataset_concat_size:
-        _require_tokenizer("`calibration_dataset_concat_size` is specified")
+        _require_tokenizer("`CalibrationConfig.concat_size` is specified")
         concatenated_data = []
         input_ids_buff = []
         attention_mask_buff = []
@@ -1527,7 +1516,7 @@ def prepare_calibration_dataset(
             raise ValueError(
                 "Quantize: concatenation produced no calibration window with more than "
                 f"{calibration_data_min_length} non-padding tokens. "
-                "`calibration_dataset_concat_size` must be larger than `min_length`."
+                "`CalibrationConfig.concat_size` must be larger than `min_length`."
             )
 
         new_calibration_dataset = concatenated_data

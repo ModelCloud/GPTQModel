@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Audit the entire kernel registry's ROCm family contract without GPU execution."""
 
+import re
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -31,6 +33,7 @@ ROCM_KERNELS = set("""
     TorchLinear TorchQuantEmbeddings AwqTorchLinear QQQTorchLinear
     GGUFTorchLinear ParoLinear ParoTritonLinear VPTQLinear NF12Linear
     MacaqLinear MacaqTritonLinear
+    AwqGEMVFastTorchLinear LLMAwqTorchLinear
     TTBlockfloatLinear
 """.split())
 CUDA_ONLY_KERNELS = set("""
@@ -43,7 +46,7 @@ CUDA_ONLY_KERNELS = set("""
 OTHER_KERNELS = set("""
     TorchFusedLinear TorchFusedAwqLinear TorchAtenLinear TorchAtenAwqLinear
     TorchCpuAvx512Linear TorchCpuAvx512AwqLinear TorchInt8Linear TorchInt8AwqLinear
-    AwqGEMVFastTorchLinear AwqGEMVTorchLinear LLMAwqTorchLinear
+    AwqGEMVTorchLinear
     GGUFCppKernel MlxQuantLinear GPTQMarlinMlxQuantLinear GPTQBitBLASMlxQuantLinear
     AwqMlxQuantLinear AWQMarlinMlxQuantLinear AWQBitBLASMlxQuantLinear
     AwqGemvMlxQuantLinear AwqGemvFastMlxQuantLinear LLMAwqMlxQuantLinear
@@ -242,3 +245,324 @@ def test_allspark_accepts_rdna4_target_when_current_device_is_unsupported(cls, h
     assert ok, error
     with pytest.raises(NotImplementedError, match="RDNA4"):
         cls.validate_device(torch.device("cuda:0"))
+
+
+# ---------------------------------------------------------------------------
+# HIP shim build contract (#5208)
+# ---------------------------------------------------------------------------
+# hipcc compiles every source file of a ROCm-enabled extension, so a CUDA-only
+# intrinsic in a file that declares HIP support is a *build* break: the whole
+# extension fails to compile and every kernel in it silently falls back. The
+# registry audit above cannot see that, and it passed while
+# `gptqmodel_exllamav3_ops` was unbuildable on ROCm (#5208).
+#
+# This scanner is the cheap, CPU-only half of the contract. It walks the
+# preprocessor regions of each HIP-compatible source and requires every
+# `__`-prefixed symbol that hipcc will actually see to be either exposed by the
+# HIP headers, rewritten by torch's hipify pass, or declared by the file's own
+# HIP shim (`#define`, `using`, `typedef` or a `__device__` shim function).
+#
+# Scope is the hipified sources: files that declare a HIP branch and are also
+# compiled by nvcc, so a CUDA-only spelling passes every NVIDIA check and only
+# breaks ROCm. Native `.hip` sources are hipcc-only, so the same mistake there
+# fails the only build it has and cannot hide.
+
+_KERNEL_SOURCE_SUFFIXES = (".cu", ".cuh", ".h", ".hpp", ".cpp", ".cc")
+_HIP_MARKERS = ("__HIP_PLATFORM_AMD__", "USE_ROCM")
+
+# Attributes, keywords and preprocessor plumbing. Not HIP symbols, and not
+# something a shim can or should provide.
+_CUDA_KEYWORDS = frozenset("""
+    __device__ __host__ __global__ __shared__ __restrict__ __forceinline__
+    __launch_bounds__ __align__ __constant__ __managed__ __inline__ __noinline__
+    __LINE__ __FILE__ __func__ __FUNCTION__ __PRETTY_FUNCTION__ __VA_ARGS__
+    __VA_OPT__ __CUDA_ARCH__ __HIP_PLATFORM_AMD__ __HIP_DEVICE_COMPILE__
+    __CUDACC__ __HIPCC__ __clang__ __GNUC__ __has_include __has_feature
+""".split())
+
+# CUDA spellings that torch's hipify pass renames in the sources it copies, so
+# hipcc never sees them: torch/utils/hipify/cuda_to_hip_mappings.py maps
+# __nv_bfloat16 -> __hip_bfloat16 and __nv_bfloat162 -> __hip_bfloat162. It has
+# no entry for the conversion intrinsics, which is why #5208 broke the build.
+_HIPIFY_REWRITTEN_SYMBOLS = frozenset({"__nv_bfloat16", "__nv_bfloat162"})
+
+# Symbols the HIP headers expose under the *same* spelling, so a HIP-compiled
+# file may use them without a shim (hip_runtime.h / amd_device_functions.h,
+# hip_fp16.h, hip_bf16.h). Everything else has to be shimmed; in particular
+# `__floats2bfloat162_rn` and the scalar `__float2bfloat16_rn` are absent,
+# which is why rotation.cuh and bf16_scale.cu declare them.
+_HIP_NATIVE_SYMBOLS = frozenset("""
+    __syncthreads __activemask __shfl_down_sync __shfl_sync __shfl_up_sync __shfl_xor_sync
+    __int_as_float __float_as_int __uint_as_float __float_as_uint __byte_perm
+    __funnelshift_r __funnelshift_l __funnelshift_rc __funnelshift_lc
+    __fadd_rn __fsub_rn __fmul_rn __fdiv_rn __frcp_rn __fsqrt_rn __fmaf_rn
+    __fminf __fmaxf __min __max __sincosf __saturatef
+    __half __half2 __half2float __float2half __float2half_rn __float2half_rz
+    __halves2half2 __low2half __high2half __half22float2 __floats2half2_rn
+    __ushort_as_half __hmul __hadd __hsub __hlt __hgt __heq __hne __hle __hge
+    __hip_bfloat16 __hip_bfloat162 __bfloat162float __float2bfloat16
+    __halves2bfloat162 __low2bfloat16 __high2bfloat16 __bfloat1622float2
+    __float22bfloat162_rn __bfloat162bfloat162
+""".split())
+
+_DIRECTIVE_RE = re.compile(r"^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)$")
+_DEFINE_RE = re.compile(r"^\s*#\s*define\s+(\w+)\s*(?:\(([^)]*)\))?")
+_USING_RE = re.compile(r"\busing\s+(__\w+)\s*=")
+_TYPEDEF_RE = re.compile(r"\btypedef\b[^;]*?\b(__\w+)\s*;")
+_DEVICE_FUNCTION_RE = re.compile(r"\b(?:__device__|__host__)\b[^;{}]*?\b(__\w+)\s*\([^;{}]*\)\s*(?:const\s*)?\{")
+_SYMBOL_RE = re.compile(r"\b(__[A-Za-z_]\w*)\b")
+
+
+def _strip_comments(text: str) -> str:
+    """Blank out `//` and `/* */` comments while preserving every line number."""
+
+    output = []
+    index = 0
+    in_block = False
+    in_string = None
+    while index < len(text):
+        char = text[index]
+        following = text[index + 1] if index + 1 < len(text) else ""
+        if in_block:
+            if char == "*" and following == "/":
+                output.append("  ")
+                index += 2
+                in_block = False
+            else:
+                output.append("\n" if char == "\n" else " ")
+                index += 1
+            continue
+        if in_string is not None:
+            output.append(char)
+            if char == "\\" and following:
+                output.append(following)
+                index += 2
+            else:
+                if char == in_string:
+                    in_string = None
+                index += 1
+            continue
+        if char in ("'", '"'):
+            in_string = char
+            output.append(char)
+            index += 1
+            continue
+        if char == "/" and following == "/":
+            while index < len(text) and text[index] != "\n":
+                output.append(" ")
+                index += 1
+            continue
+        if char == "/" and following == "*":
+            output.append("  ")
+            index += 2
+            in_block = True
+            continue
+        output.append(char)
+        index += 1
+    return "".join(output)
+
+
+def _hip_branch_possible(condition: str) -> bool:
+    """Whether `condition` can hold when hipcc compiles the file.
+
+    Only HIP markers decide it: a branch that requires one of them absent (for
+    example `#if !defined(USE_ROCM)` or `#if !defined(A) && defined(B)`) is
+    never compiled on ROCm, while anything else is treated as reachable so the
+    scan errs towards checking more code.
+    """
+
+    expression = re.sub(r"\bdefined\s*\(\s*(\w+)\s*\)", r"\1", condition).replace(" ", "")
+    if not any(marker in expression for marker in _HIP_MARKERS):
+        return True
+
+    def impossible(conjunct: str) -> bool:
+        return any(conjunct == "!" + marker for marker in _HIP_MARKERS)
+
+    return any(
+        not any(impossible(conjunct) for conjunct in disjunct.split("&&"))
+        for disjunct in expression.split("||")
+    )
+
+
+def _hip_compiled_lines(text: str):
+    """Yield `(line_number, hip_compiled, line, is_directive)` for each line."""
+
+    frames = []
+    hip = True
+    for number, line in enumerate(text.splitlines(), 1):
+        directive = _DIRECTIVE_RE.match(line)
+        if directive is None:
+            yield number, hip, line, False
+            continue
+        keyword, condition = directive.group(1), directive.group(2).strip()
+        if keyword in ("if", "ifdef", "ifndef"):
+            if keyword == "if":
+                possible = _hip_branch_possible(condition)
+            elif keyword == "ifdef":
+                possible = True
+            else:
+                possible = condition not in _HIP_MARKERS
+            frames.append((possible, hip))
+            hip = hip and possible
+        elif keyword == "elif":
+            if frames:
+                _, parent = frames[-1]
+                possible = _hip_branch_possible(condition)
+                frames[-1] = (possible, parent)
+                hip = parent and possible
+        elif keyword == "else":
+            if frames:
+                possible, parent = frames[-1]
+                hip = parent and not possible
+        elif frames:
+            _, parent = frames.pop()
+            hip = parent
+        yield number, hip, line, True
+
+
+def _hip_shim_violations(sources: dict[str, str]) -> list[str]:
+    """Report CUDA-only symbols that hipcc would see without a HIP definition."""
+
+    violations = []
+    for name, raw_text in sorted(sources.items()):
+        text = _strip_comments(raw_text)
+        hip_by_line = {}
+        declared = {}
+        for number, hip, line, _is_directive in _hip_compiled_lines(text):
+            hip_by_line[number] = hip
+            if not hip:
+                continue
+            for symbol in _USING_RE.findall(line) + _TYPEDEF_RE.findall(line):
+                declared.setdefault(symbol, number)
+            define = _DEFINE_RE.match(line)
+            if define:
+                if define.group(1).startswith("__"):
+                    declared.setdefault(define.group(1), number)
+                # Macro parameters are local to the macro body, and kernel
+                # headers routinely name them `__x`/`__y`.
+                for parameter in (define.group(2) or "").split(","):
+                    parameter = parameter.strip()
+                    if parameter.startswith("__"):
+                        declared.setdefault(parameter, number)
+        for match in _DEVICE_FUNCTION_RE.finditer(text):
+            number = text.count("\n", 0, match.start()) + 1
+            if hip_by_line.get(number, False):
+                declared.setdefault(match.group(1), number)
+
+        for number, hip, line, is_directive in _hip_compiled_lines(text):
+            if not hip:
+                continue
+            define = _DEFINE_RE.match(line)
+            if is_directive and define is None:
+                continue
+            for symbol in _SYMBOL_RE.findall(line[define.end():] if define else line):
+                if symbol in _CUDA_KEYWORDS or symbol in _HIP_NATIVE_SYMBOLS:
+                    continue
+                if symbol in _HIPIFY_REWRITTEN_SYMBOLS:
+                    continue
+                declared_at = declared.get(symbol)
+                if declared_at is None:
+                    violations.append(
+                        f"{name}:{number}: {symbol} is CUDA-only and not declared by the file's HIP shim"
+                    )
+                elif declared_at > number:
+                    violations.append(
+                        f"{name}:{number}: {symbol} is used before the HIP shim declares it at line {declared_at}"
+                    )
+    return list(dict.fromkeys(violations))
+
+
+def _hip_compatible_kernel_sources() -> dict[str, str]:
+    ext_root = Path(__file__).resolve().parents[1] / "gptqmodel_ext"
+    sources = {}
+    for path in sorted(ext_root.rglob("*")):
+        if not path.is_file() or path.suffix not in _KERNEL_SOURCE_SUFFIXES:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if any(marker in text for marker in _HIP_MARKERS):
+            sources[path.relative_to(ext_root.parent).as_posix()] = text
+    return sources
+
+
+def test_hip_shims_provide_every_cuda_only_intrinsic_used_under_hip():
+    sources = _hip_compatible_kernel_sources()
+    # Guard the guard: a scan that silently finds nothing could never fail.
+    assert "gptqmodel_ext/exllamav3/bf16_scale.cu" in sources
+    assert "gptqmodel_ext/paro/rotation.cuh" in sources
+    assert _hip_shim_violations(sources) == []
+
+
+def _hipify_pairs(entries):
+    """Flatten torch's hipify table, which is a list of dicts, a dict, or tuples."""
+
+    if isinstance(entries, dict):
+        for source, target in entries.items():
+            if isinstance(target, str):
+                yield source, target
+            else:
+                yield from _hipify_pairs(target)
+        return
+    for entry in entries:
+        if isinstance(entry, dict):
+            yield from _hipify_pairs(entry)
+        elif isinstance(entry, tuple) and len(entry) >= 2:
+            yield entry[0], entry[1]
+
+
+def test_hipify_still_rewrites_the_bf16_types_the_contract_exempts():
+    # The scanner trusts torch's hipify table for __nv_bfloat16/__nv_bfloat162
+    # and relies on it having no conversion-intrinsic entry. Pin both halves.
+    hipify = pytest.importorskip("torch.utils.hipify.cuda_to_hip_mappings")
+    pairs = set(_hipify_pairs(hipify.CUDA_TO_HIP_MAPPINGS))
+    assert ("__nv_bfloat16", "__hip_bfloat16") in pairs
+    assert ("__nv_bfloat162", "__hip_bfloat162") in pairs
+    assert not any(source == "__float2bfloat16_rn" for source, _ in pairs)
+
+
+def test_hip_shim_contract_detects_the_issue_5208_regression():
+    # Pre-#5208 shim: it aliased the bf16 *type* only, so the kernel still
+    # called CUDA's scalar __float2bfloat16_rn and hipcc rejected the file.
+    pre_fix = {
+        "gptqmodel_ext/exllamav3/bf16_scale.cu": """\
+#if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
+#include <hip/hip_bf16.h>
+using __nv_bfloat16 = __hip_bfloat16;
+#else
+#include <cuda_bf16.h>
+#endif
+
+__global__ void rescale(const float* value, __nv_bfloat16* out)
+{
+    out[threadIdx.x] = __float2bfloat16_rn(value[threadIdx.x]);
+}
+""",
+    }
+    violations = _hip_shim_violations(pre_fix)
+    assert len(violations) == 1, violations
+    assert "__float2bfloat16_rn" in violations[0]
+
+
+def test_hip_shim_contract_accepts_a_corrected_scalar_mapping():
+    # Control: the same file with the HIP branch mapping the scalar conversion
+    # (the rotation.cuh pattern) is clean, and the CUDA branch may still name
+    # the CUDA intrinsic because hipcc never compiles it.
+    fixed = {
+        "gptqmodel_ext/exllamav3/bf16_scale.cu": """\
+#if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
+#include <hip/hip_bf16.h>
+using __nv_bfloat16 = __hip_bfloat16;
+static __device__ __forceinline__ __nv_bfloat16 __float2bfloat16_rn(float value)
+{
+    return __float2bfloat16(value);
+}
+#else
+#include <cuda_bf16.h>
+#endif
+
+__global__ void rescale(const float* value, __nv_bfloat16* out)
+{
+    out[threadIdx.x] = __float2bfloat16_rn(value[threadIdx.x]);
+}
+""",
+    }
+    assert _hip_shim_violations(fixed) == []

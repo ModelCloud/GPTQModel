@@ -60,6 +60,14 @@ CONTRACT_REFS = (
     ("docs/fp8-scale-semantics.md", "gptqmodel/models/base.py",
      "_decoder_fp8_scale_semantics", SYMBOL_CITATION),
     ("docs/fusion-planner.md", "gptqmodel/models/fusion.py", "_share_operands", 444),
+    ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
+     "_normalize_gguf_config", 962),
+    ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
+     "_gguf_bits_spec_from_format_value", 892),
+    ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
+     "_gguf_bits_from_components", 933),
+    ("docs/gguf-config-resolution.md", "gptqmodel/quantization/protocol.py",
+     "_resolve_gguf_public_format", 1381),
     # `awq_processor.py` keeps growing (the #4880 replay packing added ~70
     # lines above this symbol), so cite it by name.
     ("docs/layer-type-replay-masks.md", "gptqmodel/looper/awq_processor.py",
@@ -82,9 +90,9 @@ CONTRACT_REFS = (
     ("docs/quantize-run-summary.md", "gptqmodel/models/base.py",
      "_log_quantize_summary", None),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
-     "compute_hessian_xtx", 1207),
+     "compute_hessian_xtx", 1220),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
-     "hessian_inverse", 2108),
+     "hessian_inverse", 2121),
     # `calibration.py` grew a 70-line payload normalizer above
     # `prepare_calibration_dataset` (#4934); these three citations are symbol
     # anchored so an unrelated edit cannot drift them again.
@@ -94,6 +102,18 @@ CONTRACT_REFS = (
      "prepare_calibration_dataset", SYMBOL_CITATION),
     ("docs/decision-transformer-calibration.md", "gptqmodel/utils/calibration.py",
      "_is_tensor_kwargs_row", SYMBOL_CITATION),
+    # `base.py` keeps growing (nearly every fix PR moves something above it), so
+    # every citation into it is symbol-anchored: a symbol cannot drift when
+    # unrelated code moves. `test_models_base_citations_use_the_symbol_form`
+    # enforces that for the whole registry.
+    ("docs/generate-cpu-offload-autograd.md", "gptqmodel/models/base.py",
+     "generate", SYMBOL_CITATION),
+    ("docs/generate-cpu-offload-autograd.md", "gptqmodel/utils/model.py",
+     "has_cpu_offload_hooks", SYMBOL_CITATION),
+    ("docs/generate-cpu-offload-autograd.md", "gptqmodel/utils/model.py",
+     "simple_dispatch_model", SYMBOL_CITATION),
+    ("docs/generate-cpu-offload-autograd.md", "gptqmodel/nn_modules/qlinear/torch.py",
+     "_gptq_gemm_uniform_group_for_current_g_idx", 1031),
 )
 
 PYTHON_BLOCK = re.compile(r"```python\n(.*?)```", re.S)
@@ -190,6 +210,29 @@ def test_eora_generation_saves_where_the_readme_loads():
         )
 
 
+def test_eora_scripts_leave_the_allocator_default_to_gptqmodel():
+    """The documented EoRA entry points must not force a CUDA-only allocator.
+
+    ``expandable_segments:True`` plus ``torch.cuda.empty_cache()`` corrupts
+    ordinary Torch results on ROCm 10.1 / gfx1201, so ROCm defaults to
+    ``expandable_segments:False``. The scripts import ``gptqmodel`` before
+    Torch, and ``gptqmodel._alloc_conf.apply_default_alloc_conf()`` installs
+    the right per-platform default; an unconditional override here silently
+    replaced it for every user following ``docs/eora/README.md`` (#5121).
+    """
+
+    for rel in (
+        "docs/eora/eora_generation.py",
+        "docs/eora/post_quant_eora_generation.py",
+        "docs/eora/evaluation.py",
+        "docs/eora/eora_load_and_inference.py",
+    ):
+        source = _read(rel)
+        assert 'os.environ["PYTORCH_ALLOC_CONF"]' not in source, (
+            f"{rel} overrides the allocator default that gptqmodel installs"
+        )
+
+
 @pytest.mark.parametrize("doc, source, symbol, cited", CONTRACT_REFS)
 def test_contract_reference_resolves(doc, source, symbol, cited):
     source_path = REPO_ROOT / source
@@ -217,4 +260,23 @@ def test_contract_reference_resolves(doc, source, symbol, cited):
     nearest = min(hits, key=lambda line: abs(line - cited))
     assert abs(nearest - cited) <= LINE_WINDOW, (
         f"{doc} cites `{symbol}` at {source}:{cited}, but it is defined at {hits}"
+    )
+
+
+def test_models_base_citations_use_the_symbol_form():
+    """Every guarded ``models/base.py`` citation must name its symbol.
+
+    ``base.py`` grows with nearly every fix PR, so a ``base.py:N`` citation
+    drifts within a couple of merges and turns ``main`` red (#5201). The symbol
+    form resolves against the definition instead of an offset.
+    """
+
+    line_citations = [
+        (doc, symbol, cited)
+        for doc, source, symbol, cited in CONTRACT_REFS
+        if source == "gptqmodel/models/base.py" and isinstance(cited, int)
+    ]
+    assert not line_citations, (
+        "cite `gptqmodel/models/base.py` by symbol, not line number: "
+        f"{line_citations}"
     )

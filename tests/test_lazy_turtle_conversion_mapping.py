@@ -1957,3 +1957,126 @@ def test_maybe_create_surfaces_construction_error(tmp_path, monkeypatch):
     assert "'list' object has no attribute 'keys'" in str(excinfo.value)
 
 
+def _tiny_fallback_family_shells() -> dict:
+    """Tiny runtime shells for definitions that infer the HF conversion map.
+
+    These definitions declare no ``checkpoint_key_for_load``, so the loader
+    derives a source-layout map from the live model. The shells are built from
+    the vendored Transformers 5.23 configs because the guard compares a converted name
+    against the shell's own parameter and buffer names.
+    """
+
+    from gptqmodel.models.definitions.gpt_neox import GPTNeoXQModel
+    from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
+    from gptqmodel.models.ports.native.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
+    from gptqmodel.models.ports.native.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM
+    from gptqmodel.models.ports.native.gpt_neox.configuration_gpt_neox import GPTNeoXConfig
+    from gptqmodel.models.ports.native.gpt_neox.modeling_gpt_neox import GPTNeoXForCausalLM
+    from gptqmodel.models.ports.native.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
+    from gptqmodel.models.ports.native.qwen3_moe.modeling_qwen3_moe import Qwen3MoeForCausalLM
+
+    torch.manual_seed(0)
+    return {
+        "deepseek_v4": (
+            DeepSeekV4QModel,
+            DeepseekV4ForCausalLM(
+                DeepseekV4Config(
+                    vocab_size=128,
+                    hidden_size=32,
+                    intermediate_size=32,
+                    moe_intermediate_size=16,
+                    num_hidden_layers=1,
+                    num_attention_heads=2,
+                    num_key_value_heads=1,
+                    head_dim=8,
+                    q_lora_rank=8,
+                    o_lora_rank=8,
+                    o_groups=2,
+                    n_routed_experts=2,
+                    num_experts_per_tok=1,
+                    hc_mult=1,
+                    layer_types=["sliding_attention"],
+                    mlp_layer_types=["moe"],
+                )
+            ),
+        ),
+        "qwen3_moe": (
+            Qwen3MoeQModel,
+            Qwen3MoeForCausalLM(
+                Qwen3MoeConfig(
+                    vocab_size=128,
+                    hidden_size=32,
+                    intermediate_size=32,
+                    moe_intermediate_size=16,
+                    num_hidden_layers=1,
+                    num_attention_heads=2,
+                    num_key_value_heads=1,
+                    num_experts=2,
+                    num_experts_per_tok=1,
+                    decoder_sparse_step=1,
+                )
+            ),
+        ),
+        "gpt_neox": (
+            GPTNeoXQModel,
+            GPTNeoXForCausalLM(
+                GPTNeoXConfig(
+                    vocab_size=128,
+                    hidden_size=32,
+                    num_hidden_layers=1,
+                    num_attention_heads=2,
+                    intermediate_size=32,
+                )
+            ),
+        ),
+    }
+
+
+def _shell_tensor_names(model) -> set[str]:
+    names = {name for name, _ in model.named_parameters(remove_duplicate=False)}
+    names.update(name for name, _ in model.named_buffers(remove_duplicate=False))
+    return names
+
+
+@pytest.mark.parametrize("family", ["deepseek_v4", "qwen3_moe", "gpt_neox"])
+def test_fallback_conversion_map_is_idempotent_on_runtime_names(family):
+    """#5131: a runtime name must survive the source-layout conversion map.
+
+    GPT-QModel writers store runtime keys. The inferred Transformers map is a
+    *source* layout mapping and some of its patterns are wide enough to also
+    match runtime names, so the loader must treat the shell's own names as a
+    fixed point.
+    """
+
+    from gptqmodel.models.loader import _checkpoint_key_converter
+
+    definition, model = _tiny_fallback_family_shells()[family]
+    assert not callable(getattr(definition, "checkpoint_key_for_load", None)), (
+        "an explicit checkpoint_key_for_load bypasses the fallback this test covers"
+    )
+
+    converter = _checkpoint_key_converter(definition, model, to_runtime=True)
+    assert converter is not None, f"{family} resolves no conversion map"
+
+    runtime_names = _shell_tensor_names(model)
+    assert runtime_names
+    renamed = [(name, converter(name)) for name in sorted(runtime_names) if converter(name) != name]
+    assert renamed == [], f"{family} renames its own runtime keys: {renamed}"
+
+
+def test_deepseek_v4_source_map_would_rename_the_runtime_final_norm():
+    """The #5131 trigger stays visible: the raw map hits `model.norm.weight`.
+
+    The idempotence guard is what keeps this rename from firing. If the
+    Transformers map ever stops matching the runtime name this assertion fails
+    first, and the loader guard can be revisited instead of silently rotting.
+    """
+
+    definition, model = _tiny_fallback_family_shells()["deepseek_v4"]
+    mapping = definition.resolve_hf_conversion_map_reversed(target_model=model)
+    assert mapping is not None
+
+    assert LazyTurtle.convert_hf_checkpoint_key(
+        "model.norm.weight", mapping, to_runtime=True
+    ) == "model.kv_norm.weight"
+    assert "model.kv_norm.weight" not in _shell_tensor_names(model)

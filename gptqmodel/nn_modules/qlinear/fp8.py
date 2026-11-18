@@ -43,6 +43,66 @@ _MLX_FP8_MIN_ELEMENTS = 60 * 1024 * 1024
 _FP8_ACTIVATION_QUANT_METHODS = ("none", "per_token")
 
 
+#: ``(hip?, device index, output dtype) -> bool`` answers for the row-wise
+#: ``torch._scaled_mm`` contract, measured once per process.
+_SCALED_MM_ROW_SCALE_SUPPORT: dict = {}
+
+
+def _scaled_mm_row_scale_supported(device: torch.device, out_dtype: torch.dtype) -> bool:
+    """Whether this device and torch build compute the row-wise ``_scaled_mm`` contract.
+
+    ``_scaled_mm`` takes ``scale_a=(tokens, 1)`` and ``scale_b=(1, out_features)``
+    and is documented to apply both. On sm_121 with torch 2.11.0+cu130 the
+    ``float16`` output silently drops the row-wise scaling: it returns a result
+    ~1e3x away from ``(A @ B) * scale_a * scale_b`` and raises nothing (#5174),
+    while the same call with ``bfloat16`` output is correct. A caller therefore
+    cannot detect the defect from an exception, and the answer depends on the
+    requested output dtype. Measure the contract once per process, device and
+    output dtype: a raised error *or* a mismatch disables that combination, and
+    per-token layers stay on the correct dequantize + matmul fallback. The answer
+    is memoised on the device index so the per-forward guard costs one dict
+    lookup.
+    """
+
+    index = device.index
+    if index is None:  # pragma: no cover - tensors always carry an index
+        index = torch.cuda.current_device()
+    key = (IS_ROCM, index, out_dtype)
+    cached = _SCALED_MM_ROW_SCALE_SUPPORT.get(key)
+    if cached is not None:
+        return cached
+
+    supported = False
+    try:
+        generator = torch.Generator(device=device)
+        generator.manual_seed(0)
+        rows, inner, cols = 16, 32, 16
+        x_q = (torch.randn(rows, inner, device=device, generator=generator) * 0.5).to(
+            torch.float8_e4m3fn
+        )
+        w_q = (torch.randn(cols, inner, device=device, generator=generator) * 0.5).to(
+            torch.float8_e4m3fn
+        )
+        scale_a = torch.linspace(0.5, 1.5, rows, device=device).reshape(rows, 1)
+        scale_b = torch.linspace(0.5, 1.5, cols, device=device).reshape(1, cols)
+        reference = (x_q.float() @ w_q.t().float()) * scale_a * scale_b
+        out = torch._scaled_mm(
+            x_q, w_q.t(), scale_a=scale_a, scale_b=scale_b, out_dtype=out_dtype
+        )
+        supported = bool(torch.allclose(out.float(), reference, rtol=2e-2, atol=1e-2))
+    except Exception:
+        supported = False
+
+    _SCALED_MM_ROW_SCALE_SUPPORT[key] = supported
+    if not supported:
+        log.warn.once(
+            "FP8: `torch._scaled_mm` does not compute the row-wise scale contract on "
+            f"this device for `{str(out_dtype).replace('torch.', '')}` output; per-token "
+            "(W8A8) layers use the dequantize + matmul path."
+        )
+    return supported
+
+
 def _normalize_fp8_activation_quant_method(value: Optional[str]) -> str:
     """Normalize the activation-quantization policy of a Torch FP8 layer.
 
@@ -710,6 +770,18 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         x_q = torch.clamp(x_work * scale_inv, min=-fp8_max, max=fp8_max).to(self.fp8_dtype)
         return x_q, torch.reciprocal(scale_inv).to(torch.float32)
 
+    def _scaled_mm_out_dtype(self, x_flat: torch.Tensor) -> torch.dtype:
+        """Output dtype ``_forward_scaled_mm`` requests, and the probe's key.
+
+        Rowwise scaling is the W8A8 contract: ``scale_a`` is ``(tokens, 1)`` and
+        ``scale_b`` is ``(1, out_features)``. HIP only emits BF16 from that
+        kernel; CUDA can keep FP32 so a bias is added before the final rounding.
+        """
+
+        return torch.bfloat16 if IS_ROCM else (
+            torch.float32 if self.bias is not None else x_flat.dtype
+        )
+
     def _can_use_scaled_mm(self, x_flat: torch.Tensor) -> bool:
         # ROCm support is decided by the guarded call in ``forward``, not by
         # ``get_device_capability`` (meaningless under HIP).  Measured on gfx1201
@@ -729,6 +801,13 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             # for this weight-only layer when W8A8 was explicitly requested.
             and self.activation_quant_method == "per_token"
             and self.weight_scale_method in {"tensor", "row"}
+            # The W8A8 contract is the row-wise scale layout. Some devices
+            # accept it and return a wrong result without raising (#5174), so
+            # the contract is measured once per process for the exact output
+            # dtype this forward would request.
+            and _scaled_mm_row_scale_supported(
+                x_flat.device, self._scaled_mm_out_dtype(x_flat)
+            )
             and self.fp8_format != "float8_e8m0fnu"
             and x_flat.dtype in {torch.float16, torch.bfloat16}
             and x_flat.shape[-1] == self.in_features
@@ -755,18 +834,20 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         if self._decoded_weight_bound_ready:
             return self._decoded_weight_bound
         bound: Optional[float] = None
+        smallest_scale: Optional[float] = None
         try:
             code_max = float(torch.finfo(self.fp8_dtype).max)
         except (TypeError, ValueError):
             code_max = None
         if code_max is not None and self.weight_scale_inv.numel() > 0:
             scale = self.weight_scale_inv.detach().to(device="cpu", dtype=torch.float32).abs()
+            smallest_scale = float(scale.min())
             if self.weight_scale_semantics == "multiplier":
                 bound = code_max * float(scale.max())
             else:
-                smallest = float(scale.min())
-                bound = float("inf") if smallest == 0.0 else code_max / smallest
+                bound = float("inf") if smallest_scale == 0.0 else code_max / smallest_scale
         self._decoded_weight_bound = bound
+        self._scale_inv_min = smallest_scale
         self._decoded_weight_bound_ready = True
         return bound
 
@@ -801,9 +882,143 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             and self._weights_fit_activation_dtype(x_flat.dtype)
         )
 
+    def _inverse_scales_are_nonzero(self) -> bool:
+        """Whether every inverse scale is nonzero, so the epilogue can divide.
+
+        A zero inverse scale decodes a stored code to ``inf``/``NaN`` on the
+        full-weight path. Dividing the product by it would instead turn a zero
+        product into ``NaN`` and a nonzero one into ``inf``, which differs for
+        exactly the rows whose dot product cancels to zero. Those payloads keep
+        the exact reference path.
+        """
+
+        if self._decoded_weight_bound_ready:
+            return self._scale_inv_min is not None and self._scale_inv_min > 0.0
+        self._decoded_weight_absmax_bound()
+        return self._scale_inv_min is not None and self._scale_inv_min > 0.0
+
+    def _block_scale_matches_weight(self) -> bool:
+        """Whether the block scale has the exact per-block shape of the weight.
+
+        Padded or cropped checkpoint scales are handled by
+        ``_expanded_scale_inv`` on the reference path; the in-dtype block
+        decode only accepts the exact divisible layout.
+        """
+
+        if self.weight_block_size is None:
+            return False
+        block_rows, block_cols = self.weight_block_size
+        rows, cols = self.weight.shape
+        if rows % block_rows or cols % block_cols:
+            return False
+        return self.weight_scale_inv.shape == (rows // block_rows, cols // block_cols)
+
+    def _lean_epilogue_eligible(self, x_flat: torch.Tensor) -> bool:
+        """Whether the scale can move from the weight into an output epilogue.
+
+        This is the range-safe CUDA W8A16 case only. The FP8 codes are cast
+        straight to the activation dtype, the GEMM runs on the transposed view
+        with an FP32 output, and a row/tensor scale is applied to that output.
+        Keeping the unscaled product in FP32 is what makes the epilogue safe:
+        the codes carry the inverse scale, so the unscaled product can be
+        larger than the activation dtype's finite range even when the decoded
+        weight is in range.
+
+        Everything this gate rejects keeps the existing dequantize-then-matmul
+        path bit-for-bit: ROCm (native FP8 casts are not qualified there), the
+        E8M0 format (its CUDA cast produces NaNs), a disabled native cast, a
+        non-range-safe payload, zero inverse scales, padded block scales, and
+        an autograd graph that needs the wide-GEMM ``Function``.
+        """
+
+        if IS_ROCM or self._native_dequant_disabled:
+            return False
+        if self.fp8_format == "float8_e8m0fnu":
+            return False
+        if not self._native_gemm_eligible(x_flat):
+            return False
+        if self.weight_scale_method not in {"row", "tensor", "block"}:
+            return False
+        if torch.is_grad_enabled() and (
+            x_flat.requires_grad
+            or self.weight.requires_grad
+            or self.weight_scale_inv.requires_grad
+        ):
+            return False
+        if (
+            self.weight_scale_semantics == "inverse"
+            and not self._inverse_scales_are_nonzero()
+        ):
+            return False
+        if self.weight_scale_method == "block" and not self._block_scale_matches_weight():
+            return False
+        return True
+
+    def _forward_lean_scaled_matmul(
+        self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Decode FP8 codes straight to the activation dtype and scale the output.
+
+        The cast, and the in-place block scaling, exist only for this call. No
+        decoded weight is stored on the module, so a repeated forward re-reads
+        the packed payload (and observes any mutation of it).
+        """
+
+        device = x_flat.device
+        weight = self.weight
+        if weight.device != device:
+            weight = weight.to(device=device)
+        # FP8 -> FP16/BF16 is exact (both hold more mantissa bits than E4M3 or
+        # E5M2), so this pass does not lose weight precision. The scale is not
+        # applied yet.
+        codes = weight.to(dtype=x_flat.dtype)
+
+        if self.weight_scale_method == "block":
+            block_rows, block_cols = self.weight_block_size
+            rows, cols = codes.shape
+            scale = self.weight_scale_inv
+            if scale.device != device:
+                scale = scale.to(device=device)
+            blocks = codes.view(
+                rows // block_rows, block_rows, cols // block_cols, block_cols
+            )
+            # Keep the scale in FP32: the mixed-dtype in-place op promotes to
+            # FP32, divides there and rounds once into the activation dtype.
+            # The stored code is exact in FP16/BF16, so this is the same
+            # arithmetic as the reference ``weight.float() / scale`` path, but
+            # without the full FP32 weight temporary. ``codes`` was just
+            # allocated for this call, so scaling it in place is safe.
+            if self.weight_scale_semantics == "multiplier":
+                blocks.mul_(scale[:, None, :, None])
+            else:
+                blocks.div_(scale[:, None, :, None])
+            return matmul_fp32_reduce(x_flat, codes.t(), bias=bias)
+
+        output = torch.mm(
+            x_flat.reshape(-1, x_flat.shape[-1]),
+            codes.t(),
+            out_dtype=torch.float32,
+        )
+        scale = self.weight_scale_inv
+        if scale.device != device or scale.dtype != torch.float32:
+            scale = scale.to(device=device, dtype=torch.float32)
+        if self.weight_scale_method == "row":
+            scale = scale.view(-1)
+        if self.weight_scale_semantics == "multiplier":
+            output = output * scale
+        else:
+            output = output / scale
+        if bias is not None:
+            if bias.device != device:
+                bias = bias.to(device=device)
+            output = output + bias.to(dtype=torch.float32)
+        return output.to(x_flat.dtype)
+
     def _forward_dequant_matmul(
         self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
+        if self._lean_epilogue_eligible(x_flat):
+            return self._forward_lean_scaled_matmul(x_flat, bias=bias)
         if not self._native_gemm_eligible(x_flat):
             # Decode into temporary FP32 storage only when narrowing is not
             # range-safe: a decoded FP8 weight above the activation dtype's
@@ -852,6 +1067,8 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         self.optimized = False
         # The decoded-weight range bound is derived from the loaded payload.
         self._decoded_weight_bound_ready = False
+        self._decoded_weight_bound = None
+        self._scale_inv_min = None
 
     def _apply(self, fn, recurse=True):
         # Module.to()/half()/bfloat16() normally cast every floating buffer.
@@ -885,12 +1102,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         weight = self.weight if self.weight.device == x_flat.device else self.weight.to(device=x_flat.device)
         x_q, scale_a = self._quantize_input_for_scaled_mm(x_flat)
         scale_b = self._scaled_mm_weight_scale(device=x_flat.device)
-        # Rowwise scaling is the W8A8 contract: scale_a is (tokens, 1) and
-        # scale_b is (1, out_features). HIP only emits BF16 from that kernel;
-        # CUDA can keep FP32 so a bias is added before the final rounding.
-        out_dtype = torch.bfloat16 if IS_ROCM else (
-            torch.float32 if self.bias is not None else x_flat.dtype
-        )
+        out_dtype = self._scaled_mm_out_dtype(x_flat)
         output = torch._scaled_mm(
             x_q,
             weight.t(),

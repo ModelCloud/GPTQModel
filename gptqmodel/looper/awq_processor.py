@@ -58,11 +58,13 @@ from ..utils.attn_mask import exclude_attention_sinks, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
+from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import (
     create_quant_module,
     find_modules,
     get_module_by_name_prefix,
+    install_quant_module,
     move_to,
     pack_module,
     resolve_position_limit,
@@ -148,11 +150,29 @@ class _AWQLayerState:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
+@dataclass
+class _TokenRowPlan:
+    """Precomputed token-row quota and sampling plan for a layer."""
+
+    lengths: List[int]
+    budget: int
+    max_tokens: int
+    quotas: List[int]
+    local_indices: Dict[int, torch.Tensor]
+
+
 def _accumulate_awq_weight_mean(
     layers: List[nn.Linear],
     group_size: int | List[int],
 ) -> Tuple[torch.Tensor, int]:
-    """Accumulates normalized per-channel weight sums across a group of linears."""
+    """Accumulates normalized per-channel weight sums across a group of linears.
+
+    A scaling group is anchored on one source tensor (a norm, a linear or a
+    MoE block), not on one device. With ``VramStrategy.BALANCED`` the routed
+    experts of a norm-anchored MoE group live on every device of the MoE pool,
+    so each member's reduction is gathered onto the accumulator's device
+    instead of relying on an implicit same-device add.
+    """
 
     if not layers:
         raise ValueError("Expected at least one linear layer to compute the AWQ weight mean.")
@@ -191,7 +211,9 @@ def _accumulate_awq_weight_mean(
         weight_view = weight_abs.reshape(rows, -1, effective_group_size)
         group_scale = weight_view.amax(dim=2, keepdim=True)
         weight_view.div_(group_scale.add_(1e-6))
-        w_sum += weight_abs.sum(dim=0, dtype=torch.float32)
+        # `to()` is a no-op on the accumulator's own device, so a single-device
+        # group keeps the previous allocation-free add.
+        w_sum += weight_abs.sum(dim=0, dtype=torch.float32).to(w_sum.device)
         row_count += rows
 
     return w_sum, row_count
@@ -348,6 +370,12 @@ def _forward_accepts_var_kwargs(module: nn.Module) -> bool:
     ``attention_mask``, ``position_ids``, ``kv_last_layer`` and ``use_swa``
     that way (#4891). Every name-based signature filter therefore has to treat
     such a module as accepting every key, not as accepting none of them.
+
+    This inspects the *declared* signature: ``inspect.signature`` follows
+    ``__wrapped__``, so an instance-level forward wrapper that carries
+    ``functools.wraps(original_forward)`` is reported with the signature of the
+    forward it replaces. That distinction keeps this predicate from mistaking
+    AWQ's all-experts replay wrapper for a real ``**kwargs`` block (#5095).
     """
 
     try:
@@ -503,6 +531,9 @@ class AWQProcessor(LoopProcessor):
         # Entries are keyed by (batch, id(source), source._version) and validated by
         # a weakref so a recycled id can never alias a different tensor.
         self._capture_host_cache: Dict[Tuple[Any, int, int], Tuple[Any, torch.Tensor]] = {}
+        self._capture_sampled_cache: Dict[Any, torch.Tensor] = {}
+        self._token_row_plans: Dict[Tuple[int, Optional[int]], _TokenRowPlan] = {}
+        self._reservoir_locks: Dict[str, threading.Lock] = {}
         self._capture_host_batch: Any = None
         self._rotary_lock = threading.Lock()
         self._rotary_cache: Dict[str, nn.Module] = {}
@@ -1166,6 +1197,10 @@ class AWQProcessor(LoopProcessor):
                 seen_batch_indices.add(batch_index)
                 reserved_batch_index = True
 
+        policy = self._feature_aggregation_policy(module_name)
+        aggregation_mode = (policy or {}).get("mode")
+        is_token_rows = aggregation_mode == "token_rows"
+
         try:
             feature = self._materialize_host_feature(feature)
         except Exception:
@@ -1176,6 +1211,124 @@ class AWQProcessor(LoopProcessor):
                         entry.get("seen_batch_indices", set()).discard(batch_index)
             raise
 
+        if not is_token_rows:
+            with self.lock:
+                entry = self.tasks.get(module_name)
+                if entry is None:
+                    entry = {"inputs": [], "batch_indices": []}
+                    self.tasks[module_name] = entry
+                if dedupe_batch and batch_index is not None and not reserved_batch_index:
+                    seen_batch_indices = entry.setdefault("seen_batch_indices", set())
+                    if batch_index in seen_batch_indices:
+                        return
+                    seen_batch_indices.add(batch_index)
+                inputs_list = entry.setdefault("inputs", [])
+                inputs_list.append(feature)
+                entry.setdefault("batch_indices", []).append(batch_index)
+            return
+
+        hidden = max(int(feature.shape[-1]), 1)
+        length = int(feature.numel() // hidden)
+        if length == 0:
+            with self.lock:
+                entry = self.tasks.get(module_name)
+                if entry is None:
+                    entry = {"inputs": [], "batch_indices": []}
+                    self.tasks[module_name] = entry
+                entry.setdefault("batch_indices", []).append(batch_index)
+            return
+
+        configured_max_tokens = (policy or {}).get("max_tokens")
+        plan = self._token_row_plan_for_module(module_name, hidden, configured_max_tokens)
+
+        # Plan match: Dense modules, MoE roots, and experts under ExpertsRoutingOverride
+        if (
+            plan is not None
+            and batch_index is not None
+            and 0 <= batch_index < len(plan.lengths)
+            and length == plan.lengths[batch_index]
+        ):
+            quota = plan.quotas[batch_index]
+            local_idx = plan.local_indices.get(batch_index)
+
+            share_key = self._capture_share_key(feature)
+            sampled_cache = getattr(self, "_capture_sampled_cache", None)
+            if sampled_cache is None:
+                sampled_cache = {}
+                self._capture_sampled_cache = sampled_cache
+
+            sampled_key = (share_key, quota) if share_key is not None else None
+            sampled = None
+            if sampled_key is not None:
+                with self.lock:
+                    sampled = sampled_cache.get(sampled_key)
+
+            if sampled is None:
+                if quota <= 0 or local_idx is None or len(local_idx) == 0:
+                    sampled = feature.new_empty((1, 0, hidden))
+                elif quota == length:
+                    sampled = feature.reshape(1, length, hidden)
+                else:
+                    sampled = feature.reshape(-1, hidden).index_select(0, local_idx).unsqueeze(0)
+                if sampled_key is not None and sampled is not None:
+                    with self.lock:
+                        sampled_cache[sampled_key] = sampled
+
+            with self.lock:
+                entry = self.tasks.get(module_name)
+                if entry is None:
+                    entry = {"inputs": [], "batch_indices": []}
+                    self.tasks[module_name] = entry
+                if dedupe_batch and batch_index is not None and not reserved_batch_index:
+                    seen_batch_indices = entry.setdefault("seen_batch_indices", set())
+                    if batch_index in seen_batch_indices:
+                        return
+                    seen_batch_indices.add(batch_index)
+
+                # Provenance rows name the capture slot, not the calibration
+                # batch id: captures can complete out of batch order and
+                # ``_layer_input_features`` replays them in batch order, so the
+                # slot index is what the replay kwargs index by.
+                source_index = len(entry.setdefault("batch_row_counts", []))
+                entry["batch_row_counts"].append(length)
+                entry["raw_tokens"] = entry.get("raw_tokens", 0) + length
+                entry["max_tokens"] = plan.max_tokens
+                entry.setdefault("batch_indices", []).append(batch_index)
+
+                entry.setdefault("inputs", []).append(sampled)
+                if quota > 0 and local_idx is not None and len(local_idx) > 0:
+                    prov_rows = range(length) if quota == length else local_idx.tolist()
+                    entry.setdefault("provenance", []).extend((source_index, int(r)) for r in prov_rows)
+            return
+
+        # Dynamic / streaming reservoir: routed MoE experts or cache-less runs.
+        #
+        # A routed expert keeps a different number of rows per batch, so the
+        # precomputed plan never matches. Bound the capture with a uniform
+        # priority reservoir instead: every captured row gets a deterministic
+        # priority and only the ``budget_cap`` lowest priorities survive.
+        #
+        # Resampling the kept buffer evenly together with each new batch (the
+        # previous behaviour) is *not* a reservoir: once the buffer is full, the
+        # ``budget_cap`` kept rows -- which stand for every earlier batch --
+        # weigh the same as the fresh batch, so each new batch replaces about
+        # ``L / (cap + L)`` of the sample and the surviving share decays
+        # geometrically. On a 128-document calibration set that put 70-87% of
+        # every routed expert's rows in the last quarter of the batches (#5204).
+        #
+        # Keeping the rows with the lowest uniform priority is the deterministic
+        # equivalent of Algorithm R: it is a uniform sample of every row seen, so
+        # a batch keeps a share proportional to its length regardless of where it
+        # falls in the stream, and the memory stays O(cap).
+        budget_cap = (
+            self._cap_token_rows(int(configured_max_tokens))
+            if configured_max_tokens is not None
+            else self._cap_token_rows(plan.budget if plan is not None else 906)
+        )
+        if budget_cap <= 0:
+            budget_cap = 906
+
+        feat_2d = feature.reshape(-1, hidden)
         with self.lock:
             entry = self.tasks.get(module_name)
             if entry is None:
@@ -1186,9 +1339,198 @@ class AWQProcessor(LoopProcessor):
                 if batch_index in seen_batch_indices:
                     return
                 seen_batch_indices.add(batch_index)
-            inputs_list = entry.setdefault("inputs", [])
-            inputs_list.append(feature)
+
+            source_idx = len(entry.setdefault("batch_row_counts", []))
+            entry["batch_row_counts"].append(length)
+            entry["raw_tokens"] = entry.get("raw_tokens", 0) + length
+            entry["max_tokens"] = budget_cap
             entry.setdefault("batch_indices", []).append(batch_index)
+            reservoir_locks = getattr(self, "_reservoir_locks", None)
+            if reservoir_locks is None:
+                reservoir_locks = {}
+                self._reservoir_locks = reservoir_locks
+            module_lock = reservoir_locks.get(module_name)
+            if module_lock is None:
+                module_lock = threading.Lock()
+                reservoir_locks[module_name] = module_lock
+
+        # The priority draw and the slot merge are per-module work. Holding the
+        # processor-wide lock across them serialized every routed expert's
+        # capture on one lock, which dominated AWQ quantize time on MoE models
+        # (#5233). ``self.lock`` is not reentrant, so only the O(1) bookkeeping
+        # above runs under it.
+        new_priorities = self._reservoir_priorities(source_idx, length)
+        with module_lock:
+            self._merge_reservoir_rows(
+                entry,
+                feat_2d,
+                new_priorities,
+                source_index=source_idx,
+                budget_cap=budget_cap,
+            )
+
+    @staticmethod
+    def _reservoir_priorities(source_index: int, count: int) -> torch.Tensor:
+        """Return one deterministic uniform priority per captured row.
+
+        A per-batch seed keeps the priorities independent and identically
+        uniform across batches, which is what makes the lowest-priority
+        survivors a uniform sample of the whole stream. The seed is derived from
+        the capture slot, so the same calibration run always keeps the same
+        rows.
+        """
+
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(
+            (0x9E3779B97F4A7C15 * (int(source_index) + 1) + 0x165667B19E3779F9)
+            & 0x7FFFFFFFFFFFFFFF
+        )
+        return torch.rand(count, generator=generator, dtype=torch.float64)
+
+    def _merge_reservoir_rows(
+        self,
+        entry: Dict[str, Any],
+        rows: torch.Tensor,
+        priorities: torch.Tensor,
+        *,
+        source_index: int,
+        budget_cap: int,
+    ) -> None:
+        """Merge one capture into the module's priority reservoir.
+
+        The buffer holds exactly ``budget_cap`` slots and is deliberately not
+        kept in capture order: every surviving row carries its
+        ``(source_index, row)`` provenance, which ``_layer_input_features``
+        materializes once per layer. A capture therefore copies only the new
+        rows that displace kept rows instead of concatenating, re-sorting and
+        re-listing the whole buffer under the processor-wide lock (#5233).
+        """
+
+        buffer = entry.get("reservoir_buffer")
+        if (
+            buffer is None
+            or buffer.shape[0] != budget_cap
+            or buffer.shape[1] != rows.shape[1]
+        ):
+            buffer = rows.new_empty((budget_cap, rows.shape[1]))
+            entry["reservoir_buffer"] = buffer
+            entry["reservoir_priorities"] = torch.empty((budget_cap,), dtype=torch.float64)
+            entry["reservoir_sources"] = torch.empty((budget_cap,), dtype=torch.int64)
+            entry["reservoir_rows"] = torch.empty((budget_cap,), dtype=torch.int64)
+            entry["reservoir_used"] = 0
+            # A module can capture a plan-matched batch first and fall out of
+            # the plan later (for example a row shorter than the planned
+            # length). Keep those rows instead of starting from empty.
+            self._seed_reservoir_from_captures(entry, budget_cap)
+
+        priority_buffer = entry["reservoir_priorities"]
+        source_buffer = entry["reservoir_sources"]
+        row_buffer = entry["reservoir_rows"]
+        used = int(entry.get("reservoir_used", 0))
+        count = int(rows.shape[0])
+
+        if used + count <= budget_cap:
+            buffer[used:used + count] = rows
+            priority_buffer[used:used + count] = priorities
+            source_buffer[used:used + count] = source_index
+            row_buffer[used:used + count] = torch.arange(count)
+            used += count
+        else:
+            combined = torch.cat([priority_buffer[:used], priorities])
+            keep = torch.topk(combined, budget_cap, largest=False).indices
+            kept_old = keep[keep < used]
+            kept_new = keep[keep >= used] - used
+            kept_old_mask = torch.zeros((used,), dtype=torch.bool)
+            kept_old_mask[kept_old] = True
+            # Free slots are the never-filled tail plus the kept rows this batch
+            # displaced; the new survivors go straight into them.
+            slots = torch.cat(
+                [
+                    (~kept_old_mask).nonzero(as_tuple=False).flatten(),
+                    torch.arange(used, budget_cap),
+                ]
+            )
+            buffer[slots] = rows.index_select(0, kept_new)
+            priority_buffer[slots] = priorities.index_select(0, kept_new)
+            source_buffer[slots] = source_index
+            row_buffer[slots] = kept_new
+            used = budget_cap
+
+        entry["reservoir_used"] = used
+        # ``inputs`` stays a cheap view of the live buffer so capture-time
+        # coverage checks see the rows; provenance is materialized at replay.
+        entry["inputs"] = [buffer[:used].unsqueeze(0)]
+        entry.pop("provenance", None)
+
+    def _seed_reservoir_from_captures(self, entry: Dict[str, Any], budget_cap: int) -> None:
+        """Fold rows captured before the module switched to the reservoir.
+
+        Dense modules and MoE roots use the precomputed token-row plan; a batch
+        that does not match it falls through to the reservoir. Seeding keeps
+        the plan rows instead of silently dropping the earlier batches.
+        """
+
+        inputs = entry.get("inputs") or []
+        provenance = entry.get("provenance") or []
+        if not inputs or not provenance:
+            return
+        rows = torch.cat([t.reshape(-1, t.shape[-1]) for t in inputs], dim=0)
+        if rows.shape[0] != len(provenance):
+            # Unaligned capture state cannot be relabelled safely; drop it.
+            entry["inputs"] = []
+            entry.pop("provenance", None)
+            return
+
+        counts = entry.get("batch_row_counts") or []
+        priorities = torch.empty((rows.shape[0],), dtype=torch.float64)
+        per_source: Dict[int, torch.Tensor] = {}
+        for index, (source, row) in enumerate(provenance):
+            source = int(source)
+            row = int(row)
+            if source not in per_source:
+                count = int(counts[source]) if source < len(counts) else row + 1
+                per_source[source] = self._reservoir_priorities(source, max(count, row + 1))
+            priorities[index] = per_source[source][row]
+
+        if rows.shape[0] > budget_cap:
+            keep = torch.topk(priorities, budget_cap, largest=False).indices
+            rows = rows.index_select(0, keep)
+            priorities = priorities[keep]
+            provenance = [provenance[int(index)] for index in keep.tolist()]
+
+        used = int(rows.shape[0])
+        entry["reservoir_buffer"][:used] = rows
+        entry["reservoir_priorities"][:used] = priorities
+        entry["reservoir_sources"][:used] = torch.tensor(
+            [int(source) for source, _row in provenance], dtype=torch.int64
+        )
+        entry["reservoir_rows"][:used] = torch.tensor(
+            [int(row) for _source, row in provenance], dtype=torch.int64
+        )
+        entry["reservoir_used"] = used
+
+    def _materialize_reservoir_provenance(self, entry: Dict[str, Any]) -> None:
+        """Expose the reservoir's rows and provenance in the replay layout."""
+
+        buffer = entry.get("reservoir_buffer")
+        if buffer is None:
+            return
+        used = int(entry.get("reservoir_used", 0))
+        entry["inputs"] = [buffer[:used].unsqueeze(0)]
+        entry["provenance"] = list(
+            zip(
+                entry["reservoir_sources"][:used].tolist(),
+                entry["reservoir_rows"][:used].tolist(),
+            )
+        )
+        for key in (
+            "reservoir_buffer",
+            "reservoir_priorities",
+            "reservoir_sources",
+            "reservoir_rows",
+            "reservoir_used",
+        ):
+            entry.pop(key, None)
 
     def _capture_share_key(self, feature: torch.Tensor) -> Optional[Tuple[Any, ...]]:
         """Identity of one captured source tensor, or ``None`` when it cannot be shared.
@@ -1245,6 +1587,8 @@ class AWQProcessor(LoopProcessor):
             # A capture cache only ever describes one calibration batch.
             with self.lock:
                 self._capture_host_cache.clear()
+                if hasattr(self, "_capture_sampled_cache"):
+                    self._capture_sampled_cache.clear()
                 self._capture_host_batch = batch_index
 
         key = self._capture_share_key(feature)
@@ -1382,6 +1726,129 @@ class AWQProcessor(LoopProcessor):
             return budget
         return min(int(budget), int(limit))
 
+    def _extract_cache_batch_lengths(self) -> Optional[List[int]]:
+        """Return the unpadded token count for each batch in inputs_cache."""
+        cache = getattr(self, "inputs_cache", None)
+        if cache is None:
+            return None
+        layer_inputs = getattr(cache, "layer_inputs", None)
+        if not layer_inputs:
+            return None
+        # ``_record_input_feature`` asks for this once per captured module per
+        # batch, so recomputing the full batch scan each time is quadratic in
+        # the calibration batch count. The layer's input list is replaced as a
+        # whole when the looper advances, so memoize on its identity and keep a
+        # strong reference to rule out ``id`` reuse.
+        memo = getattr(self, "_token_row_lengths_cache", None)
+        if memo is None:
+            memo = {}
+            self._token_row_lengths_cache = memo
+        memo_key = id(layer_inputs)
+        cached = memo.get(memo_key)
+        if cached is not None and cached[0] is layer_inputs:
+            return cached[1]
+        masks = getattr(cache, "attention_masks", None) or []
+        exclude_sinks = bool(
+            getattr(getattr(self, "calibration", None), "exclude_attention_sinks", False)
+        )
+        lengths = []
+        for b, batch_inputs in enumerate(layer_inputs):
+            mask = masks[b] if b < len(masks) else None
+            sink_positions = self.attention_sink_positions_for_batch(b)
+            if torch.is_tensor(mask):
+                form = self._captured_mask_form(mask)
+                m = mask.detach().to(device="cpu")
+                if m.dim() == 4:
+                    m = m[:, 0]
+                if m.dim() == 3 and m.shape[-1] == m.shape[-2] and m.shape[0] > 0:
+                    if m.dtype == torch.bool:
+                        allowed_grid = m if form == self._MASK_FORM_BOOL_KEEP else ~m
+                    elif form == self._MASK_FORM_POSITIVE_KEEP:
+                        allowed_grid = m > 0
+                    else:
+                        allowed_grid = m >= 0
+                    keep = allowed_grid.diagonal(dim1=-2, dim2=-1)
+                else:
+                    try:
+                        keep = normalize_seq_mask(m)
+                    except ValueError:
+                        keep = None
+                if keep is not None:
+                    if exclude_sinks:
+                        keep = exclude_attention_sinks(keep, sink_positions)
+                    lengths.append(int(keep.sum().item()))
+                    continue
+            if batch_inputs:
+                t = batch_inputs[0] if isinstance(batch_inputs, (list, tuple)) else batch_inputs
+                h = max(int(t.shape[-1]), 1)
+                raw_len = int(t.numel() // h)
+                if exclude_sinks and torch.is_tensor(sink_positions):
+                    raw_len = max(0, raw_len - int(sink_positions.numel()))
+                lengths.append(raw_len)
+            else:
+                lengths.append(0)
+        with self.lock:
+            memo.clear()
+            memo[memo_key] = (layer_inputs, lengths)
+        return lengths
+
+    def _token_row_plan_for_module(
+        self,
+        module_name: str,
+        hidden: int,
+        configured_max_tokens: Optional[int] = None,
+    ) -> Optional[_TokenRowPlan]:
+        """Compute or retrieve a cached token-row sampling plan for the current layer."""
+        cache = getattr(self, "inputs_cache", None)
+        if cache is None:
+            return None
+        lengths = self._extract_cache_batch_lengths()
+        if not lengths:
+            return None
+
+        cache_plans = getattr(self, "_token_row_plans", None)
+        if cache_plans is None:
+            cache_plans = {}
+            self._token_row_plans = cache_plans
+
+        cache_key = (id(cache), configured_max_tokens)
+        with self.lock:
+            plan = cache_plans.get(cache_key)
+            if plan is not None:
+                return plan
+
+        raw_tokens = sum(lengths)
+        largest_batch = max(lengths)
+        contributing_batches = len([l for l in lengths if l > 0])
+        budget = min(raw_tokens, max(largest_batch, contributing_batches))
+        max_tokens = (
+            self._cap_token_rows(int(configured_max_tokens))
+            if configured_max_tokens is not None
+            else self._cap_token_rows(budget)
+        )
+        quotas, local_indices = self._compute_token_row_quotas(lengths, max_tokens)
+        plan = _TokenRowPlan(
+            lengths=lengths,
+            budget=budget,
+            max_tokens=max_tokens,
+            quotas=quotas,
+            local_indices=local_indices,
+        )
+        with self.lock:
+            cache_plans[cache_key] = plan
+        return plan
+
+    @staticmethod
+    def _token_row_budget_for_counts(row_counts: List[int]) -> int:
+        """Derive token-row budget directly from a list of batch row counts."""
+        valid_counts = [int(c) for c in row_counts if int(c) > 0]
+        if not valid_counts:
+            return 0
+        raw_tokens = sum(valid_counts)
+        largest_batch = max(valid_counts)
+        contributing_batches = len(valid_counts)
+        return min(raw_tokens, max(largest_batch, contributing_batches))
+
     @staticmethod
     def _token_row_budget(tensors: List[torch.Tensor]) -> int:
         """Derive a pointwise sample budget from observed calibration batches.
@@ -1410,13 +1877,122 @@ class AWQProcessor(LoopProcessor):
             if rows > 0:
                 row_counts.append(rows)
 
-        if not row_counts:
-            return 0
+        return AWQProcessor._token_row_budget_for_counts(row_counts)
 
-        raw_tokens = sum(row_counts)
-        largest_batch = max(row_counts)
-        contributing_batches = len(row_counts)
-        return min(raw_tokens, max(largest_batch, contributing_batches))
+    @staticmethod
+    def _compute_token_row_quotas(
+        lengths: List[int],
+        max_tokens: int,
+    ) -> Tuple[List[int], Dict[int, torch.Tensor]]:
+        """Compute per-batch token row quotas and deterministic local indices.
+
+        Returns (quotas, local_indices_by_batch) where local_indices_by_batch[b]
+        is a 1D int64 tensor of row indices within batch b to retain.
+
+        Empty batches are excluded from the quota allocation, matching
+        ``_pack_token_rows``: they contribute no rows, so counting them would
+        steal budget (or select a zero-row batch) and break equivalence.
+        """
+        quotas = [0] * len(lengths)
+        local_indices: Dict[int, torch.Tensor] = {}
+        active = [index for index, length in enumerate(lengths) if int(length) > 0]
+        if not active:
+            return quotas, local_indices
+        active_lengths = [int(lengths[index]) for index in active]
+        batch_count = len(active_lengths)
+        total_tokens = sum(active_lengths)
+        retained_tokens = min(total_tokens, max_tokens)
+        if retained_tokens <= 0:
+            return quotas, local_indices
+
+        if retained_tokens < batch_count:
+            if retained_tokens == 1:
+                batch_ids = [0]
+            else:
+                batch_ids = [
+                    int(i * (batch_count - 1) // (retained_tokens - 1))
+                    for i in range(retained_tokens)
+                ]
+            batch_ids = list(dict.fromkeys(batch_ids))
+            for active_index in batch_ids:
+                batch_index = active[active_index]
+                quotas[batch_index] = 1
+                local_indices[batch_index] = torch.zeros(1, dtype=torch.int64)
+            return quotas, local_indices
+
+        local_quotas = [1] * batch_count
+        remaining = retained_tokens - batch_count
+        if remaining > 0:
+            exact = [length * remaining / total_tokens for length in active_lengths]
+            floors = [int(share) for share in exact]
+            for index, floor_share in enumerate(floors):
+                local_quotas[index] += floor_share
+            leftover = retained_tokens - sum(local_quotas)
+            order = sorted(
+                range(batch_count),
+                key=lambda index: (-(exact[index] - floors[index]), index),
+            )
+            while leftover > 0:
+                distributed = False
+                for index in order:
+                    if leftover <= 0:
+                        break
+                    if local_quotas[index] < active_lengths[index]:
+                        local_quotas[index] += 1
+                        leftover -= 1
+                        distributed = True
+                if not distributed:
+                    break
+
+        for active_index, batch_index in enumerate(active):
+            length = active_lengths[active_index]
+            quota = min(local_quotas[active_index], length)
+            quotas[batch_index] = quota
+            if quota <= 0:
+                continue
+            if quota == length:
+                local_indices[batch_index] = torch.arange(length, dtype=torch.int64)
+            elif quota == 1:
+                local_indices[batch_index] = torch.zeros(1, dtype=torch.int64)
+            else:
+                local_indices[batch_index] = (
+                    torch.arange(quota, dtype=torch.int64)
+                    * (length - 1)
+                    // (quota - 1)
+                )
+
+        return quotas, local_indices
+
+    @staticmethod
+    def _reorder_token_row_capture(entry: Dict[str, Any], order: List[int]) -> None:
+        """Follow the capture permutation for token-row provenance metadata.
+
+        ``entry["inputs"]`` is replayed in calibration-batch order, but captures
+        can complete out of order. ``batch_row_counts`` and ``provenance`` are
+        recorded in arrival order, so both must be permuted with the tensors;
+        otherwise the rebuilt mask and position ids describe a different batch
+        than the rows they accompany.
+        """
+
+        counts = entry.get("batch_row_counts")
+        provenance = entry.get("provenance")
+        if not counts and not provenance:
+            return
+        if counts and len(counts) == len(order):
+            entry["batch_row_counts"] = [counts[index] for index in order]
+        if provenance:
+            # Provenance rows are stored in capture order, which is the row
+            # order of the unreordered ``inputs`` list. Re-emit whole source
+            # groups in the new tensor order and renumber each group's source
+            # slot so packed rows and rebuilt kwargs stay aligned.
+            grouped: Dict[int, List[int]] = {}
+            for source, row in provenance:
+                grouped.setdefault(int(source), []).append(int(row))
+            entry["provenance"] = [
+                (new_source, row)
+                for new_source, old_source in enumerate(order)
+                for row in grouped.get(int(old_source), [])
+            ]
 
     @staticmethod
     def _pack_token_rows(
@@ -1482,77 +2058,21 @@ class AWQProcessor(LoopProcessor):
             return packed, total_tokens, provenance
 
         lengths = [int(tensor_rows.shape[0]) for tensor_rows in rows]
-        batch_count = len(rows)
-
-        if retained_tokens < batch_count:
-            # The budget cannot cover every batch; sample one leading row from
-            # evenly spaced batches so the selection stays deterministic.
-            if retained_tokens == 1:
-                batch_ids = [0]
-            else:
-                batch_ids = [
-                    int(i * (batch_count - 1) // (retained_tokens - 1))
-                    for i in range(retained_tokens)
-                ]
-            batch_ids = list(dict.fromkeys(batch_ids))
-            selected = [rows[batch_id][:1] for batch_id in batch_ids]
-            packed = torch.cat(selected, dim=0).unsqueeze(0)
-            if not with_provenance:
-                return packed, total_tokens
-            return packed, total_tokens, [(row_sources[batch_id], 0) for batch_id in batch_ids]
-
-        # Reserve one row per batch, then hand out the remaining budget
-        # proportionally to batch length (largest remainder, ties by order).
-        quotas = [1] * batch_count
-        remaining = retained_tokens - batch_count
-        if remaining > 0:
-            exact = [length * remaining / total_tokens for length in lengths]
-            floors = [int(share) for share in exact]
-            for index, floor_share in enumerate(floors):
-                quotas[index] += floor_share
-            leftover = retained_tokens - sum(quotas)
-            order = sorted(
-                range(batch_count),
-                key=lambda index: (-(exact[index] - floors[index]), index),
-            )
-            # Multiple passes: a single pass can strand budget when the
-            # high-remainder batches saturate (e.g. lengths [1, 1, 1, 5]
-            # with budget 7). retained_tokens <= total_tokens guarantees
-            # enough capacity, so the loop always terminates with zero
-            # leftover.
-            while leftover > 0:
-                distributed = False
-                for index in order:
-                    if leftover <= 0:
-                        break
-                    if quotas[index] < lengths[index]:
-                        quotas[index] += 1
-                        leftover -= 1
-                        distributed = True
-                if not distributed:
-                    break
+        quotas, local_indices_by_batch = AWQProcessor._compute_token_row_quotas(lengths, retained_tokens)
 
         selected = []
         provenance: List[Tuple[int, int]] = []
-        for batch_index, (tensor_rows, quota, length) in enumerate(zip(rows, quotas, lengths)):
-            quota = min(quota, length)
+        for batch_index, (tensor_rows, length) in enumerate(zip(rows, lengths)):
+            quota = quotas[batch_index]
             if quota <= 0:
+                continue
+            local_indices = local_indices_by_batch.get(batch_index)
+            if local_indices is None:
                 continue
             if quota == length:
                 selected.append(tensor_rows)
-                if with_provenance:
-                    source_index = row_sources[batch_index]
-                    provenance.extend((source_index, row_index) for row_index in range(length))
-                continue
-            if quota == 1:
-                local_indices = torch.zeros(1, dtype=torch.int64)
             else:
-                local_indices = (
-                    torch.arange(quota, dtype=torch.int64)
-                    * (length - 1)
-                    // (quota - 1)
-                )
-            selected.append(tensor_rows.index_select(0, local_indices))
+                selected.append(tensor_rows.index_select(0, local_indices))
             if with_provenance:
                 source_index = row_sources[batch_index]
                 provenance.extend(
@@ -1961,6 +2481,7 @@ class AWQProcessor(LoopProcessor):
         batch_indices: List[Optional[int]],
         tensors: Optional[List[torch.Tensor]] = None,
         mask_overrides: Optional[Dict[int, Optional[torch.Tensor]]] = None,
+        row_counts: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
         """Pack per-token kwargs (for example ``input_ids``) with the replayed rows.
 
@@ -2014,7 +2535,9 @@ class AWQProcessor(LoopProcessor):
                     break
                 if source_index not in structures:
                     row_count = None
-                    if tensors is not None and source_index < len(tensors):
+                    if row_counts is not None and source_index < len(row_counts):
+                        row_count = row_counts[source_index]
+                    elif tensors is not None and source_index < len(tensors):
                         source = tensors[source_index]
                         hidden = max(int(source.shape[-1]), 1)
                         row_count = int(source.numel() // hidden)
@@ -2061,6 +2584,7 @@ class AWQProcessor(LoopProcessor):
         dtype: torch.dtype,
         mask_overrides: Optional[Dict[int, Optional[torch.Tensor]]] = None,
         recurrent: bool = False,
+        row_counts: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
         """Rebuild the attention mask and positions for packed ``token_rows``.
 
@@ -2084,7 +2608,7 @@ class AWQProcessor(LoopProcessor):
         masks = getattr(cache, "attention_masks", None) or []
         mask_overrides = mask_overrides or {}
         token_aligned = self._pack_token_aligned_kwargs(
-            provenance, batch_indices, tensors, mask_overrides,
+            provenance, batch_indices, tensors, mask_overrides, row_counts=row_counts,
         )
         if cache is None or not provenance or (not masks and not mask_overrides):
             # Without a captured mask there is no document structure to replay;
@@ -2109,9 +2633,14 @@ class AWQProcessor(LoopProcessor):
             grouped.setdefault(int(source_index), []).append((packed_index, int(row_index)))
 
         for source_index, entries in grouped.items():
-            source = tensors[source_index]
-            hidden = max(int(source.shape[-1]), 1)
-            row_count = int(source.numel() // hidden)
+            if row_counts is not None and source_index < len(row_counts):
+                row_count = row_counts[source_index]
+            elif source_index < len(tensors):
+                source = tensors[source_index]
+                hidden = max(int(source.shape[-1]), 1)
+                row_count = int(source.numel() // hidden)
+            else:
+                row_count = 0
             batch_index = (
                 batch_indices[source_index] if source_index < len(batch_indices) else None
             )
@@ -2388,9 +2917,18 @@ class AWQProcessor(LoopProcessor):
         # replay mask and position ids are identical too. Build the (bounded,
         # but quadratic) block-diagonal mask once per unique capture list.
         token_row_kwargs_cache: Dict[Tuple[int, ...], Dict[str, Any]] = {}
+        # Both caches key on ``id()`` of the capture tensors. A materialized
+        # reservoir hands each module a fresh view that is dropped once the
+        # module's entry is replaced, so CPython can recycle that id for the
+        # next module's view and return a different module's (even a
+        # different-width) tensor. Keep every keyed list alive until the loop
+        # ends so an id stays unique for the cache's lifetime.
+        cache_key_owners: List[List[torch.Tensor]] = []
         # Iterate over a snapshot since quantization may mutate state.modules concurrently
         for name in feature_names:
             entry = self.tasks.get(name) or {}
+            if entry.get("reservoir_buffer") is not None:
+                self._materialize_reservoir_provenance(entry)
             tensors: List[torch.Tensor] = entry.get("inputs", [])  # type: ignore[arg-type]
             batch_indices: List[Optional[int]] = entry.get("batch_indices", [])  # type: ignore[arg-type]
             if not tensors:
@@ -2413,33 +2951,31 @@ class AWQProcessor(LoopProcessor):
                 len(batch_indices) == len(tensors)
                 and all(index is not None and index >= 0 for index in batch_indices)
             ):
-                ordered = sorted(
-                    zip(batch_indices, tensors),
-                    key=lambda item: int(item[0]),
-                )
-                batch_indices = [item[0] for item in ordered]
-                tensors = [item[1] for item in ordered]
+                order = sorted(range(len(tensors)), key=lambda index: int(batch_indices[index]))
+                batch_indices = [batch_indices[index] for index in order]
+                tensors = [tensors[index] for index in order]
+                self._reorder_token_row_capture(entry, order)
 
+            cache_key_owners.append(tensors)
             policy = self._feature_aggregation_policy(name)
             aggregation_mode = (policy or {}).get("mode")
             if aggregation_mode == "token_rows":
-                configured_max_tokens = (policy or {}).get("max_tokens")
-                max_tokens = (
-                    self._cap_token_rows(int(configured_max_tokens))
-                    if configured_max_tokens is not None
-                    else self._cap_token_rows(self._token_row_budget(tensors))
-                )
-                if max_tokens == 0 and configured_max_tokens is None:
-                    features[name] = tensors[0].new_empty((1, 0, tensors[0].shape[-1]))
-                    raw_tokens = 0
-                    replay_kwargs: Dict[str, Any] = {}
-                else:
-                    features[name], raw_tokens, provenance = self._pack_token_rows(
-                        tensors,
-                        max_tokens=max_tokens,
-                        with_provenance=True,
-                    )
+                if "provenance" in entry and entry["provenance"]:
                     cache_key = tuple(id(tensor) for tensor in tensors)
+                    cat_tensor = cat_cache.get(cache_key)
+                    if cat_tensor is None:
+                        cat_tensor = (
+                            torch.cat(tensors, dim=-2)
+                            if tensors[0].dim() == 3
+                            else torch.cat([t.reshape(-1, t.shape[-1]) for t in tensors], dim=0).unsqueeze(0)
+                        )
+                        cat_cache[cache_key] = cat_tensor
+                    features[name] = cat_tensor
+                    raw_tokens = entry.get("raw_tokens", int(features[name].shape[-2]))
+                    retained_tokens = int(features[name].shape[-2])
+                    max_tokens = entry.get("max_tokens", retained_tokens)
+                    provenance = entry["provenance"]
+
                     replay_kwargs = token_row_kwargs_cache.get(cache_key)
                     if replay_kwargs is None:
                         type_masks, replay_layer_type = self._token_row_layer_type_masks(
@@ -2454,19 +2990,64 @@ class AWQProcessor(LoopProcessor):
                             features[name].dtype,
                             mask_overrides=type_masks,
                             recurrent=_is_recurrent_attention_layer_type(replay_layer_type),
+                            row_counts=entry.get("batch_row_counts"),
                         )
                         token_row_kwargs_cache[cache_key] = replay_kwargs
-                feature_kwargs[name] = replay_kwargs
-                retained_tokens = int(features[name].shape[-2])
-                entry["inputs"] = [features[name]]
-                entry["batch_indices"] = [None]
-                feature_stats[name] = {
-                    "mode": "token_rows",
-                    "raw_tokens": raw_tokens,
-                    "retained_tokens": retained_tokens,
-                    "batches": len(tensors),
-                    "max_tokens": max_tokens,
-                }
+                    feature_kwargs[name] = replay_kwargs
+                    entry["inputs"] = [features[name]]
+                    entry["batch_indices"] = [None]
+                    feature_stats[name] = {
+                        "mode": "token_rows",
+                        "raw_tokens": raw_tokens,
+                        "retained_tokens": retained_tokens,
+                        "batches": len(entry.get("batch_row_counts") or tensors),
+                        "max_tokens": max_tokens,
+                    }
+                else:
+                    configured_max_tokens = (policy or {}).get("max_tokens")
+                    max_tokens = (
+                        self._cap_token_rows(int(configured_max_tokens))
+                        if configured_max_tokens is not None
+                        else self._cap_token_rows(self._token_row_budget(tensors))
+                    )
+                    if max_tokens == 0 and configured_max_tokens is None:
+                        features[name] = tensors[0].new_empty((1, 0, tensors[0].shape[-1]))
+                        raw_tokens = 0
+                        replay_kwargs = {}
+                    else:
+                        features[name], raw_tokens, provenance = self._pack_token_rows(
+                            tensors,
+                            max_tokens=max_tokens,
+                            with_provenance=True,
+                        )
+                        cache_key = tuple(id(tensor) for tensor in tensors)
+                        replay_kwargs = token_row_kwargs_cache.get(cache_key)
+                        if replay_kwargs is None:
+                            type_masks, replay_layer_type = self._token_row_layer_type_masks(
+                                getattr(self, "inputs_cache", None),
+                                batch_indices,
+                                state.layer_module,
+                            )
+                            replay_kwargs = self._token_row_replay_kwargs(
+                                tensors,
+                                batch_indices,
+                                provenance,
+                                features[name].dtype,
+                                mask_overrides=type_masks,
+                                recurrent=_is_recurrent_attention_layer_type(replay_layer_type),
+                            )
+                            token_row_kwargs_cache[cache_key] = replay_kwargs
+                    feature_kwargs[name] = replay_kwargs
+                    retained_tokens = int(features[name].shape[-2])
+                    entry["inputs"] = [features[name]]
+                    entry["batch_indices"] = [None]
+                    feature_stats[name] = {
+                        "mode": "token_rows",
+                        "raw_tokens": raw_tokens,
+                        "retained_tokens": retained_tokens,
+                        "batches": len(tensors),
+                        "max_tokens": max_tokens,
+                    }
             elif aggregation_mode not in (None, "batch"):
                 raise ValueError(
                     f"Unsupported AWQ feature aggregation mode {aggregation_mode!r} "
@@ -2551,6 +3132,7 @@ class AWQProcessor(LoopProcessor):
                 task_entry = self.tasks.pop(name, None)
                 if task_entry and "inputs" in task_entry:
                     task_entry["inputs"].clear()
+                getattr(self, "_reservoir_locks", {}).pop(name, None)
 
         self._feature_task_names = set()
         self._feature_stats = {}
@@ -2558,6 +3140,12 @@ class AWQProcessor(LoopProcessor):
         self._awq_feature_kwargs = {}
         with self.lock:
             self._capture_host_cache.clear()
+            if hasattr(self, "_capture_sampled_cache"):
+                self._capture_sampled_cache.clear()
+            if hasattr(self, "_token_row_plans"):
+                self._token_row_plans.clear()
+            if hasattr(self, "_token_row_lengths_cache"):
+                self._token_row_lengths_cache.clear()
             self._capture_host_batch = None
 
         if hasattr(self._scale_context, "layer_index"):
@@ -3377,10 +3965,13 @@ class AWQProcessor(LoopProcessor):
 
         original_forward = moe_block.forward
 
-        # Keep the block's own signature visible: the replay filters and
-        # promotes kwargs by `inspect.signature(module.forward)`, and a bare
-        # `**kwargs` wrapper would be read as a Hymba-style catch-all that wants
-        # synthesized `position_ids` the wrapped block cannot accept.
+        # Keep the block's real signature visible. `inspect.signature` follows
+        # `__wrapped__`, so the replay machinery still sees e.g.
+        # `OlmoeSparseMoeBlock.forward(hidden_states)` instead of this
+        # catch-all. Without it, `_forward_accepts_var_kwargs` classifies the
+        # MoE block like Hymba's real `**kwargs` block and `_sanitize_kwargs` /
+        # `_prepare_module_forward` hand it layer kwargs it never accepted
+        # (#5095).
         @functools.wraps(original_forward)
         def all_experts_forward(hidden_states, **kwargs):
             if hidden_states.dim() == 3:
@@ -3415,7 +4006,10 @@ class AWQProcessor(LoopProcessor):
                         down_ref(intermediate)
                         del intermediate
                 del gate_out, up_out, expert_input
-            return original_forward(hidden_states, **kwargs)
+            # The wrapper's `**kwargs` exists only to stay call-compatible with
+            # the replay caller; it must not widen the original block's
+            # contract. Forward just the keywords that block declares.
+            return safe_kwargs_call(original_forward, hidden_states, kwargs=kwargs)
 
         moe_block.forward = all_experts_forward
         try:
@@ -4231,7 +4825,11 @@ class AWQProcessor(LoopProcessor):
                 master = orig_weights[fc]
                 if master.device != fc.weight.device or master.dtype != fc.weight.dtype:
                     master = master.to(device=fc.weight.device, dtype=fc.weight.dtype)
-                torch.mul(master, scales_view, out=fc.weight)
+                # Members of one group can live on different devices when a
+                # balanced MoE pool splits a norm-anchored group (#5104). The
+                # channel scale is one tensor; each member reads it from its own
+                # device.
+                torch.mul(master, scales_view.to(fc.weight.device), out=fc.weight)
 
         try:
             device = next(module2inspect.parameters()).device
@@ -4309,7 +4907,7 @@ class AWQProcessor(LoopProcessor):
                         fc.weight,
                         **quantize_kwargs,
                     )
-                    fc.weight.div_(scales_view)
+                    fc.weight.div_(scales_view.to(fc.weight.device))
 
                 # W * X
                 if use_chunked_scale_search:
@@ -4868,6 +5466,32 @@ class AWQProcessor(LoopProcessor):
             return 0
         return max(int(self._quant_batch_size or 1), budget_rows)
 
+    def _invoke_replay_module(
+            self,
+            module: torch.nn.Module,
+            x: torch.Tensor,
+            module_kwargs: Dict,
+    ):
+        """Runs one module replay and reports its failures as scale-group errors.
+
+        A replayed block can reject the captured context with a bare
+        ``AssertionError`` instead of a tensor-geometry ``RuntimeError``. Hymba's
+        ``reuse_kv`` mixer asserts ``kv_last_layer is not None``: the producer's
+        K/V is threaded between layers by the forward executor and is not part of
+        the per-linear capture, so no replay boundary that needs it can be scored
+        (#5098). Convert only a failure raised by the module itself; the
+        processor's own assertions keep propagating, and the configured
+        plain-quantization fallback still handles a group that cannot be scored.
+        """
+
+        try:
+            return module(x, **module_kwargs)
+        except AssertionError as exc:
+            raise _AWQScaleGroupError(
+                f"AWQ: replaying {type(module).__name__} with the packed token "
+                f"rows failed: {exc!r}"
+            ) from exc
+
     @torch.inference_mode()
     def _iter_prepared_forward_outputs(
             self,
@@ -4895,7 +5519,7 @@ class AWQProcessor(LoopProcessor):
             or x.dim() == 0
             or x.shape[0] <= effective_quant_batch_size
         ):
-            module_output = module(x, **module_kwargs)
+            module_output = self._invoke_replay_module(module, x, module_kwargs)
             if isinstance(module_output, tuple):
                 module_output = module_output[0]
             yield module_output
@@ -4936,7 +5560,7 @@ class AWQProcessor(LoopProcessor):
                     full_batch_size=full_batch_size,
                 ))
                 partial_kwargs.update(overrides)
-            partial_output = module(x_partial, **partial_kwargs)
+            partial_output = self._invoke_replay_module(module, x_partial, partial_kwargs)
             if isinstance(partial_output, tuple):
                 partial_output = partial_output[0]
             yield partial_output
@@ -5401,7 +6025,7 @@ class AWQProcessor(LoopProcessor):
                 module_name=module_label,
         ):
             with parent_module_lock(parent_key):
-                create_quant_module(
+                qmodule = create_quant_module(
                     name=module.full_name,
                     linear_cls=quant_linear_cls,
                     bits=self._module_bits(module.full_name, resolved_cfg=resolved_cfg),
@@ -5418,6 +6042,7 @@ class AWQProcessor(LoopProcessor):
                     register_buffers=False,
                     dtype=module.weight.dtype,
                     resolved_module_config=resolved_cfg,
+                    install=False,
                 )
         if timer is not None and create_start is not None:
             timer.record(
@@ -5425,8 +6050,12 @@ class AWQProcessor(LoopProcessor):
                 time.perf_counter() - create_start,
                 source=module_label,
             )
+        if qmodule is None:
+            raise RuntimeError(
+                f"AWQProcessor: module `{module.full_name}` resolved to an excluded "
+                "quant config but still reached packing."
+            )
         # pack module
-        qmodule = self.gptq_model.model.get_submodule(module.full_name)
         qModules = (
             {module.full_name: qmodule}
             if isinstance(qmodule, quant_linear_cls)
@@ -5457,6 +6086,12 @@ class AWQProcessor(LoopProcessor):
                 time.perf_counter() - pack_start,
                 source=f"{module_label} [{packer_label or 'module.pack_original'}]",
             )
+
+        # Publish the packed kernel with one assignment; installing it before
+        # packing left an unusable projection behind when packing was
+        # interrupted (issue #5089).
+        with parent_module_lock(parent_key):
+            install_quant_module(self.gptq_model.model, module.full_name, qmodule)
 
     def finalize(self, model: BaseQModel, **kwargs):
         """Marks the model as AWQ-quantized and runs shared finalization logic."""

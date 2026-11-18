@@ -2016,6 +2016,154 @@ def test_vptq_weighted_kmeans_defers_inertia_read_until_after_update():
     assert inertia_read > centroid_update
 
 
+def _legacy_weighted_kmeans(data, num_centroids, weights, *, iters, tol, seed):
+    """The pre-fix Lloyd update: a separate segment sum for sums and counts.
+
+    Kept as the reference for the shared-plan refactor. It reuses the same
+    public :func:`_deterministic_segment_sum` primitive but builds the stable
+    sort and ``bincount`` for every reduction, so any change in the reduction
+    order or bucket arithmetic shows up as a bitwise difference.
+    """
+
+    num_rows = data.shape[0]
+    generator = torch.Generator(device=data.device)
+    generator.manual_seed(int(seed))
+    permutation = torch.randperm(num_rows, generator=generator, device=data.device)
+    if num_centroids <= num_rows:
+        init_index = permutation[:num_centroids]
+    else:
+        repeats = (num_centroids + num_rows - 1) // num_rows
+        init_index = permutation.repeat(repeats)[:num_centroids]
+    centroids = data[init_index].clone()
+
+    if weights is None:
+        weights = torch.ones(num_rows, dtype=data.dtype, device=data.device)
+    else:
+        weights = weights.to(dtype=data.dtype, device=data.device)
+
+    previous_inertia = None
+    for _ in range(max(1, int(iters))):
+        assignment, residual = _chunked_assign(data, centroids)
+        inertia = (residual.double() * weights.double()).sum()
+
+        counts = vptq_module._deterministic_segment_sum(num_centroids, assignment, weights)
+        empty = counts <= 0
+        divisor = torch.where(empty, torch.ones_like(counts), counts)
+        tiny = ~empty & (counts < torch.finfo(counts.dtype).tiny)
+        if bool(tiny.any()):
+            factor = torch.where(
+                tiny,
+                divisor.reciprocal().clamp(max=torch.finfo(counts.dtype).max),
+                torch.ones_like(counts),
+            )
+            weighted = data * (weights * factor[assignment]).unsqueeze(1)
+            divisor = divisor * factor
+        else:
+            weighted = data * weights.unsqueeze(1)
+        sums = vptq_module._deterministic_segment_sum(num_centroids, assignment, weighted)
+        updated = sums / divisor.unsqueeze(1)
+        centroids = torch.where(empty.unsqueeze(1), centroids, updated)
+
+        inertia = float(inertia.item())
+        if previous_inertia is not None:
+            denominator = max(abs(previous_inertia), vptq_module._EPS)
+            if abs(previous_inertia - inertia) <= tol * denominator:
+                break
+        previous_inertia = inertia
+
+    return centroids, assignment
+
+
+def test_vptq_weighted_kmeans_builds_one_segment_plan_per_iteration():
+    """Both Lloyd reductions must share one stable sort and one ``bincount``.
+
+    ``sums`` and ``counts`` reduce the same assignment, so the second reduction
+    used to re-sort the index and recount the buckets for nothing. The op
+    counts pin the sharing, and the bitwise comparison pins that the shared plan
+    did not change the reduction order.
+    """
+
+    ops = []
+
+    class Recorder(torch.utils._python_dispatch.TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            ops.append(str(func))
+            return func(*args, **(kwargs or {}))
+
+    generator = torch.Generator().manual_seed(0)
+    data = torch.randn(4096, 4, generator=generator)
+    weights = torch.rand(4096, generator=generator)
+    iters = 2
+
+    with Recorder():
+        centroids, assignment = _weighted_kmeans(
+            data, 32, weights, iters=iters, tol=0.0, seed=0
+        )
+
+    # ``argsort(stable=True)`` lowers to ``aten.sort.stable`` on some Torch
+    # builds, so both spellings count as the single stable sort.
+    sorts = sum(
+        op.startswith("aten.argsort") or op == "aten.sort.stable" for op in ops
+    )
+    counts = ops.count("aten.bincount.default")
+    reductions = ops.count("aten.segment_reduce.default")
+    assert sorts == iters, f"{sorts} sorts for {iters} iterations: {ops}"
+    assert counts == iters, f"{counts} bincounts for {iters} iterations: {ops}"
+    assert reductions == 2 * iters
+
+    reference_centroids, reference_assignment = _legacy_weighted_kmeans(
+        data, 32, weights, iters=iters, tol=0.0, seed=0
+    )
+    assert torch.equal(centroids, reference_centroids)
+    assert torch.equal(assignment, reference_assignment)
+
+
+@pytest.mark.parametrize("num_centroids", [16, 32, 64, 257])
+@pytest.mark.parametrize("with_weights", [False, True])
+def test_vptq_weighted_kmeans_matches_legacy_reduction_bitwise(num_centroids, with_weights):
+    """Shared-plan k-means must be bitwise identical to the two-reduction path."""
+
+    generator = torch.Generator().manual_seed(7)
+    data = torch.randn(2048, 4, generator=generator)
+    weights = torch.rand(2048, generator=generator) if with_weights else None
+
+    centroids, assignment = _weighted_kmeans(
+        data, num_centroids, weights, iters=6, tol=1e-9, seed=3
+    )
+    legacy_centroids, legacy_assignment = _legacy_weighted_kmeans(
+        data, num_centroids, weights, iters=6, tol=1e-9, seed=3
+    )
+
+    assert centroids.shape == (num_centroids, 4)
+    assert torch.equal(centroids, legacy_centroids)
+    assert torch.equal(assignment, legacy_assignment)
+
+
+def test_vptq_segment_plan_reuses_one_sort_for_both_reductions():
+    """The plan primitive must reproduce both standalone reductions exactly."""
+
+    generator = torch.Generator().manual_seed(11)
+    index = torch.randint(0, 97, (3000,), generator=generator)
+    vectors = torch.randn(3000, 4, generator=generator)
+    weights = torch.rand(3000, generator=generator)
+
+    plan = vptq_module._segment_plan(97, index)
+    assert torch.equal(
+        vptq_module._segment_sum_with_plan(plan, vectors),
+        vptq_module._deterministic_segment_sum(97, index, vectors),
+    )
+    assert torch.equal(
+        vptq_module._segment_sum_with_plan(plan, weights),
+        vptq_module._deterministic_segment_sum(97, index, weights),
+    )
+
+    empty_plan = vptq_module._segment_plan(5, torch.empty(0, dtype=torch.long))
+    assert torch.equal(
+        vptq_module._segment_sum_with_plan(empty_plan, torch.empty(0, 4)),
+        torch.zeros(5, 4),
+    )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA/HIP device")
 def test_vptq_weighted_kmeans_gpu_deterministic():
     """GPU _weighted_kmeans must produce bit-identical centroids across runs (#4137)."""

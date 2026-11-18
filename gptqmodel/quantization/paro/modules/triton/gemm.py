@@ -252,7 +252,10 @@ def paro_gemm_kernel(
     shifts = tl.broadcast_to(shifts[None, :], (BLOCK_SIZE_K * (BLOCK_SIZE_N // 8), 8))
     shifts = tl.reshape(shifts, (BLOCK_SIZE_K, BLOCK_SIZE_N))
 
-    offsets_am = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    # Rows are indexed in 64 bits. A long-context prefill can push
+    # ``rows * in_features`` (A) or ``rows * out_features`` (C) past 2^31
+    # elements, and an int32 row product wraps the address (issue #5096).
+    offsets_am = pid_m.to(tl.int64) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offsets_bn = pid_n * (BLOCK_SIZE_N // 8) + tl.arange(0, BLOCK_SIZE_N // 8)
     offsets_zn = pid_n * (BLOCK_SIZE_N // 8) + tl.arange(0, BLOCK_SIZE_N // 8)
     offsets_sn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -305,7 +308,7 @@ def paro_gemm_kernel(
         a_ptrs += BLOCK_SIZE_K
         b_ptrs += BLOCK_SIZE_K * (N // 8)
 
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cm = pid_m.to(tl.int64) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = c_ptr + N * offs_cm[:, None] + offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)

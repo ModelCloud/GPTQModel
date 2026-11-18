@@ -78,6 +78,7 @@ def _source_root() -> Path:
 def _source_files() -> list[str]:
     sources_dir = _source_root()
     source_files = [
+        "bf16_scale.cu",
         "bindings.cpp",
         "hadamard.cpp",
         "hgemm.cu",

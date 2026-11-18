@@ -87,6 +87,7 @@ from ..utils.attn_mask import normalize_seq_mask
 from ..utils.backend import (
     BACKEND,
     awq_gemm_pack_backend,
+    awq_gemv_fast_pack_backend,
     awq_gemv_pack_backend,
     backend_for_activation,
     normalize_backend,
@@ -114,6 +115,7 @@ from ..utils.model import (
     get_module,
     get_module_by_name_prefix,
     get_module_name,
+    has_cpu_offload_hooks,
     move_module_to_cpu_pinned,
     move_to,
     warn_fused_unit_dynamic_conflicts,
@@ -130,11 +132,16 @@ from ..utils.structure import (
     alias_from_turtle_for_submodule,
     restore_init_owned_rotary_buffers,
 )
-from ..utils.tied_weights import lm_head_is_tied, word_embeddings_tied
+from ..utils.tied_weights import (
+    lm_head_is_tied,
+    lm_head_quantization_is_tied,
+    word_embeddings_tied,
+)
 from ..utils.torch import (
     TORCH_HAS_COMPILE,
     as_torch_device,
     dynamo_traced_frames,
+    model_execution_device_scope,
     release_compile_trace_garbage,
     release_pinned_host_cache,
     torch_compile,
@@ -471,7 +478,13 @@ class _CompiledModelForward:
                 "compiled model `forward` called after its model was released"
             )
         try:
-            return self._compiled(module, *args, **kwargs)
+            # Inductor's lazy pattern init uses the *current* device when a
+            # graph-break frame has no device-bearing input, which claimed
+            # cuda:0 for a model compiled on cuda:1 (#5101). Enter the model's
+            # execution device for the compiled call; the caller's device is
+            # restored on exit, including on error.
+            with model_execution_device_scope(module, args, kwargs):
+                return self._compiled(module, *args, **kwargs)
         finally:
             self._release_trace_garbage()
 
@@ -2393,6 +2406,43 @@ class BaseQModel(nn.Module):
         vram_devices = _quantize_vram_devices(self.quantize_config)
         _reset_peak_vram_stats(vram_devices)
 
+        embed_quant_config = self._normalize_embed_quant_config(
+            embed_quant_config=embed_quant_config,
+            embed_quant_mode=embed_quant_mode,
+        )
+        if embed_quant_config is not None and not self.quantized:
+            embed_mode = embed_quant_config.embed_quant_mode
+            if (
+                embed_mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH)
+                and lm_head_quantization_is_tied(self)
+            ):
+                # A fresh quantize of the output endpoint replaces the tied
+                # `lm_head` with a packed module. The run used to finish every
+                # layer and only then fail to re-tie the head, leaving
+                # `quantized=True` on an unusable model (#5111). Refuse before
+                # any calibration work, matching the `lm_head=True` contract.
+                # Requantize of a loaded checkpoint stays allowed: its
+                # endpoints are already independent packed modules.
+                raise NotImplementedError(
+                    "quantize() cannot quantize the output embedding of a freshly "
+                    "loaded model with tied input/output embeddings: `lm_head` "
+                    "shares its weight with `embed_tokens`. Untie the model weights "
+                    "before quantization, or load a quantized checkpoint and use "
+                    "`requantize(embed_quant_mode=...)`."
+                )
+            if embed_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
+                # The capture forward has to execute the input embedding before
+                # the pseudo-layer is packed. A fresh run starts from a lazy
+                # shell, and materializing the endpoint for capture produced a
+                # packed FP16 endpoint in front of a dense BF16 decoder, so the
+                # in-session model could not forward (#5111). This flow is
+                # requantize-only; refuse before any calibration work.
+                raise NotImplementedError(
+                    "quantize() on an unquantized model cannot quantize the input "
+                    "embedding (QuantizeEmbed.INPUT/BOTH). Load a quantized "
+                    "checkpoint and use `requantize(embed_quant_mode=...)`."
+                )
+
         if fuse is not None and type(fuse) is not bool:
             raise TypeError("Fusion enabled must be bool")
         fusion_requested = fuse if fuse is not None else getattr(self, "_auto_fusion", False)
@@ -2402,10 +2452,6 @@ class BaseQModel(nn.Module):
             self._auto_fusion = fuse
             if not fuse:
                 self.fuse(False)
-        embed_quant_config = self._normalize_embed_quant_config(
-            embed_quant_config=embed_quant_config,
-            embed_quant_mode=embed_quant_mode,
-        )
 
         if self.quantize_config is None or not isinstance(self.quantize_config, BaseQuantizeConfig):
             raise AttributeError("`quantize_config` must be not None")
@@ -2544,12 +2590,13 @@ class BaseQModel(nn.Module):
                         device_type=quant_device_type, is_rocm=IS_ROCM
                     )
                 elif format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
-                    # The native GEMV_FAST extension is CUDA-only; a CPU-only
-                    # host packs with the portable Torch reader (issue #4736).
-                    preferred_backend = (
-                        BACKEND.AWQ_TORCH
-                        if quant_device_type == "cpu"
-                        else BACKEND.AWQ_GEMV_FAST
+                    # The native GEMV_FAST extension is CUDA-only. A host
+                    # without it -- CPU only (#4736) or ROCm, where hipcc
+                    # rejects the extension (#5109) -- packs the identical
+                    # interleaved layout with the portable Torch reader and
+                    # keeps it as the in-session kernel.
+                    preferred_backend = awq_gemv_fast_pack_backend(
+                        device_type=quant_device_type, is_rocm=IS_ROCM
                     )
                 else:
                     raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")
@@ -2911,7 +2958,10 @@ class BaseQModel(nn.Module):
         if embed_quant_config is not None:
             if not isinstance(embed_quant_config, QuantizeEmbedConfig):
                 raise TypeError("`embed_quant_config` must be a `QuantizeEmbedConfig` or `QuantizeEmbed` instance.")
-            return embed_quant_config
+            # Re-validate: the caller may have mutated the instance after
+            # construction. A bad mode/`embed_only` must fail here, before the
+            # layer replay starts, not silently quantize nothing (#5124).
+            return embed_quant_config.validate()
         if embed_quant_mode is not None:
             if not isinstance(embed_quant_mode, QuantizeEmbed):
                 raise TypeError("`embed_quant_mode` must be a `QuantizeEmbed` instance.")
@@ -2942,26 +2992,35 @@ class BaseQModel(nn.Module):
         if embed_quant_config is None and norm is None:
             raise ValueError("`requantize()` requires `embed_quant_config`, `embed_quant_mode` or `norm`.")
 
-        if norm is not None:
-            from ..quantization.norm_tuning import validate_tuning_model
-
-            # Fail before embedding packing, dataset preparation or teacher loading.
-            # Loaded GPTQ-v1 checkpoints are fine: their runtime zeros are already v2.
-            if embed_quant_config is not None and resolve_quant_format(
+        # Fail before embedding packing, dataset preparation or teacher loading.
+        # Loaded GPTQ-v1 checkpoints are fine: their runtime zeros are already v2.
+        if (
+            norm is not None
+            and embed_quant_config is not None
+            and resolve_quant_format(
                 self.quantize_config.format, self.quantize_config.method
-            ) == FORMAT.GPTQ:
-                raise ValueError(
-                    "Norm tuning cannot be combined with GPTQ-v1 embedding requantization. "
-                    "Requantize embeddings separately, save the model, then reload with "
-                    "`backend=BACKEND.TORCH` and call `requantize(norm=...)`."
-                )
-            validate_tuning_model(self.model)
+            ) == FORMAT.GPTQ
+        ):
+            raise ValueError(
+                "Norm tuning cannot be combined with GPTQ-v1 embedding requantization. "
+                "Requantize embeddings separately, save the model, then reload with "
+                "`backend=BACKEND.TORCH` and call `requantize(norm=...)`."
+            )
 
         if self.load_quantized_model and self.turtle_model is None:
             # Resolve persistence before embedding packing or norm updates can
             # mutate the loaded model. Revalidate on each requantize() call.
             self._module_replacement_source = _QuantizedCheckpointSource(
                 str(self.model_local_path), checkpoint_file_name=getattr(self, "checkpoint_file_name", None)
+            )
+
+        norm_names = None
+        if norm is not None:
+            # The whole norm pre-flight: every rejection has to land before the
+            # embeddings are replaced, or the in-session model keeps a quantized
+            # embedding that no later requantize() accepts (#5118).
+            norm_names = self._validate_requantize_norm(
+                calibration=calibration, norm=norm, tokenizer=tokenizer
             )
 
         result = {}
@@ -2979,18 +3038,28 @@ class BaseQModel(nn.Module):
                 calibration=calibration,
                 norm=norm,
                 tokenizer=tokenizer,
+                names=norm_names,
             )
         return result
 
-    def _requantize_norm(
+    def _validate_requantize_norm(
         self,
         *,
         calibration: CalibrationConfig,
         norm: NormConfig,
         tokenizer: Optional[PreTrainedTokenizerBase],
-    ) -> Dict[str, Any]:
-        """Tune tagged norm parameters against an unquantized teacher; packed tensors stay untouched."""
-        from ..quantization.norm_tuning import tune_norm_params, validate_tuning_model
+    ) -> List[str]:
+        """Reject every invalid norm request before the model is mutated (#5118).
+
+        ``requantize(embed_quant_mode=..., norm=...)`` packs the embeddings
+        first. A rejected norm half (calibration flags, no matching norm
+        modules, a bad tokenizer, a mistyped teacher id) used to arrive after
+        that, leaving the input embedding replaced by a quantized module that
+        no later ``requantize()`` accepts. Resolve the teacher here too: a
+        path/id typo must fail before the embedding is touched.
+        """
+
+        from ..quantization.norm_tuning import validate_tuning_model
 
         validate_tuning_model(self.model)
         if calibration.dataset is None:
@@ -3010,11 +3079,43 @@ class BaseQModel(nn.Module):
                 "module_tree; norm tuning is unavailable."
             )
 
+        if tokenizer is not None and not isinstance(tokenizer, PreTrainedTokenizerBase):
+            raise ValueError(
+                f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`."
+            )
+
+        teacher = norm.teacher
+        if not isinstance(teacher, nn.Module):
+            # Resolve the config only: the weights are loaded by
+            # `_requantize_norm` after the embeddings, but a bad path/id has to
+            # fail here.
+            # Same resolution `_requantize_norm` uses: vendored config for a
+            # supported model_type, AutoConfig only for unsupported ones.
+            load_model_config(
+                teacher,
+                trust_remote_code=resolve_trust_remote_code(
+                    teacher, trust_remote_code=getattr(self, "trust_remote_code", False)
+                ),
+            )
+        return names
+
+    def _requantize_norm(
+        self,
+        *,
+        calibration: CalibrationConfig,
+        norm: NormConfig,
+        tokenizer: Optional[PreTrainedTokenizerBase],
+        names: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Tune tagged norm parameters against an unquantized teacher; packed tensors stay untouched."""
+        from ..quantization.norm_tuning import tune_norm_params
+
+        if names is None:
+            names = self._validate_requantize_norm(
+                calibration=calibration, norm=norm, tokenizer=tokenizer
+            )
+
         if tokenizer is not None:
-            if not isinstance(tokenizer, PreTrainedTokenizerBase):
-                raise ValueError(
-                    f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`."
-                )
             self.tokenizer = Tokenicer.load(
                 tokenizer,
                 trust_remote_code=self.trust_remote_code,
@@ -3057,6 +3158,83 @@ class BaseQModel(nn.Module):
             self._model_free_weight_only_replacements_only = True
         return stats
 
+    @staticmethod
+    def _embedding_endpoint_state(module) -> Tuple[Optional[torch.device], Optional[torch.dtype]]:
+        """The device and floating dtype a replaced embedding endpoint occupied."""
+
+        weight = getattr(module, "weight", None)
+        dtype = None
+        if isinstance(weight, torch.Tensor) and weight.is_floating_point():
+            dtype = weight.dtype
+        return get_device(module), dtype
+
+    def _snapshot_module_placement(self) -> Dict[str, torch.device]:
+        """Record the device of every leaf module that owns tensors."""
+
+        placement: Dict[str, torch.device] = {}
+        model = getattr(self, "model", None)
+        if model is None:
+            return placement
+        for name, module in model.named_modules():
+            if not name:
+                continue
+            owns_tensors = any(
+                True for _ in module.parameters(recurse=False)
+            ) or any(True for _ in module.buffers(recurse=False))
+            if not owns_tensors:
+                continue
+            placement[name] = get_device(module)
+        return placement
+
+    def _rehome_requantized_endpoints(
+        self,
+        endpoint_state: Dict[str, Tuple],
+        placement: Optional[Dict[str, torch.device]] = None,
+    ) -> None:
+        """Place requantized endpoints back on the device and dtype they replaced.
+
+        The looper packs on CPU and a quantized embedding's scales keep the
+        checkpoint dtype, so without this the in-session model cannot run a
+        forward and a BF16 checkpoint reloads with FP16 embeddings (#5116).
+        Layers the loop returned to CPU are also moved back to where they were.
+        """
+
+        if not endpoint_state and not placement:
+            return
+        live_model = getattr(self, "model", None)
+        if live_model is None:
+            return
+
+        model_dtype = getattr(live_model, "dtype", None)
+        if not isinstance(model_dtype, torch.dtype) or not model_dtype.is_floating_point:
+            model_dtype = None
+
+        # Restore the pre-run placement of the modules the loop offloaded. The
+        # endpoints are handled below with their dtype, so skip them here.
+        for name, device in (placement or {}).items():
+            if name in endpoint_state:
+                continue
+            if device is None or device.type == "meta":
+                continue
+            module = get_module(live_model, key=name)
+            if module is None:
+                continue
+            if get_device(module) != device:
+                safe_module_to(module, device)
+
+        for name, (device, dtype) in endpoint_state.items():
+            module = get_module(live_model, key=name)
+            if module is None:
+                continue
+            setter = getattr(module, "set_embedding_output_dtype", None)
+            target_dtype = dtype if dtype is not None else model_dtype
+            if callable(setter) and target_dtype is not None:
+                setter(target_dtype)
+            if device is None or device.type == "meta":
+                continue
+            if get_device(module) != device:
+                safe_module_to(module, device)
+
     def _requantize_embeddings(
         self,
         *,
@@ -3078,6 +3256,33 @@ class BaseQModel(nn.Module):
                 endpoint_device = CPU
             quantize_config.device = normalize_device(endpoint_device)
 
+        # A requantized endpoint is rebuilt on CPU during packing, and its
+        # scales keep the checkpoint dtype (FP16 for GPTQ). Record what each
+        # replaced endpoint occupied so it can be placed back afterwards; the
+        # first in-session forward otherwise fails on a device mismatch, and a
+        # BF16 model receives FP16 embeddings (#5116).
+        mode = embed_quant_config.embed_quant_mode
+        # The loop returns every processed layer to CPU (`post_quantize`), which
+        # is right for a fresh quantize but leaves a requantized *loaded* model
+        # unrunnable on the device it came from. Record the placement of the
+        # whole model so it can be restored after the run.
+        placement = self._snapshot_module_placement()
+        endpoint_state = {}
+        live_model = getattr(self, "model", None)
+        if live_model is not None:
+            if mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
+                input_name = self.get_input_embeddings_name()
+                if input_name:
+                    input_module = get_module(live_model, key=input_name)
+                    if input_module is not None:
+                        endpoint_state[input_name] = self._embedding_endpoint_state(input_module)
+            if mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH):
+                output_name = self.get_output_embeddings_name() or getattr(self, "lm_head", None)
+                if output_name:
+                    output_module = get_module(live_model, key=output_name)
+                    if output_module is not None:
+                        endpoint_state[output_name] = self._embedding_endpoint_state(output_module)
+
         result = self.quantize(
             calibration=calibration,
             tokenizer=tokenizer,
@@ -3086,12 +3291,13 @@ class BaseQModel(nn.Module):
             embed_quant_config=embed_quant_config,
         )
 
+        self._rehome_requantized_endpoints(endpoint_state, placement)
+
         # A loaded quantized model may contain inference-repacked or fused
         # modules that cannot safely be serialized as a complete checkpoint.
         # Preserve the source checkpoint and let the module-replacement writer
         # replace only the shards owned by the requested endpoints.
         prefixes = set(getattr(self, "_module_replacement_prefixes", set()))
-        mode = embed_quant_config.embed_quant_mode
         if mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
             input_name = self.get_input_embeddings_name()
             if input_name:
@@ -3770,12 +3976,21 @@ class BaseQModel(nn.Module):
         # construction. Inference tensors cannot receive a version counter, so
         # ``torch.inference_mode`` fails before model math on the TT PJRT path.
         # no_grad keeps autograd disabled without changing tensor semantics.
+        #
+        # The same constraint applies to an Accelerate CPU-offload hook: its
+        # per-forward ``Module._apply`` materializes parameters and buffers, and
+        # under ``torch.inference_mode`` those become inference tensors without
+        # a version counter. Dynamo reads version counters when it traces the
+        # forward that ``optimize()`` compiled, so the first compiled
+        # ``generate()`` crashed with "Inference tensors do not track version
+        # counter" (#5099). ``no_grad`` disables autograd without changing the
+        # moved tensors' semantics, so the offloaded layer keeps its counter.
+        # Models without an offload hook keep inference_mode.
         model_device = getattr(self.model, "device", torch.device("cpu"))
-        generate_context = (
-            torch.no_grad()
-            if getattr(model_device, "type", None) == "xla"
-            else torch.inference_mode()
-        )
+        if getattr(model_device, "type", None) == "xla" or has_cpu_offload_hooks(self.model):
+            generate_context = torch.no_grad()
+        else:
+            generate_context = torch.inference_mode()
         with generate_context:
             # fix hf generate not applying correct pad token
             pad_token_id = kwargs.get("pad_token_id", None)

@@ -96,6 +96,8 @@ def test_finalize_looks_up_only_the_module_being_packed(
     )
     processor = object.__new__(processor_cls)
     processor.lock = threading.Lock()
+    processor._results = {}
+    processor._results_lock = threading.Lock()
     processor.calculate_w_wq_diff = False
     processor.qcfg = config_cls(
         bits=4, group_size=128, sym=True, device="cpu", offload_to_disk=False
@@ -107,14 +109,21 @@ def test_finalize_looks_up_only_the_module_being_packed(
         processor._quant_linear_kernel = lambda dtype=None: (kernel, BACKEND.QQQ_TORCH)
 
     def check_pack_inputs(**kwargs: object) -> None:
-        replacement = tree.get_submodule(name)
+        packed = kwargs["qModules"][name]
         expected_type = TorchQuantEmbeddings if embedding else kernel
-        assert isinstance(replacement, expected_type)
-        assert replacement is not original
+        assert isinstance(packed, expected_type)
+        assert packed is not original
         assert kwargs["layers"] == {name: original}
-        assert kwargs["qModules"] == {name: replacement}
-        raise RuntimeError("packing boundary")
+        # Atomic publication (#5089): until packing returns, the model tree
+        # still holds the original float projection, so an interrupted pack
+        # cannot leave a kernel without its packed buffers installed.
+        assert tree.get_submodule(name) is original
+        return "module.pack"
 
     monkeypatch.setattr(implementation, "pack_module", check_pack_inputs)
-    with pytest.raises(RuntimeError, match="packing boundary"):
-        processor.submodule_finalize(module, model)
+    processor.submodule_finalize(module, model)
+
+    replacement = tree.get_submodule(name)
+    expected_type = TorchQuantEmbeddings if embedding else kernel
+    assert isinstance(replacement, expected_type)
+    assert replacement is not original

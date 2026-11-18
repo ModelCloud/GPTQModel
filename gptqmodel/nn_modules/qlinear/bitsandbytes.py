@@ -62,6 +62,14 @@ _CPU_INT8_DENSE_TILE_FEATURES = 512
 # bitsandbytes uses a separate small-M kernel for at most 16 rows; above that
 # the 2-D INT8 GEMM goes to cuBLASLt IMMA (#4746).
 _BNB_INT8_IMMA_MAX_ROWS = 16
+# The native fused INT8 epilogue indexes its single output buffer with 32-bit
+# arithmetic; a problem holding 2**31 elements or more answers with
+# ``Error invalid argument ... ops.cu``, which terminates the interpreter
+# instead of raising (#5097). Stay below that limit.
+_INT8_NATIVE_EPILOGUE_MAX_ELEMENTS = 2**31 - 1
+# Rows per FP32 epilogue chunk: bounds the transient scratch at roughly one
+# 2**26-element tile regardless of the output width.
+_INT8_EPILOGUE_CHUNK_ELEMENTS = 1 << 26
 
 
 def _is_bitsandbytes_available() -> bool:
@@ -342,6 +350,41 @@ def _int8_vectorwise_quant_fp32(
     scale = torch.where(scale == 0, torch.ones_like(scale), scale)
     codes = (x_fp32 / scale[:, None]).round().clamp(-127, 127).to(torch.int8)
     return codes, row_absmax, None
+
+
+def _int8_chunked_fp32_epilogue(
+    mm_out: torch.Tensor,
+    x_stats: torch.Tensor,
+    weight_scb: torch.Tensor,
+    *,
+    bias: Optional[torch.Tensor] = None,
+    out_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """Apply the INT8 row/column scales over bounded row chunks.
+
+    This is the FP32 epilogue already used for bias and non-FP16 activations:
+    scale the exact INT32 product first, add a bias before the single output
+    rounding, and never materialize more than one chunk of FP32 scratch. The
+    chunking only decides which rows are visited together, so every element
+    keeps the value the unchunked expression produces.
+    """
+
+    rows, cols = mm_out.shape
+    row_scale = x_stats.to(torch.float32).reshape(-1, 1)
+    col_scale = weight_scb.to(torch.float32).reshape(1, -1)
+    chunk_rows = max(1, _INT8_EPILOGUE_CHUNK_ELEMENTS // max(cols, 1))
+
+    out = torch.empty((rows, cols), dtype=out_dtype, device=mm_out.device)
+    for start in range(0, rows, chunk_rows):
+        end = min(start + chunk_rows, rows)
+        # Same operation order as the unchunked FP32 epilogue, so a chunked
+        # result is bitwise identical to the single-expression form.
+        chunk = mm_out[start:end].to(torch.float32) * row_scale[start:end]
+        chunk = chunk * col_scale / (127.0 * 127.0)
+        if bias is not None:
+            chunk = chunk + bias.to(torch.float32)
+        out[start:end] = chunk.to(out_dtype)
+    return out
 
 
 def _cpu_packed_max_rows(
@@ -1087,11 +1130,12 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
 
         x_int8 = x_int8.contiguous()
         mm_out = bnb.functional.int8_linear_matmul(x_int8, self.weight)
-        if x.dtype == torch.float16 and bias is None:
+        fits_native_epilogue = mm_out.numel() <= _INT8_NATIVE_EPILOGUE_MAX_ELEMENTS
+        if x.dtype == torch.float16 and bias is None and fits_native_epilogue:
             # The native fused epilogue is safe without a bias: there is no
             # later cancellation that could be destroyed by its FP16 rounding.
             out = bnb.functional.int8_mm_dequant(mm_out, x_stats, self.weight_scb)
-        else:
+        elif fits_native_epilogue:
             # ``int8_mm_dequant`` runs its epilogue in FP16, which rounds (or
             # overflows) the partial sum before a cancelling bias is added. Keep
             # the row/column scales and the bias in FP32 and round once.
@@ -1103,6 +1147,18 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
             )
             if bias is not None:
                 out = out + bias.to(torch.float32)
+        else:
+            # #5097: at 2**31 output elements and above the native epilogue
+            # fails with ``Error invalid argument`` from ops.cu, which exits the
+            # interpreter instead of raising. Apply the same FP32 epilogue, in
+            # row chunks, for every dtype and bias case at that size.
+            out = _int8_chunked_fp32_epilogue(
+                mm_out,
+                x_stats,
+                self.weight_scb,
+                bias=bias,
+                out_dtype=input_dtype,
+            )
         return out.reshape(x.shape[:-1] + (self.out_features,)).to(input_dtype)
 
 

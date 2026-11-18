@@ -22,7 +22,11 @@ from safetensors.torch import save_file
 from transformers import PreTrainedTokenizerFast, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
 
-from .._quant_methods import REFUSED_HF_QUANT_METHODS, refused_hf_load_remedy
+from .._quant_methods import (
+    FP8_EXPORT_QUANT_METHOD,
+    REFUSED_HF_QUANT_METHODS,
+    refused_hf_load_remedy,
+)
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
 from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
@@ -44,6 +48,7 @@ from ..quantization.config import (
     META_VALUE_URI,
     METHOD,
     MIN_VERSION_WITH_V2,
+    _fp8_layout_is_hf_readable,
     resolve_quant_format,
 )
 from ..utils.backend import BACKEND
@@ -76,7 +81,9 @@ from ..utils.model import (
     find_modules,
     get_model_files_size,
     get_module_by_name,
+    get_module_name,
     get_state_dict_for_save,
+    is_embeddings_module_quantized,
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
     resolve_resave_format_conversion,
@@ -373,6 +380,27 @@ def hf_compat_warnings(
             f"`quant_method: \"{GGUF_EXPORT_QUANT_METHOD}\"` so an HF loader "
             "refuses it instead of random-initializing every linear layer. Load "
             "it with `GPTQModel.load`."
+        )
+    if (
+        getattr(quantize_config, "method", None) == METHOD.FP8
+        and not _fp8_layout_is_hf_readable(quantize_config)
+    ):
+        scale_method = getattr(quantize_config, "weight_scale_method", None) or "row"
+        warnings.append(
+            "This FP8 checkpoint stores GPT-QModel's inverse weight scales "
+            f"(`weight_scale_method: \"{scale_method}\"`, "
+            "`weight_scale_semantics: \"inverse\"`). `transformers` registers "
+            "its own `fp8` loader (`FineGrainedFP8`), which reads a 2-D block "
+            "`weight_scale_inv` grid as a multiplier; GPT-QModel's layout "
+            "multiplies where it should divide, so plain transformers either "
+            "broadcasts the codes against the scale and fails with a shape "
+            "error or silently produces a NaN model. This applies to every "
+            "layout, including `block`. This checkpoint publishes "
+            f"`quant_method: \"{FP8_EXPORT_QUANT_METHOD}\"`, so "
+            "`AutoModelForCausalLM.from_pretrained` random-initializes every "
+            "linear layer unless `gptqmodel` is imported (which installs a "
+            "refusing quantizer). Load it with `GPTQModel.load`; MXFP8/NVFP8 "
+            "export is the planned portable replacement."
         )
     method = getattr(quantize_config, "method", None)
     method_name = getattr(method, "value", method)
@@ -2760,7 +2788,36 @@ def ModelWriter(cls):
             ignore_modules = [self.lm_head] + self.get_base_modules(model)
             external_inclusions = qcfg.external_module_inclusions()
 
+            # A checkpoint may quantize the input embedding and/or the output
+            # head through `dynamic` (requantize / quantize embed endpoints).
+            # The loader keeps those modules and `make_quant` swaps in a
+            # `TorchQuantEmbeddings`, but this shell only kept `lm_head` when
+            # `qcfg.lm_head` was set, so the re-saved checkpoint had no
+            # `embed_tokens.weight` / `lm_head.weight` for the dense endpoint
+            # and the reload raised (#5207). Detect them exactly like the
+            # loader does so both paths cannot drift.
+            try:
+                input_embeddings = model.get_input_embeddings()
+            except NotImplementedError:
+                input_embeddings = None
+            try:
+                output_embeddings = model.get_output_embeddings()
+            except NotImplementedError:
+                output_embeddings = None
+            input_embed_name = get_module_name(model, input_embeddings) if input_embeddings is not None else None
+            output_embed_name = get_module_name(model, output_embeddings) if output_embeddings is not None else None
+            input_embed_quantized, output_embed_quantized = is_embeddings_module_quantized(
+                model_dir=model_id_or_path,
+                input_embed_name=input_embed_name,
+                output_embed_name=output_embed_name,
+            )
+
             for name in list(modules.keys()):
+                if input_embed_quantized and name == input_embed_name:
+                    continue
+                if output_embed_quantized and name == output_embed_name:
+                    continue
+
                 # allow loading of quantized lm_head
                 if qcfg.lm_head and name == self.lm_head:
                     continue

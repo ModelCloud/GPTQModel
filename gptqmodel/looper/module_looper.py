@@ -396,6 +396,18 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
         self._dense_vram_strategy_explicit = bool(dense_strategy_devices) or self._dense_vram_strategy != VramStrategy.EXCLUSIVE
         self._moe_vram_strategy_explicit = bool(moe_strategy_devices) or self._moe_vram_strategy != VramStrategy.EXCLUSIVE
 
+        # Processors are built before the looper, so hand the resolved MoE pool
+        # to the ones that own per-device capture state. EXL3 keys a routed
+        # expert's shared Hessian accumulator by owner device; deriving that
+        # owner from the bare `qcfg.device` family let every data-parallel
+        # worker resolve "cuda" to its own current GPU (#5093).
+        for processor in self.processors:
+            bind_moe_quant_devices = getattr(
+                processor, "bind_moe_quant_devices", None
+            )
+            if callable(bind_moe_quant_devices):
+                bind_moe_quant_devices(self._moe_quant_devices)
+
         # Best-effort peer enablement once the dense/MoE pools are known.  The
         # pools can span devices that ``quant_devices`` does not contain (for
         # example ``device="cuda:0"`` with
@@ -1966,6 +1978,7 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
             release_processors=self._release_failed_run_processors,
             restore_deferred=self._finalize_deferred_runtime_weights,
             restore_inflight=self._restore_inflight_layer,
+            unwrap_hooked=self._unwrap_failed_run_hooked_linears,
             restore_offloaded=self._restore_offloaded_base_modules,
             materialize_unreached=self._materialize_unreached_meta_modules,
             rehome_kernels=lambda: rehome_failed_run_kernels(self.gptq_model),

@@ -30,13 +30,26 @@ def _qcfg(**kwargs):
     return SimpleNamespace(**kwargs)
 
 
-def test_rocm_device_enum_resolves_to_the_runtime_device():
+def test_rocm_device_enum_resolves_to_the_runtime_device(monkeypatch):
+    # No visible accelerator: nothing to expand, so the family spelling is
+    # preserved. A run cannot capture a Hessian here anyway (#5093).
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
     assert routed_expert_owner_devices(
         _qcfg(device=DEVICE.ROCM, moe_vram_strategy_devices=None)
     ) == [torch.device("cuda")]
 
 
-def test_rocm_pool_entries_resolve_without_raising():
+def test_bare_family_expands_to_every_visible_ordinal(monkeypatch):
+    """An index-less owner would be resolved per data-parallel worker (#5093)."""
+
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    assert routed_expert_owner_devices(
+        _qcfg(device=DEVICE.ROCM, moe_vram_strategy_devices=None)
+    ) == [torch.device("cuda:0"), torch.device("cuda:1")]
+
+
+def test_rocm_pool_entries_resolve_without_raising(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
     devices = routed_expert_owner_devices(
         _qcfg(device=DEVICE.ROCM, moe_vram_strategy_devices=[DEVICE.ROCM, "cpu"])
     )

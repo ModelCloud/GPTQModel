@@ -160,10 +160,10 @@ __global__ void reduce_splitk_fp32_to_output_kernel(
     const float* __restrict__ partials,
     output_t* __restrict__ out,
     int split_k_iters,
-    int total_elements)
+    int64_t total_elements)
 {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  int stride = blockDim.x * gridDim.x;
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
 
   for (; idx < total_elements; idx += stride)
   {
@@ -182,10 +182,11 @@ torch::Tensor fused_reduce_splitk_fp32_to_output(torch::Tensor out_feats_tensor,
 {
   auto options = torch::TensorOptions().dtype(output_dtype).device(out_feats_tensor.device());
   at::Tensor result = torch::empty({out_feats_tensor.size(1), out_feats_tensor.size(2)}, options);
-  const int total_elements = static_cast<int>(result.numel());
+  const int64_t total_elements = result.numel();
   const int split_k_iters = static_cast<int>(out_feats_tensor.size(0));
   const int threads = 256;
-  const int blocks = std::max(1, std::min((total_elements + threads - 1) / threads, 4096));
+  const int64_t wanted_blocks = (total_elements + threads - 1) / threads;
+  const int blocks = static_cast<int>(std::max<int64_t>(1, std::min<int64_t>(wanted_blocks, 4096)));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   auto partials = reinterpret_cast<const float*>(out_feats_tensor.data_ptr<float>());
@@ -263,7 +264,7 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
   // bool wb_C_flag = (threadIdx.x / 4) < M;
 
   scalar_t* A_ptr = A 
-                + (((int)blockIdx_y) / j_factors1 * 16 + (((int)threadIdx.y) * row_stride_warp) + ((int)threadIdx.x) / (32 / 8)) * IC
+                + static_cast<int64_t>((((int)blockIdx_y) / j_factors1 * 16 + (((int)threadIdx.y) * row_stride_warp) + ((int)threadIdx.x) / (32 / 8))) * IC
                 + (((int)threadIdx.x) % (32 / 8)) * 8;
   
   int* B_ptr = B
@@ -393,7 +394,7 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
       int row_offset = (((int)blockIdx_y) / j_factors1) * 16 + ((int)threadIdx.x) / 4 + (local_id % 4) / 2 * 8;
       if (row_offset < M)
       {
-        store_accum_value(C_ptr + ax1_0_1 * 16 + row_offset * OC + (local_id / 4) * 8 + local_id % 2, C_warp[(ax1_0_1 * 8) + local_id]);
+        store_accum_value(C_ptr + ax1_0_1 * 16 + static_cast<int64_t>(row_offset) * OC + (local_id / 4) * 8 + local_id % 2, C_warp[(ax1_0_1 * 8) + local_id]);
       }
     }
   }
@@ -427,7 +428,7 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n64k32(int G, in
   bool ld_A_flag = (blockIdx_y / j_factors1 * 16 + threadIdx.y * row_stride_warp + threadIdx.x * 8 / 32) < M;
 
   scalar_t* A_ptr = A
-                + (((int)blockIdx_y) / j_factors1 * 16 + (((int)threadIdx.y) * row_stride_warp) + ((int)threadIdx.x) / (32 / 8)) * IC
+                + static_cast<int64_t>((((int)blockIdx_y) / j_factors1 * 16 + (((int)threadIdx.y) * row_stride_warp) + ((int)threadIdx.x) / (32 / 8))) * IC
                 + (((int)threadIdx.x) % (32 / 8)) * 8;
 
   int* B_ptr = B
@@ -533,7 +534,7 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n64k32(int G, in
       int row_offset = (((int)blockIdx_y) / j_factors1) * 16 + ((int)threadIdx.x) / 4 + (local_id % 4) / 2 * 8;
       if (row_offset < M)
       {
-        store_accum_value(C_ptr + ax1_0_1 * 16 + row_offset * OC + (local_id / 4) * 8 + local_id % 2, C_warp[(ax1_0_1 * 8) + local_id]);
+        store_accum_value(C_ptr + ax1_0_1 * 16 + static_cast<int64_t>(row_offset) * OC + (local_id / 4) * 8 + local_id % 2, C_warp[(ax1_0_1 * 8) + local_id]);
       }
     }
   }
@@ -578,7 +579,7 @@ __global__ void __launch_bounds__(128) gemmv2_forward_4bit_cuda_m128n64k32(int s
   // bool wb_C_flag = (threadIdx.x / 4) < M;
 
   half* A_ptr = A 
-                + (((int)blockIdx_y) / j_factors1 * 128 + (((int)threadIdx.y) * row_stride_warp) + ((int)threadIdx.x) / (32 / 8)) * IC
+                + static_cast<int64_t>((((int)blockIdx_y) / j_factors1 * 128 + (((int)threadIdx.y) * row_stride_warp) + ((int)threadIdx.x) / (32 / 8))) * IC
                 + (((int)threadIdx.x) % (32 / 8)) * 8;
   
   int* B_ptr = B
@@ -777,7 +778,7 @@ __global__ void __launch_bounds__(128) gemmv2_forward_4bit_cuda_m128n64k32(int s
         int row_offset = (((int)blockIdx_y) / j_factors1) * 128 + (threadIdx.y % 2) * 64 + ax0_0_2 * 16 + (local_id % 4) / 2 * 8 + ((int)threadIdx.x) / 4;
         if (row_offset < M)
         {
-          *(C_ptr + ax1_0 * 16 + row_offset * OC + (local_id / 4) * 8 + local_id % 2) = __float2half(C_warp[(ax0_0_2 * 16) + (ax1_0 * 8) + local_id]);
+          *(C_ptr + ax1_0 * 16 + static_cast<int64_t>(row_offset) * OC + (local_id / 4) * 8 + local_id % 2) = __float2half(C_warp[(ax0_0_2 * 16) + (ax1_0 * 8) + local_id]);
         }
       }
     }
@@ -1081,7 +1082,7 @@ __global__ void __launch_bounds__(64) group_gemm_forward_4bit_cuda_m16nXk32(
         if (topk_weights) {
             value = value * topk_weights[token_id];
         }
-        *(C_ptr + ax1_0_1 * 16 + token_id * OC + (local_id / 4) * 8 + local_id % 2) = __float2half(value);
+        *(C_ptr + ax1_0_1 * 16 + static_cast<int64_t>(token_id) * OC + (local_id / 4) * 8 + local_id % 2) = __float2half(value);
       }
     }
   }

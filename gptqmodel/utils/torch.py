@@ -347,11 +347,13 @@ def _is_compiler_failure(exc: BaseException, *, fullgraph: bool = False) -> bool
     without ``fullgraph``: ``fullgraph=True`` is an explicit single-graph
     contract and must still fail closed.
 
-    The remaining fallback is deliberately narrow: only a ``RuntimeError``
-    raised inside PyTorch's compiler packages, or dynamo's guard-check
-    ``AssertionError`` (``Guard failed on the same frame it was created ...
-    GLOBAL_STATE changed``) which fires when another thread changes a
-    process-global setting, such as ``torch.set_default_dtype``, during a
+    The remaining fallback is deliberately narrow: a ``RuntimeError`` raised
+    inside PyTorch's compiler packages, a ``LookupError`` raised there (dynamo's
+    guard bookkeeping raises ``KeyError`` from ``get_guard_fail_reason`` when a
+    concurrent compile invalidates its state, issue #5127), or dynamo's
+    guard-check ``AssertionError`` (``Guard failed on the same frame it was
+    created ... GLOBAL_STATE changed``) which fires when another thread changes
+    a process-global setting, such as ``torch.set_default_dtype``, during a
     concurrent first compile (issue #4094). Everything else belongs to the
     traced user code; retrying eagerly would run that code twice and hide the
     original error. The innermost frame is what matters: user code raising the
@@ -381,9 +383,11 @@ def _is_compiler_failure(exc: BaseException, *, fullgraph: bool = False) -> bool
         for token in ("/torch/_dynamo/", "/torch/_inductor/", "/torch/_functorch/")
     ):
         return False
-    if isinstance(exc, RuntimeError):
+    if isinstance(exc, (RuntimeError, LookupError)):
         # Inductor compile workers raise RuntimeError outside the traced frame
-        # (for example ``Attempting to use a closed pool``).
+        # (for example ``Attempting to use a closed pool``), and dynamo's guard
+        # bookkeeping raises KeyError from ``get_guard_fail_reason`` when a
+        # concurrent compile changed the process-global state (#5127).
         return True
     return isinstance(exc, AssertionError) and "Guard failed on the same frame it was created" in str(exc)
 
@@ -425,22 +429,106 @@ def _warn_compile_fallback(label: str, exc: BaseException) -> None:
     )
 
 
+def _dynamo_config():
+    """Return ``torch._dynamo.config`` without importing dynamo, or ``None``.
+
+    Importing dynamo only to read one flag would force its side effects on a
+    process that never compiled anything. ``torch_compile`` imports it
+    (``configure_dynamo_cache(ensure_import=True)``) before a wrapper exists, so
+    it is already present whenever this runs in practice.
+    """
+    dynamo = sys.modules.get("torch._dynamo")
+    return getattr(dynamo, "config", None)
+
+
+def _call_with_dynamo_suppression(compiled: Callable, fullgraph: bool, args: tuple, kwargs: dict):
+    """Invoke ``compiled`` with dynamo allowed to fall back for the failing frame.
+
+    ``fullgraph=True`` is an explicit single-graph contract and stays
+    fail-closed, so suppression is not enabled for it. The previous flag value
+    is restored in a ``finally`` block: this is a per-call behaviour switch, not
+    a process setting, and a concurrent compile in another thread must not see
+    it (a GLOBAL_STATE guard failure from that race is issue #4094).
+    """
+    if fullgraph:
+        return compiled(*args, **kwargs)
+    config = _dynamo_config()
+    if config is None:
+        return compiled(*args, **kwargs)
+    previous = getattr(config, "suppress_errors", False)
+    config.suppress_errors = True
+    try:
+        return compiled(*args, **kwargs)
+    finally:
+        config.suppress_errors = previous
+
+
+def model_global_state_lock():
+    """Return the process-wide lock guarding torch's global default dtype.
+
+    transformers' ``from_pretrained``/``from_config`` saves, sets and restores
+    ``torch.set_default_dtype``; dynamo's ``preserve_global_state`` does the
+    same around every trace. The loader serializes model construction with
+    this re-entrant lock, so the lazy first compile must take it too: otherwise
+    a compile that starts inside a load's bf16 window restores bf16 after the
+    load restored fp32 (or trips ``assert_loaded_model_state``). Look the lock
+    up through the loader accessor so tests and callers share one object.
+    """
+    from ..models.loader import model_load_lock
+
+    return model_load_lock()
+
+
 def _install_callable_compile_fallback(original: Callable, compiled: Callable, fullgraph: bool) -> Callable:
-    """Return a callable that retries ``original`` eagerly after a compile failure."""
+    """Return a callable that degrades to eager after a compile failure.
+
+    The failure is never retried by re-running ``original`` from the start. With
+    ``fullgraph=False`` dynamo executes the forward as compiled fragments plus
+    resume frames, so a compiler failure can arrive after earlier frames already
+    mutated state (the KV cache in ``generate()``, Mamba/SSM state, offload
+    hooks). Re-running there applies those side effects twice -- the first
+    ``generate()`` after ``optimize()`` appended every KV entry a second time and
+    died on the mask length (#5119).
+
+    ``torch._dynamo.config.suppress_errors`` makes dynamo skip only the failing
+    frame and run that frame eagerly, which executes nothing twice. The flag is
+    scoped to this call and restored afterwards; the skip dynamo installs is
+    sticky, so later calls stay eager without it. For ``fullgraph=True`` nothing
+    has executed yet when the compiler fails, so the eager retry is exact.
+    """
     label = _compile_label(original)
-    state = {"fallback": False}
+    state = {"fallback": False, "compiled": False}
 
     def call(*args, **kwargs):
         if state["fallback"]:
             return original(*args, **kwargs)
-        try:
-            return compiled(*args, **kwargs)
-        except Exception as exc:
-            if not _is_compiler_failure(exc, fullgraph=fullgraph):
-                raise
-            state["fallback"] = True
-            _warn_compile_fallback(label, exc)
-            return original(*args, **kwargs)
+
+        def run_compiled():
+            try:
+                return _call_with_dynamo_suppression(
+                    compiled, fullgraph, args, kwargs
+                )
+            except Exception as exc:
+                if not _is_compiler_failure(exc, fullgraph=fullgraph):
+                    raise
+                state["fallback"] = True
+                _warn_compile_fallback(label, exc)
+                return original(*args, **kwargs)
+
+        if state["compiled"]:
+            return run_compiled()
+        # Dynamo saves/restores the process-global default dtype while it
+        # traces, exactly like model construction. Hold the loader's lock only
+        # for the first (compiling) call; steady-state calls stay lock-free.
+        with model_global_state_lock():
+            if state["fallback"]:
+                return original(*args, **kwargs)
+            if state["compiled"]:
+                return run_compiled()
+            result = run_compiled()
+            if not state["fallback"]:
+                state["compiled"] = True
+            return result
 
     functools.update_wrapper(call, original)
     # Keep the dynamo wrapper chain truthful: this proxy really does forward to
@@ -475,19 +563,37 @@ def _install_module_compile_fallback(module: torch.nn.Module, compiled, fullgrap
         return module
     label = _compile_label(module)
     compiled_forward = compiled.forward
-    state = {"fallback": False}
+    state = {"fallback": False, "compiled": False}
 
     def forward(*args, **kwargs):
         if state["fallback"]:
             return module(*args, **kwargs)
-        try:
-            return compiled_forward(*args, **kwargs)
-        except Exception as exc:
-            if not _is_compiler_failure(exc, fullgraph=fullgraph):
-                raise
-            state["fallback"] = True
-            _warn_compile_fallback(label, exc)
-            return module(*args, **kwargs)
+
+        def run_compiled():
+            try:
+                return _call_with_dynamo_suppression(
+                    compiled_forward, fullgraph, args, kwargs
+                )
+            except Exception as exc:
+                if not _is_compiler_failure(exc, fullgraph=fullgraph):
+                    raise
+                state["fallback"] = True
+                _warn_compile_fallback(label, exc)
+                return module(*args, **kwargs)
+
+        if state["compiled"]:
+            return run_compiled()
+        # The first model forward is where dynamo traces and mutates the
+        # process-global default dtype; serialize it with model construction.
+        with model_global_state_lock():
+            if state["fallback"]:
+                return module(*args, **kwargs)
+            if state["compiled"]:
+                return run_compiled()
+            result = run_compiled()
+            if not state["fallback"]:
+                state["compiled"] = True
+            return result
 
     compiled.forward = forward
     return compiled
@@ -644,6 +750,189 @@ def accelerator_context_claimed(device_type: str, index: Optional[int] = None) -
         return bool(is_initialized())
     except Exception:  # pragma: no cover - runtime edge cases
         return True
+
+
+_ACCELERATOR_DEVICE_TYPES = frozenset({"cuda", "xpu", "npu", "mps"})
+_DEFUSER_CONVERSION_LOCK = threading.RLock()
+
+
+def model_accelerator_devices(model) -> List[str]:
+    """Concrete accelerator ordinals that already hold model parameters or buffers.
+
+    Placement is read from the tensors rather than inferred from a selector: a
+    fused-expert model is converted while it still lives on CPU/meta, and a
+    model converted after placement keeps its real ordinals.
+    """
+
+    devices: List[str] = []
+    seen = set()
+    for source in (getattr(model, "parameters", None), getattr(model, "buffers", None)):
+        if not callable(source):
+            continue
+        for tensor in source():
+            device = getattr(tensor, "device", None)
+            if device is None or device.type not in _ACCELERATOR_DEVICE_TYPES:
+                continue
+            name = str(device)
+            if name in seen:
+                continue
+            seen.add(name)
+            devices.append(name)
+    return devices
+
+
+def _first_accelerator_tensor_device(value) -> Optional[torch.device]:
+    """The first accelerator tensor device in ``value`` (one nesting level)."""
+
+    if isinstance(value, torch.Tensor):
+        device = value.device
+        return device if device.type in _ACCELERATOR_DEVICE_TYPES else None
+    if isinstance(value, dict):
+        values = value.values()
+    elif isinstance(value, (list, tuple)):
+        values = value
+    else:
+        return None
+    for item in values:
+        device = _first_accelerator_tensor_device(item)
+        if device is not None:
+            return device
+    return None
+
+
+def _module_accelerator_device(module) -> Optional[torch.device]:
+    """The first accelerator device held by ``module``'s parameters or buffers."""
+
+    for source in (getattr(module, "parameters", None), getattr(module, "buffers", None)):
+        if not callable(source):
+            continue
+        for tensor in source():
+            device = getattr(tensor, "device", None)
+            if device is not None and device.type in _ACCELERATOR_DEVICE_TYPES:
+                return device
+    return None
+
+
+def model_execution_device(model, *inputs) -> Optional[torch.device]:
+    """The accelerator device a model call executes on, or ``None`` for CPU.
+
+    A multi-device map is not pinned to one GPU: the first accelerator input
+    wins, then the input embedding, then the first accelerator parameter or
+    buffer. The inputs are the call's positional values (nested tuples, lists
+    and dicts are inspected one level deep), so a device map's first stage is
+    used for that stage's call.
+    """
+
+    for value in inputs:
+        device = _first_accelerator_tensor_device(value)
+        if device is not None:
+            return device
+
+    embedding = None
+    try:
+        get_input_embeddings = getattr(model, "get_input_embeddings", None)
+        if callable(get_input_embeddings):
+            embedding = get_input_embeddings()
+    except Exception:  # pragma: no cover - exotic module trees
+        embedding = None
+    for candidate in (embedding, model):
+        if candidate is None:
+            continue
+        device = _module_accelerator_device(candidate)
+        if device is not None:
+            return device
+    return None
+
+
+@contextmanager
+def model_execution_device_scope(model, *inputs):
+    """Enter the device a compiled model call executes on, then restore the caller's.
+
+    Inductor initializes its lazy graph patterns from the traced frame's input
+    device (``torch/_inductor/fx_passes/joint_graph.py::joint_graph_passes`` ->
+    ``lazy_init`` -> ``fuse_attention._sfdp_init``). A quantized-kernel graph
+    break can leave that frame without a device-bearing input, and
+    ``_get_sfdp_patterns`` then falls back to ``"cuda"`` -- the *current*
+    device. A compiled model loaded on ``cuda:1`` therefore claimed the primary
+    context of ``cuda:0`` when a later shape recompiled (#5101).
+
+    Entering the model's execution device for the compiled call makes those
+    device-less defaults resolve to the GPU that holds the model. Only the
+    current device changes; tensor placement is untouched. The previous current
+    device is restored on exit, including when the call raises. A CPU model, or
+    a model with no accelerator tensor, runs the call unchanged.
+    """
+
+    device = model_execution_device(model, *inputs)
+    if device is None or device.type not in _ACCELERATOR_DEVICE_TYPES:
+        yield
+        return
+
+    if device.type == "cuda":
+        # Also the ROCm spelling: HIP exposes the CUDA device namespace.
+        with torch.cuda.device(device):
+            yield
+        return
+
+    runtime = getattr(torch, device.type, None)
+    device_context = getattr(runtime, "device", None)
+    if callable(device_context):
+        with device_context(device):
+            yield
+        return
+    yield
+
+
+@contextmanager
+def defuser_conversion_scope(model):
+    """Bound Defuser's ``clear_memory()`` to the devices the model occupies.
+
+    Defuser's fused-expert conversion calls ``clear_memory()`` without a device
+    list, and that helper synchronizes the *current* CUDA device. Converting a
+    CPU/meta model therefore initializes the primary context of cuda:0 --
+    hundreds of MiB on a GPU the caller excluded with ``device=("cuda:1",)`` or
+    with a CPU-only load (#5105). The pinned Defuser API accepts no device
+    argument, so scope the module-level reference it calls for the duration of
+    the conversion:
+
+    * a model that already holds accelerator tensors synchronizes exactly those
+      ordinals, preserving the barrier its own data needs;
+    * a CPU/meta model passes a CPU-only list, so no accelerator is claimed.
+      ``torch.cuda.empty_cache()`` still runs and does not create a context.
+
+    Defuser also synchronizes XPU unconditionally; that remains outside this
+    scope because the pinned API exposes no per-device hook for it.
+    """
+
+    if not torch.cuda.is_available():
+        # Defuser's CUDA branch is skipped entirely without a CUDA runtime.
+        yield
+        return
+
+    device_list = model_accelerator_devices(model) or ["cpu"]
+
+    try:
+        from defuser.modeling import moe_experts_interface as defuser_moe
+    except Exception:  # pragma: no cover - optional dependency layout
+        yield
+        return
+
+    original = getattr(defuser_moe, "clear_memory", None)
+    if not callable(original):
+        yield
+        return
+
+    def _scoped_clear_memory(*args, **kwargs):
+        if len(args) < 2 and "device_list" not in kwargs:
+            kwargs["device_list"] = device_list
+        return original(*args, **kwargs)
+
+    with _DEFUSER_CONVERSION_LOCK:
+        defuser_moe.clear_memory = _scoped_clear_memory
+        try:
+            yield
+        finally:
+            defuser_moe.clear_memory = original
 
 
 def torch_sync(device: torch.device = None):

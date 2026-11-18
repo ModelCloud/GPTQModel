@@ -144,12 +144,53 @@ HESSIAN_OWNER_WEIGHTED_ROUND_ROBIN = (
 log = setup_logger()
 
 
-def routed_expert_owner_devices(qcfg) -> list[torch.device]:
+def _expand_family_owner_devices(
+    devices: list[torch.device],
+) -> list[torch.device]:
+    """Give every index-less runtime family a concrete ordinal (#5093).
+
+    A Hessian accumulator is shared by the data-parallel forward workers and
+    keyed by device, so an index-less ``torch.device("cuda")`` cannot name an
+    owner: ``Tensor.to("cuda")`` resolves to the calling worker's current
+    device while the accumulator key stays ``"cuda"``, and the second worker's
+    partial is then added to a tensor living on another device.
+
+    Expanding a bare family to the visible ordinals of the active runtime makes
+    ownership deterministic. ``torch.cuda.device_count`` is safe to call from
+    workers (see ``pytorch_gil_0_compat.md``) and already reflects the
+    process's visibility settings, so the ordinals are the ones the looper's
+    device pool uses. CPU and already-indexed entries are preserved.
+    """
+
+    expanded: list[torch.device] = []
+    for device in devices:
+        if device.index is None and device.type == "cuda":
+            count = torch.cuda.device_count()
+            candidates = (
+                [torch.device(device.type, index) for index in range(count)]
+                if count > 0
+                else [device]
+            )
+        else:
+            candidates = [device]
+        for candidate in candidates:
+            if candidate not in expanded:
+                expanded.append(candidate)
+    return expanded
+
+
+def routed_expert_owner_devices(qcfg, pool=None) -> list[torch.device]:
     """Devices a routed expert's Hessian may be owned by.
 
     ``DEVICE.ROCM`` has the value ``"rocm"``, which ``torch.device`` rejects, so
     every configured entry goes through ``as_torch_device`` (#4667). Dense
     modules never reach this path, which is why EXL3 worked on ROCm for them.
+
+    ``pool`` is the looper's resolved MoE quantization pool
+    (``ModuleLooper._moe_quant_devices`` after ``compute_device_filter``).
+    Prefer it over re-deriving the devices from the config: the pool is
+    already concrete and filtered to what this run may use. Otherwise a bare
+    ``qcfg.device`` family is expanded to its visible ordinals (#5093).
     """
 
     devices = [
@@ -157,9 +198,15 @@ def routed_expert_owner_devices(qcfg) -> list[torch.device]:
         for device in (getattr(qcfg, "moe_vram_strategy_devices", None) or [])
     ]
     if devices:
-        return devices
+        return _expand_family_owner_devices(devices)
+    if pool:
+        return _expand_family_owner_devices(
+            [torch.device(device) for device in pool]
+        )
     configured = getattr(qcfg, "device", None)
-    return [as_torch_device(configured)] if configured is not None else []
+    if configured is None:
+        return []
+    return _expand_family_owner_devices([as_torch_device(configured)])
 
 
 _EXL3_SIGMA_REG = 0.025
@@ -884,6 +931,10 @@ class EXL3Processor(SharedInputCaptureProcessor):
         self._hessian_family_owners: dict[
             tuple[str, int, int], tuple[str, GPTQ]
         ] = {}
+        # The looper's resolved MoE quantization pool; bound after the looper
+        # computes it. Routed-expert Hessian ownership prefers it so capture
+        # stays on devices `compute_device_filter` allowed (#5093).
+        self.moe_quant_devices: list[torch.device] | None = None
         self._pending_hessian_family_aliases: dict[
             tuple[str, int, int], list[tuple[str, GPTQ]]
         ] = {}
@@ -2310,7 +2361,9 @@ class EXL3Processor(SharedInputCaptureProcessor):
         identity = self._routed_expert_identity(module.full_name)
         capture_contract = None
         if identity is not None:
-            devices = routed_expert_owner_devices(self.qcfg)
+            devices = routed_expert_owner_devices(
+                self.qcfg, getattr(self, "moe_quant_devices", None)
+            )
             owner_policy = (
                 self.qcfg.meta.get(HESSIAN_OWNER_POLICY_META)
                 if isinstance(self.qcfg.meta, dict)
@@ -2384,6 +2437,11 @@ class EXL3Processor(SharedInputCaptureProcessor):
         """Reports whether preprocessing omitted this module from EXL3 work."""
 
         return self.tasks.get(module.name, False) is False
+
+    def bind_moe_quant_devices(self, devices) -> None:
+        """Record the looper's resolved routed-expert quantization pool (#5093)."""
+
+        self.moe_quant_devices = [torch.device(device) for device in devices]
 
     def has_captured_input_ids(self, name: str) -> bool:
         """Report live or lazily restored calibration coverage."""

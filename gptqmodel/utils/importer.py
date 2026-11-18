@@ -1500,26 +1500,33 @@ def _auto_select_priority(cls: Type[BaseQuantLinear], fmt: FORMAT, dtype) -> int
     return formats.get(fmt, 0)
 
 
-def _portable_cpu_fallback(quant_method: METHOD, fmt: FORMAT):
-    """Return the declared explicit-only CPU reader for one layout, if any.
+def _portable_fallback(quant_method: METHOD, fmt: FORMAT, families):
+    """Return the declared explicit-only reader for one layout and target, if any.
 
-    Some checkpoint layouts have no AUTO-eligible CPU kernel: the accelerator
-    kernel is CUDA-only and the portable reader is priority 0 so it cannot
-    change accelerator AUTO order. When AUTO resolves nothing for a CPU-only
-    target, the ``PORTABLE_CPU_FALLBACK`` kernel keeps loading and in-session
-    inference possible instead of raising ``No valid quant linear`` (issue
-    #4554).
+    Some checkpoint layouts have no AUTO-eligible kernel for a device family:
+    the native kernel is CUDA-only and the portable reader is priority 0 so it
+    cannot change AUTO order. When AUTO resolves nothing for those target
+    families, the ``PORTABLE_FALLBACK`` kernel keeps loading and in-session
+    inference possible instead of raising ``No valid quant linear`` (issues
+    #4554 and #5109).
+
+    ``families`` is the set of device families the target resolves to; a
+    reader is eligible only when it declares every one of them, so a CPU-only
+    reader never serves a ROCm placement.
     """
 
     for cls in iter_quant_linear_kernels():
-        if not getattr(cls, "PORTABLE_CPU_FALLBACK", False):
+        # ``PORTABLE_CPU_FALLBACK`` is the pre-#5109 spelling, kept because the
+        # GEMV reader still only serves CPU targets.
+        if not (getattr(cls, "PORTABLE_FALLBACK", False)
+                or getattr(cls, "PORTABLE_CPU_FALLBACK", False)):
             continue
         if quant_method not in (cls.SUPPORTS_METHODS or ()):
             continue
         if fmt not in (cls.SUPPORTS_FORMATS or {}):
             continue
-        devices = cls.SUPPORTS_DEVICES or ()
-        if DEVICE.ALL not in devices and DEVICE.CPU not in devices:
+        devices = set(cls.SUPPORTS_DEVICES or ())
+        if DEVICE.ALL not in devices and not families.issubset(devices):
             continue
         return cls
     return None
@@ -1768,8 +1775,8 @@ def select_quant_linear(
                 )
                 return auto_inference_only_fallback
             portable = (
-                _portable_cpu_fallback(quant_method, format)
-                if selector_families == {DEVICE.CPU}
+                _portable_fallback(quant_method, format, selector_families)
+                if selector_families
                 else None
             )
             if portable is not None:
@@ -1786,7 +1793,7 @@ def select_quant_linear(
                 )
                 if portable_ok:
                     log.info(
-                        f"Kernel: AUTO has no CPU kernel for `{format}`; "
+                        f"Kernel: AUTO has no kernel for `{format}` on `{sorted(f.value for f in selector_families)}`; "
                         f"selected portable fallback `{portable.__name__}`."
                     )
                     return [portable] if multi_select else portable

@@ -15,7 +15,9 @@ contract in ``docs/cancelled-run-contract.md``:
   or inference tensors left behind;
 * live disk shells keep their backing until release;
 * a secondary repair failure is recorded but never replaces the primary error;
-* a successful run publishes only after the restore.
+* a successful run publishes only after the restore;
+* a fault inside packing leaves the float projection installed, so the model
+  stays runnable instead of holding a kernel without packed buffers (#5089).
 
 The file is new rather than extending ``tests/test_cancelled_quantize_*``
 because those files pin one looper each; this fixture is the shared
@@ -28,6 +30,7 @@ values into it must not publish ``torch.empty`` weights.
 
 from __future__ import annotations
 
+import importlib
 import time
 from pathlib import Path
 from typing import List
@@ -53,6 +56,7 @@ INTERMEDIATE_SIZE = 64
 NUM_LAYERS = 3
 GROUP_SIZE = 32
 MID_RUN_FAULT = "injected next-layer failure"
+PACK_FAULT = "injected packing failure"
 FINAL_RESTORE_FAULT = "injected final-restore failure"
 SECONDARY_FAULT = "injected secondary repair failure"
 
@@ -226,6 +230,55 @@ def _lingering_hooks(model: torch.nn.Module) -> List[str]:
         if getattr(module, "forward_hook", None) is not None
         or getattr(module, "forward_hook_last", False)
     ]
+
+
+PACKED_BUFFERS = ("qweight", "qzeros", "scales", "g_idx")
+
+
+def _unpacked_quant_modules(model: GPTQModel) -> List[str]:
+    """Installed quant kernels that never received their packed buffers."""
+
+    broken: List[str] = []
+    for name, module in model.model.named_modules():
+        if not hasattr(module, "QUANT_TYPE"):
+            continue
+        missing = [buffer for buffer in PACKED_BUFFERS if not hasattr(module, buffer)]
+        if missing:
+            broken.append(f"{name} ({type(module).__name__}): {missing}")
+    return broken
+
+
+def _inject_pack_fault(looper: str, monkeypatch, *, pack_call: int = 1) -> List[str]:
+    """Raise once inside a ``pack_module`` call, as a Ctrl-C would.
+
+    Before #5089 finalization installed the empty kernel first and packed it
+    afterwards, so the fault left a kernel without ``qweight``/``qzeros``/
+    ``scales``/``g_idx`` in the model and every later forward raised
+    ``AttributeError``. The injection point is identical either way, so the
+    test fails for the intended reason on the parent commit.
+
+    The default targets the first module of the run, which is the position the
+    report's deterministic repro interrupts at (inside layer 0's first pack).
+    """
+
+    module_name = (
+        "gptqmodel.looper.gptq_processor" if looper == "gptq"
+        else "gptqmodel.looper.weight_only_processor"
+    )
+    module = importlib.import_module(module_name)
+    original = module.pack_module
+    faults: List[str] = []
+    calls = {"n": 0}
+
+    def boom(name, *args, **kwargs):
+        calls["n"] += 1
+        if not faults and calls["n"] == pack_call:
+            faults.append(name)
+            raise KeyboardInterrupt(PACK_FAULT)
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(module, "pack_module", boom)
+    return faults
 
 
 def _assert_grad_forward(model: GPTQModel) -> None:
@@ -571,3 +624,39 @@ def test_successful_run_control(tiny_model_dir, looper, offload, monkeypatch):
         "a successful run must restore the disk-offloaded layers"
     )
     _assert_grad_forward(model)
+
+
+def test_pack_fault_leaves_no_half_built_kernel(
+    tiny_model_dir, looper, offload, monkeypatch
+):
+    """A Ctrl-C inside packing must not publish an unusable quant module (#5089).
+
+    The cancelled-run contract promises the in-session model stays runnable.
+    Finalization covers most of a run's wall time in packing, and any kernel
+    installed before its pack call returned owned no packed buffers, so the
+    next forward raised ``AttributeError: ... has no attribute 'qzeros'``.
+    """
+
+    model = _load(tiny_model_dir, looper, offload=offload)
+    recoveries = _capture_recovery(
+        monkeypatch, ModuleLooper if looper == "gptq" else WeightOnlyLooper
+    )
+    faults = _inject_pack_fault(looper, monkeypatch)
+
+    with pytest.raises(KeyboardInterrupt, match=PACK_FAULT):
+        _quantize(model)
+
+    assert faults, "the injected packing fault did not fire"
+    assert recoveries[-1].completed is False
+    assert _unpacked_quant_modules(model) == [], (
+        "a cancelled run left a quant kernel installed without its packed buffers"
+    )
+    assert _lingering_hooks(model.model) == []
+    assert _non_cpu_tensors(model.model) == []
+    _assert_layers_usable(model)
+
+    # The interrupted projection kept its float weight, so the ordinary forward
+    # (not just an inference-mode probe) still runs.
+    _assert_grad_forward(model)
+
+

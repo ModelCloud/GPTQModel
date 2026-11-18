@@ -111,6 +111,194 @@ regression report and rationale.
 | `device=("cuda:1", "cuda")` | Both used all four | `ValueError` for the ambiguous mix |
 | `device=("cuda:1", "cuda:1")` | Quantization used `cuda:1`; loader map used all four | Both use only `cuda:1` |
 
+## Fused-expert conversion device scope
+
+Fused-expert MoE checkpoints (OLMoE, PhiMoE, Granite MoE, ...) are rebuilt by
+Defuser before any weight reaches the target GPU. Defuser's
+`prepare_model_for_moe_quantization()` calls `clear_memory()` without a device
+list, and that helper synchronizes the *current* CUDA device. A conversion that
+ran on CPU/meta therefore created the primary context of `cuda:0` — hundreds of
+MiB on a GPU the caller never requested — even for
+`GPTQModel.load(..., device="cuda:1")`, `device=("cuda:1",)` quantization, or a
+CPU-only load (#5105).
+
+GPT-QModel pins Defuser and cannot pass a device to `clear_memory()`, so
+`gptqmodel/utils/torch.py:679` (`defuser_conversion_scope`) scopes Defuser's
+module-level reference for the duration of the conversion.
+`model_accelerator_devices()` (`gptqmodel/utils/torch.py:653`) reads the
+ordinals that actually hold parameters or buffers: a model that already lives on
+an accelerator synchronizes exactly those ordinals, while a CPU/meta model
+passes a CPU-only list so no accelerator is claimed. Placement is never
+changed; only the devices the cache flush may touch.
+
+Old flow (`e2f9676c6`):
+
+```mermaid
+flowchart TD
+    A["_convert_model_with_defuser<br/>loader.py:1094"] --> B["defuser.convert_model<br/>loader.py:1096"]
+    B --> C["prepare_model_for_moe_quantization<br/>moe_experts_interface.py:790"]
+    C --> D["clear_memory() with no device_list<br/>defuser/utils/device.py:61"]
+    D --> E{"torch.cuda.is_available?"}
+    E -- Yes --> F["torch.cuda.synchronize()<br/>current device is cuda:0"]
+    F --> G["primary context created on cuda:0<br/>excluded GPU claimed"]
+    E -- No --> H["no accelerator touched"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class G failure;
+```
+
+New flow:
+
+```mermaid
+flowchart TD
+    A["_convert_model_with_defuser<br/>loader.py:1101"] --> S["defuser_conversion_scope(model)<br/>utils/torch.py:679"]
+    S --> D0["model_accelerator_devices(model)<br/>utils/torch.py:653"]
+    D0 --> D1{"Accelerator tensors present?"}
+    D1 -- Yes --> D2["device_list = exact ordinals"]
+    D1 -- No --> D3["device_list = CPU-only"]
+    D2 --> P["scope defuser<br/>moe_experts_interface.clear_memory"]
+    D3 --> P
+    P --> B["defuser.convert_model"]
+    B --> C["prepare_model_for_moe_quantization<br/>moe_experts_interface.py:790"]
+    C --> D["clear_memory(device_list=...)"]
+    D --> E{"CUDA entries in device_list?"}
+    E -- Yes --> F["torch.cuda.synchronize(ordinal)<br/>only devices holding tensors"]
+    E -- No --> G["skip synchronize<br/>torch.cuda.empty_cache() only"]
+    F --> R["restore original clear_memory"]
+    G --> R
+    R --> I["caller's device map still places every weight"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    classDef ok fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    class I,R ok;
+```
+
+The scope wraps every Defuser entry point: the native load and quantize load at
+`gptqmodel/models/loader.py:1101`, the Transformers bridge at
+`gptqmodel/utils/hf_load.py:340`, and the DeepSeek V4 MTP conversion at
+`gptqmodel/models/definitions/deepseek_v4.py:353`.
+
+Failure contract:
+
+- A CPU/meta model passes a CPU-only device list. Defuser still calls
+  `torch.cuda.empty_cache()`, which does not create a primary context, so no
+  accelerator is claimed.
+- A model that already holds accelerator tensors synchronizes exactly those
+  ordinals; the barrier its data needs is preserved.
+- If the pinned Defuser layout does not expose
+  `defuser.modeling.moe_experts_interface.clear_memory`, the scope yields
+  unchanged (fail-open to the historical single-device synchronize) instead of
+  failing the load.
+- Defuser's XPU flush synchronizes unconditionally and takes no device list;
+  that path is outside this scope and remains unverified for exclusion.
+- The scope never moves tensors or changes the caller's device map.
+
+Measured on an RTX 5090 visible as `cuda:1` (torch 2.15.0+cu132, transformers
+5.22.1, Defuser 0.0.28): before the change the OLMoE inference load and the
+`device=("cuda:1",)` quantize load both reported `ctx0=True`; after it both
+report `ctx0=False` with finite logits on `cuda:1`, while the dense and
+per-expert Qwen1.5-MoE controls stay `False` throughout. The regressions are
+pinned by `tests/test_load_device_context_4863.py` and
+`tests/test_excluded_device_warmup.py`.
+
+See [PR #5158](https://github.com/ModelCloud/GPTQModel/pull/5158) (draft) for the
+diff.
+
+## Compiled forward device scope
+
+`optimize()` compiles the model `forward` in place, so `generate()` runs the
+compiled proxy at `gptqmodel/models/base.py:461-476`. Inductor initializes its
+lazy graph patterns from the traced frame's input device
+(`torch/_inductor/fx_passes/joint_graph.py:812` -> `lazy_init` ->
+`fuse_attention._sfdp_init`). A quantized-kernel graph break can leave that
+frame without a device-bearing input, and
+`_get_sfdp_patterns(input_device=None)` then uses `device = "cuda"`
+(`torch/_inductor/fx_passes/fuse_attention.py:1514`). `"cuda"` means the
+*current* device, so a model loaded and compiled on `cuda:1` claimed the
+primary context of `cuda:0` when a later call recompiled for a new batch shape
+(#5101).
+
+Old flow (`04e745269`):
+
+```mermaid
+flowchart TD
+    A["generate() enters compiled forward<br/>base.py:461-470 proxy"] --> B["compiled forward<br/>no device guard"]
+    B --> C["inductor joint_graph_passes<br/>joint_graph.py:812"]
+    C --> D["lazy_init(input_device=None)<br/>graph-break frame has no device input"]
+    D --> E["_sfdp_init -> _get_sfdp_patterns<br/>fuse_attention.py:1514"]
+    E --> F["device = 'cuda'<br/>resolves to current device cuda:0"]
+    F --> G["primary context on cuda:0<br/>excluded GPU claimed"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class G failure;
+```
+
+New flow:
+
+```mermaid
+flowchart TD
+    A["generate() enters compiled forward<br/>base.py:476"] --> S["model_execution_device_scope<br/>utils/torch.py:848"]
+    S --> P0["model_execution_device<br/>utils/torch.py:816"]
+    P0 --> P1{"first accelerator input?"}
+    P1 -- Yes --> P2["use that input's device"]
+    P1 -- No --> P3{"input embedding on an accelerator?"}
+    P3 -- Yes --> P4["use the embedding's device"]
+    P3 -- No --> P5["first accelerator parameter or buffer"]
+    P2 --> E0{"accelerator device?"}
+    P4 --> E0
+    P5 --> E0
+    E0 -- No --> C0["compiled forward unchanged<br/>CPU or no accelerator"]
+    E0 -- Yes --> E1["enter torch.cuda.device(model device)"]
+    E1 --> B["compiled forward"]
+    B --> C["inductor joint_graph_passes<br/>joint_graph.py:812"]
+    C --> D["lazy_init(input_device=None)"]
+    D --> E["_sfdp_init -> _get_sfdp_patterns<br/>fuse_attention.py:1514"]
+    E --> F["device = 'cuda'<br/>resolves to cuda:1"]
+    F --> R["restore caller's current device<br/>on success and on exception"]
+    classDef ok fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    class E1,F,R ok;
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Compiled forward proxy (`gptqmodel/models/base.py:461-470`) | Ran the compiled forward with no device guard | Enters the model's execution device for the call and restores the caller's device |
+| Inductor lazy SDPA init (`joint_graph.py:812`, `fuse_attention.py:1514`) | Device-less fallback `"cuda"` resolved to the current `cuda:0` | Resolves inside the scope to the model's `cuda:1` |
+| Compiled `dequantize_weight` proxy (`gptqmodel/nn_modules/qlinear/torch.py:87-95`) | A direct compiled-kernel call had no device guard | Scoped to the module's device |
+| Multi-device map | Not handled | First accelerator input, then input embedding, then first parameter/buffer |
+
+Failure contract:
+
+- The scope changes only the current device. Tensor placement and the caller's
+  device map are untouched.
+- The caller's previous current device is restored on success and when the
+  compiled call raises, so an exception cannot leak the model's device into
+  later code.
+- A CPU model, or a model whose parameters, buffers and inputs hold no
+  accelerator tensor, runs the call unchanged.
+- Multi-device placement follows the call, not a fixed index: the first
+  accelerator input wins, then the input embedding, then the first
+  parameter/buffer. A per-layer call on `cuda:2` is scoped to `cuda:2` rather
+  than pinning every call to the embedding's GPU.
+- The scope does not create a context on any other device; `torch.cuda.device`
+  changes the current index and does not allocate.
+
+Measured with two RTX 4090s visible as `cuda:0`/`cuda:1` (torch 2.15.0+cu132,
+transformers 5.22.1, triton 3.9). The model is loaded on `cuda:1`, compiled
+with `optimize()`, then generated with batch 2 and batch 1:
+
+| Checkpoint / kernel | Before | After |
+| --- | --- | --- |
+| Llama-3.2-1B GPTQ-4bit-g128, `MarlinLinear` | `ctx0=False` after batch 2, `ctx0=True` after batch 1 | `ctx0=False` after both; 4 new tokens each; 244 dynamo frames traced |
+| Qwen2.5-0.5B-Instruct-AWQ, `AwqMarlinLinear` | `ctx0=False` after batch 2, `ctx0=True` after batch 1 | `ctx0=False` after both; 4 new tokens each |
+| EXL3 (`ExllamaV3Linear`) | Reported in #5101 on a first generate | Unverified here: no EXL3 checkpoint is cached and `exllamav3` is not installed |
+
+The `with torch.cuda.device(1):` control around the same sequence also left
+`cuda:0` untouched before the change, which identifies the current device as
+the input to inductor's fallback.
+
+The regressions are
+`tests/test_load_device_context_4863.py::test_optimize_compiled_forward_on_the_second_gpu_leaves_the_first_untouched`
+and the scope-restoration unit cases in the same file.
+
+See the draft PR that introduces this section for the diff.
+
 ## Forward device selection
 
 `ForwardExecutor.run` expands the base device to its family through
@@ -146,6 +334,53 @@ The regression is covered by
 The failure path is an empty filtered list, which `_filter_forward_devices`
 already resolves by keeping the unfiltered pool; `run` then falls back to
 `cur_layer_device`.
+
+## AWQ scale groups on a balanced MoE pool
+
+`VramStrategy.BALANCED` assigns the routed experts of one MoE family to devices
+round-robin, and `build_subset_plan` keys that assignment by expert. An AWQ
+scale group is anchored on the tensor that produces its input (for a MoE block,
+the shared `post_attention_layernorm`), so a single group can contain the
+gate/up projections of every expert and therefore span every device of the
+pool.
+
+AWQ therefore treats a scaling group as *one source, many devices*:
+
+* the weight-mean reduction gathers each member's per-channel sum onto the
+  accumulator's device;
+* the 20-candidate grid multiplies each member by the shared channel scale on
+  that member's own device;
+* the final fold divides the norm on the norm's device and multiplies each
+  consumer on the consumer's device, so a norm-anchored group is never
+  co-located.
+
+A linear- or activation-anchored group still co-locates its consumers, because
+those folds reshape the source weight itself.
+
+```mermaid
+flowchart TD
+    A["AWQ group for one prev_op"] --> B{"_is_norm_source prev_op?"}
+    B -- "yes" --> C["fold norm on its device"]
+    C --> D["scale_ln_fcs: each fc applies s<br/>on fc weight device"]
+    B -- "no" --> E["co-locate consumers on layers[0]"]
+    E --> F["scale_fc_fcs / scale_gelu_fc"]
+    D --> G["restore norm placement"]
+    F --> G
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| `_accumulate_awq_weight_mean` (`gptqmodel/looper/awq_processor.py`) | `w_sum += member.sum(0)` on `layers[0]`'s device | Reductions gathered with `.to(w_sum.device)` |
+| `_compute_best_scale` candidate replay | Scale applied to every member on `layers[0]`'s device | Scale moved to each member's device |
+| `apply_scale` (`gptqmodel/quantization/awq/quantize/scale.py`) | Whole group moved onto `layers[0]`'s device | Norm anchored groups fold in place; only linear/activation groups co-locate |
+
+The pre-fix flow raised `RuntimeError: Expected all tensors to be on the same
+device` in layer 0 after calibration capture for every MoE model with a
+balanced pool (`#5104`). Regression coverage lives in
+`tests/test_awq_balanced_moe_5104.py` (end-to-end balanced vs exclusive
+quantization on a tiny 16-expert Qwen3-MoE) and
+`tests/test_awq_balanced_moe_group_5104.py` (weight mean, candidate grid and
+fold over a group split across two devices).
 
 ## Excluded devices stay unclaimed
 
@@ -382,6 +617,68 @@ variable-length calibration samples, `batch_size=1`, `OMP_NUM_THREADS=4`:
 `tests/test_gptaq_foem_multigpu.py` pins the float64 oracle for both the CPU
 out-of-order case and the two-device case; the two-device tests skip when fewer
 than two CUDA devices are visible.
+
+## Routed-expert Hessian ownership (EXL3)
+
+EXL3 keeps one shared Hessian accumulator per routed expert projection: `w1`
+and `w3` share one state and `w2` has its own. The accumulator is keyed by
+device, and `auto_forward_data_parallel=True` feeds the same accumulator from
+more than one GPU, so the owner has to be a concrete ordinal. An index-less
+`torch.device("cuda")` resolves to the calling worker's current device while
+the accumulator key stays `"cuda"`, so the second worker's
+`existing.add_(xtx)` adds a `cuda:1` partial to a `cuda:0` tensor and layer 0
+crashes with `Expected all tensors to be on the same device`.
+
+`routed_expert_owner_devices` resolves the owner list in the order below and
+`resolve_hessian_owner_device` assigns each expert round-robin. The looper
+binds its already-filtered MoE pool to the processor
+(`bind_moe_quant_devices`) so capture stays on devices
+`compute_device_filter` allowed.
+
+```mermaid
+flowchart TD
+    A["EXL3Processor.preprocess<br/>routed expert identity"] --> B{"moe_vram_strategy_devices<br/>configured?"}
+    B -- "yes" --> C["as_torch_device per entry"]
+    B -- "no" --> D{"looper MoE pool bound?"}
+    D -- "yes" --> E["ModuleLooper._moe_quant_devices<br/>after compute_device_filter"]
+    D -- "no" --> F["qcfg.device -> as_torch_device"]
+    C --> G["_expand_family_owner_devices<br/>cuda -> cuda:0 .. cuda:N-1"]
+    E --> G
+    F --> G
+    G --> H["resolve_hessian_owner_device<br/>expert_index % len devices"]
+    H --> I["GPTQ.set_hessian_accumulator_device"]
+    I --> J["process_batch moves the batch to the owner<br/>and keys the partial under that device"]
+    I -. "index-less accelerator" .-> X["ValueError: concrete ordinal required"]
+    style X fill:#f8d7da,stroke:#c82333
+```
+
+### Before / after
+
+Line references are from `main` at the time of the fix.
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Owner list | `[as_torch_device(qcfg.device)]` keeps the family index-less (`exllamav3_processor.py:147-162`) | Configured pool, else the looper pool, else the family expanded to its visible ordinals |
+| Data-parallel worker 2 | `process_batch` moves the batch to `"cuda"` (that worker's GPU) but keys it under `"cuda"` (`gptq.py:1356-1361`) | The batch moves to the expert's concrete owner and is keyed there |
+| Accumulation | `existing.add_(xtx)` mixes `cuda:0` with `cuda:1` (`gptq.py:889`) | `add_` runs on one device |
+| Index-less accelerator | Accepted; the failure surfaces in layer 0 | `set_hessian_accumulator_device` raises `ValueError` naming the module |
+| Serial forward (`auto_forward_data_parallel=False`) | Every expert owned by the forward thread's current device | Experts spread over the pool; the reduced sum is unchanged |
+| Single GPU | `cuda:0` | Unchanged |
+
+### Measured
+
+Tiny two-layer Qwen3-MoE (hidden 128, 4 experts, 4 rows x 32 tokens, routing
+override), two GPUs, default `auto_forward_data_parallel=True`:
+
+| Run | Before | After |
+| --- | --- | --- |
+| EXL3 quantize | `RuntimeError: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cuda:1` at `gptq.py:889` | Completes; owners are `cuda:0` and `cuda:1` |
+| Routed coverage | Layer 0 aborts | 24 of 24 expert projections captured 128 tokens each |
+| Layer-0 Hessian vs serial capture | Not reached | Normalized error <= 4.3e-8 |
+| Serial and single-GPU controls | Completed | Completed |
+| Same run on a ROCm runtime (two devices) | Same index-less `cuda` owner | Completes; owners `cuda:0`/`cuda:1`; layer-0 normalized error 5.4e-8 |
+
+Introduced in PR #5144.
 
 ## GPU peer access (P2P)
 

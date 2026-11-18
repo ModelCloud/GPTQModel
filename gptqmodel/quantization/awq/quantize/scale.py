@@ -102,6 +102,21 @@ def is_foldable_source(prev_op: nn.Module) -> bool:
     return isinstance(weight, torch.Tensor) and weight.ndim == 1
 
 
+def _is_norm_source(prev_op: nn.Module) -> bool:
+    """Whether ``prev_op`` divides its output on the source device's own gain.
+
+    A norm (RMSNorm/LayerNorm and the registered family aliases) owns a
+    per-channel gain, so ``scale_ln_fcs`` can fold it locally and let each
+    consumer apply the shared channel scale on its own device. Linear and
+    activation sources reshape/concatenate the weight instead, so their
+    consumers are co-located for the fold.
+    """
+
+    if _is_fold_norm(prev_op):
+        return True
+    return "rmsnorm" in str(prev_op.__class__).lower()
+
+
 def _norm_gain_offset(ln: nn.Module) -> float:
     """Resolve whether ``ln`` applies ``weight`` or ``1 + weight``.
 
@@ -258,13 +273,22 @@ def apply_scale(module, scales_list, input_feat_dict=None, consumer_map=None):
             continue
         layers = [get_op_by_name(module, name) for name in layer_names]
 
+        # A norm-anchored group does not have to be co-located: `scale_ln_fcs`
+        # divides the norm on its own device and multiplies every consumer on
+        # that consumer's device. `VramStrategy.BALANCED` relies on this, since
+        # its routed experts live on every device of the MoE pool and copying a
+        # whole expert family onto one device can exhaust it (#5104).
+        co_locate_layers = not _is_norm_source(prev_op)
+
         original_prev_device = get_device(prev_op)
         original_layer_devices = [get_device(layer) for layer in layers]
-        target_device = _resolve_module_exec_device(layers[0] if layers else prev_op)
-
+        if co_locate_layers:
+            target_device = _resolve_module_exec_device(layers[0] if layers else prev_op)
+            for layer in layers:
+                move_to(layer, device=target_device)
+        else:
+            target_device = _resolve_module_exec_device(prev_op)
         move_to(prev_op, device=target_device)
-        for layer in layers:
-            move_to(layer, device=target_device)
         scales = scales.to(target_device)
 
         try:
@@ -279,10 +303,7 @@ def apply_scale(module, scales_list, input_feat_dict=None, consumer_map=None):
                 assert len(layers) == 1
                 scale_fc_fc(prev_op, layers[0], scales)
 
-            elif (
-                _is_fold_norm(prev_op)
-                or "rmsnorm" in str(prev_op.__class__).lower()
-            ):
+            elif _is_norm_source(prev_op):
                 # `scale_ln_fcs` renormalises the per-channel scale for
                 # offset-gain norms (see its docstring). The captured input
                 # features and the non-quantized consumers must use the same
@@ -304,8 +325,9 @@ def apply_scale(module, scales_list, input_feat_dict=None, consumer_map=None):
                 exc,
             )
             move_to(prev_op, device=original_prev_device)
-            for layer, original_device in zip(layers, original_layer_devices):
-                move_to(layer, device=original_device)
+            if co_locate_layers:
+                for layer, original_device in zip(layers, original_layer_devices):
+                    move_to(layer, device=original_device)
             continue
 
         if consumer_map and prev_op_name in consumer_map:
@@ -340,8 +362,9 @@ def apply_scale(module, scales_list, input_feat_dict=None, consumer_map=None):
                     divided[id(inp)] = group_index
 
         move_to(prev_op, device=original_prev_device)
-        for layer, original_device in zip(layers, original_layer_devices):
-            move_to(layer, device=original_device)
+        if co_locate_layers:
+            for layer, original_device in zip(layers, original_layer_devices):
+                move_to(layer, device=original_device)
 
     # A norm that was divided by `s` no longer emits the tensor its non-quantized
     # consumers were trained on. Fold the accumulated scale into those consumers
@@ -391,8 +414,12 @@ def scale_ln_fcs(ln: nn.Linear, fcs: List[nn.Linear], scales: torch.Tensor) -> t
     if hasattr(ln, "bias") and ln.bias is not None:
         ln.bias.div_(scales)
 
+    # A group can span several devices: `VramStrategy.BALANCED` splits the
+    # routed experts of one norm-anchored MoE group across the MoE pool
+    # (#5104). The channel scale is one tensor, but each consumer applies it on
+    # its own device, so the fold never has to co-locate (and copy) the group.
     for fc in fcs:
-        fc.weight.mul_(scales.view(1, -1))
+        fc.weight.mul_(scales.to(device=fc.weight.device).view(1, -1))
 
     for p in ln.parameters():
         assert torch.isnan(p).sum() == 0
@@ -414,7 +441,7 @@ def scale_fc_fc(fc1: nn.Linear, fc2: nn.Linear, scales: torch.Tensor):
     if fc1.bias is not None:
         fc1.bias.div_(scales.view(-1))
 
-    fc2.weight.mul_(scales.view(1, -1))
+    fc2.weight.mul_(scales.to(device=fc2.weight.device).view(1, -1))
 
     for p in fc1.parameters():
         assert torch.isnan(p).sum() == 0
@@ -434,7 +461,7 @@ def scale_fc_fcs(fc1: nn.Linear, fcs: List[nn.Linear], scales: torch.Tensor):
         fc1.bias.div_(scales.view(-1))
 
     for fc in fcs:
-        fc.weight.mul_(scales.view(1, -1))
+        fc.weight.mul_(scales.to(device=fc.weight.device).view(1, -1))
 
     for p in fc1.parameters():
         assert torch.isnan(p).sum() == 0

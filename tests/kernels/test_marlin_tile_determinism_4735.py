@@ -223,6 +223,8 @@ def _kernel_shmem_bytes(
         "is_zp_float": is_zp_float,
         "m_block_size_8": m_block_size_8,
         "w_type": "kU4",
+        # The modelled kernels use 16-bit scales; 8-bit (FP4/MX) scales halve the scale stage.
+        "is_8bit_scale": False,
         "group_blocks": 0
         if has_act_order
         else (-1 if group_size == -1 else (2 if group_size == 0 else group_size // 16)),

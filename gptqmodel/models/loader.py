@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 import torch
 import transformers
 
+from ..utils.hf import _compile_keep_in_fp32_matcher
 from ..utils.kernel import KernelConfig, configure_kernel
 from ..utils.modelscope import ensure_modelscope_available
 from ..utils.p2p import P2PConfig, configure_p2p
@@ -121,7 +122,7 @@ from ..utils.model import (
     simple_dispatch_model,
     validate_checkpoint_qweights,
 )
-from ..utils.torch import xla_device_count
+from ..utils.torch import defuser_conversion_scope, xla_device_count
 from ._const import DEVICE, EXPERT_INDEX_PLACEHOLDER, HAS_NPU, normalize_device
 
 
@@ -144,6 +145,57 @@ def __getattr__(name: str):
 log = setup_logger()
 
 
+def _model_keep_in_fp32_strict_names(model) -> Optional[List[str]]:
+    """Concrete runtime tensor names the model pins to fp32 for every half dtype.
+
+    transformers 5.x declares these on ``_keep_in_fp32_modules_strict`` and
+    keeps them fp32 for fp16 *and* bf16. Accelerate's loader only honors
+    ``keep_in_fp32_modules`` for fp16, so the quantized-load path restores
+    them explicitly (issue #5151). Buffers are included: the DeepSeek-V3 /
+    GLM-4.x routers store ``e_score_correction_bias`` as a buffer, and ERNIE
+    declares the ``gate.weight`` parameter.
+    """
+
+    matcher = _compile_keep_in_fp32_matcher(
+        model, attrs=("_keep_in_fp32_modules_strict",)
+    )
+    if matcher is None:
+        return None
+
+    names = [
+        name for name, _ in model.named_parameters() if matcher(name)
+    ]
+    names.extend(name for name, _ in model.named_buffers() if matcher(name))
+    return names or None
+
+
+# A source layout can need several declared renames before a key matches the
+# runtime shell (``deepseek_v4``: ``layers.N.attn.norm.weight`` needs
+# ``\.attn\.`` -> ``.self_attn.`` and then ``\.norm\.`` -> ``.kv_norm.``).
+# Bound the walk so two rules that rename each other cannot cycle.
+_MAX_CHECKPOINT_KEY_RENAMES = 8
+
+
+def _runtime_checkpoint_names(model) -> frozenset[str]:
+    """Names of every parameter and buffer the runtime shell can receive.
+
+    A GPT-QModel writer stores runtime names, so a checkpoint key in this set is
+    already in the layout Accelerate has to load. Tied weights keep both names
+    because ``remove_duplicate=False`` does not collapse them by storage.
+    Config-like stand-ins without modules return an empty set, which leaves the
+    raw Transformers conversion map in charge.
+    """
+
+    named_parameters = getattr(model, "named_parameters", None)
+    named_buffers = getattr(model, "named_buffers", None)
+    if not callable(named_parameters) or not callable(named_buffers):
+        return frozenset()
+
+    names = {name for name, _ in named_parameters(remove_duplicate=False)}
+    names.update(name for name, _ in named_buffers(remove_duplicate=False))
+    return frozenset(names)
+
+
 def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
     """Return the key converter the quantized loader should apply.
 
@@ -151,9 +203,18 @@ def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
     ``checkpoint_key_for_save``. Every other family falls back to its
     Transformers checkpoint conversion map, inferred from the live model, so a
     legacy-layout checkpoint (Transformers 4.x keys such as ``model.layers.*``
-    and ``visual.*``) is remapped to the runtime names. The map is idempotent
-    for checkpoints already written with runtime keys: their names do not match
-    the checkpoint-side patterns and pass through unchanged.
+    and ``visual.*``) is remapped to the runtime names.
+
+    That map describes a *source* layout only, and some families declare
+    patterns wide enough to also match runtime keys. ``deepseek_v4`` renames
+    ``\.norm\.`` -> ``.kv_norm.`` for the source key
+    ``layers.N.attn.norm.weight``, which also matches the runtime
+    ``model.norm.weight``; no runtime parameter is called
+    ``model.kv_norm.weight``, so the renamed final norm was reported missing
+    (#5131). The converter is therefore idempotent on the shell's own names: a
+    key that already names a runtime parameter or buffer is never renamed, and
+    a rename chain is only adopted when it lands on one. Converting a
+    checkpoint written by GPT-QModel is the identity.
     """
 
     explicit = getattr(
@@ -172,8 +233,44 @@ def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
     if mapping is None:
         return None
 
-    def convert(name: str) -> str:
+    # Runtime names only exist for the load direction. The save direction is
+    # asked for checkpoint-side names (for example quantized module aliases),
+    # where a module name is not a parameter name.
+    runtime_names = _runtime_checkpoint_names(model) if to_runtime else frozenset()
+
+    def rename_once(name: str) -> str:
         return LazyTurtle.convert_hf_checkpoint_key(name, mapping, to_runtime=to_runtime)
+
+    def convert(name: str) -> str:
+        renamed = rename_once(name)
+        if name in runtime_names:
+            # Idempotence check: the key already resolves on this shell, so a
+            # matching source-side pattern must not rename it again.
+            if renamed != name:
+                log.debug(
+                    "Loader: keeping runtime checkpoint key `%s`; the HF conversion map "
+                    "would rename it to `%s`, which is not a parameter of this model",
+                    name,
+                    renamed,
+                )
+            return name
+
+        if not to_runtime or renamed == name or renamed in runtime_names:
+            return renamed
+
+        # A source layout can need several renames before it matches the shell.
+        # Adopt the first chain result that resolves on this model; otherwise
+        # keep the single rename so families whose map matches once are
+        # unchanged.
+        current = renamed
+        for _ in range(_MAX_CHECKPOINT_KEY_RENAMES):
+            candidate = rename_once(current)
+            if candidate == current:
+                break
+            if candidate in runtime_names:
+                return candidate
+            current = candidate
+        return renamed
 
     return convert
 
@@ -1178,18 +1275,24 @@ class _DefuserClassPathAliases:
 
 def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     _check_defuser_version()
-    with _DefuserClassPathAliases(model):
-        converted = _run_defuser_conversion(cls, model, cleanup_original)
-        _apply_vendored_construction_replacements(model)
+    # Defuser's conversion flushes the accelerator cache through
+    # `clear_memory()`, which synchronizes the *current* device when no device
+    # list is supplied. Scope that call to the devices this model actually
+    # occupies so a CPU/meta conversion does not claim cuda:0 on the way to
+    # cuda:1 (#5105).
+    with defuser_conversion_scope(model):
+        with _DefuserClassPathAliases(model):
+            converted = _run_defuser_conversion(cls, model, cleanup_original)
+            _apply_vendored_construction_replacements(model)
 
-    after_conversion = getattr(cls, "after_defuser_conversion", None)
-    # Model-specific finalizers may also normalize metadata that Defuser does
-    # not own. Run them after the conversion attempt even when the installed
-    # Defuser has no matching registration and reports no structural change.
-    if callable(after_conversion):
-        after_conversion(model)
+        after_conversion = getattr(cls, "after_defuser_conversion", None)
+        # Model-specific finalizers may also normalize metadata that Defuser does
+        # not own. Run them after the conversion attempt even when the installed
+        # Defuser has no matching registration and reports no structural change.
+        if callable(after_conversion):
+            after_conversion(model)
 
-    return converted
+        return converted
 
 
 def _apply_vendored_construction_replacements(model) -> None:
@@ -1781,21 +1884,27 @@ def _load_tt_blockfloat_model(model_cls, *, model_local_path, dtype, trust_remot
 
 
 def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend=None) -> None:
-    """Refuse the CUDA-only AWQ GEMV/GEMV_FAST/LLM_AWQ layouts on ROCm.
+    """Refuse an AUTO GEMV load on ROCm when no portable reader applies.
 
-    Those three layouts are only readable by the native CUDA AWQ extension
-    (``gemv_forward``/``gemmv2_forward``/``gemv_fast_forward_decode``), which
-    hipcc cannot build: the sources include ``cuda_fp16.h`` and CUDA-only inline
-    asm, and the hipified warp-sync reduction rejects wave32.  Without this check
-    an AUTO load fails later with a bare "No valid quant linear", so point at the
-    layout and kernels that do run on ROCm.
+    ``FORMAT.GEMV`` is read by the native CUDA AWQ extension
+    (``gemv_forward``/``gemmv2_forward``), which hipcc cannot build: the
+    sources include ``cuda_fp16.h`` and CUDA-only inline asm, and the hipified
+    warp-sync reduction rejects wave32.  Without this check an AUTO load fails
+    later with a bare "No valid quant linear", so point at the layout and
+    kernels that do run on ROCm.
+
+    ``FORMAT.GEMV_FAST`` / ``FORMAT.LLM_AWQ`` are not refused here: their
+    portable Torch readers declare ROCm and read the identical interleaved
+    layout, so AUTO resolves to them on ROCm (issue #5109).  An explicit
+    selection of the CUDA-only native kernel still fails through
+    ``select_quant_linear`` with the device-family message.
     """
 
     if not IS_ROCM:
         return
     if export_quant_method != METHOD.AWQ:
         return
-    if format_code not in (FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
+    if format_code != FORMAT.GEMV:
         return
     # The portable Triton GEMV reads the GEMV layout without the extension, so an
     # explicit selection of it is a supported ROCm placement.
@@ -3681,10 +3790,13 @@ def ModelLoader(cls):
             load_extra_kwargs["offload_buffers"] = offload_kwargs["offload_buffers"]
 
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
+        keep_in_fp32_strict_modules = _model_keep_in_fp32_strict_names(model)
+
         if format_code in [FORMAT.GPTQ, FORMAT.GEMM, FORMAT.PARO]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,
+                keep_in_fp32_strict_modules=keep_in_fp32_strict_modules,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
@@ -3790,6 +3902,7 @@ def ModelLoader(cls):
                 model,
                 dtype=dtype,
                 keep_in_fp32_modules=keep_in_fp32_modules or None,
+                keep_in_fp32_strict_modules=keep_in_fp32_strict_modules,
                 fp32_bf16_buffer_names=fp32_bf16_buffer_names,
                 packed_fp8_buffer_dtypes=packed_fp8_buffer_dtypes,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292

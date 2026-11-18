@@ -485,6 +485,20 @@ past", never as an empty tuple that legacy code will index; a native
 transformers class is never wrapped; a definition's hook runs on every load
 path and must stay idempotent because quantize and reload can share a process.
 
+## M. Hymba `generate()` and the `flex` attention hint (issue #5090)
+
+Hymba's original remote code relied on three transformers-4 `generate()`
+inputs (an always-present all-ones `attention_mask`, model-built
+`position_ids`, and a cache whose length is read from its own storage) and on
+copying `attn_implementation_new` (`flex`) into `_attn_implementation` after
+transformers 5 had already validated it. GPT-QModel no longer runs that remote
+code or patches Transformers for it: Hymba is a package-owned port
+(`gptqmodel/models/ports/hymba`) whose `prepare_inputs_for_generation`, cache
+and config implement the transformers 5.23 contract directly, and whose
+`HymbaConfig` maps the serialized execution hint to portable SDPA.
+`tests/test_hymba_local_port.py` covers greedy and beam `generate()`;
+`tests/test_hymba_bf16_load_4888.py` covers the `flex` hint.
+
 ## Measured behaviour
 
 Tiny random models, GPTQ 4-bit, `group_size=32`, `desc_act=False`, saved and
@@ -514,6 +528,7 @@ quality claims for full checkpoints.
 | `tests/module_tree/test_nemotron_h_model_tree.py` | real-model `model` tree root and native mixer projection coverage |
 | `tests/test_falcon_h1_support.py` | `mup_vector` restoration and idempotence |
 | `tests/module_tree/test_registered_module_plans.py` | updated Nemotron-H registry plan |
+| `tests/test_hymba_bf16_load_4888.py` | #5090: the checkpoint's `flex` hint loads the package-owned Hymba with SDPA |
 | `tests/test_remote_code_rotary_restore.py` | fp64 oracle for legacy `inv_freq`/cos/sin, meta-shell skip, native-style skip, idempotence |
 | `tests/test_hf_config_compat.py` | legacy unscaled RoPE stays `None`, modern `rope_parameters` preserved, ChatGLM aliases, `OutputRecorder` shim, cache-length helpers restored from the layer API |
 | `tests/test_lazy_turtle_conversion_mapping.py` | chained `.bin` conversion error, legacy tied-key normalization before save |
@@ -521,7 +536,7 @@ quality claims for full checkpoints.
 | `tests/models/test_chatglm.py` | native and tiny from-config `generate()` |
 | `tests/test_legacy_generation_compat.py` | native load runs `before_model_load`; empty cache becomes `None`; `cache[0][0]`/`seen_tokens`/`get_usable_length`; `num_layers`/`n_layer` -> `num_hidden_layers` |
 | `tests/models/test_ouro.py`, `tests/models/test_spark2_5.py` | native `generate()` after the pre-load hook installs the mask-helper shim |
-| `tests/models/test_deci.py`, `test_exaone.py`, `test_nanbeige42.py`, `test_minicpm.py`, `test_baichuan.py`, `test_pangu_alpha.py` | quantize+ARC path also asserts real generated text (`ASSERT_INFERENCE`) |
+| `tests/models/test_deci.py`, `test_exaone.py`, `test_nanbeige42.py`, `test_minicpm.py`, `test_baichuan.py`, `test_pangu_alpha.py`, `test_hymba.py` | quantize+ARC path also asserts real generated text (`ASSERT_INFERENCE`) |
 
 ## E-I. Definition and calibration fixes (issue #4040)
 

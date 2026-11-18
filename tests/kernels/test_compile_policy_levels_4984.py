@@ -26,10 +26,14 @@ import pytest
 from gptqmodel.nn_modules.qlinear._compile_support import COMPILE_LEVEL, compile_level
 from gptqmodel.nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear
 from gptqmodel.nn_modules.qlinear.macaq import MacaqLinear
+from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
+from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
 from tests.kernels.compile_probe import probe, protocol_kernels, skip_without_measurable_device
 from tests.kernels.test_kernel_compile_levels_quant import (
     _build_bnb,
     _build_macaq,
+    _build_vptq,
+    _pack_qqq,
     _unavailable,
 )
 
@@ -49,6 +53,18 @@ CASES = [
         lambda: _build_macaq(MacaqLinear),
         lambda: None,
         id="MacaqLinear",
+    ),
+    pytest.param(
+        QQQTorchLinear,
+        lambda: _pack_qqq(QQQTorchLinear),
+        lambda: None,
+        id="QQQTorchLinear",
+    ),
+    pytest.param(
+        VPTQLinear,
+        lambda: _build_vptq(VPTQLinear),
+        lambda: None,
+        id="VPTQLinear",
     ),
 ]
 

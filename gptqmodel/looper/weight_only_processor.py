@@ -51,7 +51,7 @@ from ..quantization.rtn import RTN
 from ..utils.backend import BACKEND
 from ..utils.importer import select_quant_linear
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.model import create_quant_module, pack_module
+from ..utils.model import create_quant_module, install_quant_module, pack_module
 from ..utils.module_locks import parent_module_lock
 
 
@@ -241,6 +241,11 @@ class WeightOnlyProcessor(LoopProcessor):
         original_layer = layers.get(module.full_name)
         timer = getattr(model, "quant_region_timer", None)
 
+        # Build and pack the kernel off-model and publish it only once packing
+        # has returned. Installing the empty kernel first left a projection
+        # without its packed buffers in the tree when a Ctrl-C or an exception
+        # landed in `pack_module`, and every later forward then raised
+        # `AttributeError` (issue #5089).
         create_start = time.perf_counter() if timer is not None else None
         linear_cls = model.qlinear_kernel
         last_error = None
@@ -248,7 +253,7 @@ class WeightOnlyProcessor(LoopProcessor):
             try:
                 with log_time_block("create_quant_module", logger=log, module_name=module_label):
                     with parent_module_lock(parent_key):
-                        create_quant_module(
+                        qmodule = create_quant_module(
                             name=module.full_name,
                             linear_cls=candidate,
                             bits=active_qcfg.runtime_bits,
@@ -265,6 +270,7 @@ class WeightOnlyProcessor(LoopProcessor):
                             register_buffers=False,
                             init_kwargs=active_qcfg.quant_linear_init_kwargs(),
                             resolved_module_config=get_resolved_module_config(module),
+                            install=False,
                         )
             except NotImplementedError as error:
                 # A validated kernel can still refuse the module's concrete
@@ -279,8 +285,10 @@ class WeightOnlyProcessor(LoopProcessor):
             raise ValueError(f"No compatible quant linear was found for module `{module.full_name}`.")
         if timer is not None and create_start is not None:
             timer.record("submodule_finalize_create", time.perf_counter() - create_start, source=module_label)
+        if qmodule is None:
+            # The resolved config excluded this module from quantization.
+            return
 
-        qmodule = model.model.get_submodule(module.full_name)
         qmodules = (
             {module.full_name: qmodule}
             if isinstance(qmodule, (linear_cls, TorchQuantEmbeddings))
@@ -344,6 +352,9 @@ class WeightOnlyProcessor(LoopProcessor):
             self._update_logged_loss(module, f"{active_qcfg.method.value}: {mean_abs_err:.7f}")
             module.state.pop("tp_pad_info", None)
             module.state.pop("quant_source_module", None)
+            with parent_module_lock(parent_key):
+                install_quant_module(model.model, module.full_name, qmodule)
+            # Drop the float weight only after the tree no longer references it.
             module.unregister_parameter("weight")
             return
 
@@ -372,6 +383,9 @@ class WeightOnlyProcessor(LoopProcessor):
         del q_scales, q_zeros, q_g_idx
         module.state.pop("tp_pad_info", None)
         module.state.pop("quant_source_module", None)
+        with parent_module_lock(parent_key):
+            install_quant_module(model.model, module.full_name, qmodule)
+        # Drop the float weight only after the tree no longer references it.
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):

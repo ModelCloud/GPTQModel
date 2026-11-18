@@ -9,11 +9,13 @@ import pytest
 import torch
 from torch import nn
 
-from gptqmodel.looper.awq_processor import AWQProcessor
+from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState
+from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.hymba import HymbaQModel
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.quantization.awq.utils.module import get_op_name
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 from tests.module_tree.test_hymba_local_port import _config
 from tests.test_awq_scaling_groups import (
     _features,
@@ -374,7 +376,7 @@ def test_owned_hymba_drops_only_the_gateless_expert_up_to_down_fold():
     assert names(kept) == [name for name in names(generic) if name != "moe.experts.0.up_proj"]
     # in_proj is scored on its own output instead of a whole-mixer replay.
     in_proj = next(node for node in kept if get_op_name(layer, node["prev_op"]) == "input_layernorm")
-    assert "module2inspect" not in in_proj
+    assert in_proj["module2inspect"] is layer.mamba.in_proj
 
 
 @pytest.mark.parametrize("options", [{}, {"num_experts": 3, "num_experts_per_tok": 2},
@@ -425,3 +427,210 @@ def test_owned_hymba_public_awq_scale_search_quantizes_and_reloads(tmp_path, mon
     with torch.inference_mode():
         torch.testing.assert_close(reloaded.model(**calibration[0], use_cache=False).logits, expected,
                                    atol=2e-4, rtol=2e-3)
+
+
+# --------------------------------------------------------------------------- #
+# #5098: a KV-reuse consumer layer must not need the producer's KV to score
+#        `input_layernorm -> mamba.in_proj`.
+# --------------------------------------------------------------------------- #
+
+
+class _ReuseMamba(nn.Module):
+    """`HymbaBlock` mixer with the native `reuse_kv` contract.
+
+    The shapes follow the real `cuda_kernels_forward`: the projection is
+    `[batch, latent, seq]`, the padding mask is applied with
+    `attention_mask.unsqueeze(1)`, and a `reuse_kv` mixer asserts that it
+    received the producing layer's K/V (#5098).
+    """
+
+    def __init__(self, reuse_kv: bool):
+        super().__init__()
+        self.reuse_kv = reuse_kv
+        self.in_proj = nn.Linear(HIDDEN, 2 * INNER, bias=False)
+        self.out_proj = nn.Linear(INNER, HIDDEN, bias=False)
+
+    def forward(self, x, *, attention_mask=None, position_ids=None, kv_last_layer=None, use_swa=False, use_cache=False):
+        del position_ids, use_swa, use_cache
+        projected = self.in_proj(x).transpose(1, 2)
+        if projected.shape[-1] > 1 and attention_mask is not None and (attention_mask == 0).any():
+            projected = projected * attention_mask.unsqueeze(1).to(projected.dtype)
+        if self.reuse_kv:
+            assert kv_last_layer is not None
+        gate, up = projected.chunk(2, dim=1)
+        return self.out_proj(nn.functional.silu(gate.transpose(1, 2)) * up.transpose(1, 2))
+
+
+class _ReuseBlock(nn.Module):
+    """`HymbaDecoderLayer` for a KV producer/consumer pair."""
+
+    def __init__(self, reuse_kv: bool):
+        super().__init__()
+        self.input_layernorm = nn.LayerNorm(HIDDEN)
+        self.mamba = _ReuseMamba(reuse_kv=reuse_kv)
+        self.pre_moe_layernorm = nn.LayerNorm(HIDDEN)
+        self.moe = _Moe()
+
+    def forward(self, hidden_states, past_key_value=None, **kwargs):
+        mask = kwargs["attention_mask"]
+        residual = hidden_states + self.mamba(
+            self.input_layernorm(hidden_states),
+            attention_mask=mask,
+            position_ids=kwargs["position_ids"],
+            kv_last_layer=kwargs["kv_last_layer"],
+            use_swa=kwargs["use_swa"],
+            use_cache=kwargs["use_cache"],
+        )
+        hidden_states = residual + self.moe(self.pre_moe_layernorm(residual))
+        if mask is not None:
+            hidden_states = hidden_states * mask[..., :1]
+        return hidden_states, past_key_value
+
+
+class _ReuseInner(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embed_tokens = nn.Embedding(VOCAB, HIDDEN)
+        # Layer 1 produces the K/V layer 2 consumes, like `kv_reuse_group=[[1, 2]]`.
+        self.layers = nn.ModuleList([_ReuseBlock(reuse_kv=True), _ReuseBlock(reuse_kv=False), _ReuseBlock(reuse_kv=True)])
+        self.final_layernorm = nn.LayerNorm(HIDDEN)
+        self.memory_tokens = nn.Parameter(torch.zeros(4, HIDDEN))
+
+
+class _ReuseCausalLM(nn.Module):
+    """Threads `kv_last_layer` exactly like `HymbaModel.forward` does."""
+
+    def __init__(self):
+        super().__init__()
+        self.model = _ReuseInner()
+        self.lm_head = nn.Linear(HIDDEN, VOCAB, bias=False)
+        self.config = None
+
+    def forward(self, input_ids, attention_mask=None):
+        hidden = self.model.embed_tokens(input_ids)
+        position_ids = torch.arange(hidden.shape[1]).unsqueeze(0)
+        kv_last_layer = None
+        for layer in self.model.layers:
+            hidden = layer(
+                hidden,
+                past_key_value=None,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                kv_last_layer=kv_last_layer,
+                use_swa=False,
+                use_cache=False,
+            )[0]
+            kv_last_layer = (torch.zeros(1, INNER, 1, 8), torch.zeros(1, INNER, 1, 8))
+        return _Out(self.lm_head(self.model.final_layernorm(hidden)))
+
+
+def _reuse_hymba():
+    torch.manual_seed(0)
+    hf_model = _ReuseCausalLM().eval()
+    qmodel = HymbaQModel.__new__(HymbaQModel)
+    nn.Module.__init__(qmodel)
+    qmodel.__dict__["model"] = hf_model
+    tree = HymbaQModel._resolve_effective_module_tree(hf_model, None)
+    qmodel.__dict__["effective_module_tree"] = tree
+    qmodel.__dict__["module_tree"] = tree
+    return hf_model, qmodel
+
+
+def _hymba_processor(qmodel, hf_model, *, fallback=None):
+    return AWQProcessor(
+        tokenizer=None,
+        qcfg=AWQConfig(device="cpu", group_size=HIDDEN, sym=True, fallback=fallback),
+        calibration=CalibrationConfig(batch_size=1),
+        gptq_model=qmodel,
+        model=hf_model,
+    )
+
+
+def _mamba_group(layer, qmodel):
+    plan = ModulePlan.from_tree(qmodel.module_tree)
+    nodes = qmodel.awq_get_modules_for_scaling(layer, _features(layer, plan), {})
+    return next(
+        node for node in nodes
+        if get_op_name(layer, node["prev_op"]) == "input_layernorm"
+    )
+
+
+def test_hymba_kv_reuse_group_scores_the_projection_not_the_mixer():
+    hf_model, qmodel = _reuse_hymba()
+    consumer = hf_model.model.layers[2]
+    assert consumer.mamba.reuse_kv
+
+    group = _mamba_group(consumer, qmodel)
+
+    assert [get_op_name(consumer, target) for target in group["layers"]] == ["mamba.in_proj"]
+    assert group["module2inspect"] is consumer.mamba.in_proj, (
+        "replaying `HymbaBlock` requires the producer layer's `kv_last_layer`, "
+        "which the per-linear capture never records (#5098); the group has one "
+        "Linear member, so score that projection"
+    )
+
+
+def test_hymba_kv_reuse_group_search_completes_without_cross_layer_kv():
+    hf_model, qmodel = _reuse_hymba()
+    consumer = hf_model.model.layers[2]
+    processor = _hymba_processor(qmodel, hf_model)
+    group = _mamba_group(consumer, qmodel)
+
+    prev_name, targets, scales, loss = processor._search_best_scale(
+        consumer,
+        prev_op=group["prev_op"],
+        layers=group["layers"],
+        inp=group["inp"],
+        module2inspect=group["module2inspect"],
+        kwargs=dict(group["kwargs"]),
+    )
+
+    assert prev_name == "input_layernorm"
+    assert targets == ("mamba.in_proj",)
+    assert scales.shape == (HIDDEN,)
+    assert torch.isfinite(scales).all()
+    assert float(loss) >= 0.0
+
+
+def test_hymba_mixer_replay_without_cross_layer_kv_uses_the_configured_fallback(caplog):
+    """A native replay assertion must fall back instead of aborting `quantize()`."""
+
+    hf_model, qmodel = _reuse_hymba()
+    consumer = hf_model.model.layers[2]
+    processor = _hymba_processor(qmodel, hf_model, fallback={})
+    group = _mamba_group(consumer, qmodel)
+    state = _AWQLayerState(layer_module=consumer, modules={
+        "mamba.in_proj": NamedModule(
+            consumer.mamba.in_proj, name="mamba.in_proj",
+            full_name="model.layers.2.mamba.in_proj", layer_index=2,
+        ),
+    })
+    features = {"mamba.in_proj": torch.randn(4, HIDDEN)}
+    # Re-introduce the pre-#5098 boundary: replay the whole `HymbaBlock`. The
+    # captured kwargs carry no `kv_last_layer`, exactly like the real capture.
+    broken = dict(
+        group,
+        module2inspect=consumer.mamba,
+        kwargs={
+            "attention_mask": None,
+            "position_ids": torch.arange(4).unsqueeze(0),
+            "kv_last_layer": None,
+            "use_swa": False,
+            "use_cache": False,
+        },
+    )
+    processor.gptq_model.awq_get_modules_for_scaling = lambda *_args: [broken]
+    quantized = []
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(processor, "_layer_input_features", lambda _state: features)
+        patcher.setattr(
+            processor,
+            "apply_quant",
+            lambda modules, scales_list: quantized.append((set(modules), scales_list)),
+        )
+        processor._quantize_layer(2, state)
+
+    assert (set(features), []) in quantized
+    assert state.quantized
+    assert "configured plain-quantization fallback" in caplog.text

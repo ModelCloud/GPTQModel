@@ -166,19 +166,28 @@ def test_every_saveable_method_is_hf_readable_or_refused():
 
     from transformers.quantizers import auto as hf_auto
 
-    from gptqmodel._quant_methods import GGUF_EXPORT_QUANT_METHOD, REFUSED_HF_QUANT_METHODS
+    from gptqmodel._quant_methods import (
+        FP8_EXPORT_QUANT_METHOD,
+        GGUF_EXPORT_QUANT_METHOD,
+        REFUSED_HF_QUANT_METHODS,
+    )
     from gptqmodel.quantization import METHOD
     from gptqmodel.utils.hf_refusing_quantizer import GPTQModelRefusingHfQuantizer
 
     for method in METHOD:
-        # GGUF is published under the non-colliding `gptqmodel_gguf` alias;
-        # the plain `gguf` name belongs to transformers' file-based loader.
-        name = GGUF_EXPORT_QUANT_METHOD if method is METHOD.GGUF else method.value
-        if name in REFUSED_HF_QUANT_METHODS:
-            continue
-        quantizer = hf_auto.AUTO_QUANTIZER_MAPPING.get(name)
-        assert quantizer is not None, (
-            f"`{name}` is neither refused by GPT-QModel nor readable by transformers; "
-            "plain HF would silently load garbage"
-        )
-        assert quantizer is not GPTQModelRefusingHfQuantizer, name
+        # GGUF and non-block FP8 are published under non-colliding aliases; the
+        # plain `gguf`/`fp8` names belong to transformers' own loaders.
+        names = [method.value]
+        if method is METHOD.GGUF:
+            names.append(GGUF_EXPORT_QUANT_METHOD)
+        if method is METHOD.FP8:
+            names.append(FP8_EXPORT_QUANT_METHOD)
+        for name in names:
+            if name in REFUSED_HF_QUANT_METHODS:
+                continue
+            quantizer = hf_auto.AUTO_QUANTIZER_MAPPING.get(name)
+            assert quantizer is not None, (
+                f"`{name}` is neither refused by GPT-QModel nor readable by transformers; "
+                "plain HF would silently load garbage"
+            )
+            assert quantizer is not GPTQModelRefusingHfQuantizer, name
