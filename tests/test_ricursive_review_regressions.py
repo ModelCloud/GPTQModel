@@ -132,9 +132,9 @@ def test_additive_mask_preserves_empty_rows_and_forbidden_keys(dtype):
     allowed[..., 2, :] = False
     allowed[..., 4, :] = False
     additive = torch.zeros(allowed.shape, dtype=dtype).masked_fill(~allowed, float("-inf"))
-    options = {"position_ids": positions[None], "cache_position": positions, "output_attentions": True}
-    expected, expected_weights, _ = attn(x, attention_mask=allowed, **options)
-    actual, weights, _ = attn(x, attention_mask=additive, **options)
+    options = {"position_ids": positions[None], "output_attentions": True}
+    expected, expected_weights = attn(x, attention_mask=allowed, **options)
+    actual, weights = attn(x, attention_mask=additive, **options)
     torch.testing.assert_close(actual, expected, atol=2e-3, rtol=2e-3)
     torch.testing.assert_close(weights, expected_weights, atol=2e-3, rtol=2e-3)
     assert torch.count_nonzero(actual[:, [2, 4]]) == 0
