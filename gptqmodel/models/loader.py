@@ -1098,8 +1098,132 @@ def _check_defuser_version() -> None:
     )
 
 
+# Vendored Transformers 5.23 families live at
+# ``gptqmodel.models.ports.native.<family>.<module>.<Class>``; Defuser keys its
+# runtime patches, expert specs and construction-time replacements by the
+# matching ``transformers.models.<family>.<module>.<Class>`` path.
+_VENDORED_CLASS_PREFIX = "gptqmodel.models.ports.native."
+_DEFUSER_CLASS_PREFIX = "transformers.models."
+
+
+def _defuser_module_path(module_class) -> Optional[str]:
+    """Return Defuser's ``transformers.models`` module for a vendored class, else None."""
+
+    module_path = getattr(module_class, "__module__", "") or ""
+    if not module_path.startswith(_VENDORED_CLASS_PREFIX):
+        return None
+    return _DEFUSER_CLASS_PREFIX + module_path[len(_VENDORED_CLASS_PREFIX):]
+
+
+class _DefuserClassPathAliases:
+    """Present vendored module classes to Defuser under their Transformers class path.
+
+    Each vendored instance temporarily gets a per-class subclass whose only
+    difference is ``__module__`` (``transformers.models.<family>.<module>``),
+    so every Defuser lookup by class path or class name matches exactly as it
+    does for the Transformers class. On exit an instance whose alias Defuser
+    left untouched gets its vendored class back. When Defuser extended the
+    class itself (for example ``__getitem__``/``__len__`` on split experts, or
+    a wrapped ``generate``), the instance keeps that subclass, renamed back to
+    the vendored module: it then behaves exactly like the extended Transformers
+    class while neither Transformers nor the vendored class is modified.
+    """
+
+    def __init__(self, model):
+        self.model = model
+        self.aliases = {}
+        self.alias_names = {}
+
+    def _modules(self):
+        modules = getattr(self.model, "modules", None)
+        return list(modules()) if callable(modules) else []
+
+    def _alias(self, module_class):
+        alias = self.aliases.get(module_class)
+        if alias is None:
+            namespace = {
+                "__module__": _defuser_module_path(module_class),
+                "__qualname__": module_class.__qualname__,
+            }
+            alias = type(module_class.__name__, (module_class,), namespace)
+            # ``GradientCheckpointingLayer.__init_subclass__`` wraps ``forward``
+            # on every subclass; drop that so the alias inherits the vendored one.
+            if "forward" in vars(alias):
+                delattr(alias, "forward")
+            self.aliases[module_class] = alias
+            self.alias_names[alias] = (module_class, set(vars(alias)))
+        return alias
+
+    def __enter__(self):
+        for module in self._modules():
+            module_class = type(module)
+            if _defuser_module_path(module_class) is None:
+                continue
+            module.__class__ = self._alias(module_class)
+        return self
+
+    def __exit__(self, *exc):
+        extended = {}
+        for alias, (original, names) in self.alias_names.items():
+            if set(vars(alias)) - names:
+                alias.__module__ = original.__module__
+                extended[alias] = True
+        for module in self._modules():
+            alias = type(module)
+            entry = self.alias_names.get(alias)
+            if entry is not None and alias not in extended:
+                module.__class__ = entry[0]
+        return False
+
+
 def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     _check_defuser_version()
+    with _DefuserClassPathAliases(model):
+        converted = _run_defuser_conversion(cls, model, cleanup_original)
+        _apply_vendored_construction_replacements(model)
+
+    after_conversion = getattr(cls, "after_defuser_conversion", None)
+    # Model-specific finalizers may also normalize metadata that Defuser does
+    # not own. Run them after the conversion attempt even when the installed
+    # Defuser has no matching registration and reports no structural change.
+    if callable(after_conversion):
+        after_conversion(model)
+
+    return converted
+
+
+def _apply_vendored_construction_replacements(model) -> None:
+    """Give vendored classes Defuser's construction-time block replacements.
+
+    ``defuser.replace_fused_blocks()`` swaps ``transformers.models`` classes
+    (and Transformers' checkpoint conversion mapping) before construction.
+    GPT-QModel never patches Transformers and vendored models are never built
+    from those modules, so the swap is applied here, after construction, under
+    the same class keys (this runs inside ``_DefuserClassPathAliases``). Fused
+    MoE blocks are already split per expert by Defuser's generic experts pass
+    with the replacement block's parameter names; a dense replacement (for
+    example ``Glm4vTextMLP`` -> ``LinearGlm4vTextMLP``) splits ``gate_up_proj``
+    with Defuser's own runtime split, which has the replacement's forward.
+    """
+
+    from defuser.model_registry import MODEL_CONFIG, PATCH
+    from defuser.modeling.runtime_defusion import patch_split_gate_up_mlp
+
+    model_type = getattr(getattr(model, "config", None), "model_type", None)
+    if not callable(getattr(model, "modules", None)):
+        return
+    replaced = {orig for orig, _ in MODEL_CONFIG.get(model_type, {}).get(PATCH.REPLACE_MODULE, ())}
+    if not replaced:
+        return
+    for module in list(model.modules()):
+        module_class = type(module)
+        if f"{module_class.__module__}.{module_class.__name__}" not in replaced:
+            continue
+        if isinstance(getattr(module, "gate_up_proj", None), torch.nn.Linear):
+            patch_split_gate_up_mlp(module, variant="standard")
+
+
+def _run_defuser_conversion(cls, model, cleanup_original: bool) -> bool:
     converted = defuser.convert_model(model, cleanup_original=cleanup_original)
 
     # Defuser gates `convert_model()` on its own model registry. Model types
@@ -1121,13 +1245,6 @@ def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
                 log.warn("Loader: defuser module path `%s` was not found.", module_path)
                 continue
             converted = defuser.convert_model(module, cleanup_original=cleanup_original) or converted
-
-    after_conversion = getattr(cls, "after_defuser_conversion", None)
-    # Model-specific finalizers may also normalize metadata that Defuser does
-    # not own. Run them after the conversion attempt even when the installed
-    # Defuser has no matching registration and reports no structural change.
-    if callable(after_conversion):
-        after_conversion(model)
 
     return converted
 
@@ -2107,8 +2224,6 @@ def ModelLoader(cls):
 
         config = load_model_config(model_local_path, **model_init_kwargs_without_internal, **hf_gguf_load_kwargs)
 
-        defuser.replace_fused_blocks(config.model_type)
-
         from ..utils.mimo import is_mimo_mixed_source
 
         mimo_source = is_mimo_mixed_source(config)
@@ -2732,8 +2847,6 @@ def ModelLoader(cls):
             **cached_file_kwargs,
             **hf_gguf_load_kwargs,
         )
-
-        defuser.replace_fused_blocks(config.model_type)
 
         if cls.require_dtype:
             dtype = cls.require_dtype

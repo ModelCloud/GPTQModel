@@ -19,23 +19,6 @@ class Phi3QModel(BaseQModel):
 
     pre_lm_head_norm_module = "model.norm"
 
-    @classmethod
-    def after_defuser_conversion(cls, model):
-        """Split the vendored ``Phi3MLP.gate_up_proj`` exactly as Defuser does.
-
-        Defuser selects its split-MLP patch by ``transformers.models`` class
-        path, so the vendored class needs the same runtime patch (split weights
-        and the matching forward) applied explicitly.
-        """
-
-        from defuser.modeling.runtime_defusion import patch_split_gate_up_mlp
-
-        from ..ports.native.phi3.modeling_phi3 import Phi3MLP
-
-        for module in list(model.modules()):
-            if type(module) is Phi3MLP:
-                patch_split_gate_up_mlp(module, variant="standard")
-
     module_tree = [
         "model",
         "layers",
