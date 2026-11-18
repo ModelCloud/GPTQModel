@@ -34,6 +34,7 @@ from transformers.modeling_outputs import (
     TokenClassifierOutput,
 )
 from transformers.modeling_utils import PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.utils import (
     auto_docstring,
     logging,
@@ -405,7 +406,7 @@ class BloomBlock(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class BloomPreTrainedModel(PreTrainedModel):
+class BloomPreTrainedModel(NativePreTrainedModel):
     config: BloomConfig
     base_model_prefix = "transformer"
     supports_gradient_checkpointing = True

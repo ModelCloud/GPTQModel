@@ -34,6 +34,7 @@ from transformers.modeling_outputs import (
     TokenClassifierOutput,
 )
 from transformers.modeling_utils import PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.utils import auto_docstring, logging
 from .configuration_mpt import MptConfig
 
@@ -215,7 +216,7 @@ class MptBlock(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class MptPreTrainedModel(PreTrainedModel):
+class MptPreTrainedModel(NativePreTrainedModel):
     config: MptConfig
     base_model_prefix = "transformer"
     supports_gradient_checkpointing = True

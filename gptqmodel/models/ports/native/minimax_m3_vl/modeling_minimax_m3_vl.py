@@ -43,6 +43,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import ModelOutput, TransformersKwargs, auto_docstring, torch_compilable_check
 from transformers.utils.generic import can_return_tuple, get_max_seqlen, is_flash_attention_requested, merge_with_config_defaults
@@ -669,7 +670,7 @@ class MiniMaxM3VLDecoderLayer(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class MiniMaxM3VLPreTrainedModel(PreTrainedModel):
+class MiniMaxM3VLPreTrainedModel(NativePreTrainedModel):
     config: MiniMaxM3VLConfig | MiniMaxM3VLTextConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True

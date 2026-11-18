@@ -29,6 +29,7 @@ from transformers.masking_utils import create_causal_mask
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import (
     TransformersKwargs,
@@ -263,7 +264,7 @@ class CodeGenBlock(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class CodeGenPreTrainedModel(PreTrainedModel):
+class CodeGenPreTrainedModel(NativePreTrainedModel):
     config: CodeGenConfig
     base_model_prefix = "transformer"
     supports_gradient_checkpointing = True
