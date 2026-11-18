@@ -26,7 +26,10 @@ from transformers import initialization as init
 from transformers.cache_utils import CacheLayerMixin, DynamicCache, LinearAttentionCacheLayerMixin
 from transformers.masking_utils import create_causal_mask, create_recurrent_attention_mask
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.models.qwen3_5.modeling_qwen3_5 import (
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
+
+from ..native.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5DecoderLayer,
     Qwen3_5ForConditionalGeneration,
     Qwen3_5Model,
@@ -36,9 +39,6 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5TextRotaryEmbedding,
     Qwen3_5VisionModel,
 )
-from transformers.utils.generic import merge_with_config_defaults
-from transformers.utils.output_capturing import capture_outputs
-
 from .configuration_sensenova_loop import SenseNovaLoopConfig, execution_plan
 
 

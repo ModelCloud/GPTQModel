@@ -17,23 +17,24 @@ import pytest
 import torch
 from awq_neutrality import assert_awq_folds_neutral
 from safetensors.torch import load_file, save_file
-from transformers import (
-    CONFIG_MAPPING,
-    DynamicCache,
-    Qwen2Tokenizer,
-    Qwen2VLImageProcessor,
-    Qwen3_5Config,
-    Qwen3_5ForConditionalGeneration,
-    Qwen3VLProcessor,
-    Qwen3VLVideoProcessor,
+from transformers import CONFIG_MAPPING, DynamicCache
+
+# Transformers' own Qwen3.5 is the numerical oracle only.
+from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config as NativeQwen3_5Config
+from transformers.models.qwen3_5.modeling_qwen3_5 import (
+    Qwen3_5ForConditionalGeneration as NativeQwen3_5ForConditionalGeneration,
 )
-from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5DecoderLayer
 
 from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.sensenova_loop import SenseNovaLoopQModel
 from gptqmodel.models.local import LocalModelLoader
+from gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
+from gptqmodel.models.ports.native.qwen3_5.modeling_qwen3_5 import Qwen3_5DecoderLayer, Qwen3_5ForConditionalGeneration
+from gptqmodel.models.ports.native.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoProcessor
 from gptqmodel.models.ports.sensenova_loop import (
     MHCRouter,
+    Qwen2Tokenizer,
+    Qwen3VLProcessor,
     SenseNovaLoopConfig,
     SenseNovaLoopForConditionalGeneration,
     SenseNovaLoopMHCDecoderLayer,
@@ -112,7 +113,7 @@ def unrolled_native(model):
     raw["text_config"].update(num_hidden_layers=len(plan), layer_types=[LAYER_TYPES[i] for i in plan])
     raw.pop("loop_settings")
     raw.pop("mhc")
-    native = Qwen3_5ForConditionalGeneration(Qwen3_5Config(**raw)).eval()
+    native = NativeQwen3_5ForConditionalGeneration(NativeQwen3_5Config(**raw)).eval()
     state = {}
     prefix = "model.language_model.layers."
     source = model.state_dict()
@@ -309,7 +310,7 @@ def test_loop_and_mhc_disabled_equals_native_exactly():
     raw = raw_config(mhc=None)
     raw.pop("loop_settings")
     raw.pop("mhc")
-    native = Qwen3_5ForConditionalGeneration(Qwen3_5Config(**raw)).eval()
+    native = NativeQwen3_5ForConditionalGeneration(NativeQwen3_5Config(**raw)).eval()
     native.load_state_dict(model.state_dict(), strict=True)
     ids = torch.tensor([[1, 7, 11, 13, 8, 9]])
     with torch.inference_mode():
