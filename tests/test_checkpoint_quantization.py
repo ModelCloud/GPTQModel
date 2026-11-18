@@ -503,7 +503,7 @@ def test_dynamic_quantized_tensors_equal_after_resume(tmp_path, monkeypatch):
 def test_dynamic_weight_only_quantized_tensors_equal_after_resume(
     tmp_path, monkeypatch
 ):
-    from gptqmodel.quantization.config import FP8Config
+    from gptqmodel.quantization.config import RTNConfig
 
     torch.manual_seed(1234)
     native = tmp_path / "native"
@@ -525,38 +525,37 @@ def test_dynamic_weight_only_quantized_tensors_equal_after_resume(
 
     def run(output, checkpoint):
         torch.manual_seed(6789)
-        config = FP8Config(
-            weight_scale_method="row",
+        # FP8 is load-only (#5242), so the dynamic weight-only layout resumes
+        # through RTN, which still quantizes (#5271).
+        config = RTNConfig(
+            bits=4,
+            group_size=32,
             device="cpu",
             offload_to_disk=True,
             offload_to_disk_path=str(tmp_path / f"offload-{output}"),
             dynamic={
                 r"+:^model\.layers\.0\.self_attn\.q_proj$": {
-                    "format": "float8_e5m2",
-                    "weight_scale_method": "block",
-                    "weight_block_size": [32, 32],
+                    "bits": 8,
                 },
             },
         )
         model = GPTQModel.load(
-            str(native), quantize_config=config, backend=BACKEND.FP8_TORCH
+            str(native), quantize_config=config, backend=BACKEND.TORCH
         )
         model.quantize(
             CalibrationConfig(
                 dataset=calibration,
                 batch_size=1,
             ),
-            backend=BACKEND.FP8_TORCH,
+            backend=BACKEND.TORCH,
             checkpoint=checkpoint,
         )
         model.save(tmp_path / output)
         loaded = GPTQModel.load(
-            str(tmp_path / output), device="cpu", backend=BACKEND.FP8_TORCH
+            str(tmp_path / output), device="cpu", backend=BACKEND.TORCH
         )
         q_proj = loaded.model.model.layers[0].self_attn.q_proj
-        assert q_proj.fp8_format == "float8_e5m2"
-        assert q_proj.weight_scale_method == "block"
-        assert q_proj.weight_block_size == (32, 32)
+        assert q_proj.bits == 8
         del loaded
         return load_file(tmp_path / output / "model.safetensors")
 
