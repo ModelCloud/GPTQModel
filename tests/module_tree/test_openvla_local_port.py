@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 
 from gptqmodel.models.auto import MODEL_MAP
@@ -14,7 +15,7 @@ from gptqmodel.models.definitions.openvla import OpenVLAQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.ports.openvla.configuration_prismatic import OpenVLAConfig
 from gptqmodel.models.ports.openvla.modeling_prismatic import OpenVLAForActionPrediction
-from tests.test_openvla_local_port import _config, _write_assets
+from tests.test_openvla_local_port import _config, _model, _write_assets
 
 
 @pytest.fixture(scope="module")
@@ -65,9 +66,42 @@ def test_openvla_real_weight_owners_and_module_plans(llm, kv_heads, bias, device
     for layer in model.language_model.model.layers:
         for path in expected:
             assert isinstance(layer.get_submodule(path), nn.Linear)
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     assert wrapper.fusable is None
     assert MODEL_MAP["openvla"] is OpenVLAQModel
+
+
+@pytest.mark.parametrize("llm,kv_heads,qk_layernorm", [
+    ("llama2-7b-pure", 4, False), ("llama2-7b-pure", 2, False), ("mistral-v0.1-7b-pure", 4, False),
+    ("phi-2-3b", 4, False), ("phi-2-3b", 4, True),
+])
+def test_openvla_awq_scale_folds_preserve_decoder_output(llm, kv_heads, qk_layernorm):
+    model = _model(llm=llm, text_config={"num_key_value_heads": kv_heads, "qk_layernorm": qk_layernorm})
+    _convert_model_with_defuser(OpenVLAQModel, model, cleanup_original=False)
+    tree = OpenVLAQModel._resolve_effective_module_tree(model, None)
+    language_model = model.language_model
+    ids = torch.randint(2, 250, (1, 8))
+
+    def forward():
+        return language_model(input_ids=ids).logits
+
+    for layer in language_model.model.layers:
+        checked = assert_awq_folds_neutral(OpenVLAQModel, model, layer, forward, tree=tree)
+        groups = [(source, targets) for source, targets, _consumers in checked]
+        if llm == "phi-2-3b":
+            # Phi's attention and MLP read one norm in parallel and GELU splits
+            # fc1/fc2, so the only fold is the value path into `dense`.
+            assert groups == [("self_attn.v_proj", ["self_attn.dense"])]
+            continue
+        expected = [
+            ("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]),
+            ("self_attn.v_proj", ["self_attn.o_proj"]),
+            ("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"]),
+            ("mlp.up_proj", ["mlp.down_proj"]),
+        ]
+        if kv_heads != 4:
+            # GQA: the value width differs from `o_proj`'s input.
+            expected.remove(("self_attn.v_proj", ["self_attn.o_proj"]))
+        assert groups == expected
 
 
 # openvla/openvla-7b @ 47a0ec7fc4ec123775a391911046cf33cf9ed83f: config geometry and the
