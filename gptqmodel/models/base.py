@@ -29,7 +29,6 @@ from transformers import (  # Auto*: unsupported-model fallback only (see BaseQM
     PreTrainedModel,
     PreTrainedTokenizerBase,
     ProcessorMixin,
-    modeling_utils,
 )
 
 from .. import DEVICE_THREAD_POOL
@@ -618,10 +617,6 @@ def generate_node_for_awq_scaling(inp, prev_op, module_kwargs, nodes_size, subse
 
     return n, None
 
-def check_support_param_buffer_assignment(*args, **kwargs):
-    return False
-
-
 def apply_module_tree_override(module_tree, override):
     """
     Recursively find the corresponding key of override in ``module_tree``.
@@ -680,10 +675,6 @@ NORM_FLAG = ":norm"
 POST_NORM_FLAG = ":postnorm"
 NON_QUANTIZE_FLAGS = (NOT_QUANTIZE_FLAG, CAPTURE_ONLY_FLAG)
 
-
-# Fix cpu memory leak.
-# See https://github.com/huggingface/transformers/issues/34366
-modeling_utils.check_support_param_buffer_assignment = check_support_param_buffer_assignment
 
 log = setup_logger()
 
