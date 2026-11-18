@@ -426,26 +426,38 @@ def _device_budgets(per_device: Dict[int, int]) -> Tuple[DeviceBudget, ...]:
     return tuple(budgets)
 
 
-def _layer_device_indices(inner: object, layer_count: int) -> Optional[Tuple[int, ...]]:
-    """(measured) Device index of each decoder layer, or None when unresolvable."""
+def _layer_device_indices(wrapper: object, inner: object,
+                          layer_count: int) -> Optional[Tuple[int, ...]]:
+    """(measured) Device index of each decoder layer, or None when unresolvable.
 
-    layers_paths = getattr(inner, "extract_layers_node", None)
-    if not callable(layers_paths):
-        layers_paths = getattr(type(inner), "extract_layers_node", None)
+    The layer paths live on the quantization wrapper (`BaseQModel`), while the
+    modules themselves live on the HF model it wraps - the split that made an
+    earlier revision return None for every real model.
+    """
+
+    extract = getattr(wrapper, "extract_layers_node", None)
+    if not callable(extract):
+        return None
     try:
-        paths = list(layers_paths()) if callable(layers_paths) else []
+        paths = list(extract())
     except Exception:  # pragma: no cover - exotic definitions
         return None
     if len(paths) != 1:
         # Multi-branch definitions do not map 1:1 onto the config's layer list.
         return None
-    try:
-        layers = inner.model.get_submodule(paths[0])
-    except Exception:
+
+    layers = None
+    for candidate in (inner, getattr(inner, "model", None)):
+        if candidate is None or not hasattr(candidate, "get_submodule"):
+            continue
         try:
-            layers = inner.get_submodule(paths[0])
+            layers = candidate.get_submodule(paths[0])
+            break
         except Exception:
-            return None
+            continue
+    if layers is None:
+        return None
+
     indices = []
     for layer in layers:
         tensors = list(layer.parameters()) + list(layer.buffers())
@@ -462,7 +474,7 @@ def _layer_device_indices(inner: object, layer_count: int) -> Optional[Tuple[int
     return tuple(indices)
 
 
-def _budget_for(inner: object, *, reserve: float = 0.1,
+def _budget_for(inner: object, *, wrapper: object = None, reserve: float = 0.1,
                 dtype: Optional[torch.dtype] = None) -> ResourceBudget:
     """Resource budget for a decoder module: measured per-device numbers + estimates."""
 
@@ -470,7 +482,8 @@ def _budget_for(inner: object, *, reserve: float = 0.1,
     estimate = _kv_cache_estimate_for(inner, dtype=dtype)
     layer_devices = None
     if estimate is not None:
-        layer_devices = _layer_device_indices(inner, len(estimate.layers))
+        layer_devices = _layer_device_indices(wrapper if wrapper is not None else inner,
+                                              inner, len(estimate.layers))
     return ResourceBudget(
         devices=_device_budgets(per_device),
         kv_cache=estimate,
@@ -2361,17 +2374,17 @@ class BaseQModel(nn.Module):
         back from the KV budget.
         """
 
-        return _budget_for(getattr(self, "model", None), reserve=reserve, dtype=dtype)
+        return _budget_for(getattr(self, "model", None), wrapper=self, reserve=reserve, dtype=dtype)
 
     def kv_cache_estimate(self, *, dtype: Optional[torch.dtype] = None) -> Optional[KVCacheEstimate]:
         """The estimated KV-cache slice of :meth:`budget` (kept as a shortcut)."""
 
-        return _budget_for(getattr(self, "model", None), dtype=dtype).kv_cache
+        return _budget_for(getattr(self, "model", None), wrapper=self, dtype=dtype).kv_cache
 
     def log_budget(self) -> None:
         """Log the resource budget once, marked measured vs estimated."""
 
-        for line in _budget_for(getattr(self, "model", None)).describe():
+        for line in _budget_for(getattr(self, "model", None), wrapper=self).describe():
             log.info(line)
 
     @with_quantization_device_telemetry

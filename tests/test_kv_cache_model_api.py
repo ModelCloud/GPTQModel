@@ -34,9 +34,9 @@ class _FakeTensor:
 
     is_meta = False
 
-    def __init__(self, index, numel=8, size=2):
+    def __init__(self, index, numel=8, size=2, device_type="cuda"):
         self._numel, self._size = numel, size
-        self.device = types.SimpleNamespace(type="cuda", index=index)
+        self.device = types.SimpleNamespace(type=device_type, index=index if device_type == "cuda" else None)
 
     def numel(self):
         return self._numel
@@ -196,3 +196,83 @@ def test_sharded_planning_is_limited_by_the_tightest_device(monkeypatch):
     unmapped = replace(budget, layer_devices=None)
     assert unmapped.max_context_tokens() is None
     assert any("needs its layer-to-device map" in line for line in unmapped.describe())
+
+
+class _FakeLayer:
+    """One decoder layer holding a single tensor on ``device_index``."""
+
+    def __init__(self, device_index):
+        self._tensor = _FakeTensor(device_index, numel=4, size=2)
+
+    def parameters(self):
+        return iter([self._tensor])
+
+    def buffers(self):
+        return iter(())
+
+
+class _FakeInner:
+    """Stands in for the HF model: config, weights, and layer paths."""
+
+    def __init__(self, config, layer_devices, weights=None):
+        self.config = config
+        self.model = types.SimpleNamespace()
+        self._layer_devices = tuple(layer_devices)
+        self._weights = list(weights or [_FakeTensor(0, numel=8, size=2)])
+
+    def parameters(self):
+        return iter(self._weights)
+
+    def buffers(self):
+        return iter(())
+
+    def get_submodule(self, path):
+        assert path == "model.layers"
+        return [_FakeLayer(index) for index in self._layer_devices]
+
+
+def _wrapper_stub(inner):
+    """Wrapper that carries the layer paths, like BaseQModel does."""
+
+    return types.SimpleNamespace(model=inner, extract_layers_node=lambda: ["model.layers"])
+
+
+def test_layer_devices_resolve_through_the_wrapper(monkeypatch):
+    """Regression: `extract_layers_node` lives on the wrapper, not the HF model."""
+
+    monkeypatch.setattr(base, "device_memory_bytes",
+                        lambda index=None: (8 * 1024 ** 3, 24 * 1024 ** 3))
+    config = types.SimpleNamespace(hidden_size=64, num_hidden_layers=2,
+                                   num_attention_heads=4, num_key_value_heads=2)
+    # A real split puts weights on both devices, not just the first.
+    weights = [_FakeTensor(0, numel=8, size=2), _FakeTensor(1, numel=8, size=2)]
+    inner = _FakeInner(config, layer_devices=(0, 1), weights=weights)
+    wrapper = _wrapper_stub(inner)
+
+    budget = BaseQModel.budget(wrapper)
+
+    assert budget.layer_devices == (0, 1)
+    assert budget.is_sharded is True
+    assert budget.max_context_tokens() is not None
+
+
+def test_a_host_resident_buffer_does_not_make_a_model_sharded(monkeypatch):
+    """Regression: transformers keeps `rotary_emb.inv_freq` on the CPU."""
+
+    monkeypatch.setattr(base, "device_memory_bytes",
+                        lambda index=None: (8 * 1024 ** 3, 24 * 1024 ** 3))
+    config = types.SimpleNamespace(hidden_size=64, num_hidden_layers=2,
+                                   num_attention_heads=4, num_key_value_heads=2)
+    host_weights = [_FakeTensor(0, numel=8, size=2), _FakeTensor(-1, numel=16, size=1, device_type="cpu")]
+    inner = _FakeInner(config, layer_devices=(0, 0), weights=host_weights)
+    wrapper = _wrapper_stub(inner)
+
+    budget = BaseQModel.budget(wrapper)
+
+    assert budget.device_count == 2            # host bucket still reported
+    assert budget.is_sharded is False          # but it is not a shard
+    assert budget.host_weights_bytes == 16 * 1
+    assert budget.max_context_tokens() is not None
+    lines = budget.describe()
+    assert any("host" in line for line in lines)
+    assert not any("device -1" in line for line in lines)

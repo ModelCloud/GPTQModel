@@ -107,10 +107,26 @@ class ResourceBudget:
         return len(self.devices)
 
     @property
-    def is_sharded(self) -> bool:
-        """True when the weights live on more than one device."""
+    def cuda_devices(self) -> Tuple[DeviceBudget, ...]:
+        """Devices with real CUDA memory; index ``-1`` is host memory."""
 
-        return len(self.devices) > 1
+        return tuple(device for device in self.devices if device.index >= 0)
+
+    @property
+    def host_weights_bytes(self) -> int:
+        """(measured) Weight bytes held in host memory rather than VRAM."""
+
+        return sum(device.weights_bytes for device in self.devices if device.index < 0)
+
+    @property
+    def is_sharded(self) -> bool:
+        """True when the weights live on more than one CUDA device.
+
+        A CPU-resident buffer (transformers keeps ``rotary_emb.inv_freq`` on the
+        host) must not make a single-GPU load look sharded.
+        """
+
+        return len(self.cuda_devices) > 1
 
     @property
     def context_limit(self) -> Optional[int]:
@@ -127,7 +143,7 @@ class ResourceBudget:
         per-device arithmetic and does not rely on that assumption.
         """
 
-        budgets = [device.kv_budget_bytes(self.reserve_fraction) for device in self.devices]
+        budgets = [device.kv_budget_bytes(self.reserve_fraction) for device in self.cuda_devices]
         known = [budget for budget in budgets if budget is not None]
         return sum(known) if known else None
 
@@ -153,7 +169,7 @@ class ResourceBudget:
             return None
 
         limits: Dict[int, int] = {}
-        for device in self.devices:
+        for device in self.cuda_devices:
             owned = [i for i, index in enumerate(self.layer_devices) if index == device.index]
             if not owned:
                 continue
@@ -180,7 +196,8 @@ class ResourceBudget:
         if kv_budget_bytes is not None:
             return self.kv_cache.max_context_tokens(int(kv_budget_bytes), batch_size=batch_size)
         if not self.is_sharded:
-            budget = self.devices[0].kv_budget_bytes(self.reserve_fraction) if self.devices else None
+            devices = self.cuda_devices
+            budget = devices[0].kv_budget_bytes(self.reserve_fraction) if devices else None
             return None if budget is None else self.kv_cache.max_context_tokens(budget, batch_size=batch_size)
 
         limits = self._per_device_limits(batch_size=batch_size, kv_budget_bytes=None)
@@ -195,13 +212,14 @@ class ResourceBudget:
         if kv_budget_bytes is not None:
             return self.kv_cache.max_sequences(int(kv_budget_bytes), context_tokens)
         if not self.is_sharded:
-            budget = self.devices[0].kv_budget_bytes(self.reserve_fraction) if self.devices else None
+            devices = self.cuda_devices
+            budget = devices[0].kv_budget_bytes(self.reserve_fraction) if devices else None
             return None if budget is None else self.kv_cache.max_sequences(budget, context_tokens)
 
         if self.layer_devices is None or len(self.layer_devices) != len(self.kv_cache.layers):
             return None
         limits = []
-        for device in self.devices:
+        for device in self.cuda_devices:
             owned = [i for i, index in enumerate(self.layer_devices) if index == device.index]
             subset = self._layer_subset(owned)
             budget = device.kv_budget_bytes(self.reserve_fraction)
@@ -247,7 +265,7 @@ class ResourceBudget:
         weights = f"Budget: weights {human_bytes(self.weights_bytes)} (measured)"
         if self.devices:
             parts = []
-            for device in self.devices:
+            for device in self.cuda_devices:
                 if device.free_bytes is None or device.total_bytes is None:
                     parts.append(f"device {device.index} free unknown")
                     continue
@@ -255,7 +273,10 @@ class ResourceBudget:
                     f"device {device.index} free {human_bytes(device.free_bytes)}"
                     f" of {human_bytes(device.total_bytes)}"
                 )
-            weights += ", " + ", ".join(parts) + " (measured)"
+            if parts:
+                weights += ", " + ", ".join(parts) + " (measured)"
+            if self.host_weights_bytes:
+                weights += f", host {human_bytes(self.host_weights_bytes)} (measured)"
         lines = [weights]
 
         if self.kv_cache is None:
