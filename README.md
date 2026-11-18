@@ -253,6 +253,11 @@ See [installation and optional extras](https://github.com/ModelCloud/GPTQModel/w
 for source installs and platform setup. Install vLLM or SGLang in a separate
 environment aligned with that engine's dependency pins.
 
+The native GGUF C++ backends live in the `gguf` extra
+(`llama-cpp-python>=0.3.37`, which vendors ggml 1.0). `GGUF_CPP` reads the
+loaded release through `ggml_version()`; ggml 1.0 adds the `F8_E4M3` tensor
+type, which the native GGUF reader can dequantize.
+
 ## Quick start 🚀
 
 ### Inference 💬
