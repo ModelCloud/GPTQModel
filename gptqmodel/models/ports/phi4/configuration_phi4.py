@@ -4,7 +4,7 @@
 
 from copy import deepcopy
 
-from transformers import Phi4MultimodalConfig
+from ..native.phi4_multimodal.configuration_phi4_multimodal import Phi4MultimodalConfig
 
 
 class Phi4MMConfig(Phi4MultimodalConfig):

@@ -13,12 +13,16 @@ import pytest
 import torch
 from huggingface_hub import hf_hub_download
 from safetensors.torch import save_file
-from transformers import AutoConfig, AutoTokenizer, DeepseekV3Config, DeepseekV3ForCausalLM
+from transformers import AutoConfig, AutoTokenizer
+from transformers.models.deepseek_v3.configuration_deepseek_v3 import DeepseekV3Config as NativeDeepseekV3Config
+from transformers.models.deepseek_v3.modeling_deepseek_v3 import DeepseekV3ForCausalLM as NativeDeepseekV3ForCausalLM
 
 from gptqmodel import GPTQModel
 from gptqmodel.models.auto import check_and_get_model_definition
 from gptqmodel.models.definitions.deepseek_v3 import DeepSeekV3QModel
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.ports.native.deepseek_v3.configuration_deepseek_v3 import DeepseekV3Config
+from gptqmodel.models.ports.native.deepseek_v3.modeling_deepseek_v3 import DeepseekV3ForCausalLM
 from gptqmodel.utils.hf import load_hf_tokenizer, load_model_config, resolve_trust_remote_code
 from gptqmodel.utils.security import BYPASS_ENV
 
@@ -79,11 +83,12 @@ def checkpoint_state_dict(model):
 
 def write_checkpoint(path, payload):
     # The reference uses the native constructor directly, independently of the loader under test.
-    config = DeepseekV3Config.from_dict(dict(payload, model_type="deepseek_v3"))
+    # Transformers' own class is the numerical oracle the port must reproduce.
+    config = NativeDeepseekV3Config.from_dict(dict(payload, model_type="deepseek_v3"))
     config._attn_implementation = "eager"
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(42)
-        reference = DeepseekV3ForCausalLM(config).eval()
+        reference = NativeDeepseekV3ForCausalLM(config).eval()
         with torch.no_grad():
             reference.model.layers[1].mlp.gate.e_score_correction_bias.copy_(torch.tensor([.1, -.2, .3, -.4]))
     reference.save_pretrained(path, safe_serialization=True)

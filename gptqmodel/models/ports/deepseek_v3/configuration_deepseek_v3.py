@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Canonicalize the standalone Kimi-K2 alias before native weight conversion."""
 
-from transformers import DeepseekV3Config as NativeDeepseekV3Config
+from ..native.deepseek_v3.configuration_deepseek_v3 import DeepseekV3Config as NativeDeepseekV3Config
 
 
 class DeepseekV3Config(NativeDeepseekV3Config):

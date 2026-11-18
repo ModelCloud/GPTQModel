@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import Qwen2VLConfig, Qwen2VLTextConfig
 
 from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.ports.native.qwen2_vl.configuration_qwen2_vl import Qwen2VLConfig, Qwen2VLTextConfig
 from tests.port_assets import PORTS, read_port_json
 
 

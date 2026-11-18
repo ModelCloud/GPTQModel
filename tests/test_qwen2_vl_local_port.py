@@ -9,23 +9,23 @@ from pathlib import Path
 import pytest
 import torch
 from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import (
-    AutoModel,
-    AutoModelForCausalLM,
-    AutoModelForImageTextToText,
-    PreTrainedTokenizerFast,
-    Qwen2VLConfig,
-    Qwen2VLForConditionalGeneration,
-    Qwen2VLImageProcessor,
-    Qwen2VLProcessor,
-    Qwen2VLTextConfig,
-    Qwen2VLTextModel,
-    Qwen2VLVideoProcessor,
-)
+from transformers import PreTrainedTokenizerFast
+
+# Transformers' own Qwen2-VL is used only as the numerical oracle.
+from transformers.models.qwen2_vl import modeling_qwen2_vl as oracle_modeling
+from transformers.models.qwen2_vl.configuration_qwen2_vl import Qwen2VLConfig as OracleQwen2VLConfig
+from transformers.models.qwen2_vl.configuration_qwen2_vl import Qwen2VLTextConfig as OracleQwen2VLTextConfig
+from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor as OracleQwen2VLProcessor
 
 from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 from gptqmodel.models.ports import qwen2_vl
+from gptqmodel.models.ports.native.auto import AutoModel, AutoModelForCausalLM, NativeForImageTextToText
+from gptqmodel.models.ports.native.qwen2_vl.configuration_qwen2_vl import Qwen2VLConfig, Qwen2VLTextConfig
+from gptqmodel.models.ports.native.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
+from gptqmodel.models.ports.native.qwen2_vl.modeling_qwen2_vl import Qwen2VLForConditionalGeneration, Qwen2VLTextModel
+from gptqmodel.models.ports.native.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
+from gptqmodel.models.ports.native.qwen2_vl.video_processing_qwen2_vl import Qwen2VLVideoProcessor
 from gptqmodel.utils.hf import load_model_config
 from tests.port_assets import read_port_asset, read_port_json
 
@@ -183,10 +183,34 @@ def output_tensor(model, ids, **kwargs):
 def test_native_task_mapping_is_not_a_causal_alias():
     cfg = tiny_config(True)
     assert type(AutoModel.from_config(cfg)) is Qwen2VLTextModel
-    for auto in (AutoModelForCausalLM, AutoModelForImageTextToText):
-        with pytest.raises(ValueError, match="Unrecognized configuration"):
-            auto.from_config(cfg)
+    for build in (AutoModelForCausalLM.from_config, NativeForImageTextToText._from_config):
+        with pytest.raises(ValueError, match="no vendored"):
+            build(cfg)
     assert type(Qwen2VLQModel.loader.from_config(cfg)) is Qwen2VLTextModel
+
+
+@pytest.mark.parametrize("text", [False, True])
+@pytest.mark.parametrize("implementation", ["eager", "sdpa"])
+def test_vendored_classes_match_transformers_oracle(text, implementation):
+    torch.manual_seed(5)
+    cfg = tiny_config(text, kv_heads=2)
+    model = Qwen2VLQModel.loader.from_config(copy.deepcopy(cfg), attn_implementation=implementation).eval()
+    oracle_config = (OracleQwen2VLTextConfig if text else OracleQwen2VLConfig)(**cfg.to_dict())
+    oracle_class = oracle_modeling.Qwen2VLTextModel if text else oracle_modeling.Qwen2VLForConditionalGeneration
+    oracle = oracle_class._from_config(oracle_config, attn_implementation=implementation).eval()
+    assert type(model).__module__.startswith("gptqmodel.models.ports.native.qwen2_vl.")
+    assert {k: v.shape for k, v in model.state_dict().items()} == {k: v.shape for k, v in oracle.state_dict().items()}
+    oracle.load_state_dict(model.state_dict())
+    ids = torch.tensor([[1, 7, 4, 17, 8, 12]])
+    with torch.no_grad():
+        if text:
+            assert torch.equal(model(ids).last_hidden_state, oracle(ids).last_hidden_state)
+        else:
+            assert torch.equal(model(ids).logits, oracle(ids).logits)
+            assert torch.equal(
+                model.generate(ids, max_new_tokens=4, do_sample=False),
+                oracle.generate(ids, max_new_tokens=4, do_sample=False),
+            )
 
 
 @pytest.mark.parametrize("text", [False, True])
@@ -316,7 +340,7 @@ def test_public_corrupt_safetensors_then_repaired_retry(tmp_path, text):
 
 
 def test_foreign_config_rejected_without_initializing_wrong_model():
-    from transformers import Qwen2Config
+    from gptqmodel.models.ports.native.qwen2.configuration_qwen2 import Qwen2Config
 
     with pytest.raises(ValueError, match="exact native"):
         Qwen2VLQModel.loader.from_config(Qwen2Config(vocab_size=64, hidden_size=32))
@@ -496,7 +520,7 @@ def test_real_pinned_tokenizer_and_media_processor(tmp_path, text):
         assert model.generate(**inputs, max_new_tokens=2, do_sample=False).shape[1] == inputs.input_ids.shape[1] + 2
     destination = tmp_path / "processor-reload"
     processor.save_pretrained(destination)
-    restored = Qwen2VLProcessor.from_pretrained(destination)
+    restored = OracleQwen2VLProcessor.from_pretrained(destination)
     restored_inputs = restored(text=[prompt], images=[image], return_tensors="pt")
     for key in inputs:
         torch.testing.assert_close(restored_inputs[key], inputs[key])

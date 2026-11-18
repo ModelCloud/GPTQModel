@@ -9,8 +9,8 @@ from contextvars import ContextVar
 import torch
 from torch import nn
 from torch.nn import functional as F
-from transformers.models.phi4_multimodal import modeling_phi4_multimodal as native
 
+from ..native.phi4_multimodal import modeling_phi4_multimodal as native
 from .configuration_phi4 import Phi4MMConfig
 
 

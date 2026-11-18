@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import DeepseekV3ForCausalLM
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.loop_processor import CalibrationConfig
@@ -14,6 +13,7 @@ from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.definitions.deepseek_v3 import DeepSeekV3QModel
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.ports.native.deepseek_v3.modeling_deepseek_v3 import DeepseekV3ForCausalLM
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.hf import load_model_config
