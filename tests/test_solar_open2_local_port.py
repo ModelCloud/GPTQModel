@@ -11,10 +11,9 @@ import torch.nn.functional as F
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
-
-from gptqmodel.models.definitions.solar_open2 import SolarOpen2QModel
 from transformers.cache_utils import Cache
 
+from gptqmodel.models.definitions.solar_open2 import SolarOpen2QModel
 from gptqmodel.models.ports.solar_open2 import SolarOpen2Config, SolarOpen2DynamicCache, SolarOpen2ForCausalLM
 from gptqmodel.utils.hf import build_shell_model, load_model_config
 
