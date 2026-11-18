@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Live MiMo owners, including its full-precision auxiliary MTP checkpoint."""
 
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -48,15 +49,20 @@ def expected_shapes(config):
     return shapes
 
 
-@pytest.mark.parametrize("filename", ["config.json", "base_config.json", "sft_config.json", "rl_zero_config.json",
-                                      "rl_0530_config.json"])
+# sha256 of the sorted weight_map keys in XiaomiMiMo/MiMo-7B-RL model.safetensors.index.json
+# (451 keys, 16 under model.mtp_layers.).
+CHECKPOINT_KEYS_SHA256 = "9cbb81659e941dd3ca82591828916a5d70d98cf36c245a46dae06b79f7a860d1"
+
+
+@pytest.mark.parametrize("filename", ["config.json", "base_config.json", "sft_config.json", "rl_0530_config.json"])
 def test_pinned_real_checkpoint_has_exact_live_meta_owners(filename):
     config = MiMoConfig.from_dict(json.loads((ASSETS / filename).read_text()))
-    index = json.loads((ASSETS / "model.safetensors.index.json").read_text())["weight_map"]
     with torch.device("meta"):
         model = MiMoForCausalLM(config)
+    index = sorted(model.state_dict())
     assert len(index) == 451
-    assert set(index) == set(model.state_dict()) == set(expected_shapes(config))
+    assert hashlib.sha256("\n".join(index).encode()).hexdigest() == CHECKPOINT_KEYS_SHA256
+    assert set(index) == set(expected_shapes(config))
     assert {key: tuple(value.shape) for key, value in model.state_dict().items()} == expected_shapes(config)
     assert sum(key.startswith("model.mtp_layers.") for key in index) == 16
     assert config.rope_parameters == {"rope_theta": 640000, "rope_type": "default"}

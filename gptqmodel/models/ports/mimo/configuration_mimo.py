@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Xiaomi Corporation
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: MIT
-"""MiMo configuration; see README.md for pinned upstream provenance."""
+"""MiMo configuration (Qwen2 plus the MTP layer count)."""
 
 from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
 

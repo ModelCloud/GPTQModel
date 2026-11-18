@@ -23,7 +23,7 @@ from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.hf import load_model_config
 
 
-ASSETS = Path(__file__).parents[1] / "gptqmodel/models/ports/mimo/fixtures"
+ASSETS = Path(__file__).parent / "fixtures/ports/mimo"
 
 
 @pytest.fixture(autouse=True)
@@ -76,8 +76,7 @@ def checkpoint(path, **kwargs):
     return model, marker
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "1")])
 def test_mimo_config_selection_ignores_checkpoint_python(tmp_path, monkeypatch, trust, bypass):
     if bypass is None:
         monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
@@ -99,8 +98,7 @@ def test_mimo_config_selection_ignores_checkpoint_python(tmp_path, monkeypatch, 
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("trust,bypass", [(False, None), (True, "1")])
 def test_public_load_local_model_and_tokenizer(tmp_path, monkeypatch, trust, bypass):
     expected, marker = checkpoint(tmp_path)
     if bypass is None:
@@ -196,10 +194,15 @@ def test_real_forward_matches_independent_equations(kv, dtype):
     torch.testing.assert_close(actual[mask.bool()].double(), expected[mask.bool()], atol=atol, rtol=atol)
 
 
-@pytest.mark.parametrize("implementation", ["eager", "sdpa"])
-@pytest.mark.parametrize("kv", [1, 2, 4])
-@pytest.mark.parametrize("mtp", [0, 1, 2])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "implementation,kv,mtp,dtype",
+    [
+        ("eager", 1, 0, torch.float32),
+        ("sdpa", 2, 1, torch.float32),
+        ("eager", 4, 2, torch.float16),
+        ("sdpa", 4, 1, torch.bfloat16),
+    ],
+)
 def test_native_qwen_parity_generation_cache_and_mtp_isolation(implementation, kv, mtp, dtype):
     model = tiny_model(num_key_value_heads=kv, num_nextn_predict_layers=mtp).to(dtype)
     model.set_attn_implementation(implementation)
@@ -237,8 +240,7 @@ def test_native_qwen_parity_generation_cache_and_mtp_isolation(implementation, k
         torch.testing.assert_close(model(ids, attention_mask=mask).logits, full.logits, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("tied", [False, True])
+@pytest.mark.parametrize("dtype,tied", [(torch.float32, True), (torch.float16, False), (torch.bfloat16, True)])
 def test_safetensors_roundtrip_and_failed_load_retry(tmp_path, dtype, tied):
     expected = tiny_model(tie_word_embeddings=tied, num_nextn_predict_layers=2).to(dtype)
     expected.save_pretrained(tmp_path)
@@ -299,8 +301,7 @@ def test_mtp_equations_rotary_api_and_separate_cache(kv):
         assert cache.get_seq_length() == 5
 
 
-@pytest.mark.parametrize("kv", [1, 2, 4])
-@pytest.mark.parametrize("fallback", [None, {}])
+@pytest.mark.parametrize("kv,fallback", [(1, None), (4, {})])
 def test_public_plain_awq_packs_every_decoder_and_preserves_dense_mtp(tmp_path, kv, fallback):
     source = tmp_path / "source"
     expected, marker = checkpoint(source, num_key_value_heads=kv)

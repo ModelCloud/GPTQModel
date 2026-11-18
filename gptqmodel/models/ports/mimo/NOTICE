@@ -8,9 +8,9 @@ LICENSE with Xiaomi Corporation attribution (the author's spelling from the
 official repository) and attribution for ModelCloud's modifications.
 
 The official XiaomiMiMo/MiMo Git repository separately uses Apache-2.0.
-Its unmodified license at revision 5c806835bb3746808baf99c52040d6d29d58118d
-is retained as LICENSE.upstream-repository; this is distinct from the model
-card's MIT declaration, not a relicensing of the checkpoint files.
+(revision 5c806835bb3746808baf99c52040d6d29d58118d; text identical to the
+repository root LICENSE); this is distinct from the model card's MIT
+declaration, not a relicensing of the checkpoint files.
 
 Native Qwen2 components are imported from the installed Transformers package,
 whose Apache-2.0 notices remain supplied by that dependency. The inspected
@@ -20,4 +20,4 @@ than implementing MiMo-V2-Flash. No checkpoint Python is imported at runtime.
 Modifications by ModelCloud.ai, 2026: direct local-loader binding, MTP-count
 validation, current attention rotary-pair API, auxiliary weight initialization,
 explicit plain-AWQ policy, offline layout/numerical/security/cache/retry tests,
-and safetensors qualification. See README.md for source hashes and limits.
+and safetensors qualification.
