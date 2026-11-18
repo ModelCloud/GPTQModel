@@ -118,7 +118,8 @@ def test_public_config_and_definition_ignore_malicious_auto_map(layout, trust, b
 
 
 def test_genuine_native_hybrid_is_not_replaced_by_the_port(tmp_path):
-    from transformers import BailingHybridConfig, BailingHybridForCausalLM
+    from gptqmodel.models.ports.native.bailing_hybrid.configuration_bailing_hybrid import BailingHybridConfig
+    from gptqmodel.models.ports.native.bailing_hybrid.modeling_bailing_hybrid import BailingHybridForCausalLM
 
     config = BailingHybridConfig(
         vocab_size=37, pad_token_id=0, hidden_size=16, intermediate_size=24, num_hidden_layers=2,
@@ -480,7 +481,7 @@ def test_legacy_softmax_routing_respects_norm_topk_probability(normalize):
 
 
 def test_native_config_with_retained_checkpoint_metadata_uses_mla(tmp_path):
-    from transformers.models.bailing_hybrid.configuration_bailing_hybrid import BailingHybridConfig
+    from gptqmodel.models.ports.native.bailing_hybrid.configuration_bailing_hybrid import BailingHybridConfig
 
     values = tiny_config("mla").to_dict()
     values["architectures"] = ["BailingHybridForCausalLM"]

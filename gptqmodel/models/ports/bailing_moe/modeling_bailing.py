@@ -576,8 +576,8 @@ class BailingForCausalLM(BailingPreTrainedModel, GenerationMixin):
     @classmethod
     def _from_config(cls, config, **kwargs):
         if not isinstance(config, BailingConfig):
-            from transformers.models.bailing_hybrid.configuration_bailing_hybrid import BailingHybridConfig
-            from transformers.models.bailing_hybrid.modeling_bailing_hybrid import BailingHybridForCausalLM
+            from ..native.bailing_hybrid.configuration_bailing_hybrid import BailingHybridConfig
+            from ..native.bailing_hybrid.modeling_bailing_hybrid import BailingHybridForCausalLM
 
             if not isinstance(config, BailingHybridConfig):
                 raise TypeError("Bailing loader requires a Bailing config, not another architecture")
@@ -591,8 +591,8 @@ class BailingForCausalLM(BailingPreTrainedModel, GenerationMixin):
         if config is None:
             config = BailingConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
         if not isinstance(config, BailingConfig):
-            from transformers.models.bailing_hybrid.configuration_bailing_hybrid import BailingHybridConfig
-            from transformers.models.bailing_hybrid.modeling_bailing_hybrid import BailingHybridForCausalLM
+            from ..native.bailing_hybrid.configuration_bailing_hybrid import BailingHybridConfig
+            from ..native.bailing_hybrid.modeling_bailing_hybrid import BailingHybridForCausalLM
 
             if not isinstance(config, BailingHybridConfig):
                 raise TypeError("Bailing loader requires a Bailing config, not another architecture")

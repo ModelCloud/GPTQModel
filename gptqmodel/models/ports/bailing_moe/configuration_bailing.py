@@ -86,7 +86,7 @@ class BailingConfig(PretrainedConfig):
     @classmethod
     def from_dict(cls, config_dict, **kwargs):
         if is_native_hybrid(config_dict):
-            from transformers.models.bailing_hybrid.configuration_bailing_hybrid import BailingHybridConfig
+            from ..native.bailing_hybrid.configuration_bailing_hybrid import BailingHybridConfig
 
             return BailingHybridConfig.from_dict(config_dict, **kwargs)
         config_dict = dict(config_dict)
