@@ -876,6 +876,11 @@ class EXL3Processor(SharedInputCaptureProcessor):
         self._capture_frontier_store_initialized = False
         self._capture_frontier_store = None
         self._distributed_local_quant_locks: dict[str, threading.Lock] = {}
+        # Packed projections whose dense replay weight has not been published
+        # yet. A cancelled run must install the packed module instead of
+        # leaving the placeholder weight in place (#5083).
+        self._deferred_runtime_modules: dict[str, NamedModule] = {}
+        self._deferred_runtime_lock = threading.Lock()
         self._hessian_family_owners: dict[
             tuple[str, int, int], tuple[str, GPTQ]
         ] = {}
@@ -2589,6 +2594,11 @@ class EXL3Processor(SharedInputCaptureProcessor):
             target.weight = placeholder
             module.state[_DEFERRED_RUNTIME_WEIGHT_STATE] = marker
         module.state.pop("quant_source_module", None)
+        # Record the projection so a run that never reaches the next replay can
+        # still publish it. The mapping is keyed by full name because the
+        # placeholder outlives this subset's `NamedModule` wrapper.
+        with self._deferred_runtime_guard():
+            self._deferred_runtime_registry()[module.full_name] = module
 
     def prepare_runtime_weight_for_forward(
         self,
@@ -2645,6 +2655,8 @@ class EXL3Processor(SharedInputCaptureProcessor):
             with parent_module_lock(module.full_name):
                 target.weight = replay_weight
                 module.state.pop(_DEFERRED_RUNTIME_WEIGHT_STATE, None)
+            with self._deferred_runtime_guard():
+                self._deferred_runtime_registry().pop(module.full_name, None)
             if target_device.type == "cuda":
                 torch.cuda.synchronize(target_device)
             del runtime_weight, restored_weight
@@ -2701,6 +2713,10 @@ class EXL3Processor(SharedInputCaptureProcessor):
                 target.weight = sentinel
                 module.state[_DEFERRED_FINALIZE_WEIGHT_STATE] = marker
                 module.state.pop(_DEFERRED_RUNTIME_WEIGHT_STATE, None)
+            # ``submodule_finalize`` retires this projection next, so recovery
+            # must not publish it a second time.
+            with self._deferred_runtime_guard():
+                self._deferred_runtime_registry().pop(module.full_name, None)
 
     def _publish_inline_candidate(self, task_entry: dict[str, Any]) -> None:
         """Promote an unselected K2 candidate into the authoritative journal."""
@@ -3604,6 +3620,8 @@ class EXL3Processor(SharedInputCaptureProcessor):
         module.unregister_parameter("weight")
         if getattr(module, "bias", None) is not None:
             module.unregister_parameter("bias")
+        with self._deferred_runtime_guard():
+            self._deferred_runtime_registry().pop(module.full_name, None)
 
     def completed_layer_checkpoint_entries(
         self, layer_index: int
@@ -4316,9 +4334,92 @@ class EXL3Processor(SharedInputCaptureProcessor):
         model.qlinear_kernel = ExllamaV3Linear
         super().finalize(model=model, **kwargs)
 
+    def finalize_deferred_runtime_weights(self, model: BaseQModel) -> None:
+        """Publish packed projections whose replay weight a stop left deferred.
+
+        ``_stage_runtime_weight`` replaces each packed projection's dense weight
+        with a META placeholder and records the module here. Only the next
+        layer replay (``prepare_runtime_weight_for_forward``) rebuilt the dense
+        weight, so a stop at ``quant_complete`` -- or any exception or Ctrl-C
+        between a packed subset and the next replay -- left the in-flight
+        layer's projections on META and the session model could not forward
+        (#5083). ``offload_to_disk=True`` happened to escape because its layer
+        shells are restored from the checkpoint instead.
+
+        Install the packed ``ExllamaV3Linear`` for those modules, exactly as
+        ``submodule_finalize`` does on the success path. That reuses the packed
+        trellis already staged in ``NamedModule.state``, so it adds no dense
+        copy, and it is what a completed run leaves for a processor whose
+        layers are finalized. Each module is independent: one failure is logged
+        and the rest still run.
+        """
+
+        with self._deferred_runtime_guard():
+            registry = self._deferred_runtime_registry()
+            pending = list(registry.values())
+            registry.clear()
+        for module in pending:
+            try:
+                self._publish_deferred_runtime_module(module=module, model=model)
+            except Exception:
+                log.warning(
+                    "EXL3: failed to publish the deferred runtime weight of `%s` "
+                    "while recovering a cancelled or failed run",
+                    getattr(module, "full_name", getattr(module, "name", "?")),
+                    exc_info=True,
+                )
+
+    def _deferred_runtime_guard(self) -> threading.Lock:
+        """Return the registry lock, creating it for ``__new__``-built fixtures.
+
+        ``EXL3Processor.__new__`` tests drive ``process()`` without ``__init__``;
+        a missing registry must not make the staging path fail.
+        """
+
+        lock = getattr(self, "_deferred_runtime_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._deferred_runtime_lock = lock
+        return lock
+
+    def _deferred_runtime_registry(self) -> dict[str, NamedModule]:
+        """Return the deferred-weight registry, creating it on first use."""
+
+        registry = getattr(self, "_deferred_runtime_modules", None)
+        if registry is None:
+            registry = {}
+            self._deferred_runtime_modules = registry
+        return registry
+
+    def _publish_deferred_runtime_module(
+        self, *, module: NamedModule, model: BaseQModel
+    ) -> None:
+        """Install one deferred projection's packed module in the model tree."""
+
+        if module.state.get(_DEFERRED_RUNTIME_WEIGHT_STATE) is None:
+            return
+        weight = getattr(module.module, "weight", None)
+        if not isinstance(weight, torch.Tensor):
+            module.state.pop(_DEFERRED_RUNTIME_WEIGHT_STATE, None)
+            return
+        if not weight.is_meta:
+            # The next replay published the dense replay weight already.
+            module.state.pop(_DEFERRED_RUNTIME_WEIGHT_STATE, None)
+            return
+        if module.state.get(_DEFERRED_FINALIZE_WEIGHT_STATE) is not None:
+            # `prepare_layer_post_quantize` already retired this projection to
+            # its terminal sentinel; its own finalize owns the publication.
+            module.state.pop(_DEFERRED_RUNTIME_WEIGHT_STATE, None)
+            return
+        # ``submodule_finalize`` installs the packed module and consumes the
+        # staged trellis/sign tensors, so no dense copy is retained.
+        self.submodule_finalize(module, model)
+
     def release_run_workspace(self) -> None:
         """Drop the per-stream EXL3 tile scratch cached for this run."""
 
+        with self._deferred_runtime_guard():
+            self._deferred_runtime_registry().clear()
         clear_tile_workspace()
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:

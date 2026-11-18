@@ -1642,6 +1642,23 @@ class LoopProcessor:
         pass
         #self.offload_to_disk(module=module)
 
+    def finalize_deferred_runtime_weights(self, model: BaseQModel) -> None:
+        """Publish deferred replay weights a cancelled run will not replay.
+
+        A processor may pack a projection and leave the owning module holding a
+        placement placeholder until the layer's next forward materializes the
+        dense replay weight. A stopped or failed run never reaches that
+        forward, so the in-session model keeps a parameter no forward can read.
+        Processors that defer replay state override this hook and materialize
+        it here, before the looper restores the in-flight layer and before the
+        remaining-meta verdict (#5083). The default has nothing to publish.
+
+        ``model`` is the wrapper the packed module is installed into, the same
+        object ``submodule_finalize`` receives.
+        """
+
+        del model
+
     def release_run_workspace(self) -> None:
         """Release process-wide scratch that outlives individual modules.
 

@@ -1847,6 +1847,25 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
             if getattr(processor, "qcfg", None) is config:
                 processor.qcfg = private_config
 
+    def _finalize_deferred_runtime_weights(self) -> None:
+        """Let each processor publish packed state a stopped run never replayed.
+
+        A calibrated processor can finish packing a projection and defer the
+        dense replay weight until the layer's next forward. A stop, exception
+        or Ctrl-C in that window leaves the in-flight layer holding a
+        placeholder weight that no forward can read. Processors that defer such
+        state publish it here, before the layer is rehomed and before the
+        remaining-meta verdict (#5083).
+        """
+
+        for processor in getattr(self, "processors", ()) or ():
+            finalize = getattr(
+                processor, "finalize_deferred_runtime_weights", None
+            )
+            if not callable(finalize):
+                continue
+            finalize(self.gptq_model)
+
     def _restore_offloaded_base_modules(self, *, strict: bool) -> None:
         entries = getattr(self, "_offloaded_base_modules", None)
         if not entries:
@@ -1945,6 +1964,7 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
         return RunExitRecovery(
             fence=self._fence_run_work,
             release_processors=self._release_failed_run_processors,
+            restore_deferred=self._finalize_deferred_runtime_weights,
             restore_inflight=self._restore_inflight_layer,
             restore_offloaded=self._restore_offloaded_base_modules,
             materialize_unreached=self._materialize_unreached_meta_modules,
