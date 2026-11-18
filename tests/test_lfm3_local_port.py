@@ -15,6 +15,8 @@ from transformers import AutoModelForCausalLM, Lfm3Config, Lfm3ForCausalLM, PreT
 from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.lfm3 import LFM3QModel
 from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.ports.native.lfm3.configuration_lfm3 import Lfm3Config as VendoredLfm3Config
+from gptqmodel.models.ports.native.lfm3.modeling_lfm3 import Lfm3ForCausalLM as VendoredLfm3ForCausalLM
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 from gptqmodel.utils.security import BYPASS_ENV
 
@@ -108,12 +110,12 @@ def test_public_native_load_ignores_auto_map_and_converts_gate(tmp_path, monkeyp
     else:
         monkeypatch.setenv(BYPASS_ENV, bypass)  # Existing security policy, not a new behavior switch.
     config = load_model_config(tmp_path, trust_remote_code=trust)
-    assert type(config) is Lfm3Config
+    assert type(config) is VendoredLfm3Config
     assert resolve_trust_remote_code(tmp_path, trust_remote_code=trust) is False
     wrapper = GPTQModel.load(str(tmp_path), trust_remote_code=trust, device="cpu",
                             dtype=torch.float32, attn_implementation="eager")
     assert type(wrapper) is LFM3QModel
-    assert type(wrapper.model) is Lfm3ForCausalLM
+    assert type(wrapper.model) is VendoredLfm3ForCausalLM
     conv_keys = []
     for name, tensor in wrapper.model.state_dict().items():
         if ".conv.conv." not in name:

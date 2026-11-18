@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Definitions wired to the vendored Transformers 5.23 ports load only vendored classes.
 
-Each case builds a tiny checkpoint with the *vendored* config class, saves it,
-and loads it back through the public definition loader
+Each case validates a tiny config with the *vendored* config class, saves a
+checkpoint with the native Transformers class, and loads it through the public
+definition loader
 (``MODEL_MAP[model_type].loader``). Every module must come from GPT-QModel and
 none from ``transformers.models``; outputs must equal the native Transformers
 class (the oracle) loaded from the same checkpoint.
@@ -194,11 +195,15 @@ def test_definition_loader_builds_vendored_classes(model_type, tmp_path):
     config_dict["model_type"] = model_type
     vendored_config_class = CONFIG_MAPPING[model_type]
     assert vendored_config_class.__module__.startswith(NATIVE_PREFIX)
-    config = vendored_config_class.from_dict(copy.deepcopy(config_dict))
+    vendored_config_class.from_dict(copy.deepcopy(config_dict))
+    # The checkpoint is written by native Transformers, so loading it through the
+    # definition exercises Transformers' checkpoint conversion mappings.
+    native_config = transformers.AutoConfig.for_model(**copy.deepcopy(config_dict))
+    assert type(native_config).__module__.startswith("transformers.models.")
     torch.manual_seed(0)
-    built = loader.from_config(config)
-    built.save_pretrained(tmp_path)
-    del built
+    native = getattr(transformers, ORACLE[head]).from_config(native_config)
+    native.save_pretrained(tmp_path)
+    del native
 
     loaded_config = loader.load_config(str(tmp_path))
     assert type(loaded_config) is vendored_config_class
@@ -215,8 +220,15 @@ def test_definition_loader_builds_vendored_classes(model_type, tmp_path):
         actual = _flatten(model(**inputs))
     assert expected
     assert len(actual) == len(expected)
+    # A GPT-QModel load earlier in the session may have let Defuser swap native
+    # Transformers MoE blocks for per-expert ones (the vendored classes are never
+    # patched); that oracle only differs by summation order.
+    defused_oracle = any(type(m).__module__.startswith("defuser.") for m in oracle.modules())
     for want, got in zip(expected, actual):
-        assert torch.equal(want, got)
+        if defused_oracle:
+            torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-6)
+        else:
+            assert torch.equal(want, got)
 
 
 @pytest.mark.parametrize(
