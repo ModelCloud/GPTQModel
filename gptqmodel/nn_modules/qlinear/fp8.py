@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -41,9 +42,103 @@ _FP8_ACTIVATION_QUANT_METHODS = ("none", "per_token")
 #: ``torch._scaled_mm`` contract, measured once per process.
 _SCALED_MM_ROW_SCALE_SUPPORT: dict = {}
 
+#: ``GPTQMODEL_FP8_SCALED_MM``: ``auto`` (default) measures the contract,
+#: ``on``/``off`` skip the measurement and force the answer. ``off`` keeps a
+#: device with a broken row-wise kernel (for example #5174) on the correct
+#: dequantize + matmul path without paying for a probe; ``on`` is for a
+#: deployment that already knows the kernel is correct.
+_FP8_SCALED_MM_ENV = "GPTQMODEL_FP8_SCALED_MM"
 
-def _scaled_mm_row_scale_supported(device: torch.device, out_dtype: torch.dtype) -> bool:
-    """Whether this device and torch build compute the row-wise ``_scaled_mm`` contract.
+
+def _parse_scaled_mm_override(raw: Optional[str]) -> Optional[bool]:
+    """Parse the ``GPTQMODEL_FP8_SCALED_MM`` override into ``True``/``False``/``None``."""
+
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if value in {"", "auto"}:
+        return None
+    if value in {"1", "true", "on", "yes"}:
+        return True
+    if value in {"0", "false", "off", "no"}:
+        return False
+    raise ValueError(
+        f"`{_FP8_SCALED_MM_ENV}` must be one of auto/on/off, got `{raw}`."
+    )
+
+
+#: Resolved once at import so a traced ``forward`` reads a Python constant
+#: instead of calling ``os.environ`` (an opaque call for dynamo).
+_SCALED_MM_OVERRIDE: Optional[bool] = _parse_scaled_mm_override(
+    os.environ.get(_FP8_SCALED_MM_ENV)
+)
+
+
+def _is_compiling() -> bool:
+    """Whether this call is being traced by ``torch.compile``/``torch.export``."""
+
+    compiler = getattr(torch, "compiler", None)
+    return bool(compiler is not None and compiler.is_compiling())
+
+
+def _probe_must_wait() -> bool:
+    """Whether the current context cannot host a device-to-host capability probe.
+
+    A measurement ends with a device-to-host read of its verdict, and
+    CUDA-graph capture forbids that copy (the pre-#5195 probe also created a
+    ``torch.Generator``, which dynamo cannot trace). Inside either context the
+    answer is therefore "unknown", not "unsupported": callers take the correct
+    fallback and do not cache it, so the fast path is still available to the
+    next eager call.
+    """
+
+    if _is_compiling():
+        return True
+    # ``is_initialized`` avoids creating a CUDA context for a CPU-only load;
+    # an uninitialised context cannot be capturing.
+    if not torch.cuda.is_initialized():
+        return False
+    return torch.cuda.is_current_stream_capturing()
+
+
+def _probe_fp8_codes(rows: int, cols: int, device: torch.device, offset: int) -> torch.Tensor:
+    """Deterministic FP8 codes for the contract probe.
+
+    Every entry is ``n / 16`` for an integer ``n`` in ``1..16``, which is exact
+    in ``float8_e4m3fn``. Unlike ``torch.randn``, this needs no
+    ``torch.Generator``, so the probe is traceable (#5195).
+    """
+
+    index = torch.arange(rows * cols, device=device, dtype=torch.int64)
+    codes = ((index * 7 + offset) % 16 + 1).to(torch.float32) * 0.0625
+    return codes.reshape(rows, cols).to(torch.float8_e4m3fn)
+
+
+def _probe_scaled_mm_row_scale(device: torch.device, out_dtype: torch.dtype) -> torch.Tensor:
+    """Device-side verdict for the row-wise ``_scaled_mm`` contract.
+
+    Returns a 0-dim bool tensor, so measuring performs no host synchronisation:
+    no ``bool()``, no ``torch.allclose`` and no ``torch.Generator``. Only
+    ``_scaled_mm_row_scale_verdict`` reads it, and only outside capture and
+    tracing.
+    """
+
+    rows, inner, cols = 16, 32, 16
+    x_q = _probe_fp8_codes(rows, inner, device, offset=1)
+    w_q = _probe_fp8_codes(cols, inner, device, offset=5)
+    scale_a = torch.linspace(0.5, 1.5, rows, device=device, dtype=torch.float32).reshape(rows, 1)
+    scale_b = torch.linspace(0.5, 1.5, cols, device=device, dtype=torch.float32).reshape(1, cols)
+    reference = (x_q.float() @ w_q.t().float()) * scale_a * scale_b
+    out = torch._scaled_mm(
+        x_q, w_q.t(), scale_a=scale_a, scale_b=scale_b, out_dtype=out_dtype
+    )
+    return torch.isclose(out.float(), reference, rtol=2e-2, atol=1e-2).all()
+
+
+def _scaled_mm_row_scale_verdict(
+    device: torch.device, out_dtype: torch.dtype
+) -> Optional[bool]:
+    """Whether this device computes the row-wise ``_scaled_mm`` contract.
 
     ``_scaled_mm`` takes ``scale_a=(tokens, 1)`` and ``scale_b=(1, out_features)``
     and is documented to apply both. On sm_121 with torch 2.11.0+cu130 the
@@ -51,12 +146,19 @@ def _scaled_mm_row_scale_supported(device: torch.device, out_dtype: torch.dtype)
     ~1e3x away from ``(A @ B) * scale_a * scale_b`` and raises nothing (#5174),
     while the same call with ``bfloat16`` output is correct. A caller therefore
     cannot detect the defect from an exception, and the answer depends on the
-    requested output dtype. Measure the contract once per process, device and
-    output dtype: a raised error *or* a mismatch disables that combination, and
-    per-token layers stay on the correct dequantize + matmul fallback. The answer
-    is memoised on the device index so the per-forward guard costs one dict
-    lookup.
+    requested output dtype. The contract is measured once per process, device
+    and output dtype and memoised on the device index, so the per-forward guard
+    costs one dict lookup.
+
+    ``None`` means "this context could not measure it" -- a CUDA-graph capture,
+    a ``torch.compile`` trace, or an allocation failure. It is deliberately not
+    cached: the fallback runs for this call and the next eager call asks again,
+    so a probe that could not run never disables the fast path for the process
+    (#5195).
     """
+
+    if _SCALED_MM_OVERRIDE is not None:
+        return _SCALED_MM_OVERRIDE
 
     index = device.index
     if index is None:  # pragma: no cover - tensors always carry an index
@@ -66,26 +168,21 @@ def _scaled_mm_row_scale_supported(device: torch.device, out_dtype: torch.dtype)
     if cached is not None:
         return cached
 
-    supported = False
+    if _probe_must_wait():
+        return None
+
     try:
-        generator = torch.Generator(device=device)
-        generator.manual_seed(0)
-        rows, inner, cols = 16, 32, 16
-        x_q = (torch.randn(rows, inner, device=device, generator=generator) * 0.5).to(
-            torch.float8_e4m3fn
-        )
-        w_q = (torch.randn(cols, inner, device=device, generator=generator) * 0.5).to(
-            torch.float8_e4m3fn
-        )
-        scale_a = torch.linspace(0.5, 1.5, rows, device=device).reshape(rows, 1)
-        scale_b = torch.linspace(0.5, 1.5, cols, device=device).reshape(1, cols)
-        reference = (x_q.float() @ w_q.t().float()) * scale_a * scale_b
-        out = torch._scaled_mm(
-            x_q, w_q.t(), scale_a=scale_a, scale_b=scale_b, out_dtype=out_dtype
-        )
-        supported = bool(torch.allclose(out.float(), reference, rtol=2e-2, atol=1e-2))
+        supported = bool(_probe_scaled_mm_row_scale(device, out_dtype))
+    except torch.cuda.OutOfMemoryError:
+        # An allocation failure says nothing about the kernel contract.
+        return None
     except Exception:
+        # A build/kernel rejection is a real answer for this combination.
         supported = False
+
+    if _probe_must_wait():
+        # Defensive: the context turned into capture/tracing mid-measurement.
+        return supported
 
     _SCALED_MM_ROW_SCALE_SUPPORT[key] = supported
     if not supported:
@@ -95,6 +192,17 @@ def _scaled_mm_row_scale_supported(device: torch.device, out_dtype: torch.dtype)
             "(W8A8) layers use the dequantize + matmul path."
         )
     return supported
+
+
+def _scaled_mm_row_scale_supported(device: torch.device, out_dtype: torch.dtype) -> bool:
+    """``True`` only when the contract is known and correct for this device.
+
+    An unmeasured combination (``None`` above) reports ``False`` for this call
+    but stays uncached, so a capture-time or traced call cannot poison the
+    process-wide answer (#5195).
+    """
+
+    return _scaled_mm_row_scale_verdict(device, out_dtype) is True
 
 
 def _normalize_fp8_activation_quant_method(value: Optional[str]) -> str:
@@ -179,9 +287,11 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
     # Trace-clean: ``forward`` branches only on host-visible constants (device
-    # type, dtypes, shapes, config strings) and its lazy decoded-weight bound is
-    # a load-time cache warmed by the first call, so
-    # ``torch.compile(fullgraph=True)`` traces without a break. Measured on
+    # type, dtypes, shapes, config strings) and every decision that needs a
+    # device-to-host read -- the rowwise ``_scaled_mm`` contract and the
+    # decoded-weight range bound -- is resolved eagerly by
+    # ``_warm_runtime_decisions()`` at load/opt-in, never from the traced or
+    # captured forward (#5195). Measured on
     # sm_121 (tiny Llama, 4 prompts x 32 greedy tokens): static-cache decode
     # 0.126 s eager -> 0.055 s compiled (2.3x, 1 graph, 0 breaks); the reporter
     # of #4669 measured 0.77 s -> 0.175 s on a 4090. FP8 is the format that
@@ -238,6 +348,12 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         # Set when a HIP build cannot cast this format natively, so later forwards
         # go straight to the validated CPU path instead of retrying the GPU cast.
         self._native_dequant_disabled = False
+        # Range-bound cache for the in-dtype weight narrowing. ``_apply`` and
+        # ``_load_from_state_dict`` reset it, and ``post_init`` warms it, so a
+        # captured/traced forward only reads it (#5195).
+        self._decoded_weight_bound_ready = False
+        self._decoded_weight_bound = None
+        self._scale_inv_min = None
 
         if self.weight_scale_method == "block" and self.weight_block_size is not None:
             block_rows, block_cols = self.weight_block_size
@@ -269,6 +385,44 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         if not available_float8_dtype_names():
             return False, RuntimeError("TorchFP8Linear requires a PyTorch build with FP8 dtypes.")
         return True, None
+
+    def post_init(self):
+        """Resolve the host-side runtime decisions after the weight is loaded.
+
+        ``gptqmodel_post_init`` runs this on the final device, which is the last
+        safe moment to measure a capability: a later ``torch.cuda.graph``
+        capture or ``torch.compile`` trace must not synchronise the device
+        (#5195).
+        """
+
+        super().post_init()
+        self._warm_runtime_decisions()
+
+    def _warm_runtime_decisions(self) -> None:
+        """Measure the two device-to-host decisions ``forward`` must not make.
+
+        The rowwise ``_scaled_mm`` contract probe and the decoded-weight FP16
+        range bound both read device memory on the host. Doing that from
+        ``forward`` broke a first-call CUDA-graph capture and a
+        ``torch.compile(fullgraph=True)`` trace (#5195), so both are resolved
+        here, in plain eager code. A capture/trace context is left untouched:
+        it falls back for that call and asks again eagerly.
+        """
+
+        if _probe_must_wait():
+            return
+        weight = getattr(self, "weight", None)
+        scale = getattr(self, "weight_scale_inv", None)
+        if weight is None or scale is None or weight.device.type == "meta":
+            return
+
+        # ``_invalidate_compiled`` clears this cache on every device/dtype move.
+        self._decoded_weight_absmax_bound()
+
+        if self.activation_quant_method != "per_token" or weight.device.type != "cuda":
+            return
+        for out_dtype in self._scaled_mm_out_dtypes():
+            _scaled_mm_row_scale_supported(weight.device, out_dtype)
 
     def smooth_block_size(self) -> int:
         if self.weight_scale_method == "block" and self.weight_block_size is not None:
@@ -368,6 +522,10 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
 
         self.activation_quant_method = _normalize_fp8_activation_quant_method(method)
         self._scaled_mm_hard_disabled = False
+        # The documented W8A8 opt-in: measure the contract now, while the caller
+        # is in plain eager code, so a later capture/trace keeps the fast path
+        # instead of falling back to dequantize + matmul (#5195).
+        self._warm_runtime_decisions()
         return self
 
     def _weight_to_matrix(self, linear: nn.Module) -> torch.Tensor:
@@ -550,6 +708,21 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             torch.float32 if self.bias is not None else x_flat.dtype
         )
 
+    def _scaled_mm_out_dtypes(self) -> tuple[torch.dtype, ...]:
+        """Every output dtype ``_scaled_mm_out_dtype`` can return for this layer.
+
+        Mirrors the per-input answer without an input tensor, so the contract
+        can be measured at opt-in/load time. Bias-free CUDA layers request the
+        activation dtype, which is FP16 or BF16; a bias keeps FP32 so the
+        epilogue can add it before the final rounding.
+        """
+
+        if IS_ROCM:
+            return (torch.bfloat16,)
+        if self.bias is not None:
+            return (torch.float32,)
+        return (torch.float16, torch.bfloat16)
+
     def _can_use_scaled_mm(self, x_flat: torch.Tensor) -> bool:
         # ROCm support is decided by the guarded call in ``forward``, not by
         # ``get_device_capability`` (meaningless under HIP).  Measured on gfx1201
@@ -572,7 +745,9 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             # The W8A8 contract is the row-wise scale layout. Some devices
             # accept it and return a wrong result without raising (#5174), so
             # the contract is measured once per process for the exact output
-            # dtype this forward would request.
+            # dtype this forward would request. Inside capture/tracing the
+            # answer is unknown, so this call takes the correct fallback
+            # without caching a "no" (#5195).
             and _scaled_mm_row_scale_supported(
                 x_flat.device, self._scaled_mm_out_dtype(x_flat)
             )
@@ -627,6 +802,10 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             return True
         if dtype != torch.float16:
             return False
+        if not self._decoded_weight_bound_ready and _probe_must_wait():
+            # Establishing the bound copies the scale to the host. While
+            # capturing/tracing, keep the exact wide path instead (#5195).
+            return False
         bound = self._decoded_weight_absmax_bound()
         return bound is not None and bound <= float(torch.finfo(torch.float16).max)
 
@@ -660,9 +839,12 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         the exact reference path.
         """
 
-        if self._decoded_weight_bound_ready:
-            return self._scale_inv_min is not None and self._scale_inv_min > 0.0
-        self._decoded_weight_absmax_bound()
+        if not self._decoded_weight_bound_ready:
+            if _probe_must_wait():
+                # Unknown while capturing/tracing; keep the exact reference
+                # path instead of synchronising the device (#5195).
+                return False
+            self._decoded_weight_absmax_bound()
         return self._scale_inv_min is not None and self._scale_inv_min > 0.0
 
     def _block_scale_matches_weight(self) -> bool:
@@ -860,6 +1042,11 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
 
         result = super()._apply(preserve_storage, recurse=recurse)
         self._invalidate_compiled()
+        # A device/dtype move invalidates the range bound and can change the
+        # ``_scaled_mm`` answer (device index, output dtype). Re-resolve both
+        # while still in eager code so the next capture/trace sees a warm
+        # cache (#5195).
+        self._warm_runtime_decisions()
         return result
 
     def _load_from_state_dict(self, *args, **kwargs):
