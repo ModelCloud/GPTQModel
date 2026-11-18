@@ -71,6 +71,7 @@ class GGMLQuantizationType(IntEnum):
     Q1_0 = 41
     Q1_0_g128 = Q1_0
     Q2_0 = 42
+    F8_E4M3 = 43
 
 
 class GGUFEndian(IntEnum):
@@ -130,6 +131,8 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.NVFP4: (64, 4 + 32),
     GGMLQuantizationType.Q1_0: (128, 2 + 16),
     GGMLQuantizationType.Q2_0: (64, 2 + 16),
+    # ggml 1.0 added the OCP FP8 E4M3 scalar type (ggml/include/ggml.h: 43).
+    GGMLQuantizationType.F8_E4M3: (1, 1),
 }
 _TORCH_SIGN_ONLY_QTYPES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.Q1_0: GGML_QUANT_SIZES[GGMLQuantizationType.Q1_0],

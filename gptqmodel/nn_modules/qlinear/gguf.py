@@ -88,6 +88,8 @@ _GGUF_TYPE_INFO = {
     "I32": {"bits": 32, "block_size": 1, "type_size": 4},
     "I64": {"bits": 64, "block_size": 1, "type_size": 8},
     "F64": {"bits": 64, "block_size": 1, "type_size": 8},
+    # OCP FP8 E4M3 scalar type added in ggml 1.0 (one byte per element).
+    "F8_E4M3": {"bits": 8, "block_size": 1, "type_size": 1},
 }
 _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE = {
     "q1_0": "Q1_0",
@@ -190,6 +192,7 @@ _GGUF_TENSOR_QTYPE_BY_VALUE = {
     40: "NVFP4",
     PRISM_Q1_0_G128_VALUE: PRISM_Q1_0_G128_NAME,
     42: "Q2_0",
+    43: "F8_E4M3",
 }
 _GGUF_SIGN_ONLY_LUT = (
     np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1, bitorder="little").astype(np.int8) * 2 - 1
@@ -1095,6 +1098,16 @@ def _dequantize_q5_0_numpy(data: np.ndarray) -> np.ndarray:
     return (d * q.astype(np.float32)).reshape(rows.shape[0], -1)
 
 
+def _dequantize_f8_e4m3_numpy(qweight: np.ndarray) -> np.ndarray:
+    if not hasattr(torch, "float8_e4m3fn"):
+        raise NotImplementedError(
+            "Dequantizing GGUF F8_E4M3 requires a Torch build with torch.float8_e4m3fn."
+        )
+    # GGUFReader hands back a read-only view, so copy before wrapping it.
+    rows = np.array(qweight, dtype=np.uint8, copy=True, order="C")
+    return torch.from_numpy(rows).view(torch.float8_e4m3fn).to(torch.float32).numpy()
+
+
 def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
     # ``data`` may be a strided view (the Triton backend keeps its packed weight
     # in a transposed storage, #4811) and the block decoders reinterpret the
@@ -1104,6 +1117,8 @@ def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
 
     if resolved_qtype == "F32":
         return np.asarray(data, dtype=np.float32)
+    if resolved_qtype == "F8_E4M3":
+        return _dequantize_f8_e4m3_numpy(data)
     if resolved_qtype == "F16":
         return np.asarray(data, dtype=np.float16).astype(np.float32)
     if resolved_qtype == "BF16":

@@ -12,9 +12,10 @@ description: Construct regression tests for GPT-QModel bug fixes and behavior-ch
 For each bug fix or behaviour-changing refactor, add a red/green regression
 to the existing test family. Exercise the risky transition and its **next
 consumer**, not just the helper or first successful call. Select the applicable
-cases below and record the evidence in the PR. The
-[audit](references/2026-11-17-regressions.md) distinguishes proven regressions
-from recurring bug families; historical implementations are not specifications.
+cases below and record the evidence in the PR. The [Nov 17 audit](references/2026-11-17-regressions.md)
+and [Nov 18 follow-ups](references/2026-11-18-regressions.md) link fixes to
+tests and distinguish proven regressions from recurring bug families;
+historical implementations are not specifications.
 
 ## 1. Write the invariant before the patch
 
@@ -56,6 +57,15 @@ Mocks may isolate an external dependency or inject a failure at its boundary.
 Do not mock away the mutation, conversion, replay, or dispatch under test.
 Call-count/source-text assertions are supporting evidence, not substitutes for
 observable tensor values, selected policy, restored state, or released owners.
+
+**Prove the guard runs where it belongs.** When adding or moving a regression,
+check both the CI path filter and the job's pytest selection. Run the affected
+nodes with `pytest -rs` in the intended dependency profile. Keep a CPU policy
+test runnable without optional native dependencies: scope integration imports,
+fixtures and skips to the nodes that need them. For a native-path guard, use
+the backend's actual runtime/build prerequisite and assert which implementation
+served the call. Collection, a skipped node, or a passing fallback is not a
+pass for the target path.
 
 ## 3. Test the relevant transition, not only construction
 
@@ -111,6 +121,15 @@ partially published artifacts as applicable. Then run an ordinary forward or
 same-key retry: checking an empty hook/cache dictionary alone misses unusable
 models and waiters that remain blocked.
 
+For the [cancelled-run contract](../../../docs/cancelled-run-contract.md), test
+both calibrated (e.g. GPTQ) and weight-only (e.g. RTN) loops when the guarantee
+is shared. Leave one layer completed, one in flight, and one unreached; inject
+a one-shot fault at the changed phase, including the final restore if affected.
+Assert the original error, then forward in **ordinary grad mode**: an
+inference-mode probe can hide unrepaired tensors. Check the three layers'
+placement or live offload backing, not a blanket “no meta tensors” rule. A
+runnable model is required; re-quantizing that partially processed model is not.
+
 ### Concurrency, caches, and temporary storage
 
 State the ownership scope explicitly: module, run, process, device, stream, or
@@ -156,6 +175,14 @@ rejection tests before mutation. Do not silently accept an option the consumer
 ignores. Select runtime behavior through config/API arguments, never retired
 environment switches.
 
+For loader placement, feed the same checkpoint and explicit map through native
+load and the supported Transformers bridge. Include integer ordinal `0` (valid
+but falsey), a nonzero control, and an absent target when exercising map
+resolution. For mixed CPU/accelerator maps, check AUTO selects an offload-safe
+kernel without silently overriding an explicit backend. Inspect the **packed
+buffer's actual device** and run a first forward against a reference; a
+plausible device map or correct logits alone can hide a copy on every call.
+
 ### Calibration representations and repeated replay
 
 Represent the same explicit token rows as each affected supported input form:
@@ -172,6 +199,13 @@ additive mask is not an all-padding boolean mask. Test BOS-present and BOS-less
 tokenizers, not the assumption that position zero is always a special token.
 Run consecutive batches/layers/parallel branches with distinct context and
 assert no stale mask or KV state leaks between them.
+
+For packed token replay, make row **identity** observable, not just row count.
+For example, use a padded grid `[[11, 12, PAD], [21, 22, 23]]`: kept row 2
+must carry token 21, not PAD. Give each hidden row a distinct marker and assert
+its token-aligned kwargs at the replay consumer against hand-listed pairs.
+Include excluded sinks when applicable and an all-kept control. Do not use the
+production row-index helper to build the expected pairs.
 
 Follow [tokenizer ownership](../gptqmodel-tokenizer-normalization/SKILL.md) for
 reusable normalization and [AWQ safety](../gptqmodel-awq-model-onboarding/SKILL.md)
