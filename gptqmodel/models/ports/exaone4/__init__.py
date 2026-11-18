@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Native EXAONE classes and the released EXAONE 4.5 text-config alias.
+"""Vendored Transformers 5.23 EXAONE 4 classes and the released EXAONE 4.5 text-config alias.
 
-No modeling is vendored: Transformers' EXAONE 4.5 config performs the same
-``exaone4_5_text`` -> ``exaone4`` migration for its nested language model.
+The modeling is the verbatim 5.23 family under ``ports/native/exaone4``; the
+EXAONE 4.5 config performs the same ``exaone4_5_text`` -> ``exaone4`` migration
+for its nested language model.
 """
 
-from transformers import Exaone4Config, Exaone4ForCausalLM
+from ..native.exaone4.configuration_exaone4 import Exaone4Config
+from ..native.exaone4.modeling_exaone4 import Exaone4ForCausalLM
 
 
 class Exaone4TextConfig:
