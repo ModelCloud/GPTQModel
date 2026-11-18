@@ -147,7 +147,7 @@ def test_public_native_loading_ignores_malicious_config_and_model_maps(tmp_path,
 def source_oracle(model, ids):
     """Scalar recurrence + source MLP/router/attention equations; no native helpers.
 
-    Reviewed original/Nano/Super modeling sources, revisions in PROVENANCE.json.
+    Reviewed original/Nano/Super modeling sources, revisions in the port NOTICE.
     No checkpoint Python is imported or executed.
     """
     c, w = model.config, {name: value.double() for name, value in model.state_dict().items()}

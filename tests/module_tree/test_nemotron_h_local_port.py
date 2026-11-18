@@ -24,8 +24,8 @@ INVENTORIES = read_port_json(PORT / "checkpoint_shapes.json")
 
 
 def test_inspected_header_inventory_integrity():
-    manifest = json.loads((PORT / "PROVENANCE.json").read_text())
-    assert hashlib.sha256(read_port_asset(PORT / "checkpoint_shapes.json")).hexdigest() == manifest["fixture_sha256"]
+    digest = hashlib.sha256(read_port_asset(PORT / "checkpoint_shapes.json")).hexdigest()
+    assert digest == "e81db0dcb0fae2ecdbf705deca85836a05bd54d20caa6af71813b818fe459a0e"
     assert {key: len(value["shapes"]) for key, value in INVENTORIES.items()} == {"8b": 311, "nano": 6243, "super": 42683}
     assert [key for key, owner in MODEL_MAP.items() if owner is NemotronHQModel] == ["nemotron_h"]
 

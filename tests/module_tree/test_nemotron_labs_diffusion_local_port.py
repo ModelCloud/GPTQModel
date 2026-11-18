@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -12,7 +13,7 @@ from gptqmodel.models.definitions.nemotron_labs_diffusion import NemotronLabsDif
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.nemotron_labs_diffusion import NemotronLabsDiffusionConfig as Config
 from gptqmodel.models.ports.nemotron_labs_diffusion import NemotronLabsDiffusionModel as Model
-from tests.test_nemotron_labs_diffusion_local_port import PORT, tiny_config
+from tests.test_nemotron_labs_diffusion_local_port import tiny_config
 
 
 EXPECTED_PLAN = {
@@ -23,13 +24,29 @@ EXPECTED_PLAN = {
 }
 
 
+# nvidia/Nemotron-Labs-Diffusion-3B@0d51902da1f8869f83413ce642fab402fa5641e0 config.json geometry.
+RELEASED_CONFIG = {
+    "hidden_size": 3072, "intermediate_size": 9216, "num_attention_heads": 32, "num_hidden_layers": 26,
+    "num_key_value_heads": 8, "head_dim": 128, "vocab_size": 131072, "max_position_embeddings": 262144,
+    "mask_token_id": 100, "eos_token_id": 11, "rms_norm_eps": 1e-05, "tie_word_embeddings": False,
+    "rope_parameters": {
+        "beta_fast": 32.0, "beta_slow": 1.0, "factor": 16.0, "llama_4_scaling_beta": 0.1, "mscale": 1.0,
+        "mscale_all_dim": 1.0, "original_max_position_embeddings": 16384, "rope_theta": 1000000.0,
+        "rope_type": "yarn",
+    },
+}
+# sha256 of the released model.safetensors header inventory {name: shape} (237 tensors),
+# serialized with json.dumps(sort_keys=True, separators=(",", ":")).
+RELEASED_SHAPES_SHA256 = "61d774d045d4ef7d633bb877dfe5fd8225f57bbff5ce655f41914493972eba1f"
+
+
 def test_pinned_released_checkpoint_header_has_exact_owners_on_meta():
-    cfg = Config(**json.loads((PORT / "checkpoint_config.json").read_text()))
+    cfg = Config(**RELEASED_CONFIG)
     with torch.device("meta"):
         model = Model(cfg)
-    expected = json.loads((PORT / "checkpoint_shapes.json").read_text())
     actual = {k: list(v.shape) for k, v in model.state_dict().items()}
-    assert len(expected) == 237 and actual == expected
+    digest = hashlib.sha256(json.dumps(actual, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    assert len(actual) == 237 and digest == RELEASED_SHAPES_SHA256
     assert actual["encoder.layers.0.self_attn.q_proj.weight"] == [4096, 3072]
     assert all(not key.endswith("bias") for key in actual)
 

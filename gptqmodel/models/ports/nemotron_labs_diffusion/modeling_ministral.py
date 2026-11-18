@@ -11,25 +11,13 @@ without appending speculative K/V. See NOTICE for the pinned source revision.
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers.activations import ACT2FN
 from transformers.cache_utils import DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import PreTrainedModel
+from transformers.models.ministral3.modeling_ministral3 import Ministral3MLP, Ministral3RMSNorm
 
 from .configuration_nemotron_labs_diffusion import NemotronLabsDiffusionConfig
-
-
-class Ministral3RMSNorm(nn.Module):
-    def __init__(self, size, eps):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(size))
-        self.variance_epsilon = eps
-
-    def forward(self, x):
-        y = x.float()
-        y = y * torch.rsqrt(y.square().mean(-1, keepdim=True) + self.variance_epsilon)
-        return self.weight * y.to(x.dtype)
 
 
 class Ministral3RotaryEmbedding(nn.Module):
@@ -165,18 +153,6 @@ class Ministral3Attention(nn.Module):
                                                 is_causal=False, scale=self.scaling)
         out = out.transpose(1, 2).reshape(batch, length, -1)
         return self.o_proj(out), weights
-
-
-class Ministral3MLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
-
-    def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 class Ministral3DecoderLayer(nn.Module):

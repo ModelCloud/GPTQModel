@@ -20,7 +20,6 @@ from gptqmodel.models.ports.nemotron_labs_diffusion.modeling_ministral import at
 from gptqmodel.utils.hf import load_model_config
 
 
-PORT = Path(__file__).parents[1] / "gptqmodel/models/ports/nemotron_labs_diffusion"
 
 
 @pytest.fixture(autouse=True)
