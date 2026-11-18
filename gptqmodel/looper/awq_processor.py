@@ -2911,6 +2911,50 @@ class AWQProcessor(LoopProcessor):
             state.previous_weight_scale_source = previous_subset
         return state.previous_weight_scale
 
+    @staticmethod
+    def _sibling_capture_get(
+        cache: Dict[Tuple[int, ...], Tuple[Tuple[Any, ...], Any]],
+        tensors: List[torch.Tensor],
+    ) -> Tuple[Tuple[int, ...], Any]:
+        """Return the payload cached for exactly these captured tensors.
+
+        Sibling projections are hooked separately but read one activation
+        object, so the identity of their cached capture tensors names the
+        shared row set (and the replay kwargs derived from it). ``id()`` is
+        only stable while the object lives, and a routed-expert reservoir
+        materializes a fresh ``buffer[:used].unsqueeze(0)`` view per module
+        (#5236): the loop drops the previous module's view when it rebinds
+        ``tensors``, so CPython can hand the same id to the next module's
+        view. A dead weak reference proves that id was free to be reused, so
+        it must not match; a live one must be the same object. Keeping only
+        weak references also avoids retaining every reservoir buffer for the
+        rest of the layer (#5267).
+        """
+
+        cache_key = tuple(id(tensor) for tensor in tensors)
+        cached = cache.get(cache_key)
+        if cached is None:
+            return cache_key, None
+        refs, payload = cached
+        if len(refs) != len(tensors) or any(
+            ref() is not tensor for ref, tensor in zip(refs, tensors)
+        ):
+            # Either an entry whose tensors were freed (its id may now belong
+            # to this capture) or a corrupt entry: recompute the payload.
+            return cache_key, None
+        return cache_key, payload
+
+    @staticmethod
+    def _sibling_capture_put(
+        cache: Dict[Tuple[int, ...], Tuple[Tuple[Any, ...], Any]],
+        cache_key: Tuple[int, ...],
+        tensors: List[torch.Tensor],
+        payload: Any,
+    ) -> None:
+        """Cache one shared capture payload without owning the capture tensors."""
+
+        cache[cache_key] = (tuple(weakref.ref(tensor) for tensor in tensors), payload)
+
     def _layer_input_features(self, state: _AWQLayerState) -> Dict[str, torch.Tensor]:
         """Collapse cached per-batch inputs into one replay tensor per module.
 
@@ -2936,11 +2980,11 @@ class AWQProcessor(LoopProcessor):
         # Sibling modules can share one host tensor per batch, so their cached
         # input lists are the same objects in the same order. Concatenate that
         # identical list once and hand every sibling the same result.
-        cat_cache: Dict[Tuple[int, ...], torch.Tensor] = {}
+        cat_cache: Dict[Tuple[int, ...], Tuple[Tuple[Any, ...], torch.Tensor]] = {}
         # Sibling projections share one captured input list, so their packed
         # replay mask and position ids are identical too. Build the (bounded,
         # but quadratic) block-diagonal mask once per unique capture list.
-        token_row_kwargs_cache: Dict[Tuple[int, ...], Dict[str, Any]] = {}
+        token_row_kwargs_cache: Dict[Tuple[int, ...], Tuple[Tuple[Any, ...], Dict[str, Any]]] = {}
         # Iterate over a snapshot since quantization may mutate state.modules concurrently
         for name in feature_names:
             entry = self.tasks.get(name) or {}
@@ -2977,22 +3021,23 @@ class AWQProcessor(LoopProcessor):
             aggregation_mode = (policy or {}).get("mode")
             if aggregation_mode == "token_rows":
                 if "provenance" in entry and entry["provenance"]:
-                    cache_key = tuple(id(tensor) for tensor in tensors)
-                    cat_tensor = cat_cache.get(cache_key)
+                    cache_key, cat_tensor = self._sibling_capture_get(cat_cache, tensors)
                     if cat_tensor is None:
                         cat_tensor = (
                             torch.cat(tensors, dim=-2)
                             if tensors[0].dim() == 3
                             else torch.cat([t.reshape(-1, t.shape[-1]) for t in tensors], dim=0).unsqueeze(0)
                         )
-                        cat_cache[cache_key] = cat_tensor
+                        self._sibling_capture_put(cat_cache, cache_key, tensors, cat_tensor)
                     features[name] = cat_tensor
                     raw_tokens = entry.get("raw_tokens", int(features[name].shape[-2]))
                     retained_tokens = int(features[name].shape[-2])
                     max_tokens = entry.get("max_tokens", retained_tokens)
                     provenance = entry["provenance"]
 
-                    replay_kwargs = token_row_kwargs_cache.get(cache_key)
+                    kwargs_key, replay_kwargs = self._sibling_capture_get(
+                        token_row_kwargs_cache, tensors
+                    )
                     if replay_kwargs is None:
                         type_masks, replay_layer_type = self._token_row_layer_type_masks(
                             getattr(self, "inputs_cache", None),
@@ -3008,7 +3053,9 @@ class AWQProcessor(LoopProcessor):
                             recurrent=_is_recurrent_attention_layer_type(replay_layer_type),
                             row_counts=entry.get("batch_row_counts"),
                         )
-                        token_row_kwargs_cache[cache_key] = replay_kwargs
+                        self._sibling_capture_put(
+                            token_row_kwargs_cache, kwargs_key, tensors, replay_kwargs
+                        )
                     feature_kwargs[name] = replay_kwargs
                     entry["inputs"] = [features[name]]
                     entry["batch_indices"] = [None]
@@ -3036,8 +3083,9 @@ class AWQProcessor(LoopProcessor):
                             max_tokens=max_tokens,
                             with_provenance=True,
                         )
-                        cache_key = tuple(id(tensor) for tensor in tensors)
-                        replay_kwargs = token_row_kwargs_cache.get(cache_key)
+                        cache_key, replay_kwargs = self._sibling_capture_get(
+                            token_row_kwargs_cache, tensors
+                        )
                         if replay_kwargs is None:
                             type_masks, replay_layer_type = self._token_row_layer_type_masks(
                                 getattr(self, "inputs_cache", None),
@@ -3052,7 +3100,9 @@ class AWQProcessor(LoopProcessor):
                                 mask_overrides=type_masks,
                                 recurrent=_is_recurrent_attention_layer_type(replay_layer_type),
                             )
-                            token_row_kwargs_cache[cache_key] = replay_kwargs
+                            self._sibling_capture_put(
+                                token_row_kwargs_cache, cache_key, tensors, replay_kwargs
+                            )
                     feature_kwargs[name] = replay_kwargs
                     retained_tokens = int(features[name].shape[-2])
                     entry["inputs"] = [features[name]]
@@ -3070,11 +3120,10 @@ class AWQProcessor(LoopProcessor):
                     f"for {name!r}."
                 )
             elif self._can_concat_batch_tensors(tensors):
-                cat_key = tuple(id(tensor) for tensor in tensors)
-                cat_tensor = cat_cache.get(cat_key)
+                cat_key, cat_tensor = self._sibling_capture_get(cat_cache, tensors)
                 if cat_tensor is None:
                     cat_tensor = torch.cat(tensors, dim=0)
-                    cat_cache[cat_key] = cat_tensor
+                    self._sibling_capture_put(cat_cache, cat_key, tensors, cat_tensor)
                 features[name] = cat_tensor
                 feature_kwargs[name] = self._feature_kwargs_from_batch_indices(batch_indices)
                 entry["inputs"] = [features[name]]
