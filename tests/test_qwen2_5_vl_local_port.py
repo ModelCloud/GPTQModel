@@ -7,16 +7,25 @@ import json
 
 import pytest
 import torch
-from transformers import (
-    PreTrainedTokenizerFast,
-    Qwen2_5_VLConfig,
-    Qwen2_5_VLForConditionalGeneration,
-    Qwen2_5_VLTextConfig,
-)
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLTextModel
+from transformers import PreTrainedTokenizerFast
+from transformers import Qwen2_5_VLConfig as OracleConfig
+from transformers import Qwen2_5_VLForConditionalGeneration as OracleComposite
+from transformers import Qwen2_5_VLTextConfig as OracleTextConfig
+from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLTextModel as OracleTextModel
 
 from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.qwen2_5_vl import Qwen2_5_VLQModel
+from gptqmodel.models.ports.native.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig, Qwen2_5_VLTextConfig
+from gptqmodel.models.ports.native.qwen2_5_vl.modeling_qwen2_5_vl import (
+    Qwen2_5_VLForConditionalGeneration,
+    Qwen2_5_VLTextModel,
+)
+
+
+def oracle(config):
+    """Transformers 5.23's own config class: the numerical oracle for the vendored port."""
+    oracle_class = {"qwen2_5_vl": OracleConfig, "qwen2_5_vl_text": OracleTextConfig}[config.model_type]
+    return oracle_class.from_dict(copy.deepcopy(config).to_dict())
 
 
 def text_config(kv_heads=2, **kwargs):
@@ -83,7 +92,7 @@ def test_text_exact_native_state_schema_and_hidden_output(kv_heads):
     model = Qwen2_5_VLQModel.loader.from_config(text_config(kv_heads), attn_implementation="eager").eval()
     ids = torch.tensor([[1, 4, 9, 3], [1, 8, 5, 7]])
     with torch.no_grad():
-        native = Qwen2_5_VLTextModel._from_config(copy.deepcopy(model.config), attn_implementation="eager").eval()
+        native = OracleTextModel._from_config(oracle(model.config), attn_implementation="eager").eval()
         native.load_state_dict(model.state_dict())
         assert set(model.state_dict()) == set(native.state_dict())
         assert not any(key.startswith("model.") or "lm_head" in key for key in model.state_dict())
@@ -130,8 +139,8 @@ def test_text_matches_native_composite_decoder_hidden_states_and_cache(dtype, im
         dtype=dtype,
         attn_implementation=implementation,
     ).eval()
-    native = Qwen2_5_VLForConditionalGeneration._from_config(
-        config, dtype=dtype, attn_implementation=implementation
+    native = OracleComposite._from_config(
+        oracle(config), dtype=dtype, attn_implementation=implementation
     ).eval()
     native = native.model.language_model
     native.load_state_dict(text.state_dict())
@@ -220,8 +229,8 @@ def test_public_hostile_auto_map_ignores_remote_code(tmp_path, monkeypatch, bypa
     model = (
         make_text_model()
         if text_only
-        else Qwen2_5_VLForConditionalGeneration._from_config(
-            composite_config(),
+        else OracleComposite._from_config(
+            oracle(composite_config()),
             attn_implementation="eager",
         ).eval()
     )
@@ -253,7 +262,7 @@ def test_public_hostile_auto_map_ignores_remote_code(tmp_path, monkeypatch, bypa
         str(tmp_path), backend=BACKEND.TORCH, dtype=torch.float32, trust_remote_code=trust, attn_implementation="eager"
     )
     assert loaded.trust_remote_code is False
-    assert type(loaded.model) is type(model)
+    assert type(loaded.model) is (Qwen2_5_VLTextModel if text_only else Qwen2_5_VLForConditionalGeneration)
     assert loaded.require_load_processor is (not text_only)
     ids = torch.tensor([[1, 4, 7, 5]])
     with torch.inference_mode():
@@ -294,7 +303,7 @@ def test_text_native_outputs_and_input_embedding_equivalence():
 def test_native_composite_media_forward_and_generation_unchanged(beams):
     config = composite_config()
     model = Qwen2_5_VLQModel.loader.from_config(config, attn_implementation="eager").eval()
-    native = Qwen2_5_VLForConditionalGeneration._from_config(copy.deepcopy(config), attn_implementation="eager").eval()
+    native = OracleComposite._from_config(oracle(config), attn_implementation="eager").eval()
     native.load_state_dict(model.state_dict())
     # One image and one two-frame video, each producing one merged patch.
     ids = torch.tensor([[1, 62, 60, 63, 4, 62, 61, 63, 5]])
