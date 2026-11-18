@@ -15,14 +15,14 @@
 # limitations under the License.
 """Dream model configuration"""
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 from transformers.utils import logging
 
 
 logger = logging.get_logger(__name__)
 
 
-class DreamConfig(PretrainedConfig):
+class DreamConfig(PreTrainedConfig):
     model_type = "Dream"
     keys_to_ignore_at_inference = ["past_key_values"]
 
