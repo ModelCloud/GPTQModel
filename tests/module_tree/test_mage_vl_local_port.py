@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 from torch import nn
 
 from gptqmodel.models.auto import MODEL_MAP
@@ -14,7 +15,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.mage_vl.configuration_mage_vl import MageVLConfig
 from gptqmodel.models.ports.mage_vl.modeling_mage_vl import MageVLForConditionalGeneration
-from tests.test_mage_vl_local_port import _config
+from tests.test_mage_vl_local_port import _config, _model
 
 
 def _checkpoint_shapes():
@@ -84,4 +85,23 @@ def test_all_declared_leaves_bind_actual_decoder_owners(kv, bias, device):
         for name in expected:
             assert isinstance(layer.get_submodule(name), nn.Linear)
             assert plan.find(name + ".not_declared") is None
-    assert wrapper.awq_get_modules_for_scaling(model.model.language_model.layers[0], {}, {}) == []
+
+
+@pytest.mark.parametrize("kv,bias", [(4, False), (2, True)])
+def test_awq_text_decoder_folds_preserve_layer_output(kv, bias):
+    # The Qwen3 text decoder owns ordinary pre-norm folds; the vision tower is
+    # outside the quantized tree and only changes the decoder's input rows.
+    model = _model(text={"num_key_value_heads": kv, "attention_bias": bias})
+    language = model.model.language_model
+    ids = torch.randint(3, 59, (1, 8))
+
+    def forward():
+        return language(input_ids=ids).last_hidden_state
+
+    for layer in language.layers:
+        checked = assert_awq_folds_neutral(MageVLQModel, model, layer, forward)
+        assert [(source, targets) for source, targets, _ in checked] == [
+            ("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]),
+            ("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"]),
+            ("mlp.up_proj", ["mlp.down_proj"]),
+        ]

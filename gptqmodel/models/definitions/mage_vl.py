@@ -31,10 +31,6 @@ class MageVLQModel(BaseQwen3VLGPTQ):
         processor_class="gptqmodel.models.ports.mage_vl.processing_mage_vl.MageVLProcessor",
     )
 
-    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Vision-dependent decoder replay and folds have not been qualified.
-        return []
-
     def load_processor(self):
         return self.loader.load_processor(
             self.model_local_path,
