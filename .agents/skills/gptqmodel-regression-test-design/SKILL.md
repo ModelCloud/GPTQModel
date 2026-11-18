@@ -9,17 +9,12 @@ description: Construct regression tests for GPT-QModel bug fixes and behavior-ch
 
 ## At a glance
 
-- **What:** a regression that fails on the broken code for the intended reason, exercises the next consumer and the risky state transition, and passes with the fix.
-- **Why:** recent fixes kept testing a helper or the first successful call while the bug lived in a reload, a retry, a second consumer, or another representation, and so they regressed.
-- **When:** every bug fix and behaviour-changing refactor, alongside the domain skills.
-- **Where:** extend the existing family suite under `tests/`; the evidence behind this skill is in `references/2026-11-17-regressions.md`.
-- **How:** write the invariant, prove red then green, pick the applicable transition rows in section 3, and report the evidence table in the PR.
-
-Recent fixes repeatedly covered a helper or the first successful call while
-missing its next consumer, another representation, or a partially completed
-operation. The [audit evidence](references/2026-11-17-regressions.md) separates
-demonstrated regressions from recurring bug families. Use these mechanisms to
-design tests, not the historical implementation as a permanent specification.
+For each bug fix or behaviour-changing refactor, add a red/green regression
+to the existing test family. Exercise the risky transition and its **next
+consumer**, not just the helper or first successful call. Select the applicable
+cases below and record the evidence in the PR. The
+[audit](references/2026-11-17-regressions.md) distinguishes proven regressions
+from recurring bug families; historical implementations are not specifications.
 
 ## 1. Write the invariant before the patch
 

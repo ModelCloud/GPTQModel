@@ -9,13 +9,10 @@ description: Diagnose and correct GPT-QModel tokenizer initialization, tokenizat
 
 ## At a glance
 
-- **What:** fix tokenizer loading, special tokens, and chat-template normalization in Tokenicer, then consume the fix in GPT-QModel.
-- **Why:** a wrong prompt or wrong token IDs look exactly like a quantization regression, and per-model patches in GPT-QModel loaders diverge from every other Tokenicer user.
-- **When:** generation or evaluation scores are unexpectedly low, outputs look malformed, or tokenizer, special-token, or chat-template behaviour is being changed.
-- **Where:** [ModelCloud/Tokenicer](https://github.com/ModelCloud/Tokenicer) first; then GPT-QModel's `Tokenicer.load()` call sites and its Tokenicer version pin.
-- **How:** prove a dense baseline, compare rendered prompts and input IDs, fix and release upstream, then raise the pin and delete any workaround.
-
-Treat [ModelCloud/Tokenicer](https://github.com/ModelCloud/Tokenicer) as the source of truth for reusable tokenizer loading and normalization. GPT-QModel depends on Tokenicer; model loaders should consume its behavior rather than accumulate model-specific tokenizer patches.
+For tokenizer, chat-template or generation-quality changes, compare the dense
+baseline, rendered prompts and input IDs first. Repair reusable normalization
+in [Tokenicer](https://github.com/ModelCloud/Tokenicer); consume its release
+through `Tokenicer.load()` rather than patching individual GPT-QModel loaders.
 
 ## Diagnose the boundary
 
@@ -29,7 +26,7 @@ Do not suppress a correctness warning or hard-code a GPT-QModel model-name check
 
 ## Implement upstream first
 
-1. Use an existing local Tokenicer clone, or clone `https://github.com/ModelCloud/Tokenicer` when none exists.
+1. Use a task-specific clone of [Tokenicer](https://github.com/ModelCloud/Tokenicer) under the [workspace and draft PR rules](../gptqmodel-agent-workflow/SKILL.md).
 2. Sync Tokenicer's default branch and create a focused branch. Preserve unrelated worktree files.
 3. Implement the smallest general normalization in Tokenicer and make every tokenizer load and fallback path apply it consistently.
 4. Add focused unit tests for the default correction, explicit override behavior, and fallback paths. Add a lightweight end-to-end tokenizer assertion when it materially strengthens the regression.

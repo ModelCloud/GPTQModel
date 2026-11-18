@@ -9,18 +9,10 @@ description: Free-threaded (PYTHON_GIL=0) PyTorch safety. Use before writing, re
 
 ## At a glance
 
-- **What:** treat every PyTorch API as thread-unsafe under `PYTHON_GIL=0` until the ledger says otherwise.
-- **Why:** multi-GPU quantization and inference run free-threaded, and some PyTorch entry points hang or return torn data when called concurrently.
-- **When:** writing, reviewing, or debugging code that calls PyTorch from more than one thread, or that touches P2P copies, streams, or per-thread device selection.
-- **Where:** `pytorch_gil_0_compat.md` (the ledger), `scripts/gil0_api_probe.py`, `gptqmodel/utils/p2p.py`, `gptqmodel/utils/looper_helpers.py`.
-- **How:** check the ledger, probe unknown APIs on a free-threaded build with two or more GPUs, and record the result in the same change.
-
-`PYTHON_GIL=0` removes the global interpreter lock. It does **not** make a C
-extension thread-safe. PyTorch wheels built for `3.14t` still contain entry
-points that take a global lock, that are unsafe to call concurrently, or that
-silently corrupt data. We have measured this: `torch.cuda.comm.broadcast_coalesced`
-both hangs and returns torn copies when called from several threads on a
-GIL-disabled build, while the same call is fine on a GIL build.
+Check the ledger before using threaded PyTorch. A free-threaded build
+(`3.13t`/`3.14t`, `PYTHON_GIL=0`) does not make a C extension thread-safe:
+concurrent `torch.cuda.comm.broadcast_coalesced` has both hung and returned
+torn copies even though it works on a GIL build.
 
 ## Required reading
 

@@ -9,22 +9,14 @@ description: Qualify AWQ source/consumer relationships, scale-search objectives,
 
 ## At a glance
 
-- **What:** prove each AWQ scaling group's true source, every consumer, and the search objective from the native model code, or fall back to plain quantization deliberately.
-- **Why:** a wrong fold (wrong producer, a missed consumer, a nonlinear or residual boundary) corrupts the model while module plans, shapes, and generation still look fine.
-- **When:** adding a model type or alias, changing paths, tags, variants, or AWQ overrides, or touching grouping, search, replay, or folding.
-- **Where:** `gptqmodel/models/definitions/` (`awq_get_modules_for_scaling`, replay hooks), `gptqmodel/looper/awq_processor.py`, `docs/awq-scaling-groups.md`, `docs/awq-bloom-replay.md`, and the AWQ tests listed in section 4.
-- **How:** (1) read the native forward, (2) express only justified groups with existing APIs, (3) preserve candidate coordinates and native replay context, (4) add the regression evidence table, (5) state one qualification outcome per layout.
+For every new model/alias, definition variant, or grouping/search/replay/fold
+change, qualify each layout against native forward code or use tested plain
+quantization. A passing [module plan](../gptqmodel-model-plan-tests/SKILL.md),
+matching widths, live bindings and observing all declared targets cannot reveal
+an undeclared consumer. State the AWQ policy even for non-AWQ onboarding.
 
-Apply this skill before adding any model type/alias or changing model paths,
-tags, layout/config variants, AWQ overrides, grouping, replay, search, or folds.
-Use it alongside `gptqmodel-model-plan-tests`; passing the module-plan inventory
-is necessary, but is **not AWQ qualification**. General model support must state
-its AWQ policy even when the motivating feature uses another quantizer.
-
-This is a source-review and regression-test gate, not an automatic data-flow
-proof. Width equality, module order, live binding, replay containment, and
-observing every declared target cannot establish the true producer or discover
-an undeclared consumer. Do not claim arbitrary architectures are now safe.
+Start in `gptqmodel/models/definitions/` and `gptqmodel/looper/awq_processor.py`;
+use the evidence matrix below, not architecture names or generation quality.
 
 ## 1. Establish the native execution relationships
 

@@ -9,23 +9,14 @@ description: Validate quantization math, packed formats, and inference kernels a
 
 ## At a glance
 
-- **What:** prove every numerical change against an independent Torch oracle within fixed limits, and keep inference weights in quantized form between uses.
-- **Why:** fast kernels drift silently, and dense weight caches quietly multiply memory. Neither shows up in a smoke test or a generation sample.
-- **When:** adding or changing quantization math, a packer, an inference kernel, dispatch, a fusion backend, or runtime weight storage; also when auditing existing kernels.
-- **Where:** `gptqmodel/nn_modules/qlinear/`, `gptqmodel/quantization/`, `gptqmodel_ext/`, `tests/module_tree/test_fusion_kernel_backends.py`, `tests/qwen38_27b_shapes.py`.
-- **How:** deterministic A/B tests against oracle arithmetic, boundary and tie cases, the [acceptance limits](#acceptance-limits), storage inspection after repeated forwards, and runs on the target hardware.
-
-Apply this skill when adding or changing quantization math, a weight packer,
-an inference kernel, inference dispatch, or runtime weight storage, regardless
-of backend or performance intent. Also apply it when auditing existing kernels. Build
-deterministic A/B unit tests that feed the same inputs and configuration to the
-changed path and a separate Torch reference. The oracle must perform its own
-arithmetic; do not call the changed kernel or reuse its intermediate outputs as
-expected results.
-
-Select packers, thread counts, and code paths through config or explicit
-arguments and test those arguments directly; never through environment
-variables (see `AGENTS.md`).
+For changes or audits of quantizers, packers, inference kernels, dispatch,
+fusion and weight storage, compare the path with an independent Torch oracle:
+same inputs/configuration, separate arithmetic, never the kernel's outputs or
+intermediates as expected values. Test boundaries, storage after repeated
+forwards, and the [acceptance limits](#acceptance-limits) on target hardware.
+Select packers, threads and paths via config/API arguments, not environment
+variables. Start in `gptqmodel/{quantization,nn_modules/qlinear}/` and
+`gptqmodel_ext/`; fusion and MLX test inventories are listed below.
 
 ## Persistent inference weight storage
 
