@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: LicenseRef-Instella-Research-Only-RAIL-MS
 # This code was adapted from OLMo2 (Transformers v4.47.1) by AMD.
-# Modified for Transformers 5 by ModelCloud.ai. See LICENSE, NOTICES and PROVENANCE.md.
+# Modified for Transformers 5 by ModelCloud.ai. See LICENSE and NOTICES.
 """Instella's pre-norm decoder and full-projection Q/K RMSNorm, on Transformers 5."""
 
 import math
@@ -10,39 +10,28 @@ import math
 import torch
 from torch import nn
 from torch.nn import functional as F
-from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.masking_utils import create_causal_mask
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.models.llama.modeling_llama import LlamaRMSNorm as InstellaRMSNorm
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, repeat_kv
+from transformers.models.qwen2.modeling_qwen2 import Qwen2MLP as InstellaMLP
 
 from .configuration_instella import InstellaConfig
-
-
-class InstellaRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
 
 
 class InstellaRotaryEmbedding(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dim = config.hidden_size // config.num_attention_heads
-        self.base = config.rope_theta
+        rope = config.rope_parameters
+        self.base = rope["rope_theta"]
         self.max_position_embeddings = config.max_position_embeddings
-        scaling = config.rope_scaling or {}
-        self.scaling_type = scaling.get("type", scaling.get("rope_type"))
-        self.scaling_factor = scaling.get("factor", 1.0)
+        self.scaling_type = rope["rope_type"]
+        self.scaling_factor = rope.get("factor", 1.0)
         self.register_buffer("inv_freq", self.initial_frequencies(), persistent=False)
 
     def initial_frequencies(self, device=None):
@@ -75,25 +64,6 @@ class InstellaRotaryEmbedding(nn.Module):
         return cos.to(x.dtype), sin.to(x.dtype)
 
 
-def rotate_half(x):
-    x1, x2 = x.chunk(2, dim=-1)
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(q, k, cos, sin):
-    cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
-    return q * cos + rotate_half(q) * sin, k * cos + rotate_half(k) * sin
-
-
-def repeat_kv(hidden_states, n_rep):
-    batch, heads, slen, dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    return hidden_states[:, :, None, :, :].expand(batch, heads, n_rep, slen, dim).reshape(
-        batch, heads * n_rep, slen, dim
-    )
-
-
 class InstellaAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -103,6 +73,8 @@ class InstellaAttention(nn.Module):
         self.head_dim = config.hidden_size // self.num_heads
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        self.scaling = self.head_dim**-0.5
+        self.is_causal = True
         self.attention_dropout = config.attention_dropout
         self.q_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
         self.k_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
@@ -114,8 +86,7 @@ class InstellaAttention(nn.Module):
 
     def forward(
         self, hidden_states, attention_mask=None, position_ids=None,
-        past_key_value=None, output_attentions=False, use_cache=False,
-        cache_position=None, **kwargs,
+        past_key_values=None, output_attentions=False, cache_position=None, **kwargs,
     ):
         bsz, q_len, hidden_size = hidden_states.shape
         # Q/K normalization is over the complete projected width BEFORE splitting heads.
@@ -127,13 +98,15 @@ class InstellaAttention(nn.Module):
         value = value.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         cos, sin = self.rotary_emb(value, position_ids)
         query, key = apply_rotary_pos_emb(query, key, cos, sin)
-        if past_key_value is not None:
-            key, value = past_key_value.update(key, value, self.layer_idx)
-        key = repeat_kv(key, self.num_key_value_groups)
-        value = repeat_kv(value, self.num_key_value_groups)
-        mask = attention_mask[:, :, :, :key.shape[-2]] if attention_mask is not None else None
+        if past_key_values is not None:
+            key, value = past_key_values.update(key, value, self.layer_idx)
+        dropout = self.attention_dropout if self.training else 0.0
         weights = None
         if self.config._attn_implementation == "eager" or output_attentions:
+            # AMD's eager equations; also serves attention outputs for SDPA models.
+            key = repeat_kv(key, self.num_key_value_groups)
+            value = repeat_kv(value, self.num_key_value_groups)
+            mask = attention_mask[:, :, :, :key.shape[-2]] if attention_mask is not None else None
             weights = query @ key.transpose(2, 3) / math.sqrt(self.head_dim)
             if mask is not None:
                 if mask.dtype == torch.bool:
@@ -141,31 +114,17 @@ class InstellaAttention(nn.Module):
                 else:
                     weights = weights + mask
             weights = F.softmax(weights, dim=-1, dtype=torch.float32).to(query.dtype)
-            weights = F.dropout(weights, p=self.attention_dropout, training=self.training)
-            output = weights @ value
+            weights = F.dropout(weights, p=dropout, training=self.training)
+            output = (weights @ value).transpose(1, 2)
         else:
-            output = F.scaled_dot_product_attention(
-                query, key, value, attn_mask=mask,
-                dropout_p=self.attention_dropout if self.training else 0.0,
-                is_causal=mask is None and q_len > 1,
+            output, _ = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation](
+                self, query, key, value, attention_mask, dropout=dropout, scaling=self.scaling, **kwargs,
             )
-        output = output.transpose(1, 2).contiguous().reshape(bsz, q_len, hidden_size)
-        return self.o_proj(output), weights if output_attentions else None, past_key_value
+        output = output.contiguous().reshape(bsz, q_len, hidden_size)
+        return self.o_proj(output), weights if output_attentions else None
 
 
-class InstellaMLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
-
-    def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-
-
-class InstellaDecoderLayer(nn.Module):
+class InstellaDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.self_attn = InstellaAttention(config, layer_idx)
@@ -175,15 +134,16 @@ class InstellaDecoderLayer(nn.Module):
 
     def forward(self, hidden_states, **kwargs):
         residual = hidden_states
-        attn, weights, cache = self.self_attn(self.pre_attention_layernorm(hidden_states), **kwargs)
+        attn, weights = self.self_attn(self.pre_attention_layernorm(hidden_states), **kwargs)
         hidden_states = residual + attn
         hidden_states = hidden_states + self.mlp(self.pre_feedforward_layernorm(hidden_states))
-        return hidden_states, weights, cache
+        return hidden_states, weights
 
 
 class InstellaPreTrainedModel(PreTrainedModel):
     config_class = InstellaConfig
     base_model_prefix = "model"
+    supports_gradient_checkpointing = True
     _no_split_modules = ["InstellaDecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
     _supports_sdpa = True
@@ -237,9 +197,9 @@ class InstellaModel(InstellaPreTrainedModel):
         for layer in self.layers:
             if output_hidden_states:
                 all_hidden += (hidden_states,)
-            hidden_states, weights, _ = layer(
+            hidden_states, weights = layer(
                 hidden_states, attention_mask=mask, position_ids=position_ids,
-                past_key_value=past_key_values, output_attentions=output_attentions,
+                past_key_values=past_key_values, output_attentions=output_attentions,
                 use_cache=use_cache, cache_position=cache_position,
             )
             if output_attentions:

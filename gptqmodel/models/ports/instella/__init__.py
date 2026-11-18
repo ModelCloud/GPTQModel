@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Package-owned Instella implementation; see PROVENANCE.md and LICENSE."""
+"""Package-owned Instella implementation; see LICENSE and NOTICES."""
 
 from .configuration_instella import InstellaConfig
 from .modeling_instella import InstellaForCausalLM, InstellaModel

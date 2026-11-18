@@ -271,10 +271,10 @@ def test_dynamic_rotary_cache_threshold_and_warm_buffer_contract(tmp_path):
     cache = DynamicCache(config=model.config)
     hidden = torch.randn(1, 2, 32)
     positions = torch.tensor([[0, 1]])
-    attention(hidden, position_ids=positions, past_key_value=cache)
+    attention(hidden, position_ids=positions, past_key_values=cache)
     original_keys = cache.layers[0].keys.clone()
     next_positions = torch.tensor([[8, 9]])
-    attention(hidden, position_ids=next_positions, past_key_value=cache)
+    attention(hidden, position_ids=next_positions, past_key_values=cache)
     # Instella retains already-rotated K: extending NTK does not re-rotate history.
     torch.testing.assert_close(cache.layers[0].keys[:, :, :2], original_keys, rtol=0, atol=0)
     base = 10000 * (2.0 * 10 / 8 - 1.0) ** (8 / 6)
@@ -423,3 +423,36 @@ def test_public_dense_load_uses_packaged_model(tmp_path, monkeypatch, trust):
     assert wrapper.trust_remote_code is False
     assert wrapper.model.config.rope_scaling["factor"] == 2.0
     assert wrapper.model(torch.tensor([[2, 4, 8]])).logits.isfinite().all()
+
+
+@pytest.mark.parametrize("legacy", [None, {"type": "linear", "factor": 2.0}, {"rope_type": "dynamic", "factor": 3}])
+def test_rope_is_stored_as_tf5_rope_parameters_without_deprecated_alias(tmp_path, legacy):
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        config = tiny_config(rope_scaling=legacy, rope_theta=20000.0)
+        config.save_pretrained(tmp_path)
+        payload = json.loads((tmp_path / "config.json").read_text())
+        restored = InstellaConfig.from_pretrained(tmp_path)
+    expected = {"rope_type": "default", "rope_theta": 20000.0}
+    if legacy:
+        expected = {"rope_type": legacy.get("type", legacy.get("rope_type")), "rope_theta": 20000.0,
+                    "factor": legacy["factor"]}
+    assert payload["rope_parameters"] == expected and "rope_scaling" not in payload
+    assert restored.rope_parameters == expected and restored.rope_theta == 20000.0
+
+
+@pytest.mark.parametrize("backend", ["eager", "sdpa"])
+def test_gradient_checkpointing_matches_plain_backward(backend):
+    model = tiny_model(attn_implementation=backend).train()
+    ids = torch.tensor([[2, 4, 8, 6]])
+    model(ids, labels=ids, use_cache=False).loss.backward()
+    reference = {name: param.grad.clone() for name, param in model.named_parameters() if param.grad is not None}
+    model.zero_grad(set_to_none=True)
+    model.activation_checkpointing_enable()
+    model(ids, labels=ids, use_cache=False).loss.backward()
+    grads = {name: param.grad for name, param in model.named_parameters() if param.grad is not None}
+    assert grads.keys() == reference.keys()
+    for name, grad in reference.items():
+        torch.testing.assert_close(grads[name], grad, rtol=0, atol=0)
