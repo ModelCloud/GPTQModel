@@ -34,11 +34,11 @@ from transformers.generation import GenerationMixin
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from transformers.models.kimi_linear.modeling_kimi_linear import KimiLinearRMSNorm as KimiRMSNorm
-from transformers.models.kimi_linear.modeling_kimi_linear import eager_attention_forward
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, can_return_tuple
 
+from ..native.kimi_linear.modeling_kimi_linear import KimiLinearRMSNorm as KimiRMSNorm
+from ..native.kimi_linear.modeling_kimi_linear import eager_attention_forward
 from .checkpoint import ActiveKDAHeads, KimiCheckpointMixin
 from .configuration_kimi_k3 import KimiLinearConfig
 from .eager_kda import FusedRMSNormGated, ShortConvolution, kda_forward
@@ -1124,10 +1124,10 @@ def _causal_mask(input_embeds, attention_mask, past):
 class KimiModelFactory:
     @classmethod
     def _from_config(cls, config, **kwargs):
-        from transformers.models.kimi_linear.configuration_kimi_linear import KimiLinearConfig as NativeConfig
+        from ..native.kimi_linear.configuration_kimi_linear import KimiLinearConfig as NativeConfig
 
         if type(config) is NativeConfig:
-            from transformers.models.kimi_linear.modeling_kimi_linear import KimiLinearForCausalLM as NativeModel
+            from ..native.kimi_linear.modeling_kimi_linear import KimiLinearForCausalLM as NativeModel
 
             return NativeModel._from_config(config, **kwargs)
         from .configuration_kimi_k3 import KimiK3Config
@@ -1140,11 +1140,11 @@ class KimiModelFactory:
 
     @classmethod
     def from_pretrained(cls, path, **kwargs):
-        from transformers.models.kimi_linear.configuration_kimi_linear import KimiLinearConfig as NativeConfig
+        from ..native.kimi_linear.configuration_kimi_linear import KimiLinearConfig as NativeConfig
 
         config = kwargs["config"]
         if type(config) is NativeConfig:
-            from transformers.models.kimi_linear.modeling_kimi_linear import KimiLinearForCausalLM as NativeModel
+            from ..native.kimi_linear.modeling_kimi_linear import KimiLinearForCausalLM as NativeModel
 
             return NativeModel.from_pretrained(path, **kwargs)
         from .configuration_kimi_k3 import KimiK3Config

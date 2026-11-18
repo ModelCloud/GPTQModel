@@ -304,6 +304,6 @@ class KimiConfigFactory:
             if values.get("attn_res_block_size") is None:
                 raise ValueError("AttnRes requires an explicit attn_res_block_size")
             return KimiLinearConfig.from_dict(values, **kwargs)
-        from transformers.models.kimi_linear.configuration_kimi_linear import KimiLinearConfig as NativeConfig
+        from ..native.kimi_linear.configuration_kimi_linear import KimiLinearConfig as NativeConfig
 
         return NativeConfig.from_dict(values, **kwargs)
