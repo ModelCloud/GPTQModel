@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import torch
+
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
@@ -52,6 +54,48 @@ class HymbaQModel(BaseQModel):
             }
         }
     ]
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        """Score the mixer input projection instead of replaying the whole mixer.
+
+        `HymbaBlock.forward` is not a replayable AWQ boundary. A `reuse_kv`
+        layer projects no K/V of its own and reads the producing layer's
+        `kv_last_layer`, a value the forward executor threads between layers and
+        the per-linear activation capture never records. Replaying the block for
+        the `input_layernorm -> mamba.in_proj` group therefore asserts
+        `kv_last_layer is not None` (or, once a mask is supplied, fails on a
+        packed causal mask the block never receives) on every real checkpoint
+        (#5098).
+
+        `mamba.in_proj` is a plain Linear and `input_layernorm`'s only consumer,
+        so the projection's own reconstruction error is exactly the objective of
+        that group. Anchor the search on the projection; the tree still declares
+        the fold, and the scale search no longer needs the mixer's cross-layer KV
+        or its packed attention mask.
+        """
+
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        mixer = getattr(module, "mamba", None)
+        norm = getattr(module, "input_layernorm", None)
+        if mixer is None or norm is None:
+            return nodes
+        for node in nodes:
+            if node.get("prev_op") is not norm:
+                continue
+            layers = node.get("layers") or []
+            if len(layers) != 1 or node.get("module2inspect") is not mixer:
+                continue
+            if node.get("_scale_consumers"):
+                # A second consumer of the norm would be outside the Linear
+                # boundary; keep the mixed replay so the existing validation
+                # rejects or scores the whole group instead of silently
+                # dropping a branch.
+                continue
+            target = layers[0]
+            if not isinstance(target, torch.nn.Linear):
+                continue
+            node["module2inspect"] = target
+        return nodes
 
     def monkey_patch(self):
         if hasattr(self.config, 'conv_dim'):
