@@ -1,15 +1,14 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Real Dream checkpoint ownership and conservative AWQ admission."""
+"""Real Dream checkpoint ownership and AWQ scale-search qualification."""
 
 from types import SimpleNamespace
 
 import pytest
 import torch
+from awq_neutrality import assert_awq_folds_neutral
 
-from gptqmodel.looper.awq_processor import AWQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig
-from gptqmodel.looper.named_module import NamedModule
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.dream import DreamQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.ports.dream.configuration_dream import DreamConfig
@@ -58,7 +57,6 @@ def test_real_state_dict_owners_tags_roles_and_aliases(kv_heads, method):
         assert role in plan.find("self_attn." + name).flags
     assert plan.find("self_attn.q_proj.undeclared") is None
     assert plan.find("self_attn.q_proj_extra") is None
-    assert wrapper.awq_get_modules_for_scaling(model.model.layers[0], {}, {}) == []
     assert wrapper.support_batch_quantize is False
 
 
@@ -74,59 +72,67 @@ def test_published_checkpoint_meta_geometry_and_complete_key_inventory():
     assert model.model.layers[0].self_attn.k_proj.weight.shape == (512, 3584)
 
 
-@pytest.mark.parametrize("fallback", [None, "quantize"])
-def test_awq_empty_groups_reach_real_quantization_and_pack_every_linear(fallback):
-    old_threads = torch.get_num_threads()
-    torch.set_num_threads(1)
-    try:
-        torch.manual_seed(29)
-        model = DreamModel(model_config()).half().eval()
-        wrapper = DreamQModel(model=model, quantized=False, quantize_config=None)
-        processor = AWQProcessor(tokenizer=None, qcfg=AWQConfig(device="cpu", group_size=16),
-                                 calibration=CalibrationConfig(), gptq_model=wrapper, model=model,
-                                 calculate_w_wq_diff=False)
-        processor.draw_progress = lambda *args, **kwargs: None
-        processor.log_new_row = lambda *args, **kwargs: None
-        processor.fallback = fallback
-        ids = torch.tensor([[1, 2, 3]])
-        for index, layer in enumerate(model.model.layers):
-            norms = {name: layer.get_submodule(name).weight.detach().clone() for name in NORMS}
-            state = processor._get_layer_state(index)
-            state.layer_module = layer
-            modules = {
-                f"model.layers.{index}.{name}": NamedModule(layer.get_submodule(name), name, f"model.layers.{index}.{name}", index)
-                for name in sorted(QUANTIZED)}
-            weights = {name: named.weight.detach().clone() for name, named in modules.items()}
-            state.modules = modules.copy()
-            # Real projection captures populate the normal AWQ task representation.
-            handles = []
-            for name, named in modules.items():
-                processor.tasks[name] = {"inputs": []}
-                def capture(module, args, name=name):
-                    processor.tasks[name]["inputs"].append(args[0].detach())
-                handles.append(named.module.register_forward_pre_hook(capture))
-            try:
-                model(ids)
-            finally:
-                for handle in handles:
-                    handle.remove()
-            processor._quantize_layer(index, state)
-            assert state.quantized
-            for name, named in modules.items():
-                named.stream_sync()
-                assert named.state["q_scales"].numel() and named.state["q_zeros"].numel()
-                assert not torch.equal(named.weight, weights[name])
-                packed = AwqTorchLinear(bits=4, group_size=16, sym=False, desc_act=False,
-                                        in_features=named.in_features, out_features=named.out_features,
-                                        bias=named.bias is not None, dtype=torch.float16)
-                packed.pack(named.module, named.state["q_scales"], named.state["q_zeros"])
-                assert packed.qweight.dtype == torch.int32
-                assert packed.qzeros.dtype == torch.int32
-                parent_path, child_name = name.rsplit(".", 1)
-                setattr(model.get_submodule(parent_path), child_name, packed)
-            for name, expected in norms.items():
-                torch.testing.assert_close(layer.get_submodule(name).weight, expected, atol=0, rtol=0)
-        assert sum(isinstance(module, AwqTorchLinear) for module in model.modules()) == 14
-        assert torch.isfinite(model(ids).logits).all()
-    finally:
-        torch.set_num_threads(old_threads)
+# Dream-v0 ships GQA (4 KV heads for 28 query heads), where v_proj -> o_proj is
+# width-ineligible; equal KV heads additionally qualify that fold.
+@pytest.mark.parametrize("kv_heads", [2, 4])
+def test_awq_scale_folds_preserve_bidirectional_layer_output(kv_heads):
+    torch.manual_seed(29)
+    model = DreamModel(model_config(kv_heads)).eval()
+    ids = torch.tensor([[1, 2, 3, 31, 31, 7, 9, 4]])
+    mask = torch.tensor([[1, 1, 1, 1, 1, 1, 0, 0]])
+
+    def forward():
+        # Diffusion denoising attends bidirectionally over masked positions.
+        return model(ids, attention_mask=mask).logits
+
+    expected = [("input_layernorm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"])]
+    if kv_heads == 4:
+        expected.append(("self_attn.v_proj", ["self_attn.o_proj"]))
+    expected += [("post_attention_layernorm", ["mlp.gate_proj", "mlp.up_proj"]), ("mlp.up_proj", ["mlp.down_proj"])]
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(DreamQModel, model, layer, forward)
+        assert [(source, targets) for source, targets, _ in checked] == expected
+
+
+def test_public_awq_scale_search_packs_every_linear_and_reloads(tmp_path, monkeypatch):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import PreTrainedTokenizerFast
+
+    from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel.looper import awq_processor
+
+    torch.manual_seed(29)
+    DreamModel(model_config()).eval().save_pretrained(tmp_path)
+    vocab = {"<pad>": 0, "<unk>": 1} | {f"t{index}": index for index in range(2, 31)}
+    PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel(vocab, unk_token="<unk>")),
+                            pad_token="<pad>", unk_token="<unk>").save_pretrained(tmp_path)
+    wrapper = GPTQModel.load(str(tmp_path), quantize_config=AWQConfig(device="cpu", group_size=16, fallback=None),
+                             backend=BACKEND.TORCH, dtype=torch.float16)
+    applied = []
+    original_apply_scale = awq_processor.apply_scale
+
+    def record_apply_scale(module, scales_list, *args, **kwargs):
+        applied.extend((source, tuple(targets)) for source, targets, _scales, _loss in scales_list)
+        return original_apply_scale(module, scales_list, *args, **kwargs)
+
+    monkeypatch.setattr(awq_processor, "apply_scale", record_apply_scale)
+    calibration = [{"input_ids": torch.tensor([[4, 5, 6, 7, 31, 31, 10, 11]]),
+                    "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
+    wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
+    assert applied == 2 * [
+        ("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),
+        ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj")),
+        ("mlp.up_proj", ("mlp.down_proj",)),
+    ]
+    assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 14
+    ids = calibration[0]["input_ids"]
+    with torch.inference_mode():
+        expected = wrapper.model(ids).logits
+    assert torch.isfinite(expected).all()
+    saved = tmp_path / "quantized"
+    wrapper.save_quantized(str(saved))
+    reloaded = GPTQModel.load(str(saved), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
+    assert sum(isinstance(module, AwqTorchLinear) for module in reloaded.model.modules()) == 14
+    with torch.inference_mode():
+        torch.testing.assert_close(reloaded.model(ids).logits, expected, atol=2e-4, rtol=2e-3)
