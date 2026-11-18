@@ -45,21 +45,10 @@ class _QuantMambaBase(torch.nn.Module):
 
 
 class _EagerOnlyMamba(_QuantMambaBase):
-    """Matches Transformers releases that only expose the eager `forward`."""
+    """Matches the Transformers 5.23 layer, which only exposes `forward`."""
 
     def forward(self, input_states, cache_params=None, attention_mask=None):
         return self._record_eager(input_states, cache_params, attention_mask)
-
-
-class _LegacyTorchForwardMamba(_QuantMambaBase):
-    """Matches older Transformers releases that expose `torch_forward`."""
-
-    def torch_forward(self, input_states, cache_params=None, attention_mask=None):
-        return self._record_eager(input_states, cache_params, attention_mask)
-
-    def forward(self, *args, **kwargs):
-        self.path = "fast"
-        return "fast"
 
 
 def _qmodel_with_mamba(mamba):
@@ -78,7 +67,6 @@ def _assert_quantized_forward_uses_eager(mamba):
     result = mamba(
         hidden_states,
         cache_params=cache_params,
-        cache_position=torch.arange(2),
         attention_mask=attention_mask,
     )
 
@@ -91,12 +79,8 @@ def _assert_quantized_forward_uses_eager(mamba):
     }
 
 
-def test_granitemoehybrid_quantized_mamba_uses_eager_forward_without_torch_forward():
+def test_granitemoehybrid_quantized_mamba_uses_eager_forward():
     _assert_quantized_forward_uses_eager(_EagerOnlyMamba())
-
-
-def test_granitemoehybrid_quantized_mamba_uses_torch_forward_when_present():
-    _assert_quantized_forward_uses_eager(_LegacyTorchForwardMamba())
 
 
 def test_granitemoehybrid_monkey_patch_is_idempotent():
