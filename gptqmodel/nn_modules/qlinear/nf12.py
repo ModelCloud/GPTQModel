@@ -91,6 +91,23 @@ def _autocast_narrows_weight_range(
     return not _weight_dtype_is_lossless(autocast_dtype)
 
 
+def _as_normal_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """Return a non-inference copy when ``tensor`` came from InferenceMode.
+
+    ``pack_original()`` / ``load_quant_result()`` run under
+    ``torch.inference_mode()`` and a loader can install a checkpoint inside one
+    too, so the registered buffers would otherwise be inference tensors.
+    Inference tensors cannot be saved for backward, which made every grad-mode
+    forward fail at the decode matmul even though the packed weights are not
+    trainable (#5211).
+    """
+
+    if not tensor.is_inference():
+        return tensor
+    with torch.inference_mode(False):
+        return tensor.clone()
+
+
 def _hip_path(device: torch.device | str) -> bool:
     """True when the device is an RDNA4 GPU that must use the HIP port.
 
@@ -330,8 +347,12 @@ class NF12Linear(WeightOnlyQuantLinear):
             target_device = self.bias.device
         else:
             target_device = torch.device("cpu")
-        packed = result.packed.to(device=target_device, dtype=torch.uint8).contiguous()
-        escapes = result.escapes.to(device=target_device, dtype=torch.int16).contiguous()
+        packed = _as_normal_tensor(
+            result.packed.to(device=target_device, dtype=torch.uint8).contiguous()
+        )
+        escapes = _as_normal_tensor(
+            result.escapes.to(device=target_device, dtype=torch.int16).contiguous()
+        )
         if "nf12_packed" in self._buffers:
             self.nf12_packed = packed
         else:
@@ -340,7 +361,9 @@ class NF12Linear(WeightOnlyQuantLinear):
             self.nf12_escapes = escapes
         else:
             self.register_buffer("nf12_escapes", escapes)
-        base = torch.tensor([result.exp_base], dtype=torch.uint8, device=packed.device)
+        base = _as_normal_tensor(
+            torch.tensor([result.exp_base], dtype=torch.uint8, device=packed.device)
+        )
         if "nf12_exp_base" in self._buffers:
             self.nf12_exp_base = base
         else:
@@ -349,7 +372,9 @@ class NF12Linear(WeightOnlyQuantLinear):
         if source_bias is None and linear is not None:
             source_bias = getattr(linear, "bias", None)
         if source_bias is not None:
-            value = source_bias.detach().to(device=packed.device).contiguous()
+            value = _as_normal_tensor(
+                source_bias.detach().to(device=packed.device).contiguous()
+            )
             if "bias" in self._buffers:
                 self.bias = value
             else:
@@ -361,7 +386,7 @@ class NF12Linear(WeightOnlyQuantLinear):
     # ------------------------------------------------------------------
     # export / inference
     # ------------------------------------------------------------------
-    @torch.inference_mode()
+    @torch.no_grad()
     def dequantize_weight(
         self,
         *,
@@ -371,7 +396,9 @@ class NF12Linear(WeightOnlyQuantLinear):
         """Return the exact decoded BF16 matrix.
 
         This is an explicit export API: callers receive a dense tensor, but it
-        is never installed as an inference cache.
+        is never installed as an inference cache. ``no_grad`` (not
+        ``inference_mode``) keeps the result usable as an autograd operand for
+        the forward's wide path (#5211).
         """
 
         target = self.nf12_packed.device if device is None else torch.device(device)
@@ -414,7 +441,7 @@ class NF12Linear(WeightOnlyQuantLinear):
             weight = nf12_codec.decode(
                 packed, escapes, base, self.out_features, self.in_features
             )
-        return weight.to(dtype=dtype).contiguous()
+        return _as_normal_tensor(weight.to(dtype=dtype).contiguous())
 
     def dequantize(self, *, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
         return self.dequantize_weight(dtype=dtype)
