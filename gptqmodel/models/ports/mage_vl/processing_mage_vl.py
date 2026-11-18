@@ -159,7 +159,7 @@ class MageVLProcessor:
             **video_kwargs,
         )
         return cls(image_processor=image_processor, tokenizer=tokenizer, video_processor=video_processor,
-                   codec_config=codec_defaults if codec_override is None else codec_override)
+                   codec_config={**codec_defaults, **(codec_override or {})})
 
     def save_pretrained(self, save_directory, **kwargs):
         import json

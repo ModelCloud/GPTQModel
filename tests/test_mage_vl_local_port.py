@@ -438,9 +438,12 @@ def test_checkpoint_codec_settings_only_supply_processing_options(tmp_path):
     )
     assert processor._codec_config_defaults["cache_root"] == caller_cache
     assert processor._codec_config_defaults["timeout_seconds"] == 15
+    # Caller execution policy layers over, rather than discards, checkpoint geometry.
+    processor = MageVLProcessor.from_pretrained(tmp_path, codec_config={"cache_root": caller_cache})
+    assert processor._codec_config_defaults == {"target_canvas": 24, "cache_root": caller_cache}
     saved = tmp_path / "saved"
     processor.save_pretrained(saved)
-    assert json.loads((saved / "preprocessor_config.json").read_text())["codec"] == {"target_canvas": 20}
+    assert json.loads((saved / "preprocessor_config.json").read_text())["codec"] == {"target_canvas": 24}
 
 
 def test_codec_defaults_ignore_environment_and_accept_explicit_api_paths(tmp_path, monkeypatch):
