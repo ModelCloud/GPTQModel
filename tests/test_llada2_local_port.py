@@ -594,7 +594,7 @@ def test_causal_cache_continuation_invalid_mask_retry_and_diffusion_visibility(v
         ("2.2", "mixed", True),
     ],
 )
-def test_public_plain_awq_all_owners_pack_infer_and_two_reloads(tmp_path, version, kind, offload):
+def test_public_awq_scaled_all_owners_pack_infer_and_two_reloads(tmp_path, version, kind, offload):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
@@ -620,8 +620,8 @@ def test_public_plain_awq_all_owners_pack_infer_and_two_reloads(tmp_path, versio
         quantize_config=AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=offload),
     )
     assert wrapper.model.config.llada_version == version
-    for layer in wrapper.model.model.layers:
-        assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
+    # Offloaded loads keep weights lazy, so snapshot the saved source norms.
+    norms = {name: value.half() for name, value in reference.state_dict().items() if "layernorm" in name}
     expected_names = {
         name for name, mod in wrapper.model.named_modules() if isinstance(mod, torch.nn.Linear) and name != "lm_head"
     }
@@ -640,6 +640,9 @@ def test_public_plain_awq_all_owners_pack_infer_and_two_reloads(tmp_path, versio
     )
     actual_names = {name for name, mod in wrapper.model.named_modules() if isinstance(mod, AwqTorchLinear)}
     assert actual_names == expected_names
+    # Scale search ran: at least one decoder norm absorbed a searched scale.
+    state = wrapper.model.state_dict()
+    assert any(not torch.equal(state[name], value) for name, value in norms.items())
     assert len(actual_names) == 4 + dense * 3 + (2 - dense) * 15
     for name in actual_names:
         quantized = wrapper.model.get_submodule(name)

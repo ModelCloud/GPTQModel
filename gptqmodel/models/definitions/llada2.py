@@ -43,5 +43,28 @@ class LLaDA2MoeQModel(BaseQModel):
     ]
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        """Packed QKV, Q/K norms and biased routing have no qualified folds."""
-        return []
+        """Generic AWQ groups without any fold into ``attention.dense``.
+
+        ``attention.dense`` reads the attention output; the packed
+        ``query_key_value`` output is wider and the optional Q/K norms are
+        per-head, so no producer in the layer can absorb its scale. Without
+        ``use_qk_norm`` the declared norms are absent and the generic planner
+        falls back to the stale ``input_layernorm`` for ``dense``. The
+        biased sigmoid router reads ``post_attention_layernorm`` and is
+        compensated as a scale consumer, so routing is unchanged.
+        """
+
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        dense = getattr(getattr(module, "attention", None), "dense", None)
+        kept = []
+        for node in nodes:
+            layers = [layer for layer in node.get("layers") or [] if layer is not dense]
+            if not layers:
+                continue
+            if len(layers) != len(node.get("layers") or []):
+                node = dict(node, layers=layers)
+                search = node.get("_awq_search_layers")
+                if search is not None:
+                    node["_awq_search_layers"] = [layer for layer in search if layer is not dense]
+            kept.append(node)
+        return kept
