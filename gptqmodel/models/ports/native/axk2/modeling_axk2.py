@@ -42,6 +42,7 @@ from transformers.modeling_layers import (
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast, MoeModelOutputWithPast
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring
 from transformers.utils.generic import can_return_tuple, merge_with_config_defaults
@@ -706,7 +707,7 @@ class AXK2DecoderLayer(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class AXK2PreTrainedModel(PreTrainedModel):
+class AXK2PreTrainedModel(NativePreTrainedModel):
     config: AXK2Config
     base_model_prefix = "model"
     supports_gradient_checkpointing = True

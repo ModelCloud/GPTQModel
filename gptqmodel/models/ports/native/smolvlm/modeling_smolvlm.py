@@ -36,6 +36,7 @@ from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling, ModelOutput
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, logging, torch_compilable_check
 from transformers.utils.generic import merge_with_config_defaults
@@ -48,7 +49,7 @@ logger = logging.get_logger(__name__)
 
 
 @auto_docstring
-class SmolVLMPreTrainedModel(PreTrainedModel):
+class SmolVLMPreTrainedModel(NativePreTrainedModel):
     config: SmolVLMConfig
     base_model_prefix = "model"
     input_modalities = ("image", "text")
