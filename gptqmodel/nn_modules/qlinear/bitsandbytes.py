@@ -495,6 +495,21 @@ def _buffer_spec_4bit(
 
 
 class BitsAndBytesLinear(WeightOnlyQuantLinear):
+    # 4-bit stores `weight` plus the quant-state metadata/absmax/quant-map
+    # tensors; compressed statistics add the nested pair, and 8-bit stores
+    # `weight_scb`. A buffer this instance does not allocate (uncompressed
+    # stats, the other bit width) is skipped by the validator, so the union
+    # never refuses a valid checkpoint.
+    CHECKPOINT_REQUIRED_BUFFERS = (
+        "weight",
+        "weight_absmax",
+        "weight_quant_map",
+        "weight_nested_absmax",
+        "weight_nested_quant_map",
+        "weight_quant_state",
+        "weight_scb",
+    )
+
     # Measured on RTX 4090 (sm_89), RTX 5090 (sm_120) and Radeon R9700
     # (gfx1201) with torch 2.15/2.16: dynamo, aot_eager, inductor and
     # reduce-overhead all pass, and an explicit eager CUDA-graph capture

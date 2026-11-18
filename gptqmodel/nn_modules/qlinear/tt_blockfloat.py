@@ -310,6 +310,10 @@ class _BlockfloatStorage(nn.Module):
 class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
     """Linear over Tenstorrent block-float weights."""
 
+    # `codes`/`exponents` are the payload; `code_shape` is geometry the
+    # constructor already derives, so it stays optional.
+    CHECKPOINT_REQUIRED_BUFFERS = ("codes", "exponents")
+
     # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=2,
     # dynamo/aot_eager/inductor all reach it (the breaks are the
     # `lru_cache`-wrapped quantize helpers on the cold path, which dynamo
@@ -468,6 +472,8 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
     float16 table: 266.16 MiB against 501.00 MiB for Llama-3.2-1B, measured
     from the shard headers (250.50 MiB codes + 15.66 MiB exponents).
     """
+
+    CHECKPOINT_REQUIRED_BUFFERS = ("codes", "exponents")
 
     def __init__(
         self,
