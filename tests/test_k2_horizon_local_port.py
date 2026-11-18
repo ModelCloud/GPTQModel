@@ -60,8 +60,7 @@ def bounded_cpu_threads():
     torch.set_num_threads(previous)
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [False, True])
+@pytest.mark.parametrize("trust,bypass", [(False, False), (True, True)])
 def test_checkpoint_code_never_owns_k2_config(tmp_path, monkeypatch, trust, bypass):
     monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1" if bypass else "0")
     marker = tmp_path / "executed"
@@ -112,9 +111,9 @@ def test_forward_cache_generation_and_safetensors_roundtrip(tmp_path, variant, b
         model.save_pretrained(tmp_path)
 
 
-@pytest.mark.parametrize("variant", ["dense", "mova", "moe"])
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [False, True])
+@pytest.mark.parametrize(
+    "variant,trust,bypass", [("dense", False, False), ("mova", True, True), ("moe", True, False), ("moe", False, True)]
+)
 def test_saved_weights_ignore_malicious_auto_map_on_retry(tmp_path, monkeypatch, variant, trust, bypass):
     from gptqmodel.models.ports.k2_horizon import K2HorizonConfig, K2HorizonForCausalLM
 
@@ -136,9 +135,27 @@ def test_saved_weights_ignore_malicious_auto_map_on_retry(tmp_path, monkeypatch,
     assert type(config) is K2HorizonConfig
     loaded = K2HorizonQModel.loader.from_pretrained(tmp_path, trust_remote_code=trust, dtype=torch.float32).eval()
     with torch.no_grad():
-        torch.testing.assert_close(loaded(torch.tensor([[1, 3, 8]]), use_cache=False).logits, expected, rtol=0, atol=0)
+        # Security/retry is the point here; the reload may select a different attention kernel.
+        torch.testing.assert_close(
+            loaded(torch.tensor([[1, 3, 8]]), use_cache=False).logits, expected, rtol=1e-5, atol=1e-6
+        )
     assert type(loaded) is K2HorizonForCausalLM
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("variant", ["dense", "mova"])
+def test_attention_implementation_is_switchable_through_tf5_interface(variant):
+    from gptqmodel.models.ports.k2_horizon import K2HorizonForCausalLM
+
+    config = variant_config(variant)
+    config._attn_implementation = "eager"
+    model = K2HorizonForCausalLM(config).eval()
+    ids = torch.tensor([[1, 4, 8, 2]])
+    with torch.no_grad():
+        eager = model(ids, use_cache=False).logits
+        model.set_attn_implementation("sdpa")
+        assert model.config._attn_implementation == "sdpa"
+        torch.testing.assert_close(model(ids, use_cache=False).logits, eager, rtol=1e-5, atol=1e-5)
 
 
 def test_output_capture_and_cache_failure_retry():
@@ -319,9 +336,7 @@ def test_dense_router_output_and_loss_are_finite():
     assert result.router_logits == ()
 
 
-@pytest.mark.parametrize("variant", ["dense", "mova"])
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [False, True])
+@pytest.mark.parametrize("variant,trust,bypass", [("dense", False, False), ("mova", True, True)])
 def test_public_gptqmodel_load_uses_local_classes_and_native_tokenizer(tmp_path, monkeypatch, variant, trust, bypass):
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel

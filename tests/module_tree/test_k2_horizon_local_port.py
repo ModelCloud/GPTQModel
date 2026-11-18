@@ -23,7 +23,7 @@ from gptqmodel.quantization.config import AWQConfig
 from tests.test_k2_horizon_local_port import variant_config
 
 
-LAYOUTS = json.loads((Path(__file__).parents[2] / "gptqmodel/models/ports/k2_horizon/checkpoint_layouts.json").read_text())
+LAYOUTS = json.loads((Path(__file__).parents[1] / "fixtures/ports/k2_horizon/checkpoint_layouts.json").read_text())
 
 
 @pytest.mark.parametrize("layout", LAYOUTS, ids=lambda row: row["repo"])

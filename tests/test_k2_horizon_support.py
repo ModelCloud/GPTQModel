@@ -28,24 +28,14 @@ def _quantize_config():
     return SimpleNamespace(dynamic=None)
 
 
-def test_k2_horizon_model_type_selects_definition(monkeypatch):
-    monkeypatch.setattr(
-        auto,
-        "resolve_trust_remote_code",
-        lambda path, trust_remote_code=False: trust_remote_code,
-    )
-    monkeypatch.setattr(
-        auto.AutoConfig,
-        "from_pretrained",
-        lambda *args, **kwargs: SimpleNamespace(model_type="k2_horizon"),
-    )
+@pytest.mark.parametrize("trust_remote_code", [False, True])
+def test_k2_horizon_model_type_selects_definition(tmp_path, trust_remote_code):
+    # The definition-owned loader reads config.json directly; AutoConfig is never consulted.
+    from gptqmodel.models.ports.k2_horizon import K2HorizonConfig
 
-    assert (
-        auto.check_and_get_model_definition(
-            "k2-horizon-fixture", trust_remote_code=True
-        )
-        is K2HorizonQModel
-    )
+    K2HorizonConfig(num_hidden_layers=1, num_experts=0).save_pretrained(tmp_path)
+
+    assert auto.check_and_get_model_definition(str(tmp_path), trust_remote_code=trust_remote_code) is K2HorizonQModel
 
 
 def test_k2_horizon_expands_mlp_and_mova_experts_with_independent_counts():
