@@ -74,7 +74,10 @@ def save_tokenizer(path):
 @pytest.mark.parametrize("offload", [False, True])
 def test_public_fp16_plain_awq_with_fp32_compressor(tmp_path, offload):
     model_dir = tmp_path / "source"
-    native_model("compressed_sparse_attention", "hash_moe").save_pretrained(model_dir)
+    model = native_model("compressed_sparse_attention", "hash_moe")
+    with torch.no_grad():
+        model.model.norm.weight.copy_(torch.linspace(0.75, 1.25, model.config.hidden_size))
+    model.save_pretrained(model_dir)
     save_tokenizer(model_dir)
     wrapper = GPTQModel.load(
         str(model_dir),
@@ -90,6 +93,26 @@ def test_public_fp16_plain_awq_with_fp32_compressor(tmp_path, offload):
     assert layer.self_attn.compressor.kv_proj.weight.dtype == torch.float32
     assert layer.self_attn.compressor.indexer.scorer.weights_proj.weight.dtype == torch.float32
     assert layer.mlp.experts[0].gate_proj.qweight.numel() > 0
+
+    input_ids = torch.tensor([ids])
+    with torch.inference_mode():
+        expected = wrapper.model(input_ids, use_cache=False).logits
+    assert torch.isfinite(expected).all()
+
+    packed_dir = tmp_path / "packed"
+    wrapper.save(str(packed_dir))
+    reloaded = GPTQModel.load(str(packed_dir), dtype=torch.float16, device="cpu")
+    reloaded_layer = reloaded.model.model.layers[0]
+    torch.testing.assert_close(reloaded.model.model.norm.weight, wrapper.model.model.norm.weight, rtol=0, atol=0)
+    for name in ("self_attn.compressor.kv_proj", "self_attn.compressor.indexer.scorer.weights_proj"):
+        torch.testing.assert_close(
+            reloaded_layer.get_submodule(name).weight, layer.get_submodule(name).weight, rtol=0, atol=0,
+        )
+    torch.testing.assert_close(
+        reloaded_layer.mlp.experts[0].gate_proj.qweight, layer.mlp.experts[0].gate_proj.qweight, rtol=0, atol=0,
+    )
+    with torch.inference_mode():
+        torch.testing.assert_close(reloaded.model(input_ids, use_cache=False).logits, expected, rtol=0, atol=0)
 
 
 def source_checkpoint(model):

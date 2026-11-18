@@ -59,7 +59,12 @@ checkpoint loading. The GPT-QModel definition adapts the five affected dense
 linears when it wraps the native model. The projection uses its FP32 weights
 and returns FP16 activations to the compressor. BF16, FP32, and packed modules
 retain their existing execution. The public AWQ regression covers CPU
-calibration and packing with and without disk offload.
+calibration, packing and safetensors reload with and without disk offload.
+
+Packed reload limits Transformers' legacy `.norm.` rename to
+compressor and indexer norms. The final decoder norm keeps its native
+`model.norm.weight` key. The regression checks exact final norm and
+compressor weights, packed expert weights and logits after reload.
 
 ```mermaid
 flowchart LR
