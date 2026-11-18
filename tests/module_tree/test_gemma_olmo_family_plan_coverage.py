@@ -33,15 +33,18 @@ from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.module_plan import ModulePlan
-from gptqmodel.models.ports.native.auto import AutoConfig as NativeAutoConfig
+from gptqmodel.models.ports.native import auto as native_auto
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
 
 
 def _auto_config(model_type, **kwargs):
     """Build the default config with the class the definition's loader expects."""
     loader = getattr(MODEL_MAP.get(model_type), "loader", None)
-    if isinstance(loader, LocalModelLoader) and loader.config_class.startswith("gptqmodel.models.ports.native."):
-        return NativeAutoConfig.for_model(model_type, **kwargs)
+    # Package-owned loaders only accept the vendored config classes.
+    if isinstance(loader, LocalModelLoader) and (
+        loader.config_class.startswith("gptqmodel.models.ports.native.") or model_type in native_auto.CONFIG_MAPPING
+    ):
+        return native_auto.AutoConfig.for_model(model_type, **kwargs)
     return transformers.AutoConfig.for_model(model_type, **kwargs)
 
 
