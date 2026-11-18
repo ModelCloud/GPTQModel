@@ -138,7 +138,7 @@ python -m tests.kernels.gen_compile_matrix
 | `TorchInt8AwqLinear` | `torch_int8_awq` | `EAGER` | `EAGER` | no | no | - |
 | `TorchInt8Linear` | `torch_int8` | `INDUCTOR` | `INDUCTOR` | no | no | static-cache generate() auto-compile stays off: no CPU win was measured for this kernel in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
 | `TorchLinear` | `torch` | `EAGER` | `INDUCTOR` | yes | no | static-cache generate() auto-compile stays off: no CPU win was measured for the portable Torch decode in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
-| `TorchQuantEmbeddings` | `torch` | `EAGER` | `EAGER` | no | no | static-cache generate() auto-compile stays off: no CPU win was measured for the portable Torch decode in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
+| `TorchQuantEmbeddings` | `torch` | `EAGER` | `INDUCTOR` | no | no | static-cache generate() auto-compile stays off: no CPU win was measured for this kernel in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
 | `TritonV2Linear` | `tritonv2` | `EAGER` | `EAGER` | yes | no | static-cache generate() auto-compile stays off: no CPU win was measured for the portable Torch decode in this change; the INDUCTOR level is opt-in via optimize() (#4984 policy unchanged). |
 | `VPTQCudaLinear` | `vptq_cuda` | `EAGER` | `EAGER` | yes | no | no measured static-cache generate win for the portable torch path; re-measure before opting in (#4984) |
 | `VPTQLinear` | `vptq_torch` | `CUDAGRAPH` | `INDUCTOR` | yes | no | no measured static-cache generate win for the portable torch path; re-measure before opting in (#4984) |
