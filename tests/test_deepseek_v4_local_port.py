@@ -72,7 +72,7 @@ def save_tokenizer(path):
 
 
 @pytest.mark.parametrize("offload", [False, True])
-def test_public_fp16_plain_awq_with_fp32_compressor(tmp_path, offload):
+def test_public_fp16_awq_with_fp32_compressor(tmp_path, offload):
     model_dir = tmp_path / "source"
     model = native_model("compressed_sparse_attention", "hash_moe")
     with torch.no_grad():

@@ -108,7 +108,7 @@ def test_exact_native_and_defused_checkpoint_owners(device, attention, mlp):
 
 @pytest.mark.parametrize("attention", ATTENTION_TYPES)
 @pytest.mark.parametrize("mlp", MLP_TYPES)
-def test_awq_plain_policy_quantizes_and_packs_all_supported_linears(monkeypatch, attention, mlp):
+def test_featureless_awq_quantizes_and_packs_all_supported_linears(monkeypatch, attention, mlp):
     model = native_model(attention, mlp)
     _convert_model_with_defuser(DeepSeekV4QModel, model, cleanup_original=True)
     qcfg = AWQConfig(device="cpu", group_size=-1, fallback=None)
@@ -131,10 +131,11 @@ def test_awq_plain_policy_quantizes_and_packs_all_supported_linears(monkeypatch,
         for name in names
     }
     assert len(state.modules) == 16
-    features = {name: torch.randn(7, named.module.in_features) for name, named in state.modules.items()}
-    monkeypatch.setattr(processor, "_layer_input_features", lambda state: features)
+    # Without captured activations no scale group can be built, so every
+    # supported projection takes the plain AWQ path and no dense tensor moves.
+    monkeypatch.setattr(processor, "_layer_input_features", lambda state: {})
     frozen = {key: value.clone() for key, value in layer.state_dict().items() if key.removesuffix(".weight") not in names}
-    assert wrapper.awq_get_modules_for_scaling(layer, features, {}) == []
+    assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     modules = dict(state.modules)
     before = {name: named.module.weight.detach().clone() for name, named in modules.items()}
     processor._quantize_layer(0, state)
@@ -160,3 +161,47 @@ def test_awq_plain_policy_quantizes_and_packs_all_supported_linears(monkeypatch,
         torch.testing.assert_close(layer.state_dict()[key], value, rtol=0, atol=0)
     with torch.inference_mode():
         assert torch.isfinite(model(torch.tensor([[2, 4, 6, 8]])).logits).all()
+
+
+@pytest.mark.parametrize("attention", ATTENTION_TYPES)
+@pytest.mark.parametrize("mlp", MLP_TYPES)
+def test_awq_scale_folds_preserve_real_hyper_connected_layer_output(attention, mlp):
+    from awq_neutrality import assert_awq_folds_neutral
+
+    from gptqmodel.models.definitions.deepseek_v4 import DeepSeekV4MTPQuantizationModel
+
+    model = native_model(attention, mlp)
+    _convert_model_with_defuser(DeepSeekV4QModel, model, cleanup_original=True)
+    layer = model.model.layers[0]
+    # Eight tokens close four compression windows, so the compressor/indexer run.
+    ids = torch.randint(3, 30, (1, 8))
+
+    def forward():
+        return model(input_ids=ids, use_cache=False).logits
+
+    checked = assert_awq_folds_neutral(DeepSeekV4QModel, model, layer, forward)
+    compressor = []
+    if attention != "sliding_attention":
+        compressor = ["self_attn.compressor.kv_proj", "self_attn.compressor.gate_proj"]
+    if attention == "compressed_sparse_attention":
+        compressor += [
+            "self_attn.compressor.indexer.kv_proj",
+            "self_attn.compressor.indexer.gate_proj",
+            "self_attn.compressor.indexer.scorer.weights_proj",
+        ]
+    owners = [*(f"mlp.experts.{expert}" for expert in range(3)), "mlp.shared_experts"]
+    # The collapsed hyper-connection input feeds q_a/kv (and the dense
+    # compressor/indexer projections, which are compensated); the router reads
+    # the post-attention norm next to routed and shared experts. q_b_proj reads
+    # the q latent and o_b_proj the grouped low-rank output: never folded.
+    assert checked == [
+        ("input_layernorm", ["self_attn.q_a_proj", "self_attn.kv_proj"], compressor),
+        (
+            "post_attention_layernorm",
+            [f"{owner}.{proj}_proj" for owner in owners for proj in ("gate", "up")],
+            ["mlp.gate"],
+        ),
+        *((f"{owner}.up_proj", [f"{owner}.down_proj"], []) for owner in owners),
+    ]
+    # The integrated MTP adapter only owns routed experts; it stays fold-free.
+    assert DeepSeekV4MTPQuantizationModel.awq_get_modules_for_scaling(None, layer, {}, {}) == []
