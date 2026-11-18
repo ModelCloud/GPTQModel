@@ -2,7 +2,8 @@ Ovis2.6 MoE and Next local port
 
 Adapted from AIDC-AI/Ovis2.6-30B-A3B and Ovis2.6-80B-A3B,
 Apache License 2.0, as declared in the pinned model cards.
-Pinned revisions and complete source SHA-256 inventories are in provenance.json.
+Pinned revisions: AIDC-AI/Ovis2.6-30B-A3B 44beb8e150b28c7ca537a1673582c64f57d342e3,
+AIDC-AI/Ovis2.6-80B-A3B 96dd72344e17f098ba7cbe108e6872d12ba7cbfb.
 NaViT/SigLIP2 vision includes attributed Qwen2.5-VL rotary/window-index and
 Hugging Face SigLIP-style encoder components retained in vision.py.
 Native Qwen3 MoE and Qwen3 Next decoders are supplied by Transformers, not
