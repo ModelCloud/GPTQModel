@@ -38,7 +38,7 @@ class NanbeigeQModel(LoopedLayerCaptureMixin, BaseQModel):
         if config is None:
             return tree
         if getattr(config, "qk_layernorm", False):
-            tree[-1]["self_attn"] += ("q_layernorm:!", "k_layernorm:!")
+            tree[-1]["self_attn"] = tuple(dict.fromkeys((*tree[-1]["self_attn"], "q_layernorm:!", "k_layernorm:!")))
         if getattr(config, "enable_hyper_connection", False):
             for name in ("self_attn_hc", "mlp_hc"):
                 tree[-1][name] = (f"{name}:!", "mapping_proj:!")

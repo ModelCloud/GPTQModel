@@ -34,7 +34,7 @@ class Qwen2_5_VLQModel(BaseQwen2VLGPTQ):
     @classmethod
     def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
         tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
-        if cls._is_text_model(model):
+        if cls._is_text_model(model) and tree[:2] == ["model", "language_model"]:
             # Standalone native TextModel owns layers/embeddings at its root.
             # Never mutate the shared composite class tree.
             tree = tree[2:]

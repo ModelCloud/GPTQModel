@@ -54,7 +54,7 @@ def test_default_is_installed_when_unset(clean_alloc_env):
     if expected == DEFAULT_ALLOC_CONF:
         assert "expandable_segments:True" in DEFAULT_ALLOC_CONF
     else:
-        assert "expandable_segments" not in expected
+        assert "expandable_segments:True" not in expected
 
 
 def test_second_call_is_a_no_op(clean_alloc_env):

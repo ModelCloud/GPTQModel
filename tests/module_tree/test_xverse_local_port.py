@@ -50,6 +50,8 @@ def test_real_every_tensor_deepest_owner_roles_exclusions_and_plan(moe, shared, 
         model = XverseForCausalLM(config)
     _convert_model_with_defuser(XverseQModel, model, cleanup_original=False)
     tree = XverseQModel._resolve_effective_module_tree(model, None)
+    model.gptqmodel_effective_module_tree = tree
+    assert XverseQModel._resolve_effective_module_tree(model, None) == tree
     plan = ModulePlan.from_tree(tree)
     expected = {"self_attn." + name for name in ["q_proj", "k_proj", "v_proj", "o_proj"]}
     if moe:

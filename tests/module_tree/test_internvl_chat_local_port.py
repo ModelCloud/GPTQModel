@@ -20,6 +20,8 @@ def test_real_checkpoint_owners_quantization_consumers_and_plain_awq(architectur
     with torch.no_grad():
         before = model(input_ids=ids).logits
     _convert_model_with_defuser(InternVLChatQModel, model, cleanup_original=False)
+    tree = InternVLChatQModel._resolve_effective_module_tree(model, None)
+    model.gptqmodel_effective_module_tree = tree
     qmodel = InternVLChatQModel(model, quantized=False, quantize_config=QuantizeConfig(bits=4, group_size=8))
     plan = qmodel.module_plan()
     quantizable = {name for block in qmodel.simple_layer_modules(model.config, qmodel.quantize_config) for name in block}

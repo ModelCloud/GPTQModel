@@ -340,6 +340,10 @@ def wrapper_for(layout, tokenizer_assets):
 def test_real_wrapper_tree_owns_weights_roles_and_quantizer_consumers(layout, tokenizer_assets):
     declaration = copy.deepcopy(InternS1QModel.module_tree)
     wrapper = wrapper_for(layout, tokenizer_assets)
+    model = wrapper.model
+    tree = InternS1QModel._resolve_effective_module_tree(model, wrapper.quantize_config)
+    model.gptqmodel_effective_module_tree = tree
+    assert InternS1QModel._resolve_effective_module_tree(model, wrapper.quantize_config) == tree
     assert {key for key, value in MODEL_MAP.items() if value is InternS1QModel} == {"interns1"}
     assert wrapper.extract_layers_node() == ["model.language_model.layers"]
     plan = wrapper.module_plan()

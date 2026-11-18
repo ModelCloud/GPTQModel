@@ -89,10 +89,13 @@ def test_rocm_default_drops_expandable_segments(monkeypatch):
     conf = _alloc_conf.default_alloc_conf()
 
     assert conf == _alloc_conf.ROCM_DEFAULT_ALLOC_CONF
-    assert "expandable_segments" not in conf
-    # The fragmentation knobs that do not trigger the VMM bug are kept.
-    assert "max_split_size_mb:256" in conf
-    assert "garbage_collection_threshold:0.7" in conf
+    # Only the VMM exclusion is pinned. Anything else put back here changes
+    # the allocator every ROCm run uses and needs its own measurements
+    # (#5072 dropped the 256 MiB split cap and the inert GC threshold).
+    assert conf == "expandable_segments:False"
+    assert "expandable_segments:True" not in conf
+    assert "max_split_size_mb" not in conf
+    assert "garbage_collection_threshold" not in conf
 
 
 def test_rocm_default_is_installed_without_expandable_segments(monkeypatch):
@@ -104,7 +107,7 @@ def test_rocm_default_is_installed_without_expandable_segments(monkeypatch):
     installed = _alloc_conf.apply_default_alloc_conf()
 
     assert installed == _alloc_conf.ROCM_DEFAULT_ALLOC_CONF
-    assert "expandable_segments" not in installed
+    assert "expandable_segments:True" not in installed
     for name in _alloc_conf.ALLOC_CONF_ENV_VARS:
         assert os.environ[name] == installed
     # The HIP-only alias is a caller input, not something we write.
@@ -175,7 +178,7 @@ def test_import_installs_both_rocm_defaults():
     assert payload["blas"] == "0"
     assert payload["alloc"] == _alloc_conf.ROCM_DEFAULT_ALLOC_CONF
     assert payload["cuda_alloc"] == _alloc_conf.ROCM_DEFAULT_ALLOC_CONF
-    assert "expandable_segments" not in payload["alloc"]
+    assert "expandable_segments:True" not in payload["alloc"]
 
 
 @pytest.mark.skipif(not IS_ROCM, reason="ROCm-only allocator bug")
@@ -201,7 +204,7 @@ def test_default_alloc_conf_does_not_corrupt_a_matmul():
             bad += (out != reference).any(dim=1).sum().item()
         print(json.dumps({
             "bad_rows": bad,
-            "expandable": "expandable_segments" in (os.environ.get("PYTORCH_ALLOC_CONF") or ""),
+            "expandable": "expandable_segments:True" in (os.environ.get("PYTORCH_ALLOC_CONF") or ""),
         }))
     """
     payload = _last_json(_run_child(script, timeout=900).stdout)
@@ -346,4 +349,4 @@ def test_harness_import_keeps_the_rocm_safe_default():
     payload = _last_json(_run_child(_HARNESS_IMPORT_PROBE, timeout=900).stdout)
 
     assert payload["alloc"] == _alloc_conf.ROCM_DEFAULT_ALLOC_CONF
-    assert "expandable_segments" not in (payload["alloc"] or "")
+    assert "expandable_segments:True" not in (payload["alloc"] or "")

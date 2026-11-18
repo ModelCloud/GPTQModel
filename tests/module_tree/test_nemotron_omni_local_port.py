@@ -70,6 +70,8 @@ def test_every_live_decoder_linear_and_checkpoint_tensor_has_a_plan(kv, bias):
     _convert_model_with_defuser(NemotronOmniQModel, model, cleanup_original=False)
     assert NemotronOmniQModel.module_tree[-1] is NEMOTRON_H_LAYER_MODULES
     tree = NemotronOmniQModel._resolve_effective_module_tree(model, None)
+    model.gptqmodel_effective_module_tree = tree
+    assert NemotronOmniQModel._resolve_effective_module_tree(model, None) == tree
     plan = ModulePlan.from_tree(tree)
     assert NemotronOmniQModel.extract_layers_node() == ["language_model.model.layers"]
     assert NemotronOmniQModel.pre_lm_head_norm_module == "language_model.model.norm_f"

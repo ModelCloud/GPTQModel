@@ -97,3 +97,6 @@ def test_dense_registry_plan_is_unchanged_and_moe_selection_is_request_local():
     a[-1].clear()
     assert MiniCPMGPTQ._resolve_effective_module_tree(moe, None)[-1]
     assert MiniCPMGPTQ.build_layer_modules(MiniCPMGPTQ.module_tree, include_capture_only=True) == expected
+    tree = MiniCPMGPTQ._resolve_effective_module_tree(moe, None)
+    moe.gptqmodel_effective_module_tree = tree
+    assert MiniCPMGPTQ._resolve_effective_module_tree(moe, None) == tree

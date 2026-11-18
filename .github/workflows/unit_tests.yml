@@ -51,6 +51,7 @@ on:
           - '["self-hosted", "zen4"]'
 
 env:
+  PYTHON_GIL: '0'
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   CUDA_VISIBLE_DEVICES: 0
   # Force fresh torch.ops JIT builds in CI so heterogeneous GPUs never reuse
@@ -64,21 +65,6 @@ env:
   XEON5: 10.0.14.249
   GPU_ALLOCATOR_URL: http://10.0.13.31/gpu
   LOGBAR_ANIMATION: '0'
-  CUDA_VERSION: 130
-  UV_TORCH_BACKEND: cu130
-  # The pinned Torch build is below the patch for GHSA-rrmf-rvhw-rf47 /
-  # CVE-2025-3000, so the runtime gate in gptqmodel._torch_safety would
-  # refuse to import this matrix. It opts out explicitly. Raise
-  # TORCH_VERSION to >= 2.13.0 and delete this override once the image
-  # ships it.
-  TORCH_VERSION: 2.11.0
-  GPTQ_BYPASS_SAFETY_CHECKS: '1'
-  PYTHON_VERSION: 3.14t
-  UV_PYTHON: 3.14t
-  # The default matrix does not force PYTHON_GIL=0: some test-only libraries
-  # still need the GIL. The dedicated `free-threaded` job below sets it and
-  # asserts sys._is_gil_enabled() is False after importing the model stack, so
-  # a 3.14t run cannot silently serialize itself.
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py,models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   MODEL_TEST_MODE: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
   MODEL_TEST_GPU_COUNT: '1'
@@ -102,10 +88,7 @@ jobs:
   check-vm:
     runs-on: ubuntu-latest
     outputs:
-      ip: ${{ steps.get_ip.outputs.ip }}
-      run_id: ${{ steps.get_ip.outputs.run_id }}
       max-parallel: ${{ steps.get_ip.outputs['max-parallel'] }}
-      cuda_version: ${{ env.CUDA_VERSION }}
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v7
@@ -149,15 +132,21 @@ jobs:
         run: |
           .github/scripts/ci_prepare_checkout.sh "${{ github.event.inputs.pr_number }}"
 
+      - name: Set up CI runtime
+        uses: ./.github/actions/setup-ci-runtime
+        with:
+          python-version: '3.14.10t'
+
       - name: List files
         id: files
         run: |
-          test_plan=$(python3 .github/scripts/ci_workflow.py list-tests \
+          uv pip install pyyaml
+          test_plan=$(python .github/scripts/ci_workflow.py list-tests \
           --ignored-test-files "$IGNORED_TEST_FILES" \
           --test-regex "${{ github.event.inputs.test_regex }}")
           echo "Test plan: $test_plan"
 
-          TEST_PLAN="$test_plan" python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          TEST_PLAN="$test_plan" python - <<'PY' >> "$GITHUB_OUTPUT"
           import json
           import os
 
@@ -171,7 +160,7 @@ jobs:
           print(f"model-matrix={json.dumps(plan['model_matrix'])}")
           PY
 
-          TEST_PLAN="$test_plan" python3 - <<'PY'
+          TEST_PLAN="$test_plan" python - <<'PY'
           import json
           import os
 
@@ -197,9 +186,7 @@ jobs:
       repo: ${{ github.event.inputs.repo || github.repository }}
       ref: ${{ github.event.inputs.ref || github.ref }}
       pr_number: ${{ fromJSON(github.event.inputs.pr_number || '0') }}
-      check_vm_ip: ${{ needs.check-vm.outputs.ip }}
       check_vm_max_parallel: ${{ needs.check-vm.outputs['max-parallel'] }}
-      check_vm_cuda_version: ${{ needs.check-vm.outputs.cuda_version }}
       matrix_json: ${{ needs.list-test-files.outputs.cpu-matrix || '[]' }}
       model_test_mode: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
 
@@ -214,9 +201,7 @@ jobs:
       repo: ${{ github.event.inputs.repo || github.repository }}
       ref: ${{ github.event.inputs.ref || github.ref }}
       pr_number: ${{ fromJSON(github.event.inputs.pr_number || '0') }}
-      check_vm_ip: ${{ needs.check-vm.outputs.ip }}
       check_vm_max_parallel: ${{ needs.check-vm.outputs['max-parallel'] }}
-      check_vm_cuda_version: ${{ needs.check-vm.outputs.cuda_version }}
       matrix_json: ${{ needs.list-test-files.outputs.torch-matrix || '[]' }}
       model_test_mode: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
 
@@ -231,18 +216,12 @@ jobs:
       repo: ${{ github.event.inputs.repo || github.repository }}
       ref: ${{ github.event.inputs.ref || github.ref }}
       pr_number: ${{ fromJSON(github.event.inputs.pr_number || '0') }}
-      check_vm_ip: ${{ needs.check-vm.outputs.ip }}
       check_vm_max_parallel: ${{ needs.check-vm.outputs['max-parallel'] }}
-      check_vm_cuda_version: ${{ needs.check-vm.outputs.cuda_version }}
       matrix_json: ${{ needs.list-test-files.outputs.model-matrix || '[]' }}
       model_test_mode: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
 
-  # A 3.14t job without PYTHON_GIL=0 can re-enable the GIL while importing
-  # triton._C.libtriton and then run fully serialized while every GIL=0-only
-  # test skips. This lane forces the free-threaded interpreter, proves the GIL
-  # is still disabled after the model stack is imported, and runs bounded
-  # concurrency tests: CPU thread-pool/lock/shutdown paths, stream handoff, and
-  # two-GPU P2P plus native-kernel ownership checks.
+  # Keep bounded tests for CPU thread pools and locks, GPU stream handoff,
+  # and two-GPU P2P and native-kernel ownership.
   free-threaded:
     needs:
       - check-vm
@@ -253,10 +232,7 @@ jobs:
       repo: ${{ github.event.inputs.repo || github.repository }}
       ref: ${{ github.event.inputs.ref || github.ref }}
       pr_number: ${{ fromJSON(github.event.inputs.pr_number || '0') }}
-      check_vm_ip: ${{ needs.check-vm.outputs.ip }}
       check_vm_max_parallel: ${{ needs.check-vm.outputs['max-parallel'] }}
-      check_vm_cuda_version: ${{ needs.check-vm.outputs.cuda_version }}
-      free_threaded: true
       matrix_json: |
         [
           {"test_script": "test_threadx_cpu_locks", "test_group": "cpu", "alloc_gpu_count": "0", "require_single_gpu": "false", "include_model_test_mode": "false"},
@@ -271,36 +247,34 @@ jobs:
 
   check-torch:
     runs-on: [ self-hosted, xeon5 ]
+    env:
+      UV_CACHE_DIR: /opt/gptqmodel/uv-cache
     container:
-      image: 10.0.13.31:5000/nvidia/cuda:130-ubuntu24.04_0415
-      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
+      image: nvidia/cuda:13.2.1-devel-ubuntu24.04@sha256:0e1f7b8e96fa9ec5e36d4709a38c62df7b5665977446081811c12b8234d874bf
       volumes:
-        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
-        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
-        - /dev/dri/by-path:/dev/dri/by-path
-        - /monster/ci/uv:/opt/uv
-        - /monster/ci/env:/opt/env
+        - /github/workspace/uv/cache:/opt/gptqmodel/uv-cache
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: Test pypi pip
-            env_name: pypi_pip_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'true'
-            install_cmd: pip install gptqmodel torch -U -vvv
+            target: gptqmodel
           - name: Test pypi uv
-            env_name: pypi_uv_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'false'
-            install_cmd: uv pip install gptqmodel torch -U -vvv
+            target: gptqmodel
           - name: Test local pip
-            env_name: local_pip_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'true'
-            install_cmd: pip install . torch -U -vvv
+            target: .
           - name: Test local uv
-            env_name: local_uv_env_${{ github.run_id }}_${{ github.run_attempt }}
             use_pip: 'false'
-            install_cmd: uv pip install . torch -U -vvv
+            target: .
     steps:
+      - name: Install CI tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git ninja-build
+
       - name: Checkout Codes
         uses: actions/checkout@v7
         with:
@@ -311,52 +285,28 @@ jobs:
         run: |
           .github/scripts/ci_prepare_checkout.sh "${{ github.event.inputs.pr_number }}"
 
+      - name: Set up CI runtime
+        uses: ./.github/actions/setup-ci-runtime
+        with:
+          python-version: '3.14.10t'
+          source-build: 'true'
+
       - name: ${{ matrix.name }}
+        env:
+          INSTALL_TARGET: ${{ matrix.target }}
+          USE_PIP: ${{ matrix.use_pip }}
         run: |
-          uv venv "${{ matrix.env_name }}"
-          source "${{ matrix.env_name }}/bin/activate"
-          if [[ "${{ matrix.use_pip }}" == "true" ]]; then
-            uv pip install pip -U
-          fi
-          if python -VV 2>&1 | grep -q '3\.14.*free-threading'; then
-            echo "[INFO] Python 3.14t detected, installing torchao..."
-            uv pip install http://10.0.13.31/files/torchao-0.18.0+git13cd013d6-cp314-cp314t-linux_x86_64.whl
+          constraint="$GITHUB_WORKSPACE/.github/ci/torch-cu132.txt"
+          torch_index=https://download.pytorch.org/whl/cu132
+          if [[ "$USE_PIP" == 'true' ]]; then
+            uv pip install pip
+            python -m pip install --extra-index-url "$torch_index" \
+              --constraint "$constraint" torch "$INSTALL_TARGET"
           else
-            echo "[INFO] Current Python is not 3.14t, skip torchao."
+            uv pip install --torch-backend cu132 \
+              --constraint "$constraint" torch "$INSTALL_TARGET"
           fi
-
-          ${{ matrix.install_cmd }} || echo "RETRY_INSTALL=true" >> $GITHUB_ENV
-
-      - name: Clear installer cache on failure
-        if: always() && env.RETRY_INSTALL == 'true'
-        run: |
-          source "${{ matrix.env_name }}/bin/activate"
-
-          INSTALL_CMD='${{ matrix.install_cmd }}'
-
-          if [[ "$INSTALL_CMD" == uv* || "$INSTALL_CMD" == *" uv "* ]]; then
-            echo "[INFO] Previous install command uses uv, clearing uv cache..."
-            uv cache clean
-          elif [[ "$INSTALL_CMD" == pip* || "$INSTALL_CMD" == *" pip "* ]]; then
-            echo "[INFO] Previous install command uses pip, clearing pip cache..."
-            pip cache purge
-          fi
-
-      - name: retry ${{ matrix.name }}
-        if: always() && env.RETRY_INSTALL == 'true'
-        run: |
-          source "${{ matrix.env_name }}/bin/activate"
-          if [[ "${{ matrix.use_pip }}" == "true" ]]; then
-            uv pip install pip -U
-          fi
-          if python -VV 2>&1 | grep -q '3\.14.*free-threading'; then
-            echo "[INFO] Python 3.14t detected, installing torchao..."
-            uv pip install http://10.0.13.31/files/torchao-0.18.0+git13cd013d6-cp314-cp314t-linux_x86_64.whl
-          else
-            echo "[INFO] Current Python is not 3.14t, skip torchao."
-          fi
-          
-          ${{ matrix.install_cmd }}
+          python -I -X gil=0 .github/scripts/ci_assert_free_threaded.py --installed
 
   setuptools-compatibility:
     uses: ./.github/workflows/setuptools_compatibility_reusable.yml

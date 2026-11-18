@@ -111,6 +111,8 @@ def test_effective_native_exclusions_do_not_mutate_independently_owned_sibling_t
                       NemotronOmniQModel: "nemotron_h_omni"}[owner]
         model = SimpleNamespace(config=SimpleNamespace(model_type=model_type))
         tree = owner._resolve_effective_module_tree(model, None)
+        model.gptqmodel_effective_module_tree = tree
+        assert owner._resolve_effective_module_tree(model, None) == tree
         plan = ModulePlan.from_tree(tree)
         # All three released architectures own this excluded Mamba state.
         assert "!" in plan.find("mixer.A_log").flags

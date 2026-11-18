@@ -19,7 +19,6 @@ include gptqmodel_nf12/README.md
 recursive-include gptqmodel_ext/nf12_hip *.cuh *.hip *.cpp README.md
 recursive-include gptqmodel_ext/tt_blockfloat_hip *.h *.hip *.cpp *.py README.md
 exclude gptqmodel_ext/tt_blockfloat_hip/tt_blockfloat_hip_selftest.cpp
-exclude gptqmodel_ext/tt_blockfloat_hip/verify_against_torch.py
 recursive-include gptqmodel_ext/gptq_block *.cu *.cpp
 recursive-include gptqmodel_ext/int4_qzero_group_scaled_cpu *.cpp *.hpp NOTICE
 recursive-include gptqmodel_ext/hadamard *.h *.cuh *.cu *.cpp LICENSE
@@ -31,7 +30,13 @@ recursive-include gptqmodel/models/ports *.md *.txt *.json *.ttf *.model *.jinja
 # Release inventories, original tokenizer samples and tests are checkout-only.
 prune gptqmodel/models/ports/*/fixtures
 prune gptqmodel/models/ports/*/tests
-recursive-exclude gptqmodel/models/ports *.gz central_fixture_proposals.json module_plan_fixture.json
+recursive-exclude gptqmodel/models/ports *.gz *.zst central_fixture_proposals.json module_plan_fixture.json
+recursive-exclude gptqmodel/models/ports checkpoint_ownership.json checkpoint_contracts.json checkpoint_inventory.json
+recursive-exclude gptqmodel/models/ports checkpoint-schema.json checkpoint_metadata.json upstream_config.json
+recursive-exclude gptqmodel/models/ports registry_plan.json module_plan_case.json
+recursive-exclude gptqmodel/models/ports tokenizer_contracts.json tokenizer_oracle.json tokenizer_reference.json
+exclude gptqmodel/models/ports/nemotron_omni/source_config.json
+recursive-exclude gptqmodel/models/ports/minicpm_o checkpoint-*-config.json checkpoint-*-checkpoint-layout.json
 include gptqmodel_ext/pack_block_cpu.cpp
 include gptqmodel_ext/floatx_cpu.cpp
 include gptqmodel_ext/marlin/generate_kernels.py
