@@ -7,7 +7,8 @@
 
 `sensenova/SenseNova-Loop-9B` is gated, so these are definition-level
 contracts pinned to the public `SenseNova-Loop-9B-Preview` checkpoint layout
-and to the remote `modeling_sensenova_loop.py` semantics. The tensor suffix
+and to the upstream `modeling_sensenova_loop.py` semantics, which GPT-QModel
+now owns as `gptqmodel.models.ports.sensenova_loop`. The tensor suffix
 sets below are copied from that checkpoint's `model.safetensors.index.json`;
 they are what proves the declared tree resolves against real weight names.
 """
@@ -24,8 +25,9 @@ from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.qwen3_5 import Qwen3_5QModel
 from gptqmodel.models.definitions.sensenova_loop import SenseNovaLoopQModel
 from gptqmodel.models.fusable import require_fusable_config
+from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.utils.model import find_modules
-from gptqmodel.utils.security import BYPASS_ENV, RemoteCodeSecurityError
+from gptqmodel.utils.security import BYPASS_ENV
 
 
 # Every tensor of a full-attention layer (`layer_types[i] == "full_attention"`).
@@ -85,42 +87,35 @@ def _strip_flags(entry):
     return entry.split(":", 1)[0]
 
 
-def test_sensenova_loop_model_type_selects_definition_only_with_explicit_bypass(tmp_path, monkeypatch):
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("bypass", [None, "1"])
+def test_sensenova_loop_model_type_selects_definition_without_trust_or_bypass(tmp_path, monkeypatch, trust, bypass):
     checkpoint = str(tmp_path)
     (tmp_path / "config.json").write_text(json.dumps({
         "model_type": "sensenova_loop",
         "auto_map": {"AutoConfig": "configuration_sensenova_loop.SenseNovaLoopConfig"},
     }))
-    monkeypatch.delenv(BYPASS_ENV, raising=False)
+    if bypass is None:
+        monkeypatch.delenv(BYPASS_ENV, raising=False)
+    else:
+        monkeypatch.setenv(BYPASS_ENV, bypass)
 
     def load_config(model_dir, *, trust_remote_code):
         assert model_dir == checkpoint
-        assert trust_remote_code is True
+        # The package-owned loader never forwards a trust request.
+        assert trust_remote_code is False
         return SimpleNamespace(model_type="sensenova_loop")
 
-    with pytest.raises(RemoteCodeSecurityError, match=BYPASS_ENV):
-        auto.check_and_get_model_definition(checkpoint, trust_remote_code=True)
-
-    monkeypatch.setenv(BYPASS_ENV, "1")
-    with pytest.raises(ValueError, match="trust_remote_code"):
-        auto.check_and_get_model_definition(checkpoint, trust_remote_code=False)
-
-    # Check dispatch with both consents, without loading checkpoint Python.
     monkeypatch.setattr(auto, "load_model_config", load_config)
-
-    assert (
-        auto.check_and_get_model_definition(
-            checkpoint, trust_remote_code=True
-        )
-        is SenseNovaLoopQModel
-    )
+    assert auto.check_and_get_model_definition(checkpoint, trust_remote_code=trust) is SenseNovaLoopQModel
     assert MODEL_MAP["sensenova_loop"] is SenseNovaLoopQModel
 
 
-def test_sensenova_loop_requires_remote_code_and_a_processor():
-    # The checkpoint ships `modeling_sensenova_loop.py`; transformers has no
-    # in-tree `sensenova_loop` implementation, so a plain load cannot build it.
-    assert SenseNovaLoopQModel.require_trust_remote_code is True
+def test_sensenova_loop_is_package_owned_and_loads_a_processor():
+    # The port in `gptqmodel.models.ports.sensenova_loop` replaces the
+    # checkpoint's `modeling_sensenova_loop.py`; no remote code is needed.
+    assert isinstance(SenseNovaLoopQModel.loader, LocalModelLoader)
+    assert SenseNovaLoopQModel.require_trust_remote_code is False
     assert SenseNovaLoopQModel.require_load_processor is True
     assert SenseNovaLoopQModel.layer_modules_strict is False
 
@@ -129,7 +124,7 @@ def test_sensenova_loop_uses_the_vl_decoder_layout():
     assert SenseNovaLoopQModel.extract_layers_node() == ["model.language_model.layers"]
     assert SenseNovaLoopQModel.pre_lm_head_norm_module == "model.language_model.norm"
     assert SenseNovaLoopQModel.rotary_embedding == "model.language_model.rotary_emb"
-    # `mtp.safetensors` carries `mtp.*` draft-head tensors the remote model
+    # `mtp.safetensors` carries `mtp.*` draft-head tensors the model
     # itself ignores; they must survive a quantize/save round trip.
     assert "mtp" in SenseNovaLoopQModel.out_of_model_tensors["prefixes"]
 
@@ -189,7 +184,7 @@ def test_sensenova_loop_declared_paths_exist_in_the_published_checkpoint():
 
 
 class _FakeMHCRouter(nn.Module):
-    """Mirror of the remote `MHCRouter`: raw FP32 parameters, no `nn.Linear`."""
+    """Mirror of the port's `MHCRouter`: raw FP32 parameters, no `nn.Linear`."""
 
     def __init__(self, dim=16, streams=2):
         super().__init__()
@@ -235,7 +230,7 @@ def test_sensenova_should_quantize_module_keeps_mhc_routers_dense(attribute):
         SenseNovaLoopQModel.should_quantize_module(None, name, module, None) is False
     )
     # A future checkpoint that stored the routers as `nn.Linear` must still not
-    # be quantized: the remote forward raises unless they stay FP32.
+    # be quantized: the router forward raises unless they stay FP32.
     assert (
         SenseNovaLoopQModel.should_quantize_module(None, name, nn.Linear(8, 8), None)
         is False
