@@ -64,6 +64,7 @@ from ..utils.model import (
     get_module_by_name_prefix,
     move_to,
     pack_module,
+    resolve_position_limit,
     restore_moe_topk,
     set_moe_topk,
 )
@@ -76,6 +77,34 @@ log = setup_logger()
 
 class _AWQScaleGroupError(ValueError):
     """A declared group cannot be evaluated safely with its current replay."""
+
+
+#: ``RuntimeError`` messages Torch emits when a replay's tensor geometry does
+#: not fit the module it is fed to. A packed token-row replay that exceeds a
+#: module's fixed context (for example ``GPTNeoSelfAttention``'s
+#: ``[max_position_embeddings, max_position_embeddings]`` causal buffer) raises
+#: exactly these instead of a shape check in this processor, so they must reach
+#: the configured scale-group fallback rather than abort ``quantize()`` (#5085).
+_REPLAY_GEOMETRY_ERROR_MARKERS = (
+    "must match the size of tensor",
+    "expanded size of the tensor",
+    "shapes cannot be multiplied",
+    "mat1 and mat2 shapes",
+)
+
+
+def _is_replay_geometry_error(exc: BaseException) -> bool:
+    """Whether ``exc`` is a Torch tensor-geometry failure from a replay forward.
+
+    Only ``RuntimeError`` is considered, and only messages that name a broadcast
+    or matrix-shape mismatch: memory, kernel and numerical failures must keep
+    propagating so they are not silently downgraded to plain quantization.
+    """
+
+    if not isinstance(exc, RuntimeError):
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _REPLAY_GEOMETRY_ERROR_MARKERS)
 
 
 # Carries the retained rows' real positions past `_sanitize_kwargs` for the
@@ -262,6 +291,10 @@ def _awq_bound_affine_codes(
 #: Sentinel for "the root rotary has not been resolved yet". A resolved `None`
 #: must be cached too, otherwise every replayed module rescans the model.
 _ROTARY_UNRESOLVED = object()
+
+#: Sentinel for "the model's declared position limit has not been resolved yet".
+#: A resolved `None` must be cached too: configs without a limit are common.
+_POSITION_LIMIT_UNRESOLVED = object()
 
 #: Wrapper segments that own their own positional embeddings. A vision tower's
 #: rotary embedding (for example `model.visual.rotary_pos_emb` on Qwen2-VL)
@@ -1323,6 +1356,31 @@ class AWQProcessor(LoopProcessor):
             for tensor in tensors
         )
 
+    def _position_limit(self) -> Optional[int]:
+        """Return the declared sequence limit of the model being quantized."""
+
+        cached = getattr(self, "_cached_position_limit", _POSITION_LIMIT_UNRESOLVED)
+        if cached is not _POSITION_LIMIT_UNRESOLVED:
+            return cached
+        limit = None
+        for source in (
+            getattr(self.gptq_model, "model", None),
+            getattr(self, "model", None),
+        ):
+            limit = resolve_position_limit(getattr(source, "config", None))
+            if limit is not None:
+                break
+        self._cached_position_limit = limit
+        return limit
+
+    def _cap_token_rows(self, budget: int) -> int:
+        """Clamp a token-row budget to the model's declared sequence limit."""
+
+        limit = self._position_limit()
+        if limit is None or budget <= 0:
+            return budget
+        return min(int(budget), int(limit))
+
     @staticmethod
     def _token_row_budget(tensors: List[torch.Tensor]) -> int:
         """Derive a pointwise sample budget from observed calibration batches.
@@ -1332,6 +1390,12 @@ class AWQProcessor(LoopProcessor):
         adapts to actual batch size, sequence lengths, and expert occupancy
         while limiting any increase beyond the largest observed activation
         batch to the minimum needed for one-row-per-batch coverage.
+
+        Callers that own the model must still bound the result to its declared
+        sequence limit (``AWQProcessor._cap_token_rows``): packed rows are
+        replayed as one sequence, so a ``batch_size > 1`` batch, or a corpus
+        with more batches than the limit, can otherwise ask a module to attend
+        over more positions than the model declares (#5085).
         """
 
         row_counts = []
@@ -2360,9 +2424,9 @@ class AWQProcessor(LoopProcessor):
             if aggregation_mode == "token_rows":
                 configured_max_tokens = (policy or {}).get("max_tokens")
                 max_tokens = (
-                    int(configured_max_tokens)
+                    self._cap_token_rows(int(configured_max_tokens))
                     if configured_max_tokens is not None
-                    else self._token_row_budget(tensors)
+                    else self._cap_token_rows(self._token_row_budget(tensors))
                 )
                 if max_tokens == 0 and configured_max_tokens is None:
                     features[name] = tensors[0].new_empty((1, 0, tensors[0].shape[-1]))
@@ -3489,7 +3553,17 @@ class AWQProcessor(LoopProcessor):
                     with ctx(torch.inference_mode()):
                         fp16_output = self._module_forward(inp, module2inspect, module_kwargs)
                     fp16_output = fp16_output.clip(torch.finfo(fp16_output.dtype).min, torch.finfo(fp16_output.dtype).max)
-
+            except RuntimeError as exc:
+                # A replay whose packed geometry does not fit the module (GPT-Neo's
+                # fixed causal buffer, a stale mask, a squeezed batch) raises from
+                # inside the block. Report it as a scale-group failure so the
+                # configured fallback applies instead of aborting `quantize()`.
+                if not _is_replay_geometry_error(exc):
+                    raise
+                raise _AWQScaleGroupError(
+                    f"AWQ: replaying {type(module2inspect).__name__} with the packed "
+                    f"token rows failed: {exc}"
+                ) from exc
             finally:
                 for handle in handles:
                     handle.remove()
