@@ -1295,10 +1295,39 @@ class AWQProcessor(LoopProcessor):
                 entry["max_tokens"] = plan.max_tokens
                 entry.setdefault("batch_indices", []).append(batch_index)
 
-                entry.setdefault("inputs", []).append(sampled)
-                if quota > 0 and local_idx is not None and len(local_idx) > 0:
-                    prov_rows = range(length) if quota == length else local_idx.tolist()
-                    entry.setdefault("provenance", []).extend((source_index, int(r)) for r in prov_rows)
+            if quota > 0 and local_idx is not None and len(local_idx) > 0:
+                prov_rows = list(range(length)) if quota == length else local_idx.tolist()
+            else:
+                prov_rows = []
+
+            # A plan-matched batch can arrive after this module switched to the
+            # dynamic reservoir (routed experts see the shortest batches last).
+            # Append-or-merge under the module's reservoir lock so the merge
+            # cannot overwrite rows this capture just appended, and a capture
+            # cannot race the reservoir creation that seeds from ``inputs``
+            # (#5264).
+            with self._reservoir_lock_for(module_name):
+                if entry.get("reservoir_buffer") is not None:
+                    budget_cap = self._reservoir_budget_cap(configured_max_tokens, plan)
+                    row_indices = torch.tensor(prov_rows, dtype=torch.int64)
+                    priorities = self._reservoir_priorities(source_index, length).index_select(
+                        0, row_indices
+                    )
+                    entry["max_tokens"] = budget_cap
+                    self._merge_reservoir_rows(
+                        entry,
+                        sampled.reshape(-1, hidden),
+                        priorities,
+                        source_index=source_index,
+                        budget_cap=budget_cap,
+                        row_indices=row_indices,
+                    )
+                else:
+                    entry.setdefault("inputs", []).append(sampled)
+                    if prov_rows:
+                        entry.setdefault("provenance", []).extend(
+                            (source_index, int(row)) for row in prov_rows
+                        )
             return
 
         # Dynamic / streaming reservoir: routed MoE experts or cache-less runs.
@@ -1320,15 +1349,10 @@ class AWQProcessor(LoopProcessor):
         # equivalent of Algorithm R: it is a uniform sample of every row seen, so
         # a batch keeps a share proportional to its length regardless of where it
         # falls in the stream, and the memory stays O(cap).
-        budget_cap = (
-            self._cap_token_rows(int(configured_max_tokens))
-            if configured_max_tokens is not None
-            else self._cap_token_rows(plan.budget if plan is not None else 906)
-        )
-        if budget_cap <= 0:
-            budget_cap = 906
+        budget_cap = self._reservoir_budget_cap(configured_max_tokens, plan)
 
         feat_2d = feature.reshape(-1, hidden)
+        module_lock = self._reservoir_lock_for(module_name)
         with self.lock:
             entry = self.tasks.get(module_name)
             if entry is None:
@@ -1345,14 +1369,6 @@ class AWQProcessor(LoopProcessor):
             entry["raw_tokens"] = entry.get("raw_tokens", 0) + length
             entry["max_tokens"] = budget_cap
             entry.setdefault("batch_indices", []).append(batch_index)
-            reservoir_locks = getattr(self, "_reservoir_locks", None)
-            if reservoir_locks is None:
-                reservoir_locks = {}
-                self._reservoir_locks = reservoir_locks
-            module_lock = reservoir_locks.get(module_name)
-            if module_lock is None:
-                module_lock = threading.Lock()
-                reservoir_locks[module_name] = module_lock
 
         # The priority draw and the slot merge are per-module work. Holding the
         # processor-wide lock across them serialized every routed expert's
@@ -1368,6 +1384,30 @@ class AWQProcessor(LoopProcessor):
                 source_index=source_idx,
                 budget_cap=budget_cap,
             )
+
+    def _reservoir_lock_for(self, module_name: str) -> threading.Lock:
+        """Return the per-module lock that serializes reservoir mutations."""
+
+        with self.lock:
+            reservoir_locks = getattr(self, "_reservoir_locks", None)
+            if reservoir_locks is None:
+                reservoir_locks = {}
+                self._reservoir_locks = reservoir_locks
+            module_lock = reservoir_locks.get(module_name)
+            if module_lock is None:
+                module_lock = threading.Lock()
+                reservoir_locks[module_name] = module_lock
+            return module_lock
+
+    def _reservoir_budget_cap(self, configured_max_tokens, plan) -> int:
+        """Resolve the routed-expert reservoir size for one capture."""
+
+        budget_cap = (
+            self._cap_token_rows(int(configured_max_tokens))
+            if configured_max_tokens is not None
+            else self._cap_token_rows(plan.budget if plan is not None else 906)
+        )
+        return budget_cap if budget_cap > 0 else 906
 
     @staticmethod
     def _reservoir_priorities(source_index: int, count: int) -> torch.Tensor:
@@ -1395,6 +1435,7 @@ class AWQProcessor(LoopProcessor):
         *,
         source_index: int,
         budget_cap: int,
+        row_indices: Optional[torch.Tensor] = None,
     ) -> None:
         """Merge one capture into the module's priority reservoir.
 
@@ -1404,6 +1445,11 @@ class AWQProcessor(LoopProcessor):
         materializes once per layer. A capture therefore copies only the new
         rows that displace kept rows instead of concatenating, re-sorting and
         re-listing the whole buffer under the processor-wide lock (#5233).
+
+        ``row_indices`` names each row's index inside its calibration batch.
+        The dynamic path captures every row of the batch, so it defaults to
+        ``arange(count)``; the token-row plan path keeps only the sampled
+        ``local_indices`` and must pass them so replay kwargs stay aligned.
         """
 
         buffer = entry.get("reservoir_buffer")
@@ -1428,12 +1474,19 @@ class AWQProcessor(LoopProcessor):
         row_buffer = entry["reservoir_rows"]
         used = int(entry.get("reservoir_used", 0))
         count = int(rows.shape[0])
+        if row_indices is None:
+            row_indices = torch.arange(count, dtype=torch.int64)
+        elif int(row_indices.numel()) != count:
+            raise ValueError(
+                "reservoir row indices must match the captured rows: "
+                f"{int(row_indices.numel())} != {count}"
+            )
 
         if used + count <= budget_cap:
             buffer[used:used + count] = rows
             priority_buffer[used:used + count] = priorities
             source_buffer[used:used + count] = source_index
-            row_buffer[used:used + count] = torch.arange(count)
+            row_buffer[used:used + count] = row_indices
             used += count
         else:
             combined = torch.cat([priority_buffer[:used], priorities])
@@ -1453,7 +1506,7 @@ class AWQProcessor(LoopProcessor):
             buffer[slots] = rows.index_select(0, kept_new)
             priority_buffer[slots] = priorities.index_select(0, kept_new)
             source_buffer[slots] = source_index
-            row_buffer[slots] = kept_new
+            row_buffer[slots] = row_indices.index_select(0, kept_new)
             used = budget_cap
 
         entry["reservoir_used"] = used
