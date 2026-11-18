@@ -3321,6 +3321,74 @@ def sanitize_generation_config_file(path: str) -> bool:
         json.dump(data, fp, indent=2)
     return True
 
+
+def _shell_fp32_pin_attrs(dtype: Optional[torch.dtype]) -> tuple[str, ...]:
+    """Declarations the shell must honor for a ``dtype`` build.
+
+    ``_keep_in_fp32_modules_strict`` is the only declaration transformers pins
+    for both fp16 and bf16. The non-strict ``_keep_in_fp32_modules`` list is
+    fp16-only, and several families use it as a "skip from FP8 conversion"
+    marker rather than a dtype contract (DeepseekV4 lists bf16 compressor
+    projections there). Widening those in the shell would change the fp16
+    quantize layout, so the shell keeps its previous fp16 behaviour; a
+    half build pins the strict declaration only.
+    """
+
+    if dtype in (torch.float16, torch.bfloat16):
+        return ("_keep_in_fp32_modules_strict",)
+    return ()
+
+
+def pin_keep_in_fp32_shell_tensors(model, *, dtype: Optional[torch.dtype]) -> int:
+    """Keep the tensors transformers pins to fp32 at fp32 in a meta shell.
+
+    ``from_config(dtype=...)`` runs the constructor under the requested dtype,
+    so a module that registers a parameter or buffer without an explicit dtype
+    (``DeepseekV3TopkRouter.e_score_correction_bias``) gets that half dtype.
+    ``LazyTurtle`` materializes each leaf from the shell slot's dtype, so the
+    narrowed slot rounds the checkpoint value on the way in and the saved
+    checkpoint then stores the half dtype -- which also stops the #5157 reload
+    restore from firing (issue #5203). Pinning the shell slots to fp32 here
+    makes ``offload_to_disk`` agree with a direct half-precision load, where
+    transformers already keeps these tensors fp32.
+
+    Only dtype is changed: meta storage stays meta, and parameter objects are
+    kept so tied weights remain tied.
+    """
+
+    attrs = _shell_fp32_pin_attrs(dtype)
+    if not attrs:
+        return 0
+    matcher = _compile_keep_in_fp32_matcher(model, attrs=attrs)
+    if matcher is None:
+        return 0
+
+    pinned = 0
+    for module_name, module in model.named_modules():
+        prefix = f"{module_name}." if module_name else ""
+        for parameter_name, parameter in module._parameters.items():
+            if (
+                parameter is None
+                or not parameter.is_floating_point()
+                or parameter.dtype is torch.float32
+                or not matcher(f"{prefix}{parameter_name}")
+            ):
+                continue
+            parameter.data = parameter.data.float()
+            pinned += 1
+        for buffer_name, buffer in module._buffers.items():
+            if (
+                buffer is None
+                or not buffer.is_floating_point()
+                or buffer.dtype is torch.float32
+                or not matcher(f"{prefix}{buffer_name}")
+            ):
+                continue
+            module._buffers[buffer_name] = buffer.float()
+            pinned += 1
+    return pinned
+
+
 # load hf model with empty tensors on meta device (zero tensor memory usage)
 def build_shell_model(
     loader,
@@ -3395,6 +3463,23 @@ def build_shell_model(
                     raise
     finally:
         pb.close()
+
+    shell_dtype = init_kwargs.get("dtype", init_kwargs.get("torch_dtype"))
+    if isinstance(shell_dtype, str):
+        shell_dtype = getattr(torch, shell_dtype.strip().removeprefix("torch."), None)
+    if not isinstance(shell_dtype, torch.dtype):
+        shell_dtype = get_hf_config_dtype(config)
+    pinned = (
+        pin_keep_in_fp32_shell_tensors(shell, dtype=shell_dtype)
+        if isinstance(shell, torch.nn.Module)
+        else 0
+    )
+    if pinned:
+        log.debug(
+            "Model: pinned %s keep-in-fp32 shell tensor(s) to fp32 (build dtype %s)",
+            pinned,
+            shell_dtype,
+        )
 
     if trust_remote_code and isinstance(shell, PreTrainedModel):
         _normalize_legacy_tied_weights_keys(shell)
