@@ -67,6 +67,12 @@ _BNB_INT8_IMMA_MAX_ROWS = 16
 # ``Error invalid argument ... ops.cu``, which terminates the interpreter
 # instead of raising (#5097). Stay below that limit.
 _INT8_NATIVE_EPILOGUE_MAX_ELEMENTS = 2**31 - 1
+# ``int8_vectorwise_quant`` indexes the flattened activation with 32-bit
+# arithmetic as well. At 2**31 input elements and above its CUDA kernel faults
+# with ``cudaErrorIllegalAddress``; the error is sticky and takes the CUDA
+# context down with it (#5205). The quantizer is row-local, so above this limit
+# it is run over bounded row chunks instead of one launch.
+_INT8_NATIVE_QUANT_MAX_ELEMENTS = 2**31 - 1
 # Rows per FP32 epilogue chunk: bounds the transient scratch at roughly one
 # 2**26-element tile regardless of the output width.
 _INT8_EPILOGUE_CHUNK_ELEMENTS = 1 << 26
@@ -330,6 +336,42 @@ def _int8_imma_misaligned(in_features: int, out_features: int) -> bool:
     if in_features % 4 != 0:
         return False
     return in_features % 16 != 0 or out_features % 4 != 0
+
+
+def _int8_vectorwise_quant_native_chunked(
+    x: torch.Tensor,
+    *,
+    in_features: int,
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """Run the native FP16 row quantizer over bounded row chunks.
+
+    ``bitsandbytes.functional.int8_vectorwise_quant`` faults with
+    ``cudaErrorIllegalAddress`` once the flattened activation holds 2**31
+    elements or more, and the sticky error kills the CUDA context (#5205).
+    Quantization is row-local, so visiting rows in chunks below that limit is
+    value-identical to a single launch while the fast native kernel is kept.
+    """
+
+    bnb = import_bitsandbytes()
+    rows = x.shape[0]
+    chunk_rows = max(1, _INT8_NATIVE_QUANT_MAX_ELEMENTS // max(in_features, 1))
+    codes = torch.empty(x.shape, dtype=torch.int8, device=x.device)
+    stats: Optional[torch.Tensor] = None
+    for start in range(0, rows, chunk_rows):
+        end = min(start + chunk_rows, rows)
+        chunk_codes, chunk_stats, chunk_outliers = bnb.functional.int8_vectorwise_quant(
+            x[start:end],
+            threshold=0.0,
+        )
+        if chunk_outliers is not None and chunk_outliers.numel() > 0:
+            return codes, chunk_stats, chunk_outliers
+        if stats is None:
+            stats = torch.empty((rows,), dtype=chunk_stats.dtype, device=chunk_stats.device)
+        codes[start:end] = chunk_codes
+        stats[start:end] = chunk_stats
+    if stats is None:  # pragma: no cover - the caller never passes an empty row set
+        stats = torch.empty((rows,), dtype=torch.float32, device=x.device)
+    return codes, stats, None
 
 
 def _int8_vectorwise_quant_fp32(
@@ -1132,10 +1174,18 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
         x_flat = x.reshape(-1, self.in_features).contiguous()
 
         if x.dtype == torch.float16:
-            x_int8, x_stats, outlier_cols = bnb.functional.int8_vectorwise_quant(
-                x_flat,
-                threshold=0.0,
-            )
+            if x_flat.numel() <= _INT8_NATIVE_QUANT_MAX_ELEMENTS:
+                x_int8, x_stats, outlier_cols = bnb.functional.int8_vectorwise_quant(
+                    x_flat,
+                    threshold=0.0,
+                )
+            else:
+                # #5205: the native quantizer's 32-bit input indexing faults
+                # above 2**31 elements, so chunk the same kernel by rows.
+                x_int8, x_stats, outlier_cols = _int8_vectorwise_quant_native_chunked(
+                    x_flat,
+                    in_features=self.in_features,
+                )
         else:
             x_int8, x_stats, outlier_cols = _int8_vectorwise_quant_fp32(x_flat)
         if outlier_cols is not None and outlier_cols.numel() > 0:
