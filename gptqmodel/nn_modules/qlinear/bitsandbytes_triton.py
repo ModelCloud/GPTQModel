@@ -146,6 +146,10 @@ def _bnb_4bit_gemm_kernel(
     pid_n = tl.program_id(1)
     rows = pid_m * BM + tl.arange(0, BM)
     cols = pid_n * BN + tl.arange(0, BN)
+    # Rows index the whole activation and output. A long prefill can make
+    # ``rows * K`` or ``rows * N`` exceed 2^31 elements, so the row offset is
+    # computed in 64-bit; a 32-bit product wraps the address.
+    rows64 = rows.to(tl.int64)
     mmask = rows < m
     nmask = cols < N
     kk = tl.arange(0, BK)
@@ -185,7 +189,7 @@ def _bnb_4bit_gemm_kernel(
         cw = tl.load(code_ptr + codes, mask=valid, other=0.0).to(tl.float32)
         w = (cw * am).to(acc_dtype)
         xv = tl.load(
-            x_ptr + rows[:, None] * K + ks[None, :],
+            x_ptr + rows64[:, None] * K + ks[None, :],
             mask=mmask[:, None] & kvalid[None, :], other=0.0,
         )
         acc = tl.dot(xv, tl.trans(w), acc)
@@ -193,7 +197,7 @@ def _bnb_4bit_gemm_kernel(
     if HAS_BIAS:
         acc += tl.load(bias_ptr + cols, mask=nmask, other=0.0)[None, :].to(tl.float32)
     tl.store(
-        out_ptr + rows[:, None] * N + cols[None, :],
+        out_ptr + rows64[:, None] * N + cols[None, :],
         acc.to(out_ptr.dtype.element_ty),
         mmask[:, None] & nmask[None, :],
     )
