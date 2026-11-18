@@ -1230,15 +1230,19 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     # formats dequantize through numpy on the host, so they cannot be captured;
     # `supports_graph_capture()` answers that per instance (#5014).
     #
-    # Compile level: CPU, torch 2.16.0.dev20261021+cpu: eager=True,
-    # graph_breaks=0, dynamo/aot_eager/inductor all reach it after two fixes --
-    # the AVX512-BF16/oneDNN capability probes now publish a process-constant
-    # bool instead of reading `/proc/cpuinfo` (`open()`) and mutating the global
+    # Compile level: CUDA/BF16 is EAGER, so the class-wide default records the
+    # measured CUDA ceiling and CPU is raised through the per-device override.
+    # CPU, torch 2.11.0+cu130: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all reach it after two fixes -- the
+    # AVX512-BF16/oneDNN capability probes now publish a process-constant bool
+    # instead of reading `/proc/cpuinfo` (`open()`) and mutating the global
     # matmul precision under an `RLock` inside the traced region, and
     # `cpu_bf16x3_matmul()` no longer enters that scope while tracing (the
     # compiled path runs IEEE FP32, which is the more accurate direction and far
-    # inside the 4-bit quantization error).
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
+    # inside the 4-bit quantization error). The CUDA declaration follows the
+    # measurement above: declaring base INDUCTOR over-claimed it (#5110).
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
     SUPPORTS_COMPILE_EAGER_REASON = (
         "static-cache generate() auto-compile stays off: no CPU win was measured "
         "for this kernel in this change; the INDUCTOR level is opt-in via "

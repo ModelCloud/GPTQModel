@@ -131,6 +131,59 @@ def pack_scales_and_zeros(scales, zeros):
     )
 
 
+def _int4pack_output_dtype(x, out_dtype):
+    """The dtype a caller expects back: the requested one, else the input's."""
+
+    return x.dtype if out_dtype is None else out_dtype
+
+
+@torch.library.custom_op(
+    "gptqmodel::int4pack_mm_cast",
+    mutates_args=(),
+    device_types="cpu",
+)
+def _int4pack_mm_cast_op(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    group_size: int,
+    scales_and_zeros: torch.Tensor,
+    compute_dtype: torch.dtype,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    """The casting int4pack product as one opaque, fake-able custom op.
+
+    This used to run through a ``torch.compiler.disable``d Python helper, so
+    dynamo stopped there and every BF16 or biased FP16 CPU layer paid a graph
+    break per quantized linear (#5110). As a custom op it keeps the same eager
+    math (cast the operands, call ``_weight_int4pack_mm_for_cpu``, cast the
+    result) while giving dynamo a schema and a FakeTensor implementation, so
+    the casts and the extern GEMM lift into one inductor node. The casts live
+    *inside* the op, so inductor never has to lower the extern GEMM on a
+    separate graph-computed Pointwise layout (#4068).
+    """
+
+    out = torch.ops.aten._weight_int4pack_mm_for_cpu(
+        x.to(compute_dtype), qweight, group_size, scales_and_zeros.to(compute_dtype)
+    )
+    return out.to(output_dtype)
+
+
+@_int4pack_mm_cast_op.register_fake
+def _(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    group_size: int,
+    scales_and_zeros: torch.Tensor,
+    compute_dtype: torch.dtype,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    # ``_weight_int4pack_mm_for_cpu`` returns ``[rows, out_features]``; the
+    # packed ``qweight`` carries ``out_features`` on its first axis.
+    return torch.empty(
+        (x.shape[0], qweight.shape[0]), dtype=output_dtype, device=x.device
+    )
+
+
 def _cpu_int4pack_mm(x, qweight, group_size, scales_and_zeros, out_dtype=None):
     """Run int4pack with FP32 operands without expanding stored weights.
 
@@ -141,8 +194,8 @@ def _cpu_int4pack_mm(x, qweight, group_size, scales_and_zeros, out_dtype=None):
 
     When the operands already carry the compute dtype there is no cast to
     fuse, the extern op receives real graph inputs, and inductor lowers it
-    (measured on torch 2.16.0.dev CPU). Only the casting case stays a
-    deliberate graph break; see :func:`_cpu_int4pack_mm_cast`.
+    directly (measured on torch 2.16.0.dev CPU). The casting case goes through
+    :func:`_int4pack_mm_cast_op`, a custom op, so it traces as well (#5110).
     """
     compute_dtype = (
         torch.float32
@@ -154,17 +207,16 @@ def _cpu_int4pack_mm(x, qweight, group_size, scales_and_zeros, out_dtype=None):
             x, qweight, group_size, scales_and_zeros
         )
         return out if out_dtype is None else out.to(out_dtype)
-    return _cpu_int4pack_mm_cast(
+    return _int4pack_mm_cast_op(
         x,
         qweight,
         group_size,
         scales_and_zeros,
         compute_dtype,
-        out_dtype,
+        _int4pack_output_dtype(x, out_dtype),
     )
 
 
-@torch.compiler.disable
 def _cpu_int4pack_mm_cast(
     x,
     qweight,
@@ -173,22 +225,21 @@ def _cpu_int4pack_mm_cast(
     compute_dtype,
     out_dtype,
 ):
-    """Casting variant of :func:`_cpu_int4pack_mm`; a deliberate graph break.
+    """Compatibility wrapper for the old casting-helper name.
 
-    Inductor fuses the operand casts into a Pointwise node and then cannot
-    lower ``aten::_weight_int4pack_mm_for_cpu`` on it (#4068). This was
-    re-measured on torch 2.16.0.dev20261021+cpu: with operands already in the
-    compute dtype the extern op lowers, but with a fused cast inductor raises
-    ``LoweringException: AssertionError: <class 'torch._inductor.ir.Pointwise'>``
-    because the extern kernel needs a materialized buffer, not a computed
-    Pointwise layout. Keeping this path eager is a deliberate graph break
-    rather than a silent fallback to a different kernel.
+    The casting product is a traceable custom op now
+    (:func:`_int4pack_mm_cast_op`), so a caller that resolved this name keeps
+    working and no longer breaks the graph.
     """
 
-    out = torch.ops.aten._weight_int4pack_mm_for_cpu(
-        x.to(compute_dtype), qweight, group_size, scales_and_zeros.to(compute_dtype)
+    return _int4pack_mm_cast_op(
+        x,
+        qweight,
+        group_size,
+        scales_and_zeros,
+        compute_dtype,
+        _int4pack_output_dtype(x, out_dtype),
     )
-    return out.to(x.dtype if out_dtype is None else out_dtype)
 
 
 class Int4PackedOp(torch.nn.Module):
@@ -231,16 +282,16 @@ class TorchFusedLinear(PackableQuantLinear):
 
     REQUIRES_FORMAT_V2 = True
 
-    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0,
-    # dynamo/aot_eager/inductor all reach it. Two things used to break dynamo:
-    # the `_cpu_transform_lock` RLock around the one-time packed-buffer rewrite
-    # (now skipped while tracing; the eager warmup builds the layout) and
-    # `_refresh_fused_op`'s `tensor_cache_key`. The remaining `EAGER` case is a
-    # biased FP16/BF16 layer: it asks for an FP32 product so the pre-bias sum
-    # cannot overflow, and inductor cannot lower
-    # `aten::_weight_int4pack_mm_for_cpu` when its operand cast fuses into a
-    # Pointwise node (#4068, re-measured on this torch). See
-    # `_cpu_int4pack_mm_cast`.
+    # CPU, torch 2.11.0+cu130: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all reach it for every dtype/bias combination,
+    # including BF16 (the CPU AUTO dtype for this kernel) and biased FP16.
+    # Three things used to break dynamo: the `_cpu_transform_lock` RLock around
+    # the one-time packed-buffer rewrite (now skipped while tracing; the eager
+    # warmup builds the layout), `_refresh_fused_op`'s `tensor_cache_key`, and
+    # a `torch.compiler.disable`d casting helper for the BF16/biased cases.
+    # The casting product is now a custom op with a FakeTensor impl
+    # (`_int4pack_mm_cast_op`), so #4068 no longer forces those layers eager
+    # (#5110).
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
     SUPPORTS_COMPILE_EAGER_REASON = (
         "static-cache generate() auto-compile stays off: no CPU win was measured "
