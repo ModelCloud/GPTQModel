@@ -35,7 +35,7 @@ from gptqmodel.quantization import FORMAT, METHOD, MacaqConfig, QuantizeConfig
 from gptqmodel.quantization import macaq as macaq
 from gptqmodel.quantization.config import GGUFConfig, resolve_model_rotation, resolve_quant_format
 from gptqmodel.utils.backend import BACKEND
-from gptqmodel.utils.macaq_triton import triton_mxfp4_available
+from gptqmodel.utils.macaq_triton import TRITON_AVAILABLE, triton_mxfp4_available
 
 
 def _device():
@@ -710,7 +710,11 @@ def _quantized_module_pair():
         module.pack(layer, macaq_result=result)
         return module.to(device)
 
-    return layer, result, build(MacaqLinear, BACKEND.MACAQ_TORCH), build(MacaqTritonLinear, BACKEND.MACAQ_TRITON)
+    # MacaqTritonLinear refuses construction without a Triton accelerator; the
+    # torch-only callers must still run on CPU, so the Triton half is ``None``
+    # there (its callers are gated on ``triton_mxfp4_available()``).
+    triton_module = build(MacaqTritonLinear, BACKEND.MACAQ_TRITON) if triton_mxfp4_available() else None
+    return layer, result, build(MacaqLinear, BACKEND.MACAQ_TORCH), triton_module
 
 
 def test_macaq_linear_torch_matches_reference():
@@ -852,6 +856,7 @@ def test_checkpoint_module_config_roundtrips_macaq_kernel():
     assert restored.pre_alpha == 0.7
 
 
+@pytest.mark.skipif(not TRITON_AVAILABLE, reason="MacaqTritonLinear requires Triton")
 def test_checkpoint_restores_recorded_macaq_triton_kernel():
     from gptqmodel.looper.checkpoint_modules import packed_module_config, restore_packed_module
 
@@ -1011,6 +1016,7 @@ def test_triton_row_offsets_are_int64_past_2gb():
         torch.cuda.empty_cache()
 
 
+@pytest.mark.skipif(not TRITON_AVAILABLE, reason="MACaQ Triton kernels are only defined with Triton")
 def test_macaq_row_offsets_widen_to_int64():
     """All three row-indexed kernels must widen the program id.
 
