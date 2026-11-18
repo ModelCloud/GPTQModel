@@ -627,6 +627,9 @@ renames. `to_runtime=True` maps checkpoint keys onto the shell for
 name back to its checkpoint alias for `validate_checkpoint_qweights`
 (`gptqmodel/models/loader.py:3317`).
 
+Introduced by [PR #5162](https://github.com/ModelCloud/GPTQModel/pull/5162),
+which fixes #5131.
+
 ### 13.1 Before: the source map ran on every key
 
 The converter returned the first matching rename for every key and assumed the
