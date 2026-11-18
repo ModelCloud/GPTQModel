@@ -180,6 +180,22 @@ def input_rows(x: t.Tensor) -> int:
     return math.prod(shape[:-1])
 
 
+def _named_tensor(module: nn.Module, name: str):
+    """Resolve a checkpoint tensor name (possibly dotted) without raising.
+
+    ``CHECKPOINT_REQUIRED_BUFFERS`` may name a tensor owned by a submodule
+    (VPTQ's ``centroids.weight``). A suffix whose live tensor is absent is
+    skipped by the checkpoint validator, so this probe skips it too.
+    """
+
+    owner_name, _, leaf = name.rpartition(".")
+    try:
+        owner = module.get_submodule(owner_name) if owner_name else module
+    except AttributeError:
+        return None
+    return getattr(owner, leaf, None)
+
+
 def empty_linear_output(x: t.Tensor, out_features: int) -> t.Tensor:
     """Allocate an empty Linear output while preserving rank, dtype, device."""
 
@@ -580,6 +596,42 @@ class BaseQuantLinear(nn.Module):
                 seen.add(tensor_id)
                 tensors.append(tensor)
         return tensors
+
+    def checkpoint_payload_tensors(self) -> Tuple[t.Tensor, ...]:
+        """Persistent tensors that carry this module's checkpoint payload.
+
+        ``post_init`` reads the payload, so a loader that has replaced it with
+        meta placeholders (disk offload) must materialize the layer first.
+        Every kernel family declares its payload in
+        ``CHECKPOINT_REQUIRED_BUFFERS`` -- the names the checkpoint validator
+        already requires -- so this probe follows that declaration instead of
+        assuming the GPTQ name ``qweight``. A kernel that declares nothing, or
+        whose declared tensors are all absent (a QQQ layer whose derived
+        cache replaced them), falls back to every tensor the module
+        registers.
+        """
+
+        tensors = []
+        for name in self.checkpoint_required_buffers():
+            tensor = _named_tensor(self, name)
+            if isinstance(tensor, t.Tensor):
+                tensors.append(tensor)
+        if not tensors:
+            tensors = self.list_buffers()
+        return tuple(tensors)
+
+    def checkpoint_payload_is_meta(self) -> bool:
+        """Whether this module's checkpoint payload is an offloaded placeholder.
+
+        A disk-offloaded layer owns no resident checkpoint tensors: Accelerate
+        replaces them with meta placeholders and replays the real values from
+        its offload map. ``gptqmodel_post_init`` uses this to route such a
+        layer through ``_post_init_offloaded`` instead of running
+        ``post_init`` on meta. A module with no payload tensors is resident by
+        definition.
+        """
+
+        return any(tensor.is_meta for tensor in self.checkpoint_payload_tensors())
 
     def runtime_device(self) -> Optional[t.device]:
         # Prefer the real quantized storage tensor over adapter scratch buffers.

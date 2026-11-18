@@ -585,6 +585,12 @@ class _OffloadableLayer(nn.Module):
         )
         self.calls = 0
 
+    def checkpoint_payload_tensors(self):
+        return (self.qweight,)
+
+    def checkpoint_payload_is_meta(self):
+        return any(tensor.is_meta for tensor in self.checkpoint_payload_tensors())
+
     def post_init(self):
         # A disk-offloaded layer is materialized for the call, then returned.
         assert not self.qweight.is_meta

@@ -2057,8 +2057,13 @@ def _post_init_offloaded(module) -> None:
     return it to meta. Only kernels that declare `SUPPORTS_CPU_OFFLOAD` qualify,
     because their `post_init` does not rewrite the persistent tensors and the
     offload map therefore stays authoritative (#5194).
+
+    Whether the layer is a meta placeholder is the kernel's declaration
+    (`checkpoint_payload_is_meta`), not the GPTQ-specific `qweight` attribute:
+    NF12, QQQ, VPTQ, FP8, BitsAndBytes and the W4A kernels name their payload
+    differently or keep no `qweight` at all (#5261).
     """
-    if not module.qweight.is_meta:
+    if not module.checkpoint_payload_is_meta():
         module.post_init()
         return
     if not getattr(type(module), "SUPPORTS_CPU_OFFLOAD", False):
@@ -2087,7 +2092,7 @@ def _post_init_cpu_offloaded_marlin(module) -> None:
     packed tensors (#5022).
     """
     # Resident weights have no Accelerate snapshot to refresh.
-    if not module.qweight.is_meta:
+    if not module.checkpoint_payload_is_meta():
         module.post_init()
         return
 
