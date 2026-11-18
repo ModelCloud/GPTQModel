@@ -110,6 +110,11 @@ def test_exl3_checkpoint_passthrough_preserves_native_source_identity(tmp_path, 
     model.expert.register_buffer("mcg", torch.ones((), dtype=torch.int32))
     # This runtime-only spelling must never leak into the published checkpoint.
     model.runtime_alias = torch.nn.Parameter(torch.zeros((2,), dtype=torch.float32))
+    # The native passthrough only republishes source tensors the loaded model
+    # owns (#5029), so the fixture must own `original.hc_attn_base` like a real
+    # decoder layer does.
+    model.original = torch.nn.Module()
+    model.original.register_buffer("hc_attn_base", native.clone())
     owner = SimpleNamespace(
         model=model,
         turtle_model=SimpleNamespace(
@@ -199,6 +204,10 @@ def test_exl3_checkpoint_passthrough_accepts_reshard_per_layer_shards(tmp_path):
     model.model.layers[0].proj.register_buffer(
         "trellis", torch.ones((1,), dtype=torch.int16)
     )
+    # The passthrough only republishes source tensors the loaded model owns
+    # (#5029); give the fixture the modules those native tensors belong to.
+    model.model.layers[0].norm = torch.nn.LayerNorm(2)
+    model.model.embed_tokens = torch.nn.Embedding(4, 2)
     owner = SimpleNamespace(
         model=model,
         turtle_model=SimpleNamespace(
@@ -274,6 +283,8 @@ def test_exl3_checkpoint_passthrough_rejects_unsafe_shard_paths(
     model = torch.nn.Module()
     model.expert = _FakeEXL3()
     model.expert.register_buffer("trellis", torch.ones((1,), dtype=torch.int16))
+    model.native = torch.nn.Module()
+    model.native.norm = torch.nn.LayerNorm(2)
     owner = SimpleNamespace(
         model=model,
         turtle_model=SimpleNamespace(
