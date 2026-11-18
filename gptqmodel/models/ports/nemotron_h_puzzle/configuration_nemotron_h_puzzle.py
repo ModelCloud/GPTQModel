@@ -5,7 +5,7 @@
 from copy import deepcopy
 from typing import Any
 
-from transformers import NemotronHConfig
+from ..native.nemotron_h.configuration_nemotron_h import NemotronHConfig
 
 
 _BLOCK_TYPES = {"mamba": "linear_attention", "attention": "full_attention", "moe": "moe"}
