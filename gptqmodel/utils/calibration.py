@@ -454,6 +454,55 @@ def _normalize_template_input_payload(value: Any, *, key: str) -> Any:
     return normalized
 
 
+def _normalize_chat_messages(value: Any) -> Any:
+    """Return a conversation a chat template renders like the plain Python rows.
+
+    The `messages` column of the same function-calling rows #4934 normalized
+    keeps Arrow's unified struct schema (#5082). Arrow stores one struct type
+    per column, so every turn gains a ``None`` value for each key another turn
+    uses -- ``tool_calls`` on user/tool/plain-assistant turns, ``name`` or
+    ``tool_call_id`` where only some rows carry them -- and every tool call's
+    ``arguments`` gains the other rows' argument names. The template then sees
+    a different conversation than the plain Python rows do:
+
+    * Qwen2.5/Qwen3 render ``{"city": "Paris", "query": null}`` instead of
+      ``{"city": "Paris"}``, so every tool-call row is calibrated on tokens
+      inference never emits;
+    * Llama-3.x tests ``'tool_calls' in message``, so the injected
+      ``tool_calls: None`` turns a user turn into a tool call and the template
+      raises ``TypeError: object of type 'NoneType' has no len()``.
+
+    Drop dict entries whose value is ``None``, recursively. Two values are not
+    Arrow padding and are kept:
+
+    * ``content: None`` is how an OpenAI-style tool-call turn spells "no text",
+      and templates such as DeepSeek-R1 test it with ``message.content is
+      none``;
+    * ``arguments`` stored as a JSON string is inserted verbatim by raw-text
+      templates (DeepSeek-R1 writes it into a ``json`` block), so it stays a
+      string rather than being decoded into a mapping.
+
+    A ``None`` element inside a list is a legitimate JSON value and is kept as
+    well. An explicit ``None`` argument value is indistinguishable from Arrow's
+    padding for the same key, so it is dropped too -- the same rule #4934
+    applies to a ``tools`` schema's ``properties``. The walk copies every
+    container, so the caller's rows are never mutated.
+    """
+
+    # An object-dtype ndarray (`dataset.with_format("numpy")[:]`) holds one
+    # entry per row; unwrap it so the walk sees python containers.
+    value = _unwrap_object_array(value)
+    if isinstance(value, Mapping):
+        return {
+            key: _normalize_chat_messages(item)
+            for key, item in value.items()
+            if item is not None or key == "content"
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalize_chat_messages(item) for item in value]
+    return value
+
+
 def _is_batched_column(value: Any) -> bool:
     """Return True when ``value`` holds one entry per calibration row."""
 
@@ -951,6 +1000,11 @@ def prepare_calibration_dataset(
             raise ValueError(
                 "tokenizer must expose `apply_template` or `apply_chat_template` to handle `messages` calibration data."
             )
+        # Arrow unifies the `messages` struct schema across rows and turns, so
+        # a user turn carries `tool_calls: None` and every tool call's
+        # `arguments` mapping gains the other rows' argument names (#5082).
+        # Render the conversation inference actually sends, before templating.
+        messages_value = _normalize_chat_messages(messages_value)
         # A chat row carries more than `messages`: the standard HF layout puts
         # the tool schemas in `tools` (and RAG templates read `documents`).
         # Dropping them rendered the row as if no tools were declared, so the
