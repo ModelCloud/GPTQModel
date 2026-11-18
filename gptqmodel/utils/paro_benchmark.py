@@ -8,17 +8,20 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
 from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.nn_modules.qlinear.paro import ParoLinear
-from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.logger import render_table
+
+
+if TYPE_CHECKING:
+    from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
 
 
 _NM_CALIBRATION_PATH = "/monster/data/model/dataset/nm-calibration"
@@ -417,6 +420,10 @@ def _tokenize_calibration_sample(model, sample: dict[str, Any]) -> dict[str, tor
 
 
 def _clone_triton_module(module: ParoLinear) -> ParoTritonLinear:
+    # Triton is only needed for the kernel comparison itself; importing it at
+    # module scope made the CPU-only helpers (config, calibration) unusable.
+    from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
+
     cloned = ParoTritonLinear(
         bits=module.bits,
         group_size=module.group_size,
