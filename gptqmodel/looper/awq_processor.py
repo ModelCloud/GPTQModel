@@ -1782,8 +1782,26 @@ class AWQProcessor(LoopProcessor):
                 t = batch_inputs[0] if isinstance(batch_inputs, (list, tuple)) else batch_inputs
                 h = max(int(t.shape[-1]), 1)
                 raw_len = int(t.numel() // h)
-                if exclude_sinks and torch.is_tensor(sink_positions):
-                    raw_len = max(0, raw_len - int(sink_positions.numel()))
+                if (
+                    exclude_sinks
+                    and torch.is_tensor(sink_positions)
+                    and sink_positions.dim() == 2
+                    and int(sink_positions.numel()) == raw_len
+                ):
+                    # ``sink_positions`` is a [B, S] bool mask, so subtract the
+                    # attended sinks (``sum``), not the grid size (``numel``).
+                    # Only trust the mask when it describes this capture grid;
+                    # a VLM whose forward expands image placeholders keeps its
+                    # full row count, as in ``_token_row_source_structure``.
+                    keep = exclude_attention_sinks(
+                        None,
+                        sink_positions,
+                        batch=int(sink_positions.shape[0]),
+                        seq_len=int(sink_positions.shape[1]),
+                        device="cpu",
+                    )
+                    if keep is not None:
+                        raw_len = int(keep.sum().item())
                 lengths.append(raw_len)
             else:
                 lengths.append(0)

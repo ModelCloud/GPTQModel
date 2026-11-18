@@ -47,7 +47,14 @@ def _create_mock_cache(batch_lengths, hidden=64):
     return cache
 
 
-def _create_awq_processor(cache, policy_mode="token_rows", max_tokens=None):
+def _create_awq_processor(
+    cache,
+    policy_mode="token_rows",
+    max_tokens=None,
+    *,
+    exclude_attention_sinks=False,
+    sink_positions=None,
+):
     processor = AWQProcessor.__new__(AWQProcessor)
     processor.lock = threading.Lock()
     processor._batch_tls = threading.local()
@@ -64,7 +71,10 @@ def _create_awq_processor(cache, policy_mode="token_rows", max_tokens=None):
     processor._scale_feature_by_module = {}
     processor._nsamples_total = 1
     processor.inputs_cache = cache
-    processor.calibration = CalibrationConfig(exclude_attention_sinks=False)
+    processor.calibration = CalibrationConfig(
+        exclude_attention_sinks=exclude_attention_sinks
+    )
+    processor.attention_sink_positions = sink_positions
 
     gptq_model = SimpleNamespace()
     gptq_model.awq_input_feature_aggregation = lambda name: {
@@ -73,6 +83,32 @@ def _create_awq_processor(cache, policy_mode="token_rows", max_tokens=None):
     }
     processor.gptq_model = gptq_model
     return processor
+
+
+def _create_unmasked_cache(batch_lengths, hidden=64):
+    """Create a mock inputs_cache whose batches captured no attention mask."""
+    cache = SimpleNamespace()
+    cache.layer_inputs = []
+    cache.attention_masks = []
+    cache.position_ids = []
+    cache.layer_input_kwargs = []
+
+    for length in batch_lengths:
+        cache.layer_inputs.append([torch.randn(1, length, hidden)])
+        cache.attention_masks.append(None)
+        cache.position_ids.append(torch.arange(length, dtype=torch.long).unsqueeze(0))
+        cache.layer_input_kwargs.append({})
+
+    return cache
+
+
+def _marker_rows(batch_lengths, hidden):
+    """Raw [1, length, hidden] batches whose first column names the grid row."""
+    rows = []
+    for b, length in enumerate(batch_lengths):
+        values = torch.arange(length * hidden, dtype=torch.float32).reshape(1, length, hidden)
+        rows.append(values + (b + 1) * 1000.0)
+    return rows
 
 
 def test_awq_token_rows_bounded_capture_does_not_scale_with_batch_count():
@@ -319,6 +355,115 @@ def test_awq_token_row_lengths_memo_tracks_layer_inputs_identity():
     cache.position_ids = next_cache.position_ids
 
     assert processor._extract_cache_batch_lengths() == [3]
+
+
+def test_awq_token_row_plan_subtracts_declared_sinks_not_grid_size():
+    """A sink-declaring unmasked calibration plans against its kept rows (#5275).
+
+    ``attention_sink_positions`` is a ``[B, S]`` bool mask, not a position
+    list. The capture hook stores only the kept rows, so the plan's lengths
+    must subtract the attended sinks (``sum``), not the mask size (``numel``).
+    Before #5275 every planned length was 0, which disabled the plan and sent
+    the module through the 906-row reservoir fallback.
+    """
+
+    lengths = [5, 4]
+    hidden = 8
+    cache = _create_unmasked_cache(lengths, hidden=hidden)
+    sink_positions = []
+    for length in lengths:
+        mask = torch.zeros(1, length, dtype=torch.bool)
+        mask[0, 0] = True  # one attended BOS per batch
+        sink_positions.append(mask)
+
+    processor = _create_awq_processor(
+        cache,
+        exclude_attention_sinks=True,
+        sink_positions=sink_positions,
+    )
+    module_name = "self_attn.q_proj"
+
+    assert processor._extract_cache_batch_lengths() == [4, 3]
+
+    plan = processor._token_row_plan_for_module(module_name, hidden)
+    assert plan.lengths == [4, 3]
+    assert plan.budget == 4
+    assert plan.max_tokens == 4
+    assert plan.quotas == [2, 2]
+
+    raw = _marker_rows(lengths, hidden)
+    for b, sink_mask in enumerate(sink_positions):
+        processor._set_current_batch_index(b)
+        # Exactly what ModuleLooper binds: padding keep-mask minus the sinks.
+        processor._mask_tls.value = ~sink_mask
+        processor._record_input_feature(module_name, raw[b])
+
+    entry = processor.tasks[module_name]
+    # The plan, not the 906-row reservoir fallback, owns the capture.
+    assert entry["max_tokens"] == 4
+    assert "reservoir_buffer" not in entry
+    assert entry["provenance"] == [(0, 0), (0, 3), (1, 0), (1, 2)]
+
+    state = _AWQLayerState(modules={module_name: nn.Linear(hidden, hidden)})
+    features = processor._layer_input_features(state)
+    # Kept rows are 1..4 and 1..3; the sink row 0 is never replayed.
+    assert [
+        int(value) for value in features[module_name][0, :, 0].tolist()
+    ] == [1008, 1032, 2008, 2024]
+
+
+def test_awq_token_row_plan_without_sinks_is_unchanged():
+    """Without declared sinks the plan keeps the full grid and samples as before."""
+
+    lengths = [5, 4]
+    hidden = 8
+    cache = _create_unmasked_cache(lengths, hidden=hidden)
+    processor = _create_awq_processor(cache)
+    module_name = "self_attn.q_proj"
+
+    assert processor._extract_cache_batch_lengths() == [5, 4]
+
+    plan = processor._token_row_plan_for_module(module_name, hidden)
+    assert plan.lengths == [5, 4]
+    assert plan.budget == 5
+    assert plan.max_tokens == 5
+    assert plan.quotas == [3, 2]
+
+    raw = _marker_rows(lengths, hidden)
+    for b in range(len(lengths)):
+        processor._set_current_batch_index(b)
+        processor._record_input_feature(module_name, raw[b])
+
+    entry = processor.tasks[module_name]
+    assert entry["max_tokens"] == 5
+    assert entry["provenance"] == [(0, 0), (0, 2), (0, 4), (1, 0), (1, 3)]
+
+    state = _AWQLayerState(modules={module_name: nn.Linear(hidden, hidden)})
+    features = processor._layer_input_features(state)
+    assert [
+        int(value) for value in features[module_name][0, :, 0].tolist()
+    ] == [1000, 1016, 1032, 2000, 2024]
+
+
+def test_awq_token_row_lengths_ignore_sink_mask_for_expanded_capture_grid():
+    """A sink mask that does not describe the capture grid must not shrink it.
+
+    A VLM forward can expand image placeholders, so the captured token count
+    no longer equals the tokenizer mask's ``numel``. ``exclude_attention_sinks``
+    treats that as "no sink to remove"; the plan must do the same instead of
+    subtracting the whole mask size.
+    """
+
+    cache = _create_unmasked_cache([10], hidden=8)
+    sink_positions = torch.zeros(1, 5, dtype=torch.bool)
+    sink_positions[0, 0] = True
+    processor = _create_awq_processor(
+        cache,
+        exclude_attention_sinks=True,
+        sink_positions=[sink_positions],
+    )
+
+    assert processor._extract_cache_batch_lengths() == [10]
 
 
 def test_awq_token_rows_out_of_order_sampled_rows_keep_provenance_aligned():
