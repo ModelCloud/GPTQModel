@@ -66,15 +66,7 @@
 template <typename T, T v>
 struct is_valid_value { static constexpr bool value = true; };
 
-#if defined(__has_include)
-#  if __has_include(<ATen/native/quantized/Float8_e8m0fnu.h>)
-#    define HAS_FLOAT8_E8M0FNU 1
-#  else
-#    define HAS_FLOAT8_E8M0FNU 0
-#  endif
-#else
-#  define HAS_FLOAT8_E8M0FNU 0
-#endif
+#include <c10/util/Float8_e8m0fnu.h>
 
 #include "kernel.h"
 #include "marlin_scratch.cuh"
@@ -1449,23 +1441,16 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
       if (group_size == 16)
         scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
       else if (group_size == 32) {
-        #if HAS_FLOAT8_E8M0FNU
-          scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
-        #else
-          TORCH_CHECK(false,
-            "float8_e8m0fnu is not available in this build of PyTorch.");
-        #endif
+        TORCH_CHECK(false, "float4_e2m1f with float8_e8m0fnu scales requires "
+                           "bfloat16 compute (MXFP4).");
       } else
         TORCH_CHECK(false,
                     "float4_e2m1f only supports group_size == 16 (NVFP4) ",
                     "and group_size == 32 (MXFP4)");
-#if HAS_FLOAT8_E8M0FNU
     } else if (b_q_type == vllm::kFE4M3fn &&
                b_scales.scalar_type() == at::ScalarType::Float8_e8m0fnu) {
       TORCH_CHECK(false, "float8_e4m3fn with float8_e8m0fnu scales requires "
                          "bfloat16 compute (MXFP8).");
-#endif
-
     } else {
       scales_ptr = b_scales.data_ptr<at::Half>();
     }
@@ -1491,25 +1476,18 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     if (b_q_type == vllm::kFE2M1f) {
       if (group_size == 16)
         scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
-      else if (group_size == 32) {
-        #if HAS_FLOAT8_E8M0FNU
-          scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
-        #else
-          TORCH_CHECK(false,
-            "float8_e8m0fnu is not available in this build of PyTorch.");
-        #endif
-     } else
+      else if (group_size == 32)
+        scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
+      else
         TORCH_CHECK(false,
                     "float4_e2m1f only supports group_size == 16 (NVFP4) ",
                     "and group_size == 32 (MXFP4)");
-#if HAS_FLOAT8_E8M0FNU
     } else if (b_q_type == vllm::kFE4M3fn &&
                b_scales.scalar_type() == at::ScalarType::Float8_e8m0fnu) {
       TORCH_CHECK(group_size == 32,
                   "float8_e4m3fn only supports group_size == 32 (MXFP8) when "
                   "using float8_e8m0fnu scales.");
       scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
-#endif
     } else {
       scales_ptr = b_scales.data_ptr<at::BFloat16>();
     }
