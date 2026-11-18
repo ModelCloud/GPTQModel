@@ -34,7 +34,7 @@ from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.planar_packing import planar_decode_rows
 from ...utils.rocm import IS_ROCM
-from ...utils.torch import torch_compile
+from ...utils.torch import model_global_state_lock, torch_compile
 from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
 from ._numerics import (
@@ -462,13 +462,16 @@ class TorchLinear(PackableQuantLinear):
 
         # Compile the unbound function: compiling the bound method would store a
         # strong reference to this module inside the compiled wrapper (#4847).
-        compiled = torch_compile(type(self).dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
-        self.dequantize_weight = _CompiledDequantizeWeight(compiled, self)
+        # Construction imports dynamo and the first trace restores the process
+        # default dtype, so share the loader's global-state lock (#5127).
+        with model_global_state_lock():
+            compiled = torch_compile(type(self).dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
+            self.dequantize_weight = _CompiledDequantizeWeight(compiled, self)
 
-        if self.adapter:
-            self.adapter.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
+            if self.adapter:
+                self.adapter.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
-        super().optimize()
+            super().optimize()
 
     def __getstate__(self):
         """Drop the compiled ``dequantize_weight`` so the module stays picklable.

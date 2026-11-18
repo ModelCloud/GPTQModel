@@ -37,6 +37,7 @@ from ..quantization.config import (
 from .backend import BACKEND, backend_for_activation, normalize_backend
 from .hf import get_hf_config_dtype
 from .logger import setup_logger
+from .torch import defuser_conversion_scope
 
 
 log = setup_logger()
@@ -332,11 +333,15 @@ def hf_gptqmodel_prepare_model_for_load(
                 defuser.convert_model(module, cleanup_original=True)
 
     # Expand MoE experts on meta to avoid materializing dense expert weights.
+    # Defuser's cache flush synchronizes the current device when it gets no
+    # device list; scope it to this model's tensors so the conversion does not
+    # claim cuda:0 for a checkpoint placed on cuda:1 (#5105).
     if _module_has_meta_tensors(model):
-        with torch.device("meta"):
+        with torch.device("meta"), defuser_conversion_scope(model):
             convert_fused_modules()
     else:
-        convert_fused_modules()
+        with defuser_conversion_scope(model):
+            convert_fused_modules()
 
     modules = find_modules(model)
     missing_modules = sorted(set(quantized_module_names).difference(modules))

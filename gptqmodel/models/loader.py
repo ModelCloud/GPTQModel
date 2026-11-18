@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 import torch
 import transformers
 
+from ..utils.hf import _compile_keep_in_fp32_matcher
 from ..utils.kernel import KernelConfig, configure_kernel
 from ..utils.modelscope import ensure_modelscope_available
 from ..utils.p2p import P2PConfig, configure_p2p
@@ -120,7 +121,7 @@ from ..utils.model import (
     simple_dispatch_model,
     validate_checkpoint_qweights,
 )
-from ..utils.torch import xla_device_count
+from ..utils.torch import defuser_conversion_scope, xla_device_count
 from ._const import DEVICE, EXPERT_INDEX_PLACEHOLDER, HAS_NPU, normalize_device
 
 
@@ -141,6 +142,30 @@ def __getattr__(name: str):
 
 
 log = setup_logger()
+
+
+def _model_keep_in_fp32_strict_names(model) -> Optional[List[str]]:
+    """Concrete runtime tensor names the model pins to fp32 for every half dtype.
+
+    transformers 5.x declares these on ``_keep_in_fp32_modules_strict`` and
+    keeps them fp32 for fp16 *and* bf16. Accelerate's loader only honors
+    ``keep_in_fp32_modules`` for fp16, so the quantized-load path restores
+    them explicitly (issue #5151). Buffers are included: the DeepSeek-V3 /
+    GLM-4.x routers store ``e_score_correction_bias`` as a buffer, and ERNIE
+    declares the ``gate.weight`` parameter.
+    """
+
+    matcher = _compile_keep_in_fp32_matcher(
+        model, attrs=("_keep_in_fp32_modules_strict",)
+    )
+    if matcher is None:
+        return None
+
+    names = [
+        name for name, _ in model.named_parameters() if matcher(name)
+    ]
+    names.extend(name for name, _ in model.named_buffers() if matcher(name))
+    return names or None
 
 
 def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
@@ -1093,36 +1118,42 @@ def _check_defuser_version() -> None:
 
 def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     _check_defuser_version()
-    converted = defuser.convert_model(model, cleanup_original=cleanup_original)
+    # Defuser's conversion flushes the accelerator cache through
+    # `clear_memory()`, which synchronizes the *current* device when no device
+    # list is supplied. Scope that call to the devices this model actually
+    # occupies so a CPU/meta conversion does not claim cuda:0 on the way to
+    # cuda:1 (#5105).
+    with defuser_conversion_scope(model):
+        converted = defuser.convert_model(model, cleanup_original=cleanup_original)
 
-    # Defuser gates `convert_model()` on its own model registry. Model types
-    # that GPT-QModel supports through the generic Transformers experts
-    # interface (native Kimi-Linear / MiMo-V2-Flash) have no registry entry,
-    # so run Defuser's generic replacement pass explicitly instead of leaving
-    # the fused 3-D expert parameters unquantized.
-    if not converted and getattr(cls, "defuser_generic_experts", False):
-        from defuser.modeling.update_module import update_module
+        # Defuser gates `convert_model()` on its own model registry. Model types
+        # that GPT-QModel supports through the generic Transformers experts
+        # interface (native Kimi-Linear / MiMo-V2-Flash) have no registry entry,
+        # so run Defuser's generic replacement pass explicitly instead of leaving
+        # the fused 3-D expert parameters unquantized.
+        if not converted and getattr(cls, "defuser_generic_experts", False):
+            from defuser.modeling.update_module import update_module
 
-        update_module(model, cleanup_original=cleanup_original)
-        converted = True
+            update_module(model, cleanup_original=cleanup_original)
+            converted = True
 
-    defuser_module_paths = getattr(cls, "defuser_module_paths", ())
-    if defuser_module_paths:
-        for module_path in defuser_module_paths:
-            module, _ = get_module_by_name_prefix(model, module_path)
-            if module is None:
-                log.warn("Loader: defuser module path `%s` was not found.", module_path)
-                continue
-            converted = defuser.convert_model(module, cleanup_original=cleanup_original) or converted
+        defuser_module_paths = getattr(cls, "defuser_module_paths", ())
+        if defuser_module_paths:
+            for module_path in defuser_module_paths:
+                module, _ = get_module_by_name_prefix(model, module_path)
+                if module is None:
+                    log.warn("Loader: defuser module path `%s` was not found.", module_path)
+                    continue
+                converted = defuser.convert_model(module, cleanup_original=cleanup_original) or converted
 
-    after_conversion = getattr(cls, "after_defuser_conversion", None)
-    # Model-specific finalizers may also normalize metadata that Defuser does
-    # not own. Run them after the conversion attempt even when the installed
-    # Defuser has no matching registration and reports no structural change.
-    if callable(after_conversion):
-        after_conversion(model)
+        after_conversion = getattr(cls, "after_defuser_conversion", None)
+        # Model-specific finalizers may also normalize metadata that Defuser does
+        # not own. Run them after the conversion attempt even when the installed
+        # Defuser has no matching registration and reports no structural change.
+        if callable(after_conversion):
+            after_conversion(model)
 
-    return converted
+        return converted
 
 
 # Fused expert projections that Defuser splits from one 3-D tensor into a
@@ -3539,10 +3570,13 @@ def ModelLoader(cls):
             load_extra_kwargs["offload_buffers"] = offload_kwargs["offload_buffers"]
 
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
+        keep_in_fp32_strict_modules = _model_keep_in_fp32_strict_names(model)
+
         if format_code in [FORMAT.GPTQ, FORMAT.GEMM, FORMAT.PARO]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,
+                keep_in_fp32_strict_modules=keep_in_fp32_strict_modules,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
@@ -3648,6 +3682,7 @@ def ModelLoader(cls):
                 model,
                 dtype=dtype,
                 keep_in_fp32_modules=keep_in_fp32_modules or None,
+                keep_in_fp32_strict_modules=keep_in_fp32_strict_modules,
                 fp32_bf16_buffer_names=fp32_bf16_buffer_names,
                 packed_fp8_buffer_dtypes=packed_fp8_buffer_dtypes,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
