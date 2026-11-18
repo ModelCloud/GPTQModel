@@ -7,12 +7,6 @@ import pytest
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
-from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
-    DeepseekV4ForCausalLM,
-    DeepseekV4HyperHead,
-    DeepseekV4RMSNorm,
-)
 
 from gptqmodel.looper.exllamav3_processor import EXL3Processor
 from gptqmodel.looper.named_module import NamedModule
@@ -35,6 +29,12 @@ from gptqmodel.models.definitions.deepseek_v4 import (
     expected_deepseek_v4_mtp_checkpoint_keys,
     patch_deepseek_v4_router_precision,
     validate_deepseek_v4_mtp_checkpoint_keys,
+)
+from gptqmodel.models.ports.native.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
+from gptqmodel.models.ports.native.deepseek_v4.modeling_deepseek_v4 import (
+    DeepseekV4ForCausalLM,
+    DeepseekV4HyperHead,
+    DeepseekV4RMSNorm,
 )
 from gptqmodel.nn_modules.hooked_linear import HookedLinear
 from gptqmodel.quantization.config import AutoModuleDecoderConfig, EXL3Config

@@ -10,18 +10,16 @@ from safetensors.torch import save_file
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from torch.nn import functional as F
-from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
-    DeepseekV4Config,
-    DeepseekV4ForCausalLM,
-    PreTrainedTokenizerFast,
-)
+from transformers import PreTrainedTokenizerFast
 
 from gptqmodel import GPTQModel
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.deepseek_v4 import DeepSeekV4QModel
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.local import LocalModelLoader
+from gptqmodel.models.ports.native.auto import CONFIG_MAPPING, MODEL_FOR_CAUSAL_LM_MAPPING
+from gptqmodel.models.ports.native.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
+from gptqmodel.models.ports.native.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM
 from gptqmodel.quantization.config import FORMAT, AWQConfig, CalibrationConfig
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 
@@ -179,8 +177,9 @@ def checkpoint(tmp_path):
 def test_v4_uses_exact_native_mapping_without_inherited_v3_trust():
     assert {key for key, value in MODEL_MAP.items() if value is DeepSeekV4QModel} == {"deepseek_v4"}
     assert not DeepSeekV4QModel.require_trust_remote_code
-    assert AutoConfig.for_model("deepseek_v4").__class__ is DeepseekV4Config
-    assert AutoModelForCausalLM._model_mapping[DeepseekV4Config] is DeepseekV4ForCausalLM
+    assert isinstance(DeepSeekV4QModel.loader, LocalModelLoader)
+    assert CONFIG_MAPPING["deepseek_v4"] is DeepseekV4Config
+    assert MODEL_FOR_CAUSAL_LM_MAPPING["deepseek_v4"] is DeepseekV4ForCausalLM
     assert isinstance(DeepSeekV4QModel.loader.from_config(tiny_config()), DeepseekV4ForCausalLM)
 
 
