@@ -43,6 +43,7 @@ from transformers.modeling_rope_utils import (
     dynamic_rope_update,
 )
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, logging, torch_compilable_check
 from transformers.utils.generic import merge_with_config_defaults
@@ -443,7 +444,7 @@ class Llama4TextDecoderLayer(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class Llama4PreTrainedModel(PreTrainedModel):
+class Llama4PreTrainedModel(NativePreTrainedModel):
     config: Llama4Config
     input_modalities = ("image", "text")
     supports_gradient_checkpointing = True

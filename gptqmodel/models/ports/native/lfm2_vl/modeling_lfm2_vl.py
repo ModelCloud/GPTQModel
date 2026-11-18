@@ -30,6 +30,7 @@ from transformers.cache_utils import Cache
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, BaseModelOutputWithPooling, ModelOutput
 from transformers.modeling_utils import PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, torch_compilable_check
 from ..auto import AutoModel
@@ -76,7 +77,7 @@ class Lfm2VlMultiModalProjector(nn.Module):
 
 
 @auto_docstring
-class Lfm2VlPreTrainedModel(PreTrainedModel):
+class Lfm2VlPreTrainedModel(NativePreTrainedModel):
     config: Lfm2VlConfig
     base_model_prefix = "model"
     input_modalities = ("image", "text")

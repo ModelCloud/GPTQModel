@@ -38,6 +38,7 @@ from transformers.modeling_outputs import (
     TokenClassifierOutput,
 )
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.pytorch_utils import Conv1D
 from transformers.utils import (
     ModelOutput,
@@ -410,7 +411,7 @@ class GPT2SequenceSummary(nn.Module):
 
 
 @auto_docstring
-class GPT2PreTrainedModel(PreTrainedModel):
+class GPT2PreTrainedModel(NativePreTrainedModel):
     config: GPT2Config
     base_model_prefix = "transformer"
     supports_gradient_checkpointing = True

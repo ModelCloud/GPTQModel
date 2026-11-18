@@ -12,11 +12,3 @@ class DeepseekV3ForCausalLM(NativeDeepseekV3ForCausalLM):
     def __init__(self, config):
         validate_kimi_k2_config(config)
         super().__init__(config)
-
-    @classmethod
-    def is_custom_code(cls):
-        # Transformers skips its checkpoint conversion map (per-expert -> fused
-        # experts) for classes outside transformers.*. The vendored family keeps
-        # the native DeepSeek-V3 tensor ABI, so it keeps that conversion. This
-        # only declares serialization layout; LocalModelLoader owns class selection.
-        return False

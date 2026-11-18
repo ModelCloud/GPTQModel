@@ -37,6 +37,7 @@ from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, BaseModelOutputWithPooling, CausalLMOutputWithPast
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
+from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are library code, not custom code
 from transformers.processing_utils import Unpack
 from transformers.utils import (
     ModelOutput,
@@ -1334,7 +1335,7 @@ class Gemma3nTextDecoderLayer(GradientCheckpointingLayer):
 
 
 @auto_docstring
-class Gemma3nPreTrainedModel(PreTrainedModel):
+class Gemma3nPreTrainedModel(NativePreTrainedModel):
     config: Gemma3nConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
