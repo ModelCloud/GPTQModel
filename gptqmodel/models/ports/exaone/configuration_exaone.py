@@ -2,7 +2,7 @@
 # Copyright 2026 The LG AI Research and HuggingFace Inc. team. All rights reserved.
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""EXAONE 3 configuration adapted for Transformers 5; see PROVENANCE.md."""
+"""EXAONE 3 configuration adapted for Transformers 5; see NOTICE."""
 
 from copy import deepcopy
 
