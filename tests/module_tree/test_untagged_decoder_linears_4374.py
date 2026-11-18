@@ -261,7 +261,7 @@ def test_nemotron_h_latent_moe_projections_are_declared_and_ordered():
 
 
 def _tiny_qwen4_exp_text_config():
-    from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
+    from gptqmodel.models.ports.native.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
 
     return Qwen4ExpTextConfig(
         vocab_size=64,
@@ -296,7 +296,7 @@ def _tiny_qwen4_exp_text_config():
 
 
 def _tiny_qwen4_exp_config():
-    from transformers.models.qwen4_exp.configuration_qwen4_exp import (
+    from gptqmodel.models.ports.native.qwen4_exp.configuration_qwen4_exp import (
         Qwen4ExpConfig,
         Qwen4ExpVisionConfig,
     )

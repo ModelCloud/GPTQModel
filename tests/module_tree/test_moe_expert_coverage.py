@@ -39,6 +39,10 @@ def _auto_config(model_type, **kwargs):
     loader = getattr(MODEL_MAP.get(model_type), "loader", None)
     if isinstance(loader, LocalModelLoader) and loader.config_class.startswith("gptqmodel.models.ports.native."):
         return NativeAutoConfig.for_model(model_type, **kwargs)
+    if model_type == "bailing_hybrid":
+        # The package-owned Bailing loader routes vendored native hybrid configs
+        # to the vendored Transformers 5.23 hybrid model.
+        return NativeAutoConfig.for_model(model_type, **kwargs)
     return transformers.AutoConfig.for_model(model_type, **kwargs)
 
 
