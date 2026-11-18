@@ -39,7 +39,7 @@
 - **Models:** Added [SenseNova-Loop 9B](docs/supported-models.md) quantization and [Decision Transformer](docs/decision-transformer-calibration.md) quantization from trajectory tensors without a tokenizer. Fixed checkpoint round trips for Qwen2.5-Omni, Qwen3-Omni, and InternVL.
 - **Calibration:** Fixed token positions and masks for padded and multimodal batches, preserved tool and document context when rendering calibration chats, and kept AWQ scaling for MoE experts that received calibration tokens even when other experts received none.
 - **Quantization:** Reduced GPU memory use in GPTQ and EXL3, restored checkpoint resume for NF12 and MACaQ, and fixed [failed or cancelled runs](docs/cancelled-run-contract.md) leaving models unable to run inference.
-- **Inference:** `optimize()` now compiles the forward pass used by generation, and compiled models release VRAM when deleted. EXL3 uses its fast native path for BF16 inputs, and Paro automatically selects its native Triton kernel on ROCm.
+- **Inference:** `optimize()` now compiles the forward pass used by generation, and compiled models release VRAM when deleted. Supported CPU quantized kernels now run with [`torch.compile` and Inductor](docs/kernel-compile-matrix.md) without graph breaks. EXL3 uses its fast native path for BF16 inputs, and Paro automatically selects its native Triton kernel on ROCm.
 - **GGUF:** Added ggml 1.0 support, including reading and dequantizing FP8 E4M3 tensors. The `gguf` extra now requires `llama-cpp-python>=0.3.37`.
 - **Compat:** Fixed CPU offload for GPTQ and AWQ checkpoints loaded through Transformers, added CPU readers for AWQ GEMV_FAST and LLM_AWQ, and repaired MLX export for AWQ GEMV checkpoints on GPU hosts.
 
