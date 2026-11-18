@@ -236,18 +236,17 @@ def test_cpu_feature_detection_requires_vbmi(monkeypatch):
     monkeypatch.setattr(cpu_features.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(Path, "read_text", lambda self, *args, **kwargs: flags)
 
-    has_avx512_bf16.cache_clear()
-    try:
-        assert not has_avx512_bf16()
-        monkeypatch.setattr(
-            Path,
-            "read_text",
-            lambda self, *args, **kwargs: flags + " avx512vbmi",
-        )
-        has_avx512_bf16.cache_clear()
-        assert has_avx512_bf16()
-    finally:
-        has_avx512_bf16.cache_clear()
+    # The probe result is memoized in a module global; monkeypatch resets it
+    # for this test and restores the host's real answer afterwards.
+    monkeypatch.setattr(cpu_features, "_AVX512_BF16", None)
+    assert not has_avx512_bf16()
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda self, *args, **kwargs: flags + " avx512vbmi",
+    )
+    monkeypatch.setattr(cpu_features, "_AVX512_BF16", None)
+    assert has_avx512_bf16()
 
 
 def test_cpu_feature_detection_requires_xsave(monkeypatch):
@@ -259,11 +258,8 @@ def test_cpu_feature_detection_requires_xsave(monkeypatch):
     monkeypatch.setattr(cpu_features.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(Path, "read_text", lambda self, *args, **kwargs: flags)
 
-    has_avx512_bf16.cache_clear()
-    try:
-        assert not has_avx512_bf16()
-    finally:
-        has_avx512_bf16.cache_clear()
+    monkeypatch.setattr(cpu_features, "_AVX512_BF16", None)
+    assert not has_avx512_bf16()
 
 
 @pytest.mark.parametrize(
