@@ -128,14 +128,13 @@ def _build_calibration_dataset(tokenizer: PreTrainedTokenizerFast, pad_tail: int
     return dataset
 
 
-def test_jamba_registry_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="jamba")
+def test_jamba_registry_selects_definition(tmp_path):
+    from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    CONFIG_MAPPING["jamba"]().save_pretrained(tmp_path)
 
     assert auto.MODEL_MAP["jamba"] is JambaQModel
-    assert auto.check_and_get_model_definition("/tmp/jamba", trust_remote_code=False) is JambaQModel
+    assert auto.check_and_get_model_definition(str(tmp_path), trust_remote_code=False) is JambaQModel
 
 
 def test_jamba_definition_contract_and_module_tree():
