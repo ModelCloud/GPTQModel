@@ -117,14 +117,45 @@ def _synthetic_audio(sample_rate: int = 16000) -> np.ndarray:
     return np.sin(2 * np.pi * 440 * timeline / sample_rate).astype(np.float32)
 
 
-def test_qwen2_audio_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="qwen2_audio")
+def test_qwen2_audio_model_type_selects_definition(tmp_path):
+    from gptqmodel.models.ports.native.auto import CONFIG_MAPPING
 
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    CONFIG_MAPPING["qwen2_audio"](**_tiny_qwen2_audio_config().to_diff_dict()).save_pretrained(tmp_path)
 
-    assert auto.check_and_get_model_definition("/tmp/qwen2-audio") is Qwen2AudioGPTQ
+    assert auto.check_and_get_model_definition(str(tmp_path)) is Qwen2AudioGPTQ
     assert auto.MODEL_MAP["qwen2_audio"] is Qwen2AudioGPTQ
+
+
+def test_lazy_turtle_maps_nested_qwen2_audio_model_keys_to_checkpoint():
+    # Transformers also applies the `Qwen2AudioModel` class map inside the
+    # nested `model.` submodule: the checkpoint stores the text decoder as
+    # `language_model.model.*`. Without that scoped rule LazyTurtle looked for
+    # `language_model.embed_tokens.weight` and left embed_tokens on meta.
+    from gptqmodel.models.ports.native.qwen2_audio.configuration_qwen2_audio import (
+        Qwen2AudioConfig as NativeQwen2AudioConfig,
+    )
+    from gptqmodel.models.ports.native.qwen2_audio.modeling_qwen2_audio import (
+        Qwen2AudioForConditionalGeneration as NativeQwen2AudioForConditionalGeneration,
+    )
+    from gptqmodel.utils.structure import LazyTurtle
+
+    config = NativeQwen2AudioConfig(**_tiny_qwen2_audio_config().to_diff_dict())
+    with torch.device("meta"):
+        model = NativeQwen2AudioForConditionalGeneration(config)
+
+    renamings = LazyTurtle.infer_hf_conversion_map_reversed(target_model=model)
+
+    def to_checkpoint(name):
+        for renaming in renamings:
+            name, _ = renaming.rename_source_key(name)
+        return name
+
+    assert to_checkpoint("model.language_model.embed_tokens.weight") == "language_model.model.embed_tokens.weight"
+    assert to_checkpoint("model.language_model.layers.0.mlp.up_proj.weight") == (
+        "language_model.model.layers.0.mlp.up_proj.weight"
+    )
+    assert to_checkpoint("model.audio_tower.conv1.weight") == "audio_tower.conv1.weight"
+    assert to_checkpoint("lm_head.weight") == "language_model.lm_head.weight"
 
 
 def test_qwen2_audio_definition_metadata():
