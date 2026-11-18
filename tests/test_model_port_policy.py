@@ -29,8 +29,8 @@ PENDING_NATIVE_DEFINITIONS = frozenset({
 })
 
 PENDING_MODEL_IMPORT_PORTS = frozenset({
-    "chatglm", "deepseek_v3", "ernie4_5_vl_moe", "exaone4", "internvl_chat", "kimi_k3", "lfm3_vl", "llama", "mimo",
-    "minicpm_o", "nemotron_h_puzzle", "ovis2_6_moe", "phi4", "qwen2_vl", "unlimited_ocr",
+    "chatglm", "ernie4_5_vl_moe", "internvl_chat", "kimi_k3", "lfm3_vl", "llama", "mimo", "minicpm_o",
+    "nemotron_h_puzzle", "ovis2_6_moe", "unlimited_ocr",
 })
 
 PENDING_STALE_PATTERN_PORTS = frozenset({
