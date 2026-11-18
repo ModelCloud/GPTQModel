@@ -1,12 +1,8 @@
 GPT-QModel Ouro Transformers 5 port
 
 Adapted from ByteDance's Ouro-1.4B, Ouro-2.6B, Ouro-1.4B-Thinking and
-Ouro-2.6B-Thinking configuration/modeling sources. Exact Hugging Face repository
-revisions and source SHA-256 hashes are recorded in source_manifest.json.
-The upstream model cards declare Apache-2.0; configuration_ouro.py includes
-the Apache-2.0 notice reproduced in the port's source header and LICENSE.
-The checkpoint repositories inspected do not contain a standalone LICENSE file;
-LICENSE reproduces the canonical Apache License, Version 2.0 text.
+Ouro-2.6B-Thinking configuration/modeling sources. The upstream model cards
+declare Apache-2.0; see the repository root LICENSE for the license text.
 
 The upstream configuration derives from Qwen2:
 Copyright 2024 The Qwen team, Alibaba Group and the HuggingFace Inc. team.

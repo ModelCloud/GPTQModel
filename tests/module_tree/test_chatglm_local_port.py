@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real ChatGLM state_dict checkpoint ownership, aliases and layout variants."""
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,18 +21,20 @@ from tests.test_chatglm_local_port import _config
 
 @pytest.mark.parametrize("checkpoint", ["THUDM/chatglm2-6b", "THUDM/chatglm3-6b", "THUDM/glm-4-9b-chat"])
 def test_chatglm_pinned_checkpoint_exact_weight_contract(checkpoint):
-    from gptqmodel.models.ports.chatglm import __file__ as package_file
     from gptqmodel.models.ports.chatglm.configuration_chatglm import ChatGLMConfig
-    contracts = json.loads(Path(package_file).with_name("checkpoint_contracts.json").read_text())
+    contracts = json.loads((Path(__file__).parents[1] / "fixtures/ports/chatglm/checkpoint_contracts.json").read_text())
     reference = contracts[checkpoint]
     config = ChatGLMConfig.from_dict(reference["config"])
     with torch.device("meta"):
         model = ChatGLMQModel.loader.from_config(config)
-    assert set(model.state_dict()) == set(reference["checkpoint_keys"])
+    # Digest of the sorted released safetensors key inventory at the pinned revision.
+    keys = sorted(model.state_dict())
+    assert len(keys) == reference["key_count"]
+    assert hashlib.sha256("\n".join(keys).encode()).hexdigest() == reference["keys_sha256"]
     plan = ModulePlan.from_tree(ChatGLMQModel.module_tree)
     declared = {name for group in ChatGLMQModel.simple_layer_modules(config, SimpleNamespace(dynamic=None))
                 for name in group}
-    for name in reference["checkpoint_keys"]:
+    for name in keys:
         if not name.startswith("transformer.encoder.layers."):
             continue
         relative = ".".join(name.split(".")[4:-1])

@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: 2024 Zhipu AI
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0 AND MIT
-# Adapted from pinned THUDM ChatGLM sources; see PROVENANCE.md.
-"""ChatGLM2/3 sequence-first checkpoint computation (THUDM revision in PROVENANCE.md)."""
+# Adapted from THUDM ChatGLM sources.
+"""ChatGLM2/3 sequence-first checkpoint computation."""
 import math
 from typing import List, Optional
 
@@ -228,20 +228,6 @@ class SelfAttention(torch.nn.Module):
                                device=device, **_config_to_kwargs(config)
                                )
 
-    def _allocate_memory(self, inference_max_sequence_len, batch_size, device=None, dtype=None):
-        if self.multi_query_attention:
-            num_attention_heads = self.num_multi_query_groups_per_partition
-        else:
-            num_attention_heads = self.num_attention_heads_per_partition
-        return torch.empty(
-            inference_max_sequence_len,
-            batch_size,
-            num_attention_heads,
-            self.hidden_size_per_attention_head,
-            dtype=dtype,
-            device=device,
-        )
-
     def forward(
             self, hidden_states, attention_mask, rotary_pos_emb, kv_cache=None, use_cache=True
     ):
@@ -391,6 +377,8 @@ class GLMBlock(torch.nn.Module):
     output of the same size.
     """
 
+    attention_class = SelfAttention
+
     def __init__(self, config: ChatGLMConfig, layer_number, device=None):
         super(GLMBlock, self).__init__()
         self.layer_number = layer_number
@@ -405,7 +393,7 @@ class GLMBlock(torch.nn.Module):
                                              dtype=config.dtype)
 
         # Self attention.
-        self.self_attention = SelfAttention(config, layer_number, device=device)
+        self.self_attention = self.attention_class(config, layer_number, device=device)
         self.hidden_dropout = config.hidden_dropout
 
         # Layernorm on the attention output
@@ -469,6 +457,8 @@ class GLMBlock(torch.nn.Module):
 class GLMTransformer(torch.nn.Module):
     """Transformer class."""
 
+    block_class = GLMBlock
+
     def __init__(self, config: ChatGLMConfig, device=None):
         super(GLMTransformer, self).__init__()
 
@@ -480,7 +470,7 @@ class GLMTransformer(torch.nn.Module):
 
         # Transformer layers.
         def build_layer(layer_number):
-            return GLMBlock(config, layer_number, device=device)
+            return self.block_class(config, layer_number, device=device)
 
         self.layers = torch.nn.ModuleList([build_layer(i + 1) for i in range(self.num_layers)])
 
