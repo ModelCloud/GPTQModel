@@ -43,10 +43,8 @@ class MiMoMTPLayers(nn.Module):
         attention_mask: torch.Tensor | None,
         position_ids: torch.Tensor | None = None,
         past_key_values: Cache | None = None,
-        output_attentions: bool = False,
         use_cache: bool = False,
         position_embedding: tuple[torch.Tensor, torch.Tensor] | None = None,
-        cache_position=None,
         *,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs,
@@ -68,7 +66,6 @@ class MiMoMTPLayers(nn.Module):
             position_embeddings=position_embeddings,
             past_key_values=past_key_values,
             position_ids=position_ids,
-            output_attentions=output_attentions,
             use_cache=use_cache,
             **kwargs,
         )

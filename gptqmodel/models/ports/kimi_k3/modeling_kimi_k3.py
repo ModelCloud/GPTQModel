@@ -1188,7 +1188,3 @@ class KimiK3ForConditionalGeneration(KimiK3PreTrainedModel, GenerationMixin):
         )
         model_kwargs.update(pixel_values=pixels, grid_thws=grids)
         return input_ids, model_kwargs
-
-    def _reorder_cache(self, past_key_values, beam_idx):
-        past_key_values.reorder_cache(beam_idx)
-        return past_key_values
