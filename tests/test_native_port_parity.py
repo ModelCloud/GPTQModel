@@ -122,3 +122,92 @@ def test_every_vendored_family_has_parity_coverage():
     # No Transformers 5.23 model tester exists for these; they need hand-written parity tests.
     without_tester = {"bart", "llama4", "opt"}
     assert families - without_tester <= set(CASES), sorted(families - without_tester - set(CASES))
+
+
+# Llama4 has no Transformers 5.23 model tester, so its parity check is hand-written: tiny text-only and
+# conditional-generation (vision + MoE text) configs, default dict outputs plus every optional output path.
+LLAMA4_TEXT = {
+    "vocab_size": 99, "hidden_size": 32, "intermediate_size": 37, "intermediate_size_mlp": 64,
+    "num_hidden_layers": 4, "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 8,
+    "num_local_experts": 4, "num_experts_per_tok": 1, "interleave_moe_layer_step": 2, "attention_chunk_size": 4,
+    "max_position_embeddings": 64, "pad_token_id": 0, "no_rope_layer_interval": 2, "floor_scale": 4,
+}
+LLAMA4_VISION = {
+    "hidden_size": 16, "num_hidden_layers": 2, "num_attention_heads": 2, "intermediate_size": 64,
+    "vision_output_dim": 32, "image_size": 16, "patch_size": 4, "projector_input_dim": 32,
+    "projector_output_dim": 32, "pixel_shuffle_ratio": 0.5,
+}
+LLAMA4_IMAGE_TOKEN = 98
+LLAMA4_CALL_VARIANTS = (
+    {},
+    {"output_hidden_states": True, "output_attentions": True},
+    {"return_dict": False},
+)
+
+
+def _llama4_config(config_module, name):
+    if name == "Llama4TextConfig":
+        return config_module.Llama4TextConfig(**LLAMA4_TEXT, attn_implementation="eager")
+    return config_module.Llama4Config(
+        text_config=dict(LLAMA4_TEXT), vision_config=dict(LLAMA4_VISION),
+        image_token_index=LLAMA4_IMAGE_TOKEN, attn_implementation="eager",
+    )
+
+
+def _llama4_inputs(model_name):
+    pixel_values = torch.randn(2, 3, 16, 16, generator=torch.Generator().manual_seed(1))
+    if model_name == "Llama4VisionModel":
+        return {"pixel_values": pixel_values}
+    input_ids = torch.randint(1, 90, (2, 9), generator=torch.Generator().manual_seed(0))
+    if model_name != "Llama4ForConditionalGeneration":
+        return {"input_ids": input_ids}
+    input_ids[:, 1:5] = LLAMA4_IMAGE_TOKEN  # 4 tokens per 16x16 image after pixel shuffle
+    return {"input_ids": input_ids, "pixel_values": pixel_values}
+
+
+@pytest.mark.parametrize("model_name", [
+    "Llama4TextModel", "Llama4ForCausalLM", "Llama4VisionModel", "Llama4ForConditionalGeneration",
+])
+def test_vendored_llama4_matches_transformers(model_name, tmp_path):
+    native_config_module = importlib.import_module("transformers.models.llama4.configuration_llama4")
+    vendored_config_module = importlib.import_module("gptqmodel.models.ports.native.llama4.configuration_llama4")
+    config_name = "Llama4TextConfig" if model_name in {"Llama4TextModel", "Llama4ForCausalLM"} else "Llama4Config"
+    native_config = _llama4_config(native_config_module, config_name)
+    vendored_config = _llama4_config(vendored_config_module, config_name)
+    assert type(vendored_config) is not type(native_config)
+    if model_name == "Llama4VisionModel":
+        native_config, vendored_config = native_config.vision_config, vendored_config.vision_config
+
+    native_class, vendored_class = _classes("llama4", "modeling_llama4", model_name)
+    torch.manual_seed(0)
+    native = native_class(native_config).eval()
+    torch.manual_seed(0)
+    vendored = vendored_class(vendored_config).eval()
+    native_state = native.state_dict()
+    assert list(vendored.state_dict()) == list(native_state)
+    vendored.load_state_dict(native_state, strict=True)
+    for key, buffer in native.named_buffers():
+        vendored.get_buffer(key).copy_(buffer)
+
+    inputs = _llama4_inputs(model_name)
+    for variant in LLAMA4_CALL_VARIANTS:
+        with torch.no_grad():
+            expected_output = native(**inputs, **variant)
+            actual_output = vendored(**inputs, **variant)
+        assert type(actual_output).__name__ == type(expected_output).__name__, variant
+        expected, actual = _flatten(expected_output), _flatten(actual_output)
+        assert expected and len(actual) == len(expected), variant
+        for index, (want, got) in enumerate(zip(expected, actual)):
+            assert torch.equal(want, got), f"{model_name} {variant}: output {index} differs"
+
+    # A Transformers-saved checkpoint must load into the vendored class with identical outputs.
+    checkpoint = tmp_path / model_name
+    native.save_pretrained(checkpoint)
+    native_loaded = native_class.from_pretrained(checkpoint).eval()
+    loaded = vendored_class.from_pretrained(checkpoint, config=type(vendored_config).from_pretrained(checkpoint)).eval()
+    assert type(loaded) is vendored_class
+    with torch.no_grad():
+        expected, actual = _flatten(native_loaded(**inputs)), _flatten(loaded(**inputs))
+    assert expected and len(actual) == len(expected)
+    for index, (want, got) in enumerate(zip(expected, actual)):
+        assert torch.equal(want, got), f"{model_name}: output {index} differs after loading a Transformers checkpoint"
