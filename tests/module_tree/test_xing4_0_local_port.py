@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Actual Xing4.0 checkpoint inventory, live owners and conservative AWQ contract."""
 
-import gzip
 import hashlib
 import json
 from types import SimpleNamespace
@@ -15,19 +14,20 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.ports.xing4_0.configuration_xing4_0 import Xing4_0Config
 from gptqmodel.models.ports.xing4_0.modeling_xing4_0 import Xing4_0ForCausalLM
 from gptqmodel.quantization.config import AWQConfig
+from tests.port_assets import read_port_asset, read_port_json
 from tests.test_xing4_0_local_port import ASSETS, tiny_config, tiny_model
 
 
 def test_pinned_header_index_and_asset_hashes():
     manifest = json.loads((ASSETS / "source_manifest.json").read_text())
-    inventory = json.loads(gzip.decompress((ASSETS / "inventory.json.gz").read_bytes()))
-    index_bytes = gzip.decompress((ASSETS / "model.safetensors.index.json.gz").read_bytes())
+    inventory = read_port_json(ASSETS / "inventory.json")
+    index_bytes = read_port_asset(ASSETS / "model.safetensors.index.json")
     assert hashlib.sha256(index_bytes).hexdigest() == manifest["files"]["model.safetensors.index.json"]["sha256"]
     index = json.loads(index_bytes)["weight_map"]
     headers = json.loads((ASSETS / "header_manifest.json").read_text())
     reconstructed = {}
     for shard, entry in headers.items():
-        raw = gzip.decompress((ASSETS / (shard + ".header.json.gz")).read_bytes())
+        raw = read_port_asset(ASSETS / (shard + ".header.json"))
         assert len(raw) == entry["header_bytes"]
         assert hashlib.sha256(raw).hexdigest() == entry["header_sha256"]
         for name, tensor in json.loads(raw).items():
@@ -39,13 +39,13 @@ def test_pinned_header_index_and_asset_hashes():
     assert reconstructed == inventory
     assert hashlib.sha256((ASSETS.parent / "LICENSE").read_bytes()).hexdigest() == manifest["files"]["LICENSE"]["sha256"]
     for name in ["config.json", "generation_config.json", "chat_template.jinja", "tokenizer_config.json", "tokenizer.model"]:
-        raw = gzip.decompress((ASSETS / (name + ".gz")).read_bytes()) if name == "tokenizer.model" else (ASSETS / name).read_bytes()
+        raw = read_port_asset(ASSETS / name) if name == "tokenizer.model" else (ASSETS / name).read_bytes()
         assert hashlib.sha256(raw).hexdigest() == manifest["files"][name]["sha256"]
 
 
 def test_full_pinned_release_header_inventory_exact_meta():
     config = Xing4_0Config.from_dict(json.loads((ASSETS / "config.json").read_text()))
-    released = json.loads(gzip.decompress((ASSETS / "inventory.json.gz").read_bytes()))
+    released = read_port_json(ASSETS / "inventory.json")
     executed = {name: entry for name, entry in released.items() if not name.startswith("model.layers.40.")}
     assert len(released) == 8307
     assert len(executed) == 8095

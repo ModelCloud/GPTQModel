@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exact real MiniCPM checkpoint inventories and live dense/MoE owners."""
 
-import gzip
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,12 +15,12 @@ from gptqmodel.models.definitions.minicpm import MiniCPMGPTQ
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.minicpm import MiniCPMConfig, MiniCPMForCausalLM
+from tests.port_assets import read_port_json
 from tests.test_minicpm_local_port import _config
 
 
-FIXTURE = Path(__file__).parents[2] / "gptqmodel/models/ports/minicpm/checkpoint_inventories.json.gz"
-with gzip.open(FIXTURE, "rt") as _stream:
-    INVENTORIES = json.load(_stream)
+FIXTURE = Path(__file__).parents[2] / "gptqmodel/models/ports/minicpm/checkpoint_inventories.json"
+INVENTORIES = read_port_json(FIXTURE)
 SOURCES = json.loads((FIXTURE.parent / "source_manifest.json").read_text())["checkpoints"]
 
 

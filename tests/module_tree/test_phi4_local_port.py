@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """The actual legacy phi4mm tensor owners, not the similarly named native layout."""
 
-import gzip
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +14,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.phi4.configuration_phi4 import Phi4MMConfig
 from gptqmodel.models.ports.phi4.modeling_phi4 import Phi4MMForCausalLM
+from tests.port_assets import read_port_json
 from tests.test_phi4_local_port import _config
 
 
@@ -76,7 +75,7 @@ def test_real_legacy_decoder_plan_and_excluded_adapters(kv, device):
 
 def test_complete_pinned_released_tensor_header_inventory():
     root = Path(__file__).parents[2] / "gptqmodel/models/ports/phi4"
-    schema = json.loads(gzip.decompress((root / "released_schema.json.gz").read_bytes()))
+    schema = read_port_json(root / "released_schema.json")
     config = Phi4MMConfig(**schema["config"])
     config._attn_implementation = "eager"
     with torch.device("meta"):

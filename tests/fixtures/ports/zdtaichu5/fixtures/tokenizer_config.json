@@ -1,0 +1,27 @@
+{
+  "add_prefix_space": false,
+  "auto_map": {
+    "AutoProcessor": "processing.ZDTaichu5_0_Processor"
+  },
+  "backend": "tokenizers",
+  "bos_token": null,
+  "clean_up_tokenization_spaces": false,
+  "eos_token": "<|im_end|>",
+  "errors": "replace",
+  "image_end_token": "<|vision_end|>",
+  "image_start_token": "<|vision_start|>",
+  "image_token": "<|image_pad|>",
+  "image_token_id": 248056,
+  "is_local": true,
+  "model_max_length": 262144,
+  "pad_token": "<|endoftext|>",
+  "pretokenize_regex": "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+",
+  "processor_class": "ZDTaichu5_0_Processor",
+  "split_special_tokens": false,
+  "tokenizer_class": "TokenizersBackend",
+  "unk_token": null,
+  "video_token": "<|video_pad|>",
+  "video_token_id": 248057,
+  "vision_bos_token": "<|vision_start|>",
+  "vision_eos_token": "<|vision_end|>"
+}

@@ -216,7 +216,7 @@ nor the shared guard was changed in this unit. No Qwen-Drive case is deselected.
 reason to apply centrally. The sole registry delta is an excluded
 `linear_attn:!` block before its norm/conv/QKV block. The parent owns the stale
 `tests/test_qwen_drive_support.py` migration, central docs/README/PR diagrams and
-package-data inclusion of LICENSE/NOTICE/JSON/gzip/Jinja fixtures. No shared
+package-data inclusion of licenses, notices and runtime assets. No shared
 source or central fixture edits belong to the owned port commit.
 
 Shared prerequisites used for this unit's validation are the parent InternLM1

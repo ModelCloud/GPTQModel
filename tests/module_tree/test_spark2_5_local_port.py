@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real Spark2.5 checkpoint geometry and executable module-plan ownership."""
 
-import gzip
 import hashlib
 import json
 from types import SimpleNamespace
@@ -16,6 +15,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.spark2_5.configuration_spark import Spark2_5Config
 from gptqmodel.models.ports.spark2_5.modeling_spark import Spark2_5ForCausalLM
+from tests.port_assets import read_port_asset
 from tests.test_spark2_5_local_port import FIXTURES, tiny_config
 
 
@@ -25,13 +25,13 @@ def test_all_released_checkpoint_keys_and_shapes_match_exact_meta_model():
         model = Spark2_5ForCausalLM(config)
     expected = json.loads((FIXTURES / "checkpoint_shapes.json").read_text())
     manifest = json.loads((FIXTURES / "source_sha256.json").read_text())["sha256"]
-    index_bytes = gzip.decompress((FIXTURES / "model.safetensors.index.json.gz").read_bytes())
+    index_bytes = read_port_asset(FIXTURES / "model.safetensors.index.json")
     assert hashlib.sha256(index_bytes).hexdigest() == manifest["model.safetensors.index.json"]
     weight_map = json.loads(index_bytes)["weight_map"]
     published = {}
     for shard in sorted(set(weight_map.values())):
         name = shard + ".header.json"
-        payload = gzip.decompress((FIXTURES / (name + ".gz")).read_bytes())
+        payload = read_port_asset(FIXTURES / name)
         assert hashlib.sha256(payload).hexdigest() == manifest[name]
         for key, metadata in json.loads(payload).items():
             if key == "__metadata__":

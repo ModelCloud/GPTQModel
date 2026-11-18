@@ -71,12 +71,11 @@ norms, byte-exact per-head Q/K norm weights, and two exact packed reloads.
 - Marin-32B: `f19b346615212ff9a6d92c10861a9cdb100cbf97`.
 - Qwen3-0.6B: `c1899de289a04d12100db370d81485cdf75e47ca`.
 - `fixtures/manifest.json` records original URL, uncompressed bytes and SHA-256.
-  Gzip fixtures preserve original metadata, tokenizer, model card and license
-  bytes. `headers.json.gz` is a derived tensor-name/shape/dtype inventory from
+  Release tests fetch these files by revision and verify their original bytes. `headers.json` is a derived tensor-name/shape/dtype inventory from
   bounded HTTP range reads of all 14 Marin shards and the single Qwen3 shard.
   No model tensor payload or checkpoint Python was downloaded.
 - See `LICENSE`, `TRANSFORMERS_LICENSE`, `NOTICE` and the retained model cards
-  for attribution. The adapter's code is Apache-2.0. These fixtures do not
+  in the upstream release for attribution. The adapter's code is Apache-2.0. These fixtures do not
   redistribute training datasets or pretrained model tensors.
 
 ## Validation
@@ -141,7 +140,7 @@ qualification is claimed. Existing trained Marin evaluation tests need their
 uncached multi-GB checkpoints and suitable hardware.
 
 The parent integrator owns the shared docs/README/PR diagrams and package-data
-inclusion for `LICENSE`, `NOTICE`, `TRANSFORMERS_LICENSE`, JSON and gzip fixtures.
+inclusion for `LICENSE`, `NOTICE`, `TRANSFORMERS_LICENSE` and runtime JSON.
 The existing registered module plan needs no change. The stale central `marin`
 fusion reason should say: `Raw marin metadata is unqualified; supported
 Marin-32B releases serialize native qwen3 and use its existing fusion contract.`

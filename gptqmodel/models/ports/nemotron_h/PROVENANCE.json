@@ -128,7 +128,7 @@
       "chat_template.jinja": "575fb74f54ed264df9047d0ecce3c98938aae953fb4f50356675706264cbb68a"
     }
   },
-  "fixture_sha256": "163369f57e02a651edb4c25f4e37e68db68486b04d36965b4d3e03664ace1126",
+  "fixture_sha256": "e81db0dcb0fae2ecdbf705deca85836a05bd54d20caa6af71813b818fe459a0e",
   "native_transformers_5.23.0": {
     "configuration_nemotron_h.py": "cc18d1332d8df52f50f6877b9ad3b6ded2493c49ee2578610e0bc69ec05c1ec6",
     "modeling_nemotron_h.py": "d13b26d1adb49f54dd952b9ee11b3b008b79e55792c9e8d1cce9f46c213f6397",

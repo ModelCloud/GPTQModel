@@ -3,7 +3,6 @@
 """Spark2.5 real-model qualification; source oracle is independent of the port."""
 
 import copy
-import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -17,6 +16,7 @@ from gptqmodel.models.definitions.spark2_5 import Spark2_5QModel
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.ports.spark2_5.configuration_spark import Spark2_5Config
 from gptqmodel.models.ports.spark2_5.modeling_spark import Spark2_5ForCausalLM
+from tests.port_assets import has_port_asset, read_port_asset
 
 
 FIXTURES = Path(__file__).parents[1] / "gptqmodel/models/ports/spark2_5/fixtures"
@@ -30,8 +30,8 @@ def test_pinned_source_assets_and_header_exports_are_byte_preserved():
             payload = (FIXTURES.parent / name).read_bytes()
         elif (FIXTURES / name).exists():
             payload = (FIXTURES / name).read_bytes()
-        elif (FIXTURES / (name + ".gz")).exists():
-            payload = gzip.decompress((FIXTURES / (name + ".gz")).read_bytes())
+        elif has_port_asset(FIXTURES / name):
+            payload = read_port_asset(FIXTURES / name)
         else:
             continue
         assert hashlib.sha256(payload).hexdigest() == digest, name
@@ -247,7 +247,7 @@ def write_tokenizer(path, real=False):
     if real:
         manifest = json.loads((FIXTURES / "source_sha256.json").read_text())["sha256"]
         for asset in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "chat_template.jinja"]:
-            data = gzip.decompress((FIXTURES / (asset + ".gz")).read_bytes())
+            data = read_port_asset(FIXTURES / asset)
             assert hashlib.sha256(data).hexdigest() == manifest[asset]
             (path / asset).write_bytes(data)
     else:

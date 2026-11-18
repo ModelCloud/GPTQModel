@@ -3,8 +3,6 @@
 # GPU=-1
 """Real Falcon decoder owners, including the legacy 40B dual-norm layout."""
 
-import gzip
-import json
 from pathlib import Path
 
 import pytest
@@ -17,10 +15,11 @@ from gptqmodel.models.fusable import require_fusable_config
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.rw import RWConfig
+from tests.port_assets import read_port_json
 
 
 PORT = Path(__file__).parents[2] / "gptqmodel/models/ports/rw"
-RELEASES = json.loads(gzip.decompress((PORT / "checkpoint_inventory.json.gz").read_bytes()))
+RELEASES = read_port_json(PORT / "checkpoint_inventory.json")
 EXPECTED_PLAN = {
     "layers": ["transformer.h"],
     "blocks": [

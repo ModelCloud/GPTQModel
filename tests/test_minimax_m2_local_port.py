@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Native M2 and source-matched original MiniMax must remain separate."""
 
-import gzip
 import hashlib
 import json
 import re
@@ -19,6 +18,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 from gptqmodel.utils.security import BYPASS_ENV
+from tests.port_assets import read_port_asset, read_port_json
 
 
 ASSETS = Path(__file__).parents[1] / "gptqmodel/models/ports/minimax_m2"
@@ -304,7 +304,7 @@ def hostile_checkpoint(path, model_type, **kwargs):
 @pytest.mark.parametrize("model_type", ["minimax", "minimax_m2"])
 def test_entire_pinned_checkpoint_inventory_matches_real_meta_model(model_type):
     pins = json.loads((ASSETS / "provenance.json").read_text())[model_type]
-    fixture = (ASSETS / f"{model_type}_checkpoint_keys.txt.gz").read_bytes()
+    fixture = read_port_asset(ASSETS / f"{model_type}_checkpoint_keys.json")
     assert hashlib.sha256(fixture).hexdigest() == pins["fixture_sha256"]
     raw = json.loads((ASSETS / f"{model_type}_released_config.json").read_text())
     if model_type == "minimax":
@@ -313,7 +313,7 @@ def test_entire_pinned_checkpoint_inventory_matches_real_meta_model(model_type):
         config = AutoConfig.for_model(model_type, **{k: v for k, v in raw.items() if k != "model_type"})
     with torch.device("meta"):
         model = MODEL_MAP[model_type].loader.from_config(config)
-    keys = gzip.decompress(fixture).decode().splitlines()
+    keys = read_port_json(ASSETS / f"{model_type}_checkpoint_keys.json")
     key_set = set(keys)
     assert len(keys) == pins["key_count"]
     assert set(source_state(model)) == {key for key in keys if not key.endswith("weight_scale_inv")}

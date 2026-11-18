@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Independent checkpoint inventory and effective plan coverage for physical Ouro layers."""
 
-import gzip
 import json
 from pathlib import Path
 
@@ -13,6 +12,7 @@ from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.ouro import OuroQModel
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.ouro import OuroConfig, OuroForCausalLM
+from tests.port_assets import read_port_json
 
 
 PORT = Path(__file__).resolve().parents[2] / "gptqmodel/models/ports/ouro"
@@ -30,7 +30,7 @@ EXPECTED_BLOCKS = [
 
 @pytest.mark.parametrize("release", ["Ouro-1.4B", "Ouro-2.6B", "Ouro-1.4B-Thinking", "Ouro-2.6B-Thinking"])
 def test_every_pinned_released_key_and_shape_matches_meta(release):
-    fixture = json.loads(gzip.decompress((PORT / "checkpoint_inventory.json.gz").read_bytes()))[release]
+    fixture = read_port_json(PORT / "checkpoint_inventory.json")[release]
     config = OuroConfig(**fixture["config"])
     with torch.device("meta"):
         model = OuroForCausalLM(config)

@@ -15,8 +15,7 @@
       "configuration_ovis2_6.py": "7b93be59b74104b020389eea54c736c6690ca7739193f25052fa66abfcb1248c",
       "special_tokens_map.json": "76862e765266b85aa9459767e33cbaf13970f327a0e88d1c65846c2ddd3a1ecd",
       "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
-      "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
-      "checkpoint_shapes.json.gz": "d8267760475886baac85321db249e505deeb85b8597c4c49da46eeb9752f21bc"
+      "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
     },
     "source_url": "https://huggingface.co/AIDC-AI/Ovis2.6-30B-A3B/tree/44beb8e150b28c7ca537a1673582c64f57d342e3"
   },
@@ -36,8 +35,7 @@
       "configuration_ovis2_6.py": "7b93be59b74104b020389eea54c736c6690ca7739193f25052fa66abfcb1248c",
       "special_tokens_map.json": "76862e765266b85aa9459767e33cbaf13970f327a0e88d1c65846c2ddd3a1ecd",
       "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
-      "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
-      "checkpoint_shapes.json.gz": "5fef3054570b7c7db0277713d832f819cb6dcf8d0a424efe0587fc2c669f0d2b"
+      "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
     },
     "source_url": "https://huggingface.co/AIDC-AI/Ovis2.6-80B-A3B/tree/96dd72344e17f098ba7cbe108e6872d12ba7cbfb"
   },
@@ -49,10 +47,9 @@
     "80B_preprocessor_config.json": "63ff380d3e424f93e6fbca5cc8e74eeed882e96fd6be2b7728aed308f3ad1513",
     "80B_special_tokens_map.json": "76862e765266b85aa9459767e33cbaf13970f327a0e88d1c65846c2ddd3a1ecd",
     "80B_tokenizer_config.json": "2993bc5e4de8167fc82c4dcf7856503df1f956837720293870df1784eb4afa24",
-    "30B_shapes.json.gz": "d8267760475886baac85321db249e505deeb85b8597c4c49da46eeb9752f21bc",
+    "30B_shapes.json": "446beb17af3ef1a68ac759414b59a276389eb5f47305d16b259e7366ae34394c",
     "30B_config.json": "bd9ddef0a9d7fa9bf44a86221b3c8a50fa0c1803951de321111bb3f05614684c",
-    "qwen_tokenizer.json.gz": "211b8a4dffbe4ed45f2f500684b1e5b522e19dd9602464821c9d707ec220f7c8",
-    "80B_shapes.json.gz": "5fef3054570b7c7db0277713d832f819cb6dcf8d0a424efe0587fc2c669f0d2b",
+    "80B_shapes.json": "6360a4ae01a106f4ce4282de08383c663f91da961e9592db1a02ced83562ecc5",
     "30B_preprocessor_config.json": "63ff380d3e424f93e6fbca5cc8e74eeed882e96fd6be2b7728aed308f3ad1513",
     "80B_config.json": "206a0e915a8e8c77576f421758ceac60e802fac3fa0f074a22323a3524ea6582",
     "80B_added_tokens.json": "c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680"

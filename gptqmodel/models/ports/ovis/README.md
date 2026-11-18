@@ -17,7 +17,7 @@ releases. Files were inspected, not imported. `source_manifest.json` records
 SHA-256 digests for the inspected model/config/formatter/processor metadata and
 indices, plus complete safetensors headers where available. It also pins the
 three manually qualified real tokenizer asset sets and generation configs.
-`release_inventory.json.gz` contains the independently read full key sets,
+`release_inventory.json` contains the independently read full key sets,
 configs and available tensor shapes, not weights. Tests compare these with
 actual package-owned meta model state, not a tree-generated fake model.
 

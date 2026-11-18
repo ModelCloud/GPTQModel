@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real released owners, including the entire RADIO and Parakeet checkpoint."""
 
-import gzip
 import json
 import re
 
@@ -16,6 +15,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.nemotron_omni.configuration import NemotronOmniConfig
 from gptqmodel.models.ports.nemotron_omni.modeling import NemotronH_Omni_Reasoning_V3
+from tests.port_assets import read_port_json
 from tests.test_nemotron_omni_local_port import PORT, tiny_model
 
 
@@ -51,7 +51,7 @@ def source_to_runtime_shapes(source):
 
 
 def test_all_released_tensor_shapes_and_defused_owners_match_exactly():
-    source = json.load(gzip.open(PORT / "checkpoint_inventory.json.gz", "rt"))
+    source = read_port_json(PORT / "checkpoint_inventory.json")
     assert len(source) == 7349
     config = NemotronOmniConfig(**json.loads((PORT / "source_config.json").read_text()))
     with torch.device("meta"):

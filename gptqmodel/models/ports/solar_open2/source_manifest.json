@@ -27,7 +27,7 @@
     "shards": 94,
     "keys": 47019,
     "hashes": "header_manifest.json",
-    "inventory": "released_shapes.json.gz",
-    "sha256": "195b9384ef925d692885d29f6f8965b5ac565b66a2416725b3c8e33118d6df96"
+    "inventory": "released_shapes.json",
+    "sha256": "ba341235a4ff639f2ff96477c45f6b378c8374793e323301ff2da9f26d543f03"
   }
 }

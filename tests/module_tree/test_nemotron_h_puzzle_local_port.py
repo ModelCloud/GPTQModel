@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Independent checkpoint inventory and live owner contracts for Puzzle."""
 
-import gzip
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +17,7 @@ from gptqmodel.models.definitions.nemotron_h_puzzle import NemotronHPuzzleQModel
 from gptqmodel.models.fusable import require_fusable_config
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.nemotron_h_puzzle import NemotronHPuzzleConfig, NemotronHPuzzleForCausalLM
+from tests.port_assets import read_port_json
 
 
 PORT = Path(__file__).parents[2] / "gptqmodel/models/ports/nemotron_h_puzzle"
@@ -69,8 +69,7 @@ def test_puzzle_is_not_the_native_homogeneous_architecture():
 
 
 def test_pinned_full_released_decoder_inventory_and_shapes():
-    with gzip.open(PORT / "checkpoint_shapes.json.gz", "rt") as handle:
-        source = json.load(handle)
+    source = read_port_json(PORT / "checkpoint_shapes.json")
     assert source["revision"] == "8fe5546888e9bd03fdbf52d808adebdfca901b52"
     assert len(source["header_sha256"]) == 32
     shapes = source["shapes"]

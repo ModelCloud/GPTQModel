@@ -16,7 +16,7 @@ security bypass. The old checkpoint rotary/mask monkeypatch is removed.
 | [ByteDance/Ouro-2.6B-Thinking](https://huggingface.co/ByteDance/Ouro-2.6B-Thinking/tree/f1edd81e7ac41355db670500ceaf204e0f73af68) | `f1edd81e7ac41355db670500ceaf204e0f73af68` | 533 | 48 |
 
 `source_manifest.json` hashes the inspected configuration, modeling, model-card,
-tokenizer data and raw safetensors headers. `checkpoint_inventory.json.gz` stores
+tokenizer data and raw safetensors headers. `checkpoint_inventory.json` stores
 all four independent header-derived key/shape inventories plus released configs;
 the meta tests compare the complete state dict, not selected projection samples.
 Headers were obtained with HTTP range requests; no trained tensor data was needed.

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Checkpoint-owned original Qwen shapes and actual module-plan consumers."""
 
-import gzip
 import json
 from types import SimpleNamespace
 
@@ -16,6 +15,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.qwen.configuration_qwen import QWenConfig
 from gptqmodel.models.ports.qwen.modeling_qwen import QWenLMHeadModel
+from tests.port_assets import read_port_json
 
 
 EXPECTED_PLAN = {
@@ -51,7 +51,7 @@ def expected_shapes(c):
 @pytest.mark.parametrize("release", ["Qwen-1_8B", "Qwen-7B", "Qwen-14B", "Qwen-72B", "Qwen-7B-Chat"])
 def test_released_indices_headers_exact_live_meta_owners(release):
     manifest = json.loads((ASSETS / "provenance.json").read_text())["releases"][release]
-    headers = json.loads(gzip.decompress((ASSETS / "fixtures/checkpoint_headers.json.gz").read_bytes()))[release]
+    headers = read_port_json(ASSETS / "fixtures/checkpoint_headers.json")[release]
     c = QWenConfig.from_dict(manifest["config"])
     with torch.device("meta"):
         model = QWenLMHeadModel(c)

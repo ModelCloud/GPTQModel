@@ -1953,8 +1953,7 @@
   "fixture_files": {
     "fixtures/released_metadata.json": "0739c9602c9f3426466e8430664f3a2a672f70852ee93fe5f71cb1800f0aec60",
     "fixtures/tokenizer_oracles.json": "04a76e3d8b6a01d735da90686797d8729764e36ca9836b7bbc77aba512eb5cae",
-    "fixtures/checkpoint_headers.json.gz": "d72962ee6b3d2fdf31a08569325c63b133440520b860674b78b896b141e44bca",
-    "fixtures/qwen.tiktoken.gz": "7a1f99c519526afddf3770734f7af45ed80225314b24b85e25dbec18eda75f40"
+    "fixtures/checkpoint_headers.json": "cd5a93905d41b61cd124eaa2c1ddf663dcc70c608c9d770c59971b5edd5aaabd"
   },
   "header_source": "Pinned safetensors first 8-byte LE length and header Range GETs from every index shard; no tensor payloads downloaded.",
   "license_files": {

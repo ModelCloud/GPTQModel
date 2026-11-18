@@ -8,7 +8,7 @@ causal-LM mapping. This is an actual XVERSE port, not a Llama substitution.
 
 `source_manifest.json` pins the inspected official Hugging Face source files
 and their SHA-256s. No upstream Python is downloaded or executed at runtime.
-`checkpoint_inventories.json.gz` contains the independently read checkpoint
+`checkpoint_inventories.json` contains the independently read checkpoint
 indexes and available safetensors headers. The exact live meta-model checks
 compare **37,059 keys** across **13** releases; **21,449** of those entries also
 have actual safetensors-header shapes. An index-only check is not a shape or
@@ -100,8 +100,8 @@ an unrelated tokenizer selected from checkpoint class metadata. Corrective
 legacy JSON normalization belongs exclusively to **Tokenicer**. There is no
 XVERSE-specific token replacement, loader rewrite or fallback to remote code.
 
-Actual unmodified tokenizer/config/special-token/generation assets are retained
-as gzip fixtures, with original-byte hashes in the source manifest. Independent
+The tests use exact tokenizer, config, special-token and generation assets,
+with original-byte hashes in the source manifest. Independent
 exact IDs/decodes/chat prompts in `tokenizer_oracles.json` were obtained using
 **Python 3.11.18, tokenizers 0.15.2, Transformers 4.38.2**, from inspected source
 assets, not this port. They cover Latin, Chinese, whitespace, newlines, special-
@@ -219,7 +219,7 @@ Transformers **5.23.0**, on the Tokenicer source candidate identified above:
 | Original required AWQ/registry baseline, before proposed central fixture | 573 passed, 3 skipped, 1 expected XVERSE excluded-rotary registry mismatch, 9.28 s |
 | Candidate loader/security/processor/AWQ/registry/owned combined run | 874 passed, 4 skipped, 1 stale shared constructor-count assertion, 40.30 s |
 | Combined run plus fusion admission/config/merge, proposed shared changes applied **in memory only** | **1,034 passed, 464 skipped**, 46.71 s |
-| Inspected upstream file SHA-256 controls | All **104** source/metadata files match, plus code license and gzip-asset checks |
+| Inspected upstream file SHA-256 controls | All **104** source/metadata files match, plus code license and release-asset checks |
 | Whole `format/check.sh` / Ruff 0.14.2 | Passed |
 | Owned Ruff formatting / compileall / package discovery / diff checks | Passed |
 | Both Mermaid diagrams, parser 11.12.0 | Passed |

@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import gzip
 import json
 import math
 import shutil
@@ -14,6 +13,7 @@ from gptqmodel.models.definitions.xing4_0 import Xing4_0QModel
 from gptqmodel.models.ports.xing4_0.configuration_xing4_0 import Xing4_0Config
 from gptqmodel.models.ports.xing4_0.modeling_xing4_0 import Xing4_0ForCausalLM
 from gptqmodel.models.ports.xing4_0.tokenization_xing4_0 import Xing4_0Tokenizer
+from tests.port_assets import read_port_asset, read_port_json
 
 
 ASSETS = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/xing4_0/assets"
@@ -174,7 +174,7 @@ def write_assets(path):
     path.mkdir(parents=True, exist_ok=True)
     for name in ["tokenizer_config.json", "chat_template.jinja", "generation_config.json"]:
         shutil.copyfile(ASSETS / name, path / name)
-    (path / "tokenizer.model").write_bytes(gzip.decompress((ASSETS / "tokenizer.model.gz").read_bytes()))
+    (path / "tokenizer.model").write_bytes(read_port_asset(ASSETS / "tokenizer.model"))
 
 
 def checkpoint(path, model=None):
@@ -486,7 +486,7 @@ def test_fp8_release_is_same_architecture_metadata_not_a_second_remote_alias():
     assert config.model_type == "xing4_0"
     assert config.quantization_config["quant_method"] == "fp8"
     assert config.rope_parameters["rope_type"] == "yarn"
-    dense = json.loads(gzip.decompress((ASSETS / "inventory.json.gz").read_bytes()))
+    dense = read_port_json(ASSETS / "inventory.json")
     with torch.device("meta"):
         model = Xing4_0QModel.loader.from_config(config)
     assert type(model) is Xing4_0ForCausalLM

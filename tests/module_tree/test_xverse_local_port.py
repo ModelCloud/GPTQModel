@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pinned release inventories and real dense/routed/shared XVERSE owners."""
 
-import gzip
 import json
 from types import SimpleNamespace
 
@@ -15,10 +14,11 @@ from gptqmodel.models.definitions.xverse import XverseQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.xverse import XverseConfig, XverseForCausalLM
+from tests.port_assets import read_port_json
 from tests.test_xverse_local_port import PORT, tiny_config
 
 
-INVENTORIES = json.loads(gzip.decompress((PORT / "checkpoint_inventories.json.gz").read_bytes()))
+INVENTORIES = read_port_json(PORT / "checkpoint_inventories.json")
 
 
 @pytest.mark.parametrize("release", sorted(INVENTORIES))

@@ -1,0 +1,18 @@
+{
+  "tensor_key_ranges": [
+    ["embed_tokens.weight", [], [151657, 32]],
+    ["layers.{}.input_layernorm.weight", ["0-1"], [32]],
+    ["layers.{}.mlp.down_proj.weight", ["0-1"], [32, 37]],
+    ["layers.{}.mlp.gate_proj.weight", ["0-1"], [37, 32]],
+    ["layers.{}.mlp.up_proj.weight", ["0-1"], [37, 32]],
+    ["layers.{}.post_attention_layernorm.weight", ["0-1"], [32]],
+    ["layers.{}.self_attn.k_proj.bias", ["0-1"], [16]],
+    ["layers.{}.self_attn.k_proj.weight", ["0-1"], [16, 32]],
+    ["layers.{}.self_attn.o_proj.weight", ["0-1"], [32, 32]],
+    ["layers.{}.self_attn.q_proj.bias", ["0-1"], [32]],
+    ["layers.{}.self_attn.q_proj.weight", ["0-1"], [32, 32]],
+    ["layers.{}.self_attn.v_proj.bias", ["0-1"], [16]],
+    ["layers.{}.self_attn.v_proj.weight", ["0-1"], [16, 32]],
+    ["norm.weight", [], [32]]
+  ]
+}

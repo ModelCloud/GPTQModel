@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real TeleChat2 ownership, numerical and lifecycle regressions."""
 
-import gzip
 import json
 import math
 import shutil
@@ -16,6 +15,7 @@ from gptqmodel.models.ports.telechat2.configuration_telechat2 import Telechat2Co
 from gptqmodel.models.ports.telechat2.modeling_telechat2 import Telechat2ForCausalLM
 from gptqmodel.models.ports.telechat2.tokenization_telechat2 import Telechat2Tokenizer
 from gptqmodel.utils.hf import load_model_config
+from tests.port_assets import read_port_asset
 
 
 FIXTURES = Path(__file__).parents[1] / "gptqmodel/models/ports/telechat2/fixtures"
@@ -35,7 +35,7 @@ def _model(**kwargs):
 
 def _assets(path):
     path.mkdir(parents=True, exist_ok=True)
-    (path / "tokenizer.model").write_bytes(gzip.decompress((FIXTURES / "tokenizer.model.gz").read_bytes()))
+    (path / "tokenizer.model").write_bytes(read_port_asset(FIXTURES / "tokenizer.model"))
     shutil.copyfile(FIXTURES / "tokenizer_config.json", path / "tokenizer_config.json")
 
 
@@ -45,7 +45,7 @@ def test_real_source_tokenizer_ids_chat_masks_and_deleted_source_saves(tmp_path,
     oracle = json.loads((FIXTURES / "tokenizer_oracle.json").read_text())[variant]
     _assets(tmp_path)
     if variant == "115B":
-        (tmp_path / "tokenizer.model").write_bytes(gzip.decompress((FIXTURES / "115B-tokenizer.model.gz").read_bytes()))
+        (tmp_path / "tokenizer.model").write_bytes(read_port_asset(FIXTURES / "115B-tokenizer.model"))
         shutil.copyfile(FIXTURES / "115B-tokenizer_config.json", tmp_path / "tokenizer_config.json")
     original = (tmp_path / "tokenizer.model").read_bytes()
     tokenizer = Telechat2Tokenizer.from_pretrained(tmp_path, add_bos_token=bos, add_eos_token=eos)
@@ -81,12 +81,12 @@ def test_real_tokenizer_asset_failure_repair_and_subfolder(tmp_path, variant, tr
     folder = tmp_path / "nested"
     _assets(folder)
     if variant == "115B":
-        (folder / "tokenizer.model").write_bytes(gzip.decompress((FIXTURES / "115B-tokenizer.model.gz").read_bytes()))
+        (folder / "tokenizer.model").write_bytes(read_port_asset(FIXTURES / "115B-tokenizer.model"))
         shutil.copyfile(FIXTURES / "115B-tokenizer_config.json", folder / "tokenizer_config.json")
     elif variant == "telechat1":
         (folder / "tokenizer.model").unlink()
         for name in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"]:
-            (folder / name).write_bytes(gzip.decompress((FIXTURES / ("telechat1-" + name + ".gz")).read_bytes()))
+            (folder / name).write_bytes(read_port_asset(FIXTURES / ("telechat1-" + name)))
     source = folder / ("tokenizer.json" if variant == "telechat1" else "tokenizer.model")
     original = source.read_bytes()
     source.write_bytes(b"corrupt")

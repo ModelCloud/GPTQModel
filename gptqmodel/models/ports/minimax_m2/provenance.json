@@ -7,7 +7,7 @@
       "config.json": "1aabc3ed6909534c7a8fea1163e836d6346f8d7cd5a262550fb6b30ded723cf7",
       "model.safetensors.index.json": "5f92e251fdf23642b6e7fe909867b020361befb0908b5433e29788bec647cb99"
     },
-    "fixture_sha256": "c90cf24231d432d930f41ea5c32aa1e99f39c41bd71de237ab542f1ea5ecdffa"
+    "fixture_sha256": "b48fad7c4c310a42d1222f1726c698278bbfbc31a52ed3774b8ed4405c355397"
   },
   "minimax_m2": {
     "repo": "MiniMaxAI/MiniMax-M2",
@@ -17,7 +17,7 @@
       "config.json": "03d0b726553f72ee799f30f52f77b9292b873714abda76ee7e2683953373db87",
       "model.safetensors.index.json": "27f213c423ab1824390ffb4adad22cdda24809d56d38f0363c0e2090527dfeeb"
     },
-    "fixture_sha256": "719a2c93c344f0d1e3510c2eb97c69e7af946aa7e0c88a5546e9623a3b5bcad9"
+    "fixture_sha256": "27627afa3072e685a7a4ea3f23f2d61658934498d693a6fac2831ed7646cd33d"
   },
   "original_equations": {
     "repo": "MiniMaxAI/MiniMax-Text-01",

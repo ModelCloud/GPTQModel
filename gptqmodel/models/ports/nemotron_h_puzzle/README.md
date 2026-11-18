@@ -66,7 +66,7 @@ pinned at `8fe5546888e9bd03fdbf52d808adebdfca901b52`. No checkpoint Python was
 executed. `source_manifest.json` records SHA-256 of the inspected source/config/
 index/license. The unchanged pinned config is `checkpoint_config.json`.
 
-`checkpoint_shapes.json.gz` contains independently range-read safetensors names
+`checkpoint_shapes.json` contains independently range-read safetensors names
 and shapes, with SHA-256 for each of the 32 headers. All **41,643 decoder keys
 and shapes** match a real full-size meta model exactly (88 layers: 40 Mamba,
 40 MoE, 8 attention). The remaining **1,040 `mtp.*` keys** are auxiliary payload,
@@ -74,8 +74,8 @@ not decoder-owned tensors. MTP execution/speculative decoding is not implemented
 by the inspected source decoder and is not claimed here. Quantized wrapper
 saves preserve this payload instead of silently dropping it.
 
-Run `python scripts/read_nemotron_h_puzzle_checkpoint_headers.py` from the
-repository root to regenerate the inventory from
+Run `python scripts/read_nemotron_h_puzzle_checkpoint_headers.py /tmp/checkpoint_shapes.json` from the
+repository root to export the expanded inventory from
 the pinned Hub index and headers; it never fetches trained tensor bodies. Normal
 runtime and offline tests neither import nor run that script.
 

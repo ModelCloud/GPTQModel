@@ -148,8 +148,7 @@ The registered module plan is unchanged. Central fusion eligibility stays null;
 its reason should read: `Package-owned Spark2.5 packed-QKV/head-gated hybrid
 decoder; fusion executor has not been qualified.` Spark is absent from the
 generic AWQ family set, so no generic plain-family edit is necessary. Shared
-documentation, the main README, PR diagrams and LICENSE/NOTICE/JSON/gzip package
-data are integrated centrally.
+documentation, the main README, PR diagrams and license, notice and runtime package data are integrated centrally.
 
 The parent-owned shared-input fixture must replace its remote config/model
 selection with the package classes. Preserve all existing tiny overrides in

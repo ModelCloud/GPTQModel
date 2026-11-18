@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-import gzip
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +15,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.ovis.configuration_ovis import OvisConfig
 from gptqmodel.models.ports.ovis.modeling_ovis import Ovis
+from tests.port_assets import read_port_json
 from tests.test_ovis_local_port import LAYOUTS, PORT, tiny_config
 
 
@@ -25,7 +25,7 @@ EXPECTED_PLAN = {
                ["self_attn.o_proj"], ["post_attention_layernorm:!"], ["mlp.gate_proj", "mlp.up_proj"], ["mlp.down_proj"]],
 }
 LINEARS = {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"}
-INVENTORY = json.loads(gzip.decompress((PORT / "release_inventory.json.gz").read_bytes()))
+INVENTORY = read_port_json(PORT / "release_inventory.json")
 
 
 def test_exact_native_ovis_absent_and_alias_registry_distinct_from_ovis2():

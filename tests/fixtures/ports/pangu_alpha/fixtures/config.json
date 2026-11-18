@@ -1,0 +1,37 @@
+{
+  "activation_function": "gelu",
+  "architectures": [
+    "GPTPanguForCausalLM"
+  ],
+  "attn_pdrop": 0.1,
+  "bos_token_id": 9,
+  "embd_pdrop": 0.1,
+  "eos_token_id": 9,
+  "hidden_size": 2560,
+  "initializer_range": 0.02,
+  "intermediate_size": null,
+  "layer_norm_epsilon": 1e-05,
+  "max_position_embeddings": 1024,
+  "model_type": "gpt_pangu",
+  "num_heads": 32,
+  "num_layers": 32,
+  "resid_pdrop": 0.1,
+  "scale_attn_weights": true,
+  "summary_activation": null,
+  "summary_first_dropout": 0.1,
+  "summary_proj_to_labels": true,
+  "summary_type": "cls_index",
+  "summary_use_proj": true,
+  "torch_dtype": "float32",
+  "transformers_version": "4.13.0",
+  "use_cache": true,
+  "vocab_size": 40000,
+
+
+  "tokenizer_class": "GPTPanguTokenizer",
+  "auto_map": {
+    "AutoConfig": "configuration_gptpangu.GPTPanguConfig",
+    "AutoTokenizer": ["tokenization_gptpangu.GPTPanguTokenizer", null],
+    "AutoModelForCausalLM": "modeling_gptpangu.GPTPanguForCausalLM"
+  }
+}

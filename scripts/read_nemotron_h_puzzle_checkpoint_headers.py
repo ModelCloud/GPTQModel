@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Reproduce the pinned checkpoint inventory using safetensors headers only."""
 
-import gzip
+import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -11,6 +11,9 @@ import requests
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("output", type=Path, help="Destination for the expanded JSON inventory")
+    args = parser.parse_args()
     root = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/nemotron_h_puzzle"
     manifest = json.loads((root / "source_manifest.json").read_text())
     base = manifest["base_url"]
@@ -38,8 +41,7 @@ def main():
         shapes.update(entries)
     assert set(shapes) == set(weight_map)
     output = {"revision": manifest["revision"], "shapes": shapes, "header_sha256": checksums}
-    with gzip.open(root / "checkpoint_shapes.json.gz", "wt") as handle:
-        json.dump(output, handle, sort_keys=True, separators=(",", ":"))
+    args.output.write_text(json.dumps(output, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
     print(f"Read {len(shapes)} tensors from {len(checksums)} pinned safetensors headers")
 
 

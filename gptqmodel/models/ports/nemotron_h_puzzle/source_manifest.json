@@ -12,7 +12,7 @@
     "LICENSE": "8693c8dea35e24fed3d0b39c1c8f2087d8fc860f351de571c3a9b7fc4996ddca"
   },
   "inventory": {
-    "file": "checkpoint_shapes.json.gz",
+    "file": "checkpoint_shapes.json",
     "reader": "scripts/read_nemotron_h_puzzle_checkpoint_headers.py",
     "tensor_count": 42683,
     "decoder_tensor_count": 41643,

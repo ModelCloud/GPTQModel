@@ -3,7 +3,6 @@
 """Native Unlimited-OCR task, legacy conversion and public lifecycle qualification."""
 
 import copy
-import gzip
 import hashlib
 import json
 import re
@@ -18,6 +17,7 @@ from transformers import (
 
 from gptqmodel.models.definitions.unlimited_ocr import UnlimitedOCRQModel
 from gptqmodel.utils.hf import load_model_config
+from tests.port_assets import read_port_asset
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/unlimited_ocr/fixtures"
@@ -26,7 +26,7 @@ UNUSED_PATCH_NAME = "model.vision_model.embeddings.patch_embedding.weight"
 
 def asset(name):
     path = FIXTURES / name
-    return path.read_bytes() if path.exists() else gzip.decompress(Path(str(path) + ".gz").read_bytes())
+    return path.read_bytes() if path.exists() else read_port_asset(path)
 
 
 def legacy_key(name):

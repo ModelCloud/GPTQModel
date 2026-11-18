@@ -174,5 +174,5 @@ The existing trained-weight support test is retained, not claimed executed.
 
 The parent integrator owns central registry/fusion fixture updates, main docs,
 README/PR diagrams, and package-data inclusion for licenses/notices/provenance
-and JSON/gzip fixtures. Exact proposed fixture values are packaged alongside
+and runtime JSON. Exact proposed fixture values are packaged alongside
 this README; no shared fixtures are edited by this unit.

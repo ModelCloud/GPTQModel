@@ -3,7 +3,6 @@
 """Independent XVERSE equations and actual public loading/quantization cycles."""
 
 import copy
-import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -23,6 +22,7 @@ from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import CalibrationConfig
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.hf import load_model_config
+from tests.port_assets import has_port_asset, read_port_asset, read_port_json
 
 
 PORT = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/xverse"
@@ -38,7 +38,7 @@ def bounded_threads():
 
 
 def asset(family, name):
-    return gzip.decompress((FIXTURES / f"{family}-{name}.gz").read_bytes())
+    return read_port_asset(FIXTURES / f"{family}-{name}")
 
 
 def tiny_config(**kwargs):
@@ -83,10 +83,10 @@ def source_checkpoint(path, family="XVERSE-7B-Chat", **kwargs):
     }
     overrides.update(kwargs)
     model = tiny_model(**overrides)
-    gen_file = FIXTURES / f"{family}-generation_config.json.gz"
+    gen_file = FIXTURES / f"{family}-generation_config.json"
     model.generation_config = (
-        GenerationConfig.from_dict(json.loads(gzip.decompress(gen_file.read_bytes())))
-        if gen_file.exists()
+        GenerationConfig.from_dict(read_port_json(gen_file))
+        if has_port_asset(gen_file)
         else GenerationConfig.from_model_config(model.config)
     )
     model.save_pretrained(path)
@@ -674,9 +674,9 @@ def test_asset_sha_manifest():
             assert hashlib.sha256((PORT / "LICENSE").read_bytes()).hexdigest() == metadata["sha256"]
             continue
         for name, expected in metadata.get("sha256", {}).items():
-            path = FIXTURES / f"{family}-{name}.gz"
-            if path.exists():
-                assert hashlib.sha256(gzip.decompress(path.read_bytes())).hexdigest() == expected
+            path = FIXTURES / f"{family}-{name}"
+            if has_port_asset(path):
+                assert hashlib.sha256(read_port_asset(path)).hexdigest() == expected
 
 
 @pytest.mark.parametrize("persistent", [False, True])

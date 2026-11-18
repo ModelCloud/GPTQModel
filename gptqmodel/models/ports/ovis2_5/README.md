@@ -12,7 +12,7 @@ Transformers 5.23.0 has no exact `ovis2_5` config or causal-LM mapping. Its nati
 | [AIDC-AI/Ovis2.5-9B](https://huggingface.co/AIDC-AI/Ovis2.5-9B/tree/d73b2283ae2a930b7762f8d7b8b8a3f0f3b5c3bd) | `d73b2283ae2a930b7762f8d7b8b8a3f0f3b5c3bd` | 840 keys, four safetensors headers |
 
 `source_manifest.json` pins the inspected Python/config/index/license files and
-cached header JSON hashes. `released_headers.json.gz` records every key, shape and
+cached header JSON hashes. `released_headers.json` records every key, shape and
 dtype read from the six actual safetensors headers by byte ranges. No trained
 tensor data was downloaded. The original source was inspected as text, never
 imported to construct this port. The runtime uses package-relative imports.
@@ -198,8 +198,7 @@ Red/green evidence:
 The exact central registry/fusion changes are in `central_fixture_proposals.json`.
 They are integration proposals; the shared fixtures remain untouched here. The
 parent must apply them and link this port from its central documentation/README.
-Packaging must retain the port's LICENSE/NOTICE, README, provenance JSON and gzip
-header fixture; setup.py already discovers the Python package.
+Packaging must retain the port's LICENSE/NOTICE, README, and provenance JSON. The header inventory is checkout-only, and setup.py already discovers the Python package.
 
 ## Limits
 

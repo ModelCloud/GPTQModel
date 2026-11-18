@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-import gzip
 import json
 from pathlib import Path
 
@@ -13,6 +12,7 @@ from gptqmodel.models.definitions.phi4 import Phi4MMGPTQ
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.ports.phi4.configuration_phi4 import Phi4MMConfig
 from gptqmodel.models.ports.phi4.modeling_phi4 import Phi4MMForCausalLM
+from tests.port_assets import iter_port_assets, read_port_asset
 
 
 def _config(**overrides):
@@ -351,9 +351,8 @@ ASSETS = Path(__file__).parents[1] / "gptqmodel/models/ports/phi4"
 
 def _assets(path):
     path.mkdir(parents=True, exist_ok=True)
-    payload = json.loads(gzip.decompress((ASSETS / "tokenizer_assets.json.gz").read_bytes()))
-    for name, contents in payload.items():
-        (path / name).write_text(contents, encoding="utf-8")
+    for asset in iter_port_assets(ASSETS / "released_assets", "*"):
+        (path / asset.name).write_bytes(read_port_asset(asset))
 
 
 def _checkpoint(path, **overrides):

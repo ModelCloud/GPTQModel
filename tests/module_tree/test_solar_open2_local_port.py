@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -12,6 +11,7 @@ import torch
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.solar_open2 import SolarOpen2QModel
 from gptqmodel.models.ports.solar_open2 import SolarOpen2Config, SolarOpen2ForCausalLM
+from tests.port_assets import read_port_asset, read_port_json
 from tests.test_solar_open2_local_port import tiny_values
 
 
@@ -28,7 +28,7 @@ def test_pinned_release_fixture_and_license_hashes():
     ]:
         assert hashlib.sha256((PORT / local).read_bytes()).hexdigest() == manifest["sha256"][source]
     assert (
-        hashlib.sha256((PORT / "released_shapes.json.gz").read_bytes()).hexdigest()
+        hashlib.sha256(read_port_asset(PORT / "released_shapes.json")).hexdigest()
         == manifest["header_inventory"]["sha256"]
     )
     assert len(json.loads((PORT / "header_manifest.json").read_text())) == manifest["header_inventory"]["shards"] == 94
@@ -38,8 +38,7 @@ def test_entire_released_checkpoint_inventory_matches_real_meta_model():
     config = SolarOpen2Config.from_pretrained(PORT / "released_config.json")
     with torch.device("meta"):
         model = SolarOpen2ForCausalLM(config)
-    with gzip.open(PORT / "released_shapes.json.gz", "rt") as file:
-        released = json.load(file)
+    released = read_port_json(PORT / "released_shapes.json")
     actual = {key: list(value.shape) for key, value in model.state_dict().items()}
     assert len(actual) == 47019
     assert actual == {key: value["shape"] for key, value in released.items()}

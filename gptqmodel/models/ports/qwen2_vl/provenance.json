@@ -32,9 +32,9 @@
   },
   "fixture_sha256": {
     "LICENSE": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
-    "checkpoint_shapes.json.gz": "b534d8c774c45c847f7efaa9fb5eb3abb6a120548c7d93030cfe13811655d1d1",
+    "checkpoint_shapes.json": "3184ea618d65d7846220717cb39395ae87342c5ce40c68e99ebfbc64a0b00ac5",
     "released_config.json": "422adefa19e62dd175961cec85bc0400344fe5bf9b22bd1182e05aaae78556e0",
-    "released_processor_assets.json.gz": "11464c952049fba568430f2fde6cf8a3474a1314c227e14a809a4607234a4f82",
+    "released_processor_assets.json": "b92be89fba1fac0abdf44afd10c24ccd49e690ea126f16b570fa193791ce6326",
     "released_text_config.json": "943baa5e89cc09d4136fd885084e2e6f4218ac3bacde26601b7b14b03e505a37"
   },
   "notes": [

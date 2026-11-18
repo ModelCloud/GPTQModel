@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Actual Ovis2.5 Qwen3/NaViT weight owners, released headers and aliases."""
 
-import gzip
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +16,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.ovis2_5.configuration_ovis2_5 import Ovis2_5_Config
 from gptqmodel.models.ports.ovis2_5.modeling_ovis2_5 import Ovis2_5
+from tests.port_assets import read_port_json
 from tests.test_ovis2_5_local_port import _config
 
 
@@ -33,7 +33,7 @@ EXPECTED_PLAN = {
 @pytest.mark.parametrize("release", ["2B", "9B"])
 def test_exact_released_headers_and_tied_embedding_alias(release):
     # Read all six original safetensors headers via byte ranges, independent of the model.
-    headers = json.loads(gzip.decompress((PORT / "released_headers.json.gz").read_bytes()))[release]
+    headers = read_port_json(PORT / "released_headers.json")[release]
     config = Ovis2_5_Config(**json.loads((PORT / f"release_{release}_config.json").read_text()))
     with torch.device("meta"):
         model = Ovis2_5(config)

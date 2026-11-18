@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Every released Ripple decoder owner resolves through the real module plan."""
 
-import gzip
 import json
 from types import SimpleNamespace
 
@@ -15,6 +14,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.ricursive.configuration_ricursive import RicursiveConfig
 from gptqmodel.models.ports.ricursive.modeling_ricursive import RicursiveForCausalLM
+from tests.port_assets import read_port_json
 from tests.test_ricursive_local_port import FIXTURES, LINEARS, _config
 
 
@@ -23,8 +23,7 @@ def test_released_1203_keys_and_all_shapes_equal_live_meta_owners(release):
     config = RicursiveConfig.from_pretrained(FIXTURES / release)
     with torch.device("meta"):
         model = RicursiveForCausalLM(config)
-    with gzip.open(FIXTURES / f"{release}_header_inventory.json.gz", "rt") as stream:
-        expected = json.load(stream)
+    expected = read_port_json(FIXTURES / f"{release}_header_inventory.json")
     assert len(expected) == 1203
     assert {k: list(v.shape) for k, v in model.state_dict().items()} == {k: v["shape"] for k, v in expected.items()}
     assert len(model.model.layers) == 80

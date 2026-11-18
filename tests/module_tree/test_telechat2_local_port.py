@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real TeleChat checkpoint owners, not tree-generated stand-ins."""
 
-import gzip
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -16,19 +14,20 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.telechat2.configuration_telechat2 import Telechat2Config
 from gptqmodel.models.ports.telechat2.modeling_telechat2 import Telechat2ForCausalLM, TelechatModel
+from tests.port_assets import read_port_json
 from tests.test_telechat2_local_port import FIXTURES, _config
 
 
 @pytest.mark.parametrize("release", ["3B", "7B-32K", "35B-32K", "115B", "TeleChat1-7B"])
 def test_full_pinned_release_inventory_matches_meta(release):
-    fixture = json.loads(gzip.decompress((FIXTURES / "checkpoint_inventories.json.gz").read_bytes()))[release]
+    fixture = read_port_json(FIXTURES / "checkpoint_inventories.json")[release]
     with torch.device("meta"):
         model_class = TelechatModel if release == "TeleChat1-7B" else Telechat2ForCausalLM
         model = model_class(Telechat2Config(**fixture["config"]))
     assert set(model.state_dict()) == set(fixture["weight_map"])
     assert sum(value.is_meta for value in model.state_dict().values()) == len(fixture["weight_map"])
     if release in {"35B-32K", "115B"}:
-        headers = json.loads(gzip.decompress((FIXTURES / "safetensors_headers.json.gz").read_bytes()))["TeleChat2-" + release]
+        headers = read_port_json(FIXTURES / "safetensors_headers.json")["TeleChat2-" + release]
         independent_shapes = {name: tensor["shape"] for shard in headers.values() for name, tensor in shard["tensors"].items()}
         assert {name: list(value.shape) for name, value in model.state_dict().items()} == independent_shapes
 

@@ -18,14 +18,13 @@ SHA-256 hashes of inspected source, config, tokenizer, chat template, release
 index and all seven real safetensors headers. No checkpoint Python was executed
 to derive this port or its independent numerical oracle.
 
-`released_tensors.json.gz` is the independently read union of those seven header
+`released_tensors.json` is the independently read union of those seven header
 inventories: **19,434 keys** (9,216 E4M3, 9,216 U8, 892 BF16, 110 F32). Every name,
 shape and storage dtype matches a real released-config meta instantiation, with
 no invented conversion or missing auxiliary weights. The original index and
 header hashes are distinct from trained tensor-payload validation.
 
-`tokenizer.json.gz` preserves the actual serialized BPE bytes (uncompressed
-SHA-256 `47752d33008f5dd7cc91d875f1b798d1f1ad8f6a0e84aac9e67cbb49f9da16af`).
+The test reads `tokenizer.json` from the pinned release (SHA-256 `47752d33008f5dd7cc91d875f1b798d1f1ad8f6a0e84aac9e67cbb49f9da16af`).
 `tokenizer_reference.json` pins independently generated raw-Rust-tokenizer IDs,
 decode and chat text for English/Korean/CJK/emoji, code, whitespace, special-token
 text, combining accents and NUL. Release config/template/generation fixtures
@@ -221,7 +220,6 @@ GenerationMixin protocol annotations; passing runtime tests do not erase them.
 Ruff 0.14.2's full repository gate is clean.
 
 Parent owns applying the central fixture proposal, central coverage/README/PR
-diagrams, and packaging `LICENSE`, `NOTICE`, provenance JSON, Jinja and gzip
-fixtures. Existing PR 4620 is not created, merged or changed in lifecycle state
+diagrams, and packaging `LICENSE`, `NOTICE`, provenance JSON and runtime Jinja. Existing PR 4620 is not created, merged or changed in lifecycle state
 by this unit. The two diagrams and comparison table above are ready for parent
 integration into central documentation.

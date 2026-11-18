@@ -3,8 +3,6 @@
 """Real native weight owners for the distinct multimodal and text tasks."""
 
 import copy
-import gzip
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +16,7 @@ from gptqmodel.models.definitions.qwen2_5_vl import Qwen2_5_VLQModel
 from gptqmodel.models.fusable import require_fusable_config
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.utils.model import get_layers_with_prefixes
+from tests.port_assets import read_port_json
 
 
 PROJECTIONS = {
@@ -105,7 +104,7 @@ def test_pinned_released_checkpoint_all_shapes_and_text_extraction_schema():
     with torch.device("meta"):
         composite = Qwen2_5_VLQModel.loader.from_config(config)
         text = Qwen2_5_VLQModel.loader.from_config(config.text_config)
-    released = json.loads(gzip.decompress((fixtures / "qwen3b_shapes.json.gz").read_bytes()))
+    released = read_port_json(fixtures / "qwen3b_shapes.json")
     assert len(released) == 824
     expected = {}
     for key, shape in released.items():
@@ -138,7 +137,7 @@ def test_independently_published_standalone_native_headless_schema():
     assert config.model_type == "qwen2_5_vl_text"
     with torch.device("meta"):
         model = Qwen2_5_VLQModel.loader.from_config(config)
-    expected = json.loads(gzip.decompress((fixtures / "published_headless_shapes.json.gz").read_bytes()))
+    expected = read_port_json(fixtures / "published_headless_shapes.json")
     assert len(expected) == 26
     assert {key: list(value.shape) for key, value in model.state_dict().items()} == expected
     assert type(model) is Qwen2_5_VLTextModel

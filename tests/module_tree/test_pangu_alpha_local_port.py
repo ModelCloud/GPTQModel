@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real CPU/meta Pangu owners, including persistent causal buffers."""
 
-import gzip
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +12,7 @@ from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.pangu_alpha import PanguAlphaQModel
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.pangu_alpha import GPTPanguConfig, GPTPanguForCausalLM
+from tests.port_assets import read_port_json
 
 
 FIXTURES = Path(__file__).parents[2] / "gptqmodel/models/ports/pangu_alpha/fixtures"
@@ -28,8 +27,8 @@ EXPECTED_BLOCKS = [
 
 
 def test_exact_real_582_tensor_checkpoint_keys_shapes_on_meta():
-    config = GPTPanguConfig(**json.loads(gzip.decompress((FIXTURES / "config.json.gz").read_bytes())))
-    shapes = json.loads(gzip.decompress((FIXTURES / "released_key_shapes.json.gz").read_bytes()))
+    config = GPTPanguConfig(**read_port_json(FIXTURES / "config.json"))
+    shapes = read_port_json(FIXTURES / "released_key_shapes.json")
     assert len(shapes) == 582
     with torch.device("meta"):
         model = GPTPanguForCausalLM(config)

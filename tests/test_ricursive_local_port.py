@@ -3,7 +3,6 @@
 """Offline Ripple qualification: independent equations and real public consumers."""
 
 import copy
-import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -16,6 +15,7 @@ from transformers.cache_utils import DynamicCache, StaticCache
 from gptqmodel.models.definitions.ricursive import RicursiveQModel
 from gptqmodel.models.ports.ricursive.configuration_ricursive import RicursiveConfig
 from gptqmodel.models.ports.ricursive.modeling_ricursive import RicursiveForCausalLM
+from tests.port_assets import iter_port_assets, read_port_asset, read_port_json
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/ricursive/fixtures"
@@ -271,8 +271,8 @@ def _tokenizer(path):
 
 
 def _released_tokenizer(path, release="preview"):
-    for source in (FIXTURES / ("tokenizer" if release == "preview" else "base_tokenizer")).glob("*.gz"):
-        (path / source.stem).write_bytes(gzip.decompress(source.read_bytes()))
+    for source in iter_port_assets(FIXTURES / ("tokenizer" if release == "preview" else "base_tokenizer"), "*"):
+        (path / source.name).write_bytes(read_port_asset(source))
 
 
 def _assert_released_tokenizer(tokenizer, release="preview"):
@@ -438,11 +438,10 @@ def test_public_plain_awq_every_linear_dense_owner_and_two_reloads(tmp_path, off
 
 def test_fixture_artifact_hashes():
     manifest = json.loads((FIXTURES / "manifest.json").read_text())
-    for name, expected in manifest["fixture_sha256"].items():
-        assert hashlib.sha256((FIXTURES / name).read_bytes()).hexdigest() == expected
+    for name, expected in manifest["inventory_sha256"].items():
+        assert hashlib.sha256(read_port_asset(FIXTURES / name)).hexdigest() == expected
     for release, folder in (("preview", "tokenizer"), ("base", "base_tokenizer")):
-        for source in (FIXTURES / folder).glob("*.gz"):
-            original = gzip.decompress(source.read_bytes())
-            assert hashlib.sha256(original).hexdigest() == manifest["upstream_sha256"][f"{release}/{source.stem}"]
-    with gzip.open(FIXTURES / "preview_header_inventory.json.gz", "rt") as stream:
-        assert len(json.load(stream)) == 1203
+        for source in iter_port_assets(FIXTURES / folder, "*"):
+            original = read_port_asset(source)
+            assert hashlib.sha256(original).hexdigest() == manifest["upstream_sha256"][f"{release}/{source.name}"]
+    assert len(read_port_json(FIXTURES / "preview_header_inventory.json")) == 1203

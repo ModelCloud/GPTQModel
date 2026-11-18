@@ -4,7 +4,6 @@
 
 import builtins
 import copy
-import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -25,6 +24,7 @@ from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
+from tests.port_assets import read_port_asset
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/qwen_drive/fixtures"
@@ -90,7 +90,7 @@ def test_definition_owns_model_without_official_registration():
 def test_entire_released_header_matches_meta_and_only_tied_head_is_omitted():
     data = (FIXTURES / "released_config.json").read_bytes()
     assert hashlib.sha256(data).hexdigest() == "91e765ca4a46e63b364b7e79f16bdb2b5d0e271684c566c03ae87d259c2d9ff8"
-    header_data = gzip.decompress((FIXTURES / "released_header.json.gz").read_bytes())
+    header_data = read_port_asset(FIXTURES / "released_header.json")
     assert hashlib.sha256(header_data).hexdigest() == "03323c11647701e1a73546f00869740bd3e92261260f214714aa698cb656d54b"
     header = json.loads(header_data)
     header.pop("__metadata__")
@@ -407,7 +407,7 @@ def test_real_released_tokenizer_public_ids_chat_media_and_two_reloads(tmp_path,
     model.save_pretrained(source)
     manifest = json.loads((FIXTURES / "provenance.json").read_text())
     for name, entry in manifest["assets"].items():
-        data = gzip.decompress((FIXTURES / (name + ".gz")).read_bytes())
+        data = read_port_asset(FIXTURES / name)
         assert hashlib.sha256(data).hexdigest() == entry["sha256"]
         (source / name).write_bytes(data)
     tokenizer_config = json.loads((source / "tokenizer_config.json").read_text())

@@ -3,7 +3,6 @@
 """Actual OpenVLA computation, released ownership, actions and public consumers."""
 
 import copy
-import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -22,6 +21,7 @@ from gptqmodel.models.ports.openvla.configuration_prismatic import (
 )
 from gptqmodel.models.ports.openvla.modeling_prismatic import OpenVLAForActionPrediction
 from gptqmodel.models.ports.openvla.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+from tests.port_assets import read_port_asset
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/openvla/fixtures"
@@ -41,7 +41,7 @@ def _bounded_threads():
 
 
 def _asset(name):
-    return gzip.decompress((FIXTURES / (name + ".gz")).read_bytes())
+    return read_port_asset(FIXTURES / name)
 
 
 def _config(fused=True, backbone=None, llm="llama2-7b-pure", **kwargs):
@@ -475,10 +475,9 @@ def test_openvla_released_tokenizer_and_asset_hashes(tmp_path):
 
 def test_openvla_pinned_fixtures_and_license_bytes():
     manifest = json.loads((FIXTURES.parent / "PROVENANCE.json").read_text())
+    assert hashlib.sha256(_asset("checkpoint_inventory.json")).hexdigest() == manifest["inventory_sha256"]
     for name, hashes in manifest["fixtures"].items():
-        compressed = (FIXTURES / name).read_bytes()
-        assert hashlib.sha256(compressed).hexdigest() == hashes["compressed_sha256"]
-        raw = gzip.decompress(compressed)
+        raw = _asset(name)
         assert hashlib.sha256(raw).hexdigest() == hashes["source_bytes_sha256"]
         assert len(raw) == hashes["source_bytes"]
     for name, digest in manifest["license_files"].items():

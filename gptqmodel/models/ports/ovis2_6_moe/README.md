@@ -16,7 +16,7 @@ a replacement for either. Checkpoint Python is never selected for these aliases.
 Inspected source: each release's `configuration_ovis2_6.py`,
 `modeling_ovis2_6.py`, config, model card, checkpoint index and every shard
 header. `provenance.json` records SHA-256 hashes of the inspected data and
-checked-in fixtures. Gzipped shape inventories contain names/shapes only, not
+checked-in fixtures. Test shape inventories contain names/shapes only, not
 trained tensors. The 30B index omits the two vision post-LayerNorm tensors
 present in its actual shard headers; both present and absent cases are tested.
 The 80B index and headers agree. Fixtures also include actual pinned tokenizer
@@ -187,7 +187,7 @@ unqualified fusion reasons. Parent owns central fixture edits, main README,
 central docs/reference-page integration and PR diagrams; this port-local page
 supplies their diagrams/table. Neither alias is in the generic AWQ numerical
 `FAMILIES`, so no generic plain-family set change is proposed. Parent must package
-LICENSE/NOTICE/provenance plus JSON/gzip fixtures. Shared qualification baseline
+license, notice and provenance files. Shared qualification baseline
 copies are separate commits and must not be integrated as owned port changes.
 
 ## Limits

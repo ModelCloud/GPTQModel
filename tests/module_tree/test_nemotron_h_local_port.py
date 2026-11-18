@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Independent checkpoint header inventories and live native mixer owners."""
 
-import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -16,16 +15,17 @@ from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.nemotron_h import NemotronHQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
+from tests.port_assets import read_port_asset, read_port_json
 from tests.test_nemotron_h_local_port import config, wrapper
 
 
 PORT = Path(__file__).parents[2] / "gptqmodel/models/ports/nemotron_h"
-INVENTORIES = json.loads(gzip.decompress((PORT / "checkpoint_shapes.json.gz").read_bytes()))
+INVENTORIES = read_port_json(PORT / "checkpoint_shapes.json")
 
 
 def test_inspected_header_inventory_integrity():
     manifest = json.loads((PORT / "PROVENANCE.json").read_text())
-    assert hashlib.sha256((PORT / "checkpoint_shapes.json.gz").read_bytes()).hexdigest() == manifest["fixture_sha256"]
+    assert hashlib.sha256(read_port_asset(PORT / "checkpoint_shapes.json")).hexdigest() == manifest["fixture_sha256"]
     assert {key: len(value["shapes"]) for key, value in INVENTORIES.items()} == {"8b": 311, "nano": 6243, "super": 42683}
     assert [key for key, owner in MODEL_MAP.items() if owner is NemotronHQModel] == ["nemotron_h"]
 

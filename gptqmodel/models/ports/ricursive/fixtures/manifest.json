@@ -29,24 +29,14 @@
     "base/special_tokens_map.json": "78afb564e81264029b25f9caf24bda2521d5bdaeff5cd3fdbc01d3da2e8ce2f2",
     "base/chat_template.jinja": "153280e3ff55d19da1398bdb3914ee2a51b80429bfaedde11d7d216c39db80f3"
   },
-  "fixture_sha256": {
-    "preview_header_inventory.json.gz": "fc727b8342b1dfb46812b5113e29096fc4ff2e2dc04e4edd734e23dd4fd3c84d",
-    "base/config.json": "af6029ad8acb3595bb3fd878dbc273a02fc74424b094210ee270de38ce3f3785",
-    "preview/config.json": "9a5654b256ead01855f0d74cf7a70fa65294267e6b7b754b5e5737457a45e14a",
-    "base_header_inventory.json.gz": "fc727b8342b1dfb46812b5113e29096fc4ff2e2dc04e4edd734e23dd4fd3c84d",
-    "tokenizer/tokenizer.json.gz": "38c302680af86bdbfc15e80380bf4ff5d1dc4f0f93722b28d2dfc1257e04355a",
-    "tokenizer/tokenizer_config.json.gz": "5504b444b6966805c54485aebbace08e6da2bbf6c9a2e1084483975f66f33083",
-    "tokenizer/special_tokens_map.json.gz": "0d307d282589336214729e5836550c0fb401db9dc538e1271e113fc3c8febad4",
-    "tokenizer/chat_template.jinja.gz": "79b5bde94405444583972f039a3a02b60a22847eee563e98445af22c09a05902",
-    "base_tokenizer/tokenizer.json.gz": "bcebd03f44177d003a3c953dddf956371e3231eb23c0f2187b937ee0dabbdf2e",
-    "base_tokenizer/tokenizer_config.json.gz": "87e2d18925298aa5ed78609b1680f34ec440067022fdf519d450a2f5881c0e15",
-    "base_tokenizer/special_tokens_map.json.gz": "f0b39b64498580df93888252dd15bee62fbd17dc0bc22cfba4753e18a7b29ba3",
-    "base_tokenizer/chat_template.jinja.gz": "2b9fabe16ca9e9fc48cad58df573c8b3eb595bccc5bd0375c520605431233772"
-  },
   "base_tokenizer_same_bytes_as_preview": {
     "tokenizer.json": false,
     "tokenizer_config.json": false,
     "special_tokens_map.json": false,
     "chat_template.jinja": false
+  },
+  "inventory_sha256": {
+    "preview_header_inventory.json": "f1bfb6559795ec74040ee8ea2cfb84f1e186a57215d5549065e3aa35e05cb4ac",
+    "base_header_inventory.json": "f1bfb6559795ec74040ee8ea2cfb84f1e186a57215d5549065e3aa35e05cb4ac"
   }
 }

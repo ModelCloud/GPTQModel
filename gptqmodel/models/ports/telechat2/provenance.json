@@ -279,17 +279,14 @@
   ],
   "fixtures": {
     "115B-generation_config.json": "8d0fb055bca10cb08e0da5c24cb461f4e912ed1b2c60da5d869ee3ae105af418",
-    "115B-tokenizer.model.gz": "419d6b5b838f8853516904097013a1108cd22a2cfe81c6b64b9d70679bd3585e",
     "115B-tokenizer_config.json": "3583439656278ef132272420e55b635039391bda8f47da45047a9a385999c7c6",
-    "checkpoint_inventories.json.gz": "2108737a7e46b76dfe8fe0cb63625d79d411bb96783029f5d3faf1548d2f5830",
+    "checkpoint_inventories.json": "8eb5ef9477dc7331488809888baf4cc7de1b6fb0e5e3191b7ad834f175a2b97b",
     "config.json": "aad5a2ae1bbec83735af1c2c3f7b43f3cb28fa37cc95482af56771af2a14308a",
     "generation_config.json": "2cacdf4a58863ca0c887bffbf1c96fdc7cbd261466832853ee0e7052628df877",
-    "safetensors_headers.json.gz": "da95d42d5fe155d4d2e3a49c17e5ce557a4d4e9cfbe79183836e75cbb0012f3e",
-    "telechat1-config.json.gz": "12313158ad041d9afb3354716ccb11c491400eca8c79c7af4fb4bc42b49c511c",
-    "telechat1-special_tokens_map.json.gz": "28da36f0b088c63504c740c13b2ec1a8cb5d10825292190c932ba65bef160d63",
-    "telechat1-tokenizer.json.gz": "d95ec8432d5dc7ae0294ec233ba1f3f110e6eb6fa40d67c011ab37d363d4afe6",
-    "telechat1-tokenizer_config.json.gz": "0d6872abeeb8bac67ec090a720f9377e5877acf7c31c396b4a77deb1b5d34a39",
-    "tokenizer.model.gz": "a0f6f0c4d0984f8d05338d76b2d68a00eb2c914d9ee67c2a32e836c0ffa411f1",
+    "safetensors_headers.json": "0341de7642e2c8e3b5c3e26c6db57662c20ed0a8fe63f6740a647cc229987203",
+    "telechat1-config.json": "1472e7732161ff5e6f3f2aa7bfca471c6ee010cb798412c2c686d829c5792081",
+    "telechat1-special_tokens_map.json": "8a8fa5f16c90a4201278d99cff061b011709cf6198499b5ac4e87fffe76b41f4",
+    "telechat1-tokenizer_config.json": "cc1f382217a286c9fa226f4532d366815c16b1476189e704558261d67f7615db",
     "tokenizer_config.json": "473b087be9c4d35bdd472a0e329b71ff58a0dee8b1b934cba8d41951269e1c9c",
     "tokenizer_oracle.json": "190593e88c56193876c056ca582f3a273e6bc66e1cee75b6132c66eaadb054c5"
   }

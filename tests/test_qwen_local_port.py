@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Original Qwen real equations, checkpoint transitions, and public consumers."""
 
-import gzip
 import hashlib
 import json
 import math
@@ -29,6 +28,7 @@ from gptqmodel.models.ports.qwen.tokenization_qwen import PAT_STR, SPECIAL_TOKEN
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.backend import BACKEND
+from tests.port_assets import read_port_asset
 
 
 ASSETS = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/qwen"
@@ -274,7 +274,7 @@ def checkpoint(path, release="Qwen-7B", **kwargs):
     metadata = json.loads((ASSETS / "fixtures/released_metadata.json").read_text())[release]
     model.generation_config = GenerationConfig.from_dict(metadata["generation_config.json"])
     model.save_pretrained(path)
-    (path / "qwen.tiktoken").write_bytes(gzip.decompress((ASSETS / "fixtures/qwen.tiktoken.gz").read_bytes()))
+    (path / "qwen.tiktoken").write_bytes(read_port_asset(ASSETS / "fixtures/qwen.tiktoken"))
     marker = path / "EXECUTED"
     payload = f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\nraise RuntimeError('checkpoint Python')\n"
     (path / "hostile.py").write_text(payload)
@@ -382,7 +382,7 @@ def test_public_plain_awq_all_linears_dense_exclusions_two_reloads(tmp_path, no_
 
 def test_real_tokenizer_source_ids_decode_prompts_repair_retry(tmp_path):
     path = tmp_path / "qwen.tiktoken"
-    data = gzip.decompress((ASSETS / "fixtures/qwen.tiktoken.gz").read_bytes())
+    data = read_port_asset(ASSETS / "fixtures/qwen.tiktoken")
     path.write_bytes(data)
     tok = QWenTokenizer(str(path), eos_token="<|endoftext|>", pad_token="<|endoftext|>")
     # Independent backend from actual pinned release data, not tokenizer helpers.
@@ -498,7 +498,7 @@ def test_public_missing_corrupt_tokenizer_repair_retry(tmp_path, monkeypatch, tr
 
 def test_extra_vocabulary_source_tokens_roundtrip_and_collision_policy(tmp_path):
     vocab = tmp_path / "qwen.tiktoken"
-    vocab.write_bytes(gzip.decompress((ASSETS / "fixtures/qwen.tiktoken.gz").read_bytes()))
+    vocab.write_bytes(read_port_asset(ASSETS / "fixtures/qwen.tiktoken"))
     extra = tmp_path / "extra"
     import base64
 
@@ -516,7 +516,7 @@ def test_extra_vocabulary_source_tokens_roundtrip_and_collision_policy(tmp_path)
 
 def test_pinned_release_vocab_and_packaged_fixture_license_integrity():
     manifest = json.loads((ASSETS / "provenance.json").read_text())
-    vocab = gzip.decompress((ASSETS / "fixtures/qwen.tiktoken.gz").read_bytes())
+    vocab = read_port_asset(ASSETS / "fixtures/qwen.tiktoken")
     digest = hashlib.sha256(vocab).hexdigest()
     assert digest == "b2b1b8dfb5cc5f024bafc373121c6aba3f66f9a5a0269e243470a1de16a33186"
     for release in manifest["releases"].values():

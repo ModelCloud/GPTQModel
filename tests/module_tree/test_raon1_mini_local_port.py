@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real Raon decoder owners, including byte-compressed experts and mHC controls."""
 
-import gzip
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +15,7 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.raon1_mini.configuration_raon1_mini import Raon1MiniConfig
 from gptqmodel.models.ports.raon1_mini.modeling_raon1_mini import Raon1MiniForCausalLM
+from tests.port_assets import read_port_json
 from tests.test_raon1_mini_local_port import _config
 
 
@@ -73,7 +73,7 @@ def test_live_raon_module_plan_owns_every_decoder_tensor(layout, settings, devic
 
 def test_all_19434_released_tensor_shapes_and_storage_dtypes_match_exact_meta_owners():
     config = Raon1MiniConfig(**json.loads((PORT / "released_config.json").read_text()))
-    expected = json.loads(gzip.decompress((PORT / "released_tensors.json.gz").read_bytes()))
+    expected = read_port_json(PORT / "released_tensors.json")
     assert len(expected) == 19434
     with torch.device("meta"):
         model = Raon1MiniForCausalLM._from_config(config, dtype=torch.bfloat16)

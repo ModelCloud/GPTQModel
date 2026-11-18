@@ -54,7 +54,7 @@
   },
   "packaged_data_sha256": {
     "source_config.json": "bf8859c106ef73d65fd194cbd336584d24dceaf724a408c762db7945e3925957",
-    "checkpoint_inventory.json.gz": "d2b80a2d4679ade8508ff00db3afd4c5abfd5f30b1e8fe1bf5c35c03bef2e768",
+    "checkpoint_inventory.json": "13d176141c93af613db3c7c99a59522594aaf650c7c55ad6e7b30270150a822e",
     "LICENSE": "77fd4710def9ec3c0f6225800e0235f15a425abd4a8b03559127fcd782612049",
     "tokenizer_oracle.json": "ae54cff8ad53e4af345e836ba5f0debb7f3980e27185656c99e62c12b282247f"
   },

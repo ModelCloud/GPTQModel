@@ -10,5 +10,5 @@
   },
   "awq_plain_quantization_families": "no edit needed: text alias is not in the generic fixture families; six owned public cases qualify the actual plain path",
   "central_docs": "link this README from the central coverage page and main README; mirror both Mermaid diagrams in the existing PR",
-  "package_data": ["LICENSE", "LICENSE.Qwen3B", "NOTICE", "provenance.json", "fixtures/*.json", "fixtures/*.json.gz"]
+  "package_data": ["LICENSE", "LICENSE.Qwen3B", "NOTICE", "provenance.json", "fixtures/*.json"]
 }

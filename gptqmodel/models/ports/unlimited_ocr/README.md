@@ -71,9 +71,8 @@ integration for [PR 4620](https://github.com/ModelCloud/GPTQModel/pull/4620).
   `source_manifest.json` for provenance and SHA-256 values.
 - Native classes come from the installed Apache-2.0 Transformers dependency,
   qualified here on **5.23.0**. Package paths are lazy-loaded by `LocalModelLoader`.
-- Fixtures contain actual config/tokenizer/processor/generation assets, a
-  checkpoint index and a derived JSON representation of the safetensors header.
-  Gzip is storage compression only. There are **no trained tensor payloads**.
+- Tests use pinned config, tokenizer, processor and generation assets, the
+  checkpoint index, and HTTP range reads of the safetensors header.
 
 The full release header has **2,710 tensors**. Independent inverse names and
 shapes match all **2,709 native-executed source entries** after vision QKV

@@ -3,7 +3,6 @@
 """Native Qwen3 and the published Qwen3-backed Marin release."""
 
 import copy
-import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -27,6 +26,7 @@ from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.hf import load_model_config
+from tests.port_assets import iter_port_assets, read_port_asset
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/qwen3/fixtures"
@@ -59,7 +59,7 @@ def bounded_torch_threads():
 
 
 def asset(family, name):
-    return gzip.decompress((FIXTURES / f"{family}-{name}.gz").read_bytes())
+    return read_port_asset(FIXTURES / f"{family}-{name}")
 
 
 def write_assets(path, family):
@@ -240,12 +240,12 @@ def test_public_native_selection_tokenizer_generation_and_reload(tmp_path, monke
 def test_pinned_assets_integrity():
     manifest = json.loads((FIXTURES / "manifest.json").read_text())
     for family, (repo, revision) in manifest["releases"].items():
-        for path in FIXTURES.glob(f"{family}-*.gz"):
-            name = path.name[len(family) + 1 : -3]
+        for path in iter_port_assets(FIXTURES, f"{family}-*"):
+            name = path.name[len(family) + 1 :]
             if name == "headers.json":
                 continue
             expected = manifest["assets"][f"https://huggingface.co/{repo}/resolve/{revision}/{name}"]
-            raw = gzip.decompress(path.read_bytes())
+            raw = read_port_asset(path)
             assert len(raw) == expected["bytes"]
             assert hashlib.sha256(raw).hexdigest() == expected["sha256"]
 

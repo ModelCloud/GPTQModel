@@ -3,7 +3,6 @@
 """Exact native tasks: conditional generation versus headless extraction."""
 
 import copy
-import gzip
 import json
 from pathlib import Path
 
@@ -28,6 +27,7 @@ from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 from gptqmodel.models.ports import qwen2_vl
 from gptqmodel.utils.hf import load_model_config
+from tests.port_assets import read_port_asset, read_port_json
 
 
 @pytest.fixture(autouse=True)
@@ -431,9 +431,8 @@ def test_real_pinned_tokenizer_and_media_processor(tmp_path, text):
     import numpy as np
     from PIL import Image
 
-    assets = json.loads(
-        gzip.decompress((Path(qwen2_vl.__file__).parent / "released_processor_assets.json.gz").read_bytes())
-    )
+    port = Path(qwen2_vl.__file__).parent
+    assets = read_port_json(port / "released_processor_assets.json")
     source = tmp_path / "real-assets"
     source.mkdir()
     cfg = tiny_config(text)
@@ -445,9 +444,10 @@ def test_real_pinned_tokenizer_and_media_processor(tmp_path, text):
         cfg.image_token_id, cfg.video_token_id = 151655, 151656
         cfg.vision_start_token_id, cfg.vision_end_token_id = 151652, 151653
     native_model(cfg).save_pretrained(source)
-    for name, content in assets["files"].items():
-        assert hashlib.sha256(content.encode()).hexdigest() == assets["sha256"][name]
-        (source / name).write_text(content)
+    for name, digest in assets["sha256"].items():
+        content = read_port_asset(port / "released_assets" / name)
+        assert hashlib.sha256(content).hexdigest() == digest
+        (source / name).write_bytes(content)
     if not text:
         Qwen2VLVideoProcessor(
             patch_size=14, temporal_patch_size=2, merge_size=2, min_pixels=3136, max_pixels=3136

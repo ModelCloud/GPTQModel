@@ -1,0 +1,22 @@
+{
+  "tensor_key_ranges": [
+    ["lm_head.weight", [], null],
+    ["model.embed_tokens.weight", [], null],
+    ["model.layers.{}.block_sparse_moe.experts.{}.w1.weight", ["0-79", "0-31"], null],
+    ["model.layers.{}.block_sparse_moe.experts.{}.w2.weight", ["0-79", "0-31"], null],
+    ["model.layers.{}.block_sparse_moe.experts.{}.w3.weight", ["0-79", "0-31"], null],
+    ["model.layers.{}.block_sparse_moe.gate.weight", ["0-79"], null],
+    ["model.layers.{}.input_layernorm.weight", ["0-79"], null],
+    ["model.layers.{}.post_attention_layernorm.weight", ["0-79"], null],
+    ["model.layers.{}.self_attn.k_proj.weight", ["7,15,23,31,39,47,55,63,71,79"], null],
+    ["model.layers.{}.self_attn.norm.weight", ["0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70,72-78"], null],
+    ["model.layers.{}.self_attn.o_proj.weight", ["7,15,23,31,39,47,55,63,71,79"], null],
+    ["model.layers.{}.self_attn.out_proj.weight", ["0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70,72-78"], null],
+    ["model.layers.{}.self_attn.output_gate.weight", ["0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70,72-78"], null],
+    ["model.layers.{}.self_attn.q_proj.weight", ["7,15,23,31,39,47,55,63,71,79"], null],
+    ["model.layers.{}.self_attn.qkv_proj.weight", ["0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70,72-78"], null],
+    ["model.layers.{}.self_attn.v_proj.weight", ["7,15,23,31,39,47,55,63,71,79"], null],
+    ["model.norm.weight", [], null]
+  ],
+  "keys_only": true
+}

@@ -14,6 +14,7 @@ from torch.nn import functional as F
 
 from gptqmodel.models.definitions.raon1_mini import Raon1MiniQModel
 from gptqmodel.models.local import LocalModelLoader
+from tests.port_assets import read_port_asset
 
 
 def test_definition_owns_raon_model_instead_of_checkpoint_python():
@@ -745,14 +746,13 @@ def test_saved_generation_sampling_presence_and_multiple_eos_policies(tmp_path):
 @pytest.mark.parametrize("trust", [False, True])
 @pytest.mark.parametrize("bypass", [None, "0", "1"])
 def test_pinned_actual_release_tokenizer_ids_chat_security_and_reload(tmp_path, monkeypatch, trust, bypass):
-    import gzip
     import hashlib
 
     from gptqmodel.utils.hf import load_hf_tokenizer
 
     port = Path(__file__).parents[1] / "gptqmodel/models/ports/raon1_mini"
     reference = json.loads((port / "tokenizer_reference.json").read_text())
-    raw = gzip.decompress((port / "tokenizer.json.gz").read_bytes())
+    raw = read_port_asset(port / "tokenizer.json")
     assert hashlib.sha256(raw).hexdigest() == reference["tokenizer_sha256"]
     (tmp_path / "tokenizer.json").write_bytes(raw)
     (tmp_path / "tokenizer_config.json").write_bytes((port / "released_tokenizer_config.json").read_bytes())

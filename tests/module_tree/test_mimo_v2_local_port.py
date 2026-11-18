@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Checkpoint inventories and real MiMo-V2 owners, independent of tree generation."""
 
-import gzip
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +15,7 @@ from gptqmodel.models.definitions.mimo_v2 import MimoV2QModel
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports.mimo_v2.configuration_mimo_v2 import MiMoV2Config
 from gptqmodel.models.ports.mimo_v2.modeling_mimo_v2 import MiMoV2ForCausalLM
+from tests.port_assets import read_port_json
 from tests.test_mimo_v2_local_port import tiny_config
 
 
@@ -89,7 +89,7 @@ def test_actual_decoder_tensor_ownership_layout_and_consumer_tags(layout, kv, bi
 
 @pytest.mark.parametrize("variant", ["MiMo-V2.5-Base", "MiMo-V2.5-Pro-Base", "MiMo-V2.6-Pro-RL", "MiMo-V2.6-Flash-RL"])
 def test_pinned_complete_checkpoint_key_inventory(tmp_path, variant):
-    fixture = json.loads(gzip.decompress((PORT / "fixtures" / (variant + ".json.gz")).read_bytes()))
+    fixture = read_port_json(PORT / "fixtures" / (variant + ".json"))
     values = dict(fixture["config"])
     values.pop("quantization_config", None)
     with torch.device("meta"):

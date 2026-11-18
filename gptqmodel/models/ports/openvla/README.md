@@ -191,8 +191,7 @@ torchvision's Tensor-only PIL stubs, timm dynamic attributes and cache metadata.
 The default `OpenVLAQModel/gptq` registered plan is unchanged. The parent owns
 central docs, README, package-data declarations and the fusion fixture reason:
 `Package-owned OpenVLA Prismatic vision-language-action wrapper; fusion executor has not been qualified.`
-Include this package's LICENSE/NOTICE/LLAMA2 notices/JSON/gzip fixtures in source
-distributions. No new global AWQ-family fixture entry is needed: the generic
+Source distributions include the license and attribution files. No new global AWQ-family fixture entry is needed: the generic
 AutoModelForCausalLM AWQ inventory does not enumerate OpenVLA.
 
 Not qualified: trained 7B tensor payloads or robot/task quality; GPU, FlashAttention,

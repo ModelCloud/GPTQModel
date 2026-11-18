@@ -142,7 +142,7 @@ and residual-policy mutations are checked against independent equations.
 Exact final gates/results and mutation outcomes are recorded in `EVIDENCE.md`.
 
 Parent integration owns central docs/main README/PR diagrams and package-data
-coverage for LICENSE, NOTICE, PDF, JSON and gzip assets. Registered module plan
+coverage for licenses, notices and runtime JSON. Registered module plan
 is unchanged. Replace only the `telechat` fusion reason with:
 
 > Package-owned TeleChat/TeleChat2 interleaved-KV dense decoder with source-rounded dynamic NTK RoPE; fusion executor has not been qualified.

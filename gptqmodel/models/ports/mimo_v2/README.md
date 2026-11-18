@@ -33,7 +33,7 @@ and the upstream audio-codec attribution.
 | `config.json` | `425a1c96326d17e6dcff952896e64d395c194a35c8c64705a0960adee244fbc9` |
 | `preprocessor_config.json` | `b269e51bdc1c53ef7c82522984378513f462869cf83c4c75ec3f98bd92aa7972` |
 
-The gzip JSON fixtures contain public configs and independent checkpoint index
+The test JSON fixtures contain public configs and independent checkpoint index
 keys, not tensor payloads or executable checkpoint code. Each stores its source
 repository, immutable revision and original index SHA-256. Inventories:
 

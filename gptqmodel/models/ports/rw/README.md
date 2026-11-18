@@ -20,7 +20,7 @@ replace the definition's local loader, even with explicit trust and bypass.
 | [Falcon-40B-Instruct](https://huggingface.co/tiiuae/falcon-40b-instruct) | `ecb78d97ac356d098e79f0db222c9ce7c5d9ee5f` | `5b9409410d251ab8e06c48078721c8e2b71fa8a1` | Grouped QKV with eight KV heads, dual `ln_attn`/`ln_mlp`; all 484 actual legacy checkpoint-index keys match meta |
 
 `source_sha256.json` pins both historical and canonical configs, source, README, tokenizer asset,
-and header/index digest. `checkpoint_inventory.json.gz` contains those real
+and header/index digest. `checkpoint_inventory.json` contains those real
 configs and only observed key/shape metadata, with no trained tensor payload.
 Every historical config's meta geometry is also checked against the actual
 canonical in-library config from the newer checkpoint revision. Historical
@@ -123,7 +123,7 @@ still calibrate, quantize and pack. No shared algorithm changes are needed.
 
 These central files are not edited on this branch. Parent integration also
 owns central coverage/README/PR diagrams and package-data inclusion for this
-directory's LICENSE, NOTICE, JSON and gzip fixtures. The package is discovered
+directory's LICENSE, NOTICE, and runtime JSON. The package is discovered
 by setuptools without editing a shared initializer or dependency file.
 
 ## Reproduction and evidence

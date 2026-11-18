@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-import gzip
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -20,6 +19,7 @@ from gptqmodel.models.ports.zdtaichu5.configuration import ZDTaichu5_0_Config
 from gptqmodel.models.ports.zdtaichu5.image_processing import ZDTaichu5_0_ImageProcessor
 from gptqmodel.models.ports.zdtaichu5.modeling import ZDTaichu5_0_ForConditionalGeneration
 from gptqmodel.models.ports.zdtaichu5.processing import ZDTaichu5_0_Processor
+from tests.port_assets import read_port_asset, read_port_json
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / "gptqmodel/models/ports/zdtaichu5/fixtures"
@@ -66,7 +66,7 @@ def release_assets(path):
     path.mkdir(parents=True, exist_ok=True)
     for name in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja",
                  "preprocessor_config.json", "processor_config.json"):
-        (path / name).write_bytes(gzip.decompress((FIXTURES / f"{name}.gz").read_bytes()))
+        (path / name).write_bytes(read_port_asset(FIXTURES / f"{name}"))
 
 
 def public_config(**kwargs):
@@ -138,16 +138,16 @@ def test_generation_and_two_safetensors_cycles(tmp_path):
 
 
 def test_full_release_inventory_and_config_isolation():
-    payload = json.loads(gzip.decompress((FIXTURES / "config.json.gz").read_bytes()))
+    payload = read_port_json(FIXTURES / "config.json")
     original = json.dumps(payload, sort_keys=True)
     config = ZDTaichu5_0_Config(**payload)
     assert json.dumps(payload, sort_keys=True) == original
     with torch.device("meta"):
         model = ZDTaichu5_0_ForConditionalGeneration(config)
     actual = {k: list(v.shape) for k, v in model.state_dict().items()}
-    headers = json.loads(gzip.decompress((FIXTURES / "checkpoint_headers.json.gz").read_bytes()))
+    headers = read_port_json(FIXTURES / "checkpoint_headers.json")
     expected = {k: v["shape"] for h in headers.values() for k, v in h.items() if k != "__metadata__"}
-    index = json.loads(gzip.decompress((FIXTURES / "model.safetensors.index.json.gz").read_bytes()))
+    index = read_port_json(FIXTURES / "model.safetensors.index.json")
     assert len(expected) == 820 and actual == expected
     assert index["weight_map"] == {k: shard for shard, h in headers.items() for k in h if k != "__metadata__"}
 
@@ -465,7 +465,7 @@ def test_released_generation_policy_eos_sampling_and_two_cycles(tmp_path):
     torch.manual_seed(57)
     model = ZDTaichu5_0_ForConditionalGeneration(tiny_config()).eval()
     data = visual_inputs()
-    release_policy = json.loads(gzip.decompress((FIXTURES / "generation_config.json.gz").read_bytes()))
+    release_policy = read_port_json(FIXTURES / "generation_config.json")
     policy = {**release_policy, "eos_token_id": [2, 3], "bos_token_id": 1, "pad_token_id": 0}
     model.generation_config = GenerationConfig(**policy)
     policy_before = model.generation_config.to_dict()

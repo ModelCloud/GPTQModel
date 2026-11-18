@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real PanGu top-query decoding; no checkpoint Python is needed."""
 
-import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -15,6 +14,7 @@ from transformers.cache_utils import DynamicCache
 from gptqmodel.models.definitions.pangu_alpha import PanguAlphaQModel
 from gptqmodel.models.ports.pangu_alpha import GPTPanguConfig, GPTPanguForCausalLM
 from gptqmodel.models.ports.pangu_alpha.tokenization_pangu import GPTPanguTokenizer
+from tests.port_assets import read_port_asset
 
 
 FIXTURES = Path(__file__).parents[1] / "gptqmodel/models/ports/pangu_alpha/fixtures"
@@ -23,7 +23,7 @@ FIXTURES = Path(__file__).parents[1] / "gptqmodel/models/ports/pangu_alpha/fixtu
 def real_assets(path):
     pytest.importorskip("jieba", reason="PanGu-α tokenizer requires the optional jieba package")
     path.mkdir(exist_ok=True, parents=True)
-    data = gzip.decompress((FIXTURES / "vocab.model.gz").read_bytes())
+    data = read_port_asset(FIXTURES / "vocab.model")
     assert hashlib.sha256(data).hexdigest() == "18857e86783e50cfcaa0bc3c043fb4e9b5f240b885d2870ea593ee69b44f7a3a"
     (path / "vocab.model").write_bytes(data)
     return path
@@ -333,7 +333,7 @@ def test_real_tokenizer_source_ids_decode_and_two_reload_cycles(tmp_path):
             assert tokenizer.decode(case["ids"]) == case["decoded"]
         target = tmp_path / str(cycle)
         tokenizer.save_pretrained(target)
-        assert (target / "vocab.model").read_bytes() == gzip.decompress((FIXTURES / "vocab.model.gz").read_bytes())
+        assert (target / "vocab.model").read_bytes() == read_port_asset(FIXTURES / "vocab.model")
         tokenizer = GPTPanguTokenizer.from_pretrained(target)
 
 

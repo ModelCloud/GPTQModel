@@ -17,6 +17,7 @@ from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.ovis2_6_moe import Ovis2_6_MoeQModel, Ovis2_6_NextQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.ports.ovis2_6_moe.configuration_ovis2_6 import Ovis2_6_Moe_Config, Ovis2_6_Next_Config
+from tests.port_assets import read_port_asset
 
 
 CASES = [(Ovis2_6_MoeQModel, Ovis2_6_Moe_Config), (Ovis2_6_NextQModel, Ovis2_6_Next_Config)]
@@ -716,7 +717,6 @@ def test_processor_pixels_patch_order_prompt_save_reload_and_retry(definition, c
 @pytest.mark.parametrize("trust", [False, True])
 @pytest.mark.parametrize("bypass", [None, "0", "1"])
 def test_real_released_tokenizer_assets_ids_chat_and_reload(size, case, trust, bypass, tmp_path, monkeypatch):
-    import gzip
 
     from transformers import AutoTokenizer
 
@@ -725,7 +725,7 @@ def test_real_released_tokenizer_assets_ids_chat_and_reload(size, case, trust, b
 
     definition, config_class = case
     fixtures = Path(__file__).parents[1] / "gptqmodel/models/ports/ovis2_6_moe/fixtures"
-    (tmp_path / "tokenizer.json").write_bytes(gzip.decompress((fixtures / "qwen_tokenizer.json.gz").read_bytes()))
+    (tmp_path / "tokenizer.json").write_bytes(read_port_asset(fixtures / "qwen_tokenizer.json"))
     for file in ["tokenizer_config.json", "preprocessor_config.json", "added_tokens.json", "special_tokens_map.json"]:
         (tmp_path / file).write_bytes((fixtures / f"{size}_{file}").read_bytes())
     config = config_class(**json.loads((fixtures / f"{size}_config.json").read_text()))

@@ -109,7 +109,7 @@ in the repository; all generated test weight payloads are safetensors.
 Parent-only integration: exact proposed fusion reason in
 `central_fixture_proposals.json`; registered module plans/AWQ family set are
 unchanged. Central docs, main README and existing PR diagrams remain parent
-owned. Package data must include LICENSE, NOTICE, PDF, JSON and gzip assets;
+owned. Package data must include licenses, notices and runtime JSON;
 in particular preserve the model-license PDF instead of shipping its fixtures
 under an Apache-only assumption. See README/NOTICE for license and hardware,
 cache, quality and pretrained headless-model limitations.

@@ -19,7 +19,7 @@ describe the model artifacts as Apache-only. See `NOTICE` for modifications.
 All **47,019** tensor keys and shapes from **94** released safetensors headers
 equal a real package-model meta state dict, including 48 decoder blocks,
 12 full GQA layers, 36 KDA layers, 320 routed experts and the shared experts.
-`released_shapes.json.gz` is the full header-derived shape/dtype inventory;
+`released_shapes.json` is the full header-derived shape/dtype inventory;
 `header_manifest.json` pins each header. No trained tensor payload is included.
 Header acquisition used HTTP Range `bytes=0-7` for the little-endian uint64
 header length, then `bytes=8-(7+length)` for JSON, verified status 206 and
@@ -213,7 +213,7 @@ fusion reason. The generic AWQ `FAMILIES` set does not include `solar_open2`,
 so no generic `PLAIN_QUANTIZATION_FAMILIES` edit is needed. Shared fixtures are
 not edited by this port; integration checks can apply these proposals in memory.
 Parent owns central coverage/README/PR diagrams. Existing `MANIFEST.in` patterns
-include the port's licenses/NOTICE/JSON/gzip files; setuptools discovers it.
+include the port's licenses, notice and runtime JSON; setuptools discovers it.
 
 ## Limits
 

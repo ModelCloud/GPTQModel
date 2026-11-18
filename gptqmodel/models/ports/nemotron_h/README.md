@@ -66,7 +66,7 @@ checked again after quantization replaces a dense owner. No change to
 
 Inspected checkpoint config, Python source, model card and complete safetensors
 index; read only the binary length/header ranges of all 67 shards, never
-trained tensor payloads. `checkpoint_shapes.json.gz` pins every released name
+trained tensor payloads. `checkpoint_shapes.json` pins every released name
 and shape: original **311**, Nano **6243**, Super **42683** (including **1040**
 auxiliary MTP tensors). Native full-size meta owners exactly match all non-MTP
 names and shapes after documented `backbone` to `model` conversion and native

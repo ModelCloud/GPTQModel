@@ -208,7 +208,7 @@ decoder. This does not qualify a new optimized inference kernel. Packed and
 dense checkpoint comparisons, sampled/greedy token IDs and quantized reload
 logits remain exact. Ruff 0.14.2, compileall, package discovery, fixture hashes,
 the byte-preserved license and `git diff --check` also pass. Existing
-`MANIFEST.in` includes the port's LICENSE/NOTICE/JSON/gzip data.
+`MANIFEST.in` includes the port's license, notice and runtime JSON.
 
 ## Limits
 

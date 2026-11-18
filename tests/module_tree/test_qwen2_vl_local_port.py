@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-import gzip
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +11,7 @@ from transformers import Qwen2VLConfig, Qwen2VLTextConfig
 from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.models.ports import qwen2_vl
+from tests.port_assets import read_port_json
 
 
 PORT = Path(qwen2_vl.__file__).parent
@@ -29,7 +28,7 @@ BLOCKS = [
 @pytest.mark.parametrize("text", [False, True])
 def test_pinned_checkpoint_shapes_and_live_plan_ownership(text):
     # Sources are headers, not a tree-generated approximation of a checkpoint.
-    shapes = json.loads(gzip.decompress((PORT / "checkpoint_shapes.json.gz").read_bytes()))[
+    shapes = read_port_json(PORT / "checkpoint_shapes.json")[
         "text" if text else "composite"
     ]
     config_class = Qwen2VLTextConfig if text else Qwen2VLConfig

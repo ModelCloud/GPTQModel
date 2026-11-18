@@ -85,7 +85,7 @@ No shared AWQ implementation is modified.
 ## Pinned evidence and provenance
 
 `provenance.json` records exact source revisions, installed runtime source hashes
-and asset hashes. `checkpoint_shapes.json.gz` contains header shapes, not tensors.
+and asset hashes. `checkpoint_shapes.json` contains header shapes, not tensors.
 
 | Source | Immutable revision | Independent inventory |
 | --- | --- | --- |

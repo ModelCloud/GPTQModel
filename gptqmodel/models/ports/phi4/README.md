@@ -132,8 +132,7 @@ using this port's exact JSON proposal; no shared file was changed.
   failure/repair/retry use the public loader.
 - Pinned real tokenizer and processor assets; nonconstant PIL images,
   8/16 kHz waveforms, independent SpeechLib FFT/filterbank equations and exact
-  processor save/reload. `tokenizer_assets.json.gz` contains exact source bytes
-  represented as JSON strings; it is not a synthetic WordLevel tokenizer.
+  processor save/reload. The test reads the pinned release tokenizer and writes its exact bytes.
 - Six actual public **plain AWQ** runs with `fallback=None`: image, audio,
   combined media crossed with disk offload false/true; all eight decoder
   linears pack, first-decoder calibration inputs exactly match the dense
