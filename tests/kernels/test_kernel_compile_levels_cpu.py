@@ -284,6 +284,9 @@ class Case:
 CASES = [
     Case(TorchLinear, lambda: _pack_gptq(TorchLinear)),
     Case(TorchFusedLinear, lambda: _pack_gptq(TorchFusedLinear)),
+    # FP32 activations must take the same no-cast int4pack path as BF16, so a
+    # compiled FP32 model does not break on every quantized linear (#5087).
+    Case(TorchFusedLinear, lambda: _pack_gptq(TorchFusedLinear), dtype=torch.float32),
     Case(TorchInt8Linear, _pack_int8),
     Case(TorchAtenLinear, lambda: _pack_gptq(TorchAtenLinear)),
     # BF16 takes the AVX512-BF16 fused extension GEMM, not the dense fallback.
@@ -295,6 +298,7 @@ CASES = [
     # path; the biased case is the documented break in
     # ``torch_fused._cpu_int4pack_mm_cast``.
     Case(TorchFusedAwqLinear, lambda: _pack_awq(TorchFusedAwqLinear, bias=False)),
+    Case(TorchFusedAwqLinear, lambda: _pack_awq(TorchFusedAwqLinear, bias=False), dtype=torch.float32),
     Case(TorchAtenAwqLinear, lambda: _pack_awq(TorchAtenAwqLinear, bias=False)),
     Case(
         TorchCpuAvx512AwqLinear,
