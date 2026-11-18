@@ -12,6 +12,8 @@ both the true grid and its useful gradient.
 
 import torch
 
+from .qqq_activation import qqq_activation_quantize
+
 
 def qqq_candidate_values(codes, scales, *, group_size, in_features, channel_scales=None):
     """Decode [..., candidate] nibbles with weight axes [out,in].
@@ -68,11 +70,18 @@ def qqq_candidate_values(codes, scales, *, group_size, in_features, channel_scal
 def qqq_calibration_moments(inputs, *, teacher_inputs=None):
     """Return unnormalized (Hq, D, tokens) for deployed-input reconstruction.
 
-    Inputs are [tokens,in] in the same smoothing basis as the weights. Runtime
-    casts to FP16 before computing token maxima and dividing by 127; retain
-    that precision order. D = (Xteacher-Xq).T @ Xq permits asymmetric fitting
-    without an inverse. This objective excludes final output casts/roundoff.
-    Add returned moments across batches and normalize both by the same count.
+    Inputs are [tokens,in] in the same smoothing basis as the weights. The
+    deployed INT8 codes and FP32 scale come from
+    :func:`qqq_activation_quantize`, the same helper ``QQQLinear.dynamic_quant``
+    uses, so the moments describe the operand the kernel actually multiplies
+    instead of a separately narrowed grid. The kernel's own dtype/device
+    contract decides which inputs are admissible: a supported activation dtype
+    is quantized, and anything the runtime cannot represent is rejected here
+    rather than silently replaced by a different scale.
+
+    D = (Xteacher-Xq).T @ Xq permits asymmetric fitting without an inverse.
+    This objective excludes final output casts/roundoff. Add returned moments
+    across batches and normalize both by the same count.
     """
     if inputs.ndim != 2 or min(inputs.shape) <= 0 or not inputs.is_floating_point():
         raise ValueError("QQQ calibration inputs must be nonempty floating [tokens,in]")
@@ -82,17 +91,9 @@ def qqq_calibration_moments(inputs, *, teacher_inputs=None):
     if not torch.isfinite(inputs).all() or not torch.isfinite(teacher).all():
         raise ValueError("QQQ calibration inputs must be finite")
     with torch.no_grad():
-        runtime = inputs.half()
-        if not torch.isfinite(runtime).all():
-            raise ValueError("QQQ calibration inputs overflow runtime FP16")
-        maximum = runtime.abs().amax(-1, keepdim=True)
-        scale = (maximum / 127.0).float()
-        if ((maximum > 0) & (scale == 0)).any():
-            raise ValueError("QQQ runtime token scale underflows for nonzero inputs")
-        # Zero rows contribute exactly zero to both moments. Avoid NaN-to-int
-        # conversion, whose behavior is not a portable numerical contract.
-        divisor = torch.where(scale > 0, scale, torch.ones_like(scale))
-        codes = (runtime / divisor).round().clamp(-128, 127).to(torch.int8)
+        codes, scale = qqq_activation_quantize(inputs)
+        if not torch.isfinite(scale).all() or (scale <= 0).any():
+            raise ValueError("QQQ activation scales must be finite and positive")
         deployed = codes.float() * scale
         hessian = deployed.T @ deployed
         cross = (teacher.float() - deployed).T @ deployed

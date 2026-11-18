@@ -71,6 +71,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Paro](paro.md)
 - [Prism Bonsai GGUF compatibility](prism-bonsai-gguf.md)
 - [Protocol actions](protocol-actions.md)
+- [QQQ activation INT8 grid contract](qqq-activation-grid.md)
 - [QQQ default Hessian damping](qqq-default-damp.md)
 - [Quantization features: dynamic exclusions, endpoint requantize, post-quant EoRA, rotation, and GSQ](quantization-features.md)
 - [Quantization guide and end-to-end recipes](quantization-guide.md)
