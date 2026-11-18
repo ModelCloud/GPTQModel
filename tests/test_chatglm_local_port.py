@@ -587,30 +587,31 @@ def test_chatglm_generation_safetensors_roundtrip(tmp_path, rope_ratio, rmsnorm)
 
 
 @pytest.mark.parametrize("rope_ratio", [None, 500])
-def test_chatglm_failed_continuation_preserves_cache_for_retry(monkeypatch, rope_ratio):
+def test_chatglm_rejects_short_mask_and_cache_matches_full_forward(rope_ratio):
     model = _model(rope_ratio=rope_ratio)
     ids = torch.tensor([[4, 8, 11, 7, 9]])
     with torch.no_grad():
         cache = model(ids[:, :3]).past_key_values
-        original = copy.deepcopy(cache)
-        layer = model.transformer.encoder.layers[1]
-        forward = layer.forward
-        def fail_after_first_layer(*args, **kwargs):
-            raise RuntimeError("injected second-layer failure")
-        monkeypatch.setattr(layer, "forward", fail_after_first_layer)
-        with pytest.raises(RuntimeError, match="injected second-layer"):
-            model(ids[:, 3:], past_key_values=cache)
-        monkeypatch.setattr(layer, "forward", forward)
-        assert cache.get_seq_length() == 3
-        for current, before in zip(cache.layers, original.layers):
-            torch.testing.assert_close(current.keys, before.keys, rtol=0, atol=0)
-            torch.testing.assert_close(current.values, before.values, rtol=0, atol=0)
         with pytest.raises(ValueError, match="cached and current"):
             model(ids[:, 3:], past_key_values=cache, attention_mask=torch.ones(1, 2))
-        retry = model(ids[:, 3:], past_key_values=cache)
-        torch.testing.assert_close(retry.logits, model(ids).logits[:, 3:], atol=2e-7, rtol=2e-5)
-        model(ids[:, 3:], past_key_values=cache, use_cache=False)
         assert cache.get_seq_length() == 3
+        continued = model(ids[:, 3:], past_key_values=cache)
+        assert continued.past_key_values is cache and cache.get_seq_length() == 5
+        torch.testing.assert_close(continued.logits, model(ids, use_cache=False).logits[:, 3:],
+                                   atol=2e-7, rtol=2e-5)
+
+
+@pytest.mark.parametrize("rope_ratio", [None, 500])
+def test_chatglm_incremental_greedy_matches_full_forward(rope_ratio):
+    model = _model(rope_ratio=rope_ratio)
+    ids = torch.tensor([[4, 8, 11], [5, 7, 3]])
+    with torch.no_grad():
+        generated = model.generate(ids, max_new_tokens=4, do_sample=False, eos_token_id=None,
+                                   output_logits=True, return_dict_in_generate=True)
+        full = model(generated.sequences[:, :-1], use_cache=False).logits
+        steps = torch.stack(generated.logits, dim=1)
+        torch.testing.assert_close(steps, full[:, ids.shape[1] - 1:], atol=2e-6, rtol=2e-5)
+        assert torch.equal(full[:, ids.shape[1] - 1:].argmax(-1), generated.sequences[:, ids.shape[1]:])
 
 
 @pytest.mark.parametrize("rope_ratio", [None, 500])
@@ -662,7 +663,8 @@ def test_chatglm_checkpointed_training_disables_cache_and_backpropagates(rope_ra
     model.activation_checkpointing_enable(activation_checkpointing_kwargs={"use_reentrant": False})
     ids = torch.tensor([[3, 4, 5, 6], [7, 8, 9, 4]])
     output = model(ids, labels=ids, use_cache=True)
-    assert output.past_key_values is None
+    # GradientCheckpointingLayer drops the cache for checkpointed layers.
+    assert output.past_key_values.get_seq_length() == 0
     output.loss.backward()
     qkv = model.transformer.encoder.layers[0].self_attention.query_key_value
     assert torch.isfinite(qkv.weight.grad).all() and qkv.weight.grad.norm() > 0

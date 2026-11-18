@@ -9,9 +9,10 @@ from typing import List, Optional
 
 import torch
 import torch.nn.functional as F
-import torch.utils.checkpoint
 from torch import nn
 from torch.nn import LayerNorm
+from transformers.cache_utils import Cache
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.utils import logging
 
 from .configuration_chatglm import ChatGLMConfig
@@ -202,6 +203,7 @@ class SelfAttention(torch.nn.Module):
     def __init__(self, config: ChatGLMConfig, layer_number, device=None):
         super(SelfAttention, self).__init__()
         self.layer_number = max(1, layer_number)
+        self.layer_idx = self.layer_number - 1
 
         self.projection_size = config.kv_channels * config.num_attention_heads
 
@@ -229,7 +231,7 @@ class SelfAttention(torch.nn.Module):
                                )
 
     def forward(
-            self, hidden_states, attention_mask, rotary_pos_emb, kv_cache=None, use_cache=True
+            self, hidden_states, attention_mask, rotary_pos_emb, past_key_values: Optional[Cache] = None, **kwargs
     ):
         # hidden_states: [sq, b, h]
 
@@ -276,15 +278,12 @@ class SelfAttention(torch.nn.Module):
             query_layer = apply_rotary_pos_emb(query_layer, rotary_pos_emb)
             key_layer = apply_rotary_pos_emb(key_layer, rotary_pos_emb)
 
-        # adjust key and value for inference
-        if kv_cache is not None:
-            cache_k, cache_v = kv_cache
-            key_layer = torch.cat((cache_k, key_layer), dim=0)
-            value_layer = torch.cat((cache_v, value_layer), dim=0)
-        if use_cache:
-            kv_cache = (key_layer, value_layer)
-        else:
-            kv_cache = None
+        # Cache layers store [b, np, s, hn]; this core computes sequence first.
+        if past_key_values is not None:
+            key_layer, value_layer = past_key_values.update(
+                key_layer.permute(1, 2, 0, 3), value_layer.permute(1, 2, 0, 3), self.layer_idx
+            )
+            key_layer, value_layer = key_layer.permute(2, 0, 1, 3), value_layer.permute(2, 0, 1, 3)
 
         if self.multi_query_attention:
             key_layer = key_layer.unsqueeze(-2)
@@ -314,7 +313,7 @@ class SelfAttention(torch.nn.Module):
 
         output = self.dense(context_layer)
 
-        return output, kv_cache
+        return output
 
 
 def _config_to_kwargs(args):
@@ -370,7 +369,7 @@ class MLP(torch.nn.Module):
         return output
 
 
-class GLMBlock(torch.nn.Module):
+class GLMBlock(GradientCheckpointingLayer):
     """A single transformer layer.
 
     Transformer layer takes input with size [s, b, h] and returns an
@@ -404,7 +403,8 @@ class GLMBlock(torch.nn.Module):
         self.mlp = MLP(config, device=device)
 
     def forward(
-            self, hidden_states, attention_mask, rotary_pos_emb, kv_cache=None, use_cache=True,
+            self, hidden_states, attention_mask, rotary_pos_emb, past_key_values: Optional[Cache] = None,
+            use_cache: Optional[bool] = False, **kwargs,
     ):
         # hidden_states: [s, b, h]
 
@@ -413,12 +413,12 @@ class GLMBlock(torch.nn.Module):
         # their actual parameter dtype, including after model.half()/bfloat16().
         layernorm_output = self.input_layernorm(hidden_states.to(self.input_layernorm.weight.dtype))
         # Self attention.
-        attention_output, kv_cache = self.self_attention(
+        attention_output = self.self_attention(
             layernorm_output,
             attention_mask,
             rotary_pos_emb,
-            kv_cache=kv_cache,
-            use_cache=use_cache
+            past_key_values=past_key_values,
+            **kwargs,
         )
 
         # Residual connection.
@@ -451,7 +451,7 @@ class GLMBlock(torch.nn.Module):
         output = torch.nn.functional.dropout(mlp_output, p=self.hidden_dropout, training=self.training)
         output = residual + output
 
-        return output, kv_cache
+        return output
 
 
 class GLMTransformer(torch.nn.Module):
@@ -480,60 +480,25 @@ class GLMTransformer(torch.nn.Module):
             self.final_layernorm = LayerNormFunc(config.hidden_size, eps=config.layernorm_epsilon, device=device,
                                                  dtype=config.dtype)
 
-        self.gradient_checkpointing = False
-
     def _get_layer(self, layer_number):
         return self.layers[layer_number]
 
     def forward(
-            self, hidden_states, attention_mask, rotary_pos_emb, kv_caches=None,
-            use_cache: Optional[bool] = True,
-            output_hidden_states: Optional[bool] = False,
+            self, hidden_states, attention_mask, rotary_pos_emb, past_key_values: Optional[Cache] = None,
+            use_cache: Optional[bool] = True, **kwargs,
     ):
-        if not kv_caches:
-            kv_caches = [None for _ in range(self.num_layers)]
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-                )
-                use_cache = False
-        presents = () if use_cache else None
-
-        all_self_attentions = None
-        all_hidden_states = () if output_hidden_states else None
         for index in range(self.num_layers):
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)
-
-            layer = self._get_layer(index)
-            if self.gradient_checkpointing and self.training:
-                layer_ret = torch.utils.checkpoint.checkpoint(
-                    layer,
-                    hidden_states,
-                    attention_mask,
-                    rotary_pos_emb,
-                    kv_caches[index],
-                    use_cache,
-                    use_reentrant=False
-                )
-            else:
-                layer_ret = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    rotary_pos_emb=rotary_pos_emb,
-                    kv_cache=kv_caches[index],
-                    use_cache=use_cache
-                )
-            hidden_states, kv_cache = layer_ret
-            if use_cache:
-                presents = presents + (kv_cache,)
-
-        if output_hidden_states:
-            all_hidden_states = all_hidden_states + (hidden_states,)
+            hidden_states = self._get_layer(index)(
+                hidden_states,
+                attention_mask=attention_mask,
+                rotary_pos_emb=rotary_pos_emb,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                **kwargs,
+            )
 
         # Final layer norm.
         if self.post_layer_norm:
             hidden_states = self.final_layernorm(hidden_states.to(self.final_layernorm.weight.dtype))
 
-        return hidden_states, presents, all_hidden_states, all_self_attentions
+        return hidden_states

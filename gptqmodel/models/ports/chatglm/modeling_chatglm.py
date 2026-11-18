@@ -3,17 +3,20 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from THUDM ChatGLM sources.
-"""Package-owned ChatGLM checkpoint shells and Transformers 5 cache boundary.
+"""Package-owned ChatGLM checkpoint shells on the Transformers 5 cache/output APIs.
 
-Decoder math and tensor names come from the reviewed upstream cores. Only this
-boundary translates legacy cache axes to Transformers' batch/head/sequence axes.
+Decoder math and tensor names come from the reviewed upstream cores. Attention
+layers read and write a ``DynamicCache`` in Transformers' batch/head/sequence axes.
 """
 
 import torch
 from torch import nn
 from transformers import GenerationMixin, PreTrainedModel
-from transformers.cache_utils import DynamicCache
+from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.utils import can_return_tuple
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import capture_outputs
 
 from . import core, core_glm4
 from .configuration_chatglm import ChatGLMConfig
@@ -25,6 +28,8 @@ class ChatGLMPreTrainedModel(PreTrainedModel):
     _no_split_modules = ["GLMBlock"]
     _supports_sdpa = True
     supports_gradient_checkpointing = True
+    _skip_keys_device_placement = ["past_key_values"]
+    _can_record_outputs = {"hidden_states": [core.GLMBlock, core_glm4.GLMBlock]}
 
     def _init_weights(self, module):
         if isinstance(module, (nn.Linear, nn.Embedding)):
@@ -91,43 +96,27 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embedding.word_embeddings = value
 
-    def get_prompt(self, batch_size, device, dtype):
+    def _prefix_cache(self, batch_size, device, dtype):
+        """Prefix-tuning keys/values as an ordinary cache holding ``pre_seq_len`` positions."""
         tokens = torch.arange(self.pre_seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
         prefix = self.dropout(self.prefix_encoder(tokens).to(dtype)).view(
             batch_size, self.pre_seq_len, self.num_layers * 2,
             self.config.num_key_value_heads, self.config.kv_channels,
-        ).permute(2, 1, 0, 3, 4)
-        pairs = tuple((pair[0], pair[1]) for pair in prefix.split(2))
-        if self.batch_first:
-            pairs = tuple(tuple(t.permute(1, 2, 0, 3) for t in pair) for pair in pairs)
-        return pairs
+        ).permute(2, 0, 3, 1, 4)
+        cache = DynamicCache(config=self.config)
+        for index, (keys, values) in enumerate(prefix.split(2)):
+            cache.update(keys, values, index)
+        return cache
 
-    def _legacy_cache(self, past_key_values):
-        if past_key_values is None:
-            return None
-        if isinstance(past_key_values, DynamicCache):
-            if not past_key_values.get_seq_length():
-                return None
-            pairs = tuple((layer.keys, layer.values) for layer in past_key_values.layers)
-            if not self.batch_first:
-                pairs = tuple(tuple(t.permute(2, 0, 1, 3) for t in pair) for pair in pairs)
-            return pairs
-        if isinstance(past_key_values, tuple):
-            return past_key_values
-        raise TypeError("ChatGLM supports DynamicCache or its legacy forward-only tuple cache")
-
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(
         self, input_ids=None, position_ids=None, attention_mask=None,
-        full_attention_mask=None, past_key_values=None, inputs_embeds=None,
-        use_cache=None, output_hidden_states=None, return_dict=None,
-    ):
+        full_attention_mask=None, past_key_values: Cache | None = None, inputs_embeds=None,
+        use_cache=None, **kwargs,
+    ) -> BaseModelOutputWithPast:
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Provide exactly one of input_ids and inputs_embeds")
-        use_cache = self.config.use_cache if use_cache is None else use_cache
-        output_hidden_states = (
-            self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
-        )
-        return_dict = self.config.return_dict if return_dict is None else return_dict
         if inputs_embeds is None:
             inputs_embeds = self.embedding(input_ids)
         else:
@@ -139,13 +128,17 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
         batch_size = inputs_embeds.shape[0 if self.batch_first else 1]
         seq_length = inputs_embeds.shape[1 if self.batch_first else 0]
         device = inputs_embeds.device
-        legacy = self._legacy_cache(past_key_values)
-        if legacy is not None and len(legacy) != self.num_layers:
-            raise ValueError("ChatGLM cache must contain every decoder layer")
-        past_length = legacy[0][0].shape[2 if self.batch_first else 0] if legacy else 0
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache(config=self.config)
+        past_length = past_key_values.get_seq_length() if past_key_values is not None else 0
         if self.pre_seq_len is not None:
-            if legacy is None:
-                legacy = self.get_prompt(batch_size, device, inputs_embeds.dtype)
+            if not past_length:
+                prefix = self._prefix_cache(batch_size, device, inputs_embeds.dtype)
+                if past_key_values is None:
+                    past_key_values = prefix
+                else:
+                    for index, layer in enumerate(prefix.layers):
+                        past_key_values.update(layer.keys, layer.values, index)
                 past_length = self.pre_seq_len
             if attention_mask is not None:
                 attention_mask = torch.cat((
@@ -159,7 +152,8 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
         if token_offset + seq_length > self.seq_length:
             raise ValueError("ChatGLM input exceeds seq_length")
         if full_attention_mask is None:
-            # Bool True means masked, matching the original ChatGLM core.
+            # Model-specific mask: bool True means masked, matching the original ChatGLM cores, and upstream keeps
+            # padded query rows fully visible on prefill. Prefix-tuning positions are always visible.
             query_positions = torch.arange(seq_length, device=device)[:, None] + past_length
             key_positions = torch.arange(past_length + seq_length, device=device)[None, :]
             keep = (key_positions <= query_positions).expand(batch_size, -1, -1)
@@ -167,30 +161,18 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
                 if attention_mask.shape != (batch_size, past_length + seq_length):
                     raise ValueError("attention_mask must cover cached and current ChatGLM tokens")
                 keep = keep & attention_mask[:, None, :].bool()
-                # Preserve upstream's all-visible padded query rows on prefill.
                 if not past_length:
                     keep = keep | ~attention_mask[:, :, None].bool()
             full_attention_mask = ~keep[:, None]
         rope = self.rotary_pos_emb(self.seq_length)[position_ids]
         if not self.batch_first:
             rope = rope.transpose(0, 1).contiguous()
-        hidden, presents, states, attentions = self.encoder(
+        hidden = self.encoder(
             inputs_embeds, full_attention_mask, rotary_pos_emb=rope,
-            kv_caches=legacy, use_cache=use_cache, output_hidden_states=output_hidden_states,
+            past_key_values=past_key_values, use_cache=use_cache, **kwargs,
         )
-        cache = None
-        if presents is not None:
-            # Build after all layers succeed: a failed continuation leaves the
-            # caller's cache usable for a retry rather than partly advanced.
-            cache = DynamicCache()
-            for index, pair in enumerate(presents):
-                if not self.batch_first:
-                    pair = tuple(t.permute(1, 2, 0, 3) for t in pair)
-                cache.update(pair[0], pair[1], index)
-        if not return_dict:
-            return tuple(value for value in (hidden, cache, states, attentions) if value is not None)
         return BaseModelOutputWithPast(
-            last_hidden_state=hidden, past_key_values=cache, hidden_states=states, attentions=attentions
+            last_hidden_state=hidden, past_key_values=past_key_values if use_cache else None
         )
 
 
@@ -215,19 +197,17 @@ class ChatGLMForConditionalGeneration(ChatGLMPreTrainedModel, GenerationMixin):
     def set_output_embeddings(self, value):
         self.transformer.output_layer = value
 
+    @can_return_tuple
     def forward(
-        self, input_ids=None, position_ids=None, attention_mask=None, past_key_values=None,
-        inputs_embeds=None, labels=None, use_cache=None, output_attentions=None,
-        output_hidden_states=None, return_dict=None, return_last_logit=False, logits_to_keep=0,
+        self, input_ids=None, position_ids=None, attention_mask=None, past_key_values: Cache | None = None,
+        inputs_embeds=None, labels=None, use_cache=None, return_last_logit=False, logits_to_keep=0,
         **kwargs,
-    ):
-        if output_attentions:
+    ) -> CausalLMOutputWithPast:
+        if kwargs.get("output_attentions"):
             raise ValueError("ChatGLM does not return attention probabilities")
-        return_dict = self.config.return_dict if return_dict is None else return_dict
         outputs = self.transformer(
             input_ids=input_ids, position_ids=position_ids, attention_mask=attention_mask,
-            past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache,
-            output_hidden_states=output_hidden_states, return_dict=True,
+            past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs,
         )
         hidden = outputs.last_hidden_state
         if not self.transformer.batch_first:
@@ -245,11 +225,6 @@ class ChatGLMForConditionalGeneration(ChatGLMPreTrainedModel, GenerationMixin):
                 logits[:, :-1].float().reshape(-1, logits.shape[-1]), labels[:, 1:].reshape(-1),
                 ignore_index=-100,
             ).to(hidden.dtype)
-        if not return_dict:
-            values = (logits,) + tuple(
-                value for value in (outputs.past_key_values, outputs.hidden_states) if value is not None
-            )
-            return ((loss,) + values) if loss is not None else values
         return CausalLMOutputWithPast(
             loss=loss, logits=logits, past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
