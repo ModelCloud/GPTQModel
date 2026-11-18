@@ -18,7 +18,15 @@ These tests force a cold table (the state of a fresh process), attempt a
 capture first, and then compare eager output against an independent CPU
 reference. They cover the shared ``dequantize_gemm()`` helper, its
 ``AwqTorchLinear`` and dense ``ParoLinear`` consumers, and the CPU path.
+
+#5191 added the other half of the publication rule: device arithmetic is only
+*enqueued* on the caller's stream, so a table published before that stream has
+run is uninitialized for every other stream. A second test makes the first
+call on a stream that is still busy and the next call on another stream, then
+compares both with the serial output.
 """
+
+import threading
 
 import pytest
 import torch
@@ -322,3 +330,105 @@ def test_eager_shift_table_is_cached_once(cold_shift_cache):
     dequantize_gemm(qweight, qzeros, scales, 4, 64)
     dequantize_gemm(qweight, qzeros, scales, 4, 64)
     assert _AWQ_SHIFTS_CACHE[CUDA_KEY] is first
+
+
+def _two_stream_first_call(call):
+    """Run ``call`` on a busy stream A, then again on stream B after A publishes."""
+
+    published = threading.Event()
+    outputs, errors = {}, {}
+
+    def first():
+        torch.cuda.set_device(CUDA_DEVICE)
+        stream = torch.cuda.Stream(device=CUDA_DEVICE)
+        try:
+            with torch.inference_mode(), torch.cuda.stream(stream):
+                # Stream A is still busy with earlier work when the process's
+                # first AWQ dequant publishes the table.
+                torch.cuda._sleep(100_000_000)
+                outputs["a"] = call()
+        except BaseException as exc:  # noqa: BLE001 - re-raised by the caller
+            errors["a"] = exc
+        finally:
+            published.set()
+            stream.synchronize()
+
+    def second():
+        torch.cuda.set_device(CUDA_DEVICE)
+        if not published.wait(timeout=60):
+            errors["b"] = AssertionError("stream A never published the table")
+            return
+        stream = torch.cuda.Stream(device=CUDA_DEVICE)
+        try:
+            with torch.inference_mode(), torch.cuda.stream(stream):
+                outputs["b"] = call()
+        except BaseException as exc:  # noqa: BLE001
+            errors["b"] = exc
+        finally:
+            stream.synchronize()
+
+    threads = [threading.Thread(target=first), threading.Thread(target=second)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=120)
+    assert not any(thread.is_alive() for thread in threads), "two-stream AWQ first call hung"
+    assert not errors, errors
+    return outputs["a"], outputs["b"]
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="needs a CUDA/ROCm GPU")
+def test_two_stream_first_call_uses_a_complete_shift_table(cold_shift_cache):
+    """A second stream must not consume the table before its build has run (#5191).
+
+    Stream A is still busy when it makes the process's first four-bit dequant,
+    so the table's device arithmetic is only enqueued. Stream B calls right
+    after A publishes and used to decode with uninitialized offsets. Repeat
+    because the first iteration can reuse memory that still holds a correct
+    table; the defect then shows on the following iterations.
+    """
+
+    qweight, qzeros, scales = _packed_layer(512, 512, 128)
+    qweight = qweight.cuda()
+    qzeros = qzeros.cuda()
+    scales = scales.cuda()
+    serial = dequantize_gemm(qweight, qzeros, scales, 4, 128).cpu()
+
+    for iteration in range(5):
+        _AWQ_SHIFTS_CACHE.clear()
+        torch.cuda.synchronize()
+        first, second = _two_stream_first_call(
+            lambda: dequantize_gemm(qweight, qzeros, scales, 4, 128)
+        )
+        assert torch.equal(first.cpu(), serial), (
+            f"iteration {iteration}: the stream that built the table decoded wrong weights"
+        )
+        assert torch.equal(second.cpu(), serial), (
+            f"iteration {iteration}: a second stream decoded with an incomplete table; "
+            f"max |diff| = {(second.float().cpu() - serial.float()).abs().max().item()}"
+        )
+        assert _AWQ_SHIFTS_CACHE[CUDA_KEY].tolist() == EXPECTED_SHIFTS
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="needs a CUDA/ROCm GPU")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_two_stream_first_awq_torch_linear_call(cold_shift_cache, dtype):
+    """The consumer-level first call must not hand another stream a partial table."""
+
+    module = _awq_module(CUDA_DEVICE, dtype)
+    x = torch.randn(4, module.in_features, device=CUDA_DEVICE, dtype=dtype)
+    with torch.no_grad():
+        serial = module(x).clone()
+
+    for iteration in range(3):
+        _AWQ_SHIFTS_CACHE.clear()
+        torch.cuda.synchronize()
+        with torch.no_grad():
+            first, second = _two_stream_first_call(lambda: module(x))
+        assert torch.equal(first, serial), (
+            f"iteration {iteration}: the stream that built the table decoded wrong weights"
+        )
+        assert torch.equal(second, serial), (
+            f"iteration {iteration}: a second stream decoded with an incomplete table; "
+            f"max |diff| = {(second.float() - serial.float()).abs().max().item()}"
+        )

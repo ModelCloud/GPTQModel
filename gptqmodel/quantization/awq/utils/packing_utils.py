@@ -218,18 +218,26 @@ def unpack_reorder_pack(qweight, qzeros, bits):
     return qweight, qzeros
 
 
-# Extraction offsets for a four-bit decode, in AWQ reverse lane order. Building
-# them from a host list (`torch.tensor([...], device=...)`) copies host memory
-# to the device, which a CUDA-graph capture rejects and which added one H2D
-# copy to every portable AWQ forward (#4914). Derive the constant with
-# device-side arithmetic instead and keep one buffer per device.
+# Extraction offsets for a four-bit decode, in AWQ reverse lane order. The
+# table is derived with device-side arithmetic because a host-to-device copy is
+# rejected inside a CUDA-graph capture and must not run on every portable AWQ
+# forward (#4914). Keep one buffer per device.
 #
-# A capture records device work instead of running it, so a table first built
-# inside `torch.cuda.graph(...)` holds uninitialized memory (zeros) until the
-# graph is replayed. Publishing that table would make every later eager dequant
-# decode with those zeros after an abandoned capture (#5094). `_awq_shifts()`
-# therefore only publishes from an eager call and returns an uncached tensor
-# for the graph to record when the first call happens during capture.
+# Two rules govern publication:
+#
+# * A capture records device work instead of running it, so a table first built
+#   inside `torch.cuda.graph(...)` holds uninitialized memory until the graph
+#   is replayed. Publishing it would make every later eager dequant decode with
+#   those zeros after an abandoned capture (#5094). A capture therefore gets an
+#   uncached tensor and only an eager call publishes.
+# * Device arithmetic is only *enqueued* on the caller's current stream.
+#   Publishing it before that work runs let another stream's lock-free cache
+#   hit launch `dequantize_gemm` with uninitialized offsets (#5191). An eager
+#   miss therefore copies a tiny pinned host table with a blocking copy: when
+#   the copy returns, the published values are complete in device memory and
+#   valid on every stream. That is one 64-byte copy once per process and
+#   device, cheaper than creating and synchronizing a private stream for the
+#   same barrier; the warm path is unchanged.
 _AWQ_SHIFTS_CACHE = {}
 _AWQ_SHIFTS_LOCK = threading.Lock()
 
@@ -249,6 +257,26 @@ def _is_current_stream_capturing(device: torch.device) -> bool:
         return False
 
 
+def _awq_shift_values(bits: int) -> list[int]:
+    """Host-side extraction offsets in AWQ reverse lane order."""
+    return [lane * bits for lane in AWQ_REVERSE_ORDER]
+
+
+def _derive_awq_shifts(device: torch.device, bits: int) -> torch.Tensor:
+    """Derive the offsets on ``device`` without reading host memory.
+
+    Used where a host-to-device copy is impossible: a CUDA-graph capture and a
+    ``torch.compile`` trace. The arithmetic is only enqueued, so the caller must
+    not publish the result before the stream has run it.
+    """
+
+    # `AWQ_REVERSE_ORDER[j] == j // 2 + 4 * (j % 2)` for the eight lanes, so
+    # this reproduces `[lane * bits for lane in AWQ_REVERSE_ORDER]` without
+    # reading a host constant on the device.
+    lanes = torch.arange(8, device=device, dtype=torch.int64)
+    return bits * (lanes // 2) + (4 * bits) * (lanes % 2)
+
+
 def _awq_shifts(device: torch.device, bits: int) -> torch.Tensor:
     """Return the cached four-bit extraction offsets for ``device``."""
 
@@ -260,17 +288,22 @@ def _awq_shifts(device: torch.device, bits: int) -> torch.Tensor:
         # A traced graph cannot enter the Python lock. The value is a pure
         # function of device/bits, so derive it without publishing (a state
         # write); the eager warmup caches the same tensor for later calls.
-        lanes = torch.arange(8, device=device, dtype=torch.int64)
-        return bits * (lanes // 2) + (4 * bits) * (lanes % 2)
+        return _derive_awq_shifts(device, bits)
     capturing = _is_current_stream_capturing(device)
     with _AWQ_SHIFTS_LOCK:
         cached = _AWQ_SHIFTS_CACHE.get(key)
         if cached is None:
-            # `AWQ_REVERSE_ORDER[j] == j // 2 + 4 * (j % 2)` for the eight lanes,
-            # so this reproduces `[lane * bits for lane in AWQ_REVERSE_ORDER]`
-            # without reading a host constant on the device.
-            lanes = torch.arange(8, device=device, dtype=torch.int64)
-            cached = bits * (lanes // 2) + (4 * bits) * (lanes % 2)
+            if capturing:
+                # Recorded, not run: return it uncached and let the graph own it.
+                cached = _derive_awq_shifts(device, bits)
+            elif device.type == "cuda":
+                # A blocking copy from pinned host memory has completed when it
+                # returns, so the published table is valid on every stream.
+                host = torch.tensor(_awq_shift_values(bits), dtype=torch.int64).pin_memory()
+                cached = host.to(device=device, non_blocking=False)
+            else:
+                # CPU and other backends run this arithmetic synchronously.
+                cached = _derive_awq_shifts(device, bits)
             if not capturing:
                 _AWQ_SHIFTS_CACHE[key] = cached
         return cached

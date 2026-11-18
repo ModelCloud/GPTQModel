@@ -110,6 +110,56 @@ flowchart TD
 | Eager steady state | one cached table per device/bits | unchanged: one cached table, no per-call allocation or H2D copy |
 | `torch.compile` trace | uncached, derived tensor | unchanged |
 
+### Published device constants must be complete on every stream
+
+#5180 made a capture never publish its never-run table, but an eager miss had
+the same publication problem on another axis: `torch.arange` and the integer
+arithmetic that derives the table are only *enqueued* on the caller's current
+stream. Publishing the tensor before that stream runs let a second stream's
+lock-free cache hit launch `dequantize_gemm` with uninitialized offsets
+(#5191). The decode was silently wrong once per process and device.
+
+The eager miss now builds the eight offsets on the host, copies them from
+pinned memory with a blocking copy, and only then publishes the table. A
+blocking copy has completed when it returns, so the values are valid on every
+stream. That is one 64-byte copy per process and device; the warm path still
+returns the cached tensor without a copy or synchronization. The capture and
+`torch.compile` paths keep deriving the table with device arithmetic, because
+a host-to-device copy is illegal inside a capture, and neither path publishes.
+
+Before #5191:
+
+```mermaid
+flowchart TD
+    A["eager miss on stream A"] --> B["enqueue device arithmetic on A"]
+    B --> C["publish table"]
+    C --> D["stream B: lock-free cache hit"]
+    D --> E["dequant on B reads the table before A ran it"]
+    E --> F["silent wrong weights"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class E,F failure
+```
+
+After #5191:
+
+```mermaid
+flowchart TD
+    A["eager miss on stream A"] --> B["pinned host offsets"]
+    B --> C["blocking H2D copy, complete on return"]
+    C --> D["publish table"]
+    D --> E["stream B: lock-free cache hit"]
+    E --> F["correct dequant on every stream"]
+    classDef added fill:#e6f4ea,stroke:#2e7d32,color:#111
+    class C,D added
+```
+
+| Situation | Before #5191 | After #5191 |
+| --- | --- | --- |
+| First four-bit dequant publishes the table while its stream is still busy | another stream decodes with uninitialized offsets | the table is complete before it is published |
+| Eager steady state | cached tensor, no per-call work | unchanged: cached tensor, no per-call work |
+| Cold miss cost | device arithmetic enqueued, publication raced | one 64-byte pinned H2D blocking copy |
+| Capture or `torch.compile` trace | uncached, derived tensor | unchanged |
+
 The `AwqTorchLinear` and `ParoLinear` dense forwards reach this through the
 shared `_dequantize_weight_for_inference`, and the CPU kernels call the same
 `dequantize_gemm`; fixing the helper covers all of them. `AwqTorchLinear` now
@@ -198,6 +248,8 @@ unchanged and no additional persistent inference weight storage is introduced.
 | `test_successful_capture_does_not_publish_shift_table` | a successful capture leaves the cache empty until an eager call |
 | `test_awq_torch_linear_after_abandoned_capture` | FP16/BF16 `AwqTorchLinear` matches the FP64 oracle after an abandoned capture |
 | `test_awq_torch_linear_first_dequant_capture_replays` | a real first-call `AwqTorchLinear` capture replays to the FP64 oracle |
+| `test_two_stream_first_call_uses_a_complete_shift_table` | a second stream never consumes a table whose build has not run (#5191) |
+| `test_two_stream_first_awq_torch_linear_call` | FP16/BF16 `AwqTorchLinear` first calls on two streams match the serial output |
 | `test_paro_linear_dense_after_abandoned_capture` | FP16/BF16 dense `ParoLinear` matches the FP64 oracle after an abandoned capture |
 | `test_cpu_awq_torch_linear_matches_oracle` | the CPU kernel sharing `dequantize_gemm` still matches the oracle |
 | `test_eager_shift_table_is_cached_once` | eager calls reuse one published table; repeated dequant does not rebuild it |
