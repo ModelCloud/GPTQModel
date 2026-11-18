@@ -196,7 +196,8 @@ class KlearMoeForCausalLM(KlearPreTrainedModel, GenerationMixin):
                 inputs_embeds=None, labels=None, use_cache=None, logits_to_keep=0, **kwargs):
         outputs = self.model(
             input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
-            past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs,
+            past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache, return_dict=True,
+            **kwargs,
         )
         logits = self.lm_head(slice_logits_to_keep(outputs.last_hidden_state, logits_to_keep))
         loss = self.loss_function(logits, labels, self.vocab_size, **kwargs) if labels is not None else None

@@ -235,7 +235,8 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel, GenerationMixin):
     def forward(self, input_ids=None, attention_mask=None, past_key_values=None, inputs_embeds=None,
                 labels=None, use_cache=None, logits_to_keep=0, **kwargs):
         output = self.transformer(input_ids=input_ids, attention_mask=attention_mask, past_key_values=past_key_values,
-                                  inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs)
+                                  inputs_embeds=inputs_embeds, use_cache=use_cache, return_dict=True,
+                                  **kwargs)
         logits = self.lm_head(slice_logits_to_keep(output.last_hidden_state, logits_to_keep))
         loss = None
         if labels is not None:
