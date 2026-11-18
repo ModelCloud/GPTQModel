@@ -23,11 +23,11 @@ from typing import Any
 import torch
 import torch.nn as nn
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, EncoderDecoderCache
+from transformers.cache_utils import Cache
 from transformers.generation import GenerationMixin
-from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.masking_utils import create_causal_mask
 from transformers.modeling_layers import GradientCheckpointingLayer
-from transformers.modeling_outputs import BaseModelOutputWithPooling, ModelOutput
+from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling, ModelOutput
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoePreTrainedModel,
@@ -68,17 +68,14 @@ class InternS2PreviewPreTrainedModel(Qwen3_5MoePreTrainedModel):
 
 
 class InternS2PreviewTimeSeriesAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed self-attention of the (uncached) causal time-series encoder."""
 
     def __init__(
         self,
         embed_dim: int,
         num_heads: int,
         dropout: float = 0.0,
-        is_decoder: bool = False,
         bias: bool = True,
-        is_causal: bool = False,
-        layer_idx: int | None = None,
         config: InternS2PreviewTimeSeriesConfig | None = None,
         num_key_value_groups: int = 1,
     ):
@@ -95,16 +92,8 @@ class InternS2PreviewTimeSeriesAttention(nn.Module):
                 f" and `num_heads`: {num_heads})."
             )
         self.scaling = self.head_dim**-0.5
-        self.is_decoder = is_decoder
-        self.is_causal = is_causal
-
-        if layer_idx is None and is_decoder:
-            logger.warning_once(
-                f"Instantiating a decoder {self.__class__.__name__} without passing `layer_idx` is not recommended and "
-                "will to errors during the forward call, if caching is used. Please make sure to provide a `layer_idx` "
-                "when creating this class."
-            )
-        self.layer_idx = layer_idx
+        # The source encoder always applies a causal mask (see InternS2PreviewTimeSeriesEncoder.forward).
+        self.is_causal = True
 
         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
@@ -115,66 +104,22 @@ class InternS2PreviewTimeSeriesAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        key_value_states: torch.Tensor | None = None,
-        past_key_values: Cache | None = None,
         attention_mask: torch.Tensor | None = None,
-        output_attentions: bool = False,
-        cache_position: torch.Tensor | None = None,
-        # TODO: we need a refactor so that the different attention modules can get their specific kwargs
-        # ATM, we have mixed things encoder, decoder, and encoder-decoder attn
-        **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Input shape: Batch x Time x Channel"""
-
-        # if key_value_states are provided this layer is used as a cross-attention layer
-        # for the decoder
-        is_cross_attention = key_value_states is not None
-
-        # determine input shapes
         bsz, tgt_len = hidden_states.shape[:-1]
-        q_input_shape = (bsz, tgt_len, -1, self.head_dim)
+        hidden_shape = (bsz, tgt_len, -1, self.head_dim)
 
-        # Scaling is susceptible to floating point arithmetics' inprecisions
-        # which can lead to different results (this is dependent from model
-        # to model, e.g. intern_s2_preview_time_series is one such case). We therefore keep the
-        # original order of scaling to follow the original implementation
-        # and enforce no scaling (1.0) in the attention call below.
-        query_states = self.q_proj(hidden_states) * self.scaling
-        query_states = query_states.view(*q_input_shape)
-        query_states = query_states.transpose(1, 2).contiguous()
-
-        # Check is encoder-decoder model is being used. Otherwise we'll get `DynamicCache`
-        if past_key_values is not None and isinstance(past_key_values, EncoderDecoderCache):
-            is_updated = past_key_values.is_updated.get(self.layer_idx)
-            if is_cross_attention:
-                # after the first generated id, we can subsequently re-use all key/value_states from cache
-                past_key_values.is_updated[self.layer_idx] = True
-                past_key_values = past_key_values.cross_attention_cache
-            else:
-                past_key_values = past_key_values.self_attention_cache
-
-        # use key_value_states if cross attention
-        current_states = key_value_states if key_value_states is not None else hidden_states
-        if is_cross_attention and past_key_values and is_updated:
-            # reuse k,v, cross_attentions
-            key_states = past_key_values.layers[self.layer_idx].keys
-            value_states = past_key_values.layers[self.layer_idx].values
-        else:
-            key_states = self.k_proj(current_states).view(bsz, -1, self.num_heads, self.head_dim)
-            value_states = self.v_proj(current_states).view(bsz, -1, self.num_heads, self.head_dim)
-            key_states = key_states.transpose(1, 2).contiguous()
-            value_states = value_states.transpose(1, 2).contiguous()
-            if past_key_values is not None:
-                # save all key/value_states to cache to be re-used for fast auto-regressive generation
-                cache_position = cache_position if not is_cross_attention else None
-                key_states, value_states = past_key_values.update(
-                    key_states, value_states, self.layer_idx, {"cache_position": cache_position}
-                )
+        # The source scales the query projection before attention (and calls attention with
+        # scaling=1.0); keep that order for bit-compatible numerics.
+        query_states = (self.q_proj(hidden_states) * self.scaling).view(hidden_shape).transpose(1, 2).contiguous()
+        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2).contiguous()
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2).contiguous()
 
         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
             self.config._attn_implementation, eager_attention_forward
         )
-
         attn_output, attn_weights = attention_interface(
             self,
             query_states,
@@ -183,13 +128,11 @@ class InternS2PreviewTimeSeriesAttention(nn.Module):
             attention_mask,
             dropout=0.0 if not self.training else self.dropout,
             scaling=1.0,
-            output_attentions=output_attentions,
             **kwargs,
         )
 
         attn_output = attn_output.reshape(bsz, tgt_len, -1).contiguous()
         attn_output = self.out_proj(attn_output)
-
         return attn_output, attn_weights
 
 
@@ -215,25 +158,12 @@ class InternS2PreviewTimeSeriesEncoderLayer(GradientCheckpointingLayer):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor,
-        output_attentions: bool = False,
+        attention_mask: torch.Tensor | None = None,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
-        """
-        Args:
-            hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
-            attention_mask (`torch.FloatTensor`): attention mask of size
-                `(batch, 1, tgt_len, src_len)` where padding elements are indicated by very large negative values.
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-        """
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states, attn_weights = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            output_attentions=output_attentions,
-        )
+        hidden_states, _ = self.self_attn(hidden_states=hidden_states, attention_mask=attention_mask, **kwargs)
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
         hidden_states = residual + hidden_states
 
@@ -249,7 +179,7 @@ class InternS2PreviewTimeSeriesEncoderLayer(GradientCheckpointingLayer):
             clamp_value = torch.finfo(hidden_states.dtype).max - 1000
             hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
 
-        return hidden_states, attn_weights
+        return hidden_states
 
 
 class InternS2PreviewTimeSeriesEncoder(PreTrainedModel):
@@ -309,58 +239,6 @@ class InternS2PreviewTimeSeriesEncoder(PreTrainedModel):
         self.mask_type = masktype
         self.chunk_length = chunk_length
 
-    def _make_causal_mask(
-        self, input_ids_shape: torch.Size, dtype: torch.dtype, device: torch.device, past_key_values_length: int = 0
-    ):
-        """
-        Make causal mask used for bi-directional self-attention.
-        """
-        bsz, tgt_len = input_ids_shape
-        mask = torch.full((tgt_len, tgt_len), torch.finfo(dtype).min, device=device)
-        mask_cond = torch.arange(mask.size(-1), device=device)
-        mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
-        mask = mask.to(dtype)
-
-        if past_key_values_length > 0:
-            mask = torch.cat([torch.zeros(tgt_len, past_key_values_length, dtype=dtype, device=device), mask], dim=-1)
-        return mask[None, None, :, :].expand(bsz, 1, tgt_len, tgt_len + past_key_values_length)
-
-    # Copied from transformers.models.bart.modeling_bart._expand_mask
-    def _expand_mask(self, mask: torch.Tensor, dtype: torch.dtype, tgt_len: int = None):
-        """
-        Expands attention_mask from `[bsz, seq_len]` to `[bsz, 1, tgt_seq_len, src_seq_len]`.
-        """
-        # print(mask.size())
-        bsz, src_len = mask.size()
-        tgt_len = tgt_len if tgt_len is not None else src_len
-
-        expanded_mask = mask[:, None, None, :].expand(bsz, 1, tgt_len, src_len).to(dtype)
-
-        inverted_mask = 1.0 - expanded_mask
-
-        return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
-
-    def _prepare_decoder_attention_mask(self, attention_mask, input_shape, inputs_embeds, past_key_values_length):
-        # create causal mask
-        # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-        combined_attention_mask = None
-
-        if input_shape[-1] > 1:
-            combined_attention_mask = self._make_causal_mask(
-                input_shape,
-                inputs_embeds.dtype,
-                device=inputs_embeds.device,
-                past_key_values_length=past_key_values_length,
-            )
-
-        if attention_mask is not None:
-            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            expanded_attn_mask = self._expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1])
-            combined_attention_mask = (
-                expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
-            )
-        return combined_attention_mask
-
     def prepare_chunk_attention_mask(self, attention_mask, input_shape, inputs_embeds):
 
         block_size = round(self.chunk_length / 4 * 2)
@@ -389,25 +267,11 @@ class InternS2PreviewTimeSeriesEncoder(PreTrainedModel):
         attention_mask = matrix.to(inputs_embeds.device)
         return attention_mask
 
-    def forward(
-        self,
-        input_features,
-        attention_mask=None,
-        head_mask=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-    ):
+    def forward(self, input_features, **kwargs: Unpack[TransformersKwargs]) -> BaseModelOutput:
         # (N, T, C) -> (T, N, C) -> (N, C, T)
         input_features = input_features.permute(1, 0, 2)
         input_features = self.adapt_in(input_features)
         input_features = input_features.permute(1, 2, 0)
-
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # (N, C, T) -> (N, C, T//2)
         inputs_embeds = nn.functional.gelu(self.conv1(input_features))
@@ -427,64 +291,24 @@ class InternS2PreviewTimeSeriesEncoder(PreTrainedModel):
             hidden_states = inputs_embeds + embed_pos[: inputs_embeds.shape[1], :]
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
 
-        encoder_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
-
         input_shape = inputs_embeds.size()[:-1]
-        past_key_values_length = 0
-        attention_mask = None
         if self.mask_type == "chunk":
-            attention_mask = self.prepare_chunk_attention_mask(attention_mask, input_shape, inputs_embeds)
+            attention_mask = self.prepare_chunk_attention_mask(None, input_shape, inputs_embeds)
         else:
-            attention_mask = self._prepare_decoder_attention_mask(
-                attention_mask, input_shape, inputs_embeds, past_key_values_length
+            # The source encoder is causal over the (unpadded) time-series frames.
+            attention_mask = create_causal_mask(
+                config=self.config,
+                inputs_embeds=inputs_embeds,
+                attention_mask=None,
+                past_key_values=None,
+                position_ids=torch.arange(input_shape[1], device=inputs_embeds.device).unsqueeze(0),
             )
 
-        if head_mask is not None:
-            assert head_mask.size()[0] == (len(self.layers)), (
-                f"The head_mask should be specified for {len(self.layers)} layers, but it is for {head_mask.size()[0]}."
-            )
-
-        for idx, encoder_layer in enumerate(self.layers):
-            if output_hidden_states:
-                encoder_states = encoder_states + (self.layer_norm(hidden_states),)
+        for encoder_layer in self.layers:
             # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
-            to_drop = False
-            if self.training:
-                dropout_probability = torch.rand([])
-                if dropout_probability < self.layerdrop:  # skip the layer
-                    to_drop = True
-
-            if to_drop:
-                layer_outputs = (None, None)
-            else:
-                if self.gradient_checkpointing and self.training:
-
-                    def create_custom_forward(module):
-                        def custom_forward(*inputs):
-                            return module(*inputs, output_attentions)
-
-                        return custom_forward
-
-                    layer_outputs = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(encoder_layer),
-                        hidden_states,
-                        attention_mask,
-                        (head_mask[idx] if head_mask is not None else None),
-                    )
-                else:
-                    layer_outputs = encoder_layer(
-                        hidden_states,
-                        attention_mask,
-                        # TODO test whether OK
-                        # layer_head_mask=(head_mask[idx] if head_mask is not None else None),
-                        output_attentions=output_attentions,
-                    )
-
-                hidden_states = layer_outputs[0]
-
-            if output_attentions:
-                all_attentions = all_attentions + (layer_outputs[1],)
+            if self.training and torch.rand([]) < self.layerdrop:
+                continue
+            hidden_states = encoder_layer(hidden_states, attention_mask, **kwargs)
 
         # (N, T, C) -> (T, N, C)
         hidden_states = hidden_states.permute(1, 0, 2)
@@ -493,12 +317,7 @@ class InternS2PreviewTimeSeriesEncoder(PreTrainedModel):
 
         # (T, N, C) -> (N, T, C)
         hidden_states = hidden_states.permute(1, 0, 2)
-        if output_hidden_states:
-            encoder_states = encoder_states + (hidden_states,)
-
-        if not return_dict:
-            return tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
-        return ModelOutput(last_hidden_state=hidden_states, hidden_states=encoder_states, attentions=all_attentions)
+        return BaseModelOutput(last_hidden_state=hidden_states)
 
 
 class InternS2PreviewTimeSeriesConcatSubsampling(nn.Module):
@@ -624,7 +443,6 @@ class InternS2PreviewTimeSeriesProjector(nn.Module):
 
 class InternS2PreviewTimeSeriesModel(PreTrainedModel):
     main_input_name = "time_series_signals"
-    _supports_flash_attn_2 = False
     config_class = InternS2PreviewTimeSeriesConfig
     _no_split_modules = ["InternS2PreviewTimeSeriesEncoderLayer"]
 
@@ -668,15 +486,8 @@ class InternS2PreviewTimeSeriesModel(PreTrainedModel):
         ts_lens: torch.Tensor = None,
         sr: torch.Tensor = None,
         channels: torch.LongTensor | None = None,
-        output_hidden_states: bool = None,
-        return_dict: bool = None,
         time_series_embeds: torch.FloatTensor = None,
     ):
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         if time_series_signals is None and time_series_embeds is None:
             raise ValueError("You have to specify time_series_signals or time_series_embeds")
 
@@ -693,11 +504,7 @@ class InternS2PreviewTimeSeriesModel(PreTrainedModel):
                 raise ValueError(f"wrong time_series_signals size: {time_series_signals[0].shape}")
 
         # [B, 64000, 1] -> [B, 200, 256] -> [B, 100, 1024]
-        encoder_outputs = self.encoder(
-            input_features=time_series_embeds,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
+        encoder_outputs = self.encoder(input_features=time_series_embeds)
 
         # ts_lens after encoder
         ts_lens = (ts_lens + 1) // 2
@@ -995,7 +802,7 @@ class InternS2PreviewModel(InternS2PreviewPreTrainedModel):
             delta = self.rope_deltas.repeat_interleave(batch_size // self.rope_deltas.shape[0], dim=0)
             position_ids = position_ids + delta.to(device=position_ids.device)
         else:
-            # Can't build correct 3D positions. Let the model infer it from `cache_position`
+            # Can't build correct 3D positions; the text model derives them from the cache length.
             position_ids = None
         return position_ids
 
@@ -1015,7 +822,6 @@ class InternS2PreviewModel(InternS2PreviewPreTrainedModel):
         ts_lens: torch.Tensor | list[torch.Tensor] = None,
         ts_sr: torch.FloatTensor | list[torch.FloatTensor] = None,
         ts_channels: torch.LongTensor | None = None,
-        cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | InternS2PreviewModelOutputWithPast:
         r"""
@@ -1126,8 +932,6 @@ class InternS2PreviewModel(InternS2PreviewPreTrainedModel):
             ts_lens=ts_lens,
             sr=sr,
             channels=ts_channels,
-            output_hidden_states=False,
-            return_dict=True,
         )
         return ts_embeds, ts_pad_mask
 
@@ -1206,7 +1010,6 @@ class InternS2PreviewForConditionalGeneration(InternS2PreviewPreTrainedModel, Ge
         ts_lens: torch.Tensor | list[torch.Tensor] = None,
         ts_sr: torch.FloatTensor | list[torch.FloatTensor] = None,
         ts_channels: torch.LongTensor | None = None,
-        cache_position: torch.LongTensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | InternS2PreviewCausalLMOutputWithPast:
@@ -1275,7 +1078,6 @@ class InternS2PreviewForConditionalGeneration(InternS2PreviewPreTrainedModel, Ge
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
-            cache_position=cache_position,
             **kwargs,
         )
 
@@ -1313,52 +1115,14 @@ class InternS2PreviewForConditionalGeneration(InternS2PreviewPreTrainedModel, Ge
             router_logits=outputs.router_logits,
         )
 
-    def prepare_inputs_for_generation(
-        self,
-        input_ids,
-        past_key_values=None,
-        attention_mask=None,
-        inputs_embeds=None,
-        cache_position=None,
-        position_ids=None,
-        use_cache=True,
-        pixel_values=None,
-        pixel_values_videos=None,
-        ts_values=None,
-        image_grid_thw=None,
-        video_grid_thw=None,
-        ts_lens=None,
-        ts_sr=None,
-        ts_channels=None,
-        is_first_iteration=False,
-        **kwargs,
-    ):
+    def prepare_inputs_for_generation(self, input_ids, *args, is_first_iteration=False, **kwargs):
         model_inputs = super().prepare_inputs_for_generation(
-            input_ids,
-            past_key_values=past_key_values,
-            attention_mask=attention_mask,
-            inputs_embeds=inputs_embeds,
-            cache_position=cache_position,
-            position_ids=position_ids,
-            use_cache=use_cache,
-            pixel_values=pixel_values,
-            pixel_values_videos=pixel_values_videos,
-            ts_values=ts_values,
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
-            ts_lens=ts_lens,
-            ts_sr=ts_sr,
-            ts_channels=ts_channels,
-            is_first_iteration=is_first_iteration,
-            **kwargs,
+            input_ids, *args, is_first_iteration=is_first_iteration, **kwargs
         )
-
-        if not is_first_iteration and use_cache:
-            model_inputs["ts_values"] = None
-            model_inputs["ts_lens"] = None
-            model_inputs["ts_sr"] = None
-            model_inputs["ts_channels"] = None
-
+        # Time-series features are merged during prefill only; cached decode steps never see them again.
+        if not is_first_iteration and kwargs.get("use_cache", True):
+            for key in ("ts_values", "ts_lens", "ts_sr", "ts_channels"):
+                model_inputs.pop(key, None)
         return model_inputs
 
     def _prepare_position_ids_for_generation(self, inputs_tensor, model_kwargs):
@@ -1523,8 +1287,7 @@ class InternS2PreviewForConditionalGeneration(InternS2PreviewPreTrainedModel, Ge
                 if key == "position_ids" and dict_to_expand[key].ndim == 3:
                     dict_to_expand[key] = dict_to_expand[key].repeat_interleave(expand_size, dim=1)
                 elif (
-                    key != "cache_position"
-                    and dict_to_expand[key] is not None
+                    dict_to_expand[key] is not None
                     and isinstance(dict_to_expand[key], torch.Tensor)
                     and key not in visual_keys
                 ):

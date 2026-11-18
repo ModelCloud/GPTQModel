@@ -21,7 +21,7 @@
 
 import copy
 import math
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -30,11 +30,14 @@ from torch.nn import CrossEntropyLoss
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation.utils import GenerationMixin
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast, MoeModelOutputWithPast
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
-from transformers.utils import TransformersKwargs, logging
+from transformers.utils import TransformersKwargs, can_return_tuple
+from transformers.utils.generic import merge_with_config_defaults
+from transformers.utils.output_capturing import OutputRecorder, capture_outputs
 
 from .configuration_llada2_moe import LLaDA2MoeConfig
 from .generation_llada2 import (
@@ -44,9 +47,6 @@ from .generation_llada2 import (
     LLaDA21Generation,
     LLaDA22Generation,
 )
-
-
-logger = logging.get_logger(__name__)
 
 
 def prepare_attention_mask(mask, embeddings, past_seen_tokens=0):
@@ -78,21 +78,6 @@ def prepare_attention_mask(mask, embeddings, past_seen_tokens=0):
     return torch.zeros(visible.shape, dtype=embeddings.dtype, device=embeddings.device).masked_fill(
         ~visible, torch.finfo(embeddings.dtype).min
     )
-
-
-def sdpa_attention_forward(module, query, key, value, attention_mask, scaling, dropout=0.0, **kwargs):
-    key = repeat_kv(key, module.num_key_value_groups)
-    value = repeat_kv(value, module.num_key_value_groups)
-    result = F.scaled_dot_product_attention(
-        query,
-        key,
-        value,
-        attn_mask=attention_mask,
-        dropout_p=dropout,
-        is_causal=False,
-        scale=scaling,
-    )
-    return result.transpose(1, 2).contiguous(), None
 
 
 class LLaDA2MoeRMSNorm(nn.Module):
@@ -355,25 +340,18 @@ def eager_attention_forward(
 
 
 class LLaDA2MoeAttention(nn.Module):
-    def __init__(self, config: LLaDA2MoeConfig, layer_idx: Optional[int] = None):
+    def __init__(self, config: LLaDA2MoeConfig, layer_idx: int):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
-        if layer_idx is None:
-            logger.warning_once(
-                f"Instantiating {self.__class__.__name__} without passing `layer_idx` is not recommended and will to errors during the forward call, if caching is used. Please make sure to provide a `layer_idx` when creating this class."
-            )
         self.attention_dropout = config.attention_dropout
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = config.head_dim or self.hidden_size // self.num_heads
-        partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
-        self.rope_dim = int(self.head_dim * partial_rotary_factor)
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = config.rope_theta
         self.scaling = self.head_dim ** (-0.5)
+        # Diffusion decoding: visibility comes entirely from the prepared (block) mask.
         self.is_causal = False
         self.query_key_value = nn.Linear(
             self.hidden_size, (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim, bias=config.use_qkv_bias
@@ -382,22 +360,15 @@ class LLaDA2MoeAttention(nn.Module):
             self.query_layernorm = LLaDA2MoeRMSNorm(self.head_dim, eps=config.rms_norm_eps)
             self.key_layernorm = LLaDA2MoeRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.dense = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.use_bias)
-        self.sliding_window = None
-
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
     def forward(
         self,
         hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        past_key_values: Optional[Cache] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         input_shape = hidden_states.shape[:-1]
         bsz, q_len, _ = hidden_states.size()
         qkv = self.query_key_value(hidden_states)
@@ -413,16 +384,11 @@ class LLaDA2MoeAttention(nn.Module):
             key_states = self.key_layernorm(key_states)
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-        if past_key_value is not None:
-            if self.layer_idx is None:
-                raise ValueError(
-                    f"The cache structure has changed since version v4.36. If you are using {self.__class__.__name__} for auto-regressive decoding with k/v caching, please make sure to initialize the attention class with a layer index."
-                )
-            cache_kwargs = {"sin": sin, "cos": cos}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-        attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation == "sdpa" and not output_attentions:
-            attention_interface = sdpa_attention_forward
+        if past_key_values is not None:
+            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
         attn_output, attn_weights = attention_interface(
             self,
             query_states,
@@ -431,15 +397,14 @@ class LLaDA2MoeAttention(nn.Module):
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
-            sliding_window=self.sliding_window,
             **kwargs,
         )
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.dense(attn_output)
-        return (attn_output, attn_weights, past_key_value)
+        return attn_output, attn_weights
 
 
-class LLaDA2MoeDecoderLayer(nn.Module):
+class LLaDA2MoeDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: LLaDA2MoeConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -457,41 +422,27 @@ class LLaDA2MoeDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        output_attentions: Optional[bool] = False,
-        output_router_logits: Optional[bool] = False,
+        past_key_values: Optional[Cache] = None,
         use_cache: Optional[bool] = False,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        **kwargs,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states, self_attn_weights, present_key_value = self.attention(
+        hidden_states, _ = self.attention(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
+            past_key_values=past_key_values,
             position_embeddings=position_embeddings,
-            use_cache=use_cache,
+            **kwargs,
         )
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         if isinstance(hidden_states, tuple):
-            hidden_states, router_logits = hidden_states
-        else:
-            router_logits = None
-        hidden_states = residual + hidden_states.to(residual.device)
-        outputs = (hidden_states,)
-        if output_attentions:
-            outputs += (self_attn_weights,)
-        if use_cache:
-            outputs += (present_key_value,)
-        if output_router_logits:
-            outputs += (router_logits,)
-        return outputs
+            hidden_states, _ = hidden_states
+        return residual + hidden_states.to(residual.device)
 
 
 class LLaDA2MoePreTrainedModel(PreTrainedModel):
@@ -502,6 +453,11 @@ class LLaDA2MoePreTrainedModel(PreTrainedModel):
     _skip_keys_device_placement = ["past_key_values"]
     _supports_sdpa = True
     _keep_in_fp32_modules_strict = ["expert_bias"]
+    _can_record_outputs = {
+        "router_logits": OutputRecorder(LLaDA2MoeSparseMoeBlock, index=1),
+        "hidden_states": LLaDA2MoeDecoderLayer,
+        "attentions": LLaDA2MoeAttention,
+    }
 
     @torch.no_grad()
     def _init_weights(self, module):
@@ -533,120 +489,50 @@ class LLaDA2MoeModel(LLaDA2MoePreTrainedModel):
     def set_input_embeddings(self, value):
         self.word_embeddings = value
 
+    @merge_with_config_defaults
+    @capture_outputs
     def forward(
         self,
-        input_ids: torch.LongTensor = None,
+        input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        output_router_logits: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        **kwargs,
-    ) -> Union[Tuple, MoeModelOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        output_router_logits = (
-            output_router_logits if output_router_logits is not None else self.config.output_router_logits
-        )
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
-        if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
-        elif input_ids is not None:
-            batch_size, seq_length = input_ids.shape[:2]
-        elif inputs_embeds is not None:
-            batch_size, seq_length = inputs_embeds.shape[:2]
-        else:
-            raise ValueError("You have to specify either input_ids or inputs_embeds")
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> MoeModelOutputWithPast:
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+        seq_length = (input_ids if input_ids is not None else inputs_embeds).shape[1]
         if self.config.llada_version == "2.2" and seq_length % self.config.block_size:
             raise ValueError("LLaDA2.2 routing requires complete block_size token blocks")
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`transformers."
-                )
-                use_cache = False
         if past_key_values is not None and not isinstance(past_key_values, DynamicCache):
-            raise ValueError("LLaDA2 supports DynamicCache only; static/legacy caches are unqualified")
+            raise ValueError("LLaDA2 supports DynamicCache only; static caches are unqualified")
         if past_key_values is not None and not use_cache:
             raise ValueError("Set use_cache=True when supplying past_key_values")
         if use_cache and past_key_values is None:
-            past_key_values = DynamicCache()
+            past_key_values = DynamicCache(config=self.config)
         if inputs_embeds is None:
             inputs_embeds = self.word_embeddings(input_ids)
         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
         if position_ids is None:
-            position_ids = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-            )
+            position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device) + past_seen_tokens
             position_ids = position_ids.unsqueeze(0)
         attention_mask = prepare_attention_mask(attention_mask, inputs_embeds, past_seen_tokens)
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
-        all_router_logits = () if output_router_logits else None
-        next_decoder_cache = None
         for decoder_layer in self.layers:
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
-                    hidden_states,
-                    attention_mask,
-                    position_ids,
-                    past_key_values,
-                    output_attentions,
-                    output_router_logits,
-                    use_cache,
-                    position_embeddings,
-                )
-            else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_values,
-                    output_attentions=output_attentions,
-                    output_router_logits=output_router_logits,
-                    use_cache=use_cache,
-                    position_embeddings=position_embeddings,
-                )
-            hidden_states = layer_outputs[0]
-            if use_cache:
-                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
-            if output_attentions:
-                all_self_attns += (layer_outputs[1],)
-            if output_router_logits and layer_outputs[-1] is not None:
-                all_router_logits += (layer_outputs[-1],)
-        hidden_states = self.norm(hidden_states)
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
-        next_cache = None
-        if use_cache:
-            next_cache = next_decoder_cache
-        if not return_dict:
-            return tuple(
-                (
-                    v
-                    for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, all_router_logits]
-                    if v is not None
-                )
+            hidden_states = decoder_layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                position_embeddings=position_embeddings,
+                **kwargs,
             )
-        return MoeModelOutputWithPast(
-            last_hidden_state=hidden_states,
-            past_key_values=next_cache,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attns,
-            router_logits=all_router_logits,
-        )
+        hidden_states = self.norm(hidden_states)
+        return MoeModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=past_key_values)
 
 
 class LLaDA2MoeModelLM(LLaDA2MoePreTrainedModel, LLaDA22Generation, GenerationMixin):
@@ -680,29 +566,18 @@ class LLaDA2MoeModelLM(LLaDA2MoePreTrainedModel, LLaDA22Generation, GenerationMi
     def get_decoder(self):
         return self.model
 
+    @can_return_tuple
     def forward(
         self,
-        input_ids: torch.LongTensor = None,
+        input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        output_router_logits: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        **kwargs,
-    ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        output_router_logits = (
-            output_router_logits if output_router_logits is not None else self.config.output_router_logits
-        )
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> MoeCausalLMOutputWithPast:
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -710,33 +585,15 @@ class LLaDA2MoeModelLM(LLaDA2MoePreTrainedModel, LLaDA22Generation, GenerationMi
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            output_router_logits=output_router_logits,
-            return_dict=return_dict,
             **kwargs,
         )
+        logits = self.lm_head(outputs.last_hidden_state).float()
         loss = None
-        aux_loss = None
-        hidden_states = outputs[0]
-        logits = self.lm_head(hidden_states)
-        logits = logits.float()
         if labels is not None:
-            shift_logits = logits
-            shift_labels = labels
-            loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            if output_router_logits:
-                output = (aux_loss,) + output
-            return (loss,) + output if loss is not None else output
+            # Masked-diffusion objective: labels align with positions (no next-token shift).
+            loss = CrossEntropyLoss()(logits.view(-1, self.config.vocab_size), labels.view(-1).to(logits.device))
         return MoeCausalLMOutputWithPast(
             loss=loss,
-            aux_loss=aux_loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,

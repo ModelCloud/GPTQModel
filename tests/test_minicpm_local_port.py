@@ -411,8 +411,9 @@ def test_legacy_pretraining_tp_keeps_its_distinct_head_scaling(tp):
         torch.testing.assert_close(model(ids).logits, expected, atol=1e-6, rtol=2e-5)
 
 
-def test_sdpa_model_returning_attentions_keeps_the_causal_padding_mask():
-    model = _model(attn_implementation="sdpa")
+def test_eager_attentions_keep_the_causal_padding_mask():
+    # SDPA does not materialize attention probabilities; recorded attentions come from eager.
+    model = _model(attn_implementation="eager")
     ids = torch.tensor([[2, 4, 7, 5], [0, 2, 6, 4]])
     mask = torch.tensor([[1, 1, 1, 1], [0, 1, 1, 1]])
     with torch.no_grad():

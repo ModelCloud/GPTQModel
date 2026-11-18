@@ -383,8 +383,7 @@ class Phi4MMForCausalLM(native.Phi4MultimodalForCausalLM):
         input_mode=0,
         labels=None,
         use_cache=None,
-        num_logits_to_keep=0,
-        logits_to_keep=None,
+        logits_to_keep=0,
         **kwargs,
     ):
         mode = _mode(input_mode)
@@ -422,7 +421,7 @@ class Phi4MMForCausalLM(native.Phi4MultimodalForCausalLM):
                 labels=labels,
                 use_cache=use_cache,
                 input_mode=mode,
-                logits_to_keep=num_logits_to_keep if logits_to_keep is None else logits_to_keep,
+                logits_to_keep=logits_to_keep,
                 **kwargs,
             )
         finally:

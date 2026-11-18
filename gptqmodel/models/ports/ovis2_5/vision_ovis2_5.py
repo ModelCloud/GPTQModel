@@ -4,7 +4,7 @@
 """Ovis2.5 SigLIP2 NaViT: merged patch order, 2D RoPE and soft visual tokens."""
 
 import math
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
 import numpy as np
 import PIL.Image
@@ -14,8 +14,10 @@ from torch.nn import functional as F
 from transformers import SiglipImageProcessorPil
 from transformers import initialization as init
 from transformers.activations import ACT2FN
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithNoAttention
 from transformers.modeling_utils import PreTrainedModel
+from transformers.utils import can_return_tuple
 
 from .configuration_ovis2_5 import Siglip2NavitConfig
 
@@ -224,7 +226,7 @@ class Siglip2MLP(nn.Module):
         return hidden_states
 
 
-class Siglip2EncoderLayer(nn.Module):
+class Siglip2EncoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: Siglip2NavitConfig):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -269,7 +271,6 @@ class Siglip2Encoder(nn.Module):
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList([Siglip2EncoderLayer(config) for _ in range(config.num_hidden_layers)])
-        self.gradient_checkpointing = False
 
         self.rotary_pos_emb = VisionRotaryEmbedding(config.hidden_size // config.num_attention_heads // 2)
         self.patch_size = config.patch_size
@@ -354,8 +355,7 @@ class Siglip2Encoder(nn.Module):
         self,
         inputs_embeds,
         grid_thws: torch.Tensor,
-        output_hidden_states: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, ...]]]:
+    ) -> torch.Tensor:
         rotary_pos_emb = self.rot_pos_emb(grid_thws)
         window_index, cu_window_seqlens = self.get_window_index(grid_thws)
         cu_window_seqlens = torch.tensor(
@@ -386,7 +386,6 @@ class Siglip2Encoder(nn.Module):
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         reverse_indices = torch.argsort(window_index)
-        encoder_states = () if output_hidden_states else None
 
         hidden_states = inputs_embeds
         for index, block in enumerate(self.layers):
@@ -394,18 +393,12 @@ class Siglip2Encoder(nn.Module):
                 cu_seqlens_tmp = cu_seqlens
             else:
                 cu_seqlens_tmp = cu_window_seqlens
-            if self.gradient_checkpointing and self.training:
-                hidden_states = self._gradient_checkpointing_func(block.__call__, hidden_states, cu_seqlens_tmp, position_embeddings)
-            else:
-                hidden_states = block(hidden_states, cu_seqlens_tmp, position_embeddings)
-            if output_hidden_states:
-                hidden_states_ = hidden_states.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-                encoder_states += (hidden_states_[reverse_indices, :].reshape(seq_len, -1),)
+            hidden_states = block(hidden_states, cu_seqlens_tmp, position_embeddings)
         # tokens = self.post_trunk_norm(tokens)
         hidden_states = hidden_states.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
         hidden_states = hidden_states[reverse_indices, :].reshape(seq_len, -1)
 
-        return hidden_states, encoder_states
+        return hidden_states
 
 class Siglip2VisionTransformer(nn.Module):
     def __init__(self, config: Siglip2NavitConfig):
@@ -421,27 +414,14 @@ class Siglip2VisionTransformer(nn.Module):
         self,
         pixel_values: torch.FloatTensor,
         grid_thws: torch.LongTensor,
-        output_hidden_states: Optional[bool] = True,
-        return_dict: Optional[bool] = True,
-    ) -> Union[
-        Tuple[torch.Tensor],
-        Tuple[torch.Tensor, Tuple[torch.Tensor, ...]],
-        BaseModelOutputWithNoAttention,
-    ]:
-        hidden_states = self.embeddings(pixel_values, grid_thws)
-
-        last_hidden_state, hidden_states = self.encoder(hidden_states, grid_thws, output_hidden_states)
-        last_hidden_state = self.post_layernorm(last_hidden_state)
-
-        if not return_dict:
-            output = (last_hidden_state,)
-            output += (hidden_states,) if output_hidden_states else ()
-            return output
-
+    ) -> BaseModelOutputWithNoAttention:
+        # ``hidden_states`` holds only the final, window-unpermuted encoder state before
+        # ``post_layernorm``; that is the feature the Ovis2.5 visual head consumes.
+        encoder_state = self.encoder(self.embeddings(pixel_values, grid_thws), grid_thws)
         return BaseModelOutputWithNoAttention(
-                last_hidden_state=last_hidden_state,
-                hidden_states=hidden_states
-            )
+            last_hidden_state=self.post_layernorm(encoder_state),
+            hidden_states=(encoder_state,),
+        )
 
 class Siglip2PreTrainedModel(PreTrainedModel):
     config_class = Siglip2NavitConfig
@@ -477,29 +457,14 @@ class Siglip2NavitModel(Siglip2PreTrainedModel):
     def get_input_embeddings(self) -> nn.Module:
         return self.vision_model.embeddings.patch_embedding
 
+    @can_return_tuple
     def forward(
         self,
         pixel_values: torch.FloatTensor,
         grid_thws: torch.LongTensor,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[
-        Tuple[torch.Tensor],
-        Tuple[torch.Tensor, Tuple[torch.Tensor, ...]],
-        BaseModelOutputWithNoAttention,
-    ]:
-
-        if output_hidden_states is None:
-            output_hidden_states = self.config.output_hidden_states
-        if return_dict is None:
-            return_dict = self.config.use_return_dict
-
-        return self.vision_model(
-            pixel_values=pixel_values,
-            grid_thws=grid_thws,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
+        **kwargs,
+    ) -> BaseModelOutputWithNoAttention:
+        return self.vision_model(pixel_values=pixel_values, grid_thws=grid_thws)
 
 class VisualEmbedding(torch.nn.Embedding):
     """
@@ -530,7 +495,7 @@ class VisualTokenizer(torch.nn.Module):
         )
 
     def _encode(self, pixel_values, grid_thws):
-        output = self.vit(pixel_values, grid_thws, output_hidden_states=True, return_dict=True)
+        output = self.vit(pixel_values, grid_thws)
         features = output.hidden_states[-1]
         seq_len, _ = features.shape
         features = features.reshape(seq_len // (self.vit.config.hidden_stride ** 2), -1)

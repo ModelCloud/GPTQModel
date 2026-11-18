@@ -22,15 +22,16 @@ class Phi4MMConfig(Phi4MultimodalConfig):
         audio_config=None,
         **kwargs,
     ):
-        rope = kwargs.get("rope_scaling") or kwargs.get("rope_parameters") or {}
+        # Released phi4mm config.json files spell RoPE as ``rope_scaling``; convert it once at parse time.
+        legacy_rope = kwargs.pop("rope_scaling", None)
+        rope = kwargs.get("rope_parameters") or legacy_rope or {}
         self.phi4mm_rope_type = kwargs.pop("phi4mm_rope_type", rope.get("rope_type", rope.get("type", "default")))
         if self.phi4mm_rope_type not in ("default", "longrope", "su", "yarn"):
             raise ValueError("Unsupported phi4mm rotary policy")
-        if self.phi4mm_rope_type in ("su", "yarn"):
+        if rope:
             rope = deepcopy(rope)
             rope.pop("type", None)
-            rope["rope_type"] = "longrope"
-            kwargs.pop("rope_scaling", None)
+            rope["rope_type"] = "longrope" if self.phi4mm_rope_type in ("su", "yarn") else self.phi4mm_rope_type
             kwargs["rope_parameters"] = rope
         self.vision_lora = deepcopy(vision_lora or {"r": 256, "lora_alpha": 512, "dp": 0.0})
         self.speech_lora = deepcopy(speech_lora or {"r": 320, "lora_alpha": 640, "dp": 0.01})
