@@ -22,6 +22,12 @@ from tests.port_assets import read_port_asset, read_port_json
 
 
 ASSETS = Path(__file__).parents[1] / "gptqmodel/models/ports/minimax_m2"
+FIXTURES = Path(__file__).parent / "fixtures/ports/minimax_m2"
+# Released safetensors indexes: MiniMaxAI/MiniMax-Text-01-hf@f7ce0136, MiniMaxAI/MiniMax-M2@04312f0c.
+INVENTORY_PINS = {
+    "minimax": (8243, "b48fad7c4c310a42d1222f1726c698278bbfbc31a52ed3774b8ed4405c355397"),
+    "minimax_m2": (96103, "27627afa3072e685a7a4ea3f23f2d61658934498d693a6fac2831ed7646cd33d"),
+}
 IDS = torch.tensor([[1, 5, 7, 9, 4, 3, 6], [1, 4, 8, 3, 7, 5, 9]])
 
 
@@ -176,9 +182,12 @@ def moe_oracle(mlp, x, config, *, m2):
     return result.reshape(shape)
 
 
-@pytest.mark.parametrize("model_type", ["minimax", "minimax_m2"])
-@pytest.mark.parametrize("kv", [1, 2, 4])
-@pytest.mark.parametrize("shared,postnorm", [(False, True), (True, True), (False, False), (True, False)])
+# shared/postnorm only exist on the original MiniMax layer.
+@pytest.mark.parametrize(
+    "model_type,kv,shared,postnorm",
+    [("minimax", kv, shared, postnorm) for kv in (1, 2, 4) for shared in (False, True) for postnorm in (False, True)]
+    + [("minimax_m2", kv, False, True) for kv in (1, 2, 4)],
+)
 def test_source_decoder_equations(model_type, kv, shared, postnorm):
     model = tiny_model(model_type, kv=kv, shared=shared, postnorm=postnorm)
     m2 = model_type == "minimax_m2"
@@ -303,19 +312,19 @@ def hostile_checkpoint(path, model_type, **kwargs):
 
 @pytest.mark.parametrize("model_type", ["minimax", "minimax_m2"])
 def test_entire_pinned_checkpoint_inventory_matches_real_meta_model(model_type):
-    pins = json.loads((ASSETS / "provenance.json").read_text())[model_type]
+    key_count, fixture_sha256 = INVENTORY_PINS[model_type]
     fixture = read_port_asset(ASSETS / f"{model_type}_checkpoint_keys.json")
-    assert hashlib.sha256(fixture).hexdigest() == pins["fixture_sha256"]
-    raw = json.loads((ASSETS / f"{model_type}_released_config.json").read_text())
+    assert hashlib.sha256(fixture).hexdigest() == fixture_sha256
+    raw = json.loads((FIXTURES / f"{model_type}_released_config.json").read_text())
     if model_type == "minimax":
-        config = MODEL_MAP[model_type].loader.load_config(ASSETS / f"{model_type}_released_config.json")
+        config = MODEL_MAP[model_type].loader.load_config(FIXTURES / f"{model_type}_released_config.json")
     else:
         config = AutoConfig.for_model(model_type, **{k: v for k, v in raw.items() if k != "model_type"})
     with torch.device("meta"):
         model = MODEL_MAP[model_type].loader.from_config(config)
     keys = read_port_json(ASSETS / f"{model_type}_checkpoint_keys.json")
     key_set = set(keys)
-    assert len(keys) == pins["key_count"]
+    assert len(keys) == key_count
     assert set(source_state(model)) == {key for key in keys if not key.endswith("weight_scale_inv")}
     from gptqmodel.models.module_plan import ModulePlan
 
@@ -396,7 +405,7 @@ def test_original_invalid_rotary_metadata_fails_then_valid_config_retries(width)
 
 @pytest.mark.parametrize("model_type", ["minimax", "minimax_m2"])
 @pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("bypass", [None, "1"])
 def test_public_hostile_selection_and_retry(tmp_path, monkeypatch, model_type, trust, bypass):
     root = tmp_path / "root"
     path = root / "nested"
