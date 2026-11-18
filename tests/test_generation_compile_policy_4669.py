@@ -31,8 +31,10 @@ from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.macaq import MacaqLinear, MacaqTritonLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.paro import ParoLinear
+from gptqmodel.nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
 
 
 pytestmark = [pytest.mark.cpu]
@@ -259,6 +261,13 @@ def test_kernel_declarations():
     # not inherit the opt-in (#4984).
     assert MacaqLinear.SUPPORTS_COMPILE is True
     assert MacaqTritonLinear.SUPPORTS_COMPILE is False
+    # The portable QQQ/VPTQ forwards trace with zero breaks and their compiled
+    # static-cache decode is several times faster than eager (#5102). The
+    # FP16-only QQQ CUDA kernel and the fused VPTQ CUDA kernel stay out: their
+    # own decode loops recompile and lose.
+    assert QQQTorchLinear.SUPPORTS_COMPILE is True
+    assert QQQLinear.SUPPORTS_COMPILE is False
+    assert VPTQLinear.SUPPORTS_COMPILE is True
 
 
 def test_a_compile_capable_kernel_keeps_the_auto_compile():

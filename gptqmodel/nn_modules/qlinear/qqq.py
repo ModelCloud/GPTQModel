@@ -711,15 +711,14 @@ class QQQTorchLinear(QQQLinear):
     # traceable `torch._int_mm` path instead.
     SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
     SUPPORTS_GRAPH_CAPTURE = False
-    # ... and the static-cache `generate()` is still a loss: the QQQ decode
-    # recompiles per step (172 graphs, 24-115 breaks) and measures 1.3-8x
-    # slower than eager on RTX 4090/5090, so the #4669 policy stays off
-    # (#4984). Re-measure the model-level decode before opting in.
-    SUPPORTS_COMPILE = False
-    SUPPORTS_COMPILE_EAGER_REASON = (
-        "static-cache generate recompiles per step (172 graphs, 24-115 breaks) "
-        "and is 1.3-8x slower than eager (#4984)"
-    )
+    # ... and a static-cache `generate()` is a win on this torch kernel:
+    # Qwen2.5-0.5B-Instruct QQQ, bf16, RTX 4090 (sm_89), torch 2.15.0+cu132,
+    # 4 left-padded prompts x 32 greedy tokens: 2.08 s eager -> 0.48 s compiled
+    # (4.3x), 1 dynamo graph, 0 graph breaks (#5102). The 172-graph /
+    # 24-115-break number this declaration used to cite came from the AUTO
+    # `QQQLinear` CUDA kernel, not from this torch kernel; #5075 made the packed
+    # QQQ op traceable, so the copied reason was stale.
+    SUPPORTS_COMPILE = True
 
     SUPPORTS_BACKENDS = [BACKEND.QQQ_TORCH]
     SUPPORTS_METHODS = [METHOD.QQQ]
