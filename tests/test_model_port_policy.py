@@ -25,17 +25,13 @@ from gptqmodel.models.local import LocalModelLoader
 PORTS = Path(__file__).resolve().parents[1] / "gptqmodel" / "models" / "ports"
 
 PENDING_NATIVE_DEFINITIONS = frozenset({
-    "afmoe", "apertus", "bloom", "cohere2_moe", "cohere_compass", "decision_transformer", "deepseek_ocr2",
-    "deepseek_v32", "deepseek_vl", "diffusion_gemma", "dots1", "ernie4_5", "ernie4_5_moe", "exaone4_5",
-    "falcon_mamba", "flint", "gemma2", "gemma3n", "gemma3n_text", "gemma4", "gemma4_text", "gemma4_unified",
-    "gemma4_unified_text", "glm4_moe_lite", "glm4v", "glm4v_moe", "glm4v_moe_text", "glm5_next", "glm_ocr",
-    "glmasr", "gpt2", "gpt_neo", "gpt_neox", "gpt_oss", "granite_swa", "granitemoe", "granitemoe_swa", "hrm_text",
-    "hunyuan_v1_dense", "hunyuan_v1_moe", "hy_v3", "inkling_mm_model", "internvl", "laguna", "lfm2", "lfm2_moe",
-    "lfm3", "llama4", "llama4_text", "llava", "longcat_flash", "minicpm3", "minicpmv4_6", "minimax_m2",
-    "ministral3", "mistral3", "mixtral", "mllama", "mllama_text_model", "muse_glimmer", "olmo2", "olmo3", "olmoe",
-    "opt", "ovis2", "qwen2", "qwen2_5_omni", "qwen2_audio", "qwen3_5", "qwen3_5_moe", "qwen3_5_moe_text",
-    "qwen3_moe", "qwen3_next", "qwen3_omni_moe", "qwen3_vl", "qwen3_vl_moe", "qwen4_exp", "qwen4_exp_text",
-    "solar_open", "starcoder2", "voxtral", "zamba2",
+    "afmoe", "apertus", "cohere2_moe", "cohere_compass", "deepseek_ocr2", "deepseek_v32", "diffusion_gemma",
+    "dots1", "ernie4_5_moe", "exaone4_5", "flint", "gemma2", "gemma4", "gemma4_text", "gemma4_unified",
+    "gemma4_unified_text", "glm4v", "glm5_next", "glmasr", "gpt2", "gpt_neox", "gpt_oss", "granitemoe",
+    "granitemoe_swa", "hunyuan_v1_dense", "hunyuan_v1_moe", "inkling_mm_model", "internvl", "lfm2", "lfm2_moe",
+    "llama4", "llama4_text", "llava", "longcat_flash", "minicpmv4_6", "minimax_m2", "mistral3", "mixtral", "mllama",
+    "mllama_text_model", "olmo2", "olmo3", "opt", "ovis2", "qwen2_5_omni", "qwen2_audio", "qwen3_5_moe",
+    "qwen3_next", "qwen3_omni_moe", "qwen4_exp", "qwen4_exp_text", "starcoder2", "voxtral",
 })
 
 PENDING_MODEL_IMPORT_PORTS = frozenset({
