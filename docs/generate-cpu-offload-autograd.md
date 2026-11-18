@@ -15,7 +15,7 @@ models. Every other model keeps `inference_mode` (#5099).
 
 | Step | Before (`e2f9676c6`) | After |
 | --- | --- | --- |
-| Context selection | `no_grad` only for XLA, otherwise `inference_mode` (`gptqmodel/models/base.py:3902-3907`) | `no_grad` for XLA or `has_cpu_offload_hooks(self.model)` (`gptqmodel/models/base.py::generate`) |
+| Context selection | `no_grad` only for XLA, otherwise `inference_mode` (`gptqmodel/models/base.py:3939-3944`) | `no_grad` for XLA or `has_cpu_offload_hooks(self.model)` (`gptqmodel/models/base.py::generate`) |
 | Hook detection | none | `has_cpu_offload_hooks` scans `_hf_hook`, unwraps `SequentialHook`, and matches `CpuOffload` plus `AlignDevicesHook(offload=True)` (`gptqmodel/utils/model.py::has_cpu_offload_hooks`) |
 | Layer materialization | `CpuOffload.pre_forward` calls `module.to(execution_device)` under `inference_mode`; `simple_dispatch_model` installs that hook (`gptqmodel/utils/model.py::simple_dispatch_model`) | the same move runs under `no_grad` |
 | Buffer lifecycle | `Module._apply` replaces buffers outright; the second move of an inference buffer stores a tensor without a version counter | the move allocates a normal tensor, so the buffer keeps its counter |

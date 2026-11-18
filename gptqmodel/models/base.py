@@ -127,7 +127,11 @@ from ..utils.structure import (
     alias_from_turtle_for_submodule,
     restore_init_owned_rotary_buffers,
 )
-from ..utils.tied_weights import lm_head_is_tied, word_embeddings_tied
+from ..utils.tied_weights import (
+    lm_head_is_tied,
+    lm_head_quantization_is_tied,
+    word_embeddings_tied,
+)
 from ..utils.torch import (
     TORCH_HAS_COMPILE,
     as_torch_device,
@@ -2377,6 +2381,43 @@ class BaseQModel(nn.Module):
         vram_devices = _quantize_vram_devices(self.quantize_config)
         _reset_peak_vram_stats(vram_devices)
 
+        embed_quant_config = self._normalize_embed_quant_config(
+            embed_quant_config=embed_quant_config,
+            embed_quant_mode=embed_quant_mode,
+        )
+        if embed_quant_config is not None and not self.quantized:
+            embed_mode = embed_quant_config.embed_quant_mode
+            if (
+                embed_mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH)
+                and lm_head_quantization_is_tied(self)
+            ):
+                # A fresh quantize of the output endpoint replaces the tied
+                # `lm_head` with a packed module. The run used to finish every
+                # layer and only then fail to re-tie the head, leaving
+                # `quantized=True` on an unusable model (#5111). Refuse before
+                # any calibration work, matching the `lm_head=True` contract.
+                # Requantize of a loaded checkpoint stays allowed: its
+                # endpoints are already independent packed modules.
+                raise NotImplementedError(
+                    "quantize() cannot quantize the output embedding of a freshly "
+                    "loaded model with tied input/output embeddings: `lm_head` "
+                    "shares its weight with `embed_tokens`. Untie the model weights "
+                    "before quantization, or load a quantized checkpoint and use "
+                    "`requantize(embed_quant_mode=...)`."
+                )
+            if embed_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
+                # The capture forward has to execute the input embedding before
+                # the pseudo-layer is packed. A fresh run starts from a lazy
+                # shell, and materializing the endpoint for capture produced a
+                # packed FP16 endpoint in front of a dense BF16 decoder, so the
+                # in-session model could not forward (#5111). This flow is
+                # requantize-only; refuse before any calibration work.
+                raise NotImplementedError(
+                    "quantize() on an unquantized model cannot quantize the input "
+                    "embedding (QuantizeEmbed.INPUT/BOTH). Load a quantized "
+                    "checkpoint and use `requantize(embed_quant_mode=...)`."
+                )
+
         if fuse is not None and type(fuse) is not bool:
             raise TypeError("Fusion enabled must be bool")
         fusion_requested = fuse if fuse is not None else getattr(self, "_auto_fusion", False)
@@ -2386,10 +2427,6 @@ class BaseQModel(nn.Module):
             self._auto_fusion = fuse
             if not fuse:
                 self.fuse(False)
-        embed_quant_config = self._normalize_embed_quant_config(
-            embed_quant_config=embed_quant_config,
-            embed_quant_mode=embed_quant_mode,
-        )
 
         if self.quantize_config is None or not isinstance(self.quantize_config, BaseQuantizeConfig):
             raise AttributeError("`quantize_config` must be not None")
