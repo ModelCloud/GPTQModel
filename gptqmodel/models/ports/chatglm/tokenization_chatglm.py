@@ -2,7 +2,39 @@
 # SPDX-License-Identifier: Apache-2.0
 """Select a packaged tokenizer from released GLM tokenizer metadata only."""
 
-from transformers.models.auto.tokenization_auto import get_tokenizer_config
+import json
+
+from transformers.tokenization_utils_base import TOKENIZER_CONFIG_FILE
+from transformers.utils.hub import cached_file, resolve_revision
+
+
+_HUB_KWARGS = ("cache_dir", "force_download", "proxies", "token", "local_files_only", "subfolder")
+
+
+def get_tokenizer_config(path, revision=None, **kwargs):
+    """Read ``tokenizer_config.json`` ({} when absent), like Transformers' AutoTokenizer helper."""
+
+    selection = {key: kwargs[key] for key in _HUB_KWARGS if key in kwargs}
+    revision = resolve_revision(
+        path,
+        revision,
+        token=selection.get("token"),
+        local_files_only=selection.get("local_files_only", False),
+        cache_dir=selection.get("cache_dir"),
+    )
+    resolved = cached_file(
+        path,
+        TOKENIZER_CONFIG_FILE,
+        revision=revision,
+        _raise_exceptions_for_gated_repo=False,
+        _raise_exceptions_for_missing_entries=False,
+        _raise_exceptions_for_connection_errors=False,
+        **selection,
+    )
+    if resolved is None:
+        return {}
+    with open(resolved, encoding="utf-8") as reader:
+        return json.load(reader)
 
 
 class ChatGLMTokenizer:
