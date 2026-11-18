@@ -34,6 +34,7 @@ from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 from gptqmodel.models.definitions.qwen3_5_moe_text import Qwen3_5_MoeTextQModel
 from gptqmodel.utils import structure as structure_module
 from gptqmodel.utils.structure import LazyTurtle
+from tests.test_ovis_local_port import tiny_config as tiny_ovis_config
 
 
 def _write_checkpoint_index(path: Path, shard_name: str, state_dict: dict[str, torch.Tensor]) -> None:
@@ -527,34 +528,6 @@ def _assert_gemma3_shell_vision_alias_resolution(turtle: LazyTurtle) -> None:
             "patch_embedding.weight",
         )
         == "vision_tower.vision_model.embeddings.patch_embedding.weight"
-    )
-
-
-def _assert_ovis_shell_vision_alias_resolution(turtle: LazyTurtle) -> None:
-    assert (
-        turtle._resolve_checkpoint_module_path("visual_tokenizer.backbone.head")
-        == "visual_tokenizer.backbone.vision_model.head"
-    )
-    assert (
-        turtle._resolve_checkpoint_tensor_name(
-            "visual_tokenizer",
-            "backbone.head.mlp.fc1.weight",
-        )
-        == "visual_tokenizer.backbone.vision_model.head.mlp.fc1.weight"
-    )
-    assert (
-        turtle._resolve_checkpoint_tensor_name(
-            "visual_tokenizer.backbone",
-            "head.mlp.fc1.weight",
-        )
-        == "visual_tokenizer.backbone.vision_model.head.mlp.fc1.weight"
-    )
-    assert (
-        turtle._resolve_checkpoint_tensor_name(
-            "visual_tokenizer",
-            "backbone.embeddings.patch_embedding.weight",
-        )
-        == "visual_tokenizer.backbone.vision_model.embeddings.patch_embedding.weight"
     )
 
 
@@ -1682,26 +1655,29 @@ def test_gemma3_definition_hf_conversion_map_reversed_fixes_shell_vision_paths(t
     assert resolved_hf_again[0].source_patterns[0] == r"^model\.vision_tower\.(?!vision_model\.)(.+)$"
 
 
-def test_ovis_definition_hf_conversion_map_reversed_fixes_shell_vision_paths(tmp_path):
-    resolved_hf = OvisQModel.resolve_hf_conversion_map_reversed()
-
-    assert resolved_hf is not None
-
+def test_ovis_owned_vision_shell_materializes_original_checkpoint_keys(tmp_path):
+    with torch.device("meta"):
+        shell = OvisQModel.loader.from_config(tiny_ovis_config("partition-llama"))
+    module_path = "visual_tokenizer.backbone.vision_model.embeddings.patch_embedding"
+    projection = shell.get_submodule(module_path)
+    tensors = {
+        f"{module_path}.{name}": torch.arange(parameter.numel(), dtype=torch.float32).reshape(parameter.shape)
+        for name, parameter in projection.named_parameters()
+    }
+    assert projection.weight.is_meta
     turtle = _build_lazy_turtle(
         tmp_path,
-        {
-            "visual_tokenizer.backbone.vision_model.head.mlp.fc1.weight": torch.zeros(2, 2),
-            "visual_tokenizer.backbone.vision_model.embeddings.patch_embedding.weight": torch.zeros(2, 2),
-        },
-        hf_conversion_map_reversed=resolved_hf,
+        tensors,
+        config=shell.config,
+        hf_conversion_map_reversed=OvisQModel.resolve_hf_conversion_map_reversed(target_model=shell),
+        target_model=shell,
     )
 
-    _assert_ovis_shell_vision_alias_resolution(turtle)
-
-    resolved_hf[0].source_patterns[0] = r"^mutated\.runtime\.(.+)$"
-    resolved_hf_again = OvisQModel.resolve_hf_conversion_map_reversed()
-    assert resolved_hf_again is not None
-    assert resolved_hf_again[0].source_patterns[0] == r"^visual_tokenizer\.backbone\.(?!vision_model\.)(.+)$"
+    turtle.materialize_submodule(
+        target_model=shell, target_submodule=projection, device=torch.device("cpu"), module_path=module_path,
+    )
+    for name, parameter in projection.named_parameters():
+        torch.testing.assert_close(parameter, tensors[f"{module_path}.{name}"], rtol=0, atol=0)
 
 
 def test_lazy_turtle_keeps_module_tree_alias_resolution_for_mixtral(tmp_path):
