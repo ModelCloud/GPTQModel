@@ -114,3 +114,56 @@ def test_registry_proposal_contains_linear_variants_and_norm_exclusions():
     assert DeciLMQModel.extract_layers_node() == ["model.layers"]
     assert DeciLMQModel.build_layer_modules(DeciLMQModel.module_tree, include_capture_only=True) == expected
     assert config_kwargs("deci")["model_type"] != config_kwargs("nemotron-nas")["model_type"]
+
+
+def _nas_layouts():
+    def part(kind, full):
+        return full if kind == "full" else {"replace_with_linear" if kind == "linear" else "no_op": True}
+
+    blocks = [
+        {"attention": part(attention, {"n_heads_in_group": 1}), "ffn": part(ffn, {"ffn_mult": 2.0})}
+        for attention in ("full", "linear", "no_op")
+        for ffn in ("full", "linear", "no_op")
+    ]
+    # Grouped-query attention: `v_proj` is narrower than `o_proj`'s input.
+    blocks.append({"attention": {"n_heads_in_group": 2}, "ffn": {"ffn_mult": 2.0}})
+    return blocks
+
+
+@pytest.mark.parametrize("alias", ["deci", "nemotron-nas"])
+def test_awq_folds_are_neutral_across_every_nas_layout(alias):
+    from awq_neutrality import assert_awq_folds_neutral
+
+    if alias == "deci":
+        # Per-layer KV heads 2/1/4: only the last layer is full MHA.
+        model = tiny(alias, attention_bias=True, mlp_bias=True)
+    else:
+        model = tiny(alias, block_configs=_nas_layouts(), num_hidden_layers=10)
+    ids = torch.randint(2, 30, (1, 8))
+
+    def forward():
+        return model(input_ids=ids).logits
+
+    qkv = ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]
+    for layer in model.model.layers:
+        checked = assert_awq_folds_neutral(DeciLMQModel, model, layer, forward) if any(
+            name in {"self_attn", "mlp"} for name, _child in layer.named_children()
+        ) else []
+        groups = {source: targets for source, targets, _consumers in checked}
+        attn, mlp = getattr(layer, "self_attn", None), getattr(layer, "mlp", None)
+        expected = {}
+        if hasattr(attn, "q_proj"):
+            expected["input_layernorm"] = qkv
+            if attn.v_proj.out_features == attn.o_proj.in_features:
+                expected["self_attn.v_proj"] = ["self_attn.o_proj"]
+        elif attn is not None:
+            expected["input_layernorm"] = ["self_attn.linear_attn"]
+        if hasattr(mlp, "up_proj"):
+            expected["post_attention_layernorm"] = ["mlp.gate_proj", "mlp.up_proj"]
+            expected["mlp.up_proj"] = ["mlp.down_proj"]
+        elif mlp is not None:
+            expected["post_attention_layernorm"] = ["mlp.linear_mlp"]
+        # `o_proj` never joins the input-norm group, even though the absent
+        # `linear_attn` alternative ends the Q/K/V block.
+        assert groups == expected
+        assert len(checked) == len(groups)

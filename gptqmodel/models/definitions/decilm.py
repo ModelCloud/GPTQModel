@@ -3,6 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from torch import nn
+
+from ..base import generate_node_for_awq_scaling
 from ..local import LocalModelLoader
 from . import LlamaQModel
 
@@ -27,6 +30,35 @@ class DeciLMQModel(LlamaQModel):
     }]
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Heterogeneous/pruned/linear/windowed layouts have not qualified AWQ
-        # source/search/replay relationships. Empty groups use plain AWQ.
-        return []
+        # Each NAS block declares its single-linear replacement last. On a full
+        # block that entry is absent, so the planner keeps `input_layernorm` as
+        # the producer: it folds the norm into `o_proj` and never emits the
+        # `v_proj -> o_proj` / `up_proj -> down_proj` groups. Drop the stale
+        # target and add the two linear producer groups explicitly.
+        o_proj = getattr(getattr(module, "self_attn", None), "o_proj", None)
+        nodes = []
+        for node in super().awq_get_modules_for_scaling(module, input_feat, module_kwargs):
+            if isinstance(node["prev_op"], nn.Linear) and o_proj is not None and node["layers"] == [o_proj]:
+                continue
+            node["layers"] = [layer for layer in node["layers"] if layer is not o_proj]
+            if node["layers"]:
+                nodes.append(node)
+        kwargs = module_kwargs
+        if isinstance(module_kwargs, dict):
+            kwargs = {key: value for key, value in module_kwargs.items() if key != "_awq_feature_kwargs"}
+        for parent, source, target in (("self_attn", "v_proj", "o_proj"), ("mlp", "up_proj", "down_proj")):
+            owner = getattr(module, parent, None)
+            prev_op, layer = getattr(owner, source, None), getattr(owner, target, None)
+            inp = input_feat.get(f"{parent}.{target}")
+            # GQA `v_proj` is narrower than `o_proj`'s input and cannot fold.
+            if prev_op is None or layer is None or inp is None or not inp.numel():
+                continue
+            if prev_op.out_features != layer.in_features:
+                continue
+            node, _ = generate_node_for_awq_scaling(
+                inp=inp, prev_op=prev_op, module_kwargs=kwargs, nodes_size=len(nodes),
+                subset=[layer], module2inspect=None,
+            )
+            node["_input_feature_name"] = f"{parent}.{target}"
+            nodes.append(node)
+        return nodes

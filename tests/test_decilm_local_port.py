@@ -536,7 +536,7 @@ def test_invalid_architecture_fails_then_corrected_checkpoint_loads(tmp_path):
 
 @pytest.mark.parametrize("alias", ["deci", "nemotron-nas"])
 @pytest.mark.parametrize("fallback", [None, {}])
-def test_awq_plain_policy_quantizes_and_packs_every_linear(tmp_path, alias, fallback):
+def test_awq_scaled_policy_quantizes_and_packs_every_linear(tmp_path, alias, fallback):
     from gptqmodel import GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.config import AWQConfig
@@ -548,17 +548,23 @@ def test_awq_plain_policy_quantizes_and_packs_every_linear(tmp_path, alias, fall
     save_tokenizer(tmp_path)
     qcfg = AWQConfig(device="cpu", group_size=16, fallback=fallback)
     loaded = GPTQModel.load(str(tmp_path), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
-    assert loaded.awq_get_modules_for_scaling(loaded.model.model.layers[0], {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[1, 3, 4, 3, 4, 3, 4, 3]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
-    norms = {name: tensor.half().clone() for name, tensor in model.state_dict().items() if "layernorm" in name}
+    planner, emitted = loaded.awq_get_modules_for_scaling, []
+
+    def record_groups(layer, input_feat, module_kwargs):
+        nodes = planner(layer, input_feat, module_kwargs)
+        emitted.append(len(nodes))
+        return nodes
+
+    loaded.awq_get_modules_for_scaling = record_groups
     loaded.quantize(
         CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
         backend=BACKEND.TORCH,
     )
+    # Every layer owns at least one real subblock, so every layer searches scales.
+    assert len(emitted) == 3 and all(emitted)
     assert sum(isinstance(module, AwqTorchLinear) for module in loaded.model.modules()) == expected
-    for name, tensor in norms.items():
-        torch.testing.assert_close(tensor, loaded.model.state_dict()[name], rtol=0, atol=0)
     with torch.inference_mode():
         expected_logits = loaded.model(**calibration[0], use_cache=False).logits
         assert torch.isfinite(expected_logits).all()
