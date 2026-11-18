@@ -33,6 +33,16 @@
 
 ## Latest News 🗞️🚀
 
+**7.11.1**
+
+- **API migration:** Pass datasets and calibration options through [`CalibrationConfig`](docs/quantization-guide.md) instead of the old `quantize()` arguments. Replace `GPTQModel.export()` with [`dequantize_model()`](docs/checkpoint-interop.md#7-dense-dequantization-with-dequantize_model) for dense Transformers checkpoints or [`convert_gptq_to_mlx_weights()`](docs/mlx-runtime.md) for MLX-LM. ParoQuant is now [Paro](docs/paro.md); existing checkpoints still load.
+- **Models:** Added [SenseNova-Loop 9B](docs/supported-models.md) quantization and [Decision Transformer](docs/decision-transformer-calibration.md) quantization from trajectory tensors without a tokenizer. Fixed checkpoint round trips for Qwen2.5-Omni, Qwen3-Omni, and InternVL.
+- **Calibration:** Fixed token positions and masks for padded and multimodal batches, preserved tool and document context when rendering calibration chats, and kept AWQ scaling for MoE experts that received calibration tokens even when other experts received none.
+- **Quantization:** Reduced GPU memory use in GPTQ and EXL3, restored checkpoint resume for NF12 and MACaQ, and fixed [failed or cancelled runs](docs/cancelled-run-contract.md) leaving models unable to run inference.
+- **Inference:** `optimize()` now compiles the forward pass used by generation, and compiled models release VRAM when deleted. EXL3 uses its fast native path for BF16 inputs, and Paro automatically selects its native Triton kernel on ROCm.
+- **GGUF:** Added ggml 1.0 support, including reading and dequantizing FP8 E4M3 tensors. The `gguf` extra now requires `llama-cpp-python>=0.3.37`.
+- **Compat:** Fixed CPU offload for GPTQ and AWQ checkpoints loaded through Transformers, added CPU readers for AWQ GEMV_FAST and LLM_AWQ, and repaired MLX export for AWQ GEMV checkpoints on GPU hosts.
+
 **7.11.0**
 
 - **[MACaQ](https://github.com/ModelCloud/GPTQModel/blob/main/docs/macaq.md):** Native MXFP4 W4A4 quantization for low-precision weights and activations, with CUDA, ROCm, and Apple silicon inference. Includes packed checkpoints and a portable Torch fallback.
