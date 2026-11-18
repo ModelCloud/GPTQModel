@@ -12,6 +12,7 @@ from transformers import GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerFast, Q
 from gptqmodel import CalibrationConfig, GPTQModel, NormConfig
 from gptqmodel.models.ports.internlm.configuration_internlm import InternLMConfig
 from gptqmodel.models.ports.internlm.modeling_internlm import InternLMForCausalLM
+from gptqmodel.models.ports.native.gpt2.modeling_gpt2 import GPT2LMHeadModel as VendoredGPT2LMHeadModel
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import FORMAT, QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
@@ -82,6 +83,8 @@ def dense_teacher(path, family):
         model = GPT2LMHeadModel(GPT2Config(vocab_size=64, n_embd=32, n_layer=1, n_head=2,
                                           n_inner=64, n_positions=64, bos_token_id=1, eos_token_id=2))
     model.eval().save_pretrained(path)
+    # The gpt2 definition loads the vendored Transformers 5.23 class.
+    teacher_class = type(model) if family == "owned" else VendoredGPT2LMHeadModel
     config_path = path / "config.json"
     payload = json.loads(config_path.read_text())
     payload["auto_map"] = {"AutoConfig": "hostile.Forbidden", "AutoModelForCausalLM": "hostile.Forbidden"}
@@ -89,7 +92,7 @@ def dense_teacher(path, family):
     marker = path / "EXECUTED"
     (path / "hostile.py").write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
                                     "raise RuntimeError('checkpoint teacher Python executed')\n")
-    return type(model), marker
+    return teacher_class, marker
 
 
 def tune(model, teacher):
