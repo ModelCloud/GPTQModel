@@ -36,8 +36,18 @@ from gptqmodel.models.definitions.kimi_linear import (
     is_kimi_k3_config,
 )
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.ports.native.auto import AutoConfig as NativeAutoConfig
 from gptqmodel.utils.model import get_layers_with_prefixes
+
+
+def _auto_config(model_type, **kwargs):
+    """Build the default config with the class the definition's loader expects."""
+    loader = getattr(MODEL_MAP.get(model_type), "loader", None)
+    if isinstance(loader, LocalModelLoader) and loader.config_class.startswith("gptqmodel.models.ports.native."):
+        return NativeAutoConfig.for_model(model_type, **kwargs)
+    return transformers.AutoConfig.for_model(model_type, **kwargs)
 
 
 # Models whose default config does not exercise every declared layout branch.
@@ -65,7 +75,7 @@ def _nemotron_h_latent(config):
 
 
 def _qwen4_exp_text_config():
-    from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
+    from gptqmodel.models.ports.native.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
 
     return Qwen4ExpTextConfig(
         vocab_size=64,
@@ -107,7 +117,7 @@ def _qwen4_exp_text(config):
 
 
 def _qwen4_exp(config):
-    from transformers.models.qwen4_exp.configuration_qwen4_exp import (
+    from gptqmodel.models.ports.native.qwen4_exp.configuration_qwen4_exp import (
         Qwen4ExpConfig,
         Qwen4ExpVisionConfig,
     )
@@ -173,7 +183,7 @@ def _definition_for(model_type, config):
 
 
 def _build_meta_model(model_type):
-    config = transformers.AutoConfig.for_model(model_type)
+    config = _auto_config(model_type)
     override = CONFIG_OVERRIDES.get(model_type)
     if override is not None:
         replacement = override(config)

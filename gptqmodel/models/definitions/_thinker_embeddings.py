@@ -19,6 +19,8 @@ from typing import Optional
 
 from torch import nn
 
+from ..local import LocalModelLoader
+
 
 class ThinkerEmbeddingsMixin:
     """Resolve the Omni embedding endpoints through the ``thinker`` submodule."""
@@ -30,12 +32,20 @@ class ThinkerEmbeddingsMixin:
 
     @classmethod
     def _hf_wrapper_class(cls):
-        import transformers
-
         if cls.HF_WRAPPER_CLASS_NAME is None:
             raise NotImplementedError(
                 f"{cls.__name__} must declare HF_WRAPPER_CLASS_NAME to patch the Omni getters"
             )
+        if isinstance(getattr(cls, "loader", None), LocalModelLoader):
+            # The definition loads the vendored Transformers 5.23 wrapper.
+            from ..ports.native.auto import _by_name
+
+            wrapper = _by_name(cls.HF_WRAPPER_CLASS_NAME)
+            if wrapper is None:
+                raise ValueError(f"no vendored class named {cls.HF_WRAPPER_CLASS_NAME}")
+            return wrapper
+        import transformers
+
         return getattr(transformers, cls.HF_WRAPPER_CLASS_NAME)
 
     def before_model_load(self, model_local_path: str, load_quantized_model: bool):

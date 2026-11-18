@@ -28,8 +28,18 @@ from gptqmodel.models.definitions.kimi_linear import KimiLinearNativeQModel
 from gptqmodel.models.definitions.llama4 import Llama4QModel, Llama4TextQModel
 from gptqmodel.models.definitions.phi3 import Phi3QModel
 from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.ports.native.auto import AutoConfig as NativeAutoConfig
 from gptqmodel.utils.model import get_layers_with_prefixes
+
+
+def _auto_config(model_type, **kwargs):
+    """Build the default config with the class the definition's loader expects."""
+    loader = getattr(MODEL_MAP.get(model_type), "loader", None)
+    if isinstance(loader, LocalModelLoader) and loader.config_class.startswith("gptqmodel.models.ports.native."):
+        return NativeAutoConfig.for_model(model_type, **kwargs)
+    return transformers.AutoConfig.for_model(model_type, **kwargs)
 
 
 QC = SimpleNamespace(dynamic=None)
@@ -38,7 +48,7 @@ QC = SimpleNamespace(dynamic=None)
 def _build_meta(model_type, config=None):
     definition = MODEL_MAP[model_type]
     if config is None:
-        config = transformers.AutoConfig.for_model(model_type)
+        config = _auto_config(model_type)
     with torch.device("meta"):
         model = definition.loader.from_config(config)
     _convert_model_with_defuser(definition, model, cleanup_original=False)
@@ -87,7 +97,7 @@ def test_voxtral_tree_uses_the_5_22_language_model_root():
 
 
 def _nemotron_moe_config():
-    config = transformers.AutoConfig.for_model("nemotron_h")
+    config = _auto_config("nemotron_h")
     config.num_hidden_layers = 4
     config.layers_block_type = ["linear_attention", "full_attention", "mlp", "moe"]
     return config
@@ -154,7 +164,7 @@ def test_bailing_moe_keeps_the_remote_attention_layout():
 
 
 def _llama4_mixed_config():
-    config = transformers.AutoConfig.for_model("llama4_text")
+    config = _auto_config("llama4_text")
     config.num_hidden_layers = 4
     config.interleave_moe_layer_step = 2
     config.moe_layers = [0, 2]
@@ -189,7 +199,7 @@ def test_llama4_dense_layers_are_declared_next_to_moe():
 
 
 def _llama4_scout_config():
-    config = transformers.AutoConfig.for_model("llama4_text")
+    config = _auto_config("llama4_text")
     config.num_hidden_layers = 2
     config.interleave_moe_layer_step = 1
     config.moe_layers = [0, 1]
@@ -231,7 +241,7 @@ def test_llama4_scout_declares_no_dense_feed_forward_branch():
 
 
 def _gemma4_moe_config():
-    config = transformers.AutoConfig.for_model("gemma4_text")
+    config = _auto_config("gemma4_text")
     config.num_hidden_layers = 2
     config.enable_moe_block = True
     config.num_experts = 8
@@ -354,7 +364,7 @@ def test_pre_lm_head_norm_resolves_on_the_real_meta_model(model_type, expected):
     definition = MODEL_MAP[model_type]
     assert definition.pre_lm_head_norm_module == expected
 
-    config = transformers.AutoConfig.for_model(model_type)
+    config = _auto_config(model_type)
     with torch.device("meta"):
         model = definition.loader.from_config(config)
 
@@ -399,7 +409,7 @@ def test_kimi_linear_native_has_no_phantom_rotary_path():
     definition = KimiLinearNativeQModel
     assert definition.rotary_embedding is None
 
-    config = transformers.AutoConfig.for_model("kimi_linear")
+    config = _auto_config("kimi_linear")
     with torch.device("meta"):
         model = definition.loader.from_config(config)
     assert not hasattr(model.model, "rotary_emb")

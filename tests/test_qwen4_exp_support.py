@@ -175,7 +175,7 @@ def test_qwen4_exp_text_uses_causal_lm_paths_and_same_decoder_tree():
         SimpleNamespace(dynamic=None),
     )
 
-    assert Qwen4ExpTextQModel.loader.__name__ == "AutoModelForCausalLM"
+    assert Qwen4ExpTextQModel.loader.model_class == "gptqmodel.models.ports.native.auto.NativeForCausalLM"
     assert Qwen4ExpTextQModel.require_load_processor is False
     assert Qwen4ExpQModel.module_tree[-1] == Qwen4ExpTextQModel.module_tree[-1]
     assert Qwen4ExpTextQModel.extract_layers_node() == ["model.layers"]

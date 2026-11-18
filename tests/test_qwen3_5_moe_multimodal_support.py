@@ -5,15 +5,14 @@ import torch
 from PIL import Image
 from torch import nn
 from transformers import (
-    AutoModelForImageTextToText,
     Qwen3_5MoeConfig,
     Qwen3_5MoeTextConfig,
     Qwen3_5MoeVisionConfig,
 )
 
-from gptqmodel.models.definitions import base_qwen3_vl
 from gptqmodel.models.definitions.base_qwen3_vl import BaseQwen3VLGPTQ
 from gptqmodel.models.definitions.qwen3_5_moe import Qwen3_5_MoeQModel
+from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.utils.model import MODALITY
 
 
@@ -61,32 +60,40 @@ def _image_content(image):
     return {"type": "image", "image": image}
 
 
-def test_qwen3_5_moe_load_processor_uses_model_path(monkeypatch):
+def test_qwen3_5_moe_load_processor_uses_native_loader(monkeypatch):
     calls = []
     processor = object()
 
-    def fake_from_pretrained(*args, **kwargs):
-        calls.append((args, kwargs))
+    def fake_load_processor(loader, *args, **kwargs):
+        calls.append((loader, args, kwargs))
         return processor
 
-    monkeypatch.setattr(
-        base_qwen3_vl.AutoProcessor, "from_pretrained", fake_from_pretrained
-    )
+    monkeypatch.setattr(LocalModelLoader, "load_processor", fake_load_processor)
     model = _qmodel()
+    model.model = SimpleNamespace(config="qwen3.5-moe-config")
+    tokenizer = object()
+    model.tokenizer = SimpleNamespace(tokenizer=tokenizer)
 
     assert model.load_processor() is processor
     assert calls == [
         (
+            Qwen3_5_MoeQModel.loader,
             ("qwen3.5-moe",),
-            {},
+            {"config": "qwen3.5-moe-config", "tokenizer": tokenizer},
         )
     ]
+
+    # A processor BaseQModel already loaded is reused.
+    model.processor = processor
+    calls.clear()
+    assert model.load_processor() is processor
+    assert calls == []
 
 
 def test_qwen3_5_moe_uses_shared_multimodal_base_contract():
     assert Qwen3_5_MoeQModel.__bases__ == (BaseQwen3VLGPTQ,)
     assert Qwen3_5_MoeQModel.modality == [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
-    assert Qwen3_5_MoeQModel.loader is AutoModelForImageTextToText
+    assert Qwen3_5_MoeQModel.loader.model_class == "gptqmodel.models.ports.native.auto.NativeForImageTextToText"
     assert Qwen3_5_MoeQModel.require_load_processor is True
 
 

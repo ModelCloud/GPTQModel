@@ -87,7 +87,7 @@ def test_diffusion_gemma_module_tree_covers_dense_and_packed_experts():
     )
     flat_modules = {name for block in layer_modules for name in block}
 
-    assert DiffusionGemmaQModel.loader is AutoModelForMultimodalLM
+    assert DiffusionGemmaQModel.loader.model_class == "gptqmodel.models.ports.native.auto.NativeForMultimodalLM"
     assert DiffusionGemmaQModel.turtle_materialize_tie_weights is False
     assert DiffusionGemmaQModel.modality == [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
     assert DiffusionGemmaQModel.extract_layers_node() == ["model.encoder.language_model.layers"]
