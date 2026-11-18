@@ -273,7 +273,11 @@ def _patch_transformers_refusing_quantizers():
         log.debug("GPT-QModel refusing quantizers inactive: transformers quantizer API changed", exc_info=True)
         return
 
-    from ._quant_methods import REFUSED_HF_QUANT_METHODS
+    from ._quant_methods import (
+        FP8_QUANT_METHOD,
+        REFUSED_HF_QUANT_METHODS,
+        is_legacy_inverse_fp8_config,
+    )
     from .utils.hf_refusing_quantizer import (
         GPTQModelRefusingHfQuantizer,
         GPTQModelRefusingQuantizationConfig,
@@ -289,16 +293,26 @@ def _patch_transformers_refusing_quantizers():
                 method, GPTQModelRefusingHfQuantizer
             )
 
-        # transformers special-cases `quant_method == "bitsandbytes"` in
-        # `AutoHfQuantizer.from_config`: it demands an instance of its own
-        # `BitsAndBytesConfig` and only then appends the `_4bit`/`_8bit`
-        # suffix. That branch runs before the mapping lookup, so the refusing
-        # quantizer registered above is never constructed and GPT-QModel's
-        # layout raises a generic TypeError instead of the actionable error
-        # (#4664). Refuse only GPT-QModel's layout: transformers' own
-        # `BitsAndBytesConfig` carries the same plain `quant_method`, so
-        # refusing every occurrence broke all genuine HF bnb loads (QLoRA, any
-        # Hub bnb checkpoint) in a process that imported GPT-QModel (#4731).
+        # Two layouts need a check before transformers converts the dict into
+        # its own config object:
+        #
+        # * `bitsandbytes`: `AutoHfQuantizer.from_config` special-cases the
+        #   name, demands an instance of transformers' own
+        #   `BitsAndBytesConfig`, and only then appends the `_4bit`/`_8bit`
+        #   suffix. That branch runs before the mapping lookup, so the refusing
+        #   quantizer registered above is never constructed and GPT-QModel's
+        #   layout raises a generic TypeError instead of the actionable error
+        #   (#4664). Refuse only GPT-QModel's layout: transformers' own
+        #   `BitsAndBytesConfig` carries the same plain `quant_method`, so
+        #   refusing every occurrence broke all genuine HF bnb loads (QLoRA, any
+        #   Hub bnb checkpoint) in a process that imported GPT-QModel (#4731).
+        #
+        # * `fp8` + `weight_scale_semantics: "inverse"`: transformers registers
+        #   `fp8` for its own `FineGrainedFP8`, which multiplies
+        #   `weight_scale_inv`; GPT-QModel's released FP8 checkpoints divide.
+        #   `FineGrainedFP8Config` drops the unknown marker during conversion,
+        #   so inspect the raw dict before delegating. Production `fp8`
+        #   checkpoints declare `multiplier` and keep loading (#5272).
         original_from_config = hf_quant_auto.AutoHfQuantizer.__dict__["from_config"]
         if not getattr(original_from_config, "_gptqmodel_refusal_guard", False):
 
@@ -306,10 +320,49 @@ def _patch_transformers_refusing_quantizers():
             def _refusing_from_config(cls, quantization_config, **kwargs):
                 if _is_gptqmodel_bitsandbytes_layout(quantization_config):
                     raise ValueError(refusal_message("bitsandbytes"))
+                if is_legacy_inverse_fp8_config(quantization_config):
+                    raise ValueError(
+                        refusal_message(
+                            FP8_QUANT_METHOD,
+                            label="FP8",
+                            detail="weight_scale_semantics: 'inverse'",
+                        )
+                    )
                 return original_from_config.__func__(cls, quantization_config, **kwargs)
 
             _refusing_from_config._gptqmodel_refusal_guard = True
             hf_quant_auto.AutoHfQuantizer.from_config = _refusing_from_config
+
+        # A checkpoint's `quantization_config` is a dict until
+        # `merge_quantization_configs()` converts it into transformers' own
+        # config class. `FineGrainedFP8Config` drops the unknown
+        # `weight_scale_semantics` marker, so the inverse-scale check has to
+        # run before that conversion; `from_config()` alone cannot see it.
+        original_merge = hf_quant_auto.AutoHfQuantizer.__dict__[
+            "merge_quantization_configs"
+        ]
+        if not getattr(original_merge, "_gptqmodel_refusal_guard", False):
+
+            @classmethod
+            def _refusing_merge(
+                cls, quantization_config, quantization_config_from_args
+            ):
+                if is_legacy_inverse_fp8_config(quantization_config):
+                    raise ValueError(
+                        refusal_message(
+                            FP8_QUANT_METHOD,
+                            label="FP8",
+                            detail="weight_scale_semantics: 'inverse'",
+                        )
+                    )
+                return original_merge.__func__(
+                    cls, quantization_config, quantization_config_from_args
+                )
+
+            _refusing_merge._gptqmodel_refusal_guard = True
+            hf_quant_auto.AutoHfQuantizer.merge_quantization_configs = (
+                _refusing_merge
+            )
 
 
 def _is_gptqmodel_bitsandbytes_layout(quantization_config) -> bool:

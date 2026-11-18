@@ -252,8 +252,11 @@ unknown name, `supports_quant_method` only warns
 `from_pretrained` then random-initializes every linear layer. GPT-QModel
 publishes several layouts transformers does not implement (`bitsandbytes`,
 `exl3`, `qqq`, `paro`, `macaq`, `nf12`, `tt-blockfloat`) plus the
-deliberate `gptqmodel_gguf` alias. FP8 has no alias: a loaded production FP8
-checkpoint keeps its own `quant_method: "fp8"`, which transformers implements.
+deliberate `gptqmodel_gguf` alias. FP8 is load-only: production checkpoints
+keep their own `quant_method: "fp8"`, which transformers implements. The
+legacy `gptqmodel_fp8` name is refused, and so is `fp8` when the config
+declares `weight_scale_semantics: "inverse"`, because `FineGrainedFP8` would
+multiply GPT-QModel's inverse scale.
 
 `gptqmodel/__init__.py` registers a refusing quantizer for each name from the
 single table `REFUSED_HF_QUANT_METHODS` in `gptqmodel/_quant_methods.py`, using
@@ -269,21 +272,29 @@ flowchart TD
     F --> F2["GGUF_EXPORT_QUANT_METHOD registered"]
     S["save: _serialize_export_quant_method"] --> S5["quant_method: method value"]
     S5 --> G
-    G["AutoModelForCausalLM.from_pretrained"] --> H["AutoHfQuantizer.from_config"]
-    H --> I{"quant_method registered?"}
+    G["AutoModelForCausalLM.from_pretrained"] --> H["AutoHfQuantizer.merge_quantization_configs"]
+    H --> H2{"fp8 + inverse scale?"}
+    H2 -- yes --> K2["raise ValueError<br/>use GPTQModel.load"]
+    H2 -- no --> H3["AutoHfQuantizer.from_config"]
+    H3 --> I{"quant_method registered?"}
     I -- no --> J["warn and skip quantization<br/>random Linear weights"]
     I -- yes --> K["GPTQModelRefusingHfQuantizer.__init__<br/>raise ValueError"]
     style J fill:#f8d7da,stroke:#b02a37
     style K fill:#d9f2d9,stroke:#2e7d32
+    style K2 fill:#d9f2d9,stroke:#2e7d32
 ```
 
 `setdefault` keeps any quantizer transformers already owns (`gptq`, `awq`,
 `fp8`, and its own `vptq`), so this table only covers names transformers does
-not implement. GPT-QModel no longer writes FP8 checkpoints: FP8 is load-only,
-and the checkpoints it loads are production FP8 (`FineGrainedFP8`,
+not implement. The `fp8` name is the one exception: transformers owns it, but
+GPT-QModel refuses a config that also declares
+`weight_scale_semantics: "inverse"` before transformers converts the dict,
+because `FineGrainedFP8Config` would otherwise drop that marker and multiply
+the inverse scale. GPT-QModel no longer writes FP8 checkpoints: FP8 is
+load-only, and the checkpoints it loads are production FP8 (`FineGrainedFP8`,
 DeepSeek/Qwen block scales, NVIDIA ModelOpt, MXFP8, NVFP8) that publish the
-standard `fp8` name. `_serialize_export_quant_method` therefore only has to
-special-case GGUF.
+standard `fp8` name with a multiplier. `_serialize_export_quant_method`
+therefore only has to special-case GGUF.
 In particular transformers 5 registers `bitsandbytes_4bit` and
 `bitsandbytes_8bit`, not the plain `bitsandbytes` that GPT-QModel writes, so
 that name is refused like the other GPT-QModel-only layouts. The registration runs on package import, so
