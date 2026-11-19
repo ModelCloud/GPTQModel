@@ -141,8 +141,13 @@ def test_concat_separator_does_not_insert_bos_at_document_boundaries():
     assert ("\n", False) in tokenizer.calls
 
 
-def test_concat_separator_that_fits_fills_the_block():
-    """A one-token separator must not force a short, unpadded block."""
+def test_concat_separator_that_fits_alone_is_not_appended():
+    """A separator with no room for a following document is not appended (#5357).
+
+    The separator belongs between two documents in one window. Filling the last
+    position with it leaves attended trailing filler that no document follows,
+    so the window is padded instead and the next document starts a fresh one.
+    """
 
     tokenizer = _ChatTokenizer()
     dataset = [
@@ -160,8 +165,8 @@ def test_concat_separator_that_fits_fills_the_block():
 
     first_ids = prepared[0]["input_ids"][0].tolist()
     first_mask = prepared[0]["attention_mask"][0].tolist()
-    assert first_ids == [1, 2, 3, 4, 5, 6, 7, 8, 10]
-    assert first_mask == [1] * 9
+    assert first_ids == [1, 2, 3, 4, 5, 6, 7, 8, 0]
+    assert first_mask == [1] * 8 + [0]
     assert prepared[1]["input_ids"][0].tolist() == [11, 12, 13, 14, 15, 16, 17, 18, 0]
 
 

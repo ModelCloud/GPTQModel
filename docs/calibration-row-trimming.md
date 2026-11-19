@@ -90,7 +90,7 @@ flowchart TD
     B -- "yes" --> E["keep every real token<br/>no per-row trim, no per-row min_length"]
     E --> F["_iter_calibration_rows packs into<br/>windows of exactly concat_size"]
     F --> G{"window real tokens > min_length"}
-    G -- "yes" --> H["emit window; only the tail window is padded"]
+    G -- "yes" --> H["emit window padded to concat_size"]
     G -- "no" --> I["drop window<br/>count in too_short_window_count"]
     H --> J["collate_data / non-batched tensors"]
     I --> J
@@ -110,9 +110,18 @@ if not concat_mode and sum(1 for keep in row_mask if keep) <= calibration_data_m
     ...
 ```
 
-The window filter lives in `flush_buffer()` and in the final tail block, and
-measures `sum(attention_mask_buff)` — pad positions are already stripped by the
-packer, so that sum is the window's real token count.
+The window filter lives in `flush_buffer()`: every exit path — a full window,
+an early flush, and the final tail — goes through it. It measures
+`sum(attention_mask_buff)` — pad positions are already stripped by the packer,
+so that sum is the window's real token count — and pads every partial window to
+`concat_size` on `tokenizer.padding_side` with a zero attention mask. Early
+flushes used to emit short windows while only the tail was padded, so consumers
+saw ragged rows.
+
+A `concat_separator` is inserted only between two documents in the same window,
+and only when the separator plus at least one token of the next document fit in
+the remaining positions. A separator that would fill the window by itself is
+not appended; the window is flushed and the next document starts a fresh one.
 
 ### Up-front validation
 
