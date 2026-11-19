@@ -2345,9 +2345,9 @@ def build_blockfloat_model(
     # ``from_pretrained`` deliberately leaves alone. ``_from_config`` mutates the
     # process-global default dtype, so it must share the model-construction lock
     # (issue #4204).
-    from ..models.loader import model_global_state_lock, model_load_lock
+    from ..models.loader import model_load_lock
 
-    with model_load_lock(), model_global_state_lock():
+    with model_load_lock():
         model = getattr(transformers, class_name)._from_config(config)
     _cast_model_dtype(model, dtype)
     _sync_config_dtype(model.config, dtype)
