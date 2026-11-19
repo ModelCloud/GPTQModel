@@ -30,6 +30,7 @@ from ..looper.loop_processor import (
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
+    active_padding_mask,
     bind_resolved_module_config,
     get_resolved_module_config,
 )
@@ -1758,7 +1759,9 @@ class AWQProcessor(LoopProcessor):
             if cached is not None and cached[0]() is feature:
                 return cached[1]
 
-        host = self._apply_active_keep_mask_to_feature(feature)
+        host = self._apply_active_keep_mask_to_feature(
+            self._drop_padding_only_rows(feature)
+        )
         # Preserve a leading sample axis for flattened [seq, hidden] captures so later
         # concatenation produces [samples, seq, hidden] instead of collapsing into one giant sequence.
         if host.dim() <= 2:
@@ -1772,6 +1775,43 @@ class AWQProcessor(LoopProcessor):
             with self.lock:
                 self._capture_host_cache[key] = (weakref.ref(feature), host)
         return host
+
+    def _drop_padding_only_rows(self, feature: torch.Tensor) -> torch.Tensor:
+        """Drop zeroed calibration-padding rows from a routed-expert capture (#5337).
+
+        The MoE-root hook zeroes padding positions before routing (#4035), so a
+        natively routed expert receives them as all-zero rows. Their count is
+        unrelated to the keep mask, which is why the mask cannot filter them,
+        and they used to count toward the expert's sample. Only drop when the
+        batch actually has padding: an all-zero row can be a real activation.
+        """
+
+        if not torch.is_tensor(feature) or feature.dim() != 2:
+            return feature
+
+        tls = getattr(self, "_mask_tls", None)
+        keep_mask = getattr(tls, "value", None)
+        if not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
+            return feature
+        # A `[B * S, H]` capture is filtered by the mask itself, and the
+        # all-expert path already stores exactly the kept rows. Only a routed
+        # subset (pads routed to this expert, real rows elsewhere) has a row
+        # count that matches neither. A real activation can be all-zero, so
+        # the row count is the discriminator, not the zeros alone.
+        row_count = int(feature.shape[0])
+        if row_count in (int(keep_mask.numel()), int(keep_mask.sum())):
+            return feature
+
+        padding_present = getattr(tls, "mask_has_padding", None)
+        if padding_present is None:
+            padding_present = not bool(keep_mask.all())
+        if not padding_present:
+            return feature
+
+        keep_rows = (feature != 0).any(dim=-1)
+        if bool(keep_rows.all()):
+            return feature
+        return feature[keep_rows].contiguous()
 
     def _apply_active_keep_mask_to_feature(self, feature: torch.Tensor) -> torch.Tensor:
         """Remove padded rows from an activation captured by the current worker.
@@ -1838,16 +1878,59 @@ class AWQProcessor(LoopProcessor):
         if not self.forward.activation_capture:
             return False
 
+        def zero_padded_rows(_module, args, kwargs):
+            # Mirror the GPTQ MoE padding contract (#4035): zero the padded
+            # positions of the block input so a natively routed expert receives
+            # them as all-zero rows, which `_drop_padding_only_rows` then
+            # removes from its capture (#5337). Hash routers select by input
+            # id, so zeroing does not change their routing. A BOS sink is a
+            # real token and is kept: only the padding mask is applied.
+            keep_mask = active_padding_mask(self)
+            if not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
+                return None
+
+            tls = getattr(self, "_mask_tls", None)
+            padding_present = getattr(tls, "mask_has_padding", None)
+            if padding_present is None:
+                padding_present = not bool(keep_mask.all())
+            if not padding_present:
+                return None
+
+            hidden_states = kwargs.get("hidden_states") if kwargs else None
+            from_kwargs = hidden_states is not None
+            if hidden_states is None:
+                if not args or not torch.is_tensor(args[0]):
+                    return None
+                hidden_states = args[0]
+            if hidden_states.dim() != 3 or tuple(hidden_states.shape[:2]) != tuple(keep_mask.shape):
+                return None
+
+            row_mask = keep_mask.to(
+                device=hidden_states.device, dtype=hidden_states.dtype
+            ).unsqueeze(-1)
+            masked = hidden_states * row_mask
+            if from_kwargs:
+                kwargs = dict(kwargs)
+                kwargs["hidden_states"] = masked
+                return args, kwargs
+            return (masked,) + tuple(args[1:]), kwargs
+
         root_policy = self._feature_aggregation_policy(moe_block_name)
-        if not root_policy or not root_policy.get("capture_root", False):
-            return False
+        capture_root = bool(root_policy and root_policy.get("capture_root", False))
+        if capture_root:
 
-        def capture_moe_root_input(_module, inputs):
-            if inputs:
-                self.record_moe_root_input_feature(moe_block_name, inputs[0])
+            def capture_moe_root_input(_module, inputs):
+                if inputs:
+                    self.record_moe_root_input_feature(moe_block_name, inputs[0])
 
-        handles.append(moe_block.register_forward_pre_hook(capture_moe_root_input))
-        return True
+            handles.append(moe_block.register_forward_pre_hook(capture_moe_root_input))
+
+        # Registered after the capture hook so `handles[0]` stays the capture;
+        # the capture sees the padded input and drops those rows itself.
+        handles.append(
+            moe_block.register_forward_pre_hook(zero_padded_rows, with_kwargs=True)
+        )
+        return capture_root
 
     @staticmethod
     def _can_concat_batch_tensors(tensors: List[torch.Tensor]) -> bool:

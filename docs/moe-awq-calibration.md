@@ -150,10 +150,26 @@ flowchart TD
 | --- | --- | --- |
 | Dense projections | `[B, S, H]` | 3-D branch, per-sample keep mask |
 | MoE routing bypass, 2-D shared expert | `[B*S, H]` | 2-D branch, `keep_mask.reshape(-1)` |
-| Natively routed experts | `[routed_rows, H]` (row count unrelated to `B*S`) | MoE block pre-hook zeroes pad rows; zero rows add nothing to `X^T X` |
+| Natively routed experts | `[routed_rows, H]` (row count unrelated to `B*S`) | MoE block pre-hook zeroes pad rows; GPTQ drops them at its expert hook, AWQ in `_drop_padding_only_rows` |
 
 The MoE block pre-hook returns a new tensor, so the caller's residual input is
 not mutated in place.
+
+### AWQ captures the same rows
+
+`AWQProcessor.register_moe_root_capture_hook` registers the same zeroing
+pre-hook, and `_drop_padding_only_rows` removes the zeroed rows from a routed
+expert's capture before it reaches the reservoir or `raw_tokens` (#5337). #4035
+had fixed this for GPTQ only, so AWQ kept every padding row the router sent to
+an expert: at `batch_size > 1` a few experts could be dominated by pad-token
+activations, and DeepSeek-V4 hash layers sent every pad row to the same six
+experts per layer (58-75% of those experts' AWQ sample in a 32-document run).
+
+A capture is treated as a routed subset only when its row count matches neither
+`keep_mask.numel()` (the raw `[B*S, H]` grid, filtered by the mask itself) nor
+`keep_mask.sum()` (the all-expert path, which already stores exactly the kept
+rows). A real activation can be all-zero, so the row count is the
+discriminator and the zero check only finds which rows to drop.
 
 ## 4. Routed-expert capture reservoirs
 
