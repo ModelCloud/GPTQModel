@@ -278,11 +278,11 @@ def test_a_host_resident_buffer_does_not_make_a_model_sharded(monkeypatch):
     assert not any("device -1" in line for line in lines)
 
 
-def _budget_for_config(config, devices, layer_devices, *, reserve=0.0):
+def _budget_for_config(config, devices, layer_devices, *, reserve=0.0, dtype=torch.float16):
     from gptqmodel.utils.kv_cache import estimate_kv_cache
     from gptqmodel.utils.resource_budget import DeviceBudget, ResourceBudget
 
-    estimate = estimate_kv_cache(config, dtype=torch.float16)
+    estimate = estimate_kv_cache(config, dtype=dtype)
     assert estimate is not None and len(estimate.layers) == len(layer_devices)
     return ResourceBudget(
         devices=tuple(DeviceBudget(index=index, free_bytes=free, total_bytes=24 * 1024 ** 3,
@@ -360,6 +360,84 @@ def test_a_device_with_only_constant_state_layers_does_not_zero_the_plan():
     assert budget.max_sequences(1024) > 0
     plan = budget.format_plan()
     assert plan is not None and f"{human_tokens(100_000)} ctx" in plan
+
+
+def test_an_unmeasured_shard_leaves_the_sequence_count_unknown():
+    """Regression: a missing memory snapshot is unknown, not infinite room.
+
+    ``max_context_tokens`` already reported the sharded plan as unknown when a
+    device owning a growing layer had no measurement, but ``max_sequences``
+    skipped that device and answered from the measured one alone (#5410).
+    """
+
+    config = types.SimpleNamespace(
+        hidden_size=32, num_hidden_layers=2, num_attention_heads=4,
+        num_key_value_heads=2, max_position_embeddings=1024,
+    )
+    budget = _budget_for_config(
+        config,
+        devices=[(0, 524288, 0), (1, None, 0)],
+        layer_devices=(0, 1),
+        dtype=torch.float32,
+    )
+
+    assert budget.max_context_tokens() is None
+    assert budget.max_sequences(1024) is None
+    assert budget.format_plan() is None
+    # The plan line already names the missing input; keep it that way.
+    assert any(
+        "KV plan unavailable" in line and "measured free memory" in line
+        for line in budget.describe()
+    )
+
+
+def test_measured_shards_keep_the_numbers_the_unmeasured_plan_cannot_beat():
+    """Control: with every device measured, the sequence counts are unchanged."""
+
+    config = types.SimpleNamespace(
+        hidden_size=32, num_hidden_layers=2, num_attention_heads=4,
+        num_key_value_heads=2, max_position_embeddings=1024,
+    )
+
+    def plan(free_on_device_1):
+        return _budget_for_config(
+            config,
+            devices=[(0, 524288, 0), (1, free_on_device_1, 0)],
+            layer_devices=(0, 1),
+            dtype=torch.float32,
+        )
+
+    # 524288 bytes per card, one growing layer each, 128 bytes/token:
+    # four sequences of 1024 tokens fit both cards.
+    roomy = plan(524288)
+    assert (roomy.max_context_tokens(), roomy.max_sequences(1024)) == (1024, 4)
+    # The second card now holds exactly one sequence.
+    tight = plan(131072)
+    assert (tight.max_context_tokens(), tight.max_sequences(1024)) == (1024, 1)
+    # An explicit zero is a real measurement and still reports zero.
+    empty = plan(0)
+    assert (empty.max_context_tokens(), empty.max_sequences(1024)) == (0, 0)
+
+
+def test_an_unmeasured_device_without_a_growing_layer_does_not_poison_the_plan():
+    """Control: only a device that owns a growing layer can make the answer unknown."""
+
+    config = types.SimpleNamespace(
+        hidden_size=64, num_hidden_layers=4, num_attention_heads=4, num_key_value_heads=2,
+        max_position_embeddings=100_000,
+        layer_types=["linear_attention", "linear_attention", "full_attention", "full_attention"],
+    )
+    budget = _budget_for_config(
+        config,
+        devices=[(0, None, 16), (1, 4 * 1024 ** 3, 8)],
+        layer_devices=(0, 0, 1, 1),
+    )
+
+    # Device 0 holds only recurrent layers, so its missing snapshot is moot.
+    assert budget.kv_cache.growing_layers == 2
+    assert budget.max_context_tokens() == 100_000
+    assert budget.max_sequences(1024) > 0
+    assert budget.format_plan() is not None
 
 
 class _AliasedInner(_FakeInner):
