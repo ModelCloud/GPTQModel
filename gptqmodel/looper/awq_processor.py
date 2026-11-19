@@ -1337,7 +1337,7 @@ class AWQProcessor(LoopProcessor):
             # (#5264).
             with self._reservoir_lock_for(module_name):
                 if entry.get("reservoir_buffer") is not None:
-                    budget_cap = self._reservoir_budget_cap(configured_max_tokens, plan)
+                    budget_cap = self._reservoir_budget_cap(configured_max_tokens, plan, entry)
                     row_indices = torch.tensor(prov_rows, dtype=torch.int64)
                     priorities = self._reservoir_priorities(source_index, length).index_select(
                         0, row_indices
@@ -1378,8 +1378,6 @@ class AWQProcessor(LoopProcessor):
         # equivalent of Algorithm R: it is a uniform sample of every row seen, so
         # a batch keeps a share proportional to its length regardless of where it
         # falls in the stream, and the memory stays O(cap).
-        budget_cap = self._reservoir_budget_cap(configured_max_tokens, plan)
-
         feat_2d = feature.reshape(-1, hidden)
         module_lock = self._reservoir_lock_for(module_name)
         with self.lock:
@@ -1396,6 +1394,11 @@ class AWQProcessor(LoopProcessor):
             source_idx = len(entry.setdefault("batch_row_counts", []))
             entry["batch_row_counts"].append(length)
             entry["raw_tokens"] = entry.get("raw_tokens", 0) + length
+            # Size the reservoir from this module's own captures, the current
+            # one included, so a routed expert keeps the pre-#5175 per-expert
+            # budget instead of the layer-wide plan budget (#5284). The budget
+            # only grows, and a growing buffer carries the rows it held.
+            budget_cap = self._reservoir_budget_cap(configured_max_tokens, plan, entry)
             entry["max_tokens"] = budget_cap
             entry.setdefault("batch_indices", []).append(batch_index)
 
@@ -1428,14 +1431,30 @@ class AWQProcessor(LoopProcessor):
                 reservoir_locks[module_name] = module_lock
             return module_lock
 
-    def _reservoir_budget_cap(self, configured_max_tokens, plan) -> int:
-        """Resolve the routed-expert reservoir size for one capture."""
+    def _reservoir_budget_cap(self, configured_max_tokens, plan, entry=None) -> int:
+        """Resolve the routed-expert reservoir size for one capture.
 
-        budget_cap = (
-            self._cap_token_rows(int(configured_max_tokens))
-            if configured_max_tokens is not None
-            else self._cap_token_rows(plan.budget if plan is not None else 906)
-        )
+        A configured ``max_tokens`` wins. Otherwise a routed expert sizes its
+        reservoir from its own captures -- the largest capture, raised to one
+        row per capture, exactly the pre-#5175 per-expert budget -- instead of
+        the layer-wide plan budget. A layer-wide cap for every expert made the
+        clip search (and the replay forward) run on ~5x the rows on OLMoE
+        (#5284), while the reservoir still samples the same stream uniformly.
+        The budget only grows (a larger capture, or more captures), and a
+        growing buffer keeps every row it already held.
+        """
+
+        if configured_max_tokens is not None:
+            budget_cap = self._cap_token_rows(int(configured_max_tokens))
+        else:
+            budget_cap = 0
+            if entry is not None:
+                budget_cap = self._token_row_budget_for_counts(
+                    entry.get("batch_row_counts") or []
+                )
+                budget_cap = self._cap_token_rows(int(budget_cap))
+            if budget_cap <= 0:
+                budget_cap = self._cap_token_rows(plan.budget if plan is not None else 906)
         return budget_cap if budget_cap > 0 else 906
 
     @staticmethod
@@ -1487,16 +1506,46 @@ class AWQProcessor(LoopProcessor):
             or buffer.shape[0] != budget_cap
             or buffer.shape[1] != rows.shape[1]
         ):
+            # The per-expert budget only grows (a larger capture, or more
+            # captures), so a resize must keep every row the reservoir already
+            # held; rebuilding from ``inputs`` cannot, because the provenance
+            # list is materialized only at replay (#5284).
+            carried = None
+            if buffer is not None and buffer.shape[1] == rows.shape[1]:
+                previous_used = int(entry.get("reservoir_used", 0))
+                if previous_used > 0:
+                    order = torch.arange(previous_used)
+                    if previous_used > budget_cap:
+                        order = torch.topk(
+                            entry["reservoir_priorities"][:previous_used],
+                            budget_cap,
+                            largest=False,
+                        ).indices
+                        order, _ = torch.sort(order)
+                    carried = (
+                        buffer[:previous_used].index_select(0, order).clone(),
+                        entry["reservoir_priorities"][:previous_used].index_select(0, order).clone(),
+                        entry["reservoir_sources"][:previous_used].index_select(0, order).clone(),
+                        entry["reservoir_rows"][:previous_used].index_select(0, order).clone(),
+                    )
             buffer = rows.new_empty((budget_cap, rows.shape[1]))
             entry["reservoir_buffer"] = buffer
             entry["reservoir_priorities"] = torch.empty((budget_cap,), dtype=torch.float64)
             entry["reservoir_sources"] = torch.empty((budget_cap,), dtype=torch.int64)
             entry["reservoir_rows"] = torch.empty((budget_cap,), dtype=torch.int64)
             entry["reservoir_used"] = 0
-            # A module can capture a plan-matched batch first and fall out of
-            # the plan later (for example a row shorter than the planned
-            # length). Keep those rows instead of starting from empty.
-            self._seed_reservoir_from_captures(entry, budget_cap)
+            if carried is not None:
+                carried_used = int(carried[0].shape[0])
+                buffer[:carried_used] = carried[0]
+                entry["reservoir_priorities"][:carried_used] = carried[1]
+                entry["reservoir_sources"][:carried_used] = carried[2]
+                entry["reservoir_rows"][:carried_used] = carried[3]
+                entry["reservoir_used"] = carried_used
+            else:
+                # A module can capture a plan-matched batch first and fall out
+                # of the plan later (for example a row shorter than the planned
+                # length). Keep those rows instead of starting from empty.
+                self._seed_reservoir_from_captures(entry, budget_cap)
 
         priority_buffer = entry["reservoir_priorities"]
         source_buffer = entry["reservoir_sources"]
@@ -1522,10 +1571,9 @@ class AWQProcessor(LoopProcessor):
             # expert sees one batch per expert per layer, so most merges offer
             # rows that all lose to the kept ones. Comparing the capture's best
             # priority with the worst kept priority is O(cap) on host floats and
-            # skips the concat/topk/mask/arange below, which cost ~160 us per
-            # capture -- 8.6 s over a 2-layer MoE run (#5284). The condition is
-            # strict so ties keep the slow path and the kept set is unchanged
-            # for every capture this short-circuits.
+            # skips the drop-set search below (#5284). The condition is strict
+            # so ties keep the slow path and the kept set is unchanged for
+            # every capture this short-circuits.
             if used >= budget_cap and count and bool(
                 (priorities > priority_buffer[:used].max()).all()
             ):
@@ -1533,17 +1581,32 @@ class AWQProcessor(LoopProcessor):
                 entry["inputs"] = [buffer[:used].unsqueeze(0)]
                 entry.pop("provenance", None)
                 return
-            combined = torch.cat([priority_buffer[:used], priorities])
-            keep = torch.topk(combined, budget_cap, largest=False).indices
-            kept_old = keep[keep < used]
-            kept_new = keep[keep >= used] - used
-            kept_old_mask = torch.zeros((used,), dtype=torch.bool)
-            kept_old_mask[kept_old] = True
-            # Free slots are the never-filled tail plus the kept rows this batch
-            # displaced; the new survivors go straight into them.
+            # The kept set is the ``budget_cap`` lowest priorities of old + new,
+            # so ``overflow`` rows are dropped and only the ``overflow`` largest
+            # old rows can be among them (any other old row already has
+            # ``overflow`` old rows at or above it). Selecting the drop set from
+            # those plus the capture moves only the rows that survive, instead
+            # of writing every surviving row of the capture into a slot
+            # (#5284).
+            overflow = used + count - budget_cap
+            old_probe = min(overflow, used)
+            old_largest = (
+                torch.topk(priority_buffer[:used], old_probe, largest=True)
+                if old_probe
+                else None
+            )
+            union_values = (
+                torch.cat([old_largest.values, priorities]) if old_probe else priorities
+            )
+            drop = torch.topk(union_values, overflow, largest=True).indices
+            new_drop = drop[drop >= old_probe] - old_probe
+            old_drop = drop[drop < old_probe]
+            keep_new = torch.ones((count,), dtype=torch.bool)
+            keep_new[new_drop] = False
+            kept_new = keep_new.nonzero(as_tuple=False).flatten()
             slots = torch.cat(
                 [
-                    (~kept_old_mask).nonzero(as_tuple=False).flatten(),
+                    old_largest.indices[old_drop] if old_probe else kept_new.new_empty(0),
                     torch.arange(used, budget_cap),
                 ]
             )
@@ -1626,6 +1689,7 @@ class AWQProcessor(LoopProcessor):
             "reservoir_sources",
             "reservoir_rows",
             "reservoir_used",
+            "reservoir_worst_priority",
         ):
             entry.pop(key, None)
 
