@@ -198,6 +198,7 @@ The immediate repairs use existing declarations, not a graph compiler or DSL:
 | `inkling_mm_model` | The norm fed unhandled native 3-D shared experts as well as routed experts. | Disable that norm's fold and explicitly exclude shared-expert, scale, convolution and relative-logit owners. |
 | `qwen` | The inferred `w2` source crosses SiLU. | Mark `w2:nosrc`. |
 | `granitemoehybrid` | Tree order folded `in_proj` into `out_proj` across the convolution and the SSM scan, and the post-attention norm was folded for the routed experts although `shared_mlp.input_linear` also reads it. | Mark `in_proj:nosrc`, `post_attention_layernorm:nosrc`; declare the router owner; `out_proj` folds the gated output `norm` (exact). |
+| `lfm3`, `lfm3_vl`, `lfm3_omni` | A missing gate declaration could leave the sigmoid gate uncompensated. Generic stage selection could also fold `o_proj` through `operator_norm`. | Compensate the live gate (`g_proj` in native text and VL, `gate_proj` in Omni) in the Q/K/V group. Keep `conv.conv` in source dtype. Quantize `o_proj` plainly except for VL's explicit `v_proj` fold when value and query head counts match. |
 
 ```mermaid
 flowchart TD

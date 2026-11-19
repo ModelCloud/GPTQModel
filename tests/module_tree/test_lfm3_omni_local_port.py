@@ -34,7 +34,7 @@ EXPECTED_PLAN = {
         ["conv.conv:!"],
         ["conv.out_proj"],
         ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!",
-         "self_attn.v_proj", "self_attn.gate_proj:!"],
+         "self_attn.gate_proj:!", "self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["ffn_norm:!"],
         ["post_ffn_norm:!"],
@@ -87,9 +87,7 @@ def test_real_decoder_weight_owners_quantization_and_plan_tags(kv_heads, bias, s
 
 @pytest.mark.parametrize("kv_heads,bias,sandwich", [(4, False, True), (2, True, False)])
 def test_inherited_lfm3_awq_folds_preserve_every_layer_type(kv_heads, bias, sandwich):
-    # Omni inherits LFM3's fold policy: ffn_norm -> w1/w3 on every layer and
-    # operator_norm -> conv.in_proj on short-conv layers. Sandwich post-norms
-    # are never sources.
+    # Omni folds both input norms and compensates its source-dtype gate.
     model = tiny_model(kv_heads=kv_heads, bias=bias, sandwich=sandwich)
     _convert_model_with_defuser(LFM3OmniQModel, model, cleanup_original=False)
     language = model.model.language_model
@@ -100,10 +98,13 @@ def test_inherited_lfm3_awq_folds_preserve_every_layer_type(kv_heads, bias, sand
 
     for layer, layer_type in zip(language.layers, language.config.layer_types):
         checked = assert_awq_folds_neutral(LFM3OmniQModel, model, layer, forward)
-        expected = [("ffn_norm", ["feed_forward.w1", "feed_forward.w3"])]
         if layer_type == "conv":
-            expected.insert(0, ("operator_norm", ["conv.in_proj"]))
-        assert [(source, targets) for source, targets, _ in checked] == expected
+            operator_fold = ("operator_norm", ["conv.in_proj"], [])
+        else:
+            operator_fold = (
+                "operator_norm", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"], ["self_attn.gate_proj"],
+            )
+        assert checked == [operator_fold, ("ffn_norm", ["feed_forward.w1", "feed_forward.w3"], [])]
 
 
 def _layout_sha256(model):

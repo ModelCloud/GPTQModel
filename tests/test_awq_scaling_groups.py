@@ -69,6 +69,9 @@ FAMILY_MODEL_TYPES = [
     "falcon_mamba",
     "gemma4_text",
     "hrm_text",
+    # Issue #5371: the attention input norm also feeds the sigmoid gate and
+    # must not be folded into `o_proj`.
+    "lfm3",
     # Issue #4121 items 7-10: trees that folded across a nonlinearity or a
     # residual. `olmo_hybrid` alternates pre-norm linear-attention layers with
     # post-norm full-attention layers, so one static tree cannot describe both.
@@ -246,6 +249,9 @@ def _tiny_config(model_type):
         # indexes `None`. Exercise the short-convolution and attention mixers.
         kwargs["layer_types"] = ["conv", "full_attention"]
         kwargs["num_dense_layers"] = 1
+    if model_type == "lfm3" and "layer_types" in fields:
+        # LFM3's default two-layer layout is conv-only; exercise both mixers.
+        kwargs["layer_types"] = ["conv", "full_attention"]
     for key in ("head_dim", "rotary_dim"):
         if key in fields:
             kwargs[key] = 8
@@ -665,9 +671,9 @@ def test_excluded_projection_is_never_a_fold_source(family):
                 f"layers={[get_op_name(layer, m) for m in node['layers']]}"
             )
     # `falcon_mamba` declares every projection `:nosrc`, so it has no Linear
-    # source at all and is quantized plainly. Apertus folds only into its two
-    # norms: GQA blocks v_proj -> o_proj and xIELU makes up_proj `:nosrc`.
-    assert checked or family in PLAIN_QUANTIZATION_FAMILIES or family in {"falcon_mamba", "apertus"}, family
+    # source at all and is quantized plainly. Apertus and LFM3 text fold
+    # only through input norms for the tested layouts.
+    assert checked or family in PLAIN_QUANTIZATION_FAMILIES or family in {"falcon_mamba", "apertus", "lfm3"}, family
 
 
 # Jamba's Mamba-2 mixer resolves its scan/conv kernels through

@@ -146,7 +146,7 @@ def test_real_decoder_owners_tags_and_public_consumer(kind, device, layout):
         ["operator_norm:!"], ["post_operator_norm:!"],
         *conv_blocks,
         ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!",
-         "self_attn.v_proj", *(f"self_attn.{gate}:!" for gate in gates)],
+         *(f"self_attn.{gate}:!" for gate in gates), "self_attn.v_proj"],
         ["self_attn.o_proj"], ["ffn_norm:!"], ["post_ffn_norm:!"],
         ["feed_forward.w1", "feed_forward.w3"], ["feed_forward.w2"],
     ]
@@ -230,19 +230,23 @@ def test_awq_quantizes_and_packs_every_projection_and_preserves_excluded_owners(
                 handle.remove()
         assert {f"{prefix}.{name}" for name in QUANTIZED[layer_type]} <= features.keys()
         local_features = {name.removeprefix(prefix + "."): value for name, value in features.items()}
-        fold_sources = {"ffn_norm"} if kind in {"lfm3", "lfm3_omni"} else set()
-        if kind in {"lfm3", "lfm3_omni"} and layer_type == "conv":
-            fold_sources.add("operator_norm")
+        fold_sources = {"operator_norm", "ffn_norm"}
         if kind == "lfm3_vl":
-            # LFM3-VL qualifies the full generic plan (module-tree neutrality
-            # test): both input norms, the linear MLP branch and, without GQA,
-            # the attention value projection.
-            fold_sources = {"operator_norm", "ffn_norm", "feed_forward.w3"}
+            fold_sources.add("feed_forward.w3")
             attention = getattr(layer, "self_attn", None)
             if attention is not None and attention.v_proj.out_features == attention.o_proj.in_features:
                 fold_sources.add("self_attn.v_proj")
         groups = wrapper.awq_get_modules_for_scaling(layer, local_features, {})
         assert {node["prev_op"] for node in groups} == {layer.get_submodule(name) for name in fold_sources}
+        if layer_type != "conv":
+            attention = layer.self_attn
+            assert [node["prev_op"] for node in groups if attention.o_proj in node["layers"]] == (
+                [attention.v_proj] if "self_attn.v_proj" in fold_sources else []
+            )
+            norm_group = next(node for node in groups if node["prev_op"] is layer.operator_norm)
+            assert norm_group["layers"] == [attention.q_proj, attention.k_proj, attention.v_proj]
+            gate = "gate_proj" if kind == "lfm3_omni" or layout == "legacy_gate" else "g_proj"
+            assert norm_group.get("_scale_consumers", []) == ([f"self_attn.{gate}"] if config.use_attention_gate else [])
         # Folds also divide a linear source's bias and compensate non-quantized
         # readers of the folded norm (the attention gate).
         folded_extras = {f"{name}.bias" for name in fold_sources}

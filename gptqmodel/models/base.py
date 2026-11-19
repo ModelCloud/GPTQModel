@@ -2559,6 +2559,21 @@ class BaseQModel(nn.Module):
         for line in _budget_for(getattr(self, "model", None), wrapper=self).describe():
             log.info(line)
 
+    def _calibration_batch_size(self, calibration) -> int:
+        """Resolve ``CalibrationConfig(batch_size="auto")`` for any entry point.
+
+        ``quantize()`` used to be the only caller that resolved the sentinel, so
+        ``requantize(norm=...)`` and ``adapter.generate()`` handed the raw
+        ``"auto"`` string to ``prepare_dataset`` and crashed in
+        ``range(0, len(dataset), "auto")`` with a ``TypeError`` that never named
+        ``batch_size`` (#5504).
+        """
+
+        batch_size = calibration.batch_size
+        if batch_size == AUTO_BATCH_SIZE:
+            batch_size = self._auto_calibration_batch_size(calibration)
+        return batch_size
+
     def _auto_calibration_batch_size(self, calibration) -> int:
         """Pick a calibration batch that fits, or 1 when the device is unmeasurable."""
 
@@ -2577,7 +2592,7 @@ class BaseQModel(nn.Module):
             dtype_bytes = 2
 
         free_bytes = None
-        device = self.quantize_config.device
+        device = getattr(getattr(self, "quantize_config", None), "device", None)
         device_type = getattr(device, "type", None) or str(device).split(":")[0].lower()
         if device_type == "cuda":
             try:
@@ -2775,9 +2790,7 @@ class BaseQModel(nn.Module):
             if self.quantize_config.method != METHOD.AWQ:
                 raise ValueError(f"Staged GSQ is unsupported for {self.quantize_config.method}")
 
-        batch_size = calibration.batch_size
-        if batch_size == AUTO_BATCH_SIZE:
-            batch_size = self._auto_calibration_batch_size(calibration)
+        batch_size = self._calibration_batch_size(calibration)
         if not self.support_batch_quantize:
             log.warn("Quantize: batch_size overridden by model class definition to `disabled`")
             batch_size = 1 # but actually disabled
@@ -3376,7 +3389,7 @@ class BaseQModel(nn.Module):
             calibration_dataset=calibration.dataset,
             calibration_dataset_concat_size=calibration.concat_size,
             calibration_dataset_sort=calibration.sort,
-            batch_size=calibration.batch_size,
+            batch_size=self._calibration_batch_size(calibration),
             calibration_data_min_length=calibration.min_length,
             calibration_concat_separator=calibration.concat_separator,
         )
@@ -3933,7 +3946,10 @@ class BaseQModel(nn.Module):
             self.quantize_config.auto_dtype_cast = AutoDtypeCast.OFF
 
         # init processor with EoRA processor
-        calibration_config = calibration.bind(self.prepare_dataset)
+        calibration_config = calibration.bind(
+            self.prepare_dataset,
+            batch_size=self._calibration_batch_size(calibration),
+        )
         processors = []
         try:
             if getattr(self.quantize_config, "preprocessors", None):

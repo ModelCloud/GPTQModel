@@ -59,8 +59,8 @@ class LFM3QModel(BaseQModel):
             "operator_norm": ("operator_norm:!",),
             "post_operator_norm": ("post_operator_norm:!:postnorm",),
             "conv": {
-                "in_proj": ("in_proj:0",),
-                "conv": ("conv:!",),
+                "in_proj": ("in_proj:0:nosrc",),
+                "conv": ("conv:!:nosrc",),
                 "out_proj": ("out_proj:1",),
             },
             "self_attn": (
@@ -68,11 +68,13 @@ class LFM3QModel(BaseQModel):
                 "q_norm:0:!",
                 "k_proj:0",
                 "k_norm:0:!",
-                "v_proj:0",
-                # Native/legacy per-head sigmoid gates stay in source dtype.
-                "g_proj:!",
-                "gate_proj:!",
-                "o_proj:1",
+                # Both gate names describe consumers of the same norm as Q/K/V.
+                # End the block with V, which exists even when the gate is off.
+                # Its no-source flag keeps the next stage's o_proj plain.
+                "g_proj:!:nosrc",
+                "gate_proj:!:nosrc",
+                "v_proj:0:nosrc",
+                "o_proj:1:nosrc",
             ),
             "ffn_norm": ("ffn_norm:!",),
             "post_ffn_norm": ("post_ffn_norm:!:postnorm",),
@@ -81,12 +83,9 @@ class LFM3QModel(BaseQModel):
     ]
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # The FFN input norm feeds both gate and up projections. The operator
-        # norm can fold into the convolution's input projection, which is its
-        # only consumer. Attention can have an excluded sigmoid-gate consumer.
-        sources = [module.ffn_norm]
-        if getattr(module, "conv", None) is not None:
-            sources.append(module.operator_norm)
+        # Search only the two input norms. The generic planner compensates
+        # the source-dtype sigmoid gate when folding the attention input norm.
+        sources = (module.ffn_norm, module.operator_norm)
         return [
             node for node in super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
             if node["prev_op"] in sources

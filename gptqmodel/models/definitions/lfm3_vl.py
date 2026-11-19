@@ -6,7 +6,6 @@
 from collections.abc import Mapping
 from typing import Dict
 
-from torch import nn
 from transformers import BatchFeature, ProcessorMixin
 
 from ...utils.model import MODALITY, move_to
@@ -49,18 +48,18 @@ class LFM3VLQModel(LFM3QModel):
             "operator_norm": ("operator_norm:!",),
             "post_operator_norm": ("post_operator_norm:!:postnorm",),
             "conv": {
-                "in_proj": ("in_proj:0",),
+                "in_proj": ("in_proj:0:nosrc",),
                 "out_proj": ("out_proj:1",),
-                "conv:!": (),
+                "conv": ("conv:!:nosrc",),
             },
             "self_attn": (
                 "q_proj:0",
                 "q_norm:0:!",
                 "k_proj:0",
                 "k_norm:0:!",
-                "v_proj:0",
-                "g_proj:!",
-                "o_proj:1",
+                "g_proj:!:nosrc",
+                "v_proj:0:nosrc",
+                "o_proj:1:nosrc",
             ),
             "ffn_norm": ("ffn_norm:!",),
             "post_ffn_norm": ("post_ffn_norm:!:postnorm",),
@@ -149,37 +148,25 @@ class LFM3VLQModel(LFM3QModel):
         super().begin_input_capture_example(example=example, batch_device=batch_device)
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-        # Qualified generic plan (not LFM3's norm-only subset): operator_norm ->
-        # in_proj or q/k/v (+ the g_proj gate consumer), ffn_norm -> w1/w3 and
-        # w3 -> w2. Sandwich post-norms are `:postnorm`. `o_proj` reads the
-        # attention output, but after the Q/K/V block ends in an absent or
-        # non-producer entry the planner can attach it to operator_norm; strip
-        # it and add its real producer, v_proj (per-head sigmoid gating commutes
-        # with a per-channel scale). GQA v_proj is too narrow to fold.
+        # The tree suppresses the generic o_proj fold through the input norm.
+        # Preserve VL's explicit value-to-output fold for equal-width heads:
+        # a per-channel scale commutes with attention and the per-head gate
+        # when each value head maps to exactly one attention head.
+        nodes = BaseQModel.awq_get_modules_for_scaling(self, module, input_feat, module_kwargs)
         attn = getattr(module, "self_attn", None)
-        o_proj = getattr(attn, "o_proj", None)
-        nodes = []
-        for node in BaseQModel.awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
-            node["layers"] = [layer for layer in node["layers"] if layer is not o_proj]
-            prev_op = node["prev_op"]
-            # conv.in_proj (B|C|x) and the per-head g_proj never fold forward.
-            if isinstance(prev_op, nn.Linear) and any(
-                prev_op.out_features != layer.in_features for layer in node["layers"]
-            ):
-                continue
-            if node["layers"]:
-                nodes.append(node)
         inp = input_feat.get("self_attn.o_proj")
-        if o_proj is not None and inp is not None and inp.numel() and attn.v_proj.out_features == o_proj.in_features:
-            kwargs = module_kwargs
-            if isinstance(module_kwargs, dict):
-                kwargs = {key: value for key, value in module_kwargs.items() if key != "_awq_feature_kwargs"}
-            node, _ = generate_node_for_awq_scaling(
-                inp=inp, prev_op=attn.v_proj, module_kwargs=kwargs, nodes_size=len(nodes),
-                subset=[o_proj], module2inspect=None,
-            )
-            node["_input_feature_name"] = "self_attn.o_proj"
-            nodes.append(node)
+        if attn is None or inp is None or not inp.numel() or attn.v_proj.out_features != attn.o_proj.in_features:
+            return nodes
+
+        kwargs = module_kwargs
+        if isinstance(module_kwargs, dict):
+            kwargs = {key: value for key, value in module_kwargs.items() if key != "_awq_feature_kwargs"}
+        node, _ = generate_node_for_awq_scaling(
+            inp=inp, prev_op=attn.v_proj, module_kwargs=kwargs, nodes_size=len(nodes),
+            subset=[attn.o_proj], module2inspect=None,
+        )
+        node["_input_feature_name"] = "self_attn.o_proj"
+        nodes.append(node)
         return nodes
 
     def preprocess_dataset(self, sample: Dict) -> Dict:

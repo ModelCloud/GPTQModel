@@ -45,8 +45,8 @@ class LFM3OmniQModel(LFM3QModel):
             "operator_norm": ("operator_norm:!",),
             "post_operator_norm": ("post_operator_norm:!:postnorm",),
             "conv": {
-                "in_proj": ("in_proj:0",),
-                "conv": ("conv:!",),
+                "in_proj": ("in_proj:0:nosrc",),
+                "conv": ("conv:!:nosrc",),
                 "out_proj": ("out_proj:1",),
             },
             "self_attn": (
@@ -54,9 +54,10 @@ class LFM3OmniQModel(LFM3QModel):
                 "q_norm:0:!",
                 "k_proj:0",
                 "k_norm:0:!",
-                "v_proj:0",
-                "gate_proj:!",
-                "o_proj:1",
+                # The package-owned Omni decoder names this consumer gate_proj.
+                "gate_proj:!:nosrc",
+                "v_proj:0:nosrc",
+                "o_proj:1:nosrc",
             ),
             "ffn_norm": ("ffn_norm:!",),
             "post_ffn_norm": ("post_ffn_norm:!:postnorm",),

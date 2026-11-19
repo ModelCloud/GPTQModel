@@ -15,6 +15,7 @@ from gptqmodel.models import auto
 from gptqmodel.models.definitions.lfm3 import LFM3QModel
 from gptqmodel.models.definitions.lfm3_omni import LFM3OmniQModel
 from gptqmodel.models.definitions.lfm3_vl import LFM3VLQModel
+from gptqmodel.models.module_plan import ModulePlan
 
 
 MODEL_PATHS = {
@@ -80,6 +81,24 @@ def test_lfm3_module_tree_covers_conv_attention_and_mlp_paths(definition):
         "feed_forward.w2",
         "feed_forward.w3",
     }
+
+
+@pytest.mark.parametrize(("definition", "gate_name"), [
+    (LFM3QModel, "g_proj"), (LFM3VLQModel, "g_proj"), (LFM3OmniQModel, "gate_proj"),
+])
+def test_lfm3_declares_live_sigmoid_gate_and_depthwise_conv(definition, gate_name):
+    """AWQ needs the live gate and depthwise kernel declared in source dtype."""
+
+    plan = ModulePlan.from_tree(definition.module_tree)
+
+    gate = plan.find(f"self_attn.{gate_name}")
+    assert gate is not None, definition.__name__
+    assert gate.quantize is False, definition.__name__
+    assert "nosrc" in gate.flags, definition.__name__
+
+    depthwise = plan.find("conv.conv")
+    assert depthwise is not None, definition.__name__
+    assert depthwise.quantize is False, definition.__name__
 
 
 def test_lfm3_text_layers_node_and_norms():
