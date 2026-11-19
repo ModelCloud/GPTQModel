@@ -156,6 +156,13 @@ flowchart TD
 The MoE block pre-hook returns a new tensor, so the caller's residual input is
 not mutated in place.
 
+QQQ, MACaQ and the EXL3 capture receive their inputs through
+`LoopProcessor.calibration_rows`, which applies the same rule for the layouts
+the mask wrapper cannot place: a flattened `[B*S, H]` full grid is filtered
+with the calibration mask (padding and excluded sinks alike), while natively
+routed `[routed_rows, H]` rows stay unfiltered because they cannot be mapped
+back to a sequence position (#5385).
+
 ### AWQ captures the same rows
 
 `AWQProcessor.register_moe_root_capture_hook` registers the same zeroing

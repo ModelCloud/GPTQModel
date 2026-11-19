@@ -813,15 +813,20 @@ class LoopProcessor:
         )
 
     def calibration_rows(self, inp: torch.Tensor) -> torch.Tensor:
-        """Drop the attention-sink rows from a module input the mask wrapper left whole.
+        """Select the calibration rows for a module input the mask wrapper left whole.
 
         ``ModuleLooper._masked_hook_wrapper`` already applies the calibration
         mask to ``[B, S, H]`` inputs. QQQ, MACaQ and the EXL3 capture also see
-        inputs it cannot place, such as the flattened ``[B*S, H]`` rows of an
-        all-expert MoE bypass, which they historically consumed whole
-        (padding included). Here they lose exactly the BOS sink rows, so the
-        option changes nothing else. Natively routed expert rows cannot be
-        mapped back to a sequence position and stay unfiltered.
+        inputs it cannot place: a flattened ``[B*S, H]`` full grid (an
+        all-expert MoE bypass or a shared expert) and natively routed
+        ``[routed_rows, H]`` rows.
+
+        A flattened full grid keeps the batch geometry, so it is filtered with
+        the same calibration mask as the ``[B, S, H]`` layout -- padding and
+        excluded sinks alike (#5385). A ``[B, S, H]`` input that still matches
+        the mask loses only the sink rows, because its padding was already
+        removed by the wrapper. Routed rows cannot be mapped back to a sequence
+        position and stay unfiltered.
         """
 
         if not torch.is_tensor(inp):
@@ -829,18 +834,25 @@ class LoopProcessor:
         tls = getattr(self, "_mask_tls", None)
         keep_mask = getattr(tls, "value", None)
         padding_mask = getattr(tls, "padding_value", keep_mask)
-        if keep_mask is padding_mask or not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
+        if not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
+            return inp
+        inp = align_single_head_capture(inp, keep_mask)
+        # A flattened `[B*S, H]` full grid still carries the batch geometry, so
+        # filter it with the calibration mask exactly like `[B, S, H]`. It used
+        # to keep its padding rows: only sinks were removed, which made the
+        # same calibration batch accumulate 15 rows here and 12 through the
+        # grid layout (#5385).
+        if inp.dim() == 2 and inp.shape[0] == keep_mask.numel():
+            return inp[keep_mask.reshape(-1).to(device=inp.device, dtype=torch.bool)]
+        if keep_mask is padding_mask:
             # Option off or no sink in this batch: the calibration mask is the
             # padding mask itself.
             return inp
         rows = keep_mask.to(dtype=torch.bool)
         if torch.is_tensor(padding_mask) and tuple(padding_mask.shape) == tuple(rows.shape):
             rows = rows | ~padding_mask.to(device=rows.device, dtype=torch.bool)
-        inp = align_single_head_capture(inp, rows)
         if inp.dim() >= 3 and tuple(inp.shape[:2]) == tuple(rows.shape):
             return inp[rows.to(device=inp.device)]
-        if inp.dim() == 2 and inp.shape[0] == rows.numel():
-            return inp[rows.reshape(-1).to(device=inp.device)]
         return inp
 
     @staticmethod
