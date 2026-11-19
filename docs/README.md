@@ -191,6 +191,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Concurrency guards](concurrency.md)
 - [CPU pool lock scopes](cpu-pool-lock-scopes.md)
 - [CUDA activation copy lifecycle](cuda-activation-copy-lifecycle.md)
+- [Device thread pool task cancellation](device-thread-pool-cancellation.md)
 - [Device thread pool shutdown](device-thread-pool-shutdown.md)
 - [EXL3 inference buffer lifecycle](exl3-native-bias-lifecycle.md)
 - [ExLlamaV2 descriptor lifecycle](exllamav2-descriptor-lifecycle.md)
