@@ -24,7 +24,6 @@ from types import MethodType
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 
 import torch
-import transformers
 
 from ..utils.hf import _compile_keep_in_fp32_matcher
 from ..utils.kernel import KernelConfig, configure_kernel
@@ -2123,18 +2122,8 @@ def check_versions(model_class, requirements: List[str]):
 
 
 def set_dtype_compat(model_init_kwargs: dict, torch_dtype):
-    """
-    Set dtype argument in a version-compatible way for Transformers.
-    See: https://github.com/huggingface/transformers/releases/tag/v4.56.0
-
-    Args:
-        model_init_kwargs (dict): kwargs used to initialize model
-        torch_dtype: torch dtype (e.g. torch.float16)
-    """
-    if Version(transformers.__version__) >= Version("4.56.0"):
-        model_init_kwargs["dtype"] = torch_dtype
-    else:
-        model_init_kwargs["torch_dtype"] = torch_dtype
+    """Set the Transformers 5.23 ``dtype`` model-init argument."""
+    model_init_kwargs["dtype"] = torch_dtype
 
 def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     is_local = os.path.isdir(pretrained_model_id_or_path)

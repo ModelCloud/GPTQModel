@@ -342,3 +342,17 @@ def test_dynamic_lookup_guard_detects_violations(tmp_path):
     )
     hits = list(_dynamic_transformers_lookups(sample))
     assert [hit.split(":")[0] for hit in hits] == ["4", "5", "6", "7", "8"], hits
+
+
+def test_transformers_requirement_is_pinned_to_the_vendored_minor():
+    """The vendored ABI is pinned per Transformers minor: bumping means re-vendoring."""
+
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
+    header = (PORTS / "native" / "auto" / "_registry.py").read_text(encoding="utf-8").splitlines()[0]
+    vendored = Version(re.search(r"transformers v(\d+\.\d+\.\d+)", header).group(1))
+    lines = (PACKAGE.parent / "requirements.txt").read_text(encoding="utf-8").splitlines()
+    (requirement,) = [Requirement(line) for line in lines if re.match(r"transformers\b", line.strip())]
+    assert str(requirement.specifier) == f"<{vendored.major}.{vendored.minor + 1},>={vendored}", requirement
+    assert Version(transformers.__version__) in requirement.specifier, transformers.__version__

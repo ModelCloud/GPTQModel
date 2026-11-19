@@ -10,7 +10,9 @@ description: Port a model's config and modeling code into gptqmodel/models/ports
 ## The contract
 
 GPT-QModel quantizes, runs inference and trains **only** on the Transformers
-5.23 ABI. Every supported model is selected by its definition's
+5.23 ABI (`transformers>=5.23.0,<5.24`; the vendored ABI is pinned per
+Transformers minor, so a bump means re-vendoring plus parity, see
+docs/transformers5-model-ports.md). Every supported model is selected by its definition's
 `LocalModelLoader` and runs GPT-QModel's own config and modeling code from
 `gptqmodel/models/ports/<port>/`. There are no exceptions:
 

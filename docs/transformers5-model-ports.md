@@ -1,7 +1,20 @@
 # GPT-QModel Transformers 5 model ports
 
-GPT-QModel requires `transformers>=5.23.0,<6` and Python 3.11+, and it
+GPT-QModel requires `transformers>=5.23.0,<5.24` and Python 3.11+, and it
 quantizes, runs inference and trains **only** on the Transformers 5.23 ABI.
+
+The requirement is pinned to one Transformers minor release on purpose. The
+vendored families in `gptqmodel/models/ports/native/` are verbatim 5.23 sources
+that subclass and call Transformers' framework internals (`PreTrainedModel`,
+cache layers, masking, attention dispatch, conversion mappings, tokenizer and
+processor backends), and that framework ABI is only stable within a minor
+release. Supporting a new minor (for example 5.24) is a deliberate re-vendor,
+not a requirement bump: re-run `scripts/vendor_transformers_ports.py --refresh`
+against the new source, re-apply GPT-QModel's modernizations, regenerate the
+parity fixtures (`scripts/generate_native_port_parity_fixtures.py`), and pass
+`tests/test_native_port_parity.py`, `tests/test_native_auto_registry.py` and
+the `tests/test_native_definition_loading_*.py` suites before widening the pin
+in `requirements.txt`.
 
 ## Porting policy
 
@@ -36,8 +49,13 @@ quantizes, runs inference and trains **only** on the Transformers 5.23 ABI.
 - **Enforced.** `tests/test_model_port_policy.py` fails on a definition
   without a `LocalModelLoader`, a `transformers.models.*` import (or top-level
   model-family re-export such as `AutoConfig`) anywhere in `gptqmodel/` outside
-  its commented unsupported-model exceptions, or a stale pre-5.23 pattern in a
-  port. Defuser sees vendored classes under their `transformers.models` class
+  its commented unsupported-model exceptions, dynamic class resolution on the
+  `transformers` package (`getattr(transformers, <name>)`,
+  `import_module("transformers.models...")`), or a stale pre-5.23 pattern in a
+  port. Checkpoint-declared class names (tokenizer, processor and
+  sub-processor types, `architectures`) select only vendored or framework
+  classes; `tests/test_no_transformers_family_imports.py` checks at runtime
+  that supported loads import no `transformers.models.<family>` module. Defuser sees vendored classes under their `transformers.models` class
   path during conversion, so they get exactly Defuser's native treatment
   without GPT-QModel patching Transformers. The porting procedure is in the
   [model-porting skill](../.agents/skills/gptqmodel-model-porting/SKILL.md).
