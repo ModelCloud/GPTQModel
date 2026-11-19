@@ -1061,8 +1061,9 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
 
         ``fused`` selects the W8A16 product that folds the decode into the
         GEMM. It needs the exact divisible 128-wide block layout, a range-safe
-        payload, and no autograd graph; every other range-safe payload uses the
-        single-pass decode followed by ``matmul_fp32_reduce``.
+        payload, and no autograd graph on the activation, weight, scale or
+        bias; every other range-safe payload uses the single-pass decode
+        followed by ``matmul_fp32_reduce``.
         """
 
         if self.weight_scale_method != "block" or _is_compiling():
@@ -1094,6 +1095,11 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
                 x_flat.requires_grad
                 or self.weight.requires_grad
                 or self.weight_scale_inv.requires_grad
+                # The bias is added inside the opaque Triton epilogue, so a
+                # trainable bias needs the differentiable decode path too
+                # (#5402). A frozen bias is a constant and keeps the fused
+                # product.
+                or (self.bias is not None and self.bias.requires_grad)
             )
         )
 
