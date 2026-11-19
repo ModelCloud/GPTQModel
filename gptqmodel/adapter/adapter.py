@@ -23,6 +23,9 @@ LORA_MERGED_WEIGHT_PATHS = [None, ""]
 HF_ADAPTER_FILE_NAME = "adapter_model.safetensors"
 HF_ADAPTER_CONFIG_FILE_NAME = "adapter_config.json"
 HF_ADAPTER_WEIGHT_KEY_PREFIX = "base_model.model."
+# The narrowest activation dtype a model can hand ``Lora.apply()``. The fold
+# must survive the cast to it, not only the adapter's storage dtype (#5501).
+LORA_FOLD_COMPUTE_DTYPE = torch.float16
 
 
 def _local_adapter_generation(path) -> Optional[Tuple]:
@@ -603,6 +606,13 @@ class Lora(Adapter):
         FP16 to ``inf`` even though the scaled product with a small activation
         is finite (#5426). Folding can also flush a nonzero element to zero.
 
+        ``apply()`` casts both projections to the activation dtype on the first
+        forward, so the folded value must also survive that cast. A trained
+        adapter is stored in FP32 (or BF16) while the model may run in FP16: a
+        fold that is finite in FP32 still becomes ``inf`` when ``apply()``
+        narrows it, which is the #5426 failure through the storage-vs-compute
+        dtype path (#5501). Validate in :data:`LORA_FOLD_COMPUTE_DTYPE` too.
+
         Returns ``True`` when the scale was folded into ``lora_B``, ``False``
         when ``apply()`` must multiply the product instead.
         """
@@ -616,6 +626,13 @@ class Lora(Adapter):
                 return False
             if bool(((folded == 0) & (self.lora_B != 0)).any()):
                 return False
+            if self.lora_B.dtype != LORA_FOLD_COMPUTE_DTYPE:
+                # The first ``apply()`` casts the folded B down to this dtype.
+                narrowed = folded.to(LORA_FOLD_COMPUTE_DTYPE)
+                if not bool(torch.isfinite(narrowed).all()):
+                    return False
+                if bool(((narrowed == 0) & (self.lora_B != 0)).any()):
+                    return False
             self.lora_B.mul_(scale)
         return True
 
