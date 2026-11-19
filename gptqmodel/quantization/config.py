@@ -7273,7 +7273,14 @@ class ParoConfig(PreProcessorConfig):
     # Replay the sampled calibration rows in larger optimizer steps: the stage
     # loop is launch-bound, so the step count (not the row count) drives wall
     # time. Every row is still visited once per epoch, see `_chunk_rows`.
-    opt_batch_size: int = field(default=128)
+    #
+    # A larger step also means fewer optimizer steps per epoch. The stage LRs
+    # scale with this value from the 64-row reference, which recovers most of
+    # that, but not all of it: on Llama-3.2-1B-Instruct 128 rows still cost
+    # +0.44% wikitext-2 PPL at the best coefficient and +2.2% unscaled
+    # (#5306). The default therefore stays at the accuracy-tuned 64 rows; raise
+    # it for speed when the calibration budget can absorb the drift.
+    opt_batch_size: int = field(default=64)
     opt_rotation_lr: float = field(default=0.05)
     opt_weight_lr: float = field(default=1e-5)
     opt_quantizer_lr: float = field(default=1e-6)
