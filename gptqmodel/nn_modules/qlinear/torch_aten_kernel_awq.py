@@ -32,6 +32,7 @@ from ._fused_train_state import (
     restore_fused_train_state,
 )
 from ._numerics import linear_wide_bias, matmul_fp32_reduce
+from ._runtime_cache import tensor_cache_key
 from .torch_aten_kernel import (
     TorchAtenLinear,
     _cpu_int4pack_scale_dtype,
@@ -256,6 +257,10 @@ class TorchAtenAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
         # (issue #4178).
         compute_scales = self.scales.to(compute_dtype).contiguous()
         self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(iweight.t().int(), 1).contiguous()
+        # Keep the checkpoint zero codes: the affine offsets installed below
+        # are derived from ``scales`` and must be rebuilt if the caller changes
+        # them (#5372).
+        self._cpu_zero_codes = izeros
         self.qzeros = _cpu_int4pack_zero_offsets(izeros, compute_scales, self.bits).to(compute_dtype).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(compute_scales, self.qzeros)
         bind_runtime_qzeros(self)
@@ -270,6 +275,10 @@ class TorchAtenAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
         # (#4785). Detach them now that the runtime layout is built.
         self.scales = detach_cpu_operand(self.scales)
         self.bias = detach_cpu_operand(getattr(self, "bias", None))
+        # Record the inputs the installed affine offsets were derived from so a
+        # later scale-only change can rebuild them (#5372).
+        self._fused_scale_key = tensor_cache_key(self.scales)
+        self._fused_zero_key = tensor_cache_key(self.qzeros)
         self.g_idx = detach_cpu_operand(getattr(self, "g_idx", None))
 
     def transform(self, device, dtype: torch.dtype | None = None):
