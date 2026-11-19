@@ -44,7 +44,7 @@ def _skip_unless_valid(cls):
         pytest.skip(str(err))
 
 
-def _gptq_layer(cls):
+def _gptq_layer(cls, bias: bool = False):
     layer = cls(
         bits=4,
         group_size=GROUP_SIZE,
@@ -52,7 +52,7 @@ def _gptq_layer(cls):
         desc_act=False,
         in_features=IN_FEATURES,
         out_features=OUT_FEATURES,
-        bias=False,
+        bias=bias,
         format=FORMAT.GPTQ,
         pack_dtype=torch.int32,
         register_buffers=True,
@@ -63,15 +63,17 @@ def _gptq_layer(cls):
     scales = weight.reshape(OUT_FEATURES, groups, GROUP_SIZE).abs().amax(dim=-1).clamp_min(1e-4) / 7.0
     zeros = torch.full((OUT_FEATURES, groups), 8.0)
     groups_idx = torch.arange(IN_FEATURES, dtype=torch.int32) // GROUP_SIZE
-    source = torch.nn.Linear(IN_FEATURES, OUT_FEATURES, bias=False)
+    source = torch.nn.Linear(IN_FEATURES, OUT_FEATURES, bias=bias)
     with torch.no_grad():
         source.weight.copy_(weight)
+        if bias:
+            source.bias.copy_(torch.randn(OUT_FEATURES))
     layer.pack_original(source, scales, zeros, groups_idx)
     layer.post_init()
     return layer
 
 
-def _awq_layer(cls):
+def _awq_layer(cls, bias: bool = False):
     layer = cls(
         bits=4,
         group_size=GROUP_SIZE,
@@ -79,7 +81,7 @@ def _awq_layer(cls):
         desc_act=False,
         in_features=IN_FEATURES,
         out_features=OUT_FEATURES,
-        bias=False,
+        bias=bias,
         format=FORMAT.GEMM,
         pack_dtype=torch.int32,
         register_buffers=True,
@@ -94,6 +96,9 @@ def _awq_layer(cls):
     layer.qzeros.copy_(qzeros)
     layer.scales.copy_(scales)
     layer.post_init()
+    if bias:
+        with torch.no_grad():
+            layer.bias.copy_(torch.randn(OUT_FEATURES))
     return layer
 
 

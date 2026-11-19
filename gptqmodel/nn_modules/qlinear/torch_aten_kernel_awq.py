@@ -20,6 +20,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear, detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
+from ._cpu_int4pack_layout import runtime_int4pack_dense_weight
 from ._fused_train_state import (
     bind_runtime_qzeros,
     capture_fused_train_state,
@@ -378,6 +379,7 @@ class TorchAtenAwqLinear(AWQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
+        runtime_dense = False
         if torch.compiler.is_compiling():
             # ``_cpu_transform_lock`` is an ``RLock``: dynamo cannot enter it (a
             # hard graph break), and the one-time ``transform()`` rewrites the
@@ -385,6 +387,12 @@ class TorchAtenAwqLinear(AWQuantLinear):
             # do. The transform runs on the first eager forward and in
             # ``optimize()``'s warmup, so the graph only reads the resolved
             # ``linear_mode``.
+            #
+            # A grad-requiring call cannot use the ``@torch.no_grad`` fused op
+            # and must not restore the checkpoint layout by mutating buffers
+            # inside the trace. Decode the live runtime operands instead
+            # (#5369).
+            runtime_dense = x.device.type == "cpu" and fused_autograd_needs_dense(self, x)
             linear_mode = self.linear_mode
         else:
             with self._cpu_transform_lock:
@@ -425,7 +433,13 @@ class TorchAtenAwqLinear(AWQuantLinear):
                     self.linear_mode = "train"
             linear_mode = self.linear_mode
 
-        if linear_mode == "inference":
+        if runtime_dense:
+            weight = runtime_int4pack_dense_weight(self).to(x.dtype)
+            if self.bias is not None:
+                out = matmul_fp32_reduce(x, weight, self.bias).reshape(out_shape)
+            else:
+                out = torch.matmul(x, weight).reshape(out_shape)
+        elif linear_mode == "inference":
             if not self._fused_input_dtype(x):
                 raise RuntimeError(
                     f"{self.__class__.__name__} was transformed for {self._cpu_transform_dtype} "

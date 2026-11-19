@@ -22,6 +22,7 @@ from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
 from . import AWQuantLinear, detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
+from ._cpu_int4pack_layout import runtime_int4pack_dense_weight
 from ._fused_train_state import (
     bind_runtime_qzeros,
     capture_fused_train_state,
@@ -457,6 +458,7 @@ class TorchFusedAwqLinear(AWQuantLinear):
         # The XPU op keeps its BF16 contract.
         if input_dtype == torch.float32 and x_flat.device.type != "cpu":
             x_flat = x_flat.to(torch.bfloat16)
+        runtime_dense = False
         if torch.compiler.is_compiling():
             # ``_cpu_transform_lock`` is an ``RLock``: dynamo cannot enter it (a
             # hard graph break), and the one-time ``transform()`` rewrites the
@@ -464,6 +466,12 @@ class TorchFusedAwqLinear(AWQuantLinear):
             # graph must not do. The transform runs on the first eager forward
             # and in ``optimize()``'s warmup, so the graph only reads the
             # resolved ``linear_mode``.
+            #
+            # A grad-requiring call cannot use the ``@torch.no_grad`` fused op
+            # and must not restore the checkpoint layout by mutating buffers
+            # inside the trace. Decode the live runtime operands instead
+            # (#5369).
+            runtime_dense = x_flat.device.type == "cpu" and fused_autograd_needs_dense(self, x_flat)
             linear_mode = self.linear_mode
         else:
             with self._cpu_transform_lock:
@@ -511,7 +519,13 @@ class TorchFusedAwqLinear(AWQuantLinear):
                     self.linear_mode = LinearMode.TRAIN
             linear_mode = self.linear_mode
 
-        if linear_mode == LinearMode.INFERENCE:
+        if runtime_dense:
+            weight = runtime_int4pack_dense_weight(self).to(x_flat.dtype)
+            if self.bias is not None:
+                out = matmul_fp32_reduce(x_flat, weight, self.bias)
+            else:
+                out = torch.matmul(x_flat, weight)
+        elif linear_mode == LinearMode.INFERENCE:
             # log.debug("awq calling fused op")
             out = self._fused_op_forward(x_flat)
             if self.bias is not None:
