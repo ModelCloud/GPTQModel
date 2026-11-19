@@ -7,7 +7,10 @@ Transformers' own model tester by scripts/generate_native_port_parity_fixtures.p
 For every model class, the native class (the oracle; tests may import
 ``transformers.models``) and the vendored class are built from the same config,
 must have identical state_dict keys/shapes, and with identical weights must
-produce bit-identical outputs.
+produce bit-identical outputs: the default forward (SDPA) plus, with eager
+attention, every call variant (hidden states, attentions, return_dict=False,
+cached decoding, loss, greedy generate). bart, opt and llama4 have hand-written
+tiny configs.
 """
 
 import importlib
@@ -126,7 +129,7 @@ def test_vendored_family_matches_transformers(family, tmp_path):
 def test_every_vendored_family_has_parity_coverage():
     native = Path(__file__).resolve().parents[1] / "gptqmodel" / "models" / "ports" / "native"
     families = {p.name for p in native.iterdir() if p.is_dir() and p.name not in {"auto", "__pycache__"}}
-    # No Transformers 5.23 model tester exists for these; they need hand-written parity tests.
+    # No importable Transformers 5.23 model tester for these; hand-written parity tests below.
     without_tester = {"bart", "llama4", "opt"}
     assert families - without_tester <= set(CASES), sorted(families - without_tester - set(CASES))
 
@@ -145,13 +148,6 @@ LLAMA4_VISION = {
     "projector_output_dim": 32, "pixel_shuffle_ratio": 0.5,
 }
 LLAMA4_IMAGE_TOKEN = 98
-LLAMA4_CALL_VARIANTS = (
-    {},
-    {"output_hidden_states": True, "output_attentions": True},
-    {"return_dict": False},
-)
-
-
 def _llama4_config(config_module, name):
     if name == "Llama4TextConfig":
         return config_module.Llama4TextConfig(**LLAMA4_TEXT, attn_implementation="eager")
@@ -197,15 +193,16 @@ def test_vendored_llama4_matches_transformers(model_name, tmp_path):
         vendored.get_buffer(key).copy_(buffer)
 
     inputs = _llama4_inputs(model_name)
-    for variant in LLAMA4_CALL_VARIANTS:
+    _assert_hand_variants("llama4", native, vendored, model_name, inputs)
+    if model_name == "Llama4VisionModel":
+        # Native crashes on output_attentions alone (NATIVE_BUGS); its attentions with both flags set
+        # are the oracle for the vendored output_attentions-only call.
         with torch.no_grad():
-            expected_output = native(**inputs, **variant)
-            actual_output = vendored(**inputs, **variant)
-        assert type(actual_output).__name__ == type(expected_output).__name__, variant
-        expected, actual = _flatten(expected_output), _flatten(actual_output)
-        assert expected and len(actual) == len(expected), variant
-        for index, (want, got) in enumerate(zip(expected, actual)):
-            assert torch.equal(want, got), f"{model_name} {variant}: output {index} differs"
+            expected = native(**inputs, output_attentions=True, output_hidden_states=True)
+            actual = vendored(**inputs, output_attentions=True)
+        assert list(actual.keys()) == ["last_hidden_state", "attentions"]
+        _assert_same(expected.last_hidden_state, actual.last_hidden_state, "last_hidden_state")
+        _assert_same(expected.attentions, actual.attentions, "attentions")
 
     # A Transformers-saved checkpoint must load into the vendored class with identical outputs.
     checkpoint = tmp_path / model_name
@@ -240,16 +237,25 @@ FORWARD_VARIANTS = {
     "return_dict_false": {"return_dict": False},
     "return_dict_false_all_outputs": {"return_dict": False, "output_hidden_states": True, "output_attentions": True},
 }
-# Variants native Transformers 5.23 itself raises on (the vendored class must raise the same type).
+# Variants native Transformers 5.23 itself raises on (the vendored class must raise the same type,
+# except for the NATIVE_BUGS where the vendored class must work and is checked separately).
 # Absent capabilities (no `labels` argument, no cache returned, not a GenerationMixin) are not
 # listed: those variants do not exist for the class.
 NATIVE_UNSUPPORTED = {
+    "llama4": {
+        "Llama4VisionModel/output_attentions": (
+            "native 5.23 bug: with output_attentions alone Llama4VisionModel reads output[2] of a 2-tuple "
+            "(IndexError); the vendored class returns the attentions, checked against native's "
+            "output_hidden_states+output_attentions call"
+        ),
+    },
     "timm_wrapper": {
         f"{name}/{variant}": "timm models do not expose attention weights (native raises ValueError)"
         for name in ("TimmWrapperModel", "TimmWrapperForImageClassification")
         for variant in ("output_attentions", "return_dict_false_all_outputs")
     },
 }
+NATIVE_BUGS = {"llama4": frozenset({"Llama4VisionModel/output_attentions"})}
 CLASSIFICATION_SUFFIXES = ("ForSequenceClassification", "ForImageClassification", "ForAudioClassification", "ForMultipleChoice")
 # Step-2 inputs keep only text inputs: like generation, media inputs are consumed by the prefill.
 STEP_KEEP = {"input_ids", "attention_mask"}
@@ -307,7 +313,8 @@ def _describe(exc):
 class _Checker:
     """Collects mismatches (all of them, not just the first) and natively unsupported variants."""
 
-    def __init__(self):
+    def __init__(self, native_bugs=frozenset()):
+        self.native_bugs = native_bugs
         self.failures = []
         self.unsupported = {}
         self.compared = []
@@ -319,7 +326,10 @@ class _Checker:
         if native_error is not None:
             self.unsupported[label] = _describe(native_error)
             self.raised.append(label)
-            if vendored_error is None or type(vendored_error) is not type(native_error):
+            if label in self.native_bugs:
+                if vendored_error is not None:
+                    self.failures.append(f"{label}: documented native bug, but vendored raised {_describe(vendored_error)}")
+            elif vendored_error is None or type(vendored_error) is not type(native_error):
                 self.failures.append(f"{label}: native raised {_describe(native_error)}; vendored gave {vendored_error!r}")
             return None, None
         if vendored_error is not None:
@@ -338,16 +348,21 @@ def _accepts(model_class, name):
     return name in inspect.signature(model_class.forward).parameters
 
 
-def _labels(name, model_class, config, inputs):
+def _label_kwargs(name, model_class, config, inputs):
+    """Label arguments shaped for the head, or ``None`` when the class computes no loss."""
+
+    batch = next((v for v in inputs.values() if isinstance(v, torch.Tensor)), None)
+    if _accepts(model_class, "start_positions") and batch is not None:
+        zeros = torch.zeros(batch.shape[0], dtype=torch.long)
+        return {"start_positions": zeros, "end_positions": zeros + 1}
     if not _accepts(model_class, "labels"):
         return None
     if name.endswith(CLASSIFICATION_SUFFIXES):
-        batch = next(v for v in inputs.values() if isinstance(v, torch.Tensor)).shape[0]
-        return torch.zeros(batch, dtype=torch.long)
+        return {"labels": torch.zeros(batch.shape[0], dtype=torch.long)}
     if getattr(config, "is_encoder_decoder", False) and "decoder_input_ids" in inputs:
-        return inputs["decoder_input_ids"].clone()
+        return {"labels": inputs["decoder_input_ids"].clone()}
     if "input_ids" in inputs:
-        return inputs["input_ids"].clone()
+        return {"labels": inputs["input_ids"].clone()}
     return None
 
 
@@ -408,14 +423,14 @@ def _build_pair(native_class, vendored_class, native_config, vendored_config, at
     return native, vendored
 
 
-def assert_variants_match(native, vendored, name, inputs):
+def assert_variants_match(native, vendored, name, inputs, native_bugs=frozenset()):
     """Run every call variant on an identically initialized (eager) native/vendored pair.
 
     Returns ({variant label: reason} for variants that do not apply or that Transformers itself
     does not support, the mismatches, the compared labels, the labels native raised on).
     """
 
-    check = _Checker()
+    check = _Checker(native_bugs)
     config = native.config
     for variant, kwargs in FORWARD_VARIANTS.items():
         check.compare(native, vendored, "forward", {**inputs, **kwargs}, f"{name}/{variant}")
@@ -449,11 +464,11 @@ def assert_variants_match(native, vendored, name, inputs):
                 label = f"{name}/cached_step" if keep_mask else f"{name}/cached_step_without_mask"
                 check.compare(native, vendored, "forward", native_step, label, vendored_step)
 
-    labels = _labels(name, type(native), config, inputs)
+    labels = _label_kwargs(name, type(native), config, inputs)
     if labels is None:
         check.unsupported[f"{name}/loss"] = "forward takes no labels or no label-shaped input"
     else:
-        expected, _ = check.compare(native, vendored, "forward", {**inputs, "labels": labels}, f"{name}/loss")
+        expected, _ = check.compare(native, vendored, "forward", {**inputs, **labels}, f"{name}/loss")
         if isinstance(expected, ModelOutput) and expected.get("loss") is None:
             check.unsupported[f"{name}/loss"] = "native returns no loss"
 
@@ -493,3 +508,102 @@ def test_vendored_family_call_variants_match_transformers(family):
     _record_report(family, unsupported, failures, compared)
     assert not failures, "\n".join(failures)
     assert sorted(raised) == sorted(NATIVE_UNSUPPORTED.get(family, {})), {label: unsupported[label] for label in raised}
+
+
+def _assert_hand_variants(family, native, vendored, model_name, inputs):
+    unsupported, failures, compared, raised = assert_variants_match(
+        native, vendored, model_name, inputs, NATIVE_BUGS.get(family, frozenset())
+    )
+    _record_report(family, unsupported, failures, compared)
+    assert not failures, "\n".join(failures)
+    assert sorted(raised) == sorted(label for label in NATIVE_UNSUPPORTED.get(family, {}) if label.startswith(f"{model_name}/")), {
+        label: unsupported[label] for label in raised
+    }
+    assert f"{model_name}/default" in compared
+
+
+def _assert_hand_family_parity(family, config_name, config_kwargs, model_name, inputs, tmp_path):
+    """Hand-written tiny-config parity for families without a usable Transformers model tester."""
+
+    native_config_class, vendored_config_class = _classes(family, f"configuration_{family}", config_name)
+    assert vendored_config_class is not native_config_class
+    native_class, vendored_class = _classes(family, f"modeling_{family}", model_name)
+    native, vendored = _build_pair(
+        native_class, vendored_class,
+        native_config_class(**config_kwargs, attn_implementation="eager"),
+        vendored_config_class(**config_kwargs, attn_implementation="eager"),
+    )
+    assert list(vendored.state_dict()) == list(native.state_dict())
+    _assert_hand_variants(family, native, vendored, model_name, inputs)
+
+    # A Transformers-saved checkpoint must load into the vendored class with identical outputs.
+    checkpoint = tmp_path / model_name
+    native.save_pretrained(checkpoint)
+    native_loaded = native_class.from_pretrained(checkpoint).eval()
+    loaded = vendored_class.from_pretrained(checkpoint, config=vendored_config_class.from_pretrained(checkpoint)).eval()
+    assert type(loaded) is vendored_class
+    with torch.no_grad():
+        torch.manual_seed(0)
+        expected = native_loaded(**inputs)
+        torch.manual_seed(0)
+        actual = loaded(**inputs)
+    _assert_same(expected, actual, f"{model_name}/reloaded")
+
+
+def _text_inputs(batch=2, length=9, eos=None, vocab=90, seed=0):
+    """Token ids in [3, vocab) (0/1/2 are pad/bos/eos), optionally eos-terminated, row 1 left-padded."""
+
+    input_ids = torch.randint(3, vocab, (batch, length), generator=torch.Generator().manual_seed(seed))
+    if eos is not None:
+        input_ids[:, -1] = eos
+    attention_mask = torch.ones_like(input_ids)
+    attention_mask[1, 0] = 0
+    return input_ids, attention_mask
+
+
+# BART and OPT: the Transformers 5.23 testers exist but cannot be imported here (they need the
+# `timeout_decorator` test dependency), so these tiny configs are hand-written.
+BART_CONFIG = {
+    "vocab_size": 99, "d_model": 16, "encoder_layers": 2, "decoder_layers": 2, "encoder_attention_heads": 4,
+    "decoder_attention_heads": 4, "encoder_ffn_dim": 32, "decoder_ffn_dim": 32, "max_position_embeddings": 64,
+    "pad_token_id": 1, "bos_token_id": 0, "eos_token_id": 2, "decoder_start_token_id": 2,
+    "forced_eos_token_id": None,
+}
+
+
+def _bart_inputs(model_name):
+    # BartForSequenceClassification pools the final <eos>; every row must contain the same number.
+    input_ids, attention_mask = _text_inputs(eos=BART_CONFIG["eos_token_id"])
+    inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
+    if model_name in {"BartModel", "BartForConditionalGeneration"}:
+        decoder_input_ids, _ = _text_inputs(length=5, seed=1)
+        decoder_input_ids[:, 0] = BART_CONFIG["decoder_start_token_id"]
+        inputs["decoder_input_ids"] = decoder_input_ids
+    return inputs
+
+
+@pytest.mark.parametrize("model_name", [
+    "BartModel", "BartForConditionalGeneration", "BartForCausalLM", "BartForSequenceClassification",
+    "BartForQuestionAnswering",
+])
+def test_vendored_bart_matches_transformers(model_name, tmp_path):
+    config = dict(BART_CONFIG, is_decoder=True, is_encoder_decoder=False) if model_name == "BartForCausalLM" else BART_CONFIG
+    _assert_hand_family_parity("bart", "BartConfig", config, model_name, _bart_inputs(model_name), tmp_path)
+
+
+OPT_CONFIG = {
+    "vocab_size": 99, "hidden_size": 16, "num_hidden_layers": 2, "ffn_dim": 32, "num_attention_heads": 4,
+    "max_position_embeddings": 64, "word_embed_proj_dim": 16, "pad_token_id": 1, "bos_token_id": 2,
+    "eos_token_id": 2,
+}
+
+
+@pytest.mark.parametrize("model_name", ["OPTModel", "OPTForCausalLM", "OPTForSequenceClassification", "OPTForQuestionAnswering"])
+@pytest.mark.parametrize("projection", [False, True], ids=["plain", "project_in_out"])
+def test_vendored_opt_matches_transformers(model_name, projection, tmp_path):
+    # word_embed_proj_dim != hidden_size exercises project_in/project_out (OPT-350m style).
+    config = dict(OPT_CONFIG, word_embed_proj_dim=8) if projection else OPT_CONFIG
+    input_ids, attention_mask = _text_inputs()
+    _assert_hand_family_parity(
+        "opt", "OPTConfig", config, model_name, {"input_ids": input_ids, "attention_mask": attention_mask}, tmp_path
+    )
