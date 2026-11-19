@@ -1529,6 +1529,31 @@ def _validate_smooth_number(
     return number
 
 
+def _validate_finite_float(
+    owner: str,
+    field: str,
+    value: Any,
+    *,
+    minimum: Optional[float] = None,
+    range_text: str = "non-negative",
+) -> float:
+    """Validate a calibration option that must be finite and in range.
+
+    ``NaN`` comparisons are always false, so a plain ``value < minimum`` check
+    lets ``NaN`` through and the feature silently disables itself later
+    (#5307). Validate the normalized float instead.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{owner}: `{field}` must be a number, got {value!r}.")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{owner}: `{field}` must be a finite number, got {value!r}.")
+    if minimum is not None and number < minimum:
+        raise ValueError(f"{owner}: `{field}` must be {range_text}, got {value!r}.")
+    return number
+
+
 def _validate_smooth_int(
     owner: str,
     field: str,
@@ -2053,24 +2078,21 @@ class HessianConfig:
 
         multiple = self.sink_row_cap_median_multiple
         if multiple is not None:
-            if isinstance(multiple, bool) or not isinstance(multiple, (int, float)):
-                raise ValueError(
-                    "HessianConfig: `sink_row_cap_median_multiple` must be a number or None."
-                )
-            if multiple < 0:
-                raise ValueError(
-                    "HessianConfig: `sink_row_cap_median_multiple` must be non-negative."
-                )
-            self.sink_row_cap_median_multiple = float(multiple)
+            self.sink_row_cap_median_multiple = _validate_finite_float(
+                "HessianConfig",
+                "sink_row_cap_median_multiple",
+                multiple,
+                minimum=0.0,
+            )
 
         if self.chunk_size is not None:
-            if not isinstance(self.chunk_size, int):
+            if isinstance(self.chunk_size, bool) or not isinstance(self.chunk_size, int):
                 raise ValueError("HessianConfig: `chunk_size` must be an integer or None.")
             if self.chunk_size <= 0:
                 raise ValueError("HessianConfig: `chunk_size` must be a positive integer.")
 
         if self.chunk_bytes is not None:
-            if not isinstance(self.chunk_bytes, int):
+            if isinstance(self.chunk_bytes, bool) or not isinstance(self.chunk_bytes, int):
                 raise ValueError("HessianConfig: `chunk_bytes` must be an integer or None.")
             if self.chunk_bytes <= 0:
                 raise ValueError("HessianConfig: `chunk_bytes` must be a positive integer amount of bytes.")
@@ -2152,9 +2174,9 @@ class MSEConfig:
     )
 
     def __post_init__(self):
-        if not isinstance(self.norm, (int, float)) or isinstance(self.norm, bool):
-            raise ValueError("MSEConfig: `norm` must be a number.")
-        self.norm = float(self.norm)
+        self.norm = _validate_finite_float(
+            "MSEConfig", "norm", self.norm, minimum=0.0
+        )
         self.grid_budget = _normalize_budget_bytes(self.grid_budget, "grid_budget")
         self.clip_grid_budget = _normalize_budget_bytes(self.clip_grid_budget, "clip_grid_budget")
 
@@ -2476,8 +2498,9 @@ class GPTAQConfig:
     device: Union[str, torch.device] = field(default="auto")
 
     def __post_init__(self):
-        if not isinstance(self.alpha, (int, float)):
-            raise ValueError("GPTAQConfig: `alpha` must be a numeric value.")
+        self.alpha = _validate_finite_float(
+            "GPTAQConfig", "alpha", self.alpha, minimum=0.0
+        )
         if isinstance(self.device, str):
             if not self.device:
                 raise ValueError("GPTAQConfig: `device` must be a non-empty string or torch.device.")
@@ -2517,10 +2540,12 @@ class FOEMConfig:
     device: Union[str, torch.device] = field(default="auto")
 
     def __post_init__(self):
-        if not isinstance(self.alpha, (int, float)):
-            raise ValueError("FOEMConfig: `alpha` must be a numeric value.")
-        if not isinstance(self.beta, (int, float)):
-            raise ValueError("FOEMConfig: `beta` must be a numeric value.")
+        self.alpha = _validate_finite_float(
+            "FOEMConfig", "alpha", self.alpha, minimum=0.0
+        )
+        self.beta = _validate_finite_float(
+            "FOEMConfig", "beta", self.beta, minimum=0.0
+        )
         if isinstance(self.device, str):
             if not self.device:
                 raise ValueError("FOEMConfig: `device` must be a non-empty string or torch.device.")
