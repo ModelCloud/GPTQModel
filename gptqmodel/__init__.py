@@ -1008,9 +1008,78 @@ def _ensure_transformers_awq_gptqmodel_load_bridge():
         # importing it again cannot succeed.
         return False
 
+    _capture_awq_quantizer_from_frames()
     if _patch_transformers_awq_gptqmodel_load_bridge():
         return True
     _AWQ_BRIDGE_UNAVAILABLE = True
+    return False
+
+
+def _capture_awq_quantizer_from_frames() -> bool:
+    """Publish the in-flight AWQ load's model before the bridge is installed.
+
+    ``transformers.integrations.awq.replace_with_awq_linear`` imports
+    ``gptqmodel`` from inside ``AwqQuantizer._process_model_before_weight_loading``,
+    so the bridge installed by that import only wraps *later* calls: the load
+    that triggered the import never reaches ``_prepare_with_gptqmodel_bridge``,
+    and ``self._gptqmodel_model`` stays unset. ``validate_environment`` still
+    runs afterwards with the placement resolved from ``max_memory``, but
+    ``_reselect_kernels_for_resolved_device_map`` needs the model to rebuild a
+    CUDA-only Marlin module for a CPU/disk-offloaded layer (#5395).
+
+    The quantizer and model are still live locals of the prepare call that is
+    on this thread's stack. Walk a bounded number of frames for exactly that
+    pair and publish the same state the wrapper would have published, so the
+    existing resolved-map reselection covers the current load too. This is a
+    compatibility shim for Transformers' AWQ import order; it is a no-op for
+    every other caller (package init, post-weight hook, later loads).
+    """
+
+    import torch.nn as nn
+
+    try:
+        from transformers.quantizers.quantizer_awq import AwqQuantizer
+    except ImportError:
+        return False
+
+    frame = sys._getframe(1)
+    for _ in range(32):
+        if frame is None:
+            return False
+        local_vars = frame.f_locals
+        quantizer = local_vars.get("self")
+        model = local_vars.get("model")
+        if isinstance(quantizer, AwqQuantizer) and isinstance(model, nn.Module):
+            from .utils.hf_load import (
+                hf_gptqmodel_reselect_context,
+                is_native_gptqmodel_checkpoint,
+            )
+
+            kwargs = local_vars.get("kwargs")
+            if not isinstance(kwargs, dict):
+                kwargs = {}
+            if getattr(quantizer, "_gptqmodel_model", None) is None:
+                quantizer._gptqmodel_model = model
+            # A native checkpoint gets its own repair from the post-weight hook,
+            # which rebuilds from the serialized per-module config. Publishing a
+            # context built from the *global* config here would replace the
+            # modules with the wrong geometry before that repair runs.
+            if (
+                getattr(model, "_gptqmodel_hf_reselect_context", None) is None
+                and not is_native_gptqmodel_checkpoint(
+                    model, kwargs.get("checkpoint_files")
+                )
+            ):
+                context = hf_gptqmodel_reselect_context(
+                    model,
+                    checkpoint_files=kwargs.get("checkpoint_files"),
+                    backend=_hf_quantizer_backend(quantizer),
+                    dtype=kwargs.get("dtype"),
+                )
+                if context is not None:
+                    model._gptqmodel_hf_reselect_context = context
+            return True
+        frame = frame.f_back
     return False
 
 

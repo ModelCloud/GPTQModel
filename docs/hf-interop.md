@@ -151,6 +151,76 @@ flowchart TD
 | Native AWQ `dynamic` checkpoint, no `gptqmodel` import | Global group size; CPU wrong logits, CUDA qzeros error | Post hook rebuilds every module from the manifest; matches `GPTQModel.load` |
 | Second AWQ load in the same process | Same as the first | Prepare hook runs before any layer is replaced |
 
+### AWQ late import and CPU/disk-offload kernel selection
+
+Introduced by PR #5543.
+
+`validate_environment` is where Transformers first hands the quantizer the
+placement resolved from `device_map="auto"` and `max_memory`. The bridge wraps
+it so `hf_gptqmodel_reselect_offloaded_kernels` can rebuild an
+`AwqMarlinLinear` that ended up on a CPU or disk layer with an offload-safe
+kernel. That rebuild runs before any checkpoint tensor is assigned, while the
+affected modules are still meta placeholders.
+
+For the load that imports `gptqmodel` from inside `replace_with_awq_linear`,
+the wrapper was installed too late to run the prepare step, so
+`self._gptqmodel_model` stayed unset. `validate_environment` ran with the
+resolved map but had no model to re-select against, AUTO kept
+`AwqMarlinLinear` on the offloaded layer, and `post_init` raised
+`AWQ Marlin requires CUDA tensors` (CPU spill) or the disk-backed `post_init`
+refusal (#5395).
+
+```mermaid
+flowchart TD
+    A["replace_with_awq_linear imports gptqmodel"] --> B["bridge installs for later calls only"]
+    B --> C["validate_environment has no _gptqmodel_model"]
+    C --> D["_reselect_kernels_for_resolved_device_map returns early"]
+    D --> E["AwqMarlinLinear stays on the CPU/disk layer"]
+    E --> F["post_init raises"]
+    style E fill:#f8d7da,stroke:#b02a37
+    style F fill:#f8d7da,stroke:#b02a37
+```
+
+`_capture_awq_quantizer_from_frames` runs while the bridge is being installed
+and walks this thread's stack for the live `AwqQuantizer` and model of the
+prepare call that triggered the import. It records the same
+`_gptqmodel_hf_reselect_context` the prepare wrapper records for a third-party
+checkpoint, so the existing `validate_environment` path can rebuild the
+offloaded modules before weight assignment. Native checkpoints keep their
+post-weight repair instead, because a context built from the global config
+would replace their serialized per-module geometry.
+
+```mermaid
+flowchart TD
+    A["plain AutoModelForCausalLM.from_pretrained"] --> B["AwqQuantizer._process_model_before_weight_loading"]
+    B --> C["replace_with_awq_linear"]
+    C --> D["import gptqmodel (first import, mid-load)"]
+    D --> E["_ensure_transformers_awq_gptqmodel_load_bridge"]
+    E --> F["_capture_awq_quantizer_from_frames"]
+    F --> G{"AwqQuantizer and model on this stack?"}
+    G -->|"no: package init or later entry point"| H["install the bridge hooks"]
+    G -->|"yes: the load that triggered the import"| I["record _gptqmodel_model and publish the third-party reselect context"]
+    I --> H
+    H --> J["Transformers builds modules from the global config"]
+    J --> K["_get_device_map resolves auto plus max_memory"]
+    K --> L["patched AwqQuantizer.validate_environment"]
+    L --> M{"offloaded layer with a CUDA-only kernel?"}
+    M -->|"yes"| N["hf_gptqmodel_reselect_offloaded_kernels rebuilds the meta modules"]
+    M -->|"no"| O["keep the AUTO kernel"]
+    N --> P["Transformers assigns checkpoint tensors"]
+    O --> P
+    style N fill:#d9f2d9,stroke:#2e7d32
+```
+
+| Situation | Before this change | After |
+| --- | --- | --- |
+| First third-party AWQ load, `device_map="auto"`, CPU spill, no `import gptqmodel` | `validate_environment` has no model; `AwqMarlinLinear` stays on the CPU layer and `post_init` raises | The prepare frame publishes the reselect context; the CPU layer is rebuilt with an offload-safe kernel before weights |
+| Same load with a disk spill | Same, then the disk-backed `post_init` refusal | Same offload-safe rebuild; the layer stays meta and Accelerate's hook replays it |
+| First load, `device_map="auto"`, no spill | Marlin | Marlin; the reselect helper finds no offloaded layer |
+| First load, explicit dict with CPU entries | Offload-safe kernel chosen from the dict | Unchanged |
+| Native AWQ checkpoint, no `import gptqmodel` | Post-weight repair from the serialized manifest | Unchanged; the capture deliberately does not publish a global-config context |
+| Second AWQ load in the same process | Prepare hook records the model | Unchanged |
+
 ### Transformers 5.23 mismatch gate
 
 Transformers 5.23 tightened `core_model_loading.set_param_for_module`. A
