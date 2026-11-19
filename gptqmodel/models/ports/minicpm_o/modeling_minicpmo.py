@@ -14,7 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Inherited ChatTTS-derived TTS helpers have an unresolved licensing boundary; see NOTICE.
+# CustomRepetitionPenaltyLogitsProcessorRepeat (shared with tts_26.py) and gen_logits are
+# ModelCloud.ai clean-room implementations (Apache-2.0) written from a behavioral
+# specification; see NOTICE.
 
 import json
 import logging
@@ -58,6 +60,7 @@ from .configuration_minicpmo import MiniCPMOConfig, MiniCPMTTSConfig
 from .modeling_navit_siglip import SiglipVisionTransformer
 from .native import LlamaModel, Qwen2ForCausalLM, Qwen3ForCausalLM
 from .processing_minicpmo import MiniCPMOProcessor
+from .tts_26 import CustomRepetitionPenaltyLogitsProcessorRepeat
 from .utils import (
     ChunkPrefillChunkGenerate,
     DuplexWindowConfig,
@@ -4844,7 +4847,22 @@ class MiniCPMTTS(PreTrainedModel):
         return MiniCPMTTSGenerationOutput(new_ids=torch.cat(generated_tokens, dim=1), finished=True)
 
 
-# [clean-room: removed; implement from cleanroom/minicpm_o/SPEC.md]
+# Clean-room implementation (ModelCloud.ai, Apache-2.0) written from a behavioral specification; see NOTICE.
+def gen_logits(
+    num_code: int,
+    top_p=0.7,
+    top_k=20,
+    repetition_penalty=1.0,
+):
+    """Build the `(logits_warpers, logits_processors)` pair used for audio-code sampling."""
+    logits_warpers = []
+    if top_p is not None:
+        logits_warpers.append(TopPLogitsWarper(top_p, min_tokens_to_keep=3))
+    if top_k is not None:
+        logits_warpers.append(TopKLogitsWarper(top_k, min_tokens_to_keep=3))
 
+    logits_processors = []
+    if repetition_penalty is not None and repetition_penalty != 1:
+        logits_processors.append(CustomRepetitionPenaltyLogitsProcessorRepeat(repetition_penalty, num_code, 16))
 
-# [clean-room: removed; implement from cleanroom/minicpm_o/SPEC.md]
+    return logits_warpers, logits_processors
