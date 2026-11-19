@@ -172,6 +172,25 @@ def test_compiled_inference_then_grad_forward_keeps_gradient(builder):
 
 
 @pytest.mark.parametrize(
+    "builder", [builder for _, builder in BUILDERS], ids=[name for name, _ in BUILDERS]
+)
+def test_compiled_grad_forward_keeps_the_runtime_layout(builder):
+    layer = builder()
+    _warm(layer)
+    compiled = torch.compile(layer, backend="eager", fullgraph=True)
+    x = torch.randn(4, IN_FEATURES, dtype=torch.bfloat16, requires_grad=True)
+    compiled(x).sum().backward()
+
+    assert _mode(layer) == "inference", "the dense fallback mutated the runtime latch"
+    dense_shapes = {
+        (IN_FEATURES, OUT_FEATURES),
+        (OUT_FEATURES, IN_FEATURES),
+    }
+    for name, value in list(layer.named_parameters()) + list(layer.named_buffers()):
+        assert tuple(value.shape) not in dense_shapes, f"{name} retained a dense weight"
+
+
+@pytest.mark.parametrize(
     "builder",
     [builder for _, builder in BIAS_BUILDERS],
     ids=[name for name, _ in BIAS_BUILDERS],
