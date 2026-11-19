@@ -243,6 +243,13 @@ def finalize_fused_train_state(module: nn.Module) -> bool:
     """
 
     snapshot = getattr(module, "_fused_train_state", None)
+    if getattr(module, "_FUSED_TRAIN_STATE_REBUILD", None) in ("gptq", "awq"):
+        # The compile-time dense fallback must not run the layout probe inside
+        # a traced graph (it creates a ``torch.Generator``). Cache the verified
+        # block size while the transform is still eager (#5369).
+        from ._cpu_int4pack_layout import int4pack_block_size
+
+        module._cpu_int4pack_block_size = int4pack_block_size()
     if not snapshot:
         return False
     rebuild = getattr(module, "_rebuild_checkpoint_qweight", None)
