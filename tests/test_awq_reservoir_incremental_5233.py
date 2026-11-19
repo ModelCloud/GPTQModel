@@ -232,3 +232,135 @@ def test_plan_capture_after_reservoir_keeps_its_local_row_indices():
     processor._materialize_reservoir_provenance(entry)
     assert entry["provenance"] == [(0, 0), (0, 1), (1, 0), (1, 2)]
     assert entry["inputs"][0][0, :, 0].tolist() == [0.0, 0.0, 1.0, 1.0]
+
+
+def test_out_of_order_merge_never_shrinks_the_reservoir():
+    """A stale smaller cap must not evict rows a larger capture merged (#5333).
+
+    Two captures of one module book their budget caps under the processor lock
+    but merge under the per-module lock, so they can merge in the opposite
+    order. The first capture used to book a smaller cap; when its merge ran
+    second it resized the buffer down and kept only that many rows.
+    """
+
+    hidden = 4
+    processor = _processor(max_tokens=None, hidden=hidden)
+    lengths = {0: 8, 1: 64}
+    generator = torch.Generator().manual_seed(0)
+    rows = {
+        source: torch.randn(length, hidden, generator=generator)
+        for source, length in lengths.items()
+    }
+    priorities = {
+        source: torch.rand(length, generator=generator, dtype=torch.float64)
+        for source, length in lengths.items()
+    }
+    # Independent oracle: the cap is 64, so the kept rows are the 64 lowest
+    # priorities of the whole 72-row stream.
+    expected_indices = torch.topk(
+        torch.cat([priorities[0], priorities[1]]), lengths[1], largest=False
+    ).indices
+    expected = {
+        (0, int(index)) if index < lengths[0] else (1, int(index) - lengths[0])
+        for index in expected_indices.tolist()
+    }
+
+    for order in ((0, 1), (1, 0)):
+        entry = {"inputs": [], "batch_indices": []}
+        caps = {}
+        # Both captures book their counts and caps before either merges, as the
+        # dynamic path does under ``self.lock``.
+        for source in (0, 1):
+            entry.setdefault("batch_row_counts", []).append(lengths[source])
+            caps[source] = processor._reservoir_budget_cap(None, None, entry)
+            entry["max_tokens"] = caps[source]
+        assert caps == {0: 8, 1: 64}
+
+        for source in order:
+            processor._merge_reservoir_rows(
+                entry,
+                rows[source],
+                priorities[source],
+                source_index=source,
+                budget_cap=caps[source],
+            )
+
+        assert entry["reservoir_buffer"].shape == (lengths[1], hidden)
+        assert int(entry["reservoir_used"]) == lengths[1]
+        assert entry["max_tokens"] == lengths[1]
+
+        processor._materialize_reservoir_provenance(entry)
+        assert set(entry["provenance"]) == expected
+        for packed_row, (source, row) in enumerate(entry["provenance"]):
+            assert torch.equal(entry["inputs"][0][0, packed_row], rows[source][row])
+
+
+def test_concurrent_captures_keep_the_lowest_priority_rows():
+    """The real dynamic path must not shrink when captures interleave (#5333).
+
+    The small capture books its cap first, then waits until the larger capture
+    has merged. It then merges with its now-stale smaller cap.
+    """
+
+    hidden = 3
+    processor = _processor(max_tokens=None, hidden=hidden)
+    module_name = "mlp.experts.7.gate_proj"
+    lengths = {0: 8, 1: 64}
+    small_ready = threading.Event()
+    large_merged = threading.Event()
+    recorded = {}
+    record_lock = threading.Lock()
+    real_priorities = processor._reservoir_priorities
+
+    def gated_priorities(source_index, count):
+        values = real_priorities(source_index, count)
+        with record_lock:
+            recorded[source_index] = values.clone()
+        if count == lengths[0]:
+            small_ready.set()
+            assert large_merged.wait(10), "the larger capture did not merge"
+        else:
+            assert small_ready.wait(10), "the smaller capture did not book its cap"
+        return values
+
+    processor._reservoir_priorities = gated_priorities
+    errors = []
+
+    def capture(source, length):
+        try:
+            processor._set_current_batch_index(source)
+            processor._record_input_feature(
+                module_name, torch.full((1, length, hidden), float(source))
+            )
+        except BaseException as exc:  # surfaced on the test thread below
+            errors.append(exc)
+        finally:
+            if source == 1:
+                large_merged.set()
+
+    small = threading.Thread(target=capture, args=(0, lengths[0]), daemon=True)
+    large = threading.Thread(target=capture, args=(1, lengths[1]), daemon=True)
+    small.start()
+    small_booked = small_ready.wait(10)
+    large.start()
+    small.join(timeout=15)
+    large.join(timeout=15)
+
+    assert small_booked, "the smaller capture did not reach its merge"
+    assert not small.is_alive() and not large.is_alive()
+    assert errors == []
+
+    entry = processor.tasks[module_name]
+    assert entry["reservoir_buffer"].shape == (lengths[1], hidden)
+    assert int(entry["reservoir_used"]) == lengths[1]
+    assert entry["max_tokens"] == lengths[1]
+
+    expected_indices = torch.topk(
+        torch.cat([recorded[0], recorded[1]]), lengths[1], largest=False
+    ).indices
+    expected = {
+        (0, int(index)) if index < lengths[0] else (1, int(index) - lengths[0])
+        for index in expected_indices.tolist()
+    }
+    processor._materialize_reservoir_provenance(entry)
+    assert set(entry["provenance"]) == expected

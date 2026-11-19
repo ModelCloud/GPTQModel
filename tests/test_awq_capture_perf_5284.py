@@ -189,17 +189,22 @@ def _snapshot(entry):
     )
 
 
-def _kept_rows(entry):
+def _canonical_snapshot(entry):
+    """Sort the kept rows by provenance; buffer layout is not a contract."""
     used = int(entry["reservoir_used"])
-    return {
-        (int(source), int(row)): (float(priority), tuple(values.tolist()))
-        for source, row, priority, values in zip(
-            entry["reservoir_sources"][:used],
-            entry["reservoir_rows"][:used],
-            entry["reservoir_priorities"][:used],
-            entry["reservoir_buffer"][:used],
-        )
-    }
+    sources = entry["reservoir_sources"][:used].tolist()
+    rows = entry["reservoir_rows"][:used].tolist()
+    order = torch.tensor(
+        sorted(range(used), key=lambda index: (sources[index], rows[index])),
+        dtype=torch.int64,
+    )
+    return (
+        entry["reservoir_buffer"][:used].index_select(0, order),
+        entry["reservoir_priorities"][:used].index_select(0, order),
+        entry["reservoir_sources"][:used].index_select(0, order),
+        entry["reservoir_rows"][:used].index_select(0, order),
+        torch.tensor(used),
+    )
 
 
 def _full_entry(processor, *, rows=CAP, seed=0):
@@ -248,7 +253,6 @@ def test_a_winning_capture_still_merges(monkeypatch):
         entry, winner, torch.zeros(1, dtype=torch.float64), source_index=7, budget_cap=CAP
     )
 
-    # The merge path ran (the drop-set search of #5327 uses topk).
     assert calls
     # The survivor lands in the slot of the row it displaced, not slot 0.
     assert int(entry["reservoir_sources"][displaced]) == 7
@@ -270,7 +274,8 @@ def test_tied_priorities_take_the_merge_path(monkeypatch):
         entry, torch.randn(1, 4), worst_kept.reshape(1), source_index=3, budget_cap=CAP
     )
 
-    # A tie is not a strict loss, so the short-circuit must not fire.
+    # A tie is not a loss, so the merge still runs; which of the two equal
+    # priorities survives is not contractual.
     assert calls
 
 
@@ -292,11 +297,10 @@ def test_merge_matches_the_previous_algorithm(seed):
             reference, rows, priorities, source_index=capture, budget_cap=CAP
         )
 
-    # The kept rows (keyed by their replay provenance) must be identical. The
-    # slot layout is deliberately not capture order (#5233), and #5327's
-    # drop-set merge may pair surviving rows with displaced slots differently.
-    assert _kept_rows(fast) == _kept_rows(reference)
-    assert int(fast["reservoir_used"]) == int(reference["reservoir_used"])
+    for fast_value, reference_value in zip(
+        _canonical_snapshot(fast), _canonical_snapshot(reference)
+    ):
+        assert torch.equal(fast_value, reference_value)
 
 
 def test_merge_preserves_row_indices_and_provenance():

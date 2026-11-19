@@ -9,7 +9,6 @@ from test_torch_weight_storage import state_tensors
 
 from gptqmodel.quantization import FORMAT
 from gptqmodel.utils.kernel import KernelConfig, configure_kernel
-from tests.fp8_test_utils import pack_fp8_module
 
 
 DEVICES = ['cpu'] + (['cuda'] if torch.cuda.is_available() else [])
@@ -45,13 +44,12 @@ def check(module, x, expected):
 @pytest.mark.parametrize('method', ['tensor', 'row', 'block'])
 def test_fp8_small_weight_scale(device, dtype, fmt, method):
     from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+    from tests.fp8_test_utils import pack_fp8_module
     m = TorchFP8Linear(bits=8, group_size=-1, desc_act=False, sym=True,
                        in_features=128, out_features=64, bias=False, format=fmt,
                        weight_scale_method=method, weight_block_size=(16, 16) if method == "block" else None)
     linear = torch.nn.Linear(128, 64, bias=False)
     linear.weight.data.fill_(2**-20)
-    # FP8 is load-only (#5242): install the synthetic checkpoint payload the
-    # loader would read instead of calling the refused ``pack`` entry point.
     pack_fp8_module(m, linear)
     m = m.to(device).eval()
     x = torch.full((1, 128), 1024., dtype=dtype, device=device)

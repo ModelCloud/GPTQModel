@@ -74,7 +74,14 @@ def _constructor_kwargs(qcfg, *, bias: bool) -> dict:
 
 
 def _cpu_fallback_sources(qcfg) -> list[type[BaseQuantLinear]]:
-    """Packing kernels for ``qcfg`` that cannot run on CPU."""
+    """Packing kernels for ``qcfg`` that cannot run on CPU.
+
+    Restricted to CUDA sources: ``rehome_quantized_kernel`` moves the kernel a
+    CUDA calibration run selected. Enumerating the live registry without that
+    filter also picked up other accelerators (``QQQMlxQuantLinear`` on MPS) once
+    an unrelated test had imported their module, which made the assertion
+    depend on test order (#5325).
+    """
 
     method = qcfg.export_quant_method()
     fmt = resolve_quant_format(qcfg.format, method)
@@ -84,6 +91,7 @@ def _cpu_fallback_sources(qcfg) -> list[type[BaseQuantLinear]]:
         if method in (cls.SUPPORTS_METHODS or ())
         and fmt in (cls.SUPPORTS_FORMATS or {})
         and _supports_pack_api(cls)
+        and DEVICE.CUDA in (cls.SUPPORTS_DEVICES or ())
         and DEVICE.CPU not in (cls.SUPPORTS_DEVICES or ())
         and DEVICE.ALL not in (cls.SUPPORTS_DEVICES or ())
     ]

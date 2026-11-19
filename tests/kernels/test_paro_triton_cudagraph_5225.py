@@ -29,13 +29,12 @@ from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
 from gptqmodel.utils.paro import build_identity_rotation_buffers
 
 
-# Every case builds the layer on CUDA and runs the Triton kernels; constructing
-# ``ParoTritonLinear`` itself validates that Triton is installed.
-pytest.importorskip("triton")
-
 pytestmark = [
     pytest.mark.gpu,
-    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or ROCm GPU required"),
+    pytest.mark.skipif(
+        not torch.cuda.is_available(),
+        reason="Paro Triton requires a CUDA or ROCm GPU",
+    ),
 ]
 
 

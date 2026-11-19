@@ -25,6 +25,7 @@ from gptqmodel.quantization.awq.utils.packing_utils import pack_awq_columns
 from gptqmodel.utils.marlin_scalar_type import scalar_types
 from gptqmodel.utils.packing import hf_pack_layer
 from gptqmodel.utils.packing_math import scaled_zero_offset
+from tests.fp8_test_utils import quantize_fp8_weight
 
 
 @pytest.fixture(params=["cpu", "cuda"])
@@ -216,6 +217,30 @@ def test_qqq_channel_scale_widens_before_division(device):
         hf_pack_layer(module, linear, torch.full((64, 1), scale, dtype=torch.float16, device=device))
         torch.testing.assert_close(module.s_channel, torch.full_like(module.s_channel, scale / 16), rtol=0, atol=0)
         assert torch.equal(module.B.cpu(), _words(torch.full((8, 128 * 8), 7), 4))
+
+
+@pytest.mark.parametrize("fmt", ["float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz"])
+@pytest.mark.parametrize("method", ["tensor", "row", "block"])
+def test_fp8_tiny_groups_have_finite_scales_and_exact_codes(fmt, method):
+    dtype = getattr(torch, fmt)
+    maximum = torch.finfo(dtype).max
+    limit = torch.finfo(torch.float32).max
+    threshold = torch.tensor(maximum / limit, dtype=torch.float32)
+    maxima = [0., 2.0 ** -149, 2.0 ** -126, float(torch.nextafter(threshold, torch.tensor(0.))),
+              float(threshold), float(torch.nextafter(threshold, torch.tensor(torch.inf)))]
+    for value in maxima:
+        weight = torch.tensor([[0., -0., value, -value]]).repeat(2, 1)
+        actual, scales = quantize_fp8_weight(weight, format=fmt, weight_scale_method=method,
+                                            weight_block_size=(1, 4) if method == "block" else None)
+        # Compute the ideal inverse in FP64 then saturate to the stored FP32
+        # range. Code multiplication follows the specified FP32 format math.
+        inv = torch.tensor(min(maximum / max(value, torch.finfo(torch.float32).tiny), limit)
+                           if value else 1., dtype=torch.float32)
+        expected = (weight * inv).clamp(-maximum, maximum).to(dtype)
+        assert torch.isfinite(scales).all()
+        torch.testing.assert_close(scales, inv.expand_as(scales), rtol=1e-6, atol=0)
+        assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+        assert torch.isfinite(actual.float()).all()
 
 
 def test_mxfp4_minimum_scale_and_rounding_neighbors():
