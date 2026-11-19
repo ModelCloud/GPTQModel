@@ -275,6 +275,23 @@ class NF12Linear(WeightOnlyQuantLinear):
         self._exp_base_version = None
         self._invalidate_compiled()
 
+    def _normalize_inference_buffers(self) -> None:
+        """Replace buffers installed under ``InferenceMode`` at load time.
+
+        ``pack()``/``load_quant_result()`` already normalise what they install,
+        but a checkpoint loader can assign the tensors directly inside
+        ``torch.inference_mode()`` (#5211). ``dequantize_weight()`` used to
+        re-check ``tensor.is_inference()`` on every forward; dynamo cannot trace
+        that call, so it graph-broke every compiled CPU forward (#5299). The
+        check runs once, when ``post_init()`` binds the checkpoint, so it stays
+        out of ``forward``.
+        """
+
+        for name in ("nf12_packed", "nf12_escapes", "nf12_exp_base", "bias"):
+            tensor = self._buffers.get(name)
+            if isinstance(tensor, torch.Tensor) and tensor.is_inference():
+                setattr(self, name, _as_normal_tensor(tensor))
+
     def _weight_to_matrix(self, linear: nn.Module) -> torch.Tensor:
         return weight_to_matrix(linear)
 
@@ -448,7 +465,14 @@ class NF12Linear(WeightOnlyQuantLinear):
             weight = nf12_codec.decode(
                 packed, escapes, base, self.out_features, self.in_features
             )
-        return _as_normal_tensor(weight.to(dtype=dtype).contiguous())
+        # Deliberately no ``_as_normal_tensor`` here: it calls
+        # ``tensor.is_inference()``, which dynamo cannot trace, so wrapping the
+        # decode output graph-broke every compiled CPU forward (#5299). The
+        # buffers are already normalised at install time (``pack`` /
+        # ``load_quant_result``), which is what #5211 needed; when the caller
+        # itself runs under ``inference_mode`` the decoded tensor is an
+        # inference tensor, and that caller cannot need a gradient through it.
+        return weight.to(dtype=dtype).contiguous()
 
     def dequantize(self, *, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
         return self.dequantize_weight(dtype=dtype)
@@ -584,6 +608,10 @@ class NF12Linear(WeightOnlyQuantLinear):
 
     def post_init(self):
         super().post_init()
+        # A checkpoint installed under ``InferenceMode`` hands us inference
+        # tensors; replace them once here instead of checking in ``forward``
+        # (#5211, #5299).
+        self._normalize_inference_buffers()
         # Validate the loaded checkpoint's packing geometry once.
         if self.nf12_packed.shape != (self.out_features, self.in_features * 3 // 2):
             raise ValueError(
