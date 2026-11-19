@@ -470,6 +470,35 @@ def test_paro_biased_fp16_compiles_before_the_first_eager_call():
     _compile_first(lambda: _pack_awq(ParoLinear, bias=True))
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+def test_paro_biased_layer_compiles_after_an_eager_warmup(dtype):
+    """An eager warmup must not disable the declared CPU compile level (#5332).
+
+    The first eager forward materializes the ATen int4pack layout. A biased
+    layer then fell through to the dense restore whenever that layout was live,
+    and the restore cannot be traced, so ``fullgraph=True`` raised even though
+    the class declares ``INDUCTOR`` on CPU. The biased product asks for the
+    wide result and adds the bias afterwards, and the #4068 operand cast is a
+    registered custom op (#5110), so the warmed-up forward traces as well.
+    """
+
+    module = _pack_awq(ParoLinear, bias=True).to(dtype).eval()
+    x = torch.randn(ROWS, IN_FEATURES, dtype=dtype)
+    with torch.inference_mode():
+        eager = module(x)
+    layout = module._live_cpu_layout()
+    if layout != "aten":
+        pytest.skip(f"the AVX512-BF16 kernel took this layer (layout={layout})")
+
+    torch._dynamo.reset()
+    compiled = torch.compile(module.forward, fullgraph=True, backend="inductor")
+    with torch.inference_mode():
+        out = compiled(x)
+    assert torch.allclose(out.float(), eager.float(), atol=2e-2, rtol=1e-2), (
+        "the compiled warmed-up biased forward differs from the eager reference"
+    )
+
+
 def _pack_paro_rotated(*, dtype: torch.dtype = torch.bfloat16):
     """A Paro layer whose rotation is learned, not the identity (#5115).
 
