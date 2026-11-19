@@ -19,7 +19,7 @@ import transformers
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
-from ..utils.fallback import resolve_fallback_strategy
+from ..utils.fallback import resolve_fallback_strategy, should_use_fallback
 from ..utils.logger import setup_logger
 from ..utils.p2p import safe_move_to
 from ..utils.torch import torch_sync
@@ -462,17 +462,31 @@ class FOEM(GPTQ):
             blocksize=128,
     ):
         self._finalize_foem_hessian()
-        if self.nsamples == 0 or self.H is None:
-            # No calibration rows reached this module (for example an unrouted
-            # expert). GPTQ falls back to data-independent quantization; mirror
-            # that here instead of dereferencing a missing Hessian.
+        # Mirror GPTQ's shared low-sample decision: an unrouted expert can see a
+        # few calibration rows, which is still not enough to trust its Hessian
+        # (#5377).
+        below_threshold = should_use_fallback(
+            self.fallback,
+            float(self.nsamples),
+            self.expected_nsamples,
+        )
+        if self.nsamples == 0 or self.H is None or below_threshold:
             strategy = resolve_fallback_strategy(self.fallback)
-            log.warn(
-                "Quantization: Module `%s` -> FOEM received no calibration "
-                "samples; using `%s` fallback quantization.",
-                self.name,
-                strategy.value,
-            )
+            if self.nsamples == 0 or self.H is None:
+                log.warn(
+                    "Quantization: Module `%s` -> FOEM received no calibration "
+                    "samples; using `%s` fallback quantization.",
+                    self.name,
+                    strategy.value,
+                )
+            else:
+                log.warn(
+                    "Quantization: Module `%s` -> FOEM observed %s samples, "
+                    "below the fallback threshold; using `%s` fallback quantization.",
+                    self.name,
+                    self.nsamples,
+                    strategy.value,
+                )
             if self.gptaq:
                 self.native_inps = []
             self.dXXT = None
