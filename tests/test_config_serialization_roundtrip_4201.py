@@ -23,8 +23,10 @@ import torch
 
 from gptqmodel.quantization.config import (
     AWQConfig,
+    BitsAndBytesConfig,
     Fallback,
     FOEMConfig,
+    GGUFConfig,
     GPTAQConfig,
     GPTQConfig,
     MSEConfig,
@@ -51,9 +53,21 @@ def _json_round_trip(config):
     return QuantizeConfig(**json.loads(json.dumps(config.to_dict())))
 
 
+def _dynamic_override_owner(overrides):
+    """Return a config whose quantizer applies every object-valued override.
+
+    A GPTQ/GPTQ-family `dynamic` rule cannot carry `smoother` any more: the
+    calibrated solve never applied it (#5302), so the weight-only RTN config
+    owns that object-valued case.
+    """
+
+    cls = RTNConfig if "smoother" in overrides else GPTQConfig
+    return cls(bits=4, dynamic={r".*down_proj": overrides})
+
+
 @pytest.mark.parametrize("overrides", OBJECT_OVERRIDES, ids=lambda value: next(iter(value)))
 def test_object_valued_dynamic_overrides_are_json_serializable(overrides):
-    config = GPTQConfig(bits=4, dynamic={r".*down_proj": overrides})
+    config = _dynamic_override_owner(overrides)
 
     payload = json.loads(json.dumps(config.to_dict()))
 
@@ -62,7 +76,7 @@ def test_object_valued_dynamic_overrides_are_json_serializable(overrides):
 
 @pytest.mark.parametrize("overrides", OBJECT_OVERRIDES, ids=lambda value: next(iter(value)))
 def test_object_valued_dynamic_overrides_round_trip_through_the_factory(overrides):
-    config = GPTQConfig(bits=4, dynamic={r".*down_proj": overrides})
+    config = _dynamic_override_owner(overrides)
     payload = json.loads(json.dumps(config.to_dict()))
 
     restored = QuantizeConfig(**payload)
@@ -71,7 +85,9 @@ def test_object_valued_dynamic_overrides_round_trip_through_the_factory(override
 
 
 def test_save_pretrained_writes_object_valued_overrides(tmp_path):
-    config = GPTQConfig(
+    # `smoother` in a dynamic rule is the weight-only recipe's setting; the
+    # calibrated owners refuse it (#5302), so RTN carries it here.
+    config = RTNConfig(
         bits=4,
         dynamic={
             r".*down_proj": {
@@ -94,8 +110,25 @@ def test_save_pretrained_writes_object_valued_overrides(tmp_path):
     [GPTQConfig, QQQConfig, VPTQConfig, ParoConfig],
     ids=lambda cls: cls.__name__,
 )
-def test_gptq_family_keeps_smoother_preprocessors(config_cls):
-    config = config_cls(smoother={"smooth": {"type": "mad", "k": 2.5}})
+def test_gptq_family_refuses_a_smoother_its_quantizer_ignores(config_cls):
+    """#5302: the field persists into the checkpoint but never reaches a tensor."""
+
+    with pytest.raises(ValueError, match="not applied by the .* quantizer"):
+        config_cls(smoother={"smooth": {"type": "mad", "k": 2.5}})
+
+
+@pytest.mark.parametrize(
+    "config_cls",
+    [RTNConfig, GGUFConfig, BitsAndBytesConfig],
+    ids=lambda cls: cls.__name__,
+)
+def test_weight_only_family_keeps_smoother_preprocessors(config_cls):
+    """The weight-only packing path reads `smooth`, so it stays serializable."""
+
+    kwargs = {"bits": 4}
+    if config_cls is GGUFConfig:
+        kwargs["format"] = "q_k_m"
+    config = config_cls(smoother={"smooth": {"type": "mad", "k": 2.5}}, **kwargs)
     assert config.smoother is not None
 
     restored = _json_round_trip(config)
