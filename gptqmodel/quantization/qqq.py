@@ -1210,7 +1210,18 @@ class QQQ:
 
                 Losses1.div_(2)
 
-                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+                # Chunk the cross-block error propagation along columns.  For
+                # lm_head-sized weights (248320 x 5120) the full product is a
+                # ~4.6 GiB temporary and OOMs 24 GB cards; multiplying column
+                # slices is mathematically identical and caps the temporary at
+                # rows * update_chunk * 4 bytes.
+                remaining = W.shape[1] - i2
+                update_chunk = 512
+                for c0 in range(0, remaining, update_chunk):
+                    c1 = min(c0 + update_chunk, remaining)
+                    W[:, i2 + c0:i2 + c1] -= Err1.matmul(
+                        Hinv[i1:i2, i2 + c0:i2 + c1]
+                    )
 
                 if DEBUG:
                     self.layer.weight.data[:, :i2] = Q[:, :i2]
