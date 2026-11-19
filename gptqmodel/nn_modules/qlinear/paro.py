@@ -764,6 +764,19 @@ class ParoLinear(AwqTorchLinear):
             self._rotation_runtime_key = runtime_key
         return self._runtime_theta, self._runtime_channel_scales
 
+    def _rotation_parameters_need_grad(self) -> bool:
+        """Whether an enabled gradient path consumes the rotation operands.
+
+        An identity rotation is a no-op in value but not in its derivatives:
+        the identity angle still has a nonzero derivative and a unit scale has
+        a unit derivative (#5419). Dropping the rotation is only safe when no
+        enabled gradient needs ``theta`` or ``channel_scales``.
+        """
+
+        if not torch.is_grad_enabled():
+            return False
+        return bool(self.theta.requires_grad or self.channel_scales.requires_grad)
+
     def _rotation_needs_autograd(self, x_flat: torch.Tensor) -> bool:
         """Whether this rotation must stay inside the autograd graph.
 
@@ -775,15 +788,14 @@ class ParoLinear(AwqTorchLinear):
 
         if not torch.is_grad_enabled():
             return False
-        return bool(
-            x_flat.requires_grad
-            or self.theta.requires_grad
-            or self.channel_scales.requires_grad
-        )
+        return bool(x_flat.requires_grad or self._rotation_parameters_need_grad())
 
     def _rotate_inputs(self, x_flat: torch.Tensor) -> torch.Tensor:
         """Apply the learned input transform before quantized matmul."""
-        if self._rotation_identity:
+        if self._rotation_identity and not self._rotation_parameters_need_grad():
+            # The identity is exact, so the shortcut is bit-identical for the
+            # activations; it may only run when the rotation parameters are
+            # frozen or the caller disabled grad (issue #5419).
             return x_flat
         needs_autograd = self._rotation_needs_autograd(x_flat)
         if (

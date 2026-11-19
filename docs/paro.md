@@ -25,7 +25,7 @@ flowchart TD
     D -- "No" --> F["is_identity_rotation(theta, channel_scales)"]
     F --> G["Store _rotation_identity"]
     G --> I["ParoLinear.forward() calls _rotate_inputs()"]
-    I --> J{"_rotation_identity?"}
+    I --> J{"_rotation_identity and no enabled gradient needs the rotation operands?"}
     J -- "Yes" --> K["Use input unchanged"]
     J -- "No" --> L["Apply Paro rotation"]
     K --> M["AWQ packed matmul"]
@@ -45,6 +45,13 @@ remain the only persistent weight representation. The CPU dense fallback still
 dequantizes a temporary weight for its current forward.
 
 Introduced in [PR #3744](https://github.com/ModelCloud/GPTQModel/pull/3744).
+
+The shortcut is a value shortcut only: the identity still has nonzero
+derivatives for `theta` and `channel_scales`, so `_rotate_inputs()` returns
+the input unchanged only when `_rotation_parameters_need_grad()` is false
+(grad mode is off, or both rotation buffers are frozen). A trainable
+identity rotation therefore takes the autograd path instead of silently
+dropping those gradients (issue #5419).
 
 ## Activation Checkpointing
 
