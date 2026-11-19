@@ -335,7 +335,7 @@ def _dummy_gptq_model(*, wait_for_finalizers: bool):
             )
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, module_path=None):
             return module
 
         def should_quantize_layer(self, *_args):
