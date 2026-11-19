@@ -1305,6 +1305,8 @@ def _bind_converted_experts_forwards(model, routed_blocks) -> None:
 
     from defuser.modeling.moe_experts_interface import LINEAR_LOOP_IMPL, linear_loop_experts_forward
 
+    if not callable(getattr(model, "modules", None)):
+        return
     routed_experts = {id(getattr(block, "experts", None)) for block in routed_blocks}
     for module in model.modules():
         if "forward" in vars(module) or "0" not in module._modules:
