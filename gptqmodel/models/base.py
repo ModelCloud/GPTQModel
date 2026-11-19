@@ -163,7 +163,7 @@ from ._const import (
     normalize_device,
 )
 from .fusable import FusableConfig, require_fusable_config
-from .loader import ModelLoader, _setup_rotation_online_had
+from .loader import ModelLoader, _setup_rotation_online_had, model_load_lock
 from .module_plan import ModulePlan
 from .quantization_run_plan import ProcessorStep, QuantizationRunPlan, processor_class
 from .shared_input import SharedInputPlan, build_shared_input_plan
@@ -3433,15 +3433,20 @@ class BaseQModel(nn.Module):
         owns_teacher = not isinstance(teacher, nn.Module)
         if owns_teacher:
             device = get_device(self.get_input_embeddings())
-            # The teacher is another transformers construction: its
-            # ``local_torch_dtype`` window takes the writer itself (#5304), so
-            # the surrounding weight I/O stays concurrent.
-            teacher = AutoModelForCausalLM.from_pretrained(
-                teacher,
-                dtype=self.model.dtype,
-                device_map={"": device},
-                trust_remote_code=self.trust_remote_code,
-            )
+            # The teacher is a GPT-QModel-owned transformers construction, so it
+            # takes the same load lock as every other build: another thread
+            # must not be inside its own ``post_init`` while this one
+            # constructs, or the class-wide no-tie patch leaves the shell
+            # untied (#5421). The construction window still holds the
+            # global-state writer by itself (#5304), so the teacher's weight
+            # I/O stays concurrent with optimized forwards.
+            with model_load_lock():
+                teacher = AutoModelForCausalLM.from_pretrained(
+                    teacher,
+                    dtype=self.model.dtype,
+                    device_map={"": device},
+                    trust_remote_code=self.trust_remote_code,
+                )
         try:
             stats = tune_norm_params(self.model, teacher, batches, names, norm)
         finally:

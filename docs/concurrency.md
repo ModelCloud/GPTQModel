@@ -301,6 +301,73 @@ the remaining spikes (106-190 ms) are the load's own host work on a
 free-threaded interpreter, not the writer (the dtype window excludes them for
 its 21 ms only).
 
+### Construction is exclusive for every class-wide patch (#5421)
+
+`local_torch_dtype` is only one of the process-global contexts a construction
+opens. `PreTrainedModel.get_init_context` also opens `init.no_tie_weights()`,
+which replaces `PreTrainedModel.tie_weights` for **every** class, and
+`apply_patches()`, which swaps registered classes in every transformers module.
+Neither held the writer, so a plain `from_pretrained` in another thread could
+disable tying while a GPT-QModel shell was building or re-tying its head. A
+quantized load of a tied checkpoint (the checkpoint stores only
+`model.embed_tokens.weight`) then failed with
+`does not provide tensors for 1 non-quantized parameter(s): lm_head.weight`.
+
+The tie that matters for a quantized load is the post-load one: the shell is
+built with weight init suspended (`suspend_hf_weight_init`), so `post_init`
+does not tie anything and `_tie_weights_after_checkpoint_load` is the only
+call that binds `lm_head`. It ran outside the writer too, which is why guarding
+only the construction window did not close the failure.
+
+The writer now belongs to the construction and to every consumer of those
+patches, not only to the dtype window:
+
+- `PreTrainedModel.get_init_context` prepends the writer to the returned
+  context list. `ContextManagers` enters the list in order through an
+  `ExitStack`, so the writer is acquired before `no_tie_weights` /
+  `apply_patches` and released after them.
+- `PreTrainedModel._from_config` holds it for the whole `from_config`
+  construction, which opens `apply_patches` outside `get_init_context` and may
+  have no dtype window at all.
+- `init.no_tie_weights` and `apply_patches` take it themselves, so a direct
+  use of either patch is exclusive even on a transformers version without
+  `get_init_context`.
+- `_tie_weights_after_checkpoint_load` takes it around the tie, so a foreign
+  window cannot turn that call into a no-op.
+- The default-dtype value a load captures and the one it compares against in
+  `assert_loaded_model_state` are both read under the writer, so a correct load
+  is not rejected as a "corrupted state" because another thread's window was
+  open at that instant.
+
+```mermaid
+flowchart TD
+    A["thread 1: GPTQModel.load"] --> B["_MODEL_LOAD_LOCK<br/>whole load"]
+    B --> C["from_config: global-state writer<br/>init-context group"]
+    C --> D["weight I/O, packing"]
+    D --> E["_tie_weights_after_checkpoint_load<br/>global-state writer"]
+    E --> F["assert_loaded_model_state<br/>dtype read under writer"]
+    G["thread 2: user from_pretrained"] --> H["get_init_context<br/>global-state writer"]
+    H --> I["no_tie_weights / apply_patches<br/>inside the writer"]
+    I --> J["cls(config): construction"]
+    H -. "excludes C and E" .-> C
+    H -. "excludes C and E" .-> E
+    K["thread 3: compiled forward"] --> L["global-state reader"]
+    C -. "excludes L only while<br/>construction runs" .-> L
+    D -. "does not exclude" .-> L
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| `local_torch_dtype` window | writer | writer (unchanged) |
+| `get_init_context` group (`no_tie_weights`, `apply_patches`, meta device) | no writer | writer prepended to the context list |
+| `_from_config` construction | writer only when a dtype is given | writer for the whole construction |
+| `init.no_tie_weights` / `apply_patches` themselves | no writer | writer for the patch window |
+| post-load tie (`_tie_weights_after_checkpoint_load`) | no writer; skipped inside a foreign window | writer; waits for the foreign window |
+| load default-dtype capture and check | bare `torch.get_default_dtype()` | both read under the writer |
+
+The writer is still held for construction only -- not for a load's weight I/O,
+packing or kernel post-init -- so the #5304 contract is unchanged.
+
 A load also no longer calls `torch._dynamo.reset()`, which used to discard other
 models' compiled frames and crash a concurrent forward. See
 [torch compile fallback](torch-compile-fallback.md).
@@ -398,7 +465,10 @@ and defaults to 1.
 | Two `GPTQModel.load()` calls overlap | the second waits, then builds; both models are consistent |
 | A first `TorchLinear` compile overlaps a load | the compile waits for the load lock, then traces with fp32; steady-state forwards stay lock-free |
 | A dense `GPTQModel.load()` overlaps an `optimize()`d forward | the forward waits only for the load's `local_torch_dtype` window, not for weight I/O (#5304) |
-| A construction site forgets to take the writer | impossible: the writer is inside `local_torch_dtype`, not at the call site |
+| A construction site forgets to take the writer | impossible: the writer is inside the init-context group and `_from_config`, not at the call site |
+| A user `from_pretrained` runs while a GPT-QModel load builds or ties its shell | the load waits for the foreign construction window; the head stays tied (#5421) |
+| A load ends while another thread's dtype window is open | the invariant compares the settled default dtype; no false "corrupted state" (#5421) |
+| A construction site runs on a transformers version without `get_init_context` | `local_torch_dtype` and the guarded patches still take the writer |
 | A load leaves a mixed dtype, a meta tied weight, or a changed default dtype | `RuntimeError`; the corrupted model is never returned |
 | A float32 parameter is declared by `_keep_in_fp32_modules` / `_keep_in_fp32_modules_strict` | exempt from the dtype checks; still must be materialized |
 | A float32 parameter is *not* declared, or a declared module is left in a half dtype | `RuntimeError`; the corrupted model is never returned |
@@ -410,6 +480,7 @@ The regressions are covered by `tests/test_compile_load_scope_5304.py`,
 `tests/test_quantize_load_global_state_5301.py`,
 `tests/test_compile_lock_scope_5268.py`, `tests/test_concurrency_guards.py`,
 `tests/test_load_state_assertions.py`, `tests/test_concurrent_load.py`,
+`tests/test_construction_global_state_5421.py`,
 `tests/test_hf_init_guard.py`, `tests/test_triton_patch_api.py`,
 `tests/test_awq_triton_cold_jit.py`, and `tests/test_torch_compile_fallback.py`.
 The cold-JIT test runs a child process
@@ -434,11 +505,19 @@ Measured on 2026-11-15 with the ROCm 10.1 R9700 (`gfx1201`) venv and the CUDA
 | BF16x3 race, 30 trials, `PYTHON_GIL=1` | 2/30 forwards differ | 0/30 forwards differ |
 | Concurrent dense loads of Qwen2.5-0.5B and Qwen3-0.6B at fp16, 6 rounds, `PYTHON_GIL=0` | 6/6 rounds corrupted (an earlier run: 5/6) | 0/6 rounds corrupted |
 | Same loads, 6 rounds, `PYTHON_GIL=1` | 5/6 rounds corrupted (an earlier run: 6/6) | 0/6 rounds corrupted |
+| Tied-checkpoint load next to a plain `from_pretrained` loop, 20 loads (2026-11-19) | 7 failed: 5 default-dtype flips, 2 missing `lm_head.weight` | 0 failed |
+| Same race, 40 loads | not measured (the 20-load run already failed) | 0 failed |
 
 The 268/504 count is this host's reproduction; the issue measured 177-210 of
 794 on its checkpoint layout. Both counts are the same defect: the second
 quantize's later layers ran on the backend selected by the first quantize's
 restore.
+
+The #5421 rows use a 16-layer GPTQ 4-bit checkpoint whose shard stores only
+`model.embed_tokens.weight` (the normal tied-save layout) and a dense
+`from_pretrained` in another thread. The deterministic regression is
+`tests/test_construction_global_state_5421.py`, which holds each foreign
+window open until the test releases it instead of relying on the race.
 
 The BF16x3 numbers use a CPU host with AVX512-BF16 and the
 `Llama-3.2-1B-Instruct-EXL3-W4-ALL` checkpoint: a 2048-wide
