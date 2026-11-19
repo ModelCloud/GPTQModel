@@ -78,11 +78,42 @@ jobs:
           source-build: 'true'
 
       - name: Install package with selected setuptools
+        shell: bash
         run: |
+          set -euo pipefail
           uv pip install pip
-          python -m pip install --extra-index-url https://download.pytorch.org/whl/cu132 \
-            --constraint .github/ci/torch-cu132.txt . "setuptools==${{ matrix.version }}"
+          # PEP 517 builds in an isolated environment whose setuptools is
+          # resolved from ``pyproject.toml`` independently of the installed
+          # version. Pin the build environment to the row's version so the row
+          # really tests what it reports (#5374).
+          build_constraint="$RUNNER_TEMP/setuptools-build-constraint.txt"
+          printf 'setuptools==%s\n' "${{ matrix.version }}" > "$build_constraint"
+          python -m pip install -v \
+            --extra-index-url https://download.pytorch.org/whl/cu132 \
+            --constraint .github/ci/torch-cu132.txt \
+            --build-constraint "$build_constraint" . "setuptools==${{ matrix.version }}" \
+            2>&1 | tee "$RUNNER_TEMP/setuptools-build.log"
           python -I -X gil=0 .github/scripts/ci_assert_free_threaded.py --installed
+
+      - name: Verify the isolated build used the selected setuptools
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/setuptools-build.log"
+          build_log="$RUNNER_TEMP/setuptools-build-deps.log"
+          # The same pip command also installs ``setuptools==<row>`` into the
+          # runtime environment, so a bare grep over the whole log would pass
+          # even when the isolated build picked a different release. Keep only
+          # the "Installing build dependencies" block, which describes the
+          # actual PEP 517 build environment.
+          awk '/Installing build dependencies: started/ {capture=1}
+               capture {print}
+               /Installing build dependencies: finished/ {capture=0}' "$log" > "$build_log"
+          if ! grep -q "setuptools-${{ matrix.version }}-" "$build_log"; then
+            echo "::error::The isolated build did not install setuptools==${{ matrix.version }}"
+            grep -o "setuptools-[0-9][^ ]*-py3-none-any.whl" "$build_log" | sort -u || true
+            exit 1
+          fi
 
       - name: Show versions
         run: |
