@@ -39,6 +39,7 @@ from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear._compile_support import supports_compiled_generation
+from ..nn_modules.qlinear._fused_train_state import ensure_cpu_inference_layout
 from ..nn_modules.qlinear.fp4 import TorchFP4Linear
 from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
@@ -4638,6 +4639,26 @@ class BaseQModel(nn.Module):
             self.model,
             layers=[BaseQuantLinear, ExllamaV3TorchLinear],
         )
+        # The CPU int4pack kernels only build their runtime layout in an eager
+        # forward, so compiling before the first forward traced the dense
+        # fallback and kept dequantizing every weight on every token (#5515).
+        # Install the layout for every eval-mode CPU module first; a kernel
+        # that cannot use the fused layout is left to its own forward.
+        model_dtype = getattr(self.model, "dtype", None)
+        if not isinstance(model_dtype, torch.dtype):
+            # ``nn.Module`` has no ``dtype``; a quantized model still carries
+            # the model dtype on its unquantized parameters (norms, embeddings).
+            model_dtype = next((param.dtype for param in self.model.parameters()), None)
+        if isinstance(model_dtype, torch.dtype):
+            for module in modules.values():
+                if getattr(module, "linear_mode", "unsupported") is not None:
+                    continue
+                try:
+                    ensure_cpu_inference_layout(module, model_dtype)
+                except Exception:
+                    log.debug(
+                        "CPU int4pack warm-up skipped for `%s`", type(module).__name__, exc_info=True
+                    )
         for name in modules.keys():
             modules[name].optimize(fullgraph=False, backend=backend, mode=mode)
 
