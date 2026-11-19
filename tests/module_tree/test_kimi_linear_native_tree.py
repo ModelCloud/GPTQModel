@@ -126,14 +126,14 @@ def test_native_kimi_linear_definition_builds_the_vendored_model(tmp_path):
     from gptqmodel.models.local import LocalModelLoader
     from gptqmodel.utils.hf import load_model_config
 
-    config = dict(
-        model_type="kimi_linear", architectures=["KimiLinearForCausalLM"], vocab_size=64, hidden_size=32,
-        intermediate_size=64, num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=2,
-        moe_intermediate_size=16, num_experts=2, num_experts_per_token=1, pad_token_id=0, bos_token_id=1,
-        eos_token_id=2,
-        linear_attn_config={"kda_layers": [1], "full_attn_layers": [], "head_dim": 16, "num_heads": 2,
-                            "short_conv_kernel_size": 4},
-    )
+    config = {
+        "model_type": "kimi_linear", "architectures": ["KimiLinearForCausalLM"], "vocab_size": 64,
+        "hidden_size": 32, "intermediate_size": 64, "num_hidden_layers": 1, "num_attention_heads": 2,
+        "num_key_value_heads": 2, "moe_intermediate_size": 16, "num_experts": 2, "num_experts_per_token": 1,
+        "pad_token_id": 0, "bos_token_id": 1, "eos_token_id": 2,
+        "linear_attn_config": {"kda_layers": [1], "full_attn_layers": [], "head_dim": 16, "num_heads": 2,
+                               "short_conv_kernel_size": 4},
+    }
     (tmp_path / "config.json").write_text(json.dumps(config))
     definition = check_and_get_model_definition(str(tmp_path))
     assert definition is KimiLinearNativeQModel
