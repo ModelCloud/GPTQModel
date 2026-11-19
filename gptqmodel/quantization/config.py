@@ -1554,13 +1554,37 @@ def _validate_finite_float(
     return number
 
 
+def _validate_group_size(owner: str, value: Any) -> int:
+    """Validate `group_size`: ``-1`` (per-channel) or a positive integer.
+
+    The shared ``group_size != -1 and group_size <= 0`` check is always false
+    for ``NaN``, so a non-finite value used to slip through and the packing
+    path either divided by it or silently fell back to per-channel (#5437).
+    Non-finite and non-integral values are rejected here; the existing
+    supported-set check still produces its own message for out-of-range
+    integers.
+    """
+
+    if isinstance(value, bool):
+        raise ValueError(f"{owner}: `group_size` must be an integer, got {value!r}.")
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{owner}: `group_size` must be a finite integer, got {value!r}.")
+        if not value.is_integer():
+            raise ValueError(f"{owner}: `group_size` must be an integer, got {value!r}.")
+        return int(value)
+    if not isinstance(value, int):
+        raise ValueError(f"{owner}: `group_size` must be an integer, got {value!r}.")
+    return value
+
+
 def _validate_smooth_int(
     owner: str,
     field: str,
     value: Any,
     *,
     minimum: Optional[int] = None,
-    range_text: str,
+    range_text: str = "a valid integer",
 ) -> int:
     """Validate one integer smoother parameter."""
 
@@ -6178,6 +6202,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                     checkpoint_format=format_family,
                 )
 
+        self.group_size = _validate_group_size(self.__class__.__name__, self.group_size)
         if self.group_size != -1 and self.group_size <= 0:
             raise ValueError(_resolve_dynamic_group_size_error())
 
@@ -6949,8 +6974,12 @@ class GPTQConfig(PreProcessorConfig):
             self.damp_auto_increment = _default_damp_auto_increment(self.method)
         if not (0 < self.damp_percent < 1):
             raise ValueError("QuantizeConfig: `damp_percent` must between 0 and 1.")
-        if self.damp_auto_increment < 0:
-            raise ValueError("QuantizeConfig:: `damp_auto_increment` must greater than 0.")
+        self.damp_auto_increment = _validate_finite_float(
+            "QuantizeConfig",
+            "damp_auto_increment",
+            self.damp_auto_increment,
+            minimum=0.0,
+        )
 
         self.hessian = _normalize_hessian(self.hessian)
         self.gptaq = _normalize_gptaq(self.gptaq)
@@ -7340,20 +7369,42 @@ class ParoConfig(PreProcessorConfig):
         self.opt_train_samples = int(self.opt_train_samples)
         self.opt_validation_samples = int(self.opt_validation_samples)
         self.opt_batch_size = int(self.opt_batch_size)
-        self.opt_rotation_lr = float(self.opt_rotation_lr)
-        self.opt_weight_lr = float(self.opt_weight_lr)
-        self.opt_quantizer_lr = float(self.opt_quantizer_lr)
-        self.opt_pair_ratio = float(self.opt_pair_ratio)
+        # `NaN`/`inf` compare false against every bound below, so they used to
+        # reach the optimizer and silently produce a +13.8% PPL checkpoint
+        # (#5437). Validate the normalized float instead.
+        self.opt_rotation_lr = _validate_finite_float(
+            "ParoConfig", "opt_rotation_lr", self.opt_rotation_lr, minimum=0.0
+        )
+        self.opt_weight_lr = _validate_finite_float(
+            "ParoConfig", "opt_weight_lr", self.opt_weight_lr, minimum=0.0
+        )
+        self.opt_quantizer_lr = _validate_finite_float(
+            "ParoConfig", "opt_quantizer_lr", self.opt_quantizer_lr, minimum=0.0
+        )
+        self.opt_pair_ratio = _validate_finite_float(
+            "ParoConfig", "opt_pair_ratio", self.opt_pair_ratio, minimum=0.0
+        )
         self.opt_seed = int(self.opt_seed)
         self.opt_optimizer = str(self.opt_optimizer).strip().lower()
-        self.opt_weight_decay = float(self.opt_weight_decay)
+        self.opt_weight_decay = _validate_finite_float(
+            "ParoConfig", "opt_weight_decay", self.opt_weight_decay, minimum=0.0
+        )
         if not isinstance(self.opt_betas, (list, tuple)) or len(self.opt_betas) != 2:
             raise ValueError("ParoConfig: `opt_betas` must be a 2-tuple/list of floats.")
-        self.opt_betas = (float(self.opt_betas[0]), float(self.opt_betas[1]))
-        self.opt_eps = float(self.opt_eps)
+        self.opt_betas = (
+            _validate_finite_float("ParoConfig", "opt_betas[0]", self.opt_betas[0], minimum=0.0),
+            _validate_finite_float("ParoConfig", "opt_betas[1]", self.opt_betas[1], minimum=0.0),
+        )
+        self.opt_eps = _validate_finite_float(
+            "ParoConfig", "opt_eps", self.opt_eps, minimum=0.0
+        )
         self.opt_amsgrad = bool(self.opt_amsgrad)
-        self.opt_sgd_momentum = float(self.opt_sgd_momentum)
-        self.opt_sgd_dampening = float(self.opt_sgd_dampening)
+        self.opt_sgd_momentum = _validate_finite_float(
+            "ParoConfig", "opt_sgd_momentum", self.opt_sgd_momentum, minimum=0.0
+        )
+        self.opt_sgd_dampening = _validate_finite_float(
+            "ParoConfig", "opt_sgd_dampening", self.opt_sgd_dampening, minimum=0.0
+        )
         self.opt_sgd_nesterov = bool(self.opt_sgd_nesterov)
         self.opt_fused_rotation = bool(self.opt_fused_rotation)
         self.opt_scope = str(self.opt_scope).strip().lower()
@@ -7380,8 +7431,18 @@ class ParoConfig(PreProcessorConfig):
         self.opt_stage_impl = str(self.opt_stage_impl).strip().lower()
         self.opt_pair_impl = str(self.opt_pair_impl).strip().lower()
         self.opt_quantizer_impl = str(self.opt_quantizer_impl).strip().lower()
-        self.opt_channel_scale_clamp_min = float(self.opt_channel_scale_clamp_min)
-        self.opt_channel_scale_clamp_max = float(self.opt_channel_scale_clamp_max)
+        self.opt_channel_scale_clamp_min = _validate_finite_float(
+            "ParoConfig",
+            "opt_channel_scale_clamp_min",
+            self.opt_channel_scale_clamp_min,
+            minimum=0.0,
+        )
+        self.opt_channel_scale_clamp_max = _validate_finite_float(
+            "ParoConfig",
+            "opt_channel_scale_clamp_max",
+            self.opt_channel_scale_clamp_max,
+            minimum=0.0,
+        )
         if self.opt_rotation_epochs < 0 or self.opt_finetune_epochs < 0:
             raise ValueError("ParoConfig: optimization epochs must be non-negative.")
         if self.opt_train_samples <= 0 or self.opt_validation_samples <= 0:
@@ -7707,6 +7768,16 @@ class VPTQConfig(GPTQConfig):
                 "integer of at least 2; a one-entry residual codebook has no index bits and "
                 "cannot be packed."
             )
+        # `NaN`/`inf` are false against every bound below, so they used to pass
+        # as "no outlier channels" / "one codebook" / "no seed" and the run
+        # silently used a different recipe than the caller asked for (#5437).
+        self.npercent = _validate_finite_float(
+            "VPTQConfig", "npercent", self.npercent, minimum=0.0
+        )
+        self.group_num = _validate_smooth_int("VPTQConfig", "group_num", self.group_num)
+        self.kmeans_iters = _validate_smooth_int("VPTQConfig", "kmeans_iters", self.kmeans_iters)
+        self.kmeans_seed = _validate_smooth_int("VPTQConfig", "kmeans_seed", self.kmeans_seed)
+        self.block_size = _validate_smooth_int("VPTQConfig", "block_size", self.block_size)
         if self.npercent < 0:
             raise ValueError("VPTQConfig: `npercent` must be greater than or equal to 0.")
         if self.npercent > 0 and self.vector_lens[0] <= 0:
@@ -7937,7 +8008,11 @@ class MacaqConfig(PreProcessorConfig):
         # (the inherited default) and were always block-Hadamard rotated.
         self.rotation = "hadamard" if self.rotation is None else str(self.rotation).strip().lower()
         self.n_flip_iters = int(self.n_flip_iters)
-        self.ridge = float(self.ridge)
+        # `ridge` is applied only when `ridge > 0`, so a `NaN` silently turned
+        # the flip refinement off while the run reported success (#5437).
+        self.ridge = _validate_finite_float(
+            "MacaqConfig", "ridge", self.ridge, minimum=0.0
+        )
         self.pre_alpha = float(self.pre_alpha)
         self.do_flip = bool(self.do_flip)
         self.fast_flip = bool(self.fast_flip)
@@ -7967,6 +8042,19 @@ class MacaqConfig(PreProcessorConfig):
 
         if self.lm_head:
             raise ValueError("MacaqConfig: MACaQ does not quantize the LM head.")
+        # Both fields are forced to the MXFP4 constants below, so a `NaN`/`inf`
+        # or a different value used to be replaced without a word (#5437).
+        # Reject anything that is not the MXFP4 setting first.
+        self.group_size = _validate_group_size("MacaqConfig", self.group_size)
+        # -1 is the shared "unset" sentinel; MXFP4 fixes the real value to the
+        # E8M0 block width. Anything else is a caller error.
+        if self.group_size not in (-1, self.block_size):
+            raise ValueError(
+                f"MacaqConfig: OCP MXFP4 requires `group_size={self.block_size}` "
+                f"(the E8M0 block width), got {self.group_size}."
+            )
+        if self.bits != 4:
+            raise ValueError(f"MacaqConfig: OCP MXFP4 requires `bits=4`, got {self.bits!r}.")
         self.group_size = self.block_size
         self.bits = 4
         self.desc_act = False
@@ -8535,6 +8623,10 @@ class EXL3Config(PreProcessorConfig):
         if self.format != FORMAT.EXL3:
             raise ValueError("EXL3Config: `format` must be `exl3`.")
 
+        # `group_size` is unused here and is forced to -1 below, but a
+        # `NaN`/`inf`/non-integer is still a caller error rather than
+        # something to drop silently (#5437).
+        self.group_size = _validate_group_size("EXL3Config", self.group_size)
         self.group_size = -1
         self.desc_act = False
         self.sym = True
