@@ -445,6 +445,31 @@ def _uniform_column_group(count: int, device: torch.device) -> torch.Tensor:
     return _uniform_column_group_cached(count, device, _uniform_column_group_stream(device))
 
 
+_BLOCK_ERROR_PRODUCT_BYTES = 256 * 1024 * 1024
+
+
+def _propagate_block_error(
+    trailing_weight: torch.Tensor,
+    block_error: torch.Tensor,
+    trailing_factor: torch.Tensor,
+) -> None:
+    """Subtract the block's error with a byte budget for the matmul output."""
+    rows, columns = trailing_weight.shape
+    if rows == 0 or columns == 0:
+        return
+
+    # Rows are independent and each tile reuses the same Hessian factor view.
+    row_bytes = columns * trailing_weight.element_size()
+    rows_per_tile = max(1, _BLOCK_ERROR_PRODUCT_BYTES // row_bytes)
+    if rows <= rows_per_tile:
+        trailing_weight.sub_(block_error.matmul(trailing_factor))
+        return
+
+    for start in range(0, rows, rows_per_tile):
+        end = start + rows_per_tile
+        trailing_weight[start:end].sub_(block_error[start:end].matmul(trailing_factor))
+
+
 def _move_static_groups(groups, device: torch.device):
     """Move static-group quantizers to ``device`` and return their parameters.
 
@@ -3164,7 +3189,7 @@ class GPTQ:
 
                         if Hinv is not None:
                             Losses1.div_(2)
-                            W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+                            _propagate_block_error(W[:, i2:], Err1, Hinv[i1:i2, i2:])
 
                         del W1, Q1, Err1, Losses1
                         if Hinv is not None:

@@ -338,6 +338,7 @@ def test_public_resave_keeps_selected_config_and_exact_checkpoint(tmp_path, subf
     qcfg = QuantizeConfig(bits=4, group_size=32, desc_act=False, device="cpu", offload_to_disk=False)
     model = GPTQModel.load(str(source), subfolder=subfolder, quantize_config=qcfg, backend=BACKEND.GPTQ_TORCH)
     assert model.model.config.hidden_size == 32
+    assert Path(model.model_local_path) == selected
     model.quantize(CalibrationConfig(dataset=CALIBRATION, batch_size=1, min_length=1), backend=BACKEND.GPTQ_TORCH)
     ids = torch.tensor([[1, 7, 4, 9, 2]])
     with torch.inference_mode():
@@ -359,7 +360,7 @@ def test_public_resave_keeps_selected_config_and_exact_checkpoint(tmp_path, subf
         )
         assert not hasattr(model.model, "_model_init_kwargs")
         assert model.model.config.hidden_size == 32
-        assert Path(model.model_local_path) == first_root
+        assert Path(model.model_local_path) == first
         with torch.inference_mode():
             torch.testing.assert_close(model.model(ids).logits, expected_logits, rtol=0, atol=0)
 
@@ -485,7 +486,7 @@ def test_writer_reads_retained_gguf_metadata_from_pinned_source(tmp_path, monkey
     monkeypatch.setattr(writer, "load_model_config", observed_config)
     monkeypatch.setattr(wrapped.loader, "from_config", stop_at_model)
     with pytest.raises(ConfigReached):
-        wrapped.get_model_with_quantize(QuantizeConfig(bits=4, group_size=32), wrapped.model_local_path)
+        wrapped.get_model_with_quantize(QuantizeConfig(bits=4, group_size=32), str(source))
     assert len(calls) == 2
     for index, (path, kwargs) in enumerate(calls):
         assert path == str(source)

@@ -18,8 +18,11 @@ from ...quantization.awq.utils.packing_utils import (
 )
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.torch import dynamo_is_compiling
 from . import AWQuantLinear, detach_cpu_operand
+from ._awq_decode import AwqDecodeRangeMixin
 from ._compile_support import COMPILE_LEVEL
+from ._cpu_int4pack_layout import runtime_int4pack_dense_weight
 from ._fused_train_state import (
     bind_runtime_qzeros,
     capture_fused_train_state,
@@ -28,7 +31,7 @@ from ._fused_train_state import (
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
-from ._numerics import matmul_fp32_reduce
+from ._numerics import linear_wide_bias, matmul_fp32_reduce
 from .torch_aten_kernel import (
     TorchAtenLinear,
     _cpu_int4pack_scale_dtype,
@@ -46,7 +49,7 @@ from .torch_fused import (
 log = setup_logger()
 
 
-class TorchAtenAwqLinear(AWQuantLinear):
+class TorchAtenAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
     """AWQ CPU int4pack backend implemented with local ATen ops."""
 
     QUANT_TYPE = "awq_torch_aten_kernel"
@@ -154,6 +157,7 @@ class TorchAtenAwqLinear(AWQuantLinear):
                 self.register_buffer("bias", torch.zeros(self.out_features, dtype=torch.float16))
             else:
                 self.bias = None
+        self._refresh_decode_range_fits()
 
     @classmethod
     def _validate(
@@ -211,6 +215,9 @@ class TorchAtenAwqLinear(AWQuantLinear):
         return ok, err
 
     def post_init(self):
+        # The decode range is read by a compiled graph as a Python constant, so
+        # it must be computed before ``optimize()`` traces the first forward.
+        self._refresh_decode_range_fits()
         super().post_init()
         self.optimize()
 
@@ -274,17 +281,24 @@ class TorchAtenAwqLinear(AWQuantLinear):
             )
 
     def awq_weight_dequantize(self, device, dtype):
+        # ``dequantize_gemm`` multiplies the integer codes by the scales, so a
+        # half-precision decode can overflow before the result is widened.
+        # Convert the temporary scales first; the checkpoint buffer keeps its
+        # loaded dtype.
+        scales = self.scales
+        if scales.device != device or scales.dtype != dtype:
+            scales = scales.to(device=device, dtype=dtype)
         return dequantize_gemm(
             qweight=self.qweight,
             qzeros=self.qzeros,
-            scales=self.scales,
+            scales=scales,
             bits=self.bits,
             group_size=self.group_size,
         ).to(device=device, dtype=dtype)
 
     @torch.no_grad()
     def _fused_op_forward(self, x, out_dtype=None):
-        if not torch.compiler.is_compiling():
+        if not dynamo_is_compiling():
             # Rebuilds ``scales_and_zeros`` from a ``tensor_cache_key``
             # (`is_inference`/`_version`/`data_ptr`), which dynamo cannot trace,
             # and writes module state a graph must not mutate. The eager warmup
@@ -320,6 +334,7 @@ class TorchAtenAwqLinear(AWQuantLinear):
     _refresh_fused_state = TorchAtenLinear._refresh_fused_state
 
     def clear_weight_cache(self):
+        self._refresh_decode_range_fits()
         self._fused_state_key = None
         self._refresh_fused_state()
 
@@ -378,13 +393,20 @@ class TorchAtenAwqLinear(AWQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        if torch.compiler.is_compiling():
+        runtime_dense = False
+        if dynamo_is_compiling():
             # ``_cpu_transform_lock`` is an ``RLock``: dynamo cannot enter it (a
             # hard graph break), and the one-time ``transform()`` rewrites the
             # packed int4pack buffers in place, which a traced graph must not
             # do. The transform runs on the first eager forward and in
             # ``optimize()``'s warmup, so the graph only reads the resolved
             # ``linear_mode``.
+            #
+            # A grad-requiring call cannot use the ``@torch.no_grad`` fused op
+            # and must not restore the checkpoint layout by mutating buffers
+            # inside the trace. Decode the live runtime operands instead
+            # (#5369).
+            runtime_dense = x.device.type == "cpu" and fused_autograd_needs_dense(self, x)
             linear_mode = self.linear_mode
         else:
             with self._cpu_transform_lock:
@@ -425,7 +447,13 @@ class TorchAtenAwqLinear(AWQuantLinear):
                     self.linear_mode = "train"
             linear_mode = self.linear_mode
 
-        if linear_mode == "inference":
+        if runtime_dense:
+            weight = runtime_int4pack_dense_weight(self).to(x.dtype)
+            if self.bias is not None:
+                out = matmul_fp32_reduce(x, weight, self.bias).reshape(out_shape)
+            else:
+                out = torch.matmul(x, weight).reshape(out_shape)
+        elif linear_mode == "inference":
             if not self._fused_input_dtype(x):
                 raise RuntimeError(
                     f"{self.__class__.__name__} was transformed for {self._cpu_transform_dtype} "
@@ -436,11 +464,19 @@ class TorchAtenAwqLinear(AWQuantLinear):
                 out = (out.float() + self.bias.to(out.device, torch.float32)).to(x.dtype)
             out = out.reshape(out_shape)
         else:
-            weight = self.awq_weight_dequantize(device=x.device, dtype=x.dtype)
-            if self.bias is not None:
-                out = matmul_fp32_reduce(x, weight, self.bias).reshape(out_shape)
+            decode_dtype = self._decode_dtype_for_activation(x.dtype)
+            weight = self.awq_weight_dequantize(device=x.device, dtype=decode_dtype)
+            if weight.dtype == x.dtype:
+                if self.bias is not None:
+                    out = matmul_fp32_reduce(x, weight, self.bias)
+                else:
+                    out = torch.matmul(x, weight)
             else:
-                out = torch.matmul(x, weight).reshape(out_shape)
+                # Wide decode: promote the activation for this call, accumulate
+                # in FP32, add the stored bias there, and round once at output.
+                # The reconstructed weight stays call-local.
+                out = linear_wide_bias(x, weight.t(), self.bias)
+            out = out.reshape(out_shape)
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 

@@ -35,7 +35,7 @@ from ...utils.fp8_block_triton import (
 )
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
-from ...utils.torch import TORCH_HAS_COMPILE, torch_compile
+from ...utils.torch import TORCH_HAS_COMPILE, dynamo_is_compiling, torch_compile
 from . import WeightOnlyQuantLinear
 from ._compile_support import COMPILE_LEVEL
 from ._numerics import autocast_active, matmul_fp32_reduce
@@ -94,8 +94,7 @@ _SCALED_MM_OVERRIDE: Optional[bool] = _parse_scaled_mm_override(
 def _is_compiling() -> bool:
     """Whether this call is being traced by ``torch.compile``/``torch.export``."""
 
-    compiler = getattr(torch, "compiler", None)
-    return bool(compiler is not None and compiler.is_compiling())
+    return dynamo_is_compiling()
 
 
 def _probe_must_wait() -> bool:

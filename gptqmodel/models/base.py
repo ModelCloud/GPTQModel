@@ -100,6 +100,7 @@ from ..utils.hf import (
     autofix_hf_model_config,
     get_config_selection_kwargs,
     load_model_config,
+    resolve_checkpoint_subfolder,
     resolve_trust_remote_code,
 )
 from ..utils.importer import select_quant_linear
@@ -1408,8 +1409,16 @@ class BaseQModel(nn.Module):
         self.qlinear_kernel = qlinear_kernel
         self.quantize_backend: Optional[BACKEND] = None
         self.trust_remote_code = trust_remote_code
-        self.model_local_path = model_local_path
+        # Wrapper-owned files live beside the selected weights. The save-time
+        # config lookup still needs the repository root and its selection kwargs.
+        self._checkpoint_repo_path = model_local_path
         self._config_load_kwargs = copy.deepcopy(config_load_kwargs or {})
+        subfolder = self._config_load_kwargs.get("subfolder")
+        self.model_local_path = (
+            resolve_checkpoint_subfolder(model_local_path, subfolder)
+            if model_local_path is not None and subfolder
+            else model_local_path
+        )
         self.quantize_config = quantize_config
         self.quantization_run_plan: Optional[QuantizationRunPlan] = None
         self.quant_region_timer = QuantizationRegionTimer(logger=log)
@@ -1494,7 +1503,7 @@ class BaseQModel(nn.Module):
 
         # auto-fix model config erors
         if isinstance(self.model, PreTrainedModel):
-            autofix_hf_model_config(self.model, path=model_local_path)
+            autofix_hf_model_config(self.model, path=self.model_local_path)
         # Reject activation-quantized checkpoints at load time so the rest of
         # the floatx decoder stack can continue assuming dense activations.
         self._configure_modelopt_runtime()

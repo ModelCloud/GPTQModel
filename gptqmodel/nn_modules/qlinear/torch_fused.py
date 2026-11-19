@@ -22,8 +22,9 @@ from ...nn_modules.qlinear import (
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ...utils.torch import TORCH_HAS_FUSED_OPS
+from ...utils.torch import TORCH_HAS_FUSED_OPS, dynamo_is_compiling
 from ._compile_support import COMPILE_LEVEL
+from ._cpu_int4pack_layout import runtime_int4pack_dense_weight
 from ._fused_train_state import (
     bind_runtime_qzeros,
     capture_fused_train_state,
@@ -487,7 +488,7 @@ class TorchFusedLinear(PackableQuantLinear):
         return result
 
     def _build_ret_idx(self) -> torch.Tensor:
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # `tensor_cache_key` (`is_inference`/`_version`/`data_ptr`) is a
             # hard dynamo graph break and publishing ``ret_idx`` is a state
             # write a graph must not perform. The eager warmup built it for
@@ -657,13 +658,20 @@ class TorchFusedLinear(PackableQuantLinear):
             torch.bfloat16,
             torch.float16,
         )
-        if torch.compiler.is_compiling():
+        runtime_dense = False
+        if dynamo_is_compiling():
             # `_cpu_transform_lock` is an ``RLock``: dynamo cannot enter it (a
             # hard graph break), and the one-time ``transform()`` rewrites the
             # packed ``qweight``/``qzeros`` buffers in place, which a traced
             # graph must not do. The transform runs on the first eager forward
             # (and in ``optimize()``'s warmup), so the graph only reads the
             # resolved ``linear_mode``.
+            #
+            # A grad-requiring call cannot use the ``@torch.no_grad`` fused op
+            # and must not restore the checkpoint layout by mutating buffers
+            # inside the trace. Decode the live runtime operands instead
+            # (#5369).
+            runtime_dense = x.device.type == "cpu" and fused_autograd_needs_dense(self, x)
             linear_mode = self.linear_mode
         else:
             with self._cpu_transform_lock:
@@ -701,7 +709,18 @@ class TorchFusedLinear(PackableQuantLinear):
                     self.linear_mode = LinearMode.TRAIN
             linear_mode = self.linear_mode
 
-        if linear_mode == LinearMode.INFERENCE:
+        if runtime_dense:
+            weights = runtime_int4pack_dense_weight(self).to(x.dtype)
+            dense_x = x
+            if self._needs_activation_gather(x.device.type):
+                dense_x = x[:, self._build_ret_idx().to(x.device)].contiguous()
+            elif not dense_x.is_contiguous():
+                dense_x = dense_x.contiguous()
+            if self.bias is not None:
+                out = matmul_fp32_reduce(dense_x, weights, self.bias).reshape(out_shape)
+            else:
+                out = torch.matmul(dense_x, weights).reshape(out_shape)
+        elif linear_mode == LinearMode.INFERENCE:
             out = self._fused_op_forward(x)
             if self.bias is not None:
                 # BF16 has FP32's range; add its bias before the visible cast.
@@ -735,7 +754,7 @@ class TorchFusedLinear(PackableQuantLinear):
 
     @torch.no_grad
     def _fused_op_forward(self, x):
-        if not torch.compiler.is_compiling():
+        if not dynamo_is_compiling():
             # Rebuilds ``scales_and_zeros`` from a ``tensor_cache_key``
             # (`is_inference`/`_version`/`data_ptr`), which dynamo cannot trace,
             # and writes module state a graph must not mutate. The eager warmup

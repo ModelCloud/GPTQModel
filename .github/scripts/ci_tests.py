@@ -126,7 +126,10 @@ def maybe_uninstall_vllm() -> None:
 
 def run_tests(args: argparse.Namespace) -> int:
     env = os.environ.copy()
-    if args.clear_cuda:
+    # Only the allocation step grants a GPU lease. CPU-only, XPU and NPU jobs
+    # skip it, so any inherited CUDA_VISIBLE_DEVICES is not a lease: never
+    # expose it to the test process and never join lease monitoring.
+    if args.clear_cuda or not args.gpu_lease:
         env["CUDA_VISIBLE_DEVICES"] = ""
         print("CUDA_VISIBLE_DEVICES=")
 
@@ -141,9 +144,14 @@ def run_tests(args: argparse.Namespace) -> int:
         env["GPTQMODEL_MODEL_TEST_MODE"] = args.model_test_mode
         print(f"GPTQMODEL_MODEL_TEST_MODE={args.model_test_mode}")
 
-    print(f"CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES', '')}")
+    cuda_visible_devices = env.get("CUDA_VISIBLE_DEVICES", "")
+    print(f"CUDA_VISIBLE_DEVICES={cuda_visible_devices}")
+    if args.gpu_lease and not cuda_visible_devices:
+        print("GPU lease declared but CUDA_VISIBLE_DEVICES is empty; refusing to run without a lease")
+        append_github_env("ERROR", "22")
+        return 22
 
-    log_dir = Path(f"/opt/dist/GPTQModel/{args.run_id}/logs")
+    log_dir = Path(args.log_root) / args.run_id / "logs"
     log_file = log_dir / f"{args.test_script}.log"
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -163,7 +171,7 @@ def run_tests(args: argparse.Namespace) -> int:
     monitor_thread = None
     monitor_stop = None
     monitor_state = {"forced_exit_code": 0}
-    if env.get("CUDA_VISIBLE_DEVICES", "") and not ascend_npu_test:
+    if args.gpu_lease and not ascend_npu_test:
         keepalive_endpoint = f"{normalize_base_url(args.base_url)}/keepalive"
         keepalive_payload = build_job_request(
             runner_name=args.runner,
@@ -174,7 +182,7 @@ def run_tests(args: argparse.Namespace) -> int:
             proc=proc,
             keepalive_endpoint=keepalive_endpoint,
             keepalive_payload=keepalive_payload,
-            expected_gpu_ids=env.get("CUDA_VISIBLE_DEVICES", ""),
+            expected_gpu_ids=cuda_visible_devices,
             interval_sec=args.monitor_interval_sec,
         )
 
@@ -250,8 +258,14 @@ def main() -> int:
     run_parser.add_argument("--gpu-id", default="")
     run_parser.add_argument("--model-test-mode")
     run_parser.add_argument("--clear-cuda", action="store_true")
+    run_parser.add_argument(
+        "--gpu-lease",
+        action="store_true",
+        help="the allocation step granted this job a GPU lease",
+    )
     run_parser.add_argument("--xpu-mode", action="store_true")
     run_parser.add_argument("--monitor-interval-sec", type=int, default=60)
+    run_parser.add_argument("--log-root", default="/opt/dist/GPTQModel")
 
     check_parser = subparsers.add_parser("check-log")
     check_parser.add_argument("--run-id", required=True)

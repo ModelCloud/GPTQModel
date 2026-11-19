@@ -32,6 +32,7 @@ from ...utils.paro import (
     validate_rotation_buffers,
 )
 from ...utils.rocm import IS_ROCM
+from ...utils.torch import dynamo_is_compiling
 from . import detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import (
@@ -712,7 +713,7 @@ class ParoLinear(AwqTorchLinear):
         device: torch.device,
         dtype: torch.dtype,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # `tensor_cache_key` reads `is_inference()`/`_version`/`data_ptr()`,
             # all hard dynamo graph breaks, and publishing the cache is a state
             # write a traced graph must not perform. The eager warmup built the
@@ -842,7 +843,7 @@ class ParoLinear(AwqTorchLinear):
         # The dense path dequantizes the checkpoint tensors, so a CPU kernel
         # layout must be returned first.
         if self._live_cpu_layout() is not None:
-            if torch.compiler.is_compiling():
+            if dynamo_is_compiling():
                 # Restoring rewrites the registered buffers, which a traced
                 # graph must not do. A layer whose activation dtype or int4pack
                 # availability does not match the warmup-built layout reaches
@@ -1006,7 +1007,7 @@ class ParoLinear(AwqTorchLinear):
 
         gemm = TorchCpuAvx512AwqLinear.gemm_int4_qzero_group_scaled_cpu_kernel
         if gemm is None:
-            if torch.compiler.is_compiling():
+            if dynamo_is_compiling():
                 # Resolving the handle loads the JIT extension through
                 # importlib, which dynamo cannot trace (a `setattr` on the
                 # extension module is a hard graph break). The eager warmup
@@ -1021,7 +1022,7 @@ class ParoLinear(AwqTorchLinear):
 
         original_dtype = x_flat.dtype
         kernel_input = x_flat if x_flat.is_contiguous() else x_flat.contiguous()
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # The transform rewrites registered buffers and takes the RLock
             # dynamo cannot enter; a traced graph must not do either. The eager
             # warmup built this layout, so only read it. Without a warmup, fall
@@ -1082,7 +1083,7 @@ class ParoLinear(AwqTorchLinear):
         ):
             return None
 
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # The transform rewrites registered buffers and takes the RLock
             # dynamo cannot enter; a traced graph only reads the eager-built
             # layout. A biased layer asks for the FP32 product and adds the

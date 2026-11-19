@@ -429,7 +429,8 @@ def _restore_global_intraop_threads(ambient: int) -> None:
 
     for _ in range(3):
         try:
-            torch.set_num_threads(int(ambient))
+            with torch_utils.model_global_state_write_guard():
+                torch.set_num_threads(int(ambient))
             return
         except Exception:  # pragma: no cover - defensive
             continue
@@ -465,7 +466,12 @@ def install_worker_intraop_threads(target: Optional[int]) -> None:
         if ambient == target:
             return
         try:
-            torch.set_num_threads(target)
+            # ``num_threads`` is part of dynamo's GLOBAL_STATE guard, so a
+            # trace in another thread may restore the value it captured
+            # when the trace started (#5390). Hold the writer for the
+            # transient write so no in-flight trace straddles it.
+            with torch_utils.model_global_state_write_guard():
+                torch.set_num_threads(target)
         except Exception as exc:  # pragma: no cover - defensive
             log.warn.once(
                 "Could not set intra-op threads to %s for this pool worker (%s); "

@@ -5,6 +5,7 @@
 
 import pytest
 import torch
+from compile_state_utils import under_compile
 from safetensors.torch import save_file
 
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -655,18 +656,14 @@ def test_awq_torch_decode_range_widens_past_fp32(device):
 
 
 def _under_compile(fn):
-    """Run ``fn`` while ``torch.compiler.is_compiling()`` reports ``True``.
+    """Run ``fn`` while ``dynamo_is_compiling()`` reports ``True``.
 
     The compiled region cannot read the scale tensor on the host, so this is
     the branch a dynamo trace takes.
     """
 
-    original = torch.compiler.is_compiling
-    torch.compiler.is_compiling = lambda: True
-    try:
+    with under_compile():
         return fn()
-    finally:
-        torch.compiler.is_compiling = original
 
 
 @pytest.mark.parametrize("device", _AWQ_DEVICES, ids=str)

@@ -441,8 +441,19 @@ def _dynamo_config():
     return getattr(dynamo, "config", None)
 
 
+_IS_DYNAMO = getattr(getattr(torch, "compiler", None), "is_dynamo_compiling", None)
+_IS_EXPORT = getattr(getattr(torch, "compiler", None), "is_exporting", None)
+
+
 def dynamo_is_compiling() -> bool:
     """Return True when dynamo is already tracing this thread.
+
+    ``torch.compiler.is_compiling()`` is not per-thread: it reads a module-level
+    flag that the compile session sets for the whole process, so every eager
+    thread sees ``True`` while *any* thread compiles (#5427). The constant
+    ``is_dynamo_compiling()`` is ``False`` in eager code and folded to ``True``
+    inside the traced frame, so another thread's session cannot leak in. Export
+    is still process-scoped but single-threaded, so its flag is folded in.
 
     ``torch.compile`` is lazy, so the wrapper ``torch_compile`` installs can be
     entered from inside another ``torch.compile`` trace: transformers compiles
@@ -453,6 +464,8 @@ def dynamo_is_compiling() -> bool:
     overwritten-output corruption (#5224). Nested calls therefore stay
     read-only; the eager body is inlined into the outer graph instead.
     """
+    if _IS_DYNAMO is not None:
+        return bool(_IS_DYNAMO()) or (_IS_EXPORT is not None and bool(_IS_EXPORT()))
     compiler = getattr(torch, "compiler", None)
     is_compiling = getattr(compiler, "is_compiling", None)
     if is_compiling is None:
@@ -534,6 +547,11 @@ class _ModelGlobalStateLock:
         """Whether the calling thread currently holds the shared side."""
 
         return bool(getattr(self._local, "read_depth", 0))
+
+    def holds_writer(self) -> bool:
+        """Whether the calling thread currently owns the exclusive side."""
+
+        return self._writer == threading.get_ident()
 
     def _acquire_reader(self) -> bool:
         """Take the shared side; return False when this thread owns the writer."""
@@ -642,6 +660,52 @@ def model_global_state_lock():
         _MODEL_GLOBAL_STATE_ACCESSOR = accessor
 
     return accessor()
+
+
+@contextmanager
+def model_global_state_write_guard():
+    """Hold the global-state writer for one process-global torch switch.
+
+    ``torch.backends.*.fp32_precision``, the CPU BF16x3 matmul precision and
+    ``torch.set_num_threads`` are process-global, and dynamo's ``GLOBAL_STATE``
+    guard snapshots them when a trace starts and writes them back when it ends.
+    A switch that only takes its own lock can therefore be overwritten
+    mid-window by a trace in another thread (#5390). Compiled calls hold the
+    shared side for the whole call, including their traces, so the writer
+    excludes every in-flight trace.
+
+    A caller that is already inside a compiled call holds the reader and
+    cannot upgrade without deadlocking; the trace it is running already spans
+    the switch, so that caller skips the writer instead of raising. A switch
+    that runs while the package itself is still importing (a pool worker's
+    intra-op install) skips the writer too: the lock lives in the loader,
+    which cannot be imported from that thread without deadlocking.
+    """
+
+    lock = _global_state_lock_for_write()
+    if lock is None or lock.holds_reader():
+        yield
+        return
+    with lock:
+        yield
+
+
+def _global_state_lock_for_write():
+    """Return the lock to hold, or None when it cannot be resolved yet.
+
+    ``gptqmodel.models.loader`` imports this module, so a pool worker that
+    starts while the package is still importing must not resolve the accessor:
+    that import blocks on the importing thread, which may itself be waiting
+    for the worker. No compiled call can exist before the package is imported,
+    so a switch in that window runs without the writer.
+    """
+
+    accessor = _MODEL_GLOBAL_STATE_ACCESSOR
+    if accessor is not None:
+        return accessor()
+    module = sys.modules.get(f"{__name__.split('.')[0]}.models.loader")
+    accessor = getattr(module, "model_global_state_lock", None)
+    return accessor() if accessor is not None else None
 
 
 _LOCAL_TORCH_DTYPE_GUARDED = False
@@ -1591,6 +1655,13 @@ def tf32_high_precision_guard():
     IEEE math. The count under a lock keeps the override until the last caller
     exits and restores exactly the setting captured by the first caller
     (issue #4094).
+
+    A trace in another thread is the other overwriter: dynamo snapshots the
+    precision when a trace starts and writes it back when the trace ends, and
+    it does not take this guard's lock. The depth-0 transitions therefore also
+    take the model-global-state writer, which excludes in-flight compiled
+    calls and their traces, so no trace can straddle a switch (#5390). Only
+    the switches take the writer, not the whole quantization.
     """
 
     global _TF32_GUARD_DEPTH, _TF32_GUARD_PREVIOUS
@@ -1601,8 +1672,9 @@ def tf32_high_precision_guard():
 
     with _TF32_GUARD_LOCK:
         if _TF32_GUARD_DEPTH == 0:
-            _TF32_GUARD_PREVIOUS = _snapshot_tf32_state()
-            _set_tf32_state(False)
+            with model_global_state_write_guard():
+                _TF32_GUARD_PREVIOUS = _snapshot_tf32_state()
+                _set_tf32_state(False)
         _TF32_GUARD_DEPTH += 1
     try:
         yield
@@ -1613,7 +1685,8 @@ def tf32_high_precision_guard():
                 previous_state = _TF32_GUARD_PREVIOUS
                 _TF32_GUARD_PREVIOUS = None
                 if previous_state is not None:
-                    _restore_tf32_state(previous_state)
+                    with model_global_state_write_guard():
+                        _restore_tf32_state(previous_state)
 
 
 @contextmanager

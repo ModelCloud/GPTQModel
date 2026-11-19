@@ -2438,7 +2438,7 @@ def ModelWriter(cls):
         if self.load_quantized_model and runtime_format != FORMAT.EXL3:
             model_for_save = self.get_model_with_quantize(
                 qcfg=quantize_config,
-                model_id_or_path=self.model_local_path,
+                model_id_or_path=self._checkpoint_repo_path,
             )
             live_generation_config = getattr(self.model, "generation_config", None)
             if live_generation_config is not None:

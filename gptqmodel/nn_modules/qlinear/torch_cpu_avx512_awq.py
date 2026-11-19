@@ -15,7 +15,9 @@ from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
 from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
+from ...utils.torch import dynamo_is_compiling
 from . import AWQuantLinear, detach_cpu_operand
+from ._awq_decode import AwqDecodeRangeMixin
 from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import (
     capture_fused_train_state,
@@ -31,7 +33,7 @@ from .torch_cpu_avx512 import _fake_gemm_int4_qzero_group_scaled, unpack_hf_int4
 log = setup_logger()
 
 
-class TorchCpuAvx512AwqLinear(AWQuantLinear):
+class TorchCpuAvx512AwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
     """AWQ W4A16 adapter for the shared AVX512-BF16 int4 GEMM."""
 
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH_CPU_AVX512]
@@ -112,6 +114,7 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
         )
         self._cpu_transformed = False
         self.linear_mode = None
+        self._refresh_decode_range_fits()
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -146,6 +149,12 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
 
     def _fused_input_dtype(self, x: torch.Tensor) -> bool:
         return x.dtype == torch.bfloat16
+
+    def post_init(self):
+        # The decode range is read by a compiled graph as a Python constant, so
+        # it must be computed before the first traced forward.
+        self._refresh_decode_range_fits()
+        super().post_init()
 
     def train(self, mode: bool = True):
         # forward() caches the fused-vs-dequantized dispatch decision. Reset it
@@ -228,6 +237,7 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
             if name in self._parameters:
                 restored = torch.nn.Parameter(restored, requires_grad=False)
             setattr(self, name, restored)
+        self._refresh_decode_range_fits()
         return result
 
     def clear_weight_cache(self) -> None:
@@ -241,6 +251,7 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
         that.
         """
 
+        self._refresh_decode_range_fits()
         if not getattr(self, "_cpu_transformed", False):
             return
         if self.scales.dtype != torch.float32:
@@ -256,15 +267,23 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
                 "TorchCpuAvx512AwqLinear only supports fused transforms on CPU devices."
             )
 
-    def dequantize_weight(self, num_itr: int = 1):
+    def dequantize_weight(self, num_itr: int = 1, dtype: torch.dtype | None = None):
         if not self._cpu_transformed:
-            return dequantize_gemm(
+            # ``dequantize_gemm`` multiplies the integer codes by the scales,
+            # so a half-precision decode can overflow before the result is
+            # widened. Convert the temporary scales first; the checkpoint
+            # buffer keeps its loaded dtype.
+            scales = self.scales
+            if dtype is not None and scales.dtype != dtype:
+                scales = scales.to(dtype=dtype)
+            weight = dequantize_gemm(
                 qweight=self.qweight,
                 qzeros=self.qzeros,
-                scales=self.scales,
+                scales=scales,
                 bits=self.bits,
                 group_size=self.group_size,
             )
+            return weight if dtype is None else weight.to(dtype=dtype)
         if num_itr != 1:
             raise NotImplementedError(
                 f"{self.__class__.__name__}.dequantize_weight only supports num_itr=1"
@@ -280,10 +299,20 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
         zeros = self.qzeros.index_select(0, groups)
         scales = self.scales.index_select(0, groups)
         weight = (codes.t().float() - zeros.float()) * scales.float()
-        return weight.to(self._dequant_scales_dtype)
+        return weight.to(self._dequant_scales_dtype if dtype is None else dtype)
 
     def awq_weight_dequantize(self, device, dtype):
-        return self.dequantize_weight().to(device=device, dtype=dtype)
+        # The dense fallback's natural decode dtype is the checkpoint scale
+        # dtype (or the transformed layout's recorded width). Widen only when
+        # that dtype cannot hold the decoded weight, then cast to the activation
+        # dtype as before.
+        natural = self._dequant_scales_dtype if self._cpu_transformed else self.scales.dtype
+        decode_dtype = self._decode_dtype_for_activation(natural)
+        if decode_dtype == natural:
+            weight = self.dequantize_weight()
+        else:
+            weight = self.dequantize_weight(dtype=decode_dtype)
+        return weight.to(device=device, dtype=dtype)
 
     @torch.no_grad()
     def _fused_op_forward(self, x):
@@ -311,7 +340,7 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # ``_cpu_transform_lock`` is an ``RLock``: dynamo cannot enter it (a
             # hard graph break), and the one-time ``transform()`` rewrites the
             # packed ``qweight``/``qzeros`` buffers in place, which a traced
@@ -358,7 +387,7 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
                 )
             out = self._fused_op_forward(x_flat).reshape(out_shape)
         else:
-            weight = self.dequantize_weight().to(x_flat.dtype)
+            weight = self.awq_weight_dequantize(device=x_flat.device, dtype=x_flat.dtype)
             if self.bias is not None:
                 # transform_cpu() keeps the fused kernel's bias in FP32. Keep
                 # the product and the bias in FP32 so a cancelling bias is

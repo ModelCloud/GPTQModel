@@ -89,6 +89,28 @@ forward with the GGUF/bitsandbytes scope as A: chunk precisions
 `bf16, bf16, none, none` and 5/5 forwards differing from the all-BF16x3
 reference. After the change all four chunks stay `bf16` and 0/5 differ.
 
+The three switches are also part of dynamo's `GLOBAL_STATE` guard: a trace
+snapshots them when it starts and writes them back when it ends. The depth-0
+transitions therefore take the model-global-state writer
+(`model_global_state_write_guard()`), which excludes in-flight compiled calls
+and their traces, so a trace in another thread cannot restore the user's value
+mid-window (issue #5390). The writer is held for the switch only, never for the
+whole quantization. A caller that is already inside a compiled call holds the
+shared side and skips it instead of deadlocking.
+
+The lock cannot fix the other half of that hazard: "am I being traced" itself.
+`torch.compiler.is_compiling()` reads a module-level flag that the compile
+session sets for the whole process, so every eager thread in the process sees
+`True` while *any* thread compiles (#5427). Kernels that took their trace-only
+branch on that signal (NF12's exponent-base cache fill, the `optimize()` proxy's
+eager short-circuit, the `_awq_shifts`/`ret_idx` caches) therefore degraded or
+crashed whenever an unrelated thread compiled. Every call site now goes through
+`utils/torch.py:dynamo_is_compiling()`, which uses
+`torch.compiler.is_dynamo_compiling()`: a constant `False` in eager code that
+dynamo folds to `True` inside the traced frame, so another thread's session
+cannot leak in. `torch.compiler.is_exporting()` is folded in for export, which
+is process-scoped but single-threaded.
+
 The guards stay scoped where they are entered. #4092 narrows
 `quant_blas_backend` to the Hessian/linalg phase; the counting works for that
 placement too, because it depends only on entry and exit, not on which phase

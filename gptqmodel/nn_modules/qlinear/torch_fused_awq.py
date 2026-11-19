@@ -19,9 +19,11 @@ from ...quantization.awq.utils.packing_utils import (
 )
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ...utils.torch import TORCH_HAS_FUSED_OPS
+from ...utils.torch import TORCH_HAS_FUSED_OPS, dynamo_is_compiling
 from . import AWQuantLinear, detach_cpu_operand
+from ._awq_decode import AwqDecodeRangeMixin
 from ._compile_support import COMPILE_LEVEL
+from ._cpu_int4pack_layout import runtime_int4pack_dense_weight
 from ._fused_train_state import (
     bind_runtime_qzeros,
     capture_fused_train_state,
@@ -30,7 +32,7 @@ from ._fused_train_state import (
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
-from ._numerics import matmul_fp32_reduce
+from ._numerics import linear_wide_bias, matmul_fp32_reduce
 from ._runtime_cache import tensor_cache_key
 from .torch_fused import (
     Int4PackedOp,
@@ -44,7 +46,7 @@ from .torch_fused import (
 log = setup_logger()
 
 
-class TorchFusedAwqLinear(AWQuantLinear):
+class TorchFusedAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
     """Torch fused AWQ variant based on GPTQ fused kernels via CPU int4 packing."""
 
     QUANT_TYPE = "torch_fused_awq"
@@ -146,6 +148,7 @@ class TorchFusedAwqLinear(AWQuantLinear):
                 self.register_buffer("bias", torch.zeros(self.out_features, dtype=torch.float16))
             else:
                 self.bias = None
+        self._refresh_decode_range_fits()
 
     @classmethod
     def _validate(
@@ -189,6 +192,9 @@ class TorchFusedAwqLinear(AWQuantLinear):
         )
 
     def post_init(self):
+        # The decode range is read by a compiled graph as a Python constant, so
+        # it must be computed before ``optimize()`` traces the first forward.
+        self._refresh_decode_range_fits()
         super().post_init()
         self.optimize()
 
@@ -351,10 +357,17 @@ class TorchFusedAwqLinear(AWQuantLinear):
         return out
 
     def awq_weight_dequantize(self, device, dtype):
+        # ``dequantize_gemm`` multiplies the integer codes by the scales, so a
+        # half-precision decode can overflow before the result is widened.
+        # Convert the temporary scales first; the checkpoint buffer keeps its
+        # loaded dtype.
+        scales = self.scales
+        if scales.device != device or scales.dtype != dtype:
+            scales = scales.to(device=device, dtype=dtype)
         return dequantize_gemm(
             qweight=self.qweight,
             qzeros=self.qzeros,
-            scales=self.scales,
+            scales=scales,
             bits=self.bits,
             group_size=self.group_size,
         ).to(device=device, dtype=dtype)
@@ -376,6 +389,7 @@ class TorchFusedAwqLinear(AWQuantLinear):
         must keep the live packed weight authoritative. Only checkpoint loads,
         export, and training resume restore the snapshot.
         """
+        self._refresh_decode_range_fits()
         self._fused_state_key = None
         self._refresh_fused_op()
 
@@ -457,13 +471,20 @@ class TorchFusedAwqLinear(AWQuantLinear):
         # The XPU op keeps its BF16 contract.
         if input_dtype == torch.float32 and x_flat.device.type != "cpu":
             x_flat = x_flat.to(torch.bfloat16)
-        if torch.compiler.is_compiling():
+        runtime_dense = False
+        if dynamo_is_compiling():
             # ``_cpu_transform_lock`` is an ``RLock``: dynamo cannot enter it (a
             # hard graph break), and the one-time ``transform()`` rewrites the
             # packed ``qweight``/``qzeros`` buffers in place, which a traced
             # graph must not do. The transform runs on the first eager forward
             # and in ``optimize()``'s warmup, so the graph only reads the
             # resolved ``linear_mode``.
+            #
+            # A grad-requiring call cannot use the ``@torch.no_grad`` fused op
+            # and must not restore the checkpoint layout by mutating buffers
+            # inside the trace. Decode the live runtime operands instead
+            # (#5369).
+            runtime_dense = x_flat.device.type == "cpu" and fused_autograd_needs_dense(self, x_flat)
             linear_mode = self.linear_mode
         else:
             with self._cpu_transform_lock:
@@ -511,18 +532,31 @@ class TorchFusedAwqLinear(AWQuantLinear):
                     self.linear_mode = LinearMode.TRAIN
             linear_mode = self.linear_mode
 
-        if linear_mode == LinearMode.INFERENCE:
+        if runtime_dense:
+            weight = runtime_int4pack_dense_weight(self).to(x_flat.dtype)
+            if self.bias is not None:
+                out = matmul_fp32_reduce(x_flat, weight, self.bias)
+            else:
+                out = torch.matmul(x_flat, weight)
+        elif linear_mode == LinearMode.INFERENCE:
             # log.debug("awq calling fused op")
             out = self._fused_op_forward(x_flat)
             if self.bias is not None:
                 out = (out.float() + self.bias.to(out.device, torch.float32)).to(x_flat.dtype)
         else:
             # log.debug("awq dense path")
-            weight = self.awq_weight_dequantize(device=x_flat.device, dtype=x_flat.dtype)
-            if self.bias is not None:
-                out = matmul_fp32_reduce(x_flat, weight, self.bias)
+            decode_dtype = self._decode_dtype_for_activation(x_flat.dtype)
+            weight = self.awq_weight_dequantize(device=x_flat.device, dtype=decode_dtype)
+            if weight.dtype == x_flat.dtype:
+                if self.bias is not None:
+                    out = matmul_fp32_reduce(x_flat, weight, self.bias)
+                else:
+                    out = torch.matmul(x_flat, weight)
             else:
-                out = torch.matmul(x_flat, weight)
+                # Wide decode: promote the activation for this call, accumulate
+                # in FP32, add the stored bias there, and round once at output.
+                # The reconstructed weight stays call-local.
+                out = linear_wide_bias(x_flat, weight.t(), self.bias)
         if self.adapter:
             out = self.adapter.apply(x=x_flat, out=out)
 

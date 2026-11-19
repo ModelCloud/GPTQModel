@@ -34,7 +34,7 @@ from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.planar_packing import planar_decode_rows
 from ...utils.rocm import IS_ROCM
-from ...utils.torch import model_execution_device_scope, model_global_state_lock, torch_compile
+from ...utils.torch import dynamo_is_compiling, model_execution_device_scope, model_global_state_lock, torch_compile
 from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
 from ._numerics import (
@@ -879,7 +879,7 @@ class TorchLinear(PackableQuantLinear):
         return zeros[:, :self.scales.shape[1]]
 
     def _stream_decode_qzeros(self):
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # `tensor_cache_key` reads `is_inference()`/`_version`/`data_ptr()`,
             # all hard dynamo graph breaks, and publishing a fresh key is an
             # attribute write a graph must not perform. The decoded zero-points
@@ -907,7 +907,7 @@ class TorchLinear(PackableQuantLinear):
             else:
                 target_device = self.g_idx.device
 
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # Same reason as `_stream_decode_qzeros`: the cache key is
             # untraceable and the cache publication is a state write. A traced
             # graph reads the eager-built cache, or converts `g_idx` inline.
@@ -1333,7 +1333,7 @@ class TorchQuantEmbeddings(TorchLinear):
         weight is retained. The state is keyed on the packed tensors so a
         replaced or mutated checkpoint invalidates it.
         """
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # `tensor_cache_key` reads `is_inference()`/`_version`/`data_ptr()`,
             # all hard dynamo graph breaks, and publishing the metadata is a
             # state write. The eager warmup built it for this constant
