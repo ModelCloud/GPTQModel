@@ -166,11 +166,13 @@ an expert: at `batch_size > 1` a few experts could be dominated by pad-token
 activations, and DeepSeek-V4 hash layers sent every pad row to the same six
 experts per layer (58-75% of those experts' AWQ sample in a 32-document run).
 
-A capture is treated as a routed subset only when its row count matches neither
-`keep_mask.numel()` (the raw `[B*S, H]` grid, filtered by the mask itself) nor
-`keep_mask.sum()` (the all-expert path, which already stores exactly the kept
-rows). A real activation can be all-zero, so the row count is the
-discriminator and the zero check only finds which rows to drop.
+A capture is a routed subset unless its row count is exactly
+`keep_mask.numel()`: that is the raw `[B*S, H]` grid, which
+`_apply_active_keep_mask_to_feature` filters by the mask itself. AWQ keeps the
+raw batch input (`preserve_batch_keep_mask`) so no other layout can arrive
+already filtered -- a routed subset's row count is unrelated to the mask and
+can even equal `keep_mask.sum()` while still carrying padding (#5360). A real
+activation can be all-zero, so the zero check only finds which rows to drop.
 
 ### MLA's single-head latent
 
