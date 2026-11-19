@@ -2046,7 +2046,11 @@ def ModelWriter(cls):
 
         assert hasattr(self, 'lora_results')
 
-        # save lora tensors
+        # Save the generated adapter tensors. Keep them on the model after the
+        # export: a quantized model may be saved more than once, and
+        # `_eora_generate()` also exports before a later `save()`. Deleting the
+        # only copy after the first export left every later save without its
+        # adapter (#5354).
         if self.lora_results:  # TODO REFRACTOR
             weights = {}
             target_modules = set()
@@ -2099,8 +2103,6 @@ def ModelWriter(cls):
             log.info(f"Adapter: Saving EoRA weights to -> `{save_dir}`")
 
             save_file(tensors=weights, filename=weight_file_path, metadata={"format": "pt"})
-
-            del self.lora_results  # TODO REFRACTOR
 
     cls.eora_save = _eora_save
 
