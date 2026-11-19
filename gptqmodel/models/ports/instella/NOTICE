@@ -1,0 +1,15 @@
+Instella port for GPT-QModel
+============================
+
+This directory contains an independent Apache-2.0 implementation of the
+Instella decoder-only language model architecture (AMD Instella, e.g. the
+published amd/Instella-3B checkpoints). It was written from a behavioral
+specification in a clean-room process, without reference to any third-party
+Instella source code, and is compatible with the published checkpoints'
+config.json and safetensors format.
+
+It builds on GPT-QModel's vendored Hugging Face Transformers v5.23.0 Llama and
+Qwen2 blocks (Apache-2.0), whose attribution is in ../native/NOTICE.
+
+The model weights are not part of this code and remain under their own
+license; users loading the official checkpoints are bound by its terms.
