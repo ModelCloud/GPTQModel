@@ -95,7 +95,15 @@ from ..utils.backend import (
     normalize_backend,
 )
 from ..utils.backend_config import Backend, resolve_quantize_backend
-from ..utils.calibration import AUTO_BATCH_SIZE, auto_batch_size, prepare_calibration_dataset
+from ..utils.calibration import (
+    AUTO_BATCH_SIZE,
+    _columnar_mapping_examples,
+    _frame_columns,
+    _hf_dataset_rows,
+    _is_columnar_mapping,
+    auto_batch_size,
+    prepare_calibration_dataset,
+)
 from ..utils.checkpoint_paths import resolve_checkpoint_path
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
@@ -525,52 +533,105 @@ def _kv_cache_estimate_for(inner: object, *, dtype: Optional[torch.dtype] = None
     )
 
 
+def _calibration_rows(calibration) -> List[Any]:
+    """The rows the quantizer will see, normalized like the looper does.
+
+    ``batch_size="auto"`` used to read the raw ``calibration.dataset``, so the
+    estimate depended on the container: a ``DataFrame`` iterated its column
+    labels, a columnar mapping counted its columns as rows, a ``[1, S]`` tensor
+    row reported ``shape[-2] == 1`` and a bare tensor row raised from
+    ``Tensor.values()`` (#5505). Normalizing through the helpers
+    ``prepare_calibration_dataset`` already uses keeps the estimate on the rows
+    that are actually calibrated.
+    """
+
+    dataset = calibration.dataset
+    columns = _frame_columns(dataset)
+    if columns is not None:
+        return _columnar_mapping_examples(columns)
+    if isinstance(dataset, Mapping):
+        if _is_columnar_mapping(dataset):
+            return _columnar_mapping_examples(dataset)
+        return [dataset]
+    hf_rows = _hf_dataset_rows(dataset)
+    if hf_rows is not None:
+        return hf_rows
+    try:
+        return list(dataset)
+    except TypeError:
+        return [dataset]
+
+
+def _sequence_length(value: Any) -> int:
+    """Length of the last sequence dimension of a token-id container, else 0."""
+
+    if torch.is_tensor(value):
+        return int(value.shape[-1]) if value.dim() else 0
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return 0
+        head = value[0]
+        if isinstance(head, (list, tuple)) or torch.is_tensor(head):
+            return _sequence_length(value[-1])
+        return len(value)
+    return 0
+
+
+def _count_calibration_tokens(qmodel, text: Any) -> int:
+    """Tokenizer length of one text row, 0 when it cannot be measured."""
+
+    tokenizer = getattr(qmodel, "tokenizer", None)
+    if tokenizer is None or not isinstance(text, str):
+        return 0
+    try:
+        return len(tokenizer(text)["input_ids"])
+    except Exception:  # pragma: no cover - exotic tokenizers
+        return 0
+
+
 def _calibration_row_count(calibration) -> int:
     """Rows the calibration set will produce, or a conservative estimate."""
 
     try:
-        return max(1, len(calibration.dataset))
-    except TypeError:
+        return max(1, len(_calibration_rows(calibration)))
+    except Exception:
         return 1
 
 
 def _calibration_tokens_per_row(qmodel, calibration) -> int:
-    """Tokens in a typical calibration row: declared concat size or sampled."""
+    """Longest calibration row in tokens: declared concat size or measured."""
 
     if calibration.concat_size:
         return int(calibration.concat_size)
 
     try:
-        iterator = iter(calibration.dataset)
-    except TypeError:
+        rows = _calibration_rows(calibration)
+    except Exception:
         return 512
-    samples = []
-    for _ in range(4):
-        try:
-            samples.append(next(iterator))
-        except StopIteration:
-            break
 
-    # Tensor-kwargs rows already carry their sequence dimension.
-    for sample in samples:
-        values = getattr(sample, "values", lambda: [])()
-        for value in values:
-            if torch.is_tensor(value) and value.dim() >= 2:
-                return int(value.shape[-2])
-
-    tokenizer = getattr(qmodel, "tokenizer", None)
-    if tokenizer is None or not samples:
-        return 512
-    lengths = []
-    for sample in samples:
-        text = sample if isinstance(sample, str) else (sample.get("text") if isinstance(sample, dict) else None)
-        if not isinstance(text, str):
+    longest = 0
+    texts: List[str] = []
+    for row in rows:
+        ids = row.get("input_ids") if isinstance(row, Mapping) else row
+        length = _sequence_length(ids) if ids is not None else 0
+        if length:
+            longest = max(longest, length)
             continue
-        try:
-            lengths.append(len(tokenizer(text)["input_ids"]))
-        except Exception:  # pragma: no cover - exotic tokenizers
-            continue
-    return max(lengths) if lengths else 512
+        text = row if isinstance(row, str) else (
+            row.get("text") if isinstance(row, Mapping) else None
+        )
+        if isinstance(text, str):
+            texts.append(text)
+    if texts:
+        # Tokenizing every row would repeat the whole calibration pass. The
+        # longest few by character count bound the padded row far better than
+        # the first four rows, which is all the old estimate ever looked at.
+        texts.sort(key=len, reverse=True)
+        longest = max(
+            longest,
+            max((_count_calibration_tokens(qmodel, text) for text in texts[:4]), default=0),
+        )
+    return longest or 512
 
 
 def _module_weight_dtype(module: object) -> Optional[torch.dtype]:

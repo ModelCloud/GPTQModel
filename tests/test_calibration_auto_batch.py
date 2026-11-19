@@ -105,3 +105,82 @@ def test_row_count_and_token_estimate_come_from_the_dataset():
     assert _calibration_row_count(calibration) == 7
     # A declared concat size is the row length; no tokenizer is needed.
     assert _calibration_tokens_per_row(stub, calibration) == 1024
+
+class _WordTokenizer:
+    """One token per whitespace-separated word."""
+
+    def __call__(self, text):
+        return {"input_ids": list(range(len(text.split())))}
+
+
+def _tokenizer_qmodel():
+    return types.SimpleNamespace(tokenizer=_WordTokenizer())
+
+
+TEXTS = [" ".join(["w"] * (index + 1)) for index in range(64)]
+TOKEN_IDS = [list(range(index + 1)) for index in range(64)]
+EXPECTED_ROWS = 64
+EXPECTED_TOKENS = 64
+
+
+def _containers():
+    pandas = pytest.importorskip("pandas")
+    return {
+        "list_of_str": TEXTS,
+        "list_of_dict_text": [{"text": text} for text in TEXTS],
+        "columnar_text": {"text": TEXTS},
+        "dataframe": pandas.DataFrame({"text": TEXTS}),
+        "list_of_tensor_rows": [torch.tensor([ids]) for ids in TOKEN_IDS],
+        "list_of_dict_ids": [
+            {
+                "input_ids": torch.tensor([ids]),
+                "attention_mask": torch.ones(1, len(ids), dtype=torch.long),
+            }
+            for ids in TOKEN_IDS
+        ],
+        "columnar_ids": {
+            "input_ids": TOKEN_IDS,
+            "attention_mask": [[1] * len(ids) for ids in TOKEN_IDS],
+        },
+        "short_rows_first": ["w"] * 4 + TEXTS,
+    }
+
+
+@pytest.mark.parametrize("name", list(_containers()))
+def test_auto_batch_sizes_every_supported_input_form(name):
+    """The estimate must read the rows, not the container (#5505).
+
+    A ``DataFrame`` used to report one token per row (iterating it yields the
+    column label), a columnar mapping reported its column count as the row
+    count, a ``[1, S]`` tensor row reported ``shape[-2] == 1`` and a bare tensor
+    row raised from ``Tensor.values()``.
+    """
+
+    dataset = _containers()[name]
+    calibration = CalibrationConfig(dataset=dataset, batch_size=AUTO_BATCH_SIZE)
+    expected_rows = EXPECTED_ROWS + (4 if name == "short_rows_first" else 0)
+
+    assert _calibration_row_count(calibration) == expected_rows
+    assert _calibration_tokens_per_row(_tokenizer_qmodel(), calibration) == EXPECTED_TOKENS
+
+
+def test_auto_batch_reads_an_hf_dataset_columnwise():
+    pytest.importorskip("datasets")
+    from datasets import Dataset
+
+    calibration = CalibrationConfig(
+        dataset=Dataset.from_dict({"text": TEXTS}), batch_size=AUTO_BATCH_SIZE
+    )
+
+    assert _calibration_row_count(calibration) == EXPECTED_ROWS
+    assert _calibration_tokens_per_row(_tokenizer_qmodel(), calibration) == EXPECTED_TOKENS
+
+
+def test_auto_batch_ignores_a_single_row_mapping():
+    calibration = CalibrationConfig(
+        dataset={"input_ids": [1, 2, 3]}, batch_size=AUTO_BATCH_SIZE
+    )
+
+    assert _calibration_row_count(calibration) == 1
+    assert _calibration_tokens_per_row(_tokenizer_qmodel(), calibration) == 3
+
