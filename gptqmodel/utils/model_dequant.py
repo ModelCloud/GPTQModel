@@ -2053,19 +2053,35 @@ def copy_aux_files(
     *,
     dirs_exist_ok: bool = False,
 ) -> None:
+    """Copy the checkpoint's non-weight files into the dense export.
+
+    ``skip`` holds checkpoint-relative paths (the shard names the export has
+    just rewritten), including the nested ones a per-layer layout uses. The walk
+    has to compare those full relative paths: matching only the top-level entry
+    name let a source layer shard be copied over the dense file written for the
+    same path (#5412).
+    """
+
     skipped_dirs = {".cache", ".git", "__pycache__"}
-    for item in model_path.iterdir():
-        if item.name in skip:
+    skip_paths = {Path(str(name).replace("\\", "/")).as_posix() for name in skip}
+    for item in sorted(model_path.rglob("*")):
+        if item.is_dir():
             continue
+        relative = item.relative_to(model_path).as_posix()
         # Local snapshots can carry hub/VCS caches that are not model files and
         # may be read-only; they are never part of the exported checkpoint.
-        if item.is_dir() and item.name in skipped_dirs:
+        if any(part in skipped_dirs for part in relative.split("/")[:-1]):
             continue
-        target = output_path / item.name
-        if item.is_dir():
-            shutil.copytree(item, target, dirs_exist_ok=dirs_exist_ok)
-        else:
-            shutil.copy2(item, target)
+        if relative in skip_paths:
+            continue
+        target = output_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() and not dirs_exist_ok:
+            raise FileExistsError(
+                f"Auxiliary output path already exists: {target}. "
+                "Pass resume=True to merge into an existing export."
+            )
+        shutil.copy2(item, target)
 
 
 _DENSE_TARGET_DTYPES = {
@@ -2244,6 +2260,9 @@ def dequantize_model(
         for idx, filename in enumerate(files):
             path = model_path / filename
             output_file = output_path / filename
+            # A per-layer layout keeps its shards in `model.layers.N/`
+            # subdirectories, so the parent has to exist before the write.
+            output_file.parent.mkdir(parents=True, exist_ok=True)
             if resume and output_file.exists():
                 # Opening the shard validates its safetensors header before it
                 # is accepted as complete. Tensor views are memory-mapped, so
