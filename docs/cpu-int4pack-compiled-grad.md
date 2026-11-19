@@ -12,7 +12,7 @@ call; a traced graph cannot perform that restore because it mutates packed
 buffers.
 
 This page documents the compile-only fallback that decodes the live runtime
-operands instead. Introduced by the PR that fixes #5369.
+operands instead. Introduced by #5499.
 
 ## Old compiled flow
 
