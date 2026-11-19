@@ -49,6 +49,8 @@ flowchart TD
 (`gptqmodel/models/base.py:4319-4363`); the override now follows the same
 branches, so the two public names cannot disagree.
 
+Introduced by [PR #5480](https://github.com/ModelCloud/GPTQModel/pull/5480).
+
 `save_quantized_embeddings()` copies missing source files, then rewrites only
 the safetensors shards that contain replaced modules. Each rewritten shard is
 read from the existing output when present, or from the source checkpoint
