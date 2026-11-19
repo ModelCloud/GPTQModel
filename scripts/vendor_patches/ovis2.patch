@@ -1,0 +1,16 @@
+--- a/ovis2/modeling_ovis2.py
++++ b/ovis2/modeling_ovis2.py
+@@ -1,4 +1,5 @@
+ # Vendored from huggingface/transformers v5.23.0 (Apache-2.0) by GPT-QModel.
++# GPT-QModel: modernized to Transformers 5.23 conventions (no legacy return paths).
+ # Do not edit by hand except to keep it on the 5.23 ABI; see docs/transformers5-model-ports.md.
+ #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
+ #           This file was automatically generated from src/transformers/models/ovis2/modular_ovis2.py.
+@@ -373,7 +374,6 @@
+     supports_gradient_checkpointing = True
+     _no_split_modules = ["Ovis2VisionAttention"]
+     _skip_keys_device_placement = ["past_key_values"]
+-    _supports_cache_class = True
+     _supports_flash_attn = True
+     _supports_flex_attn = True
+     _supports_sdpa = True
