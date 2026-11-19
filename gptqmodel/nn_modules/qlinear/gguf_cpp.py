@@ -1733,7 +1733,12 @@ class GGUFCppKernel(GGUFTorchLinear):
                 "Load GGUF models on CPU or use BACKEND.GGUF_CPP_CUDA or BACKEND.GGUF_TORCH for CUDA inference."
             )
 
-        if self._use_ggml_cpu_matmul(x_flat):
+        # The native ggml matmul has no autograd support and returns a detached
+        # tensor, so a grad-mode forward silently dropped the gradient (#5392).
+        # Take the exact torch path for that call only; inference forwards keep
+        # the native kernel.
+        needs_grad = torch.is_grad_enabled() and x_flat.requires_grad
+        if not needs_grad and self._use_ggml_cpu_matmul(x_flat):
             try:
                 output = _finish_ggml_output(self, x_flat, self._forward_ggml_cpu(x_flat))
             except Exception:
