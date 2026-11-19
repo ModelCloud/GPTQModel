@@ -125,7 +125,18 @@ def test_vendored_classes_are_defused_like_transformers(family):
     assert not any(name.endswith("gate_up_proj") for name, _ in vendored.named_parameters())
     # Runtime forward overrides (split MLPs, ``linear_loop`` experts) land on the same modules.
     native_forwards = {name for name, module in native.named_modules() if "forward" in vars(module)}
-    assert {name for name, module in vendored.named_modules() if "forward" in vars(module)} == native_forwards
+    # Experts Defuser unfused behind ``@use_experts_implementation`` dispatch
+    # ``linear_loop`` through Transformers' experts registry on the native
+    # model; the vendored model carries that forward on the instance instead.
+    registry_experts = {
+        name for name, module in native.named_modules()
+        if "forward" not in vars(module) and "0" in module._modules
+        and hasattr(type(module).forward, "__wrapped__")
+        and getattr(getattr(module, "config", None), "_experts_implementation", None) == "linear_loop"
+    }
+    assert {name for name, module in vendored.named_modules() if "forward" in vars(module)} == (
+        native_forwards | registry_experts
+    )
     for name, module in vendored.named_modules():
         assert not type(module).__module__.startswith("transformers.models."), name
         if name in vendored_classes:
