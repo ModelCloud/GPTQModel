@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import gptqmodel.looper.paro_processor as paro_processor_module
+from gptqmodel.looper import paro_processor as paro_processor_module
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.paro_processor import ParoProcessor
 from gptqmodel.quantization.config import Fallback, FallbackStrategy, ParoConfig
