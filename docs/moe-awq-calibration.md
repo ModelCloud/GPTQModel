@@ -224,6 +224,17 @@ already held; the reservoir therefore never resets mid-layer. Keeping the
 layer-wide budget for every routed expert made the clip search and the replay
 forward run on about five times the rows on OLMoE (#5284).
 
+The budget is not final until the layer materializes, so a row evicted
+under a smaller cap can still belong in the final sample (#5384). Evicted
+rows are therefore kept as candidates while the budget can grow.
+`plan.max_tokens` bounds the final per-expert budget -- no capture is
+larger than one layer batch and no expert sees more captures than the
+layer has batches -- so the pool is pruned to that many lowest
+priorities; without a plan it keeps every evicted row. At materialization
+the reservoir keeps the final budget's lowest priorities over the whole
+stream, which also makes the kept set independent of capture arrival
+order. A configured `max_tokens` is fixed and needs no candidates.
+
 The cap is a high-water mark. Two captures of one module compute their caps
 under the processor lock and merge under the module lock, so they can merge in
 the opposite order. The merge raises the cap to the buffer's current capacity
@@ -237,6 +248,9 @@ the `overflow` largest kept rows can be displaced — any other kept row already
 has `overflow` kept rows at or above it — so the merge selects the drop set
 from those plus the capture and writes only the rows that survive. A capture
 whose priorities all lose to the largest kept one leaves the buffer untouched.
+At materialization the candidate pool is folded back in, so the final
+kept set is the final `budget_cap` lowest priorities of the whole stream
+(#5384).
 
 ```mermaid
 flowchart TD
