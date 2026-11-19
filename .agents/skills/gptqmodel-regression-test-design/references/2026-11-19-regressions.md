@@ -15,6 +15,11 @@ examples trace selected follow-ups through the merged code and tests at
 | NF12 grad-mode forward [#5230](https://github.com/ModelCloud/GPTQModel/pull/5230), trace safety [#5309](https://github.com/ModelCloud/GPTQModel/pull/5309), fused dispatch [#5308](https://github.com/ModelCloud/GPTQModel/pull/5308) | The CPU backward exercised the decoded-weight path. The fused GPU op could return a tensor with a `grad_fn` and still leave `x.grad` unset. The eager inference-tensor probe also caused a graph break. Check the gradient value, the inference dispatch, and execution under the advertised compiler separately. | [Cold pack and backward](../../../../tests/test_nf12_grad_mode_forward_5211.py), [forward probe guard](../../../../tests/test_nf12_forward_no_inference_probe_5299.py), [GPU input gradient](../../../../tests/test_nf12_native_grad_5305.py) |
 | Required payloads [#5239](https://github.com/ModelCloud/GPTQModel/pull/5239) and post-init [#5276](https://github.com/ModelCloud/GPTQModel/pull/5276) | A missing-key rejection exits before initialization. Given a complete checkpoint, the residency check still assumed every family had `qweight`. Exercise both sides of the existing per-kernel payload contract through the loader. | [Truncated payload](../../../../tests/test_fail_closed_checkpoint_5218.py), [resident and offloaded post-init](../../../../tests/test_post_init_payload_5261.py) |
 
+The CPU test `test_plan_capture_after_reservoir_keeps_its_rows` from #5273
+returned batch markers `[0, 0, 2, 3, 3]` on the fix's parent, `2665486b8`.
+The same assertion passed on the audited code with all eight markers
+present: `[0, 0, 1, 1, 1, 2, 3, 3]`.
+
 The [AWQ capture ownership proposal](https://github.com/ModelCloud/GPTQModel/issues/5319)
 would give each module one owner for retained rows and their source indices
 across plan matches, reservoir merges and replay.
