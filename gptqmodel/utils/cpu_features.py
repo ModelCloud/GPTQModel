@@ -152,6 +152,14 @@ def has_cpu_bf16x3_matmul() -> bool:
     return has_cpu_bf16x3_precision()
 
 
+def _model_global_state_write_guard():
+    """Resolve the global-state writer lazily: ``utils.torch`` imports us."""
+
+    from .torch import model_global_state_write_guard
+
+    return model_global_state_write_guard()
+
+
 @contextmanager
 def cpu_bf16x3_scope():
     """Run FP32 matmuls as oneDNN BF16x3, reference-counted process-wide.
@@ -166,6 +174,12 @@ def cpu_bf16x3_scope():
 
     The lock is an ``RLock`` on purpose: this scope is re-entrant, and a nested
     entry on the same thread would deadlock behind a plain ``Lock``.
+
+    The depth-0 transitions also take the model-global-state writer, so a
+    dynamo trace in another thread -- which snapshots this precision when it
+    starts and writes it back when it ends -- cannot straddle a switch
+    (#5390). ``torch.compile`` cannot enter this scope (see
+    :func:`cpu_bf16x3_matmul`), so the writer never has to upgrade a reader.
 
     Callers decide whether BF16x3 is eligible for their input; this scope only
     owns the process-global setting.
@@ -182,7 +196,8 @@ def cpu_bf16x3_scope():
             previous = _cpu_bf16x3_precision()
             if previous != "bf16":
                 try:
-                    _set_cpu_bf16x3_precision("bf16")
+                    with _model_global_state_write_guard():
+                        _set_cpu_bf16x3_precision("bf16")
                 except (AttributeError, RuntimeError, ValueError):
                     pass
                 else:
@@ -206,7 +221,8 @@ def cpu_bf16x3_scope():
                 _CPU_BF16X3_RESTORE = None
                 if previous is not None:
                     try:
-                        _set_cpu_bf16x3_precision(previous)
+                        with _model_global_state_write_guard():
+                            _set_cpu_bf16x3_precision(previous)
                     except (AttributeError, RuntimeError, ValueError):
                         # Best effort: the matmul already produced its result,
                         # and a platform that refuses the restore must not turn
