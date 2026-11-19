@@ -19,6 +19,8 @@ import torch
 from safetensors import safe_open
 from torch import nn
 
+from gptqmodel.looper.checkpoint_store import CheckpointConfig
+from gptqmodel.looper.gptq_checkpoint import checkpoint_session
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.utils.model import OffloadTensorRef, get_state_dict_for_save
@@ -86,6 +88,44 @@ def test_bind_private_offload_root_isolates_shared_config(tmp_path):
     assert second.quantize_config.offload_to_disk_path == second_root
 
 
+def test_checkpoint_session_keeps_shared_config_offload_root(tmp_path):
+    """#5361: a checkpoint attempt is run-owned, not shared-config state."""
+
+    shared = _shared_config(tmp_path)
+    first = _dummy_qmodel(shared)
+    second = _dummy_qmodel(shared)
+    first_model = _TinyModel(3.0)
+
+    with checkpoint_session(CheckpointConfig(path=tmp_path / "first"), first):
+        bind_private_offload_root(first)
+        offload_to_disk(
+            model=first_model,
+            module=["model.layers.0.linear"],
+            disk_path=first.quantize_config.offload_to_disk_path,
+            force=True,
+        )
+
+    # Both models share the caller's config object; the first attempt must not
+    # move its offload root into the first model's explicit checkpoint dir.
+    assert shared.offload_to_disk_path == str(tmp_path / "shared-offload")
+    first_root = Path(first.quantize_config.offload_to_disk_path)
+    assert first_root.is_relative_to(tmp_path / "first")
+    torch.testing.assert_close(
+        _resolved_weight(first_model, first.quantize_config),
+        torch.full((8, 8), 3.0),
+    )
+
+    # A second model built from the same config resolves `auto` against the
+    # caller's root, not the first model's explicit checkpoint directory.
+    with checkpoint_session(CheckpointConfig(), second) as session:
+        assert session.store.root == tmp_path / "shared-offload"
+        assert (
+            Path(second._checkpoint_offload_attempt_root).parent
+            == tmp_path / "shared-offload"
+        )
+        assert second.quantize_config is shared
+
+
 def test_module_looper_rebinds_processor_to_private_config(tmp_path):
     shared = _shared_config(tmp_path)
     model = _dummy_qmodel(shared)
@@ -96,6 +136,23 @@ def test_module_looper_rebinds_processor_to_private_config(tmp_path):
     assert processor.qcfg is model.quantize_config
     assert processor.qcfg is not shared
     assert processor.qcfg.offload_to_disk_path.startswith(str(tmp_path / "shared-offload"))
+
+
+def test_checkpoint_looper_binds_processor_inside_attempt(tmp_path):
+    """#5361: the attempt is the base for this run's private namespace."""
+
+    shared = _shared_config(tmp_path)
+    model = _dummy_qmodel(shared)
+    processor = SimpleNamespace(qcfg=shared)
+
+    with checkpoint_session(CheckpointConfig(path=tmp_path / "first"), model):
+        ModuleLooper(model, processors=[processor])
+        assert processor.qcfg is model.quantize_config
+        assert Path(processor.qcfg.offload_to_disk_path).is_relative_to(
+            tmp_path / "first"
+        )
+
+    assert shared.offload_to_disk_path == str(tmp_path / "shared-offload")
 
 
 def test_offload_bundles_do_not_cross_run_namespaces(tmp_path):
