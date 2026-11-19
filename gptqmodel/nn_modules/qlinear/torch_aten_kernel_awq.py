@@ -19,6 +19,7 @@ from ...quantization.awq.utils.packing_utils import (
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear, detach_cpu_operand
+from ._awq_decode import AwqDecodeRangeMixin
 from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import (
     bind_runtime_qzeros,
@@ -28,7 +29,7 @@ from ._fused_train_state import (
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
-from ._numerics import matmul_fp32_reduce
+from ._numerics import linear_wide_bias, matmul_fp32_reduce
 from .torch_aten_kernel import (
     TorchAtenLinear,
     _cpu_int4pack_scale_dtype,
@@ -46,7 +47,7 @@ from .torch_fused import (
 log = setup_logger()
 
 
-class TorchAtenAwqLinear(AWQuantLinear):
+class TorchAtenAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
     """AWQ CPU int4pack backend implemented with local ATen ops."""
 
     QUANT_TYPE = "awq_torch_aten_kernel"
@@ -154,6 +155,7 @@ class TorchAtenAwqLinear(AWQuantLinear):
                 self.register_buffer("bias", torch.zeros(self.out_features, dtype=torch.float16))
             else:
                 self.bias = None
+        self._refresh_decode_range_fits()
 
     @classmethod
     def _validate(
@@ -211,6 +213,9 @@ class TorchAtenAwqLinear(AWQuantLinear):
         return ok, err
 
     def post_init(self):
+        # The decode range is read by a compiled graph as a Python constant, so
+        # it must be computed before ``optimize()`` traces the first forward.
+        self._refresh_decode_range_fits()
         super().post_init()
         self.optimize()
 
@@ -274,10 +279,17 @@ class TorchAtenAwqLinear(AWQuantLinear):
             )
 
     def awq_weight_dequantize(self, device, dtype):
+        # ``dequantize_gemm`` multiplies the integer codes by the scales, so a
+        # half-precision decode can overflow before the result is widened.
+        # Convert the temporary scales first; the checkpoint buffer keeps its
+        # loaded dtype.
+        scales = self.scales
+        if scales.device != device or scales.dtype != dtype:
+            scales = scales.to(device=device, dtype=dtype)
         return dequantize_gemm(
             qweight=self.qweight,
             qzeros=self.qzeros,
-            scales=self.scales,
+            scales=scales,
             bits=self.bits,
             group_size=self.group_size,
         ).to(device=device, dtype=dtype)
@@ -320,6 +332,7 @@ class TorchAtenAwqLinear(AWQuantLinear):
     _refresh_fused_state = TorchAtenLinear._refresh_fused_state
 
     def clear_weight_cache(self):
+        self._refresh_decode_range_fits()
         self._fused_state_key = None
         self._refresh_fused_state()
 
@@ -436,11 +449,19 @@ class TorchAtenAwqLinear(AWQuantLinear):
                 out = (out.float() + self.bias.to(out.device, torch.float32)).to(x.dtype)
             out = out.reshape(out_shape)
         else:
-            weight = self.awq_weight_dequantize(device=x.device, dtype=x.dtype)
-            if self.bias is not None:
-                out = matmul_fp32_reduce(x, weight, self.bias).reshape(out_shape)
+            decode_dtype = self._decode_dtype_for_activation(x.dtype)
+            weight = self.awq_weight_dequantize(device=x.device, dtype=decode_dtype)
+            if weight.dtype == x.dtype:
+                if self.bias is not None:
+                    out = matmul_fp32_reduce(x, weight, self.bias)
+                else:
+                    out = torch.matmul(x, weight)
             else:
-                out = torch.matmul(x, weight).reshape(out_shape)
+                # Wide decode: promote the activation for this call, accumulate
+                # in FP32, add the stored bias there, and round once at output.
+                # The reconstructed weight stays call-local.
+                out = linear_wide_bias(x, weight.t(), self.bias)
+            out = out.reshape(out_shape)
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 
