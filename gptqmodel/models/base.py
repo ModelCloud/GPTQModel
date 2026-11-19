@@ -1533,12 +1533,26 @@ class BaseQModel(nn.Module):
             self.fuse()
 
     @classmethod
+    def _model_module_tree(cls, model, quantize_config, detector=None):
+        """Return the declared tree variant that matches this model's config.
+
+        Model definitions override this to pick a layout variant (for example
+        Falcon's two-norm parallel decoder). ``module_tree`` stays the default
+        declaration other code reads; the selected tree still goes through
+        ``module_tree_overrides`` in ``_resolve_effective_module_tree``.
+        """
+
+        return cls.module_tree
+
+    @classmethod
     def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
         """Resolve a model tree before a loader needs to plan against it."""
         quant_method = getattr(quantize_config, "method", None) if quantize_config else None
         effective_tree = copy.deepcopy(getattr(model, "gptqmodel_effective_module_tree", None))
         if effective_tree is None:
-            effective_tree = copy.deepcopy(cls.module_tree)
+            effective_tree = copy.deepcopy(
+                cls._model_module_tree(model, quantize_config, detector=detector)
+            )
         if quant_method is not None:
             override = (getattr(cls, "module_tree_overrides", None) or {}).get(quant_method)
             if override is not None and effective_tree is not None:
