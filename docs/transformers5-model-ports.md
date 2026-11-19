@@ -145,7 +145,7 @@ Published checkpoints continue to use safetensors.
 | `MiniCPMVQModel` / `minicpmv` | Six legacy MiniCPM-V vision/resampler/decoder layouts, Apache-2.0 | Native MiniCPM-V 4.6 remains separate; no trained weights, GPU, foreign-cache or fusion qualification |
 | `MiniMaxQModel`, `MiniMaxM2GPTQ` | Owned Text-01 hybrid attention/cache and exact native M2, MIT/Apache notices | No trained weights, GPU, long-context RoPE or fusion qualification |
 | `MimoV2QModel` / `mimo_v2` | Source-matched XiaomiMiMo hybrid decoder, pinned provenance and MIT notices | Separate from original MiMo and native MiMo-V2-Flash; no trained weights, GPU or fusion qualification |
-| `MobileLLMQModel` / `mobilellm` | Pinned public FAIR architecture source, **FAIR Noncommercial Research License and AUP** | Official HF assets returned HTTP 401: architecture qualification only; no released-checkpoint/tokenizer or trained-weight quality claim; commercial use not granted |
+| `MobileLLMQModel` / `mobilellm` | Clean-room Apache-2.0 implementation from a behavioral specification (see the port's NOTICE); checkpoint-format compatible | Official HF assets returned HTTP 401: architecture qualification only; no released-checkpoint/tokenizer or trained-weight quality claim; published weights keep their own license terms |
 
 Only the definitions listed here are qualified. Rows do not qualify other
 architectures, kernels or trained checkpoints by analogy.
