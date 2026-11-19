@@ -26,28 +26,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _bitblas_runtime_error() -> str | None:
-    """Why the BitBLAS package itself cannot be imported on this host.
-
-    Several nodes stub ``import_bitblas`` to unit-test configuration logic, but
-    they still construct a ``BitblasLinear``, which reads ``MatmulConfig`` from
-    the real package. A wheel built against a different CUDA runtime imports as
-    a module and only then fails to load its TVM shared library, so the
-    attribute-level ``BITBLAS_AVAILABLE`` gate cannot see it. Probe the import
-    once, and skip the nodes that need a usable runtime.
-    """
-
-    try:
-        import bitblas  # noqa: F401
-    except Exception as exc:
-        return f"{type(exc).__name__}: {exc}"
-    return None
-
-
-BITBLAS_RUNTIME_ERROR = _bitblas_runtime_error()
+# Several nodes stub ``import_bitblas`` inside the test body, so the backend
+# availability gate has to be evaluated at collection time, before that stub
+# replaces the real import path.
 requires_bitblas_runtime = pytest.mark.skipif(
-    BITBLAS_RUNTIME_ERROR is not None,
-    reason=f"BitBLAS runtime cannot be imported: {BITBLAS_RUNTIME_ERROR}",
+    not bitblas_module.BITBLAS_AVAILABLE,
+    reason="BitBLAS backend is not available",
 )
 
 
