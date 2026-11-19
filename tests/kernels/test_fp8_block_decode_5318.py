@@ -42,7 +42,11 @@ pytestmark = [pytest.mark.gpu]
 BLOCK = (128, 128)
 
 
-_TRITON_DECODE_AVAILABLE = fp8_block_triton.triton_fp8_available(torch.device("cuda"))
+_TRITON_DECODE_AVAILABLE = fp8_block_triton.triton_fp8_available(
+    torch.device("cuda")
+) and fp8_block_triton.triton_fp8_supports_format(
+    torch.device("cuda"), "float8_e4m3fn"
+)
 _DECODE_SKIP = pytest.mark.skipif(
     not _TRITON_DECODE_AVAILABLE,
     reason="block-scaled FP8 Triton decode is not available on this device",
@@ -257,6 +261,99 @@ def test_block_decode_declines_unsupported_payloads(monkeypatch) -> None:
         module.weight_scale_inv = module.weight_scale_inv.half()
         module._fp8_block_plan_key = None
         assert module._block_decode_eligible(x_flat, fused=False)
+
+
+def _all_ones_block_kernel():
+    """The #5400 payload: one 128x128 block, every code and the scale at 1."""
+
+    kernel = fp8_module.TorchFP8Linear(
+        bits=8,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        in_features=128,
+        out_features=128,
+        bias=False,
+        format="float8_e4m3fn",
+        weight_scale_method="block",
+        weight_block_size=BLOCK,
+        register_buffers=False,
+    )
+    kernel.weight = torch.ones((128, 128), dtype=torch.float8_e4m3fn, device="cuda")
+    kernel.weight_scale_inv = torch.ones((1, 1), dtype=torch.float32, device="cuda")
+    kernel.bias = None
+    kernel._scaled_mm_hard_disabled = False
+    kernel._native_dequant_disabled = False
+    kernel._invalidate_compiled()
+    return kernel.eval()
+
+
+def test_block_dispatch_skips_an_operand_the_device_cannot_lower(monkeypatch):
+    """#5400: a target without ``fp8e4nv`` must keep the portable block decode.
+
+    Triton's CUDA backend only adds ``fp8e4nv`` -- the type behind
+    ``torch.float8_e4m3fn`` -- to a target's supported operands at SM 8.9 and
+    later. The dispatcher used to gate on "CUDA and not ROCm" alone, so an
+    Ampere target compiled a kernel that raised ``ValueError: type fp8e4nv not
+    supported in this architecture`` inside the layer's forward.
+
+    The compute capability is a hardware fact this host cannot change, so the
+    test injects it at the Torch boundary. Triton derives its target arch from
+    the same probe, so on the pre-fix tree the injected capability reproduces
+    the reported compile error end to end instead of only a wrong dispatch.
+    """
+
+    module = _all_ones_block_kernel()
+    x = torch.zeros((1, 128), dtype=torch.float16, device="cuda")
+    x[0, 0] = 0.25
+    expected = torch.zeros((1, 128), dtype=torch.float32, device="cuda")
+    expected[0, :] = 0.25
+
+    calls: list[str] = []
+    real_gemv = fp8_module.fp8_block_gemv
+    real_decode = fp8_module.fp8_block_decode
+    monkeypatch.setattr(
+        fp8_module,
+        "fp8_block_gemv",
+        lambda *a, **k: calls.append("fused") or real_gemv(*a, **k),
+    )
+    monkeypatch.setattr(
+        fp8_module,
+        "fp8_block_decode",
+        lambda *a, **k: calls.append("decode") or real_decode(*a, **k),
+    )
+
+    real_capability = torch.cuda.get_device_capability
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *a, **k: (8, 0))
+    try:
+        with torch.inference_mode():
+            output = module(x)
+    finally:
+        module._fp8_block_plan_key = None
+
+    assert calls == [], (
+        "#5400: the dispatcher selected a Triton FP8 operand SM 8.0 cannot lower: "
+        f"{calls}"
+    )
+    torch.testing.assert_close(output.float(), expected, rtol=2e-3, atol=2e-3)
+
+    if not _TRITON_DECODE_AVAILABLE:
+        # Nothing to control against: this host's own target cannot run the
+        # kernel either, which the skip marker above already reports.
+        return
+
+    # Control: at the host's real capability the same payload still uses the
+    # fused product, so the gate discriminates instead of always falling back.
+    monkeypatch.setattr(torch.cuda, "get_device_capability", real_capability)
+    assert fp8_block_triton.triton_fp8_supports_format(
+        module.weight.device, "float8_e4m3fn"
+    )
+    module._fp8_block_plan_key = None
+    calls.clear()
+    with torch.inference_mode():
+        accelerated = module(x)
+    assert calls == ["fused"]
+    torch.testing.assert_close(accelerated.float(), expected, rtol=2e-3, atol=2e-3)
 
 
 @_DECODE_SKIP

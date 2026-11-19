@@ -50,6 +50,45 @@ except Exception:  # pragma: no cover
 #: payloads keep the portable Torch decode.
 TRITON_FP8_FORMATS = frozenset({"float8_e4m3fn", "float8_e5m2"})
 
+#: Minimum NVIDIA compute capability per Triton FP8 operand type. Triton's
+#: CUDA backend only adds ``fp8e4nv`` -- the type behind ``torch.float8_e4m3fn``
+#: -- to a target's supported operands at SM 8.9 and later, so a kernel that
+#: loads those codes on Ampere (SM 8.0/8.6) fails to compile with
+#: ``ValueError: type fp8e4nv not supported in this architecture``. E5M2 lowers
+#: to ``fp8e5``, which every target supports. A format outside this table has
+#: no Triton operand at all and keeps the portable Torch decode.
+TRITON_FP8_MIN_CAPABILITY = {
+    "float8_e4m3fn": (8, 9),
+    "float8_e5m2": (0, 0),
+}
+
+
+def fp8_operand_supported(fp8_format: str, capability: tuple[int, int]) -> bool:
+    """Whether Triton can name *fp8_format* as an operand at *capability*."""
+
+    minimum = TRITON_FP8_MIN_CAPABILITY.get(fp8_format)
+    if minimum is None:
+        return False
+    return tuple(capability) >= minimum
+
+
+def triton_fp8_supports_format(device: torch.device, fp8_format: str) -> bool:
+    """Whether the Triton block kernels can load *fp8_format* on *device*.
+
+    The operand type a kernel declares is fixed by the payload's format, and
+    Triton's CUDA backend rejects ``fp8e4nv`` (``float8_e4m3fn``) on every
+    target below SM 8.9 (#5400). ROCm keeps the portable Torch decode, as
+    ``triton_fp8_available`` already decides for the whole path.
+    """
+
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return False
+    from .rocm import IS_ROCM
+
+    if IS_ROCM:
+        return False
+    return fp8_operand_supported(fp8_format, torch.cuda.get_device_capability(device))
+
 
 def _launch_device(device: torch.device):
     """Bind a Triton launch to the device that owns the operands.
@@ -181,7 +220,9 @@ def triton_fp8_available(device: Optional[torch.device] = None) -> bool:
     It is qualified on NVIDIA CUDA only. HIP's activation-dtype narrowing and
     its FP8 GEMM differ enough that this path needs its own numerical
     qualification before it is enabled there, so ROCm keeps the portable Torch
-    decode.
+    decode. This is the environment half of the gate: a payload also has to
+    pass :func:`triton_fp8_supports_format` for its own FP8 operand, which is
+    what the two ``*_supported`` payload predicates below check.
     """
 
     if not TRITON_AVAILABLE or not torch.cuda.is_available():
@@ -205,17 +246,21 @@ def fp8_block_decode_supported(
     codes: torch.Tensor,
     scale: torch.Tensor,
     *,
+    fp8_format: str,
     block_size: tuple[int, int],
     dtype: torch.dtype,
 ) -> bool:
     """Whether :func:`fp8_block_decode` accepts this payload.
 
     The kernel follows arbitrary strides, so only the geometry and the dtype
-    are constrained. Non-divisible or padded/cropped checkpoint scales keep the
-    portable decode.
+    are constrained, together with the device and format the Triton operand
+    needs. Non-divisible or padded/cropped checkpoint scales, and a format the
+    target cannot lower, keep the portable decode.
     """
 
     if not TRITON_AVAILABLE or codes.device.type != "cuda":
+        return False
+    if not triton_fp8_supports_format(codes.device, fp8_format):
         return False
     if codes.ndim != 2 or scale.device != codes.device or scale.dtype != torch.float32:
         return False
@@ -309,15 +354,17 @@ def fp8_block_gemv_payload_supported(
     codes: torch.Tensor,
     scale: torch.Tensor,
     *,
+    fp8_format: str,
     block_size: tuple[int, int],
     dtype: torch.dtype,
 ) -> bool:
     """Payload-side preconditions of :func:`fp8_block_gemv`.
 
     The fused kernel needs the exact divisible block layout, an FP16/BF16
-    activation dtype, and a 128-wide scale column block so each reduction step
-    owns exactly one scale. Everything else keeps the portable decode. Callers
-    check the activation tensor itself with the per-call check below.
+    activation dtype, a device whose Triton target can load the payload's FP8
+    operand, and a 128-wide scale column block so each reduction step owns
+    exactly one scale. Everything else keeps the portable decode. Callers check
+    the activation tensor itself with the per-call check below.
     """
 
     if not TRITON_AVAILABLE:
@@ -325,6 +372,8 @@ def fp8_block_gemv_payload_supported(
     if dtype not in (torch.float16, torch.bfloat16):
         return False
     if codes.device.type != "cuda" or scale.device != codes.device:
+        return False
+    if not triton_fp8_supports_format(codes.device, fp8_format):
         return False
     if codes.ndim != 2 or scale.dtype != torch.float32 or not scale.is_contiguous():
         return False
@@ -394,9 +443,12 @@ def fp8_block_gemv(
 __all__ = [
     "TRITON_AVAILABLE",
     "TRITON_FP8_FORMATS",
+    "TRITON_FP8_MIN_CAPABILITY",
     "fp8_block_decode",
     "fp8_block_decode_supported",
     "fp8_block_gemv",
     "fp8_block_gemv_payload_supported",
+    "fp8_operand_supported",
     "triton_fp8_available",
+    "triton_fp8_supports_format",
 ]
