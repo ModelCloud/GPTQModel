@@ -11,7 +11,9 @@ Purpose: compare the exact bits two compiled kernels produce on CPU.
 from __future__ import annotations
 
 import re
+
 import numpy as np
+
 
 M32 = np.uint64(0xFFFFFFFF)
 
@@ -26,7 +28,9 @@ def u64(f):
 
 def fma32(a, b, c):
     """Correctly rounded float32 a*b+c (the float64 product is exact)."""
-    a = a.astype(np.float64); b = b.astype(np.float64); c = c.astype(np.float64)
+    a = a.astype(np.float64)
+    b = b.astype(np.float64)
+    c = c.astype(np.float64)
     p = a * b
     r = p + c
     bb = r - p
@@ -114,7 +118,8 @@ def split_args(args: str):
         elif ch in "}]":
             depth -= 1
         if ch == "," and depth == 0:
-            out.append(cur.strip()); cur = ""
+            out.append(cur.strip())
+            cur = ""
         else:
             cur += ch
     if cur.strip():
@@ -345,7 +350,8 @@ class Emulator:
                 setr(a[0], mask_bits(field, bits), pm)
                 continue
             if base == "prmt":
-                x = mask_bits(val(a[1]), 32); y = mask_bits(val(a[2]), 32)
+                x = mask_bits(val(a[1]), 32)
+                y = mask_bits(val(a[2]), 32)
                 sel = int(a[3].rstrip("U"), 0) if not a[3].startswith("%") else None
                 assert sel is not None and len(parts) == 2, "prmt mode"
                 src = x | (y << np.uint64(32))
@@ -362,14 +368,16 @@ class Emulator:
                 dt, st = parts[-2], parts[-1]
                 if "rn" in parts or dt.startswith("f") or st.startswith("f"):
                     raise NotImplementedError(op)
-                sb = int(re.sub(r"\D", "", st)); db = int(re.sub(r"\D", "", dt))
+                sb = int(re.sub(r"\D", "", st))
+                db = int(re.sub(r"\D", "", dt))
                 v = val(a[1], sb)
                 v = sx(v, sb).astype(np.uint64) if st.startswith("s") else mask_bits(v, sb)
                 setr(a[0], mask_bits(v, db), pm)
                 continue
             if base == "shfl":
                 assert parts[2] == "bfly", op
-                x = val(a[1]); lm = int(a[2].rstrip("U"), 0)
+                x = val(a[1])
+                lm = int(a[2].rstrip("U"), 0)
                 lane = np.arange(T)
                 src = (lane & ~31) | ((lane & 31) ^ lm)
                 setr(a[0], x[:, src], pm)
@@ -381,7 +389,8 @@ class Emulator:
                 # strip cache qualifiers
                 rest = [p for p in rest if p not in ("ca", "cg", "cs", "lu", "cv", "nc", "L1::evict_last", "L1::evict_first")]
                 if rest and rest[0].startswith("v"):
-                    vec = int(rest[0][1:]); rest = rest[1:]
+                    vec = int(rest[0][1:])
+                    rest = rest[1:]
                 w = int(re.sub(r"\D", "", rest[-1])) // 8
                 if base == "ld":
                     dst = [d.strip() for d in a[0].strip("{} ").split(",")]

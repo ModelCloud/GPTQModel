@@ -26,6 +26,7 @@ except ImportError:  # no Triton (e.g. macOS): the module still imports for the 
 
 from .api import NF12Weight
 
+
 # The multi-row gate kernel below is written in Gluon so the accumulator layout
 # (and therefore the reduction tree) is pinned rather than inferred; plain
 # ``tl`` picks warpsPerCTA [2, 2] for a [2, 1024] tile and changes the bits.
