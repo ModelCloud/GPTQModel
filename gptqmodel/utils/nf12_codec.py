@@ -201,15 +201,32 @@ def decode(
     values = (values - ((values >> 15) << 16)).to(torch.int16)
 
     escaped = (meta == 0).all(1)
-    if bool(escaped.any()):
+    if escapes.dim() != 2 or escapes.shape[1] != 8 or escapes.dtype != torch.int16:
+        raise TypeError("escapes must be int16 [E, 8]")
+    if torch.compiler.is_compiling():
+        # ``bool(escaped.any())`` and ``int(index.max())`` are data-dependent
+        # host reads, so a traced graph cannot branch on them. The escaped rows
+        # are instead selected with a static-shape gather: every group gets a
+        # (clamped) escape row and ``where`` keeps it only where the mask is
+        # set. ``post_init()`` already validated the indices against the table,
+        # so the clamp never hides a corrupt checkpoint in normal loading.
+        if escapes.shape[0] > 0:
+            index = (
+                low[:, 0]
+                | (low[:, 1] << 8)
+                | (low[:, 2] << 16)
+                | (low[:, 3].to(torch.int64) << 24)
+            )
+            safe_index = index.clamp(0, escapes.shape[0] - 1).to(torch.int64)
+            replacement = escapes.to(values.device)[safe_index]
+            values = torch.where(escaped.unsqueeze(1), replacement, values)
+    elif bool(escaped.any()):
         index = (
             low[escaped, 0]
             | (low[escaped, 1] << 8)
             | (low[escaped, 2] << 16)
             | (low[escaped, 3].to(torch.int64) << 24)
         )
-        if escapes.dim() != 2 or escapes.shape[1] != 8 or escapes.dtype != torch.int16:
-            raise TypeError("escapes must be int16 [E, 8]")
         if int(index.max()) >= escapes.shape[0]:
             raise ValueError("escape index out of range")
         values[escaped] = escapes.to(values.device)[index.to(torch.int64)]

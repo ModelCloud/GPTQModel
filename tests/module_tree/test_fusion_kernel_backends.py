@@ -8,6 +8,7 @@ architecture exclusions are explicit skips, never portable-kernel substitutions.
 """
 
 import copy
+import gc
 import weakref
 
 import pytest
@@ -48,6 +49,12 @@ EXCLUDED = {
     "AwqSwordfishLinear": "Swordfish requires Blackwell",
     "W4ANVFP4Linear": "NVFP4 requires SM121+",
     "TorchInt8AwqLinear": "Retired INT4-to-INT8 expanded-weight backend",
+    # Portable CPU readers for layouts whose native kernel is CUDA-only
+    # (#4554, #4736). They dequantize to a dense tile per forward, so no
+    # fused executor group can consume their packed storage.
+    "AwqGEMVTorchLinear": "CPU-only portable GEMV reader (#4554); no fusion adapter",
+    "AwqGEMVFastTorchLinear": "portable GEMV_FAST reader (#4736, #5109); no fusion adapter",
+    "LLMAwqTorchLinear": "portable LLM_AWQ reader (#4736, #5109); no fusion adapter",
 }
 
 
@@ -485,6 +492,13 @@ def _check_native_fusion(cls, family, dtype, profile, record_property, *, unifor
     try:
         group.install()
         assert type(group.packed) is cls
+        # Since #4871 the module is a graph input of the compiled
+        # ``dequantize_weight``, so Dynamo leaves transient trace garbage
+        # (``LazyCache -> LazyVariableTracker -> ConstDictVariable`` of the
+        # module's buffers) that keeps the pre-fusion allocation alive until
+        # the cycle collector runs.  The contract is that no *live* owner
+        # remains, not that CPython never saw a temporary reference.
+        gc.collect()
         assert all(ref() is None for ref in refs), "Original native weight allocations were retained"
         with torch.inference_mode():
             for x, baseline in zip(xs, before):

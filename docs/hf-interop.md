@@ -48,14 +48,22 @@ flowchart TD
 ```
 
 The wrapper is installed by `_patch_optimum_gptqmodel_load_bridge` in
-`gptqmodel/__init__.py`. It is installed at the end of package import because
-`optimum.gptq` imports `gptqmodel` while it loads.
+`gptqmodel/__init__.py`. Installation is import-order independent: the eager
+attempt at the end of package import can lose a race with `optimum.gptq`
+importing `gptqmodel` mid-initialization, so the same idempotent install is
+retried from Transformers' `GptqHfQuantizer` pre/post weight-loading hooks and
+from the `hf_select_quant_linear_v2` / `hf_gptqmodel_post_init` entry points
+Optimum calls. A partially initialized `optimum.gptq` is treated as "retry
+later", never as "Optimum is not installed". Loading a native GPTQ checkpoint
+through `AutoModelForCausalLM.from_pretrained` therefore does not require an
+`import gptqmodel` first.
 
 | Situation | Before | After |
 | --- | --- | --- |
 | Native GPT-QModel checkpoint | Optimum replaces attention only; experts missing | Bridge rebuilds every serialized module, then Optimum post-init is replaced |
 | Optimum-owned checkpoint | Optimum path | Bridge returns `None`, original Optimum path |
 | Per-module `dynamic` bits/group size | Global config wins | `QuantizeConfig.from_pretrained` manifest wins |
+| Native checkpoint, plain `AutoModelForCausalLM` without `import gptqmodel` | Bridge not installed; global bits silently applied | Bridge installs from Transformers' GPTQ hooks before `convert_model` |
 | Optimum not installed | ImportError from Transformers | Same; the patch is skipped |
 
 ### AWQ: the second loader Transformers owns
@@ -95,19 +103,63 @@ wrapper: a native checkpoint gets the manifest-driven module build, and any
 other checkpoint keeps Transformers' own AWQ path because the bridge returns
 `None`.
 
+Unlike Optimum's GPTQ quantizer, `AwqQuantizer` never imports `gptqmodel`
+before it starts loading. The first import happens inside
+`replace_with_awq_linear`, i.e. while the prepare hook is already executing, so
+the patch cannot run the prepare step for the load that triggered it (#4795).
+`_ensure_transformers_awq_gptqmodel_load_bridge` therefore retries the
+idempotent install from the quantizer's post-weight hook,
+`hf_select_quant_linear_v2`, and the package init: every later AWQ load in the
+process gets the prepare step, and the post-weight hook repairs the load that
+triggered the import.
+
+The repair is exact for a dense checkpoint: it rebuilds each
+checkpoint-backed module from its serialized per-module `bits`/`group_size`
+(and its kernel class) and moves the already-assigned checkpoint tensors into
+it before the native post-init. Without it a `dynamic` AWQ checkpoint was built
+from the global config only, so on CPU the tensors were decoded with the wrong
+group size (silently wrong logits) and on CUDA the Marlin pack raised
+`AWQ qzeros shape must be ...`. A checkpoint that stores per-expert
+`experts.<n>.*.qweight` tensors cannot be repaired after the fact, because
+Transformers already dropped those tensors as UNEXPECTED: the post hook raises
+an actionable error instead of returning randomly initialized experts.
+
+```mermaid
+flowchart TD
+    A["plain AutoModelForCausalLM.from_pretrained"] --> B["AwqQuantizer._process_model_before_weight_loading"]
+    B --> C["replace_with_awq_linear"]
+    C --> D["import gptqmodel (first import, mid-load)"]
+    D --> E["package init installs the AWQ bridge"]
+    E --> F["transformers builds every module from the global config"]
+    F --> G["weights assigned"]
+    G --> H["patched post-weight hook"]
+    H --> I{"bridge context?"}
+    I -->|"no, dense checkpoint"| J["hf_gptqmodel_repair_awq_load rebuilds modules from the manifest"]
+    I -->|"no, per-expert checkpoint"| K["raise: import gptqmodel before loading"]
+    I -->|"yes (later loads)"| L["hf_gptqmodel_post_init_for_load"]
+    J --> L
+    style K fill:#f8d7da,stroke:#b02a37
+    style J fill:#d9f2d9,stroke:#2e7d32
+```
+
 | Situation | Before | After |
 | --- | --- | --- |
 | Native AWQ MoE checkpoint, `import gptqmodel` first | Attention quantized; every routed expert random | Every serialized expert module rebuilt as a packed kernel |
 | AWQ checkpoint written by another tool | Transformers' AWQ path | Unchanged; bridge declines it |
-| Native AWQ checkpoint, no `gptqmodel` import | Random experts, no error | Unchanged; only the save-time warning applies |
+| Native AWQ checkpoint, no `gptqmodel` import | Random experts, no error | Actionable error naming the dropped expert tensors |
 | Native AWQ attention-only checkpoint | Transformers' AWQ path | Bridge rebuilds the same modules |
+| Native AWQ `dynamic` checkpoint, no `gptqmodel` import | Global group size; CPU wrong logits, CUDA qzeros error | Post hook rebuilds every module from the manifest; matches `GPTQModel.load` |
+| Second AWQ load in the same process | Same as the first | Prepare hook runs before any layer is replaced |
 
-The save path reports the same hazard loudly through `hf_compat_warnings`
+The save path reports the same hazards loudly through `hf_compat_warnings`
 (`gptqmodel/models/writer.py`). A checkpoint that stores per-expert
 `experts.<n>.*.qweight` tensors emits a warning naming the missing /
 unexpected tensor failure, the fact that both built-in GPTQ and AWQ loaders
 only replace `nn.Linear`, and the remedy: import `gptqmodel` before
 Transformers so the native bridge is installed, or load with `GPTQModel.load`.
+A `dynamic` AWQ checkpoint emits a warning that a loader without the native
+AWQ bridge builds every module from the global `bits`/`group_size`, which
+silently changes CPU logits and raises a qzeros shape error on CUDA.
 
 ## 2. Legacy checkpoint key layouts
 
@@ -200,7 +252,11 @@ unknown name, `supports_quant_method` only warns
 `from_pretrained` then random-initializes every linear layer. GPT-QModel
 publishes several layouts transformers does not implement (`bitsandbytes`,
 `exl3`, `qqq`, `paro`, `macaq`, `nf12`, `tt-blockfloat`) plus the
-deliberate `gptqmodel_gguf` alias.
+deliberate `gptqmodel_gguf` alias. FP8 is load-only: production checkpoints
+keep their own `quant_method: "fp8"`, which transformers implements. The
+legacy `gptqmodel_fp8` name is refused, and so is `fp8` when the config
+declares `weight_scale_semantics: "inverse"`, because `FineGrainedFP8` would
+multiply GPT-QModel's inverse scale.
 
 `gptqmodel/__init__.py` registers a refusing quantizer for each name from the
 single table `REFUSED_HF_QUANT_METHODS` in `gptqmodel/_quant_methods.py`, using
@@ -214,17 +270,32 @@ flowchart TD
     C --> E["AUTO_QUANTIZER_MAPPING.setdefault<br/>GPTQModelRefusingHfQuantizer"]
     A --> F["_patch_transformers_gptqmodel_gguf_quantizer_compat"]
     F --> F2["GGUF_EXPORT_QUANT_METHOD registered"]
-    G["AutoModelForCausalLM.from_pretrained"] --> H["AutoHfQuantizer.from_config"]
-    H --> I{"quant_method registered?"}
+    S["save: _serialize_export_quant_method"] --> S5["quant_method: method value"]
+    S5 --> G
+    G["AutoModelForCausalLM.from_pretrained"] --> H["AutoHfQuantizer.merge_quantization_configs"]
+    H --> H2{"fp8 + inverse scale?"}
+    H2 -- yes --> K2["raise ValueError<br/>use GPTQModel.load"]
+    H2 -- no --> H3["AutoHfQuantizer.from_config"]
+    H3 --> I{"quant_method registered?"}
     I -- no --> J["warn and skip quantization<br/>random Linear weights"]
     I -- yes --> K["GPTQModelRefusingHfQuantizer.__init__<br/>raise ValueError"]
     style J fill:#f8d7da,stroke:#b02a37
     style K fill:#d9f2d9,stroke:#2e7d32
+    style K2 fill:#d9f2d9,stroke:#2e7d32
 ```
 
 `setdefault` keeps any quantizer transformers already owns (`gptq`, `awq`,
 `fp8`, and its own `vptq`), so this table only covers names transformers does
-not implement. In particular transformers 5 registers `bitsandbytes_4bit` and
+not implement. The `fp8` name is the one exception: transformers owns it, but
+GPT-QModel refuses a config that also declares
+`weight_scale_semantics: "inverse"` before transformers converts the dict,
+because `FineGrainedFP8Config` would otherwise drop that marker and multiply
+the inverse scale. GPT-QModel no longer writes FP8 checkpoints: FP8 is
+load-only, and the checkpoints it loads are production FP8 (`FineGrainedFP8`,
+DeepSeek/Qwen block scales, NVIDIA ModelOpt, MXFP8, NVFP8) that publish the
+standard `fp8` name with a multiplier. `_serialize_export_quant_method`
+therefore only has to special-case GGUF.
+In particular transformers 5 registers `bitsandbytes_4bit` and
 `bitsandbytes_8bit`, not the plain `bitsandbytes` that GPT-QModel writes, so
 that name is refused like the other GPT-QModel-only layouts. The registration runs on package import, so
 a process that never imports `gptqmodel` still only sees transformers'
@@ -239,6 +310,74 @@ per-format table also appears in [the MACaQ page](macaq.md#transformers-interop)
 | `quant_method` transformers already implements | its own quantizer | unchanged (`setdefault`) |
 | save of a GPT-QModel-only layout | silent | `hf_compat_warnings` entry naming the method |
 
+## 6. Keyword `device_map` and `max_memory`
+
+Transformers calls a quantizer's `preprocess_model` *before* it resolves
+`device_map="auto"` from `max_memory`, and it never forwards `max_memory` to
+the quantizer. The bridge therefore receives an unresolved accelerate keyword,
+not a placement.
+
+### Before: the keyword expanded to every visible GPU
+
+`hf_select_quant_linear{,_v2}` and `hf_gptqmodel_prepare_model_for_load` sent
+the keyword to `hf_normalize_device_device_map`, which expanded it with
+`expand_selector_device_family` and validated the result. On a host whose GPUs
+span compute-capability groups, the load was refused before `max_memory` was
+considered, even when the budget named one card. `GPTQModel.load` was already
+fixed for that (#4632/#4747) because it resolves the budget itself.
+
+```mermaid
+flowchart TD
+    A["from_pretrained device_map=auto max_memory N card"] --> B["preprocess_model device_map=auto"]
+    B --> C["hf_normalize_device_device_map expands every visible GPU"]
+    C --> D{"capabilities differ?"}
+    D -->|"yes"| E["ValueError: mixed compute capabilities"]
+    D -->|"no"| F["kernel valid on every GPU"]
+    E --> G["max_memory never applied"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class E,G failure;
+```
+
+### After: defer placement, validate what was resolved
+
+The bridge now normalizes an accelerate keyword to the accelerator *family*
+(`defer_keyword_placement`) instead of a concrete ordinal. A family selector
+makes kernel selection validate the candidate against every visible device, so
+whichever card the budget names is served; a homogeneous host keeps the
+historical concrete expansion, so kernel choice there is unchanged. Once
+Transformers has applied `max_memory` and Accelerate has dispatched the model,
+`model.hf_device_map` is the real placement and
+`validate_device_map_capability_groups` keeps the refusal for a map that truly
+spans generations, with a remedy that can work on this path.
+
+```mermaid
+flowchart TD
+    A["from_pretrained device_map=auto max_memory N card"] --> B["preprocess_model device_map=auto"]
+    B --> C{"host spans capability groups?"}
+    C -->|"no"| D["expand to every visible GPU as before"]
+    C -->|"yes"| E["keep accelerator family"]
+    D --> F["kernel valid on every expanded GPU"]
+    E --> G["kernel valid on every visible GPU"]
+    F --> H["Transformers resolves max_memory"]
+    G --> H
+    H --> I["Accelerate dispatches and sets hf_device_map"]
+    I --> J["validate_device_map_capability_groups"]
+    J -->|"one capability group"| K["load succeeds"]
+    J -->|"mixed groups"| L["ValueError: explicit map or CUDA_VISIBLE_DEVICES"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    classDef ok fill:#d9f2d9,stroke:#2e7d32;
+    class L failure;
+    class K ok;
+```
+
+| Situation | Before | After |
+| --- | --- | --- |
+| `device_map="auto", max_memory={1: ...}` on a mixed host | `ValueError: cuda:0=..., cuda:1=...` | Loads on the budgeted card |
+| `device_map="auto", max_memory={... , "cpu": ...}` on a mixed host | Same `ValueError` | Loads; CPU-offload kernel contract still applies (#5022) |
+| `max_memory` naming both capability groups | `ValueError` before weights load | `ValueError` after dispatch, naming an explicit map |
+| Homogeneous host, any keyword | One kernel for all visible GPUs | Unchanged |
+| Explicit `device_map={"": "cuda:0", "model.layers.1": "cuda:1"}` | `ValueError` | Unchanged, still refused up front |
+
 ## Failure contract
 
 | Condition | Before | After |
@@ -248,12 +387,14 @@ per-format table also appears in [the MACaQ page](macaq.md#transformers-interop)
 | AWQ module with non-divisible `in_features` | `ValueError` after calibration | Retuned group size before calibration |
 | Native save of a source with `auto_map` | Dangling `auto_map`, `OSError` on load | `auto_map` removed; config loads natively |
 | GPT-QModel-only `quant_method` in plain HF | warning + random weights | refusing quantizer raises when `gptqmodel` is imported |
+| Keyword `max_memory` budget on a mixed-capability host | `ValueError` before the budget applies | Loads when the budget names one capability group; a resolved mixed map is still refused |
 
 ## Tests
 
 | Test | Invariant |
 | --- | --- |
 | `tests/test_hf_gptqmodel_load_bridge.py::test_optimum_gptq_quantizer_is_routed_through_the_native_bridge` | Optimum's hooks call the bridge |
+| `tests/test_hf_optimum_bridge_import_order.py` | A fresh interpreter that never imports `gptqmodel` installs the bridge and keeps `dynamic` bit widths |
 | `tests/test_checkpoint_compat.py::test_hf_compat_warning_for_defused_moe_checkpoint` | Per-expert saves warn |
 | `tests/test_checkpoint_compat.py::test_saved_config_drops_auto_map_when_remote_code_is_not_copied` | `auto_map` is dropped only when `.py` files are not copied |
 | `tests/test_legacy_vl_checkpoint_load.py` | Legacy keys convert both directions and a real legacy VL checkpoint loads |
@@ -261,3 +402,4 @@ per-format table also appears in [the MACaQ page](macaq.md#transformers-interop)
 | `tests/test_checkpoint_interop_4053.py::test_hf_from_pretrained_refuses_every_gptqmodel_only_method` | Every table entry raises instead of loading random weights |
 | `tests/test_checkpoint_compat.py::test_every_gptqmodel_only_method_registers_a_refusing_quantizer` | The package-init guard covers the whole table |
 | `tests/test_checkpoint_compat.py::test_hf_compat_warning_for_every_gptqmodel_only_method` | Save-time warnings name every table entry |
+| `tests/test_hf_bridge_mixed_capability_5084.py` | A keyword map is not validated before `max_memory`; the resolved map is |

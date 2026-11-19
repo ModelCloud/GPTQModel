@@ -1000,3 +1000,35 @@ def test_nf12_module_preserves_leading_dimensions_on_hip():
         x = (torch.randn(shape, device="cuda") * 0.05).to(torch.bfloat16)
         got = layer(x)
         assert tuple(got.shape) == (*shape[:-1], n), shape
+
+
+def test_compiled_decode_matches_eager_with_escapes():
+    """A traced decode must reproduce escaped groups bit for bit.
+
+    The compiled path selects escaped groups with a static-shape gather instead
+    of ``bool(mask.any())`` / ``int(index.max())`` host reads. This pins the
+    exact values on a checkpoint that actually has escape rows.
+    """
+
+    from gptqmodel.quantization.nf12 import quantize_nf12_weight
+
+    torch.manual_seed(0)
+    weight = (torch.randn(64, 128) * torch.logspace(-4, 4, 128)).to(torch.bfloat16)
+    result = quantize_nf12_weight(weight)
+    assert result.escapes.shape[0] > 0
+
+    eager = nf12_codec.decode(
+        result.packed, result.escapes, result.exp_base, weight.shape[0], weight.shape[1]
+    )
+    assert torch.equal(eager, weight)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(
+        lambda packed, escapes: nf12_codec.decode(
+            packed, escapes, result.exp_base, weight.shape[0], weight.shape[1]
+        ),
+        fullgraph=True,
+        backend="inductor",
+    )
+    got = compiled(result.packed, result.escapes)
+    assert torch.equal(got, eager)

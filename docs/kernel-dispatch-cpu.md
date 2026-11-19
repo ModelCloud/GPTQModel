@@ -138,6 +138,20 @@ the accelerator family for kernel validation. The loader then runs
 moves them to the execution device only for `forward`
 (`simple_dispatch_model` -> `cpu_offload_with_hook`).
 
+Two placement rules keep that path runnable (#4866):
+
+* A tied group is never split across devices. `retie_parameters` rebinds the
+  whole group to one tensor, so a map with `lm_head` on `cpu` and
+  `model.embed_tokens` on the accelerator would put the shared weight on CPU
+  while the embedding's `AlignDevicesHook` kept moving `input_ids` to the
+  accelerator. The group follows the accelerator of its GPU member, and the
+  hooks share one materialized copy per device through Accelerate's
+  `tied_params_map`.
+* A module with no parameters (rotary embeddings) cannot carry
+  `CpuOffload.pre_forward`, which reads `next(module.parameters())`. Such a
+  module mapped to `cpu` stays on `main_device` with an `AlignDevicesHook`
+  instead, the same choice `max_memory` makes for structural modules.
+
 A CUDA-only kernel such as `MarlinLinear` or `ExllamaV2Linear` needs CUDA during
 `post_init`, so it cannot serve that map. `TritonV2Linear` is CUDA-only for
 execution but its `post_init` only validates `g_idx` bounds with Torch ops, so
@@ -164,6 +178,75 @@ flowchart TD
 `BaseQuantLinear` is `False` (fail closed). An explicit `gptq_marlin` or
 `gptq_exllamav2` request with a CPU-offload map raises with the same message.
 
+### The post-init payload probe
+
+`gptqmodel_post_init` runs `post_init` for every remaining `BaseQuantLinear`.
+Before that call it asks the module whether its checkpoint payload is a meta
+placeholder, and only a meta layer goes through `_post_init_offloaded`. That
+probe is a kernel contract, not a GPTQ attribute (#5261):
+
+* `checkpoint_payload_tensors()` resolves the names in
+  `CHECKPOINT_REQUIRED_BUFFERS` (dotted names such as VPTQ's
+  `centroids.weight` are allowed) and falls back to every registered tensor
+  when the declaration is empty or the live tensors are absent.
+* `checkpoint_payload_is_meta()` is true when any of those tensors is a meta
+  placeholder.
+
+`CHECKPOINT_REQUIRED_BUFFERS` is the same declaration
+`validate_checkpoint_qweights` uses, so the probe cannot drift from the
+loader's required payload.
+
+| Kernel family | Payload tensors |
+| --- | --- |
+| GPTQ / RTN (`PackedGroupedQuantLinear`) | `qweight`, `scales`, `qzeros` (+ `g_idx` with `desc_act`) |
+| Marlin / AWQ Marlin | inherits the GPTQ payload |
+| NF12 | `nf12_packed`, `nf12_escapes`, `nf12_exp_base` |
+| QQQ | `B`, `s_channel`, `s_group` |
+| VPTQ | `indices` + the live codebook / norm / permutation tensors |
+| FP8 | `weight`, `weight_scale_inv` |
+| BitsAndBytes | `weight` + the live quant-state tensors |
+| MacaQ | `W_packed`, `W_scales`, `BH`, `pre_scale` |
+
+```mermaid
+flowchart TD
+    A["gptqmodel_post_init(submodule)"] --> B["checkpoint_payload_is_meta()"]
+    B --> C["checkpoint_payload_tensors()<br/>resolve CHECKPOINT_REQUIRED_BUFFERS"]
+    C --> D{"any payload tensor<br/>is meta?"}
+    D -- "no, resident" --> E["submodule.post_init()"]
+    D -- "yes, disk-offloaded" --> F{"SUPPORTS_CPU_OFFLOAD?"}
+    F -- "no" --> G["RuntimeError<br/>fail closed"]
+    F -- "yes" --> H["hook.pre_forward -> post_init<br/>-> hook.post_forward"]
+    style E fill:#d1e7dd,stroke:#146c43,stroke-width:2px
+    style G fill:#f8d7da,stroke:#b02a37,stroke-width:2px
+    style H fill:#d1e7dd,stroke:#146c43,stroke-width:2px
+```
+
+Before #5261 the first decision read `module.qweight.is_meta` directly. NF12,
+QQQ, VPTQ and BitsAndBytes never register `qweight`, so every plain
+single-GPU load raised
+`AttributeError: '<Kernel>' object has no attribute 'qweight'` even though no
+offload was involved.
+
+```mermaid
+flowchart LR
+    subgraph Before["Before #5261"]
+        A1["BaseQuantLinear"] --> A2["module.qweight.is_meta"]
+        A2 --> A3["AttributeError for<br/>NF12 / QQQ / VPTQ / BnB"]
+    end
+    subgraph After["After #5261"]
+        B1["BaseQuantLinear"] --> B2["checkpoint_payload_is_meta()"]
+        B2 --> B3["family payload declaration"]
+        B3 --> B4["resident -> post_init()<br/>meta -> offload hook"]
+    end
+```
+
+A resident layer is initialized exactly once: the probe returns `False`, so
+`post_init` runs in place and the layer never enters the materialize/restore
+path. A disk-offloaded layer still runs `post_init` while materialized and is
+returned to meta afterwards, so the offload map stays authoritative.
+`_post_init_cpu_offloaded_marlin` uses the same probe for the GPTQ and AWQ
+Marlin repack path.
+
 Measured on Qwen2.5-0.5B-Instruct-GPTQ-Int4 with
 `model.layers.2`/`model.layers.3` mapped to `cpu`:
 
@@ -171,6 +254,39 @@ Measured on Qwen2.5-0.5B-Instruct-GPTQ-Int4 with
 | --- | --- | --- | --- |
 | AUTO, before | `MarlinLinear` | `ValueError: GPTQ Marlin requires CUDA tensors, got cpu` | n/a |
 | AUTO, after | `TritonV2Linear` | loads | bitwise equal (`rel 0.0`) |
+
+### The Transformers/Optimum bridge derives the same contract
+
+`GPTQModel.load` is not the only entry point that can receive an offloading map.
+`AutoModelForCausalLM.from_pretrained` reaches the kernels through three
+selectors, and all three must derive `cpu_offload` from the map they are handed
+(#5022):
+
+* `gptqmodel.utils.importer.hf_select_quant_linear` — Transformers' GPTQ
+  quantizer (`GptqHfQuantizer`).
+* `gptqmodel.utils.importer.hf_select_quant_linear_v2` — Optimum's
+  `GPTQQuantizer.convert_model` and Transformers' AWQ `replace_with_awq_linear`.
+* `gptqmodel.utils.hf_load.hf_gptqmodel_prepare_model_for_load` — the native
+  bridge, which calls `make_quant` directly instead of a selector.
+
+`utils.importer.device_map_uses_cpu` is the single implementation (the native
+loader's `_device_map_uses_cpu` delegates to it), and
+`utils.importer.auto_cpu_offload` narrows it to AUTO: an explicit
+`backend="marlin"` with a CPU-offload map stays the caller's choice, because
+`_post_init_cpu_offloaded_marlin` can repack such a layer.
+
+That repack needs a **writable in-memory** map. Transformers dispatches through
+Accelerate, which attaches
+`AlignDevicesHook(weights_map=PrefixedDataset(OffloadedWeightsLoader(...)))` —
+not the plain `dict` the original guard accepted. `_cpu_offload_writable_storage`
+unwraps the prefix and uses the loader's `state_dict` (its `index` names the
+entries that live on disk and therefore cannot be rewritten). A disk-backed
+entry still fails closed with the original
+`CPU-offloaded Marlin requires a writable in-memory weights map.` message.
+
+`AwqMarlinLinear` shares that post-init: it repacks AWQ weights into the Marlin
+layout the same way, so before the fix it ran `post_init` on `meta` and raised
+`AWQ Marlin requires CUDA tensors, got 'meta'` for every offloading map.
 
 ## 3. `max_memory` placement
 

@@ -104,9 +104,9 @@ Before-lines are from `origin/main`; after-lines are this change.
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| Captured mask | layer 0's mask only; `capture_first_layer_input_kwargs` returned the caller's kwargs unchanged (`gptqmodel/models/base.py:3284`) | one mask per declared layer type in `capture_layer_type_replay_kwargs` (`gptqmodel/models/base.py:3457`), built by `_build_layer_type_attention_mask` (`:3409`) |
-| Captured RoPE | layer 0's tuple only | one tuple per declared type when the rotary takes a layer type (`_build_layer_type_position_embeddings`, `gptqmodel/models/base.py:3440`) |
-| Replay selection | none; `prepare_layer_replay_kwargs` was a no-op (`gptqmodel/models/base.py:3334`) | layer's declared type or `self_attn.layer_idx` (`_apply_layer_type_replay_kwargs`, `gptqmodel/models/base.py:3642`, called from `prepare_layer_replay_kwargs` at `:3623`) |
+| Captured mask | layer 0's mask only; `capture_first_layer_input_kwargs` returned the caller's kwargs unchanged (`gptqmodel/models/base.py:3284`) | one mask per declared layer type in `gptqmodel/models/base.py::capture_layer_type_replay_kwargs`, built by `_build_layer_type_attention_mask` (`:3409`) |
+| Captured RoPE | layer 0's tuple only | one tuple per declared type when the rotary takes a layer type (`gptqmodel/models/base.py::_build_layer_type_position_embeddings`) |
+| Replay selection | none; `prepare_layer_replay_kwargs` was a no-op (`gptqmodel/models/base.py:3334`) | layer's declared type or `self_attn.layer_idx` (`_apply_layer_type_replay_kwargs`, `gptqmodel/models/base.py:4274`, called from `prepare_layer_replay_kwargs` at `:3623`) |
 | Raw 2-D padding mask | discarded (`gptqmodel/models/base.py:3272`) | retained for one example (`gptqmodel/models/base.py:3285`) |
 | Capture stage | `gptqmodel/looper/stage_inputs_capture.py:296` | same call, plus the optional `capture_layer_type_replay_kwargs` hook at `gptqmodel/looper/stage_inputs_capture.py:306` |
 | Replay stage | `gptqmodel/looper/forward_executor.py:394` | same call; selection happens inside the default `prepare_layer_replay_kwargs` |
@@ -170,6 +170,106 @@ rotary tuple) and replaying the stack reproduces the native last hidden state.
 It covers `gemma3_text`, `gpt_oss`, and a `llama4_text` configuration whose
 layer 0 is `full_attention` and layer 1 is `chunked_attention`; the chunked case
 also pins that a materialized mask is injected after a causal-skip layer 0.
+
+## PanGu top-query replay and non-layer module residency
+
+PanGu-α's `GPTPanguModel.forward` applies `transformer.ln_f` before the last
+decoder block and passes that block `custom_query = transformer.wqe(position_ids)`.
+`PanguAlphaQModel.prepare_layer_replay_kwargs` reproduces those two operations
+for the replayed top-query block. Unlike a decoder layer, `ln_f` and `wqe` are
+not part of the quantized module tree, so the quantizer never materializes them
+for replay. Before the fix for issue #5135 the hook assumed both were resident
+on the layer's device.
+
+Introduced by the fix in [PR #5169](https://github.com/ModelCloud/GPTQModel/pull/5169).
+
+### Before the fix
+
+```mermaid
+flowchart TD
+    A["ForwardExecutor.run_single<br/>forward_executor.py:457"] --> B["PanguAlphaQModel.prepare_layer_replay_kwargs<br/>pangu_alpha.py:64"]
+    B --> C{"last decoder layer?"}
+    C -- no --> D["return cached kwargs"]
+    C -- yes --> E["read transformer.ln_f and hidden_states"]
+    E --> F{"ln_f device equals hidden device?"}
+    F -- yes --> G["ln_f output"]
+    F -- no --> H["move_to(ln_f, hidden.device)<br/>pangu_alpha.py:101"]
+    H --> I{"meta tensors behind a recognized hook?"}
+    I -- no --> J["NotImplementedError<br/>Cannot move a module that still contains meta tensors"]
+    I -- yes --> G
+    G --> K["wqe(position_ids.to(target_device))<br/>pangu_alpha.py:121"]
+    K --> L{"wqe on target_device?"}
+    L -- no --> M["RuntimeError<br/>index is on cuda:0, weight is on cpu"]
+    L -- yes --> N["custom_query"]
+    style J fill:#ffccc7,stroke:#cf1322
+    style M fill:#ffccc7,stroke:#cf1322
+```
+
+The default `offload_to_disk=True` path offloads the base modules after input
+capture. `ln_f`/`wqe` become meta placeholders behind an Accelerate
+`SequentialHook`, which `move_to` did not recognize as an offload hook, so the
+last layer raised the `NotImplementedError`. With `offload_to_disk=False` the
+modules stayed on CPU while `position_ids` moved to `cuda:0`, producing the
+embedding device mismatch.
+
+### After the fix
+
+```mermaid
+flowchart TD
+    A["ForwardExecutor.run_single"] --> B["prepare_layer_replay_kwargs"]
+    B --> C{"last decoder layer?"}
+    C -- no --> D["return cached kwargs"]
+    C -- yes --> E["_materialize_replay_module(ln_f, hidden.device)<br/>pangu_alpha.py:95"]
+    E --> F{"meta tensors?"}
+    F -- no --> H["move_to(ln_f, hidden.device)"]
+    F -- yes --> G{"offload hook?<br/>SequentialHook-aware"}
+    G -- yes --> I["undo_offload_to_disk(ln_f, device)"]
+    G -- no --> J{"turtle_model available?"}
+    J -- yes --> K["shell_module_materialize(ln_f, device)"]
+    J -- no --> L["move_to raises the existing clear error"]
+    I --> H
+    K --> H
+    H --> M["ln_f(hidden)"]
+    M --> N["_materialize_replay_module(wqe, replay_device)<br/>pangu_alpha.py:128"]
+    N --> O["wqe(position_ids.to(replay_device))"]
+    O --> P["custom_query on replay_device"]
+    style L fill:#ffccc7,stroke:#cf1322
+    style P fill:#f6ffed,stroke:#389e0d
+```
+
+`_materialize_replay_module` (`pangu_alpha.py:132`) first checks for meta
+tensors. It restores a disk-offloaded module with `undo_offload_to_disk` when
+`has_cpu_offload_hooks` finds an offload hook (including one wrapped in
+`SequentialHook`), or materializes a lazy shell with the definition's
+`shell_module_materialize`. Only then does it call `move_to`, which is a no-op
+for a resident module already on the target device.
+
+### Before / after
+
+Before-lines are from `origin/main`; after-lines are this change.
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Final norm | `move_to(norm, device=...)` on a meta offloaded module (`pangu_alpha.py:101`) raised `NotImplementedError` | `_materialize_replay_module` restores through the offload or turtle helper (`pangu_alpha.py:95`, `:132`) |
+| Lazy shell | no materialization path; a meta shell has no hook to restore from | `shell_module_materialize` from `turtle_model` (`pangu_alpha.py:153`) |
+| Query embedding | `wqe(position_ids.to(target_device))` indexed a CPU/meta weight (`pangu_alpha.py:121`) | `wqe` is materialized and placed on `replay_device` first (`pangu_alpha.py:128`) |
+| Target resolution | norm used the hidden device, `wqe` used `target_device` implicitly | `replay_device = target_device` or the hidden/position device when it is `None` (`pangu_alpha.py:117`) |
+
+### Failure contracts
+
+| Situation | Behaviour |
+| --- | --- |
+| Default offload, `ln_f`/`wqe` meta behind a `SequentialHook` | restored from the offload bundle, hook detached |
+| LazyTurtle shell, meta with no offload hook | materialized from the checkpoint via `shell_module_materialize` |
+| Modules already resident on the target device | `move_to` is a no-op; replay values are unchanged |
+| Meta module with neither an offload hook nor a turtle source | `move_to` raises the existing clear `NotImplementedError` |
+| `target_device` is `None` | falls back to the hidden-state or position-id device |
+
+The replay math is unchanged. On the resident CPU fixture the `ln_f` output and
+`custom_query` equal the pre-fix values exactly (`torch.equal`). In the
+end-to-end 2-layer tiny PanGu run the max absolute difference against a resident
+HF reference is `0.0` on CPU and `7.15e-7` on CUDA for the `ln_f` output
+(float32 device rounding); `custom_query` is exactly equal in both cases.
 
 ## Extension points
 

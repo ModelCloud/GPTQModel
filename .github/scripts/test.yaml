@@ -1,5 +1,5 @@
 common:
-  py: 3.14t # common config
+  py: 3.14.10t # common config
   gpu: 1
   sm: 0
   skip: false

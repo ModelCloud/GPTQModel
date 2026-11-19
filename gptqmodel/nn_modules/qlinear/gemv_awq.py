@@ -12,7 +12,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.packing_utils import pack_awq_columns
+from ...quantization.awq.utils.packing_utils import pack_awq_columns, source_weight_out_in
 from ...utils.awq import awq_gemmv2_forward, awq_gemv_forward
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
@@ -41,14 +41,18 @@ log = setup_logger()
 # stay CUDA-only and keep raising the message above; a ROCm user can now pick
 # the Triton backend explicitly (``BACKEND.AWQ_GEMV_TRITON``) and AUTO stays off
 # it so no existing checkpoint silently changes kernel.
+# ``FORMAT.GEMV_FAST``/``FORMAT.LLM_AWQ`` are excluded from this refusal: their
+# portable Torch readers declare ROCm and read the identical interleaved layout
+# (issue #5109).
 AWQ_GEMV_ROCM_UNSUPPORTED = (
-    "AWQ GEMV/GEMV_FAST/LLM_AWQ kernels require the native CUDA AWQ extension, "
-    "which is not available on ROCm (it includes cuda_fp16.h and CUDA-only inline "
-    "asm, and its hipified warp-sync reduction rejects wave32). Use the AWQ GEMM "
-    "layout with `backend=AUTO` or `BACKEND.AWQ_GEMM_TRITON`, which has a Triton "
-    "ROCm kernel, instead of FORMAT.GEMV/GEMV_FAST/LLM_AWQ. For a GEMV-layout "
-    "checkpoint, `BACKEND.AWQ_GEMV_TRITON` runs the same packed layout with a "
-    "portable Triton kernel on ROCm."
+    "AWQ FORMAT.GEMV requires the native CUDA AWQ extension, which is not "
+    "available on ROCm (it includes cuda_fp16.h and CUDA-only inline asm, and "
+    "its hipified warp-sync reduction rejects wave32). Use the AWQ GEMM layout "
+    "with `backend=AUTO` or `BACKEND.AWQ_GEMM_TRITON`, which has a Triton ROCm "
+    "kernel, or load this GEMV checkpoint with `BACKEND.AWQ_GEMV_TRITON`, which "
+    "runs the same packed layout with a portable Triton kernel on ROCm. "
+    "`FORMAT.GEMV_FAST`/`FORMAT.LLM_AWQ` pack and load through their portable "
+    "Torch readers here."
 )
 
 
@@ -86,11 +90,12 @@ class AwqGEMVLinear(AWQuantLinear):
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemv"
 
-    # Calls the native `awq.gemv_forward` custom op, which has no fake/meta
-    # kernel, so dynamo breaks. The JIT extension could not build on this host
-    # (no CUDA_HOME/nvcc); EAGER is the conservative static answer.
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output. The native
+    # ``awq.gemv_forward`` op has no fake/meta kernel, so ``torch.compile``
+    # stops at EAGER.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
 
     @classmethod
     def validate(
@@ -260,7 +265,7 @@ class AwqGEMVLinear(AWQuantLinear):
         qscales = torch.zeros(
             (
                 scales.shape[0],
-                calculate_zeros_width(linear.in_features, self.group_size) * pack_num,
+                calculate_zeros_width(self.in_features, self.group_size) * pack_num,
             ),
             dtype=torch.float16,
             device=scales.device,
@@ -280,9 +285,10 @@ class AwqGEMVLinear(AWQuantLinear):
         # Gather each input column's group scale/zero in a single pass instead
         # of launching one tiny kernel per input column.  The GEMV layout keeps
         # scales as [out_features, groups], so the group index selects columns.
-        group_index = torch.arange(self.in_features, device=linear.weight.device) // self.group_size
+        weight = source_weight_out_in(linear)
+        group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
         intweight = torch.round(
-            (linear.weight.data.float() + scale_zeros.index_select(1, group_index))
+            (weight.float() + scale_zeros.index_select(1, group_index))
             / self.scales.index_select(1, group_index).float()
         ).clamp_(0, (1 << self.bits) - 1).to(torch.int32)
         self.register_buffer("qweight", pack_awq_columns(intweight, self.bits))
@@ -291,7 +297,7 @@ class AwqGEMVLinear(AWQuantLinear):
         # Pad the group axis up to the packed width so the vectorized packer
         # reproduces the loop's out-of-range skips (those codes stay zero).
         padded_zeros = torch.zeros(
-            (zeros.shape[0], calculate_zeros_width(linear.in_features, self.group_size) * pack_num),
+            (zeros.shape[0], calculate_zeros_width(self.in_features, self.group_size) * pack_num),
             dtype=torch.int32,
             device=zeros.device,
         )
@@ -392,6 +398,14 @@ class AwqGEMVTritonLinear(AwqGEMVLinear):
     # of the eager forward succeeds.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
     SUPPORTS_GRAPH_CAPTURE = True
+    # Only reachable through an explicit `BACKEND.AWQ_GEMV_TRITON` selection
+    # (FORMAT priority 0), and no static-cache `generate()` win has been
+    # measured for it, so the #4669 policy stays off (#4984).
+    SUPPORTS_COMPILE = False
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "explicit-selection-only GEMV decode kernel; no static-cache generate "
+        "win measured (#4984)"
+    )
 
     @classmethod
     def validate(cls, bits, group_size=-1, desc_act=False, sym=True, in_features=None,
@@ -488,7 +502,8 @@ class AwqGEMVTorchLinear(AwqGEMVLinear):
     It is a documented fallback, not an AUTO replacement: the priority-0
     ``SUPPORTS_FORMATS`` entry keeps the accelerator AUTO order (native CUDA
     GEMV, explicit Triton GEMV) untouched, and ``select_quant_linear`` only
-    reaches it for a CPU-only target through ``PORTABLE_CPU_FALLBACK``.
+    reaches it for a CPU-only target through ``PORTABLE_CPU_FALLBACK`` (ROCm
+    uses the Triton reader, which keeps the weights packed).
     """
 
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH]
@@ -515,11 +530,19 @@ class AwqGEMVTorchLinear(AwqGEMVLinear):
     # Consumed by select_quant_linear() when AUTO has no CPU kernel for GEMV.
     PORTABLE_CPU_FALLBACK = True
 
-    # Measured on NVIDIA GB10 (sm_121) and on CPU, torch 2.11.0+cu130: every
-    # compile level including reduce-overhead passes; the eager forward also
-    # captures into a CUDA graph on the GPU probe.
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    # CPU-only kernel (`SUPPORTS_DEVICES` above), so the CPU measurement is the
+    # declaration: on torch 2.16.0.dev20261021+cpu eager=True, graph_breaks=0,
+    # and dynamo/aot_eager/inductor all pass. CUDA-graph capture is CUDA-only,
+    # so it is not a CPU level.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
     SUPPORTS_GRAPH_CAPTURE = True
+    # CPU-only portable fallback for the packed GEMV layout: compiling a CPU
+    # static-cache decode has no measured win, so the #4669 policy stays off
+    # (#4984).
+    SUPPORTS_COMPILE = False
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "CPU-only portable GEMV fallback; no measured static-cache win (#4984)"
+    )
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("backend", BACKEND.AWQ_TORCH)

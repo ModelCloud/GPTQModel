@@ -26,10 +26,15 @@ from transformers import CompileConfig, GenerationConfig
 
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear
+from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+from gptqmodel.nn_modules.qlinear.macaq import MacaqLinear, MacaqTritonLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.paro import ParoLinear
+from gptqmodel.nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
 
 
 pytestmark = [pytest.mark.cpu]
@@ -94,6 +99,23 @@ def test_compile_clean_kernel_keeps_auto_compile():
 
     assert harness._kernels_support_compile() is True
     assert harness._generation_compile_kwargs({}) == {}
+
+
+def test_native_exl3_linear_is_not_compile_clean():
+    """The native EXL3 kernel breaks graphs but is not a ``BaseQuantLinear``.
+
+    ``_ensure_inner`` holds an RLock and, in bf16, reads a host scalar, so the
+    static-cache auto-compile was 2.4-14x slower than eager. Because the kernel
+    lives outside ``qlinear/``, the policy search missed it and a native EXL3
+    model looked dense, which kept the compile on (#4917).
+    """
+
+    from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
+
+    harness = _Harness(ExllamaV3Linear(in_features=8, out_features=8, name="proj"))
+
+    assert harness._kernels_support_compile() is False
+    assert harness._generation_compile_kwargs({}) == {"disable_compile": True}
 
 
 def test_an_explicit_disable_compile_false_is_respected():
@@ -219,9 +241,74 @@ def test_optimize_wrapper_is_unwrapped():
 
 
 def test_kernel_declarations():
-    """Only a measured non-pessimization opts in; subclasses do not inherit it."""
+    """Only a trace-clean, measured win opts in; subclasses do not inherit it."""
 
     assert MarlinLinear.SUPPORTS_COMPILE is False
     assert TorchLinear.SUPPORTS_COMPILE is False
+    # AWQ is trace-clean (`SUPPORTS_COMPILE_LEVEL = CUDAGRAPH`) and its compiled
+    # static-cache decode beats eager, so it stays opted in (#4669, #4739).
     assert AwqTorchLinear.SUPPORTS_COMPILE is True
     assert ParoLinear.SUPPORTS_COMPILE is False
+    # FP8 traces clean under `fullgraph=True` and its compiled static-cache
+    # decode is 3x faster than eager here, so it must not stay opted out (#4739).
+    assert TorchFP8Linear.SUPPORTS_COMPILE is True
+    # BnB traces to one graph with zero breaks and its compiled static-cache
+    # decode is 2.2-3.5x faster than eager on the reporter's hardware, and AUTO
+    # picks it for every BitsAndBytes checkpoint on CUDA (#4984).
+    assert BitsAndBytesLinear.SUPPORTS_COMPILE is True
+    # `MACAQ_TORCH` is the same story (9x faster compiled, one graph, zero
+    # breaks); the Triton sibling breaks the graph on `device_count()` and must
+    # not inherit the opt-in (#4984).
+    assert MacaqLinear.SUPPORTS_COMPILE is True
+    assert MacaqTritonLinear.SUPPORTS_COMPILE is False
+    # The portable QQQ/VPTQ forwards trace with zero breaks and their compiled
+    # static-cache decode is several times faster than eager (#5102). The
+    # FP16-only QQQ CUDA kernel and the fused VPTQ CUDA kernel stay out: their
+    # own decode loops recompile and lose.
+    assert QQQTorchLinear.SUPPORTS_COMPILE is True
+    assert QQQLinear.SUPPORTS_COMPILE is False
+    assert VPTQLinear.SUPPORTS_COMPILE is True
+
+
+def test_a_compile_capable_kernel_keeps_the_auto_compile():
+    """A real traceable kernel must not be forced eager by the policy (#4984).
+
+    `MacaqLinear` declares `SUPPORTS_COMPILE_LEVEL = CUDAGRAPH`; before #4984 it
+    inherited `SUPPORTS_COMPILE = False`, so `generate(cache_implementation=
+    "static")` silently added `disable_compile=True` and ran 9x slower.
+    """
+
+    harness = _Harness(MacaqLinear(bits=4, group_size=32, in_features=32, out_features=32))
+
+    assert harness._kernels_support_compile() is True
+    assert harness._generation_compile_kwargs({"cache_implementation": "static"}) == {
+        "cache_implementation": "static"
+    }
+
+
+def test_a_compile_capable_opt_out_must_record_its_reason():
+    """The level and the policy flag cannot drift apart silently (#4984)."""
+
+    from gptqmodel.nn_modules.qlinear._compile_support import (
+        COMPILE_LEVEL,
+        compile_policy_is_justified,
+    )
+
+    class _SilentOptOut(BaseQuantLinear):
+        """Declares a traceable level but keeps the policy off with no reason."""
+
+        SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+        SUPPORTS_GRAPH_CAPTURE = True
+
+        def __init__(self):
+            nn.Module.__init__(self)
+
+    class _DocumentedOptOut(_SilentOptOut):
+        SUPPORTS_COMPILE_EAGER_REASON = (
+            "measured 1.3-8x slower than eager under a static-cache generate"
+        )
+
+    assert compile_policy_is_justified(_SilentOptOut) is False
+    assert _Harness(_SilentOptOut())._kernels_support_compile() is False
+    assert compile_policy_is_justified(_DocumentedOptOut) is True
+    assert _Harness(_DocumentedOptOut())._kernels_support_compile() is False

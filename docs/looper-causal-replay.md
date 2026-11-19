@@ -28,8 +28,8 @@ flowchart TD
 | Before this extraction layer | Carried implementation |
 |---|---|
 | Previous stack layer: `gptqmodel/looper/forward_executor.py:36` | `gptqmodel/looper/forward_executor.py:36`: `ForwardExecutor` |
-| Previous stack layer: `gptqmodel/looper/stage_inputs_capture.py:47` | `gptqmodel/looper/stage_inputs_capture.py:47`: `StageInputsCapture` |
-| Previous stack layer: `gptqmodel/quantization/gptq.py:292` | `gptqmodel/quantization/gptq.py:328`: `GPTQ` |
+| Previous stack layer: `gptqmodel/looper/stage_inputs_capture.py:47` | `gptqmodel/looper/stage_inputs_capture.py:72`: `StageInputsCapture` |
+| Previous stack layer: `gptqmodel/quantization/gptq.py:292` | `gptqmodel/quantization/gptq.py:452`: `GPTQ` |
 
 The previous stack layer supplies dependencies. Standalone store/policy APIs are connected by the later processor, looper and model layers rather than being enabled implicitly here.
 

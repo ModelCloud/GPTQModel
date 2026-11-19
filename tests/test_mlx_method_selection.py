@@ -16,7 +16,6 @@ pytest.importorskip("mlx.core")
     ("paro", "paro", 4, 128, True, "ParoMlxQuantLinear"),
     ("qqq", "qqq", 4, 128, True, "QQQMlxQuantLinear"),
     ("gguf", "gguf", 4, -1, True, "GGUFMlxQuantLinear"),
-    ("fp8", "fp8", 8, -1, True, "FP8MlxQuantLinear"),
     ("bitsandbytes", "bitsandbytes", 4, -1, True, "BitsAndBytesMlxQuantLinear"),
 ])
 def test_mlx_registry_has_method_holder(method, fmt, bits, group, sym, expected):
@@ -41,7 +40,6 @@ def test_mlx_registry_has_method_holder(method, fmt, bits, group, sym, expected)
     ("qqq", "qqq", 4, 128, None, "mlx"),
     ("gguf", "gguf", 4, -1, "q4_k", "mlx"),
     ("gguf", "gguf", 4, -1, "q3_k", "auto"),
-    ("fp8", "fp8", 8, -1, None, "mlx"),
     ("bitsandbytes", "bitsandbytes", 4, -1, None, "auto"),
     ("exl3", "exl3", 3.0, -1, None, "auto"),
 ])

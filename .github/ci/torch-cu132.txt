@@ -1,0 +1,4 @@
+torch==2.15.0+cu132
+# The CUDA index has only abi3 wheels for torchao 0.18.0. Use the public
+# universal wheel for the free-threaded CI environment.
+torchao @ https://files.pythonhosted.org/packages/c4/4d/485477bb8f05bd501016059c6d8abd742f830cb1b24ab7704e086c7cc35a/torchao-0.18.0-py3-none-any.whl#sha256=5c2b4485341bf28b7fed2c4fc95b9f298e209f41685350f067de85527a05585e

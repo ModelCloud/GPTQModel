@@ -3,7 +3,9 @@ import types
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7" #"expandable_segments:True"
+# The allocator default belongs to ``gptqmodel/_alloc_conf.py``, which is
+# backend-aware and defers to the caller; pinning it here forced
+# ``expandable_segments`` on ROCm and overrode the caller (#4821).
 
 import time
 
@@ -606,6 +608,7 @@ def test_awq_pack_token_rows_ignores_empty_captures_during_quota_allocation():
 
     assert raw == 2
     assert packed.shape == (1, 1, 4)
+    # A single-row quota keeps the batch's first row when it is the only one.
     assert torch.equal(packed[0, 0], populated[0, 0])
 
     all_empty, all_empty_raw = AWQProcessor._pack_token_rows(

@@ -169,33 +169,28 @@ def balance_pre_scale(
 # ---------------------------------------------------------------------------
 # OCP MXFP4 round-to-nearest (E2M1 + E8M0)
 # ---------------------------------------------------------------------------
+_E2M1_CODE_THRESHOLDS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
+
+
 def _e2m1_code_from_scaled(abs_scaled: torch.Tensor, *, tie_high: bool = False) -> torch.Tensor:
     """Nearest E2M1 magnitude code (0..7) for values already divided by the scale.
 
     ``tie_high=False`` uses strict ``>`` comparisons, matching the MACaQ weight
     quantizer.  The MACaQ activation kernels compare with ``>=``; pass
     ``tie_high=True`` to reproduce that tie behavior bit-for-bit.
+
+    The codes fit in four bits, so they accumulate in ``uint8``.  A nested
+    ``torch.where`` tree ending in ``.long()`` materialized an int64 plane per
+    weight; on an 8B ``down_proj`` that was 448 MiB per plane, and the exponent
+    screen builds three (#4820).  ``uint8`` is only ever used as data here, not
+    as an index.
     """
 
-    def above(value: float) -> torch.Tensor:
-        return abs_scaled >= value if tie_high else abs_scaled > value
-
-    return torch.where(
-        above(5.0), 7,
-        torch.where(
-            above(3.5), 6,
-            torch.where(
-                above(2.5), 5,
-                torch.where(
-                    above(1.75), 4,
-                    torch.where(
-                        above(1.25), 3,
-                        torch.where(above(0.75), 2, torch.where(above(0.25), 1, 0)),
-                    ),
-                ),
-            ),
-        ),
-    ).long()
+    code = torch.zeros(abs_scaled.shape, dtype=torch.uint8, device=abs_scaled.device)
+    for threshold in _E2M1_CODE_THRESHOLDS:
+        above = abs_scaled >= threshold if tie_high else abs_scaled > threshold
+        code += above.to(torch.uint8)
+    return code
 
 
 @torch.no_grad()
@@ -230,11 +225,16 @@ def mxfp4_rtn_signed_index(
     abs_scaled = (grouped / scale).abs()
     code = _e2m1_code_from_scaled(abs_scaled, tie_high=tie_high)
     negative = grouped < 0
-    signed_index = torch.where(
+    # Build the signed grid in uint8 (values 0..14) and widen once.  int32 is
+    # the narrowest dtype PyTorch accepts as a gather index; int64 doubled
+    # every plane for no benefit, and the exponent screen holds one per offset
+    # (#4820).
+    signed = torch.where(
         code == 0,
         torch.full_like(code, 7),
         torch.where(negative, 7 - code, 7 + code),
-    ).view(out_features, in_features)
+    )
+    signed_index = signed.to(torch.int32).view(out_features, in_features)
     scale_element = scale.expand(out_features, groups, block_size).reshape(out_features, in_features).contiguous()
     return signed_index, log2_scale.squeeze(-1), scale_element
 
@@ -399,9 +399,13 @@ def _flip_sweep(
     delta = torch.where(up_better, delta_up, delta_down)
     best_delta, best_column = delta.min(dim=1)
     improving = best_delta < -1e-12
-    if not improving.any():
-        return torch.empty(0, dtype=torch.long, device=signed_index.device)
-
+    # No data-dependent early return here: ``if not improving.any(): return``
+    # is a Dynamo graph break, and the resume frames of a broken graph keep
+    # this sweep's whole working set (the masks, ``best_column`` and the
+    # Hessian operands) in an unreachable reference cycle that only a cyclic
+    # GC pass reclaims (issue #4801). A converged iteration instead runs one
+    # wasted update whose empty masks make every index_put a no-op, so the
+    # refined codes are bit-identical.
     local_rows = torch.arange(rows.shape[0], device=signed_index.device)
     up_selected = up_better[local_rows, best_column]
     up_mask = up_selected & improving
@@ -435,7 +439,15 @@ def _compiled_flip_sweep(*args, **kwargs):
     global _COMPILED_FLIP_SWEEP
     with _COMPILED_FLIP_LOCK:
         if _COMPILED_FLIP_SWEEP is None:
-            _COMPILED_FLIP_SWEEP = torch.compile(_flip_sweep, dynamic=True)
+            # ``fullgraph=True`` is load-bearing, not a debugging aid: a graph
+            # break leaves the sweep's working set in Dynamo resume frames
+            # that only a cyclic GC pass reclaims (issue #4801). The sweep is
+            # written without data-dependent control flow so the whole call
+            # traces into one graph, and a future break fails loudly here
+            # instead of silently pinning the Hessian until ``gc.collect()``.
+            _COMPILED_FLIP_SWEEP = torch.compile(
+                _flip_sweep, dynamic=True, fullgraph=True
+            )
         return _COMPILED_FLIP_SWEEP(*args, **kwargs)
 
 
@@ -612,7 +624,6 @@ def macaq_quantize_weight(
             signed_index, scale_element, rotated_weight, flip_hessian, n_flip_iters,
             fast=fast_flip, compile_flip=compile_flip,
         )
-
     packed, scales = pack_mxfp4_from_signed_index(signed_index, log2_scale, block_size)
     result = MacaqQuantResult(
         W_packed=packed,

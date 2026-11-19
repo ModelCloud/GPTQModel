@@ -12,7 +12,11 @@ if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7" #"expandable_segments:True"
+# Do not pin the allocator here. ``gptqmodel`` installs the documented
+# per-backend default at import (``gptqmodel/_alloc_conf.py``: expandable
+# segments on CUDA, never on ROCm, where it corrupts results) and defers to a
+# value the caller already set. Setting it in the harness instead overrode both
+# for every test that imports ``ModelTest`` (#4821).
 
 # Following makes test results more deterministic but much slower
 # # the CUBLAS env is required for use_deterministic_algorithms
@@ -129,7 +133,6 @@ from gptqmodel.quantization.config import (  # noqa: E402
     BitsAndBytesConfig,
     Fallback,
     FOEMConfig,
-    FP8Config,
     GGUFConfig,
     GPTAQConfig,
     HessianConfig,
@@ -1565,21 +1568,6 @@ class ModelTest(unittest.TestCase):
             if format_family == FORMAT.GGUF or self.WEIGHT_ONLY.method.value == "gguf":
                 return GGUFConfig(
                     bits=self.BITS,
-                    adapter=self.EORA,
-                    pack_impl="cpu",
-                    dense_vram_strategy=self.DENSE_VRAM_STRATEGY,
-                    dense_vram_strategy_devices=self.DENSE_VRAM_STRATEGY_DEVICES,
-                    moe_vram_strategy=self.MOE_VRAM_STRATEGY,
-                    moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
-                    dynamic=self.DYNAMIC,
-                    moe=self.MOE_CONFIG,
-                    smoother=self.WEIGHT_ONLY.smooth,
-                )
-
-            if format_family == FORMAT.FP8 or self.WEIGHT_ONLY.method.value == "fp8":
-                return FP8Config(
-                    bits=self.BITS,
-                    format=self.FORMAT,
                     adapter=self.EORA,
                     pack_impl="cpu",
                     dense_vram_strategy=self.DENSE_VRAM_STRATEGY,

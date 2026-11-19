@@ -118,12 +118,12 @@ flowchart LR
     style B5 fill:#f6ffed,stroke:#389e0d
 ```
 
-The fixed overrides are `Olmo3QModel` (`gptqmodel/models/definitions/olmo3.py:83`),
+The fixed overrides are `Olmo3QModel` (`gptqmodel/models/definitions/olmo3.py:53`),
 both Gemma 4 text and composite classes
 (`gptqmodel/models/definitions/gemma4.py:218` and `:287`), both Gemma 4 unified
 classes (`gptqmodel/models/definitions/gemma4_unified.py:106` and `:138`), both
 Gemma 3n classes (`gptqmodel/models/definitions/gemma3n.py:259` and `:311`), and
-`Raon1MiniQModel` (`gptqmodel/models/definitions/raon1_mini.py:46`).
+`Raon1MiniQModel` (`gptqmodel/models/definitions/raon1_mini.py:8`).
 
 ## AWQ needs the same per-layer-type rotary
 
@@ -134,7 +134,7 @@ embeddings take a required `layer_type` / `attention_type` argument, so the old
 `rotary(x, position_ids)` call raised
 `TypeError: Gemma3RotaryEmbedding.forward() missing 1 required positional
 argument: 'layer_type'` for every Gemma 3 text model.
-`_rotary_layer_type_kwargs` (`gptqmodel/looper/awq_processor.py:2835`) inspects
+`_rotary_layer_type_kwargs` (`gptqmodel/looper/awq_processor.py::_rotary_layer_type_kwargs`) inspects
 the rotary signature and supplies the attention module's declared type. Rotaries
 without that parameter are called exactly as before.
 

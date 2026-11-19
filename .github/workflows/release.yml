@@ -45,6 +45,7 @@ on:
         default: false
 
 env:
+  PYTHON_GIL: '0'
   RUNNER: 10.0.13.31
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
@@ -60,70 +61,41 @@ jobs:
     runs-on: [ self-hosted, xeon5 ]
     if: ${{ inputs.github_vm == false }}
     env:
-      UV_TORCH_BACKEND: cu130
-  # The pinned Torch build is below the patch for GHSA-rrmf-rvhw-rf47 /
-      # CVE-2025-3000, so the runtime gate in gptqmodel._torch_safety would
-      # refuse to import this matrix. It opts out explicitly. Raise
-      # TORCH_VERSION to >= 2.13.0 and delete this override once the image
-      # ships it.
-      TORCH_VERSION: 2.11.0
-      GPTQ_BYPASS_SAFETY_CHECKS: '1'
-      PYTHON_VERSION: 3.14
-      UV_PYTHON: 3.14
+      UV_CACHE_DIR: /opt/gptqmodel/uv-cache
     container:
-      image: 10.0.13.31:5000/nvidia/cuda:130-ubuntu24.04_0415
+      image: nvidia/cuda:13.2.1-devel-ubuntu24.04@sha256:0e1f7b8e96fa9ec5e36d4709a38c62df7b5665977446081811c12b8234d874bf
       volumes:
-        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
-        - /github/workspace/uv:/opt/uv
-        - /github/workspace/tmp:/opt/uv/tmp
-        - /monster/ci/uv/python:/opt/uv/python
-        - /monster/ci/uv/cache/python:/opt/uv/cache/python
-        - /monster/ci/uv/setup_uv_venv.sh:/opt/uv/setup_uv_venv.sh
-        - /monster/ci/uv/uv:/opt/uv/uv
-        - /monster/ci/uv/uvx:/opt/uv/uvx
-        - /monster/ci/uv/env:/opt/uv/env
-        - /monster/ci/uv/uv.toml:/opt/uv/uv.toml
-        - /monster/ci/env:/opt/env
+        - /github/workspace/uv/cache:/opt/gptqmodel/uv-cache
+        - /monster/ci/dist:/opt/dist
     steps:
+      - name: Install CI tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git ninja-build
+
       - name: Checkout Codes
         uses: actions/checkout@v7
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
-      - name: Activate uv env
-        run: |
-          echo "::group::-- dust uv cache dir --"
-            dust $(uv cache dir) || true
-          echo "::endgroup::"
-
-          bash .github/scripts/ci_unit_activate_uv_env.sh \
-            "gptqmodel_py314t_release_source" \
-            130 \
-            "${{ env.TORCH_VERSION }}" \
-            "${{ github.run_id }}" \
-            "${{ github.run_attempt }}" \
-            "unit_test_env_${{ github.run_id }}_${{ github.run_attempt }}"
-
-      - name: Setup release env
-        run: |
-          echo "::group::-- uv envs --"
-            printenv | grep UV
-          echo "::endgroup::"
-
-          env_name="gptqmodel_py314t_release_source"
-          /opt/uv/setup_uv_venv.sh $env_name
+      - name: Set up CI runtime
+        uses: ./.github/actions/setup-ci-runtime
+        with:
+          python-version: '3.14.10t'
+          source-build: 'true'
 
       - name: Run shared release source flow
         uses: ./.github/actions/release-source-common
         with:
           pr-number: ${{ github.event.inputs.pr_number || 0 }}
-          run-id: ${{ needs.check-vm.outputs.run_id }}
+          run-id: ${{ github.run_id }}
           confirmation-mode: manual
           test-install: 'true'
           upload-local: 'true'
           artifact-continue-on-error: 'true'
           require-pypi-confirmation: 'true'
+          publish: 'true'
           pypi-token: ${{ secrets.PYPI_KEY }}
 
   release-source-github:
@@ -131,25 +103,34 @@ jobs:
       contents: write
     runs-on: ubuntu-24.04
     if: ${{ inputs.github_vm == true }}
+    container:
+      image: nvidia/cuda:13.2.1-devel-ubuntu24.04@sha256:0e1f7b8e96fa9ec5e36d4709a38c62df7b5665977446081811c12b8234d874bf
     steps:
+      - name: Install CI tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git ninja-build
+
       - name: Checkout Codes
         uses: actions/checkout@v7
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
-      - uses: actions/setup-python@v7
+      - name: Set up CI runtime
+        uses: ./.github/actions/setup-ci-runtime
         with:
-          python-version: '3.14'
-          cache: 'pip'
+          python-version: '3.14.10t'
+          source-build: 'true'
 
       - name: Run shared release source flow
         uses: ./.github/actions/release-source-common
         with:
           pr-number: ${{ github.event.inputs.pr_number || 0 }}
           confirmation-mode: sleep
-          test-install: 'false'
+          test-install: 'true'
           upload-local: 'false'
           artifact-continue-on-error: 'false'
           require-pypi-confirmation: 'false'
+          publish: 'true'
           pypi-token: ${{ secrets.PYPI_KEY }}

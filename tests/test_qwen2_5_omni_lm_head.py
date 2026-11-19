@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from torch import nn
@@ -225,3 +226,79 @@ def test_omni_lm_head_rejects_shared_weights(tiny_omni_checkpoint, method):
     assert model.model.thinker.lm_head.weight is embedding.weight
     assert not any(isinstance(module, TorchLinear) for module in model.model.modules())
 
+
+@pytest.mark.parametrize("method", ["gptq", "rtn"])
+def test_omni_saved_checkpoint_uses_source_hf_layout(tiny_omni_checkpoint, tmp_path, method):
+    """The towers and embeddings must be saved in the source HF key layout.
+
+    Transformers 5.22 keeps ``thinker.audio_tower``/``thinker.visual`` under
+    ``thinker.model.*`` and ``embed_tokens`` under
+    ``thinker.model.language_model.*`` in memory. Writing those runtime names
+    produced a checkpoint the loader could not map back, so the towers and
+    embeddings reloaded as ``torch.empty`` garbage (issue #4758).
+    """
+
+    config_cls = QuantizeConfig if method == "gptq" else RTNConfig
+    qcfg = config_cls(
+        bits=4, group_size=32, desc_act=False, lm_head=False, device="cpu", format=FORMAT.GPTQ,
+    )
+    model = GPTQModel.load(
+        str(tiny_omni_checkpoint), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16,
+    )
+    inputs = {"input_ids": torch.arange(4, 36).unsqueeze(0), "attention_mask": torch.ones(1, 32, dtype=torch.long)}
+    model.quantize(CalibrationConfig(dataset=[inputs]), backend=BACKEND.TORCH)
+    output = tmp_path / "quantized"
+    model.save(str(output))
+
+    saved = load_file(str(output / "model.safetensors"))
+    assert "thinker.audio_tower.conv1.weight" in saved
+    assert "thinker.model.audio_tower.conv1.weight" not in saved
+    assert "thinker.visual.patch_embed.proj.weight" in saved
+    assert "thinker.model.visual.patch_embed.proj.weight" not in saved
+    assert "thinker.model.embed_tokens.weight" in saved
+    assert "thinker.model.language_model.embed_tokens.weight" not in saved
+    # The decoder lives under `thinker.model.layers` in a source checkpoint.
+    assert "thinker.model.layers.0.input_layernorm.weight" in saved
+    assert "thinker.model.language_model.layers.0.input_layernorm.weight" not in saved
+    assert not any(
+        key.startswith(("thinker.model.audio_tower.", "thinker.model.visual.", "thinker.model.language_model."))
+        for key in saved
+    )
+
+    dtype = saved["thinker.audio_tower.conv1.weight"].dtype
+    reloaded = GPTQModel.load(str(output), backend=BACKEND.TORCH, device="cpu", dtype=dtype)
+    multimodal = thinker_multimodal_model(reloaded.model)
+    text_model = thinker_text_model(reloaded.model)
+    for name, tensor in (
+        ("thinker.audio_tower.conv1.weight", multimodal.audio_tower.conv1.weight),
+        ("thinker.visual.patch_embed.proj.weight", multimodal.visual.patch_embed.proj.weight),
+        ("thinker.model.embed_tokens.weight", text_model.embed_tokens.weight),
+    ):
+        torch.testing.assert_close(tensor, saved[name], rtol=0, atol=0, msg=lambda msg, name=name: f"{name}: {msg}")
+
+
+def test_omni_load_fails_loudly_on_unmapped_checkpoint_keys(tiny_omni_checkpoint, tmp_path):
+    """A checkpoint written in the runtime layout must not load silently.
+
+    Reloading one leaves the towers and embeddings on ``torch.empty`` storage;
+    the loader must name the parameters instead of returning a model that runs
+    on random values (issue #4758).
+    """
+
+    qcfg = RTNConfig(bits=4, group_size=32, desc_act=False, lm_head=False, device="cpu", format=FORMAT.GPTQ)
+    model = GPTQModel.load(
+        str(tiny_omni_checkpoint), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16,
+    )
+    inputs = {"input_ids": torch.arange(4, 36).unsqueeze(0), "attention_mask": torch.ones(1, 32, dtype=torch.long)}
+    model.quantize(CalibrationConfig(dataset=[inputs]), backend=BACKEND.TORCH)
+    output = tmp_path / "quantized"
+    model.save(str(output))
+
+    checkpoint = output / "model.safetensors"
+    state = load_file(str(checkpoint))
+    # The runtime name a checkpoint written by an older release would carry.
+    state["thinker.model.audio_tower.conv1.weight"] = state.pop("thinker.audio_tower.conv1.weight")
+    save_file(state, str(checkpoint))
+
+    with pytest.raises(RuntimeError, match=r"non-quantized parameter\(s\).*thinker\.model\.audio_tower\.conv1\.weight"):
+        GPTQModel.load(str(output), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)

@@ -26,7 +26,11 @@ import pcre
 import torch
 from packaging import version
 
-from .._quant_methods import GGUF_EXPORT_QUANT_METHOD, LEGACY_PARO_QUANT_METHOD
+from .._quant_methods import (
+    GGUF_EXPORT_QUANT_METHOD,
+    LEGACY_FP8_QUANT_METHOD,
+    LEGACY_PARO_QUANT_METHOD,
+)
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.backend_config import RuntimeConfig
 from ..utils.hf import resolve_checkpoint_subfolder
@@ -239,10 +243,47 @@ class QuantizeEmbed(str, Enum):
     BOTH = "both"
 
 
+def _normalize_embed_quant_mode(value: Any) -> QuantizeEmbed:
+    """Coerce ``embed_quant_mode`` to ``QuantizeEmbed`` or reject it (#5124).
+
+    A misspelled mode matches none of the consumer branches in
+    ``module_looper``/``stage_layer``/``weight_only_looper``, so a run replays
+    every layer, quantizes nothing and still returns a normal result. ``None``
+    reaches the layer planner and fails there with an unrelated missing-module
+    error. Both are rejected here instead.
+    """
+
+    try:
+        return QuantizeEmbed(value)
+    except (TypeError, ValueError):
+        valid = ", ".join(repr(mode.value) for mode in QuantizeEmbed)
+        raise ValueError(
+            f"QuantizeEmbedConfig: `embed_quant_mode` must be one of {valid} "
+            f"(a QuantizeEmbed value), got {value!r}."
+        ) from None
+
+
 @dataclass
 class QuantizeEmbedConfig:
+    """Embedding endpoints ``quantize()``/``requantize()`` should quantize."""
+
     embed_quant_mode: QuantizeEmbed = QuantizeEmbed.OUTPUT
     embed_only: bool = True
+
+    def __post_init__(self):
+        # `QuantizeEmbed("inptu")` would raise only where it is consumed; the
+        # consumers instead compare with `in (QuantizeEmbed.INPUT, ...)`, so a
+        # misspelled value silently matched nothing. Coerce (and reject) here.
+        self.embed_quant_mode = _normalize_embed_quant_mode(self.embed_quant_mode)
+        # `embed_only="False"` is truthy and behaves as True; #4668 made that
+        # coercion an error for every QuantizeConfig bool field.
+        _require_bool_value(type(self).__name__, "embed_only", self.embed_only)
+
+    def validate(self) -> "QuantizeEmbedConfig":
+        """Re-validate a passed instance; entry points call this before any work."""
+
+        self.__post_init__()
+        return self
 
 
 CALIBRATION_SORT_ORDERS = ("asc", "desc", "shuffle")
@@ -852,6 +893,38 @@ def _normalize_gguf_public_format(value: Any) -> Optional[str]:
     )
 
 
+def _gguf_bits_spec_from_format_value(value: Any) -> Optional[GGUFBits]:
+    """Return the width-bearing spec when ``value`` names a full GGUF alias.
+
+    A full subtype (``q8_0``, ``q4_k_m``, ``mxfp4``) carries its own bit width.
+    Projecting it to the width-less public token before comparing it with an
+    explicit ``bits`` discarded that width and let a conflict resolve to the
+    wrong subtype. Callers use this helper to compare the requested widths
+    first; width-less public tokens (``q_0``, ``q_k``) return ``None``.
+    """
+
+    if isinstance(value, GGUFBits):
+        return value
+    if isinstance(value, FORMAT):
+        value = value.value
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower().replace("-", "_")
+    if normalized in _GGUF_BITS_ALIAS_INFO:
+        return GGUFBits.from_alias(normalized)
+    return None
+
+
+def _gguf_requested_value_label(value: Any) -> str:
+    """Render a requested GGUF bits/format value for a rejection message."""
+
+    if isinstance(value, GGUFBits):
+        return value.to_string()
+    if isinstance(value, FORMAT):
+        return value.value
+    return str(value)
+
+
 def _default_gguf_public_format(bits: int) -> str:
     """Return the default GGUF subtype for a supported bit width."""
 
@@ -948,6 +1021,18 @@ def _normalize_gguf_config(
             )
         )
 
+    # A full subtype such as ``q8_0`` names its own width. Compare it with the
+    # explicit ``bits`` before projecting it to the width-less public token;
+    # otherwise the projection erases the 8 and the subtype is rebuilt from the
+    # conflicting width (issue #5106).
+    format_bits_spec = _gguf_bits_spec_from_format_value(format_value)
+    if format_bits_spec is not None and format_bits_spec.bits != normalized_bits:
+        raise ValueError(
+            "Unsupported GGUF combination: "
+            f"bits={_gguf_requested_value_label(bits)}, "
+            f"format={_gguf_requested_value_label(format_value)}."
+        )
+
     normalized_format = _normalize_gguf_public_format(format_value)
     if normalized_format is None:
         if bits_spec_from_bits is not None:
@@ -960,7 +1045,9 @@ def _normalize_gguf_config(
         bits_spec = _gguf_bits_from_components(normalized_bits, normalized_format)
         if bits_spec_from_bits is not None and bits_spec_from_bits != bits_spec:
             raise ValueError(
-                f"GGUFConfig: incompatible GGUF bits/format combination: bits={bits}, format={format_value}."
+                "Unsupported GGUF combination: "
+                f"bits={_gguf_requested_value_label(bits)}, "
+                f"format={_gguf_requested_value_label(format_value)}."
             )
 
     return normalized_bits, normalized_format, bits_spec
@@ -1276,7 +1363,10 @@ _FP8_FMT_ALIASES = {
     "float8_e8m0fnu": "float8_e8m0fnu",
 }
 _FP8_WEIGHT_SCALE_METHODS = {"tensor", "row", "block"}
-_FP8_SCALE_SEMANTICS = {"inverse"}
+# Production checkpoints multiply by `weight_scale_inv` (transformers
+# `FineGrainedFP8`, DeepSeek/Qwen, ModelOpt). `inverse` is accepted only so
+# legacy GPT-QModel checkpoints keep loading; it is not an output.
+_FP8_SCALE_SEMANTICS = {"multiplier", "inverse"}
 _BITSANDBYTES_4BIT_FORMATS = {"fp4", "nf4"}
 _BITSANDBYTES_8BIT_FORMATS = {"int8"}
 _BITSANDBYTES_FORMATS = _BITSANDBYTES_4BIT_FORMATS | _BITSANDBYTES_8BIT_FORMATS
@@ -1332,7 +1422,7 @@ def _normalize_fp8_weight_scale_method(
 ) -> str:
     """Resolve the FP8 weight scaling strategy from config inputs."""
 
-    normalized = "block" if weight_block_size is not None and value is None else (value or "row")
+    normalized = "block" if weight_block_size is not None and value is None else (value or "tensor")
     normalized = str(normalized).strip().lower()
     if normalized not in _FP8_WEIGHT_SCALE_METHODS:
         supported = ", ".join(sorted(_FP8_WEIGHT_SCALE_METHODS))
@@ -1351,7 +1441,7 @@ def _normalize_fp8_weight_scale_method(
 def _normalize_fp8_scale_semantics(value: Optional[str]) -> str:
     """Normalize FP8 scale semantics to the supported enum-like string."""
 
-    normalized = "inverse" if value is None else str(value).strip().lower()
+    normalized = "multiplier" if value is None else str(value).strip().lower()
     if normalized not in _FP8_SCALE_SEMANTICS:
         supported = ", ".join(sorted(_FP8_SCALE_SEMANTICS))
         raise ValueError(
@@ -1409,6 +1499,137 @@ def _normalize_bitsandbytes_block_size(value: Optional[int]) -> int:
         )
     return normalized
 
+
+def _validate_smooth_number(
+    owner: str,
+    field: str,
+    value: Any,
+    *,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+    include_minimum: bool = True,
+    include_maximum: bool = True,
+    range_text: str,
+) -> float:
+    """Validate one numeric smoother parameter and return it as a float."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{owner}: `{field}` must be a number, got {value!r}.")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{owner}: `{field}` must be a finite number, got {value!r}.")
+    if minimum is not None and (
+        number < minimum or (not include_minimum and number == minimum)
+    ):
+        raise ValueError(f"{owner}: `{field}` must be {range_text}, got {value!r}.")
+    if maximum is not None and (
+        number > maximum or (not include_maximum and number == maximum)
+    ):
+        raise ValueError(f"{owner}: `{field}` must be {range_text}, got {value!r}.")
+    return number
+
+
+def _validate_finite_float(
+    owner: str,
+    field: str,
+    value: Any,
+    *,
+    minimum: Optional[float] = None,
+    range_text: str = "non-negative",
+) -> float:
+    """Validate a calibration option that must be finite and in range.
+
+    ``NaN`` comparisons are always false, so a plain ``value < minimum`` check
+    lets ``NaN`` through and the feature silently disables itself later
+    (#5307). Validate the normalized float instead.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{owner}: `{field}` must be a number, got {value!r}.")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{owner}: `{field}` must be a finite number, got {value!r}.")
+    if minimum is not None and number < minimum:
+        raise ValueError(f"{owner}: `{field}` must be {range_text}, got {value!r}.")
+    return number
+
+
+def _validate_smooth_int(
+    owner: str,
+    field: str,
+    value: Any,
+    *,
+    minimum: Optional[int] = None,
+    range_text: str,
+) -> int:
+    """Validate one integer smoother parameter."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{owner}: `{field}` must be an integer, got {value!r}.")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{owner}: `{field}` must be {range_text}, got {value!r}.")
+    return value
+
+
+def _validate_smooth_percentile(owner: str, field: str, value: Any) -> float:
+    """Validate a percentile on the 0-100 scale used by ``_quantile``.
+
+    Values at or below 1 are rejected explicitly: the public examples use
+    ``99`` for the 99th percentile, so ``0.99`` is a fraction passed by mistake
+    and clamps nearly every weight to the row minimum (#4953).
+    """
+
+    number = _validate_smooth_number(
+        owner,
+        field,
+        value,
+        minimum=0.0,
+        maximum=100.0,
+        include_minimum=False,
+        include_maximum=True,
+        range_text="on a 0-100 scale with 1 < value <= 100",
+    )
+    if number <= 1.0:
+        raise ValueError(
+            f"{owner}: `{field}` is on a 0-100 scale (99 = 99th percentile), "
+            f"got {value!r}; a value <= 1 looks like a fraction and clamps almost "
+            "every weight. Valid range is (1, 100]."
+        )
+    return number
+
+
+def _validate_asymmetric_percentile_bounds(owner: str, low: float, high: float) -> None:
+    """Reject fraction bounds for the asymmetric percentile clip (#5005).
+
+    ``SmoothPercentileAsymmetric`` reads the same 0-100 scale as
+    ``SmoothPercentile`` through ``fallback_smooth._quantile``. A ``high`` at or
+    below 1 puts the upper bound next to the row minimum, so ``_clamp_block``
+    pins almost every weight to the bottom tail and the model is destroyed with
+    no error: ``high=0.995`` is the fraction form of 99.5 (#4953, #4970).
+
+    ``low`` legitimately sits below 1 (the documented default is the 0.5th
+    percentile), so it cannot use the same rule. A non-zero ``low`` below 0.1
+    clips nothing at any realistic group size (0.1% of a 4096-wide block is 4
+    elements, and the smoother normally runs at ``group_size >= 128``), so it is
+    either a fraction typo or dead configuration; ``0`` stays the explicit "no
+    lower clip".
+    """
+
+    if high <= 1.0:
+        raise ValueError(
+            f"{owner}: `high` is on a 0-100 scale (99.5 = 99.5th percentile), "
+            f"got {high!r}; a value <= 1 looks like a fraction and clamps almost "
+            "every weight to the row minimum. Valid range is (1, 100]."
+        )
+    if 0.0 < low < 0.1:
+        raise ValueError(
+            f"{owner}: `low` is on a 0-100 scale (0.5 = 0.5th percentile), "
+            f"got {low!r}; a lower percentile below 0.1 clips nothing and looks "
+            "like a fraction. Use 0 to disable the lower clip, or a value in "
+            "[0.1, high)."
+        )
+
+
 @dataclass
 class SmoothMethod:
     """Base smoother descriptor shared by all smoothing strategies."""
@@ -1416,6 +1637,20 @@ class SmoothMethod:
     name: str
     # Apply the smoother only when group size >= this threshold.
     group_size_threshold: int = 128
+
+    def __post_init__(self) -> None:
+        """Reject a threshold that would silently disable or always apply."""
+
+        owner = type(self).__name__
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError(f"{owner}: `name` must be a non-empty string, got {self.name!r}.")
+        self.group_size_threshold = _validate_smooth_int(
+            owner,
+            "group_size_threshold",
+            self.group_size_threshold,
+            minimum=0,
+            range_text=">= 0",
+        )
 
 
 @dataclass
@@ -1436,7 +1671,9 @@ class SmoothPercentile(SmoothMethod):
         """Configure percentile clipping with an optional group-size floor."""
 
         super().__init__(name="percentile", group_size_threshold=group_size_threshold)
-        self.percentile = percentile
+        self.percentile = _validate_smooth_percentile(
+            type(self).__name__, "percentile", percentile
+        )
 
 
 @dataclass
@@ -1458,8 +1695,18 @@ class SmoothPercentileAsymmetric(SmoothMethod):
         """Configure asymmetric percentile clipping bounds."""
 
         super().__init__(name="percentile_asym", group_size_threshold=group_size_threshold)
-        self.low = low
-        self.high = high
+        owner = type(self).__name__
+        self.low = _validate_smooth_number(
+            owner, "low", low, minimum=0.0, maximum=100.0, range_text="0 <= value <= 100"
+        )
+        self.high = _validate_smooth_number(
+            owner, "high", high, minimum=0.0, maximum=100.0, range_text="0 <= value <= 100"
+        )
+        if self.low >= self.high:
+            raise ValueError(
+                f"{owner}: `low` must be < `high`, got low={low!r}, high={high!r}."
+            )
+        _validate_asymmetric_percentile_bounds(owner, self.low, self.high)
 
 
 @dataclass
@@ -1480,7 +1727,9 @@ class SmoothMAD(SmoothMethod):
         """Configure MAD-based clipping width and activation threshold."""
 
         super().__init__(name="mad", group_size_threshold=group_size_threshold)
-        self.k = k
+        self.k = _validate_smooth_number(
+            type(self).__name__, "k", k, minimum=0.0, include_minimum=False, range_text="> 0"
+        )
 
 
 @dataclass
@@ -1493,6 +1742,7 @@ class SmoothMSE(SmoothMethod):
     +----------------+-------------------------------------------+
     | steps (N)      | number of shrink candidates               |
     | maxshrink (S)  | smallest range multiplier                 |
+    | objective      | importance-weighted weight error          |
     | effect         | more steps = better fit, slower           |
     +----------------+-------------------------------------------+
     """
@@ -1503,8 +1753,20 @@ class SmoothMSE(SmoothMethod):
         """Configure search granularity for MSE-based shrinking."""
 
         super().__init__(name="mse", group_size_threshold=group_size_threshold)
-        self.steps = steps
-        self.maxshrink = maxshrink
+        owner = type(self).__name__
+        self.steps = _validate_smooth_int(
+            owner, "steps", steps, minimum=1, range_text=">= 1"
+        )
+        self.maxshrink = _validate_smooth_number(
+            owner,
+            "maxshrink",
+            maxshrink,
+            minimum=0.0,
+            maximum=1.0,
+            include_minimum=False,
+            include_maximum=True,
+            range_text="0 < value <= 1",
+        )
 
 
 @dataclass
@@ -1525,7 +1787,16 @@ class SmoothOutlier(SmoothMethod):
         """Configure top-percent outlier clipping behavior."""
 
         super().__init__(name="outlier", group_size_threshold=group_size_threshold)
-        self.pct = pct
+        self.pct = _validate_smooth_number(
+            type(self).__name__,
+            "pct",
+            pct,
+            minimum=0.0,
+            maximum=100.0,
+            include_minimum=True,
+            include_maximum=False,
+            range_text="0 <= value < 100",
+        )
 
 
 @dataclass
@@ -1546,7 +1817,9 @@ class SmoothSoftNorm(SmoothMethod):
         """Configure z-score clipping strength for soft normalization."""
 
         super().__init__(name="softnorm", group_size_threshold=group_size_threshold)
-        self.k = k
+        self.k = _validate_smooth_number(
+            type(self).__name__, "k", k, minimum=0.0, include_minimum=False, range_text="> 0"
+        )
 
 
 @dataclass
@@ -1569,8 +1842,11 @@ class SmoothLog(SmoothMethod):
         """Configure log-domain smoothing with percentile and companding strength."""
 
         super().__init__(name="log", group_size_threshold=group_size_threshold)
-        self.percentile = percentile
-        self.mu = mu
+        owner = type(self).__name__
+        self.percentile = _validate_smooth_percentile(owner, "percentile", percentile)
+        self.mu = _validate_smooth_number(
+            owner, "mu", mu, minimum=0.0, include_minimum=False, range_text="> 0"
+        )
 
 
 @dataclass
@@ -1591,7 +1867,12 @@ class SmoothRowCol(SmoothMethod):
         """Configure RMS normalization over rows or columns."""
 
         super().__init__(name="rowcol", group_size_threshold=group_size_threshold)
-        self.axis = axis
+        normalized = str(axis).strip().lower()
+        if normalized not in ("row", "col"):
+            raise ValueError(
+                f"{type(self).__name__}: `axis` must be 'row' or 'col', got {axis!r}."
+            )
+        self.axis = normalized
 
 
 class GcMode(str, Enum):
@@ -1614,6 +1895,11 @@ class Fallback:
     # Smoothers can help some low-sample fallback cases, but a static default can
     # hurt whole-model RTN quality. Leave smoothing opt-in.
     smooth: Optional[SmoothMethod] = None
+
+    def __post_init__(self) -> None:
+        """Validate a directly constructed smoother payload."""
+
+        self.smooth = _parse_smooth_method(self.smooth)
 
 
 @dataclass
@@ -1769,6 +2055,20 @@ class HessianConfig:
                     "other group members instead of accumulating it separately for each module"
         },
     )
+    # ``desc_act=True`` switches ``act_group_aware`` off, and with it the
+    # per-group scale protection that keeps a handful of massive-activation
+    # ("attention sink") rows from dominating ``X^T X``. Without protection the
+    # sink channels are ordered first, get a tiny ``Hinv[i, i]``, and their
+    # quantization error is amplified into the columns correlated with them
+    # (issue #4742). Capping each row's norm before the outer product keeps the
+    # sink row's direction but bounds its weight in the Hessian.
+    sink_row_cap_median_multiple: Optional[float] = field(
+        default=4.0,
+        metadata={
+            "help": "Cap each calibration row's norm at `min(p99.9, N x median)` before `X^T X` when "
+                    "`desc_act=True` disables `act_group_aware`; 0 or None disables the cap"
+        },
+    )
 
     def __post_init__(self):
         """Validate Hessian chunking and staging dtype settings."""
@@ -1776,14 +2076,23 @@ class HessianConfig:
         if not isinstance(self.dedup_shared_inputs, bool):
             raise ValueError("HessianConfig: `dedup_shared_inputs` must be a bool.")
 
+        multiple = self.sink_row_cap_median_multiple
+        if multiple is not None:
+            self.sink_row_cap_median_multiple = _validate_finite_float(
+                "HessianConfig",
+                "sink_row_cap_median_multiple",
+                multiple,
+                minimum=0.0,
+            )
+
         if self.chunk_size is not None:
-            if not isinstance(self.chunk_size, int):
+            if isinstance(self.chunk_size, bool) or not isinstance(self.chunk_size, int):
                 raise ValueError("HessianConfig: `chunk_size` must be an integer or None.")
             if self.chunk_size <= 0:
                 raise ValueError("HessianConfig: `chunk_size` must be a positive integer.")
 
         if self.chunk_bytes is not None:
-            if not isinstance(self.chunk_bytes, int):
+            if isinstance(self.chunk_bytes, bool) or not isinstance(self.chunk_bytes, int):
                 raise ValueError("HessianConfig: `chunk_bytes` must be an integer or None.")
             if self.chunk_bytes <= 0:
                 raise ValueError("HessianConfig: `chunk_bytes` must be a positive integer amount of bytes.")
@@ -1865,9 +2174,9 @@ class MSEConfig:
     )
 
     def __post_init__(self):
-        if not isinstance(self.norm, (int, float)) or isinstance(self.norm, bool):
-            raise ValueError("MSEConfig: `norm` must be a number.")
-        self.norm = float(self.norm)
+        self.norm = _validate_finite_float(
+            "MSEConfig", "norm", self.norm, minimum=0.0
+        )
         self.grid_budget = _normalize_budget_bytes(self.grid_budget, "grid_budget")
         self.clip_grid_budget = _normalize_budget_bytes(self.clip_grid_budget, "clip_grid_budget")
 
@@ -2189,8 +2498,9 @@ class GPTAQConfig:
     device: Union[str, torch.device] = field(default="auto")
 
     def __post_init__(self):
-        if not isinstance(self.alpha, (int, float)):
-            raise ValueError("GPTAQConfig: `alpha` must be a numeric value.")
+        self.alpha = _validate_finite_float(
+            "GPTAQConfig", "alpha", self.alpha, minimum=0.0
+        )
         if isinstance(self.device, str):
             if not self.device:
                 raise ValueError("GPTAQConfig: `device` must be a non-empty string or torch.device.")
@@ -2230,10 +2540,12 @@ class FOEMConfig:
     device: Union[str, torch.device] = field(default="auto")
 
     def __post_init__(self):
-        if not isinstance(self.alpha, (int, float)):
-            raise ValueError("FOEMConfig: `alpha` must be a numeric value.")
-        if not isinstance(self.beta, (int, float)):
-            raise ValueError("FOEMConfig: `beta` must be a numeric value.")
+        self.alpha = _validate_finite_float(
+            "FOEMConfig", "alpha", self.alpha, minimum=0.0
+        )
+        self.beta = _validate_finite_float(
+            "FOEMConfig", "beta", self.beta, minimum=0.0
+        )
         if isinstance(self.device, str):
             if not self.device:
                 raise ValueError("FOEMConfig: `device` must be a non-empty string or torch.device.")
@@ -2457,7 +2769,8 @@ PARO_OPT_SCALE_CLAMP_MAX_DEFAULT = 1e2
 QQQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.QQQ,
 )
-FP8_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+# FP8 storage layouts this build can read. Not an export target: FP8 is load-only.
+FP8_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.FP8,
 )
 BITSANDBYTES_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
@@ -3327,59 +3640,128 @@ def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
             dict_scale_dtype_to_str(value)
 
 
+# Accepted payload fields and constructor converters per smoother type. The
+# dict/JSON parser and the protocol compiler share this table, so a new
+# smoother field cannot be accepted on one path and dropped on the other.
+# Defaults are read from the dataclasses themselves: `GPTQConfig(smoother=
+# "mad")` used to hard-code ``k=3.0`` while ``SmoothMAD()`` defaults to 2.75.
+_SMOOTH_METHOD_BUILDERS = {
+    "percentile": (SmoothPercentile, {"percentile": float}),
+    "percentile_asym": (SmoothPercentileAsymmetric, {"low": float, "high": float}),
+    "percentile_asymmetric": (SmoothPercentileAsymmetric, {"low": float, "high": float}),
+    "mad": (SmoothMAD, {"k": float}),
+    "mse": (SmoothMSE, {"steps": int, "maxshrink": float}),
+    "outlier": (SmoothOutlier, {"pct": float}),
+    "softnorm": (SmoothSoftNorm, {"k": float}),
+    "log": (SmoothLog, {"percentile": float, "mu": float}),
+    "rowcol": (SmoothRowCol, {"axis": str}),
+}
+_SMOOTH_METHOD_FIELDS: Dict[str, Tuple[str, ...]] = {
+    method_type: tuple(converters)
+    for method_type, (_, converters) in _SMOOTH_METHOD_BUILDERS.items()
+}
+_SMOOTH_METHOD_FIELDS["none"] = ()
+_SMOOTH_METHOD_COMMON_FIELDS = ("type", "name", "group_size_threshold")
+
+
+def _smooth_method_default(cls, field_name: str) -> Any:
+    """Read a smoother dataclass default so the dict path cannot drift."""
+
+    for field_info in fields(cls):
+        if field_info.name == field_name:
+            return field_info.default
+    raise KeyError(f"{cls.__name__} has no field `{field_name}`.")
+
+
+def _smooth_method_allowed_fields(method_type: str, *, allow_name: bool = True) -> Tuple[str, ...]:
+    common = tuple(
+        key for key in _SMOOTH_METHOD_COMMON_FIELDS if allow_name or key != "name"
+    )
+    return tuple(dict.fromkeys((*common, *_SMOOTH_METHOD_FIELDS[method_type])))
+
+
+def _reject_unknown_payload_keys(
+    owner: str,
+    context: str,
+    payload: Mapping[str, Any],
+    allowed: Tuple[str, ...],
+) -> None:
+    """Reject a key the payload owner never reads, with a close-match hint."""
+
+    unknown = sorted(str(key) for key in payload if key not in allowed)
+    if not unknown:
+        return
+    details = []
+    for key in unknown:
+        matches = difflib.get_close_matches(key, sorted(allowed), n=1)
+        details.append(f"`{key}`" + (f" (did you mean `{matches[0]}`?)" if matches else ""))
+    accepted = ", ".join(f"`{key}`" for key in sorted(allowed))
+    raise TypeError(
+        f"{owner}: unknown {context} key(s): "
+        + ", ".join(details)
+        + f". Accepted {context} keys: {accepted}."
+    )
+
+
+def _smooth_method_type(payload: Mapping[str, Any], *, owner: str = "QuantizeConfig") -> str:
+    """Return the normalized smoother type, requiring an explicit one.
+
+    A dict without ``type``/``name`` used to return ``None`` from the builder,
+    which disabled smoothing while the caller believed it was configured.
+    """
+
+    raw = payload.get("type") or payload.get("name")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        hints = []
+        for key in payload:
+            matches = difflib.get_close_matches(str(key), ["type", "name"], n=1)
+            if matches:
+                hints.append(f"`{key}` (did you mean `{matches[0]}`?)")
+        hint_text = f" Unknown key(s): {', '.join(hints)}." if hints else ""
+        raise ValueError(
+            f"{owner}: smoother dicts require a `type` field (for example "
+            "`{\"type\": \"mad\", \"k\": 2.75}`); without it smoothing is silently disabled."
+            + hint_text
+        )
+    return str(raw).strip().lower()
+
+
+def _validate_smooth_method_payload(
+    payload: Mapping[str, Any],
+    *,
+    owner: str = "QuantizeConfig",
+    allow_name: bool = True,
+) -> str:
+    """Validate one smoother dict and return its normalized type."""
+
+    method_type = _smooth_method_type(payload, owner=owner)
+    if method_type not in _SMOOTH_METHOD_FIELDS:
+        matches = difflib.get_close_matches(method_type, sorted(_SMOOTH_METHOD_FIELDS), n=1)
+        hint = f" (did you mean `{matches[0]}`?)" if matches else ""
+        raise ValueError(f"{owner}: Unknown smooth type `{method_type}`{hint}.")
+    _reject_unknown_payload_keys(
+        owner,
+        f"`{method_type}` smooth method",
+        payload,
+        _smooth_method_allowed_fields(method_type, allow_name=allow_name),
+    )
+    return method_type
+
+
 def _build_smooth_method_from_dict(payload: Dict[str, Any]) -> Optional[SmoothMethod]:
-    method_type = payload.get("type") or payload.get("name")
-    if not method_type:
-        return None
-    method_type = str(method_type).strip().lower()
-    group_size_threshold_raw = payload.get("group_size_threshold", 128)
-    group_size_threshold = int(group_size_threshold_raw) if group_size_threshold_raw is not None else 128
-    if method_type == "percentile":
-        return SmoothPercentile(
-            percentile=float(payload.get("percentile", 99.0)),
-            group_size_threshold=group_size_threshold,
-        )
-    if method_type in ("percentile_asym", "percentile_asymmetric"):
-        return SmoothPercentileAsymmetric(
-            low=float(payload.get("low", 0.5)),
-            high=float(payload.get("high", 99.5)),
-            group_size_threshold=group_size_threshold,
-        )
-    if method_type == "mad":
-        return SmoothMAD(
-            k=float(payload.get("k", 3.0)),
-            group_size_threshold=group_size_threshold,
-        )
-    if method_type == "mse":
-        return SmoothMSE(
-            steps=int(payload.get("steps", 32)),
-            maxshrink=float(payload.get("maxshrink", 0.8)),
-            group_size_threshold=group_size_threshold,
-        )
-    if method_type == "outlier":
-        return SmoothOutlier(
-            pct=float(payload.get("pct", 1.0)),
-            group_size_threshold=group_size_threshold,
-        )
-    if method_type == "softnorm":
-        return SmoothSoftNorm(
-            k=float(payload.get("k", 3.0)),
-            group_size_threshold=group_size_threshold,
-        )
-    if method_type == "log":
-        return SmoothLog(
-            percentile=float(payload.get("percentile", 99.0)),
-            mu=float(payload.get("mu", 8.0)),
-            group_size_threshold=group_size_threshold,
-        )
-    if method_type == "rowcol":
-        return SmoothRowCol(
-            axis=str(payload.get("axis", "row")),
-            group_size_threshold=group_size_threshold,
-        )
+    method_type = _validate_smooth_method_payload(payload)
     if method_type == "none":
         return None
-    raise ValueError(f"QuantizeConfig: Unknown smooth type `{method_type}`.")
+
+    cls, converters = _SMOOTH_METHOD_BUILDERS[method_type]
+    threshold = payload.get("group_size_threshold")
+    if threshold is None:
+        threshold = _smooth_method_default(cls, "group_size_threshold")
+    kwargs = {
+        name: converter(payload.get(name, _smooth_method_default(cls, name)))
+        for name, converter in converters.items()
+    }
+    return cls(group_size_threshold=int(threshold), **kwargs)
 
 
 def _parse_smooth_method(setting: Any) -> Optional[SmoothMethod]:
@@ -3451,8 +3833,23 @@ def _normalize_smoother_config(
         return None
     if isinstance(payload, SmootherConfig):
         return payload
-    if isinstance(payload, dict) and "smooth" in payload and "type" not in payload:
-        return SmootherConfig(smooth=payload.get("smooth"))
+    if isinstance(payload, dict):
+        if "type" in payload or "name" in payload:
+            return SmootherConfig(smooth=payload)
+        if "smooth" in payload:
+            _reject_unknown_payload_keys(
+                "QuantizeConfig", "smoother", payload, ("smooth",)
+            )
+            return SmootherConfig(smooth=payload.get("smooth"))
+        # Neither accepted shape is identified. Check against the union so a
+        # misspelled wrapper key such as `smoth` gets a close-match hint.
+        _reject_unknown_payload_keys(
+            "QuantizeConfig",
+            "smoother",
+            payload,
+            ("smooth", "type", "name", "group_size_threshold"),
+        )
+        return SmootherConfig(smooth=payload)
     return SmootherConfig(smooth=payload)
 
 
@@ -3481,11 +3878,12 @@ def _normalize_preprocessor_config(payload: Any) -> BasePreProcessorConfig:
             return TensorParallelPadderConfig()
         if code and code != PreProcessorCode.SMOOTHER.value:
             raise ValueError(f"QuantizeConfig: unsupported preprocessor code `{code}`.")
-        if "smooth" in payload:
+        if code == PreProcessorCode.SMOOTHER.value:
+            _reject_unknown_payload_keys(
+                "QuantizeConfig", "smoother preprocessor", payload, ("code", "smooth")
+            )
             return SmootherConfig(smooth=payload.get("smooth"))
-        if "type" in payload:
-            return SmootherConfig(smooth=payload)
-        return SmootherConfig(smooth=None)
+        return _normalize_smoother_config(payload)
     raise ValueError("QuantizeConfig: `preprocessors` entries must be preprocessor configs, smooth configs, dicts, or strings.")
 
 
@@ -3813,6 +4211,10 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
         value = value.lower()
         if value == LEGACY_PARO_QUANT_METHOD:
             return METHOD.PARO
+        if value == LEGACY_FP8_QUANT_METHOD:
+            # Checkpoints written between #5181 and #5242 publish this alias.
+            # It is read-only compatibility: exports always write `fp8`.
+            return METHOD.FP8
         if value == FORMAT.MARLIN:
             return METHOD.GPTQ
         if value == FORMAT.BITBLAS:
@@ -3894,10 +4296,33 @@ def _normalize_paro_best_state_dtype(best_state_dtype: Optional[Union[str, torch
     )
 
 
+# Fields one `fallback` dict may set. The legacy `smooth_*`/`clip_method`
+# aliases predate `smooth` and remain accepted.
+_FALLBACK_KEYS = ("strategy", "threshold", "smooth")
+_FALLBACK_LEGACY_KEYS = (
+    "smooth_method",
+    "clip_method",
+    "smooth_percentile",
+    "smooth_mad_k",
+    "smooth_mse_steps",
+    "smooth_mse_maxshrink",
+    "smooth_outlier_pct",
+    "smooth_rms_k",
+    "smooth_log_mu",
+    "smooth_axis",
+)
+
+
 def _normalize_fallback(fallback: Optional[Union[Fallback, Dict[str, Any], str, int, float]]) -> Optional[Fallback]:
     if fallback is None:
         return None
     if isinstance(fallback, dict):
+        _reject_unknown_payload_keys(
+            "QuantizeConfig",
+            "fallback",
+            fallback,
+            _FALLBACK_KEYS + _FALLBACK_LEGACY_KEYS,
+        )
         strategy = fallback.get("strategy", FallbackStrategy.RTN)
         # The dataclass default is the single source of truth.  A dict that only
         # sets `strategy` or `smooth` must not silently double the threshold from
@@ -4229,8 +4654,24 @@ _TYPE_HINTS_CACHE: Dict[type, Dict[str, Any]] = {}
 #: Keys a ``dynamic`` per-module rule may carry beyond the config field names.
 #: ``fmt`` is the documented legacy alias for ``format``; ``nested`` is an opaque
 #: passthrough whose contents the dynamic fingerprint and defensive-copy paths
-#: preserve verbatim, so it is accepted as-is rather than inspected.
-_DYNAMIC_LEGACY_KEYS = frozenset({"fmt", "nested"})
+#: preserve verbatim, so it is accepted as-is rather than inspected. The
+#: ``bnb_*`` names are the legacy synonyms ``QUANT_CONFIG_ARG_SYNONYMS`` maps at
+#: the top level; the BnB per-module normalizer still translates them, so the
+#: key check must let them through (#4728).
+_DYNAMIC_LEGACY_KEYS = frozenset(
+    {
+        "fmt",
+        "nested",
+        "bnb_quant_type",
+        "bnb_block_size",
+        "bnb_compress_statistics",
+        # `optimize/requant_embed_lm_head.py` used to publish this no-op knob in
+        # every embed/lm_head override, so checkpoints it wrote carry it. No
+        # quantization config has the field; accept it on load (and strip it on
+        # save) instead of refusing a checkpoint GPT-QModel itself wrote (#5206).
+        "scale_search",
+    }
+)
 
 
 def _resolved_type_hints(cls) -> Dict[str, Any]:
@@ -4250,6 +4691,29 @@ def _is_optional_bool(hint) -> bool:
     """True for an ``Optional[bool]`` / ``bool | None`` annotation."""
 
     return hint is not bool and set(get_args(hint)) == {bool, type(None)}
+
+
+def _bool_annotated_fields(cls) -> List[Tuple[str, bool]]:
+    """Return ``(name, optional)`` for every ``bool``/``Optional[bool]`` field."""
+
+    hints = _resolved_type_hints(cls)
+    out = []
+    for field_info in fields(cls):
+        hint = hints.get(field_info.name)
+        optional = _is_optional_bool(hint)
+        if hint is bool or optional:
+            out.append((field_info.name, optional))
+    return out
+
+
+def _require_bool_value(owner_name: str, field_label: str, value: Any) -> None:
+    """Raise ``TypeError`` unless ``value`` is a real ``bool`` (#4668)."""
+
+    if not isinstance(value, bool):
+        raise TypeError(
+            f"{owner_name}: `{field_label}` must be a bool, "
+            f"got {type(value).__name__} ({value!r})."
+        )
 
 
 def _validate_dynamic_layer_keys(owner, layer_name: str, layer_dict: Mapping) -> None:
@@ -4296,22 +4760,64 @@ def _validate_dynamic_layer_keys(owner, layer_name: str, layer_dict: Mapping) ->
             ) from exc
 
 
-def _validate_dynamic_boolean_overrides(layer_name: str, layer_dict: Mapping) -> None:
-    """Reject non-boolean `sym`/`desc_act` values in one per-module rule.
+def _validate_dynamic_boolean_overrides(owner, layer_name: str, layer_dict: Mapping) -> None:
+    """Reject non-boolean values for every bool field in one per-module rule.
 
-    The top-level fields are type-checked, but `dynamic` values were coerced
-    with `bool(...)` when the module was packed, so `{"sym": "False"}` silently
-    became `sym=True` and produced a checkpoint labelled with the opposite
-    layout. `None` keeps meaning "inherit the global value".
+    The top-level fields are type-checked by ``_validate_bool_fields``, but
+    ``dynamic`` values used to be copied verbatim or coerced with ``bool(...)``
+    when the module was packed. The string ``"False"`` is truthy, so
+    ``{"static_groups": "False"}`` silently turned static groups on. Derive the
+    set from the owning config's annotations, exactly like the top-level path,
+    and include the legacy synonyms those keys map to (``#4728``). ``None``
+    keeps meaning "inherit the global value".
     """
 
-    for key in ("sym", "desc_act"):
-        value = layer_dict.get(key)
-        if value is not None and not isinstance(value, bool):
-            raise TypeError(
-                f"QuantizeConfig: `dynamic['{layer_name}'].{key}` must be a bool, "
-                f"got {type(value).__name__} ({value!r})."
-            )
+    bool_fields = {name for name, _ in _bool_annotated_fields(type(owner))}
+    for key, value in layer_dict.items():
+        canonical = QUANT_CONFIG_ARG_SYNONYMS.get(key, key)
+        if canonical not in bool_fields or value is None:
+            continue
+        _require_bool_value(
+            owner.__class__.__name__,
+            f"dynamic['{layer_name}'].{key}",
+            value,
+        )
+
+
+# Keys of one `dynamic` rule that can carry a smoother. Each is normalized
+# through the same helper the runtime uses, so an invalid smoother fails at
+# construction instead of when quantization first reaches a matching module.
+_DYNAMIC_SMOOTHER_KEYS = ("fallback", "preprocessors", "smoother", "smooth")
+
+
+def _validate_dynamic_smoothers(owner, layer_name: str, layer_dict: Mapping) -> None:
+    """Validate the smoothers inside one per-module ``dynamic`` rule (#5005).
+
+    A ``dynamic`` rule is merged into a per-module config only when the module
+    is first matched, so ``{"fallback": {"smooth": {"type": "mad", "k": 0}}}``
+    used to construct cleanly and then raise from ``normalize_fallback`` in the
+    middle of ``quantize()``, after the model had already been mutated, with no
+    module name in the message. Run the same normalizers here -- without
+    mutating the rule, so serialization and runtime normalization are unchanged
+    -- and name the offending pattern.
+    """
+
+    for key in _DYNAMIC_SMOOTHER_KEYS:
+        if key not in layer_dict:
+            continue
+        value = layer_dict[key]
+        try:
+            if key == "fallback":
+                _normalize_fallback(value)
+            elif key == "preprocessors":
+                _normalize_preprocessors(value)
+            else:
+                _normalize_smoother_config(value)
+        except (TypeError, ValueError) as exc:
+            raise type(exc)(
+                f"{owner.__class__.__name__}: `dynamic['{layer_name}'].{key}` is not a valid "
+                f"smoother: {exc}"
+            ) from exc
 
 
 def _default_damp_percent(method: METHOD) -> float:
@@ -4483,13 +4989,17 @@ def _resolve_export_quant_method(format_value: FORMAT, fallback_method: Optional
     return method
 
 
-def _serialize_export_quant_method(method: METHOD) -> str:
+def _serialize_export_quant_method(
+    method: METHOD,
+    quantize_config: Any = None,
+) -> str:
     """Return the HF-facing ``quant_method`` name for an export method.
 
     ``METHOD.GGUF`` keeps its internal name but is published under
     ``GGUF_EXPORT_QUANT_METHOD``: transformers reserves ``gguf`` for its own
     ``GgufHfQuantizer``, which expects a ``.gguf`` file and otherwise loads the
     checkpoint as randomly initialized weights.
+
     """
 
     if method == METHOD.GGUF:
@@ -5216,7 +5726,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
-        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
+        _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         for key, value in layer_dict.items():
             if key == "bits":
                 normalized_bits = self._normalize_bits_field(
@@ -5234,6 +5744,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return tuple(METHOD)
+
+    def is_load_only(self) -> bool:
+        """Whether this config may only load checkpoints, never quantize or export."""
+        return False
 
     def supported_export_formats(self) -> Tuple[FORMAT, ...]:
         valid_formats = QUANT_METHOD_FORMAT_MAPPING.get(self.method, None)
@@ -5295,20 +5809,11 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         default" value.
         """
 
-        hints = _resolved_type_hints(type(self))
-        for field_info in fields(self):
-            hint = hints.get(field_info.name)
-            optional = _is_optional_bool(hint)
-            if hint is not bool and not optional:
-                continue
-            value = getattr(self, field_info.name, None)
+        for field_name, optional in _bool_annotated_fields(type(self)):
+            value = getattr(self, field_name, None)
             if value is None and optional:
                 continue
-            if not isinstance(value, bool):
-                raise TypeError(
-                    f"{self.__class__.__name__}: `{field_info.name}` must be a bool, "
-                    f"got {type(value).__name__} ({value!r})."
-                )
+            _require_bool_value(self.__class__.__name__, field_name, value)
 
     def __post_init__(self):
         self._normalize_serialization_fields()
@@ -5378,6 +5883,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
             for layer, layer_dict in self.dynamic.items():
                 _validate_dynamic_layer_keys(self, layer, layer_dict)
+                _validate_dynamic_smoothers(self, layer, layer_dict)
                 self._normalize_dynamic_layer_config(
                     layer,
                     layer_dict,
@@ -5939,7 +6445,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "activation": self.activation,
             "auto_dtype_cast": self.auto_dtype_cast.value,
             METHOD_FIELD_CODE: self.method,
-            QUANT_METHOD_FIELD: _serialize_export_quant_method(self.export_quant_method()),
+            QUANT_METHOD_FIELD: _serialize_export_quant_method(
+                self.export_quant_method(),
+                quantize_config=self,
+            ),
             FORMAT_FIELD_CODE: self.format,
             FORMAT_FIELD_CHECKPOINT: self.format,
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
@@ -5954,10 +6463,16 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         dynamic = out["dynamic"]
         if dynamic:
             dynamic = copy.deepcopy(dynamic)
-            for _, overrides in dynamic.items():
+            for layer_name, overrides in dynamic.items():
                 if not isinstance(overrides, Mapping):
                     continue
+                # Refuse to write a checkpoint the loader would reject (#4668,
+                # #5206): a dynamic key that no config owns used to be saved
+                # silently and only failed on the next `GPTQModel.load()`.
+                _validate_dynamic_layer_keys(self, layer_name, overrides)
                 overrides.pop("adapter", None)
+                # No-op keys written by older tools must not propagate.
+                overrides.pop("scale_search", None)
                 for key, value in overrides.items():
                     if key == "bits":
                         overrides[key] = serialize_quant_bits(value)
@@ -6226,8 +6741,14 @@ class GPTQConfig(PreProcessorConfig):
 
         if desc_act_enabled_by_user and act_group_aware_user_value is None and self.act_group_aware:
             log.warn(
-                "QuantizeConfig: `desc_act=True` automatically disables `act_group_aware`. "
-                "Set `act_group_aware=False` explicitly to silence this warning."
+                "QuantizeConfig: `desc_act=True` automatically disables `act_group_aware`, which is the "
+                "per-group scale protection that keeps massive-activation (attention-sink) rows from "
+                "dominating the Hessian. On Llama-3 models this makes sink damage much worse: the sink "
+                "channels are ordered first and their quantization error saturates the columns correlated "
+                "with them (issue #4742). A row-norm cap on the Hessian is applied by default for this "
+                "case (`HessianConfig.sink_row_cap_median_multiple`); consider "
+                "`CalibrationConfig(exclude_attention_sinks=True)` as well, and validate the checkpoint "
+                "before shipping it. Set `act_group_aware=False` explicitly to silence this warning."
             )
             self.act_group_aware = False
 
@@ -6283,6 +6804,9 @@ class GPTQConfig(PreProcessorConfig):
             "chunk_bytes": self.hessian.chunk_bytes,
             "staging_dtype": str(self.hessian.staging_dtype).split(".")[-1],
             "dedup_shared_inputs": self.hessian.dedup_shared_inputs,
+            # The row-norm cap changes the accumulated Hessian, so a reload
+            # must not silently restore the default (issue #4742).
+            "sink_row_cap_median_multiple": self.hessian.sink_row_cap_median_multiple,
         }
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
@@ -6474,7 +6998,10 @@ class ParoConfig(PreProcessorConfig):
     opt_finetune_epochs: int = field(default=10)
     opt_train_samples: int = field(default=2048)
     opt_validation_samples: int = field(default=64)
-    opt_batch_size: int = field(default=64)
+    # Replay the sampled calibration rows in larger optimizer steps: the stage
+    # loop is launch-bound, so the step count (not the row count) drives wall
+    # time. Every row is still visited once per epoch, see `_chunk_rows`.
+    opt_batch_size: int = field(default=128)
     opt_rotation_lr: float = field(default=0.05)
     opt_weight_lr: float = field(default=1e-5)
     opt_quantizer_lr: float = field(default=1e-6)
@@ -7171,17 +7698,29 @@ class MacaqConfig(PreProcessorConfig):
 
 @dataclass
 class FP8Config(PreProcessorConfig):
-    gsq: Optional[GSQConfig] = field(default=None)
-    gsq_calibration: bool = field(default=False)
+    """Load-only descriptor for a production FP8 checkpoint.
+
+    GPT-QModel no longer quantizes or exports FP8. This config exists only to
+    describe an existing checkpoint so the loader can decode and run it. New
+    FP8 checkpoints are not produced here: use a production FP8 checkpoint
+    (transformers ``FineGrainedFP8`` / DeepSeek / Qwen block scales, or NVIDIA
+    ModelOpt per-tensor scales) and quantize to GPTQ/AWQ/RTN if a GPT-QModel
+    layout is required.
+
+    The row/tensor inverse-scale layouts that earlier GPT-QModel releases
+    invented are still readable for backward compatibility, but they are not a
+    supported output.
+    """
+
     bits: int = field(default=8, metadata={"choices": [8]})
     method: METHOD = field(default=METHOD.FP8)
     format: Optional[str] = field(default="float8_e4m3fn")
     group_size: int = field(default=-1)
     desc_act: Optional[bool] = field(default=False)
     sym: bool = field(default=True)
-    weight_scale_method: str = field(default="row")
+    weight_scale_method: str = field(default="tensor")
     weight_block_size: Optional[Union[List[int], Tuple[int, int]]] = field(default=None)
-    weight_scale_semantics: str = field(default="inverse")
+    weight_scale_semantics: str = field(default="multiplier")
 
     def _resolve_checkpoint_format(self) -> FORMAT:
         self.format = _normalize_fp8_fmt(self.format)
@@ -7190,8 +7729,11 @@ class FP8Config(PreProcessorConfig):
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.FP8,)
 
+    def is_load_only(self) -> bool:
+        return True
+
     def supported_export_formats(self) -> Tuple[FORMAT, ...]:
-        return FP8_EXPORT_FORMATS
+        return FP8_FORMATS
 
     def default_desc_act(self) -> bool:
         return False
@@ -7210,14 +7752,6 @@ class FP8Config(PreProcessorConfig):
         self.desc_act = False
         self.sym = True
 
-        self.gsq = normalize_gsq_config(self.gsq)
-        if self.gsq is not None and self.gsq.enabled and self.gsq.learn_scales:
-            raise ValueError("FP8Config: GSQ currently requires fixed inverse scales")
-        if not isinstance(self.gsq_calibration, bool):
-            raise TypeError("FP8Config: gsq_calibration must be boolean")
-        if self.gsq_calibration and (self.gsq is None or not self.gsq.enabled):
-            raise ValueError("FP8Config: gsq_calibration requires enabled GSQ")
-
         self.format = _normalize_fp8_fmt(self.format)
         block_size = _normalize_fp8_weight_block_size(self.weight_block_size)
         self.weight_scale_method = _normalize_fp8_weight_scale_method(
@@ -7226,7 +7760,6 @@ class FP8Config(PreProcessorConfig):
         )
         self.weight_block_size = list(block_size) if block_size is not None else None
         self.weight_scale_semantics = _normalize_fp8_scale_semantics(self.weight_scale_semantics)
-        self._validate_gsq()
 
         if self.dynamic is not None:
             self.dynamic = {
@@ -7235,6 +7768,7 @@ class FP8Config(PreProcessorConfig):
             }
             for layer, layer_dict in self.dynamic.items():
                 _validate_dynamic_layer_keys(self, layer, layer_dict)
+                _validate_dynamic_smoothers(self, layer, layer_dict)
                 self._normalize_dynamic_layer_config(
                     layer,
                     layer_dict,
@@ -7251,7 +7785,7 @@ class FP8Config(PreProcessorConfig):
         checkpoint_format: FORMAT,
     ) -> None:
         del valid_bit_widths, checkpoint_format
-        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
+        _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         if "bits" in layer_dict:
             layer_dict["bits"] = _normalize_quant_bits(
                 layer_dict["bits"],
@@ -7302,23 +7836,14 @@ class FP8Config(PreProcessorConfig):
             "weight_scale_semantics": self.weight_scale_semantics,
         }
 
-    def _validate_gsq(self) -> None:
-        if self.gsq is not None and self.gsq.enabled and self.format == "float8_e8m0fnu":
-            raise ValueError("FP8Config: GSQ requires finite E4M3/E5M2 weight storage")
-        if self.gsq_calibration and self.weight_scale_method == "tensor":
-            raise ValueError("FP8Config: calibrated GSQ requires row or block weight scales")
-
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out[FORMAT_FIELD_CODE] = self.format
-        if self.gsq is not None:
-            out["gsq"] = asdict(self.gsq)
-        out["gsq_calibration"] = self.gsq_calibration
         out["weight_scale_method"] = self.weight_scale_method
         out["weight_block_size"] = self.weight_block_size
         out["weight_scale_semantics"] = self.weight_scale_semantics
 
     def uses_weight_only_lifecycle(self) -> bool:
-        return not self.gsq_calibration
+        return True
 
 
 @dataclass
@@ -7537,6 +8062,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
             }
             for layer, layer_dict in self.dynamic.items():
                 _validate_dynamic_layer_keys(self, layer, layer_dict)
+                _validate_dynamic_smoothers(self, layer, layer_dict)
                 self._normalize_dynamic_layer_config(
                     layer,
                     layer_dict,
@@ -7553,7 +8079,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
         checkpoint_format: FORMAT,
     ) -> None:
         del valid_bit_widths, checkpoint_format
-        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
+        _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         if "bits" in layer_dict:
             layer_dict["bits"] = _normalize_quant_bits(
                 layer_dict["bits"],
@@ -7590,14 +8116,17 @@ class BitsAndBytesConfig(PreProcessorConfig):
                 effective_format = _normalize_bitsandbytes_format(None, bits=effective_bits)
             if effective_format != self.format:
                 layer_dict[FORMAT_FIELD_CODE] = effective_format
+        layer_dict.pop("bnb_quant_type", None)
         if "block_size" in layer_dict or "bnb_block_size" in layer_dict:
             layer_dict["block_size"] = _normalize_bitsandbytes_block_size(
                 layer_dict.get("block_size", layer_dict.get("bnb_block_size"))
             )
         layer_dict.pop("bnb_block_size", None)
         if "compress_statistics" in layer_dict or "bnb_compress_statistics" in layer_dict:
-            layer_dict["compress_statistics"] = bool(
-                layer_dict.get("compress_statistics", layer_dict.get("bnb_compress_statistics"))
+            # `_validate_dynamic_boolean_overrides` already rejected a string
+            # like `"False"`; keep the real bool instead of re-coercing it.
+            layer_dict["compress_statistics"] = layer_dict.get(
+                "compress_statistics", layer_dict.get("bnb_compress_statistics")
             )
         layer_dict.pop("bnb_compress_statistics", None)
 
@@ -7740,6 +8269,7 @@ class EXL3Config(PreProcessorConfig):
             }
             for layer, layer_dict in self.dynamic.items():
                 _validate_dynamic_layer_keys(self, layer, layer_dict)
+                _validate_dynamic_smoothers(self, layer, layer_dict)
                 self._normalize_dynamic_layer_config(
                     layer,
                     layer_dict,
@@ -7981,7 +8511,7 @@ class GGUFConfig(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
-        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
+        _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         bits_override_present = "bits" in layer_dict
         format_override_present = FORMAT_FIELD_CODE in layer_dict
 
@@ -8202,7 +8732,11 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
     ):
         return GGUFConfig
     if weight_only_method == WeightOnlyMethod.FP8:
-        return FP8Config
+        raise ValueError(
+            "QuantizeConfig: weight-only FP8 export was removed. GPT-QModel no longer "
+            "produces FP8 checkpoints; load a production FP8 checkpoint, or quantize "
+            "with `rtn`, `gguf`, or `bitsandbytes`."
+        )
     if weight_only_method == WeightOnlyMethod.BITSANDBYTES:
         return BitsAndBytesConfig
     if weight_only_method == WeightOnlyMethod.RTN:

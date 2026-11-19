@@ -96,6 +96,76 @@ coverage. The pre-pack dequantization and the packed grid then agree.
 The symmetric branch is unchanged: its zero point is the fixed midpoint
 `(maxq + 1) / 2`.
 
+## SmoothMSE endpoint candidates
+
+`mse_optimal_quant` searches the shrink factor `p` but must treat the unshrunk
+range (`p = 1`) as a candidate, not as an unchecked initialization. The ternary
+probes are computed from interior thirds of `[maxshrink, 1]`, so none of them
+equals `1`; a search seeded with `p = 1` and `best_err = inf` let the first
+interior probe replace the incumbent before `p = 1` was ever scored. The
+refinement then only searched near that probe.
+
+The endpoint scores and the final reconstruction are float32 while the tensor
+is stored at checkpoint precision, so a float64 oracle can still report a
+relative difference around `1e-5`. That is scoring rounding, not a worse
+selection: the incumbent is the same expression the search scores.
+
+### Importance-weighted objective
+
+Scoring `p = 1` exposed a second problem: the uniform mean squared weight
+error is the wrong objective for a trained transformer. Clipping a row's
+largest weight is nearly free under that mean — one element's error buys a
+smaller step for the other 127 elements — but those large weights dominate the
+row's dot product, so the layer output error rises while the weight MSE falls.
+#5221 therefore made SmoothMSE worse end-to-end (Qwen2.5-0.5B-Instruct 4-bit
+symmetric PPL 25.363 before it, 26.188 after it) even though it made the
+weight-MSE contract exact.
+
+The search now minimizes an importance-weighted error:
+
+| Consumer | Weight for each squared error | Source |
+| --- | --- | --- |
+| GPTQ / QQQ fallback | `H[j, j]` | Captured Hessian diagonal: exact input-channel activation energy for the diagonal approximation of the layer output error |
+| Calibration-free RTN | `abs(w[i, j]) + mean_j(abs(w[i, :]))` | Weight magnitude: a large weight dominates its row's dot product, so its relative error is more visible at the layer output |
+
+Both weightings are per-row normalized before the reduction. The unshrunk
+`p = 1` grid is still scored with the same weights and remains the incumbent,
+so a clipped grid is accepted only when it lowers the *weighted* error. The
+uniform weight MSE is no longer the contract: it can rise slightly while the
+weighted output error falls.
+
+```mermaid
+flowchart TD
+    S["mse_optimal_quant(block)"] --> W["weights = Hessian diagonal<br/>or |w| + mean(|w|)"]
+    W --> B["_eval_mse at p = maxshrink and p = 1"]
+    B --> I["incumbent = lower-error endpoint"]
+    I --> T["Ternary iterations over interior midpoints"]
+    T --> R["Refine around the incumbent"]
+    R --> C{"Refined error < incumbent error?"}
+    C -- Yes --> N["Adopt refinement"]
+    C -- No --> K["Keep incumbent"]
+    N --> O["Final quantization at best_p"]
+    K --> O
+    style O fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+```
+
+| Mechanism | Previous behavior | New behavior |
+| --- | --- | --- |
+| Objective | Uniform mean squared weight error | Per-row importance-weighted error (Hessian diagonal or weight magnitude) |
+| `p = 1` scoring | Never evaluated; `best_err` started at `inf` | Scored together with `p = maxshrink` before the search |
+| First interior probe | Always replaced the unscored incumbent | Only replaces an endpoint with a strictly lower measured error |
+| Refinement | Argmin over the refinement set only | Compared with the incumbent error |
+| Result vs the unshrunk grid | Could be worse (for example a constant row returned `0.9979189634` instead of the exact grid) | Rejected when its weighted error is not lower than the `p = 1` score |
+
+`tests/test_smooth_mse_endpoint_baseline.py` pins this with an independent
+float64 endpoint oracle for normal, negative-constant, all-zero and mixed-sign
+rows, in symmetric and asymmetric modes, through the direct search and the
+`rtn.py`, `gptq.py` and `qqq.py` fallback consumers.
+`tests/test_smooth_mse_saliency_criterion.py` pins the weighting itself: a
+heavy-tail row that the uniform mean clips must stay on the unshrunk grid, the
+Gaussian control must still clip, and the GPTQ fallback must protect the
+channel marked by the Hessian diagonal.
+
 ```mermaid
 flowchart TD
     F["GPTQ._fallback_quantize"] --> M{"SmoothMSE?"}

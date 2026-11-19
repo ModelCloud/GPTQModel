@@ -4,12 +4,11 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import os
-from types import SimpleNamespace
 from typing import Dict, Optional
 
 import torch
 from PIL import Image
-from transformers import AutoModelForTextToWaveform, AutoProcessor, PreTrainedModel, ProcessorMixin
+from transformers import AutoModelForTextToWaveform, AutoProcessor, ProcessorMixin
 
 from ...utils.audio import process_audio_info
 from ...utils.calibration import batched_conversations
@@ -18,6 +17,8 @@ from ...utils.model import MODALITY, thinker_multimodal_model, thinker_text_mode
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ._omni_thinker_layout import OmniThinkerCheckpointLayoutMixin
+from ._thinker_embeddings import ThinkerEmbeddingsMixin
 from ._vlm_calibration import (
     finalize_conversation_batches,
     pop_conversation_calibration_options,
@@ -83,35 +84,12 @@ def _patch_qwen2_5_omni_talker_prepare_inputs_for_generation(talker_cls):
     talker_cls.prepare_inputs_for_generation = prepare_inputs_for_generation
 
 
-class BaseQwen2_5_OmniGPTQ(BaseQModel):
+class BaseQwen2_5_OmniGPTQ(OmniThinkerCheckpointLayoutMixin, ThinkerEmbeddingsMixin, BaseQModel):
     ATTENTION_MASKS_REQUIRED_FOR_INPUT = True
     ATTENTION_MASKS_DTYPE = torch.long
     require_monkeypatch = True
 
-    # Transformers 5.22 registers the checkpoint -> runtime renames for the
-    # Qwen2.5-Omni thinker (``thinker.visual`` -> ``thinker.model.visual``, and
-    # likewise for the audio tower and ``language_model``) under the nested
-    # ``qwen2_5_omni_thinker`` model type, not the top-level ``qwen2_5_omni``.
-    # Resolving the top-level type therefore finds no conversion map, and the
-    # lazy disk loader leaves the towers and ``embed_tokens`` on META. Declare
-    # the runtime -> checkpoint aliases explicitly so both layouts resolve.
-    HF_CONVERSION_MAP_REVERSED = (
-        SimpleNamespace(
-            source_patterns=[r"^thinker\.model\.visual\.(.+)$"],
-            target_patterns=[r"^thinker.visual.\1"],
-            operations=[],
-        ),
-        SimpleNamespace(
-            source_patterns=[r"^thinker\.model\.audio_tower\.(.+)$"],
-            target_patterns=[r"^thinker.audio_tower.\1"],
-            operations=[],
-        ),
-        SimpleNamespace(
-            source_patterns=[r"^thinker\.model\.language_model\.(.+)$"],
-            target_patterns=[r"^thinker.model.\1"],
-            operations=[],
-        ),
-    )
+    HF_WRAPPER_CLASS_NAME = "Qwen2_5OmniForConditionalGeneration"
 
     loader = AutoModelForTextToWaveform
 
@@ -133,23 +111,6 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
 
     require_load_processor = True
-
-    def before_model_load(self, model_local_path: str, load_quantized_model: bool):
-        from transformers import Qwen2_5OmniForConditionalGeneration
-
-        # The quantized loader discovers endpoints before constructing our
-        # wrapper. Supply the missing HF getters there as well as on the wrapper.
-        model_cls = Qwen2_5OmniForConditionalGeneration
-        if model_cls.get_input_embeddings is PreTrainedModel.get_input_embeddings:
-            model_cls.get_input_embeddings = lambda model: model.thinker.get_input_embeddings()
-        if model_cls.get_output_embeddings is PreTrainedModel.get_output_embeddings:
-            model_cls.get_output_embeddings = lambda model: model.thinker.lm_head
-
-    def get_input_embeddings(self):
-        return self.model.thinker.get_input_embeddings()
-
-    def get_output_embeddings(self):
-        return self.model.thinker.lm_head
 
     def after_model_load(self, model, load_quantized_model=False):
         # The thinker decoder lives under `thinker.model` before transformers

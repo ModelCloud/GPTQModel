@@ -18,12 +18,13 @@ from ...quantization.awq.utils.packing_utils import (
 )
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from . import AWQuantLinear
+from . import AWQuantLinear, detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import (
     bind_runtime_qzeros,
     capture_fused_train_state,
     finalize_fused_train_state,
+    fused_autograd_needs_dense,
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
@@ -50,10 +51,19 @@ class TorchAtenAwqLinear(AWQuantLinear):
 
     QUANT_TYPE = "awq_torch_aten_kernel"
 
-    # Measured on CPU, torch 2.11.0+cu130: dynamo cannot enter the
-    # `_cpu_transform_lock` RLock held in forward. CPU-only, so no CUDA graph
-    # capture applies.
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    # Measured on CPU, torch 2.16.0.dev20261021+cpu: eager=True,
+    # graph_breaks=0, dynamo/aot_eager/inductor all reach it for an unbiased
+    # layer. The `_cpu_transform_lock` RLock around the one-time int4pack
+    # rewrite is skipped while tracing, and `_refresh_fused_state` is
+    # eager-only now. A biased FP16/BF16 layer needs an FP32 product, which
+    # inductor cannot lower through a fused operand cast (#4068). CPU-only, so
+    # no CUDA graph capture applies.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.INDUCTOR
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for this kernel in this change; the INDUCTOR level is opt-in via "
+        "optimize() (#4984 policy unchanged)."
+    )
     SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH_ATEN]
@@ -247,6 +257,13 @@ class TorchAtenAwqLinear(AWQuantLinear):
         # ``qweight`` now holds int4pack words: drop the checkpoint clone if
         # the inverse reproduces exactly the bytes captured before the pack.
         finalize_fused_train_state(self)
+        # ``scales`` keeps the checkpoint dtype and order and ``bias`` is
+        # untouched, so both are still views of the shard's ``safetensors``
+        # mapping; either one alone pins every page the loader faulted in
+        # (#4785). Detach them now that the runtime layout is built.
+        self.scales = detach_cpu_operand(self.scales)
+        self.bias = detach_cpu_operand(getattr(self, "bias", None))
+        self.g_idx = detach_cpu_operand(getattr(self, "g_idx", None))
 
     def transform(self, device, dtype: torch.dtype | None = None):
         if device == "cpu":
@@ -267,7 +284,12 @@ class TorchAtenAwqLinear(AWQuantLinear):
 
     @torch.no_grad()
     def _fused_op_forward(self, x, out_dtype=None):
-        self._refresh_fused_state()
+        if not torch.compiler.is_compiling():
+            # Rebuilds ``scales_and_zeros`` from a ``tensor_cache_key``
+            # (`is_inference`/`_version`/`data_ptr`), which dynamo cannot trace,
+            # and writes module state a graph must not mutate. The eager warmup
+            # already refreshed it for the current packed buffers.
+            self._refresh_fused_state()
         if x.device.type != "cpu":
             raise NotImplementedError
 
@@ -344,35 +366,62 @@ class TorchAtenAwqLinear(AWQuantLinear):
             self.scales_and_zeros = None
             self._cpu_transformed = False
             self._cpu_transform_dtype = None
+        elif not mode and self.linear_mode == "train":
+            # The dense-dequant path holds no derived state, so clearing the
+            # latch lets the next forward choose the int4pack layout again.
+            # Without this a forward taken while the module was in training
+            # mode pinned it to dense dequantization for the rest of its life,
+            # so a later `eval()` could never recover (#4907).
+            self.linear_mode = None
         return super().train(mode=mode)
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        with self._cpu_transform_lock:
-            if (
-                not self.training
-                and not x.requires_grad
-                and self.linear_mode is None
-                and _has_local_int4pack_cpu_ops()
-                and x.device.type == "cpu"
-                and self._fused_input_dtype(x)
-                # FP16 can overflow before a cancelling bias. BF16 has FP32's
-                # range, so it can use the fused kernel and add the bias once.
-                # The CPU fused op returns an FP32 product for a biased FP16
-                # layer.
-                and (
-                    self.bias is None
-                    or x.dtype in (torch.bfloat16, torch.float16)
-                )
-            ):
-                capture_fused_train_state(self)
-                self.transform(x.device.type, dtype=x.dtype)
-                self.linear_mode = "inference"
-            elif self.linear_mode is None:
-                self.linear_mode = "train"
+        if torch.compiler.is_compiling():
+            # ``_cpu_transform_lock`` is an ``RLock``: dynamo cannot enter it (a
+            # hard graph break), and the one-time ``transform()`` rewrites the
+            # packed int4pack buffers in place, which a traced graph must not
+            # do. The transform runs on the first eager forward and in
+            # ``optimize()``'s warmup, so the graph only reads the resolved
+            # ``linear_mode``.
+            linear_mode = self.linear_mode
+        else:
+            with self._cpu_transform_lock:
+                force_dense = fused_autograd_needs_dense(self, x)
+                if force_dense:
+                    # The fused op has no backward. Restore the checkpoint
+                    # layout so this call can take the differentiable dequant
+                    # path; a later inference forward transforms again (#5314).
+                    if not restore_fused_train_state(self):
+                        raise RuntimeError(
+                            f"{type(self).__name__} cannot provide a gradient after the fused "
+                            "inference transform because the checkpoint layout cannot be restored."
+                        )
+                if not force_dense and (
+                    not self.training
+                    and not x.requires_grad
+                    and self.linear_mode is None
+                    and _has_local_int4pack_cpu_ops()
+                    and x.device.type == "cpu"
+                    and self._fused_input_dtype(x)
+                    # FP16 can overflow before a cancelling bias. BF16 has
+                    # FP32's range, so it can use the fused kernel and add the
+                    # bias once. The CPU fused op returns an FP32 product for a
+                    # biased FP16 layer.
+                    and (
+                        self.bias is None
+                        or x.dtype in (torch.bfloat16, torch.float16)
+                    )
+                ):
+                    capture_fused_train_state(self)
+                    self.transform(x.device.type, dtype=x.dtype)
+                    self.linear_mode = "inference"
+                elif not force_dense and self.linear_mode is None:
+                    self.linear_mode = "train"
+            linear_mode = self.linear_mode
 
-        if self.linear_mode == "inference":
+        if linear_mode == "inference":
             if not self._fused_input_dtype(x):
                 raise RuntimeError(
                     f"{self.__class__.__name__} was transformed for {self._cpu_transform_dtype} "

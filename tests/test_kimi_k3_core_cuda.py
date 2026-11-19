@@ -21,9 +21,10 @@ from torch.nn import functional as F
 
 from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
 from gptqmodel.utils import kimi_k3_core_format as core
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
-requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason='requires admitted CUDA GPU')
+requires_cuda = pytest.mark.skipif(not requires_nvidia_cuda(), reason='requires admitted CUDA GPU')
 
 
 @pytest.fixture(scope='module', autouse=True)

@@ -67,7 +67,7 @@ from ..quantization.gptq import SharedHessianFactorCache
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.model import create_quant_module, pack_module
+from ..utils.model import create_quant_module, install_quant_module, pack_module
 from ..utils.module_locks import parent_module_lock
 from ..utils.torch import HAS_NPU
 
@@ -430,10 +430,16 @@ class GPTQProcessor(LoopProcessor):
             return plan
 
     @staticmethod
-    def _hessian_accumulation_settings(task: GPTQ) -> Tuple[str, Optional[int], Optional[int]]:
+    def _hessian_accumulation_settings(task: GPTQ) -> Tuple[Any, ...]:
         """Settings that alter the numerical result of Hessian accumulation; members must match to share `H`."""
         hessian = task.qcfg.hessian
-        return (str(hessian.staging_dtype), hessian.chunk_size, hessian.chunk_bytes)
+        return (
+            str(hessian.staging_dtype),
+            hessian.chunk_size,
+            hessian.chunk_bytes,
+            # The sink-row cap rescales rows before `X^T X` (issue #4742).
+            getattr(hessian, "sink_row_cap_median_multiple", None),
+        )
 
     def _hessian_capture_signature(self, task: Any) -> Optional[Tuple[Any, ...]]:
         """Numerical capture contract; ``None`` excludes the task from sharing.
@@ -856,11 +862,21 @@ class GPTQProcessor(LoopProcessor):
                     f"does not match target device {expected_device}."
                 )
 
-            g_h = getattr(g, "H", None)
-            if g_h is not None:
-                assert torch.device(g_h.device) == expected_device, (
-                    f"GPTQ Hessian tensor for '{module.full_name}' lives on {g_h.device}, expected {expected_device}."
+            # Read the Hessian's device through the task instead of binding it
+            # to a local: GPTAQ/FOEM hand their `[C, C]` accumulator to the
+            # quantizer and rebind it to a permuted copy, so a local reference
+            # kept the original unpermuted fp32 Hessian alive across
+            # `g.quantize()` and its peak (#5026).
+            if getattr(g, "H", None) is not None:
+                assert torch.device(g.H.device) == expected_device, (
+                    f"GPTQ Hessian tensor for '{module.full_name}' lives on {g.H.device}, expected {expected_device}."
                 )
+                # No local may be bound here. GPTAQ/FOEM release the task
+                # Hessian themselves and then rebind `H` to the permutation,
+                # so a surviving reference keeps the original unpermuted
+                # [C, C] fp32 copy alive across the whole quantize -- including
+                # the peak, where `H`, `dXXT` and the inverse are all live
+                # (#5026). 784 MiB for an 8B down_proj.
 
             if expected_device.type == "cuda" and torch.cuda.is_available():
                 current_cuda_device = torch.device("cuda", torch.cuda.current_device())
@@ -875,7 +891,25 @@ class GPTQProcessor(LoopProcessor):
                     f"while processing '{module.full_name}'."
                 )
 
-        wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+        try:
+            wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+        except BaseException:
+            # `free()` below is the success-path teardown. A failing quantize
+            # must still drop the `[C, C]` accumulator, or the task pins it
+            # until the processor is torn down. Only the Hessian state is
+            # released: the module and quantizer are left intact for the
+            # failed-run cleanup (#5026).
+            release = getattr(g, "release_hessian_state", None)
+            if release is not None:
+                try:
+                    release()
+                except Exception:  # pragma: no cover - teardown must not mask
+                    log.warning(
+                        "GPTQProcessor: releasing the Hessian for '%s' failed after a "
+                        "quantize error; the original exception is re-raised.",
+                        module.full_name,
+                    )
+            raise
         gsq_diagnostics = getattr(g, "gsq_diagnostics", None)
         if gsq_diagnostics is not None:
             module.state["gsq_diagnostics"] = gsq_diagnostics
@@ -1069,6 +1103,11 @@ class GPTQProcessor(LoopProcessor):
         # replace module with quantized module
         timer = getattr(model, "quant_region_timer", None)
 
+        # Build and pack the kernel off-model and publish it only once packing
+        # has returned. Installing the empty kernel first left a projection
+        # without `qweight`/`qzeros`/`scales` in the tree when a Ctrl-C or an
+        # exception landed in `pack_module`, and every later forward then
+        # raised `AttributeError` (issue #5089).
         create_start = time.perf_counter() if timer is not None else None
         with log_time_block(
             "create_quant_module",
@@ -1076,7 +1115,7 @@ class GPTQProcessor(LoopProcessor):
             module_name=module_label,
         ):
             with parent_module_lock(parent_key):
-                create_quant_module(
+                qmodule = create_quant_module(
                     name=module.full_name,
                     linear_cls=model.qlinear_kernel,
                     bits=self.qcfg.runtime_bits,
@@ -1092,6 +1131,7 @@ class GPTQProcessor(LoopProcessor):
                     format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
                     register_buffers=False,
                     resolved_module_config=get_resolved_module_config(module),
+                    install=False,
                 )
         if timer is not None and create_start is not None:
             timer.record(
@@ -1100,8 +1140,11 @@ class GPTQProcessor(LoopProcessor):
                 source=module_label,
             )
 
+        if qmodule is None:
+            # The resolved config excluded this module from quantization.
+            return
+
         # pack module
-        qmodule = model.model.get_submodule(module.full_name)
         if self.qcfg.activation_mode == "w4a_nvfp4":
             qmodule.activation_global_scale.fill_(module.state.pop("activation_global_scale"))
         qModules = (
@@ -1134,6 +1177,12 @@ class GPTQProcessor(LoopProcessor):
                 time.perf_counter() - pack_start,
                 source=f"{module_label} [{packer_label or 'module.pack_original'}]",
             )
+
+        # The kernel is complete; publish it with one assignment under the same
+        # parent lock the creation and packing used.
+        if qmodule is not None:
+            with parent_module_lock(parent_key):
+                install_quant_module(model.model, module.full_name, qmodule)
 
         # TODO: store module quant results in module, not global processor result
         self.result_pop(module.full_name)

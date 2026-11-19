@@ -348,8 +348,11 @@ class DeepSeekV4MTPAuxiliaryShell(nn.Module):
 
         import defuser
 
-        if not defuser.convert_model(self, cleanup_original=False):
-            raise RuntimeError("Defuser did not expand DeepSeek V4 MTP expert tensors")
+        from ...utils.torch import defuser_conversion_scope
+
+        with defuser_conversion_scope(self):
+            if not defuser.convert_model(self, cleanup_original=False):
+                raise RuntimeError("Defuser did not expand DeepSeek V4 MTP expert tensors")
         patched = patch_deepseek_v4_router_precision(self)
         if patched != MTP_BLOCK_COUNT:
             raise RuntimeError(
@@ -397,6 +400,8 @@ class DeepSeekV4MTPAuxiliary:
             raise ValueError(
                 "DeepSeek V4 MTP auxiliary loading requires a local checkpoint snapshot"
             )
+        # The shell's own ``local_torch_dtype`` window takes the writer
+        # (#5304); the rest of its construction stays concurrent.
         shell = DeepSeekV4MTPAuxiliaryShell(config, device=device)
         turtle = LazyTurtle.maybe_create(
             model_local_path=model_local_path,

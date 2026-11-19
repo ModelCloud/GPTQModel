@@ -121,7 +121,7 @@ flowchart TD
 | Before (baseline `c9efdbacf`) | Now |
 | --- | --- |
 | Candidate search multiplies non-quantized consumer weights (`awq_processor.py:3099-3119`). | Search leaves them unchanged; final folding still compensates them. |
-| Shared-source merge retains the first inspection module for cross-root groups (`models/base.py:5540-5546`). | Group construction remains unchanged, but search rejects boundaries missing any member rather than scoring only one branch. |
+| Shared-source merge retains the first inspection module for cross-root groups (`models/base.py:5540-5546`). | Group construction remains unchanged, but search rejects boundaries missing any *scored* member rather than scoring only one branch. A group the tree declares across sibling branches of one norm (`_awq_allow_outside_fold`) folds the out-of-boundary members **and scale consumers** instead of scoring them: they read the same tensor, so the same scale is exact, and `apply_scale` compensates every declared consumer. Only members the search scores must be replayed (#4741, #4898). |
 | A contained target need not execute during replay (`awq_processor.py:2551-2572`). | Reference-forward observation rejects unexecuted targets before candidate mutation; observation hooks are always removed. |
 | Replay always routes with the model's native top-k, even when calibration captured features under `ExpertsRoutingOverride` (`awq_processor.py:2358-2661`). | Reference and candidate replays re-enter the capture-time override; a target that still cannot execute rejects the group. |
 | Weight restoration occurs only after successful grid evaluation (`awq_processor.py:3267-3278`). | Restoration is in `finally`, covering quantizer, replay, and loss exceptions. |
@@ -588,12 +588,100 @@ implementation returns `(x, module_kwargs)` unchanged, and TeleChat2 promotes
 the 2-D capture to 3-D, passes the block input as `residual` (an additive
 constant shared by reference and candidate), and builds a causal bool mask.
 
+### Module replay failures and the scale-group fallback
+
+A replay can fail for reasons the processor cannot pre-check. Two contracts keep
+such a failure from aborting `quantize()`:
+
+1. A tensor-geometry `RuntimeError` from the replayed module is converted to
+   `_AWQScaleGroupError` (`_is_replay_geometry_error`), so the configured
+   fallback quantizes the consumer plainly (#5085).
+2. A bare `AssertionError` raised **by the replayed module** is converted the
+   same way (`AWQProcessor._invoke_replay_module`). Hymba's `reuse_kv` mixer
+   asserts `kv_last_layer is not None`; that value is threaded between layers by
+   the forward executor, is not part of the per-linear capture, and cannot be
+   reconstructed from the retained token rows (#5098).
+
+The conversion is scoped to the replay call: the processor's own assertions and
+non-`AssertionError` exceptions still propagate, so a numerical or logical
+failure is never silently downgraded to plain quantization.
+
+```mermaid
+flowchart TD
+    A["AWQProcessor._search_best_scale"] --> B["replay boundary forward<br/>_iter_prepared_forward_outputs"]
+    B --> C{"module forward raised?"}
+    C -- "no" --> D["score candidates"]
+    C -- "RuntimeError naming<br/>broadcast or matmul shapes" --> E["_AWQScaleGroupError"]
+    C -- "AssertionError from the module" --> E
+    C -- "any other exception" --> F["propagate; abort quantize()"]
+    E --> G{"AWQConfig.fallback set?"}
+    G -- "yes" --> H["plain quantization for the group<br/>log the configured fallback"]
+    G -- "no" --> I["raise; no unsafe fold"]
+    style F fill:#f8d7da,stroke:#842029,stroke-width:2px
+    style I fill:#f8d7da,stroke:#842029,stroke-width:2px
+    style H fill:#fff3cd,stroke:#997404,stroke-width:2px
+```
+
+### `hymba`: KV-reuse layers
+
+Every Hymba checkpoint shares KV across layers (`kv_reuse_group`, 15 consumer
+layers of 32 on `nvidia/Hymba-1.5B-Base`). A consumer's `HymbaBlock` projects no
+K/V of its own: it reads the producer layer's `kv_last_layer`, which
+`ForwardExecutor` injects for the real forward only
+(`looper/forward_executor.py`, enabled by `HymbaQModel.write_shared_kv_cache`).
+
+`input_layernorm -> mamba.in_proj` is a single-member group whose declared
+inspection module was the whole mixer, so the scale search replayed
+`HymbaBlock(x, **captured_kwargs)` without that value and asserted. Block replay
+was also the wrong objective: the group has one Linear member, and the
+projection's own reconstruction error is exactly what the search ranks.
+
+`HymbaQModel.awq_get_modules_for_scaling` re-anchors that group's
+`module2inspect` onto the `mamba.in_proj` `nn.Linear`. The fold itself is
+unchanged: `input_layernorm` is still divided and `in_proj`'s input rows are
+still scaled (`tests/test_hymba_awq_4891.py` pins that folding the resulting
+groups still reproduces the logits).
+
+```mermaid
+flowchart LR
+    subgraph OLD["before: boundary is the mixer"]
+        N1["input_layernorm"] --> M1["HymbaBlock.forward"]
+        M1 --> R1["needs kv_last_layer<br/>and packed causal mask"]
+        R1 --> X1["AssertionError<br/>aborts quantize()"]
+    end
+    subgraph NEW["after: boundary is the projection"]
+        N2["input_layernorm"] --> P2["mamba.in_proj Linear"]
+        P2 --> S2["score scale on the projection"]
+        S2 --> F2["fold the norm; consumer stays quantized"]
+    end
+    style X1 fill:#f8d7da,stroke:#842029,stroke-width:2px
+    style F2 fill:#d1e7dd,stroke:#0f5132,stroke-width:2px
+```
+
+| Situation | Before | After |
+| --- | --- | --- |
+| `input_layernorm -> mamba.in_proj` on a KV-reuse layer | replayed `HymbaBlock`; `assert kv_last_layer is not None` aborted `quantize()` | replayed `mamba.in_proj`; the projection is the whole group and owns no cross-layer state |
+| `input_layernorm -> mamba.in_proj` on a producer layer | replayed `HymbaBlock`; group scored through the mixer | same re-anchor: one Linear member, so the projection alone is the objective |
+| Replay raises `AssertionError` in the module | propagated and aborted the run | `_AWQScaleGroupError`; configured fallback or a raise when `fallback=None` |
+| Processor-side assertion or non-assertion failure | propagated | unchanged: still propagates |
+| Multi-consumer norm or non-Linear target | replayed the block | unchanged: the mixed replay is kept so the existing validation decides |
+
 ## Looped decoder calibration
 
-HRM-Text, Ouro (`total_ut_steps=4`) and Nanbeige 4.2 (`num_loops=2`) run the
-same physical layers several times per forward. The default capture aborts at
-the first layer, so each processor's Hessian only saw loop 0. Ouro's steps 1-3
-have cosine -0.03..0.42 against the single captured input.
+HRM-Text, Ouro (`total_ut_steps=4`), Nanbeige 4.2 (`num_loops=2`) and
+SenseNova-Loop (`loop_settings = {start, end, eval_count}`) run the same
+physical layers several times per forward. The default capture aborts at the
+first layer, so each processor's Hessian only saw loop 0. Ouro's steps 1-3 have
+cosine -0.03..0.42 against the single captured input.
+
+A definition opts in by deriving from `LoopedLayerCaptureMixin`. When the mixin
+is missing the run still succeeds, so the guard is a definition-level contract:
+`tests/test_looped_decoder_capture.py` asserts the mixin is present for every
+looped family **and** that the captured invocation counts equal the model's own
+`execution_plan()`. SenseNova-Loop regressed exactly this way in #5081: its
+docstring claimed the looper already handled the loop, but the definition
+derived only from `Qwen3_5QModel`, so layers inside the looped block were
+calibrated on one visit and the post-loop layers on one-loop inputs.
 
 ```mermaid
 flowchart TD
@@ -661,7 +749,7 @@ Issue #4093 item coverage:
 | `tests/test_telechat2_coverage.py` | `query`/`key_value`/`dense` are quantized and no leaf is undeclared; replay supplies `residual` + mask |
 | `tests/test_awq_position_kwargs.py` | stale `position_ids` are rebuilt, mismatched `position_embeddings` dropped, module-local rotary rebuilds cos/sin |
 | `tests/test_pangu_alpha_replay.py` | last layer replays `ln_f` + `custom_query`; GPTQ beats RTN on the top-query `q_proj` |
-| `tests/test_looped_decoder_capture.py` | Ouro captures 4 invocations, Nanbeige 2, per-loop cosine < 0.99 |
+| `tests/test_looped_decoder_capture.py` | Ouro captures 4 invocations, Nanbeige 2, per-loop cosine < 0.99; SenseNova-Loop captures the published `execution_plan()` exactly and its post-loop replay input equals the real model's |
 | `tests/test_layer_module_coverage.py` | undeclared quantizable leaves are recorded and warned about |
 | `tests/test_awq_moe_root_capture_4697.py` | a real tiny Granite-MoE/gpt-oss quantize applies the routed-expert gate/up group from the declared root feature; an empty root warns instead of silently dropping the group |
 
@@ -673,15 +761,25 @@ Issue #4121 item coverage:
 | `tests/module_tree/test_nemotron_h_model_tree.py` | the Omni definition shares the Nemotron-H declaration, and its fold preserves the real remote decoder layer to `1e-5` relative |
 | `tests/test_awq_vl_rotary_resolution.py` | `_get_root_rotary` finds `model.language_model.rotary_emb`, never the vision tower, ignores per-layer rotaries, and `_prepare_module_forward` rebuilds cos/sin for a nested rotary; tiny Qwen2-VL quantizes with AWQ and GPTQ |
 
-### Real-checkpoint CPU CI
+### On-demand CPU test suites
 
-The `AWQ CPU` pull-request workflow runs the offline regressions plus
-`tests/test_awq_hf_cpu.py` against revision-pinned, trained SmolLM2-135M and
-TinyMoE-100M checkpoints from Hugging Face. The integration tests download real
+From the repository root, use the [CPU test runner](../tests/run_awq_cpu.sh)
+with the project dependencies (including CPU-capable PyTorch), `pytest`,
+`pytest-timeout`, and `parameterized` installed:
+
+```bash
+bash tests/run_awq_cpu.sh unit   # Offline regressions
+bash tests/run_awq_cpu.sh dense  # SmolLM2-135M
+bash tests/run_awq_cpu.sh moe    # TinyMoE-100M
+```
+
+These suites do not run automatically on pull requests. The optional
+checkpoint tests in `tests/test_awq_hf_cpu.py` use revision-pinned models from
+Hugging Face. They download real
 safetensors, compare held-out logits and next-token loss before/after 4-bit AWQ,
 check all expected packed projections and unquantized MoE routers, then save,
 reload with the same activation dtype, and check logits and greedy generation.
-Network/download failures fail the integration job rather than silently skip it.
+Network or download errors fail the test rather than silently skipping it.
 The MoE test permits configured fallback when calibration does not execute all
 experts and records how many groups used it. These short deterministic checks
 guard against catastrophic drift; they are not a corpus-level perplexity or

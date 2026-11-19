@@ -360,12 +360,14 @@ def test_awq_module_export_keeps_checkpoint_layout(dtype):
         bits=8, group_size=-1, sym=False, desc_act=False,
         in_features=k, out_features=n, bias=True, dtype=dtype, register_buffers=True,
     ).cuda().to(dtype)
-    module.qweight = torch.nn.Parameter(qw, requires_grad=False)
-    module.qzeros = torch.nn.Parameter(qz, requires_grad=False)
-    module.scales = torch.nn.Parameter(scales, requires_grad=False)
-    module.bias = torch.nn.Parameter(
-        torch.randn(n, dtype=dtype, device="cuda") * 0.01, requires_grad=False
-    )
+    # A real checkpoint load installs these as buffers (``register_buffers=True``),
+    # not Parameters. Assigning Parameters here lets ``_kernel_bias`` cache the
+    # bias Parameter itself as ``_bias_value``, which adds a second parameter and
+    # an extra ``state_dict`` key that no loaded checkpoint has.
+    module.qweight = qw
+    module.qzeros = qz
+    module.scales = scales
+    module.bias = torch.randn(n, dtype=dtype, device="cuda") * 0.01
 
     pristine = {name: tuple(t.shape) for name, t in module.state_dict().items()}
     assert set(pristine) == {"qweight", "qzeros", "scales", "bias", "qzeros_format"}

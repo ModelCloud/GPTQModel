@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from importlib import import_module
 from typing import TYPE_CHECKING, Callable
 
+import torch
+
 from .utils.logger import setup_logger
 
 
@@ -82,8 +84,9 @@ _EXTENSION_SPECS = (
         unsupported_error=lambda: (
             "The native AWQ JIT extension is CUDA-only and cannot be built by hipcc. "
             "On ROCm use BACKEND.AWQ_GEMM_TRITON (FORMAT.GEMM) or "
-            "BACKEND.AWQ_GEMV_TRITON (FORMAT.GEMV/GEMV_FAST/LLM_AWQ), which run "
-            "the same packed layouts in Triton."
+            "BACKEND.AWQ_GEMV_TRITON (FORMAT.GEMV), which run the same packed "
+            "layouts in Triton; FORMAT.GEMV_FAST/LLM_AWQ run through their "
+            "portable Torch readers."
         ),
     ),
     _ExtensionSpec(
@@ -292,6 +295,33 @@ def op(name: str, op_name: str, *, use_cache: bool = True) -> object:
     """Return one torch.ops handle after ensuring the selected extension is loaded."""
 
     return _load_one(name, use_cache=use_cache).op(op_name)
+
+
+_FAKE_REGISTERED: set[str] = set()
+
+
+def register_fake(
+    name: str,
+    op_name: str,
+    fake: Callable,
+    *,
+    use_cache: bool = True,
+) -> None:
+    """Register a FakeTensor/meta implementation for one extension op.
+
+    The JIT extensions register CPU-only kernels with ``TORCH_LIBRARY`` and a
+    ``torch::kCPU`` implementation but no Meta kernel, so dynamo refuses to
+    trace through them ("Operator does not support running with fake tensors").
+    A fake impl only reports the output shape/dtype; inductor still emits the
+    real CPU call as an extern kernel. Registering is idempotent per process.
+    """
+
+    handle = op(name, op_name, use_cache=use_cache)
+    key = str(handle)
+    if key in _FAKE_REGISTERED:
+        return
+    torch.library.register_fake(key.replace(".", "::", 1))(fake)
+    _FAKE_REGISTERED.add(key)
 
 
 def namespace(name: str, *, use_cache: bool = True) -> object:

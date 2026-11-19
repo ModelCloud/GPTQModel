@@ -116,7 +116,7 @@ PR #3753.
 | FP4 checkpoint decoder (`_build_fp4_forward_module`), `models/base.py:3871` | `bias.to(device=device, dtype=target_dtype)` before PR #3753 | Bias kept at its stored width, so the forward can still go wide |
 | Portable GPTQ fallback, `nn_modules/qlinear/torch.py:444-458` | `bias.to(device=x.device, dtype=x.dtype)` before `matmul_fp32_reduce` | Device move only; a bias `linear_needs_wide_bias` marks as wide is passed at its stored dtype |
 | Portable GPTQ streaming, `nn_modules/qlinear/torch.py:603-682` | Same narrowing cast before the per-tile `addmm` | Wide-bias calls take the per-tile FP32 epilogue; every other bias keeps the cast |
-| `matmul_fp32_reduce`, `nn_modules/qlinear/_numerics.py:108-147` | Narrow reductions on HIP/CPU rounded (or overflowed) the product before a wide bias was added | A wide bias routes to `linear_wide_bias`, so both values meet in FP32 |
+| `matmul_fp32_reduce`, `nn_modules/qlinear/_numerics.py:120-159` | Narrow reductions on HIP/CPU rounded (or overflowed) the product before a wide bias was added | A wide bias routes to `linear_wide_bias`, so both values meet in FP32 |
 
 ## Dtype promotion contract
 

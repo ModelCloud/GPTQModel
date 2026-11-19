@@ -187,20 +187,27 @@ def _assert_token_rows(prepared):
     assert [batch["attention_mask"].tolist() for batch in prepared] == [[mask] for mask in masks]
 
 
-@pytest.mark.parametrize("format", ["numpy", "pandas", "torch", None])
-def test_dataset_formats_unpack_into_token_rows(format):
-    """`Dataset.with_format(...)[:]` must reach the same rows as the dataset itself.
+@pytest.mark.parametrize("format", ["numpy", "pandas", "torch", "arrow", "python", None])
+@pytest.mark.parametrize("sliced", [False, True], ids=["iterated", "sliced"])
+def test_dataset_formats_unpack_into_token_rows(format, sliced):
+    """Every ``Dataset.with_format(...)`` shape must reach the same rows.
 
     ``numpy`` hands back a 1-D ``ndarray(dtype=object)`` per column, and
-    ``pandas`` hands back a ``DataFrame``; neither was recognised as a columnar
-    container, so ``numpy`` crashed in tensor conversion and ``pandas``
-    calibrated on the column labels.
+    ``pandas`` hands back a one-row ``DataFrame`` per row; neither was
+    recognised as a columnar container, so ``numpy`` crashed in tensor
+    conversion and ``pandas`` calibrated on the column labels. ``arrow`` was
+    missed entirely: iterating yields one ``pyarrow.Table`` per row and
+    ``[:]`` yields a ``pyarrow.Table`` whose iteration yields one
+    ``ChunkedArray`` per column, so both shapes were rejected purely because
+    of the format the caller had left on the dataset (#4882).
     """
 
     datasets = pytest.importorskip("datasets")
     ids, masks = _columnar_token_rows()
     dataset = datasets.Dataset.from_dict({"input_ids": ids, "attention_mask": masks})
-    calibration_input = dataset.with_format(format)[:] if format else dataset
+    calibration_input = dataset.with_format(format) if format else dataset
+    if sliced:
+        calibration_input = calibration_input[:]
 
     _assert_token_rows(
         prepare_calibration_dataset(
@@ -254,6 +261,33 @@ def test_dataframe_text_column_is_tokenized_per_row():
 
     # A DataFrame is not a Mapping; iterating it yields the column label
     # `"text"` and would calibrate on that single word.
+    assert [batch["input_ids"].tolist() for batch in prepared] == [[[4]], [[4]]]
+
+
+@pytest.mark.parametrize("format", ["pandas", "arrow"])
+@pytest.mark.parametrize("sliced", [False, True], ids=["iterated", "sliced"])
+def test_dataset_text_column_format_is_tokenized_per_row(format, sliced):
+    """A text-column ``Dataset`` left in a display format still tokenizes (#4882).
+
+    ``pandas`` yields one-row ``DataFrame`` objects and ``arrow`` yields
+    one-row ``Table`` objects when the dataset is iterated, so a plain text
+    column was rejected before its rows were ever tokenized.
+    """
+
+    datasets = pytest.importorskip("datasets")
+    texts = ["one two three four", "five six seven eight"]
+    dataset = datasets.Dataset.from_dict({"text": texts})
+    calibration_input = dataset.with_format(format)
+    if sliced:
+        calibration_input = calibration_input[:]
+
+    prepared = prepare_calibration_dataset(
+        _qmodel(),
+        calibration_input,
+        batch_size=1,
+        calibration_data_min_length=0,
+    )
+
     assert [batch["input_ids"].tolist() for batch in prepared] == [[[4]], [[4]]]
 
 

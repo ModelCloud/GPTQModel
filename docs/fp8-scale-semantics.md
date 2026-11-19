@@ -75,8 +75,10 @@ flowchart TD
 `_dequantize_native`, `_dequantize_cpu`, `dequantize_weight`, and the
 `torch._scaled_mm` weight scale. The `_scaled_mm` path is only used by the
 explicit per-token W8A8 opt-in; see
-[FP8 weight-only dispatch](fp8-weight-only-dispatch.md). `FP8Config` still emits only GPT-QModel's own
-inverse scales; the multiplier spelling is accepted for loaded checkpoints.
+[FP8 weight-only dispatch](fp8-weight-only-dispatch.md). `FP8Config` is
+load-only: it accepts `multiplier` (the HF/DeepSeek/Qwen default) and
+`inverse` (legacy GPT-QModel checkpoints) on load, and never writes a
+checkpoint.
 
 ## Before / after
 
@@ -84,7 +86,7 @@ inverse scales; the multiplier spelling is accepted for loaded checkpoints.
 | --- | --- | --- |
 | Forward wrapper semantics | `TorchFP8Linear` only divided; a multiplier checkpoint was wrong by 1e4 (`gptqmodel/models/base.py:4045`) | `_build_fp8_forward_module` passes the resolved semantics (`gptqmodel/models/base.py:4070`, `:4114`) |
 | Quant-source semantics | `dequantize_fp8` defaulted to multiplier (`gptqmodel/models/base.py:3683`) | Same resolved value is passed explicitly (`gptqmodel/models/base.py:3683-3686`) |
-| Resolution | Two independent decisions | One cached `_decoder_fp8_scale_semantics()` per checkpoint (`gptqmodel/models/base.py:3731`) |
+| Resolution | Two independent decisions | One cached `_decoder_fp8_scale_semantics()` per checkpoint (`gptqmodel/models/base.py::_decoder_fp8_scale_semantics`) |
 | Wrapper arithmetic | `inverse` only; other values raised `NotImplementedError` (`gptqmodel/nn_modules/qlinear/fp8.py:492`) | `multiplier` and `inverse` in native, CPU, and `_scaled_mm` paths (`:532`, `:575`, `:592`) |
 | Direct `weight_scale` | Reciprocated and divided | Reciprocated and explicitly `inverse` |
 

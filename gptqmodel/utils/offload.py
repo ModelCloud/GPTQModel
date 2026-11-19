@@ -31,6 +31,7 @@ from .device import get_device
 from .logger import setup_logger
 from .module_locks import parent_module_lock
 from .tensor import tensor_buffer
+from .tied_weights import retie_tied_weights, tied_weights_keys, word_embeddings_tied
 from .torch import CPU, META
 
 
@@ -218,6 +219,23 @@ def restore_offloaded_modules(
     """
     unresolved: List[str] = []
     for name, module, device in entries:
+        # A base module can be replaced during quantization (the quantizer
+        # swaps the recorded dense module for its packed kernel and writes the
+        # packed bundle into the same offload directory). Restoring the stale
+        # dense module would read the replacement's index and tensors, so skip
+        # it: the live module owns its own bundle and is restored below by
+        # `restore_disk_offloaded_modules` (issue #4758).
+        try:
+            live_module = get_submodule(model, name) if name else model
+        except AttributeError:
+            live_module = None
+        if live_module is not module:
+            log.debug(
+                "Offload: `%s` was replaced during quantization; skipping the "
+                "stale base-module restore.",
+                name,
+            )
+            continue
         try:
             undo_offload_to_disk(module, device=device)
         except Exception as exc:  # pragma: no cover - defensive
@@ -227,11 +245,14 @@ def restore_offloaded_modules(
         if is_meta_module(module):
             unresolved.append(name)
 
-    config = getattr(model, "config", None)
     tie_weights = getattr(model, "tie_weights", None)
-    if callable(tie_weights) and getattr(config, "tie_word_embeddings", False):
+    if callable(tie_weights):
         try:
-            tie_weights()
+            # Only re-apply the pairs the checkpoint really ties: a composite
+            # wrapper can default `tie_word_embeddings` to True while the
+            # decoder declares False and the checkpoint carries a real head
+            # (#4799).
+            retie_tied_weights(model)
         except Exception as exc:  # pragma: no cover - defensive
             log.warn("Offload: tie_weights() after restore failed: %s", exc)
             unresolved.append("<tie_weights>")
@@ -263,6 +284,19 @@ def _owns_offload_hook(module: nn.Module) -> bool:
         elif getattr(hook, "offload", False):
             return True
     return False
+
+
+def has_disk_offloaded_modules(model: nn.Module) -> bool:
+    """Whether any module still reads its weights from a disk-offload bundle.
+
+    Such a module owns an accelerate disk-offload hook and points at a
+    ``module.safetensors`` inside the run's private offload directory. That
+    directory must outlive every module in this state: deleting it leaves the
+    module on meta with a dangling hook, so the next forward raises
+    ``FileNotFoundError`` (issue #4807).
+    """
+
+    return any(_owns_offload_hook(module) for module in model.modules())
 
 
 def restore_disk_offloaded_modules(
@@ -410,23 +444,27 @@ def _retie_shared_embeddings(model: nn.Module) -> bool:
     was on meta cannot be loaded from it (issue #4597). The lazy shell also
     replaces parameters as it materializes, which breaks the tie the config
     declares. Re-tie before judging whether a module is still meta.
+
+    The load-time snapshot is authoritative: it already resolved tying from the
+    wrapper flag and the checkpoint, so a wrapper whose decoder text config
+    defaults to ``False`` still ties here (#4973), while a distinct checkpoint
+    head stays untied (#4799).
     """
 
     tie = getattr(model, "tie_weights", None)
     if not callable(tie):
         return False
+    snapshot = tied_weights_keys(model)
+    if snapshot is not None:
+        # An empty snapshot means the checkpoint really leaves the head untied.
+        if not snapshot:
+            return False
+        return retie_tied_weights(model)
+    # No snapshot (a model loaded outside the lazy path): keep the config gate.
     config = getattr(model, "config", None)
-    tied = bool(getattr(config, "tie_word_embeddings", False))
-    if not tied and hasattr(config, "get_text_config"):
-        try:
-            text_config = config.get_text_config()
-        except Exception:  # pragma: no cover - defensive
-            text_config = None
-        tied = bool(getattr(text_config, "tie_word_embeddings", False))
-    if not tied:
+    if not word_embeddings_tied(config):
         return False
-    tie()
-    return True
+    return retie_tied_weights(model)
 
 
 def materialize_remaining_meta_modules(qmodel, *, device: torch.device = CPU) -> List[str]:
@@ -502,6 +540,24 @@ def _tensor_nbytes(tensor: torch.Tensor) -> int:
     except RuntimeError:
         itemsize = torch.empty((), dtype=tensor.dtype).element_size()
     return tensor.numel() * itemsize
+
+
+def _module_has_tensors(module: nn.Module) -> bool:
+    """True when ``module`` owns state at any depth.
+
+    ``offload_to_disk`` bundles ``module.state_dict()``, which is recursive, so
+    the "is there anything to offload" gate must be recursive too. Checking
+    ``recurse=False`` made container modules (``model.visual`` and friends)
+    look empty and silently skipped their offload (#5145).
+    """
+
+    for parameter in module.parameters(recurse=True):
+        if parameter.numel() > 0:
+            return True
+    for buffer in module.buffers(recurse=True):
+        if buffer.numel() > 0:
+            return True
+    return False
 
 
 def _write_offload_index(index: dict, offload_dir: str) -> None:
@@ -1212,9 +1268,11 @@ def _offload_to_disk_impl(
             source_checkpoint=source_checkpoint,
         )
 
-    if hasattr(module, "config") and hasattr(module, "tie_weights") and getattr(module.config,
-                                             "tie_word_embeddings", False):
-        module.tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after offload
+    if hasattr(module, "config") and hasattr(module, "tie_weights"):
+        # Re-applies only the pairs the checkpoint really ties (see
+        # `gptqmodel.utils.tied_weights`), so an untied `lm_head` keeps its own
+        # storage after offload/restore (#4799).
+        retie_tied_weights(module)
 
     # print("offload_disk: list item tree")
             # print_module_tree(module)
@@ -1266,10 +1324,13 @@ def _offload_disk_locked(
 
     # print(f"device_map base_modules: {device_map}")
 
-    # skip modules that have no parameters and no buffers since they can't be offloaded
-    has_params  = any(p.numel() > 0 for p in module.parameters(recurse=False))
-    has_buffers = any(b.numel() > 0 for b in module.buffers(recurse=False))
-    if not has_params and not has_buffers:
+    # Skip only a module whose recursive state is empty. The old check used
+    # recurse=False, so a container that owns no direct tensors (a multimodal
+    # ``model.visual`` tower, whose weights all live in its children) was
+    # skipped as "empty" and silently stayed on the accelerator for the whole
+    # layer loop (#5145). ``state_dict()`` below is recursive, so this check
+    # now matches what actually gets bundled.
+    if not _module_has_tensors(module):
         return
 
     module_offload_dir = os.path.join(disk_path, name)
@@ -1335,6 +1396,35 @@ def _offload_disk_locked(
     # print("offload_disk: list item tree")
     # print_module_tree(module)
 
+
+def _materialize_meta_nonpersistent_buffers(module: nn.Module) -> List[str]:
+    """Replace non-persistent buffers that are still on meta with real tensors.
+
+    ``disk_offload`` builds its index from ``state_dict()``, which excludes
+    non-persistent buffers by definition. A module rebuilt on ``meta`` for a
+    checkpoint resume (#4562) therefore keeps, for example,
+    ``QQQLinear.workspace`` on meta with no stored value, and accelerate's hook
+    init raises ``ValueError: workspace is on the meta device`` (#4777). Those
+    buffers are runtime scratch and never checkpoint state, so allocate them
+    here instead of trying to load them. Returns the qualified names that were
+    materialized.
+    """
+
+    materialized: List[str] = []
+    for prefix, submodule in module.named_modules():
+        for name, tensor in list(submodule._buffers.items()):
+            if tensor is None or not tensor.is_meta:
+                continue
+            if name not in submodule._non_persistent_buffers_set:
+                # Persistent: the offload index carries it and the hook loads it.
+                continue
+            submodule._buffers[name] = torch.zeros(
+                tensor.shape, dtype=tensor.dtype, device=CPU
+            )
+            materialized.append(f"{prefix}.{name}" if prefix else name)
+    return materialized
+
+
 # undo offload
 def attach_disk_offload_hook(
     module: nn.Module,
@@ -1365,6 +1455,15 @@ def attach_disk_offload_hook(
         raise RuntimeError(
             f"Offload: no offload index for `{offload_dir}`; the resumed packed "
             "module cannot be materialized after quantization"
+        )
+    # The index is built from ``state_dict()``, so a non-persistent buffer (for
+    # example QQQ's split-K ``workspace``) has no stored value and would still
+    # be meta when accelerate initializes the hook (#4777).
+    materialized = _materialize_meta_nonpersistent_buffers(module)
+    if materialized:
+        log.debug(
+            "Offload: materialized non-persistent buffers for resumed module: %s",
+            ", ".join(materialized),
         )
     disk_offload(
         module,
@@ -1611,14 +1710,12 @@ def undo_offload_to_disk(
 
             # 3) Tie embedding if module is model and enabled/tied
             tie_weights = getattr(module, "tie_weights", None)
-            if (
-                callable(tie_weights)
-                and hasattr(module, "config")
-                and getattr(module.config, "tie_word_embeddings", False)
-            ):
+            if callable(tie_weights) and hasattr(module, "config"):
                 # Submodules such as rotary embeddings expose `config` but are
-                # not models; calling tie_weights() on them raises.
-                tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after undo_offload
+                # not models; `retie_tied_weights` is a no-op without a snapshot
+                # when the config declares untied embeddings, and re-applies the
+                # resolved pairs otherwise (#4799).
+                retie_tied_weights(module)  # makes a tied lm_head point to embed_tokens.weight again
 
         # 4) Optionally delete offload folders.
         if delete_offload_folders:

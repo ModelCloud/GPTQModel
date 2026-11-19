@@ -1,21 +1,18 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# GPU=-1
 
 """The 3.14t unit-test workflow must prove it is really running free-threaded.
 
-`unit_tests.yml` selects Python `3.14t` but used to leave `PYTHON_GIL: 0`
-commented out, and `unit_tests_reusable.yml` neither set nor asserted it. A
-3.14t job can therefore re-enable the GIL while importing
-`triton._C.libtriton` and run fully serialized while every GIL=0-only test
-skips. These tests pin the dedicated lane: it forces the interpreter, asserts
-the GIL is still disabled after the model stack is imported, and runs bounded
-concurrency tests on CPU and on two GPUs.
+The CUDA jobs force the GIL off and assert the state after importing the model
+stack. The dedicated lane runs bounded concurrency tests on CPU and on two GPUs.
 """
 
 import json
 import os
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -62,34 +59,23 @@ def test_free_threaded_lane_exists_and_forces_the_interpreter():
 
     lane = jobs["free-threaded"]
     assert lane["uses"] == "./.github/workflows/unit_tests_reusable.yml"
-    assert lane["with"]["free_threaded"] is True
     assert lane["with"]["matrix_json"]
 
-    # The default matrix must not pretend to be free-threaded; only the lane
-    # forces it, and it does so through the reusable workflow.
-    assert "PYTHON_GIL" not in (workflow.get("env") or {})
+    assert workflow["env"]["PYTHON_GIL"] == "0"
 
 
-def test_reusable_workflow_exports_gil0_before_asserting_and_testing():
+def test_reusable_workflow_forces_gil0_and_checks_the_installed_stack():
     reusable = _load(REUSABLE)
-    inputs = reusable[True]["workflow_call"]["inputs"]
-    assert inputs["free_threaded"]["type"] == "boolean"
-    assert inputs["free_threaded"]["default"] is False
-
+    assert reusable["env"]["PYTHON_GIL"] == "0"
     steps = _job_steps(reusable)
-    export_index = _step_index(steps, "Force the free-threaded interpreter")
+    setup_index = _step_index(steps, "Set up CI runtime")
+    install_index = _step_index(steps, "Install package from source")
     assert_index = _step_index(steps, "Assert the GIL stays disabled after importing the model stack")
     run_index = _step_index(steps, "Run tests")
-
-    assert export_index < assert_index < run_index
-    export_step = steps[export_index]
-    assert export_step["if"] == "${{ inputs.free_threaded }}"
-    assert "PYTHON_GIL=0" in export_step["run"]
-    assert "$GITHUB_ENV" in export_step["run"]
-
-    assert_step = steps[assert_index]
-    assert assert_step["if"] == "${{ inputs.free_threaded }}"
-    assert "ci_assert_free_threaded.py" in assert_step["run"]
+    assert setup_index < install_index < assert_index < run_index
+    assert steps[setup_index]["with"]["python-version"] == "3.14.10t"
+    assert "if" not in steps[assert_index]
+    assert "-X gil=0 .github/scripts/ci_assert_free_threaded.py --installed" in steps[assert_index]["run"]
 
 
 def test_lane_runs_bounded_cpu_and_multi_gpu_concurrency_tests():
@@ -116,14 +102,26 @@ def test_lane_runs_bounded_cpu_and_multi_gpu_concurrency_tests():
         assert by_script[script]["require_single_gpu"] == "false"
 
 
-def _run_gate(gil):
+def _free_threaded_build() -> bool:
+    """True only for a free-threaded (3.13t/3.14t) interpreter.
+
+    ``hasattr(sys, "_is_gil_enabled")`` is true on every CPython >= 3.13,
+    including GIL builds, so it cannot gate a ``PYTHON_GIL=0`` subprocess: a
+    regular build aborts with "Disabling the GIL is not supported by this
+    build" instead of running the gate (#4768).
+    """
+
+    return sysconfig.get_config_var("Py_GIL_DISABLED") == 1
+
+
+def _run_gate(gil, *args):
     env = dict(os.environ)
     env["PYTHON_GIL"] = gil
     env["PYTHONPATH"] = str(REPO_ROOT) + (
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
     )
     return subprocess.run(
-        [sys.executable, str(GATE)],
+        [sys.executable, str(GATE), *args],
         cwd=str(REPO_ROOT),
         env=env,
         capture_output=True,
@@ -136,15 +134,26 @@ def test_gate_fails_when_the_gil_is_enabled():
     result = _run_gate("1")
     output = result.stdout + result.stderr
     assert result.returncode != 0, output
-    if hasattr(sys, "_is_gil_enabled"):
+    if _free_threaded_build():
         assert "the GIL is enabled before the model stack is imported" in output
     else:
         assert "not a free-threaded build" in output
 
 
 @pytest.mark.skipif(
-    not hasattr(sys, "_is_gil_enabled"),
-    reason="requires a free-threaded interpreter to prove the gate can pass",
+    not (_free_threaded_build() and sys.version_info[:3] == (3, 14, 10)),
+    reason="requires the pinned free-threaded CI interpreter",
+)
+def test_gate_verifies_gil0_without_importing_the_model_stack():
+    result = _run_gate("0", "--python-only")
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "starts with the GIL disabled" in output
+
+
+@pytest.mark.skipif(
+    not (_free_threaded_build() and sys.version_info[:3] == (3, 14, 10)),
+    reason="requires the pinned free-threaded CI interpreter",
 )
 def test_gate_passes_with_gil0():
     result = _run_gate("0")

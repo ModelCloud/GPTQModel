@@ -18,7 +18,6 @@ import os
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 # -- end do not touch
 
 
@@ -93,7 +92,7 @@ if __name__ == '__main__':
 
     eora = Lora(
         # for quant, path is save path. for load, it is loading path
-        path=os.path.join(quant_path, eora_path),
+        path=eora_path,
         rank=rank,
     )
 

@@ -10,6 +10,10 @@ The declarations live in the kernel modules (`SUPPORTS_COMPILE_LEVEL` and
   host-sync / host-transfer / device-address construct in that kernel's own
   `forward`;
 * a `SUPPORTS_COMPILE=True` policy claim implies at least `DYNAMO`;
+* a kernel that reaches `INDUCTOR` (the documented bar for a compiled decode
+  win) either opts into the #4669 policy or records the measured loss in
+  `SUPPORTS_COMPILE_EAGER_REASON`, so the two declarations cannot drift apart
+  (#4984);
 * `docs/kernel-compile-matrix.md` lists exactly the registered kernels and
   matches their declarations.
 
@@ -21,12 +25,18 @@ consistency.
 from pathlib import Path
 
 import pytest
+import torch
 
+from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear._compile_support import (
     COMPILE_LEVEL,
+    COMPILE_POLICY_FLOOR,
     compile_level,
+    compile_policy_is_justified,
+    compile_policy_reason,
     describe_kernel,
     graph_capture_safe,
+    supports_compiled_generation,
 )
 from tests.kernels.compile_probe import graph_unsafe_constructs, protocol_kernels
 
@@ -69,6 +79,32 @@ def test_declared_levels_are_compile_levels():
         )
 
 
+def test_cpu_capable_kernels_do_not_declare_a_cuda_graph_cpu_level():
+    """A CPU level above INDUCTOR cannot be measured: CUDA graphs are CUDA-only.
+
+    ``mode="reduce-overhead"`` captures a CUDA graph, which has no CPU
+    equivalent, so a kernel that can run on CPU must record its CPU ceiling as
+    at most ``INDUCTOR`` (or a per-device override). Without this, a
+    CPU-resident caller reads ``CUDAGRAPH`` and asks for a backend that cannot
+    exist on its device.
+    """
+
+    offenders = []
+    for cls in _kernels():
+        devices = getattr(cls, "SUPPORTS_DEVICES", None)
+        if not devices or DEVICE.CPU not in devices:
+            continue
+        level = compile_level(cls, device_type="cpu")
+        if level > COMPILE_LEVEL.INDUCTOR:
+            offenders.append(f"{cls.__name__}={level.name}")
+
+    assert not offenders, (
+        "these CPU-capable kernels declare a CUDA-graph CPU level, which cannot "
+        "be measured on a CPU: " + ", ".join(offenders) + ". Record the CPU "
+        "ceiling in SUPPORTS_COMPILE_LEVEL_BY_DEVICE={'cpu': ...}."
+    )
+
+
 @pytest.mark.parametrize("cls", _kernels(), ids=lambda cls: cls.__name__)
 def test_capture_claims_have_no_host_sync_in_forward(cls):
     claims_capture = graph_capture_safe(cls) or compile_level(cls) >= COMPILE_LEVEL.CUDAGRAPH
@@ -98,6 +134,37 @@ def test_compiled_generation_claim_is_traceable(cls):
     )
 
 
+@pytest.mark.parametrize("cls", _kernels(), ids=lambda cls: cls.__name__)
+def test_compile_capable_kernels_pair_the_policy_with_a_reason(cls):
+    """A traceable kernel cannot opt out of compiled generation for free (#4984).
+
+    ``SUPPORTS_COMPILE_LEVEL >= INDUCTOR`` is the documented bar for "a
+    compiled decode can pay off". Keeping the #4669 policy off from there is
+    allowed (eager really can be faster), but the measured loss has to be
+    recorded next to the declaration, otherwise the two answers drift apart and
+    a trace-clean kernel stays 2-9x slower by default.
+    """
+
+    level = max(compile_level(cls), compile_level(cls, device_type="cpu"))
+    if level < COMPILE_POLICY_FLOOR:
+        pytest.skip("kernel does not reach the compiled-generation policy floor")
+
+    reason = compile_policy_reason(cls)
+    if supports_compiled_generation(cls):
+        assert reason is None, (
+            f"{cls.__name__} opts into compiled generation but still carries "
+            f"SUPPORTS_COMPILE_EAGER_REASON={reason!r}; drop the stale reason."
+        )
+    else:
+        assert reason, (
+            f"{cls.__name__} declares {level.name} (>= "
+            f"{COMPILE_POLICY_FLOOR.name}) but keeps SUPPORTS_COMPILE=False. "
+            "Record the measured loss in SUPPORTS_COMPILE_EAGER_REASON, or opt "
+            "the kernel in when a compiled static-cache decode is faster."
+        )
+    assert compile_policy_is_justified(cls)
+
+
 def _matrix_rows():
     rows = {}
     for line in MATRIX.read_text(encoding="utf-8").splitlines():
@@ -107,8 +174,10 @@ def _matrix_rows():
         kernel = cells[0].strip("`")
         rows[kernel] = {
             "level": cells[2].strip("`"),
-            "graph_capture": cells[3].lower() == "yes",
-            "compiled_generation": cells[4].lower() == "yes",
+            "level_cpu": cells[3].strip("`"),
+            "graph_capture": cells[4].lower() == "yes",
+            "compiled_generation": cells[5].lower() == "yes",
+            "compiled_generation_reason": None if cells[6] == "-" else cells[6],
         }
     return rows
 
@@ -128,9 +197,44 @@ def test_docs_matrix_matches_the_declarations():
         assert row["level"] == want["compile_level"], (
             f"{name}: docs say {row['level']}, kernel declares {want['compile_level']}"
         )
+        assert row["level_cpu"] == want["compile_level_cpu"], (
+            f"{name}: docs CPU level is {row['level_cpu']}, kernel declares "
+            f"{want['compile_level_cpu']}"
+        )
         assert row["graph_capture"] is want["graph_capture"], (
             f"{name}: docs graph capture is stale"
         )
         assert row["compiled_generation"] is want["compiled_generation"], (
             f"{name}: docs compiled-generation policy is stale"
         )
+        assert row["compiled_generation_reason"] == want["compiled_generation_reason"], (
+            f"{name}: docs policy reason is stale"
+        )
+
+
+class _CommentOnlyKernel(torch.nn.Module):
+    def forward(self, x):
+        # The native quantizer reads data_ptr() and may call .item() for a log;
+        # a comment must not be mistaken for an executed host transfer.
+        return x + 1
+
+
+class _StringLiteralKernel(torch.nn.Module):
+    def forward(self, x):
+        raise RuntimeError("this branch would call .cpu() or data_ptr()")
+        return x + 1
+
+
+class _HostSyncKernel(torch.nn.Module):
+    def forward(self, x):
+        return x + x.item()
+
+
+def test_static_scan_ignores_comments_and_strings():
+    assert graph_unsafe_constructs(_CommentOnlyKernel) == []
+    assert graph_unsafe_constructs(_StringLiteralKernel) == []
+
+
+def test_static_scan_still_finds_executed_host_sync():
+    found = graph_unsafe_constructs(_HostSyncKernel)
+    assert any(".item()" in item for item in found), found

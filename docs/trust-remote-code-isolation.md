@@ -89,7 +89,7 @@ from the pre-#4373 resolver (`def6e61`) only for Ling-2.6-flash.
 
 Re-saving a loaded quantized checkpoint rebuilds the shell model with
 `get_model_with_quantize()`. It now reads the config with the model's own
-`self.trust_remote_code` (`gptqmodel/models/writer.py:2140-2147`); the old
+`self.trust_remote_code` (`gptqmodel/models/writer.py:2638`); the old
 `AutoConfig.from_pretrained(..., trust_remote_code=True)` is gone.
 
 ```mermaid
@@ -149,8 +149,8 @@ unless `trust_remote_code=True`, because it `exec`s
 | `auto_map` import at load | `prepare_remote_model_init_compat()` called `get_class_from_dynamic_module()` with no trust argument (`gptqmodel/utils/hf.py:1900-1923`) | Returns before the import unless `trust_remote_code=True` (`gptqmodel/utils/hf.py:1902`) |
 | Load call sites | `loader.py:1789` / `1801` and `1307` / `1313` did not pass the flag | Both pass `trust_remote_code=trust_remote_code` (`gptqmodel/models/loader.py:1313`, `1803`) |
 | `auto_map` compat patches | Enabled whenever `auto_map` existed (`gptqmodel/utils/hf.py:1729-1735`) | Enabled only for `trust_remote_code=True` (`gptqmodel/utils/hf.py:1723`) |
-| Re-save config | `AutoConfig.from_pretrained(..., trust_remote_code=True)` (`gptqmodel/models/writer.py:2140-2147`) | `trust_remote_code=self.trust_remote_code` (`gptqmodel/models/writer.py:2145`) |
-| Dequantize config/model | Hard-coded `True` (`gptqmodel/utils/model_dequant.py:335`, `354`) | `trust_remote_code` parameter threaded from `dequantize_model()` (`gptqmodel/utils/model_dequant.py:1766`) |
+| Re-save config | `AutoConfig.from_pretrained(..., trust_remote_code=True)` (`gptqmodel/models/writer.py:2140-2147`) | `trust_remote_code=self.trust_remote_code` (`gptqmodel/models/writer.py:2638`) |
+| Dequantize config/model | Hard-coded `True` (`gptqmodel/utils/model_dequant.py:335`, `354`) | `trust_remote_code` parameter threaded from `dequantize_model()` (`gptqmodel/utils/model_dequant.py:1994`) |
 | Processor load | `self.require_trust_remote_code` (`gptqmodel/models/base.py:746`) | `self.trust_remote_code` (`gptqmodel/models/base.py:746`) |
 | K3 reference exec | `load_calibration_reference(snapshot)` with no opt-in (`gptqmodel/utils/kimi_k3.py:24-57`) | Requires `trust_remote_code=True` (`gptqmodel/utils/kimi_k3.py:24`) |
 

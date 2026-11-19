@@ -13,6 +13,7 @@ import json
 import math
 import operator
 import os
+import re
 import secrets
 import shutil
 import stat
@@ -22,7 +23,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
@@ -48,7 +49,6 @@ from ..models._const import (
 )
 from ..nn_modules.qlinear import (
     QZEROS_FORMAT_BUFFER,
-    AWQuantLinear,
     BaseQuantLinear,
     GPTQQuantLinear,
 )
@@ -83,6 +83,7 @@ from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_corre
 from .p2p import safe_module_to, safe_move_to
 from .packing import _auto_pack_impl
 from .tensor import tensor_buffer
+from .tied_weights import tied_weights_keys
 from .torch import HAS_CUDA, as_torch_device, release_pinned_host_cache, torch_empty_cache
 
 
@@ -280,6 +281,25 @@ def recurse_setattr(module, name, value):
     else:
         name, rest = name.split(".", 1)
         recurse_setattr(getattr(module, name), rest, value)
+
+def install_quant_module(
+    module_root: nn.Module,
+    name: str,
+    quant_module: nn.Module,
+) -> nn.Module:
+    """Publish a fully built and packed quant module with one assignment.
+
+    Finalization used to swap the float projection for an empty kernel
+    (``register_buffers=False``) and only then call ``pack_module()``, so a
+    Ctrl-C or exception inside packing left a module in the tree that owned no
+    ``qweight``/``qzeros``/``scales``/``g_idx``. Every later forward then
+    raised ``AttributeError`` (issue #5089). Callers build and pack the module
+    off-tree and call this function last, so the tree only ever sees a complete
+    module or the untouched float one.
+    """
+
+    recurse_setattr(module_root, name, quant_module)
+    return quant_module
 
 
 def _module_has_meta_tensors(module: nn.Module) -> bool:
@@ -700,6 +720,8 @@ def create_quant_module(
     dtype: Optional[torch.dtype] = None,
     bias_dtype: Optional[torch.dtype] = None,
     resolved_module_config: Optional[ResolvedModuleConfig] = None,
+    transfer_from: Optional[nn.Module] = None,
+    install: bool = True,
 
 ):
     # An adapter only covers the modules named by its PEFT target list and
@@ -733,8 +755,10 @@ def create_quant_module(
 
     # Transformers builds quantized models on the meta device before assigning
     # checkpoint tensors, so allow either CPU or meta here and keep the
-    # replacement layer on the device the original layer occupied.
-    if ori_layer_device.type not in {CPU.type, "meta"}:
+    # replacement layer on the device the original layer occupied. A rebuild of
+    # an already-loaded layer (`transfer_from`) legitimately sees a live device:
+    # its checkpoint tensors are moved into the replacement below.
+    if transfer_from is None and ori_layer_device.type not in {CPU.type, "meta"}:
         raise AssertionError(
             f"Expected `{name}` to reside on CPU or meta during quant module creation, "
             f"but found tensors on `{ori_layer_device}`."
@@ -847,7 +871,40 @@ def create_quant_module(
         **tmp_init_kwargs,
     )
     new_layer.device = ori_layer_device
-    recurse_setattr(module, name, new_layer.to(ori_layer_device))
+    if isinstance(new_layer, TorchQuantEmbeddings):
+        # An embedding returns hidden states, so it must emit the dtype the
+        # model computes in, not the checkpoint dtype its scales keep (#5116).
+        embedding_dtype = dtype
+        if embedding_dtype is None:
+            source_weight = getattr(submodule, "weight", None)
+            if isinstance(source_weight, torch.Tensor) and source_weight.is_floating_point():
+                embedding_dtype = source_weight.dtype
+        if embedding_dtype is not None:
+            new_layer.set_embedding_output_dtype(embedding_dtype)
+    if transfer_from is not None:
+        # The caller already loaded the checkpoint tensors into the module this
+        # one replaces (a load started before the native bridge was installed,
+        # #4795). The replacement was constructed from the same serialized
+        # config, so every persistent tensor keeps the checkpoint's shape and
+        # only has to be copied over before the device move.
+        source_state = transfer_from.state_dict()
+        missing = sorted(set(new_layer.state_dict()) - set(source_state))
+        if missing:
+            sample = ", ".join(missing[:8])
+            raise ValueError(
+                f"Cannot rebuild `{name}` from its loaded tensors: the checkpoint "
+                f"did not assign {sample}. Load this checkpoint with `GPTQModel.load`."
+            )
+        new_layer.load_state_dict(source_state, strict=False)
+        # A freshly constructed module is in training mode; the module it
+        # replaces may not be (a completed load is in eval). The CPU int4pack
+        # kernels pick their layout from `self.training` on the first forward
+        # and latch it, so carry the replaced module's mode over (#4907).
+        new_layer.train(transfer_from.training)
+    new_layer = new_layer.to(ori_layer_device)
+    if install:
+        install_quant_module(module, name, new_layer)
+    return new_layer
 
 def create_quant_layer(
         linear_candidates: List[Type[BaseQuantLinear]],
@@ -867,6 +924,7 @@ def create_quant_layer(
         init_kwargs: Optional[Dict[str, Any]] = None,
         dtype: Optional[torch.dtype] = None,
         bias_dtype: Optional[torch.dtype] = None,
+        transfer_from: Optional[Dict[str, nn.Module]] = None,
 
 ) -> Type[BaseQuantLinear]:
     if any(isinstance(module, candidate) for candidate in linear_candidates):
@@ -902,6 +960,9 @@ def create_quant_layer(
                     init_kwargs=init_kwargs,
                     dtype=dtype,
                     bias_dtype=bias_dtype,
+                    transfer_from=(
+                        transfer_from.get(name) if transfer_from is not None else None
+                    ),
                 )
             except NotImplementedError as error:
                 last_error = error
@@ -941,25 +1002,44 @@ def hf_convert_gptq_v1_to_v2_format(
         source_format = resolve_quant_format(checkpoint_format, METHOD.GPTQ)
     except (TypeError, ValueError):
         source_format = None
+    converted = False
     if source_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
         # Optimum calls this before `save_pretrained()` can run. Record the
-        # on-disk layout here so the state-dict hook can undo the runtime v2
-        # conversion for a v1 checkpoint.
+        # on-disk layout here so the state-dict hook emits the checkpoint
+        # convention instead of the kernel's runtime one.
         for module in model.modules():
-            if isinstance(module, GPTQQuantLinear):
-                module._checkpoint_format_on_disk = source_format
+            if not isinstance(module, GPTQQuantLinear):
+                continue
+            module._checkpoint_format_on_disk = source_format
+            if source_format == FORMAT.GPTQ_V2:
+                # A v2 file already stores logical zero points and the kernel
+                # decodes v2, so no word conversion runs. Mark the runtime
+                # layout anyway: without it the module keeps the constructor's
+                # v1 placeholder, `checkpoint_layout_qzeros` mistakes the live
+                # v2 words for v1, and the next save adds one to every zero
+                # point (issue #4952). The call also initializes the persistent
+                # `qzeros_format` marker, which an HF-loaded module otherwise
+                # leaves as uninitialized memory.
+                module.qzero_format(format=2)
 
-    if source_format == FORMAT.GPTQ:
-        # Skip v1 to v2 conversion when no loaded quant module requires v2.
-        if not any(
-            isinstance(m, BaseQuantLinear) and getattr(m, "REQUIRES_FORMAT_V2", False)
-            for m in model.modules()
-        ):
-            return model, False
-
-        cfg = QuantizeConfig(bits=bits)
-        return convert_gptq_v1_to_v2_format(model, cfg, qlinear_kernel), True
-    return model, False
+        if source_format == FORMAT.GPTQ:
+            # Skip v1 to v2 conversion when no loaded quant module requires v2.
+            if any(
+                isinstance(m, BaseQuantLinear) and getattr(m, "REQUIRES_FORMAT_V2", False)
+                for m in model.modules()
+            ):
+                cfg = QuantizeConfig(bits=bits)
+                model = convert_gptq_v1_to_v2_format(model, cfg, qlinear_kernel)
+                converted = True
+            # A v1 checkpoint that no kernel converted still holds v1 words.
+            # Initialize its marker too; a converted module was marked by the
+            # conversion itself.
+            for module in model.modules():
+                if isinstance(module, GPTQQuantLinear) and not getattr(
+                    module, "_qzeros_format_established", False
+                ):
+                    module.qzero_format(format=module._runtime_qzeros_format())
+    return model, converted
 
 def convert_gptq_v1_to_v2_format_module(module: BaseQuantLinear, bits: int, pack_dtype: torch.dtype) -> nn.Module:
     assert isinstance(module, BaseQuantLinear)
@@ -1604,6 +1684,196 @@ def apply_no_placement_to_device_map(model: nn.Module, device_map: Dict[str, Uni
     return result
 
 
+def _is_offload_device(device) -> bool:
+    """Whether a device-map value names an offload target rather than an accelerator."""
+
+    if isinstance(device, str):
+        return device in ("cpu", "disk")
+    return getattr(device, "type", None) == "cpu"
+
+
+def _module_has_parameters(module: nn.Module) -> bool:
+    return any(True for _ in module.parameters())
+
+
+def _device_map_entry_for_parameter(device_map, parameter_name: str):
+    """Return the device-map key that governs one parameter name."""
+
+    name = parameter_name
+    while True:
+        if name in device_map:
+            return name
+        if "." not in name:
+            return "" if "" in device_map else None
+        name = name.rsplit(".", 1)[0]
+
+
+def _parameter_by_name(model: nn.Module, parameter_name: str):
+    module = model
+    parts = parameter_name.split(".")
+    for part in parts[:-1]:
+        module = getattr(module, part)
+    return getattr(module, parts[-1])
+
+
+def _declared_tied_weights_keys(model) -> dict[str, str]:
+    """Return the ``{target: source}`` pairs the model declares as tied.
+
+    This is the same source ``tie_weights(recompute_mapping=True)`` uses, so
+    every pair it may compare is a pair this loader can place.
+    """
+
+    getter = getattr(model, "get_expanded_tied_weights_keys", None)
+    if callable(getter):
+        try:
+            keys = getter(all_submodels=True)
+        except TypeError:  # pragma: no cover - older signature
+            keys = getter()
+        if isinstance(keys, dict):
+            return dict(keys)
+    declared = getattr(model, "all_tied_weights_keys", None)
+    if not isinstance(declared, dict):
+        declared = getattr(model, "_tied_weights_keys", None)
+    return dict(declared) if isinstance(declared, dict) else {}
+
+
+def _keep_tied_groups_on_one_device(device_map, tied_params) -> None:
+    """Give every really-tied parameter group a single placement.
+
+    ``retie_parameters`` rebinds a whole tied group to one tensor, so a map that
+    splits the group across devices puts that shared tensor on whichever member
+    comes first and leaves the other member's hook moving inputs to a device
+    that no longer holds the weight (#4866). Tied groups therefore follow the
+    accelerator of their GPU member, like ``accelerate.dispatch_model``.
+    """
+
+    for group in tied_params:
+        entries = {
+            entry
+            for name in group
+            if (entry := _device_map_entry_for_parameter(device_map, name)) is not None
+        }
+        # The root entry describes the whole model; never collapse it onto a member.
+        entries.discard("")
+        if len(entries) < 2:
+            continue
+        target = next(
+            (
+                device_map[entry]
+                for entry in sorted(entries)
+                if not _is_offload_device(device_map[entry])
+            ),
+            None,
+        )
+        if target is None:
+            continue
+        for entry in entries:
+            device_map[entry] = target
+
+
+def _single_resident_device(model: nn.Module, device_map: Dict[str, Union[str, int]]) -> Optional[torch.device]:
+    """Return the map's one device when every tensor is already resident there.
+
+    ``add_hook_to_module`` rebinds ``module.forward`` to ``partial(new_forward, module)``
+    and keeps the previous bound method on ``module._old_forward``.  Both point back
+    at the module, so a hooked model is a reference cycle: a GPU model keeps its VRAM
+    allocated after the last user reference is dropped, until a full ``gc.collect()``
+    (#4847).  A layer-wise map whose entries all name the same device does not need
+    the hooks at all -- accelerate's own ``dispatch_model`` only attaches them when
+    the map spans more than one device or offloads to disk -- so skip them whenever
+    nothing is left to materialise or offload.
+    """
+
+    devices = {d for d in device_map.values() if d is not None}
+    if len(devices) != 1:
+        return None
+    raw_device = next(iter(devices))
+    if isinstance(raw_device, str) and raw_device in ("cpu", "mps", "disk"):
+        return None
+    try:
+        device = torch.device(raw_device)
+    except (TypeError, RuntimeError):
+        return None
+    for parameter in model.parameters():
+        if parameter.device.type != device.type:
+            return None
+        if device.index is not None and parameter.device.index != device.index:
+            return None
+    # A meta buffer still has to be materialised; a CPU buffer does not block
+    # the shortcut, because the caller places the buffers no checkpoint entry
+    # covers (``_place_non_persistent_buffers``).
+    if any(buffer.device.type == "meta" for buffer in model.buffers()):
+        return None
+    return device
+
+
+def _place_non_persistent_buffers(model: nn.Module, device: torch.device) -> int:
+    """Move shell-created buffers that no checkpoint entry can place.
+
+    A non-persistent buffer (rotary ``inv_freq``/``cos_cached``, a Paro
+    ``had_K``, ...) is built by the module shell and never appears in the
+    checkpoint, so ``load_checkpoint_in_model`` cannot move it to the mapped
+    device.  ``AlignDevicesHook.init_hook`` normally does, because it walks
+    every module tensor; the single-device shortcut skips the hooks, so it has
+    to place them itself (#5232).  Without this a remote-code family that
+    indexes its cached rotary tables directly crashes on the first forward
+    while the rest of its layer is on the accelerator.
+
+    A buffer shared by two modules is copied once, so sharing is preserved.
+    """
+
+    moved: Dict[int, torch.Tensor] = {}
+    placed = 0
+    for module in model.modules():
+        for name in getattr(module, "_non_persistent_buffers_set", ()):
+            buffer = module._buffers.get(name)
+            if not isinstance(buffer, torch.Tensor) or buffer.device == device:
+                continue
+            replacement = moved.get(id(buffer))
+            if replacement is None:
+                replacement = buffer.to(device)
+                moved[id(buffer)] = replacement
+            module._buffers[name] = replacement
+            placed += 1
+    return placed
+
+
+def has_cpu_offload_hooks(model: nn.Module) -> bool:
+    """Whether ``model`` carries an Accelerate hook that moves tensors per forward.
+
+    ``simple_dispatch_model`` attaches ``CpuOffload`` to every ``cpu`` map entry;
+    transformers' own dispatch attaches ``AlignDevicesHook(offload=True)``. Both
+    call ``Module._apply`` on every forward, so they materialize parameters and
+    buffers each time. Inside ``torch.inference_mode`` those materialized
+    tensors are inference tensors without a version counter (#4572); dynamo
+    reads version counters when it traces the forward installed by
+    ``optimize()``, so the first compiled ``generate()`` failed (#5099).
+
+    A hook may be wrapped in ``SequentialHook``; only a hook that actually
+    offloads counts, because a resident ``AlignDevicesHook`` does not move the
+    tensors back and forth.
+    """
+
+    if not isinstance(model, nn.Module):
+        return False
+
+    from accelerate.hooks import AlignDevicesHook, CpuOffload, SequentialHook
+
+    for module in model.modules():
+        pending = [getattr(module, "_hf_hook", None)]
+        while pending:
+            hook = pending.pop()
+            if hook is None:
+                continue
+            if isinstance(hook, SequentialHook):
+                pending.extend(hook.hooks)
+            elif isinstance(hook, CpuOffload):
+                return True
+            elif isinstance(hook, AlignDevicesHook) and hook.offload:
+                return True
+    return False
+
+
 def simple_dispatch_model(model, device_map):
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
@@ -1619,6 +1889,17 @@ def simple_dispatch_model(model, device_map):
         model.hf_device_map = device_map
         return model
 
+    # One device and nothing to materialise: the per-entry hooks would only pin the
+    # model in a reference cycle, so place nothing and keep the tensors where the
+    # checkpoint loader already put them.
+    resident_device = _single_resident_device(model, device_map)
+    if resident_device is not None:
+        # The hooks would have placed every module tensor, buffers included.
+        # Skipping them must not leave a shell-created rotary cache on the CPU.
+        _place_non_persistent_buffers(model, resident_device)
+        model.hf_device_map = device_map
+        return model
+
     # Avoid eagerly materialising the full model on a single device when the map
     # provides finer-grained placements; rely on accelerate hooks instead.
     tied_params = accelerate.utils.modeling.find_tied_parameters(model)
@@ -1630,14 +1911,33 @@ def simple_dispatch_model(model, device_map):
     else:
         main_device = [d for d in device_map.values() if d not in ["cpu", "disk"]][0]
 
+    # A tied group must not be split across devices: `retie_parameters` below
+    # collapses it onto one member's tensor, and the other member's hook would
+    # then move its inputs to a device that no longer holds the weight (#4866).
+    _keep_tied_groups_on_one_device(device_map, tied_params)
+    # Accelerate reuses one materialized copy per device for a tied parameter.
+    # Without it each hooked module would move its own copy and break the tie.
+    tied_params_map = {}
+    for group in tied_params:
+        for name in group:
+            parameter = _parameter_by_name(model, name)
+            if parameter.device.type != "meta":
+                tied_params_map[parameter.data_ptr()] = {}
+
     # These modules perform their own CPU lookup and must remain resident;
     # a normal CPU-offload hook would move their full weights back to the GPU.
     resident_cpu_modules = no_placement_module_names(model)
     module_names = dict(model.named_modules())
+    # `CpuOffload.pre_forward` reads `next(module.parameters())`, so a
+    # parameterless structural module (rotary embeddings) cannot carry an
+    # offload hook; it stays on the accelerator instead (#4866).
     cpu_offload_group = [
         (n, d)
         for n, d in device_map.items()
-        if d == "cpu" and n not in resident_cpu_modules and n in module_names
+        if d == "cpu"
+        and n not in resident_cpu_modules
+        and n in module_names
+        and _module_has_parameters(module_names[n])
     ]
     prev_hook = None
     for idx, (n, d) in enumerate(cpu_offload_group):
@@ -1654,6 +1954,10 @@ def simple_dispatch_model(model, device_map):
         if m is None:
             # Fine-grained maps can contain direct parameter entries.
             continue
+        if d == "cpu" and n not in resident_cpu_modules and not _module_has_parameters(m):
+            # Parameterless structural modules follow the max_memory builder:
+            # keep them on an accelerator so they never need an offload hook.
+            d = main_device
         if d != "cpu":
             d = torch.device(d)
             has_other_device_child = any(
@@ -1661,7 +1965,12 @@ def simple_dispatch_model(model, device_map):
                 for child_name, child_device in device_map.items()
             )
             # A mixed-device child means the parent hook may move inputs, but not descendants.
-            hook = AlignDevicesHook(d, io_same_device=True, place_submodules=not has_other_device_child)
+            hook = AlignDevicesHook(
+                d,
+                io_same_device=True,
+                place_submodules=not has_other_device_child,
+                tied_params_map=tied_params_map or None,
+            )
             add_hook_to_module(m, hook)
     accelerate.utils.modeling.retie_parameters(model, tied_params)
 
@@ -1673,6 +1982,12 @@ def simple_dispatch_model(model, device_map):
 # public/stable api exposed to transformer/optimum
 def hf_gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
                         max_input_length: Optional[int] = None):
+    # Optimum calls this after ``convert_model``. Retrying here keeps the
+    # package-init probe from caching a partially initialized ``optimum.gptq``
+    # as "Optimum not installed" (#4749).
+    from gptqmodel import _ensure_optimum_gptqmodel_load_bridge
+
+    _ensure_optimum_gptqmodel_load_bridge()
     return gptqmodel_post_init(model, use_act_order, quantize_config, max_input_length)
 
 
@@ -1688,15 +2003,36 @@ from .hf_load import (  # noqa: E402,F401
 )
 
 
-def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
-    """Refresh the writable CPU snapshot after Marlin changes its packed layout."""
-    # Resident weights have no Accelerate snapshot to refresh.
-    if not module.qweight.is_meta:
-        module.post_init()
-        return
+def _cpu_offload_writable_storage(weights_map):
+    """Return ``(storage, prefix, disk_index)`` for a CPU-offloaded weights map.
+
+    Accelerate keeps offloaded tensors in a plain dict, in an
+    ``OffloadedWeightsLoader`` (in-memory ``state_dict`` plus an optional
+    disk-backed ``index``), or in a ``PrefixedDataset`` wrapping either. Only an
+    in-memory entry can be rewritten, so the loader's ``state_dict`` is the
+    writable storage and its ``index`` names the entries that are not.
+    """
+
+    from accelerate.utils import OffloadedWeightsLoader, PrefixedDataset
+
+    prefix = ""
+    dataset = weights_map
+    if isinstance(dataset, PrefixedDataset):
+        prefix = dataset.prefix
+        dataset = dataset.dataset
+    if isinstance(dataset, dict):
+        return dataset, prefix, None
+    if isinstance(dataset, OffloadedWeightsLoader):
+        return dataset.state_dict, prefix, dataset.index
+    raise RuntimeError(
+        "CPU-offloaded Marlin requires a writable in-memory weights map."
+    )
+
+
+def _layer_offload_hook(module):
+    """Return the single layer-level Accelerate offload hook that owns `module`."""
 
     from accelerate.hooks import AlignDevicesHook, SequentialHook
-    from accelerate.utils import PrefixedDataset
 
     # An offload hook may be wrapped by other hooks, but it must own this layer.
     attached = getattr(module, "_hf_hook", None)
@@ -1706,21 +2042,66 @@ def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
     ]
     if len(offload_hooks) != 1 or offload_hooks[0].place_submodules:
         raise RuntimeError(
-            "CPU-offloaded Marlin requires a layer-level Accelerate offload hook."
+            "An offloaded quantized layer requires a layer-level Accelerate "
+            "offload hook."
         )
-    hook = offload_hooks[0]
-    # CPU offload can keep layer entries in a shared dictionary under a prefix.
-    weights_map = hook.weights_map
-    if isinstance(weights_map, PrefixedDataset) and isinstance(
-        weights_map.dataset, dict
-    ):
-        storage, prefix = weights_map.dataset, weights_map.prefix
-    elif isinstance(weights_map, dict):
-        storage, prefix = weights_map, ""
-    else:
+    return offload_hooks[0]
+
+
+def _post_init_offloaded(module) -> None:
+    """Run `post_init` for a CPU- or disk-offloaded layer.
+
+    A CPU-mapped layer normally holds real CPU tensors, so the plain call works.
+    A disk-mapped layer is a meta placeholder whose tensors are re-read from the
+    offload map on every forward: materialize it for the call and let the hook
+    return it to meta. Only kernels that declare `SUPPORTS_CPU_OFFLOAD` qualify,
+    because their `post_init` does not rewrite the persistent tensors and the
+    offload map therefore stays authoritative (#5194).
+
+    Whether the layer is a meta placeholder is the kernel's declaration
+    (`checkpoint_payload_is_meta`), not the GPTQ-specific `qweight` attribute:
+    NF12, QQQ, VPTQ, FP8, BitsAndBytes and the W4A kernels name their payload
+    differently or keep no `qweight` at all (#5261).
+    """
+    if not module.checkpoint_payload_is_meta():
+        module.post_init()
+        return
+    if not getattr(type(module), "SUPPORTS_CPU_OFFLOAD", False):
         raise RuntimeError(
-            "CPU-offloaded Marlin requires a writable in-memory weights map."
+            f"`{type(module).__name__}` was dispatched to a disk-offloaded layer, "
+            "but its `post_init` needs resident tensors and it does not declare "
+            "`SUPPORTS_CPU_OFFLOAD`. Load with `offload_state_dict=False`, or "
+            "select a backend whose kernel declares `SUPPORTS_CPU_OFFLOAD`."
         )
+    hook = _layer_offload_hook(module)
+    hook.pre_forward(module)
+    try:
+        module.post_init()
+    finally:
+        # `AlignDevicesHook.post_forward` only returns the tensors to meta; it
+        # does not write the offload map, so the disk copy stays authoritative.
+        hook.post_forward(module, None)
+
+
+def _post_init_cpu_offloaded_marlin(module) -> None:
+    """Refresh the writable CPU snapshot after Marlin changes its packed layout.
+
+    Shared by the GPTQ (`MarlinLinear`) and AWQ (`AwqMarlinLinear`) kernels: both
+    repack their checkpoint tensors into the Marlin layout during `post_init`,
+    so the CPU-offload snapshot Accelerate will replay must be rewritten with the
+    packed tensors (#5022).
+    """
+    # Resident weights have no Accelerate snapshot to refresh.
+    if not module.checkpoint_payload_is_meta():
+        module.post_init()
+        return
+
+    hook = _layer_offload_hook(module)
+    # CPU offload can keep layer entries in a shared dictionary under a prefix.
+    # Transformers' `dispatch_model` attaches
+    # `PrefixedDataset(OffloadedWeightsLoader(...))`, whose in-memory
+    # `state_dict` is writable (#5022).
+    storage, prefix, disk_index = _cpu_offload_writable_storage(hook.weights_map)
 
     # Save the original offloaded names before post_init changes tensor layouts.
     names = [
@@ -1735,6 +2116,18 @@ def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
     )
     missing = [name for name in names if f"{prefix}{name}" not in storage]
     if missing:
+        disk_backed = [
+            name
+            for name in missing
+            if disk_index is not None and f"{prefix}{name}" in disk_index
+        ]
+        if disk_backed:
+            raise RuntimeError(
+                "CPU-offloaded Marlin requires a writable in-memory weights map: "
+                f"{disk_backed} are disk-backed entries that `post_init` cannot "
+                "rewrite. Load with `offload_state_dict=False`, or select a "
+                "backend whose kernel declares `SUPPORTS_CPU_OFFLOAD`."
+            )
         raise RuntimeError(
             f"CPU-offloaded Marlin is missing weights map entries: {missing}."
         )
@@ -1874,15 +2267,17 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
                     "constructing the module."
                 )
 
+    from ..nn_modules.qlinear.marlin_awq import AwqMarlinLinear
+
     # The buffers need to have been initialized first before calling make_q4.
     for _, submodule in model.named_modules():
         if isinstance(submodule, (ExllamaV2Linear, AwqExllamaV2Linear)):
             device = submodule.qweight.device
             submodule.post_init(scratch_space=model.device_tensors[device])
-        elif isinstance(submodule, MarlinLinear):
+        elif isinstance(submodule, (MarlinLinear, AwqMarlinLinear)):
             _post_init_cpu_offloaded_marlin(submodule)
         elif isinstance(submodule, BaseQuantLinear):
-            submodule.post_init()
+            _post_init_offloaded(submodule)
 
     if quantize_config is not None and quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
         from ..nn_modules.qlinear.w4a_llama_stream import install_w4a_llama_stream
@@ -2615,6 +3010,12 @@ def _restore_checkpoint_layout_for_export(model: nn.Module) -> int:
 
     restored = 0
     for module in model.modules():
+        # A kernel that dropped its checkpoint buffers for a derived cache has
+        # to publish them again: `named_buffers` skips `None`, so the manifest
+        # would silently omit the quantized weights (#5010).
+        materialize = getattr(module, "materialize_checkpoint_layout_for_export", None)
+        if callable(materialize) and materialize():
+            restored += 1
         if getattr(module, "_fused_train_state", None) is None:
             continue
         if restore_fused_train_state(module):
@@ -2721,6 +3122,14 @@ def get_state_dict_for_save(
             tensor = source
             if getattr(tensor, "is_meta", False) or tensor.device.type == "meta":
                 key = ("meta", id(tensor))
+            elif tensor.numel() == 0:
+                # Every zero-element tensor reports storage pointer 0, so
+                # storage identity cannot distinguish one empty buffer from
+                # another. They carry no data to share; keep each named entry
+                # so a required empty buffer (e.g. a per-channel QQQ
+                # `s_group`) is written instead of being removed as a
+                # duplicate (#5126).
+                key = ("empty", name)
             else:
                 try:
                     # Distinct checkpoint weights may be views into one fused
@@ -2733,12 +3142,28 @@ def get_state_dict_for_save(
             key = ("other", id(source))
         ptrs[key].append(name)
 
+    # Only a pair the checkpoint really ties may be collapsed to one tensor.
+    # `_tied_weights_keys` is derived from the model config alone, and a
+    # composite wrapper can leave its top-level `tie_word_embeddings` at the
+    # default `True` while the checkpoint stores a distinct `lm_head` (#4799).
+    # The stamped snapshot records what the checkpoint really ties.
+    snapshot = tied_weights_keys(model)
+    tied_targets = set(snapshot) if snapshot is not None else None
+
     shared_ptrs = {ptr: names for ptr, names in ptrs.items() if len(names) > 1}
     warn_names = set()
+    separated_names = set()
     for names in shared_ptrs.values():
         # Removing the keys which are declared as known duplicates on
         # load. This allows to make sure the name which is kept is consistent.
-        if model._tied_weights_keys is not None:
+        if tied_targets is not None:
+            found = 0
+            for name in sorted(names):
+                if name in tied_targets and name in state_dict:
+                    found += 1
+                    if found < len(names):
+                        del state_dict[name]
+        elif model._tied_weights_keys is not None:
             found = 0
             for name in sorted(names):
                 matches_pattern = any(pcre.compile(pat).search(name) for pat in model._tied_weights_keys)
@@ -2757,11 +3182,29 @@ def get_state_dict_for_save(
             if name in state_dict:
                 found += 1
                 if found > 1:
+                    entry = state_dict[name]
+                    if (
+                        tied_targets is not None
+                        and name not in tied_targets
+                        and isinstance(entry.source, torch.Tensor)
+                    ):
+                        # The checkpoint does not tie this tensor, so it must
+                        # not be dropped: give it its own storage and keep it.
+                        state_dict[name] = replace(
+                            entry, source=entry.source.clone()
+                        )
+                        separated_names.add(name)
+                        continue
                     del state_dict[name]
                     warn_names.add(name)
     if len(warn_names) > 0:
         log.warn.once(
             f"Removed shared tensor {warn_names} while saving. This should be OK, but check by verifying that you don't receive any warning while reloading",
+        )
+    if len(separated_names) > 0:
+        log.warn.once(
+            f"Separated shared storage for {separated_names} while saving: the checkpoint does "
+            "not tie these tensors, so both are written.",
         )
     return state_dict
 
@@ -2816,26 +3259,66 @@ def _checkpoint_tensor_keys(
     )
 
 
+def _checkpoint_suffix_tensor(module: nn.Module, suffix: str) -> Optional[torch.Tensor]:
+    """Resolve one declared checkpoint suffix on a live module.
+
+    A suffix is a dotted path because some kernels keep their payload in a
+    submodule (VPTQ's codebooks are ``nn.Embedding`` weights, so
+    ``centroids.weight``). ``None`` means this module instance does not own the
+    tensor at all: the kernel is conditionally configured without it (an
+    AllSpark layer has no ``qzeros``, a VPTQ layer without residuals has no
+    ``res_centroids``, a BnB checkpoint without compressed statistics has no
+    ``weight_nested_absmax``), so there is nothing for the checkpoint to
+    restore and the suffix must not be required.
+    """
+
+    target: Any = module
+    for part in suffix.split("."):
+        if not isinstance(target, nn.Module):
+            return None
+        child = target._modules.get(part)
+        target = child if child is not None else getattr(target, part, None)
+        if target is None:
+            return None
+    return target if isinstance(target, torch.Tensor) else None
+
+
 def validate_checkpoint_qweights(
     model: nn.Module, checkpoint: str | os.PathLike, format: FORMAT, key_converter=None,
 ) -> None:
-    # AWQ producers (AutoAWQ, llm-compressor) and shared Marlin/BitBLAS
-    # checkpoints expose the same `qweight` key as GPTQ.  Skipping validation
-    # for them let a module whose checkpoint tensor was never loaded keep its
-    # zero-filled placeholder and produce silent NaN output.
-    validated_formats = {
-        FORMAT.GPTQ,
-        FORMAT.GPTQ_V2,
-        FORMAT.GPTQ_P,
-        FORMAT.GEMM,
-        FORMAT.GEMV,
-        FORMAT.GEMV_FAST,
-        FORMAT.LLM_AWQ,
-        FORMAT.MARLIN,
-        FORMAT.BITBLAS,
-    }
-    if format not in validated_formats:
-        return
+    """Fail a load whose checkpoint lacks a kernel's required payload.
+
+    Every quantized kernel declares the checkpoint tensors it cannot rebuild
+    (``CHECKPOINT_REQUIRED_BUFFERS``): the packed ``qweight``/``scales``/
+    ``qzeros`` for the GPTQ/AWQ/Marlin/BitBLAS/Paro family, ``B``/``s_group``/
+    ``s_channel`` for QQQ, ``weight``/``weight_scale_inv`` for FP8,
+    ``nf12_packed``/``nf12_escapes``/``nf12_exp_base`` for NF12, ``qweight``
+    for GGUF, the quant-state buffers for BitsAndBytes, ``indices`` plus the
+    codebooks for VPTQ, ``W_packed``/``W_scales`` for MACaQ, and
+    ``trellis``/``suh``/``svh`` plus a codebook for EXL3.
+
+    Without this, a module whose checkpoint tensor was never loaded kept its
+    zero-filled placeholder and produced silent NaN output, wrong logits, a
+    BnB CUDA illegal-memory-access that poisoned the context, or a device
+    mismatch at the first forward. A truncated checkpoint must raise, not
+    corrupt the context (#5010, #5218).
+
+    Only a suffix the live module actually owns is required. Kernels declare
+    the union of the payload they may store, and conditionally disabled
+    buffers (``None`` or absent) are skipped: AllSpark has no ``qzeros``, a
+    plain MXFP4 MACaQ layer has no ``BH``/``pre_scale``, a VPTQ layer without
+    residuals has no ``res_centroids``. This keeps a kernel from refusing a
+    checkpoint that never contained the tensor by design.
+
+    A suffix listed in ``CHECKPOINT_OPTIONAL_EMPTY_BUFFERS`` is not required
+    when the live module's buffer is empty: there is no data to restore, and
+    per-channel QQQ derives its empty ``s_group`` from ``s_channel`` (#5126),
+    NF12 derives an empty escape table, and a symmetric BitBLAS layer has no
+    zero points. A non-empty buffer of the same name stays required.
+
+    ``format`` is kept for the call-site signature; the per-kernel declaration
+    is the source of truth.
+    """
 
     checkpoint_keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
     if checkpoint_keys is None:
@@ -2844,11 +3327,27 @@ def validate_checkpoint_qweights(
     # A shared quantized module can be saved under any one of its aliases.
     module_keys = collections.defaultdict(set)
     for name, module in model.named_modules(remove_duplicate=False):
-        if isinstance(module, (GPTQQuantLinear, AWQuantLinear)):
-            tensor_name = f"{name}.qweight" if name else "qweight"
-            module_keys[id(module)].add(tensor_name)
-            if callable(key_converter):
-                module_keys[id(module)].add(key_converter(tensor_name))
+        # A kernel may make the payload conditional on its configuration
+        # (GPTQ `desc_act` needs `g_idx`), so ask the instance first.
+        resolve = getattr(module, "checkpoint_required_buffers", None)
+        required = resolve() if callable(resolve) else getattr(module, "CHECKPOINT_REQUIRED_BUFFERS", ())
+        if not required:
+            continue
+        optional_empty = getattr(module, "CHECKPOINT_OPTIONAL_EMPTY_BUFFERS", ())
+        aliases = [name]
+        if callable(key_converter):
+            aliases.append(key_converter(name))
+        for suffix in required:
+            tensor = _checkpoint_suffix_tensor(module, suffix)
+            if tensor is None:
+                # Conditional payload this kernel instance does not own.
+                continue
+            if suffix in optional_empty and tensor.numel() == 0:
+                continue
+            for alias in aliases:
+                module_keys[(id(module), suffix)].add(
+                    f"{alias}.{suffix}" if alias else suffix
+                )
     missing = sorted(
         min(keys) for keys in module_keys.values() if not keys & checkpoint_keys
     )
@@ -2859,11 +3358,98 @@ def validate_checkpoint_qweights(
         )
 
 
+def _matches_ignore_pattern(name: str, pattern) -> bool:
+    try:
+        return re.search(pattern, name) is not None
+    except (TypeError, re.error):
+        return False
+
+
+def _unmaterialized_checkpoint_parameters(
+    model: nn.Module, checkpoint: str | os.PathLike | None,
+    key_converter=None,
+) -> List[str]:
+    """Non-quantized parameters that no checkpoint tensor was loaded into.
+
+    A quantized checkpoint only stores the non-quantized tensors as plain
+    dense entries. When a key cannot be mapped back onto the runtime module the
+    parameter keeps the ``torch.empty`` storage allocated while the initializers
+    were suspended: random values, sometimes NaN/inf, with no warning. Compare
+    the checkpoint key set against the live parameters so such a load fails
+    loudly instead of returning a model that runs on garbage.
+    """
+
+    if checkpoint is None:
+        return []
+    checkpoint_keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
+    if checkpoint_keys is None:
+        # Pickle checkpoints cannot be inspected without loading them; leave
+        # that path to Accelerate's own reporting.
+        return []
+    if callable(key_converter):
+        checkpoint_keys = {key_converter(key) for key in checkpoint_keys}
+
+    loaded_parameter_ids = {
+        id(parameter)
+        for name, parameter in model.named_parameters(remove_duplicate=False)
+        if name in checkpoint_keys
+    }
+
+    quantized_prefixes: List[str] = []
+    for name, module in model.named_modules():
+        if getattr(module, "QUANT_TYPE", None) is not None:
+            quantized_prefixes.append(f"{name}." if name else "")
+
+    ignored_patterns = getattr(model, "_keys_to_ignore_on_load_missing", None) or ()
+
+    missing: List[str] = []
+    for name, parameter in model.named_parameters(remove_duplicate=False):
+        if name in checkpoint_keys:
+            continue
+        if parameter.is_meta:
+            # Meta parameters belong to a lazy shell; its own checks cover them.
+            continue
+        if id(parameter) in loaded_parameter_ids:
+            # Tied to a parameter the checkpoint did populate.
+            continue
+        if any(name.startswith(prefix) for prefix in quantized_prefixes):
+            continue
+        if any(_matches_ignore_pattern(name, pattern) for pattern in ignored_patterns):
+            continue
+        missing.append(name)
+    return missing
+
+
+def _raise_on_unmaterialized_checkpoint_parameters(
+    model: nn.Module, checkpoint: str | os.PathLike | None,
+    key_converter=None,
+) -> None:
+    """Raise when a load leaves non-quantized parameters uninitialized."""
+
+    missing = _unmaterialized_checkpoint_parameters(
+        model, checkpoint, key_converter=key_converter,
+    )
+    if not missing:
+        return
+    preview = ", ".join(missing[:8]) + (", ..." if len(missing) > 8 else "")
+    raise RuntimeError(
+        "Loader: the checkpoint "
+        f"{os.fspath(checkpoint)!r} does not provide tensors for {len(missing)} "
+        f"non-quantized parameter(s): {preview}. They would keep the "
+        "`torch.empty` storage allocated while weight initialization was "
+        "suspended, so inference would run on random (sometimes NaN/inf) "
+        "values. This usually means the checkpoint was written in a module "
+        "layout the loader cannot map back onto the runtime model; save it in "
+        "the source HF layout or load a checkpoint that matches this model."
+    )
+
+
 def _tie_weights_after_checkpoint_load(
     model,
     checkpoint: str | os.PathLike | None,
     *,
     extra_keys: set[str] | frozenset[str] | None = None,
+    key_converter=None,
 ) -> None:
     # Match transformers.from_pretrained(): when both sides of a tied-weight
     # pair are present in the checkpoint, tie_weights(missing_keys=...) checks
@@ -2874,6 +3460,8 @@ def _tie_weights_after_checkpoint_load(
     if checkpoint is not None:
         checkpoint_keys = _checkpoint_tensor_keys(checkpoint)
         if checkpoint_keys is not None:
+            if callable(key_converter):
+                checkpoint_keys = {key_converter(key) for key in checkpoint_keys}
             if extra_keys:
                 # Accelerate may have received a temporary checkpoint without
                 # some tensors the loader restored itself; they were present
@@ -3242,7 +3830,7 @@ def _checkpoint_tensor_dtypes(checkpoint) -> Dict[str, torch.dtype]:
     return dtypes
 
 
-def _prepare_variable_quant_buffers(model, checkpoint) -> None:
+def _prepare_variable_quant_buffers(model, checkpoint, key_converter=None) -> None:
     """Resize data-dependent quant buffers to the checkpoint's stored shapes."""
 
     shapes = _checkpoint_tensor_shapes(checkpoint)
@@ -3264,7 +3852,8 @@ def _prepare_variable_quant_buffers(model, checkpoint) -> None:
             expected_quant_type = "nf12"
         if suffix is None:
             continue
-        module_name = key[: -len(suffix)]
+        runtime_key = key_converter(key) if callable(key_converter) else key
+        module_name = runtime_key[: -len(suffix)]
         try:
             module = model.get_submodule(module_name)
         except AttributeError:
@@ -3307,6 +3896,37 @@ def _checkpoint_runtime_to_source_keys(
     return mapping
 
 
+def _device_map_target(device_map, name: str) -> Optional[torch.device]:
+    """Resolve the device a ``device_map`` entry assigns to one tensor name.
+
+    Returns ``None`` when the map says nothing about ``name`` or names an
+    offload target (``disk``/``meta``), so the caller keeps the slot's device.
+
+    The result is always a ``torch.device``, never the raw map value: #4915
+    spells ``cuda:0`` as the int ordinal ``0`` for Accelerate, and ``0`` is
+    falsy, so a truthiness test at the call site silently fell back to the
+    CPU slot and left every packed FP8 weight on the host (#4964).
+    """
+
+    if not isinstance(device_map, dict):
+        return None
+    module_name = name
+    while module_name and module_name not in device_map:
+        module_name = ".".join(module_name.split(".")[:-1])
+    if module_name == "" and "" not in device_map:
+        return None
+    target = device_map[module_name]
+    if isinstance(target, str) and target in ("disk", "meta"):
+        return None
+    if isinstance(target, int) and not isinstance(target, bool):
+        # Accelerate accepts a bare ordinal; it always means this accelerator.
+        return torch.device("cuda", target)
+    try:
+        return torch.device(target)
+    except (TypeError, RuntimeError, ValueError):
+        return None
+
+
 def _restore_checkpoint_buffers(
     model, checkpoint, dtypes: dict[str, torch.dtype | None],
     *, exact_source_names: set[str] | frozenset[str] = frozenset(),
@@ -3330,17 +3950,7 @@ def _restore_checkpoint_buffers(
     source_name = (lambda name: name_map.get(name, name)) if name_map else (lambda name: name)
 
     def mapped_device(name: str):
-        if not isinstance(device_map, dict):
-            return None
-        module_name = name
-        while module_name and module_name not in device_map:
-            module_name = ".".join(module_name.split(".")[:-1])
-        if module_name == "" and "" not in device_map:
-            return None
-        target = device_map[module_name]
-        if target in ("disk", "meta"):
-            return None
-        return target
+        return _device_map_target(device_map, name)
 
     checkpoint = os.fspath(checkpoint)
     if os.path.isdir(checkpoint):
@@ -3392,7 +4002,9 @@ def _restore_checkpoint_buffers(
         target_dtype = dtypes[name]
         target_device = slot.device
         if name in exact_source_names:
-            target_device = mapped_device(name) or target_device
+            mapped = mapped_device(name)
+            if mapped is not None:
+                target_device = mapped
         restored_value = value.to(
             device=target_device, dtype=value.dtype if target_dtype is None else target_dtype
         )
@@ -3449,46 +4061,319 @@ def _restore_fp32_checkpoint_buffers(model, checkpoint, names: set[str]) -> None
     _restore_checkpoint_buffers(model, checkpoint, dict.fromkeys(names, torch.float32))
 
 
+def _int_ordinal_device_map(device_map):
+    """Return a copy of a load map with ``"cuda:N"`` spelled as the int ``N``.
+
+    ``accelerate.utils.modeling.load_state_dict`` hands the map value straight
+    to ``safetensors.safe_open(device=...)``. With a *string* device,
+    safetensors initializes the primary context of the current CUDA device in
+    addition to the requested one, so loading onto ``cuda:1`` also claimed
+    ~500 MiB on ``cuda:0`` -- a GPU the caller never asked for (#4863). An int
+    ordinal only touches the device that was requested, and Accelerate accepts
+    int ordinals everywhere it accepts a device map entry.
+    """
+
+    converted = {}
+    for name, device in device_map.items():
+        if isinstance(device, str):
+            prefix, _, ordinal = device.partition(":")
+            if prefix == "cuda" and ordinal.isdigit():
+                converted[name] = int(ordinal)
+                continue
+        converted[name] = device
+    return converted
+
+
+def _safetensors_shard_files(checkpoint) -> Optional[List[str]]:
+    """Return the safetensors shards of ``checkpoint``, or ``None``.
+
+    The resolution mirrors Accelerate's ``load_checkpoint_in_model``: a pickle
+    checkpoint or an ambiguous index is left to the copy path. The returned
+    paths are the source shards, whose headers still use the checkpoint's
+    (possibly legacy) key layout.
+    """
+
+    path = os.fspath(checkpoint)
+    if os.path.isdir(path):
+        if os.path.isfile(os.path.join(path, "pytorch_model.bin")):
+            return None
+        single = os.path.join(path, "model.safetensors")
+        if os.path.isfile(single):
+            return [single]
+        indexes = [name for name in os.listdir(path) if name.endswith(".index.json")]
+        if len(indexes) != 1:
+            return None
+        path = os.path.join(path, indexes[0])
+    if path.endswith(".index.json"):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                weight_map = json.load(handle).get("weight_map")
+        except (OSError, ValueError):
+            return None
+        if not isinstance(weight_map, dict) or not weight_map:
+            return None
+        base = os.path.dirname(path)
+        files = sorted({os.path.join(base, name) for name in weight_map.values()})
+        if not all(
+            os.path.isfile(file) and file.endswith(".safetensors")
+            for file in files
+        ):
+            return None
+        return files
+    if path.endswith(".safetensors") and os.path.isfile(path):
+        return [path]
+    return None
+
+
+def _load_key_converted_safetensors(
+    model,
+    checkpoint,
+    key_converter,
+    *,
+    device_map,
+    dtype,
+    offload_state_dict: bool,
+    keep_in_fp32_modules,
+    strict: bool,
+) -> bool:
+    """Load a safetensors checkpoint under runtime names without copying it.
+
+    A legacy-layout checkpoint only differs in its header keys. Instead of
+    rewriting every shard into a temporary file (a full checkpoint copy), read
+    each tensor with ``safe_open`` and place it with Accelerate's
+    ``set_module_tensor_to_device``, so device placement and dtype casting stay
+    the same. The caller ties weights afterwards, as it does for the copy path.
+
+    Returns ``False`` when the checkpoint needs the copy path (pickle, disk
+    offload, bitsandbytes SCB metadata, a shape/name mismatch, ...). The caller
+    then falls back to ``_remap_safetensors_checkpoint_keys``. The function
+    only returns ``False`` before it mutates the model.
+    """
+
+    if not callable(key_converter):
+        return False
+    if not isinstance(device_map, dict) or not device_map:
+        # Accelerate's no-device-map branch has different semantics
+        # (`set_model_state_dict` / `model.load_state_dict`); keep the copy.
+        return False
+    if offload_state_dict:
+        return False
+    if any(str(device) in ("disk", "meta") for device in device_map.values()):
+        return False
+    shards = _safetensors_shard_files(checkpoint)
+    if not shards:
+        return False
+    if isinstance(dtype, str):
+        resolved_dtype = getattr(torch, dtype.replace("torch.", ""), None)
+        if resolved_dtype is None:
+            return False
+        dtype = resolved_dtype
+
+    model_state = model.state_dict()
+    model_keys = set(model_state.keys())
+    seen: set[str] = set()
+    plan: List[Tuple[str, str, str]] = []
+    unexpected: List[str] = []
+    changed = False
+    for shard in shards:
+        try:
+            with safe_open(shard, framework="pt", device="cpu") as handle:
+                metadata = handle.metadata()
+                if metadata is not None and metadata.get("format") not in (None, "pt"):
+                    return False
+                keys = list(handle.keys())
+                # BitsAndBytes stores `weight`/`SCB` pairs; Accelerate has a
+                # dedicated fp16-statistics path for them.
+                if any("SCB" in key for key in keys):
+                    return False
+                for source_name in keys:
+                    runtime_name = key_converter(source_name)
+                    changed |= runtime_name != source_name
+                    if runtime_name in seen:
+                        raise ValueError(
+                            "Checkpoint key conversion produced duplicate tensor name: "
+                            f"{runtime_name}"
+                        )
+                    seen.add(runtime_name)
+                    if runtime_name not in model_keys:
+                        unexpected.append(runtime_name)
+                        if strict:
+                            return False
+                        continue
+                    shape = tuple(handle.get_slice(source_name).get_shape())
+                    if tuple(model_state[runtime_name].shape) != shape:
+                        return False
+                    plan.append((shard, source_name, runtime_name))
+        except (OSError, ValueError):
+            return False
+    if not changed or not plan:
+        # No header key changes: let Accelerate load the source checkpoint
+        # exactly as before.
+        return False
+
+    def _param_device(name: str):
+        module_name = name
+        while module_name and module_name not in device_map:
+            module_name = ".".join(module_name.split(".")[:-1])
+        if module_name == "" and "" not in device_map:
+            return None
+        return device_map[module_name]
+
+    placed: List[Tuple[str, str, str, object]] = []
+    for shard, source_name, runtime_name in plan:
+        param_device = _param_device(runtime_name)
+        if param_device is None:
+            return False
+        placed.append((shard, source_name, runtime_name, param_device))
+
+    # Accelerate's loader does not retie: `_tie_weights_after_checkpoint_load`
+    # runs right after this call and ties with `missing_keys`, which keeps a
+    # checkpoint that stores a deliberately distinct `lm_head` untied.
+    from accelerate.utils.modeling import set_module_tensor_to_device
+
+    by_shard: Dict[str, List[Tuple[str, str, object]]] = {}
+    for shard, source_name, runtime_name, param_device in placed:
+        by_shard.setdefault(shard, []).append(
+            (source_name, runtime_name, param_device)
+        )
+    for shard, entries in by_shard.items():
+        with safe_open(shard, framework="pt", device="cpu") as handle:
+            for source_name, runtime_name, param_device in entries:
+                value = handle.get_tensor(source_name)
+                new_dtype = dtype
+                if dtype is not None and torch.is_floating_point(value):
+                    if keep_in_fp32_modules is not None and dtype == torch.float16:
+                        for key in keep_in_fp32_modules:
+                            if ((key in runtime_name and key + "." in runtime_name)
+                                    or key == runtime_name):
+                                new_dtype = torch.float32
+                                break
+                set_module_tensor_to_device(
+                    model,
+                    runtime_name,
+                    param_device,
+                    value=value,
+                    dtype=new_dtype,
+                )
+    if unexpected:
+        log.warn(
+            "Loader: %d checkpoint tensor(s) were not used by the model: %s",
+            len(unexpected),
+            unexpected[:8],
+        )
+    return True
+
+
+def _load_dtype_is_half(dtype) -> bool:
+    """True for fp16/bf16 loads (dtype objects or their string spellings)."""
+
+    return dtype in (torch.float16, torch.bfloat16) or str(dtype) in {
+        "torch.float16",
+        "torch.bfloat16",
+        "float16",
+        "bfloat16",
+    }
+
+
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     checkpoint = kwargs.get("checkpoint")
     if checkpoint is None and args:
         checkpoint = args[0]
     key_converter = kwargs.pop("key_converter", None)
     fp32_bf16_buffer_names = set(kwargs.pop("fp32_bf16_buffer_names", ()))
+    keep_in_fp32_strict_modules = list(
+        kwargs.pop("keep_in_fp32_strict_modules", ()) or ()
+    )
     packed_fp8_buffer_dtypes = dict(kwargs.pop("packed_fp8_buffer_dtypes", {}))
     restore_checkpoint_buffer_dtypes = bool(
         kwargs.pop("restore_checkpoint_buffer_dtypes", False)
     )
     fp8_weight_names = set(packed_fp8_buffer_dtypes)
+    device_map = kwargs.get("device_map")
+    if isinstance(device_map, dict):
+        # Read every shard with the int ordinal so the checkpoint read does not
+        # initialize a context on cuda:0 for a `cuda:N` placement (#4863).
+        device_map = _int_ordinal_device_map(device_map)
+        # `_tie_weights_after_checkpoint_load` below delegates to
+        # `tie_weights(missing_keys=...)`, which compares the two sides of a
+        # tied pair with `torch.equal` when the checkpoint stores both copies
+        # (AutoAWQ, GPTQModel <= 1.x). A map that splits the pair across devices
+        # makes that comparison raise, so give each pair one placement before
+        # the load -- the same rule `simple_dispatch_model` applies to the
+        # hooks (#4943, #4866). The model is not tied yet at this point, so the
+        # pairs come from its declared mapping, which is also what
+        # `tie_weights` iterates.
+        tied_groups = [
+            [target, source]
+            for target, source in _declared_tied_weights_keys(model).items()
+        ]
+        tied_groups.extend(accelerate.utils.modeling.find_tied_parameters(model))
+        _keep_tied_groups_on_one_device(device_map, tied_groups)
+        kwargs["device_map"] = device_map
     converted_checkpoint = None
     restore_checkpoint = checkpoint
     restore_name_map = None
+    lazy_loaded = False
     if checkpoint is not None and (callable(key_converter) or fp8_weight_names):
-        converted_checkpoint = _remap_safetensors_checkpoint_keys(
-            checkpoint, key_converter, fp8_weight_names,
-        )
-        if converted_checkpoint is not None:
-            kwargs["checkpoint"] = converted_checkpoint
-            if fp8_weight_names:
-                # Packed FP8 weights are absent from the temporary checkpoint:
-                # Accelerate would cast them to the model dtype (and stage the
-                # whole shard on the target device) before the loader restored
-                # the packed bytes. Read them from the source checkpoint
-                # instead, and use the same source for every other restored
-                # buffer so key conversion is applied only once.
-                restore_checkpoint = checkpoint
-                if callable(key_converter):
-                    restore_name_map = _checkpoint_runtime_to_source_keys(
-                        checkpoint, key_converter,
-                    )
-            else:
-                restore_checkpoint = converted_checkpoint
+        if (
+            callable(key_converter)
+            and not fp8_weight_names
+            and len(args) <= 1
+            and not kwargs.get("broadcast_from_rank0", False)
+        ):
+            # Rename the header keys lazily instead of copying every shard
+            # (issue #4959). A legacy-layout VL checkpoint can be many GiB,
+            # and the copy was ~80% of its load time.
+            lazy_loaded = _load_key_converted_safetensors(
+                model,
+                checkpoint,
+                key_converter,
+                device_map=kwargs.get("device_map"),
+                dtype=kwargs.get("dtype"),
+                offload_state_dict=bool(kwargs.get("offload_state_dict", False)),
+                keep_in_fp32_modules=kwargs.get("keep_in_fp32_modules"),
+                strict=bool(kwargs.get("strict", False)),
+            )
+        if lazy_loaded:
+            # The source checkpoint keeps the legacy names, so the dtype and
+            # buffer restore passes read it through this runtime -> source map.
+            restore_checkpoint = checkpoint
+            restore_name_map = _checkpoint_runtime_to_source_keys(
+                checkpoint, key_converter,
+            )
+        else:
+            converted_checkpoint = _remap_safetensors_checkpoint_keys(
+                checkpoint, key_converter, fp8_weight_names,
+            )
+            if converted_checkpoint is not None:
+                kwargs["checkpoint"] = converted_checkpoint
+                if fp8_weight_names:
+                    # Packed FP8 weights are absent from the temporary checkpoint:
+                    # Accelerate would cast them to the model dtype (and stage the
+                    # whole shard on the target device) before the loader restored
+                    # the packed bytes. Read them from the source checkpoint
+                    # instead, and use the same source for every other restored
+                    # buffer so key conversion is applied only once.
+                    restore_checkpoint = checkpoint
+                    if callable(key_converter):
+                        restore_name_map = _checkpoint_runtime_to_source_keys(
+                            checkpoint, key_converter,
+                        )
+                else:
+                    restore_checkpoint = converted_checkpoint
     try:
-        _prepare_variable_quant_buffers(
-            model,
-            kwargs.get("checkpoint", checkpoint),
-        )
-        accelerate.load_checkpoint_in_model(model, *args, **kwargs)
+        if lazy_loaded:
+            # The source shards still use the legacy names, so the buffers are
+            # looked up through the same converter as the tensor placement.
+            _prepare_variable_quant_buffers(
+                model, checkpoint, key_converter=key_converter,
+            )
+        else:
+            _prepare_variable_quant_buffers(
+                model, kwargs.get("checkpoint", checkpoint),
+            )
+        if not lazy_loaded:
+            accelerate.load_checkpoint_in_model(model, *args, **kwargs)
         restore_dtypes = dict(packed_fp8_buffer_dtypes)
         if str(kwargs.get("dtype")) in {"torch.bfloat16", "bfloat16"}:
             restore_dtypes.update(dict.fromkeys(fp32_bf16_buffer_names, torch.float32))
@@ -3501,6 +4386,22 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
         # shell (`restore_checkpoint_buffer_dtypes`) republishes every
         # floating buffer at exactly its stored dtype instead (#4379).
         checkpoint_dtypes = _checkpoint_tensor_dtypes(kwargs.get("checkpoint", checkpoint))
+        if lazy_loaded and restore_name_map:
+            checkpoint_dtypes = {
+                runtime: checkpoint_dtypes[source]
+                for runtime, source in restore_name_map.items()
+                if source in checkpoint_dtypes
+            }
+        # transformers pins `_keep_in_fp32_modules_strict` tensors to fp32 for
+        # every half dtype (5.x rule). Accelerate only honors
+        # `keep_in_fp32_modules` for fp16, so a bf16 reload narrowed the
+        # DeepSeek-V3 / GLM-4.x router bias and the ERNIE router weight,
+        # silently re-routing 11-36% of tokens per layer (#5151). Restore them
+        # from the checkpoint at their stored dtype.
+        if keep_in_fp32_strict_modules and _load_dtype_is_half(kwargs.get("dtype")):
+            for name in keep_in_fp32_strict_modules:
+                if checkpoint_dtypes.get(name) == torch.float32:
+                    restore_dtypes[name] = torch.float32
         for name, module in model.named_modules():
             model_dtype_buffers = getattr(module, "MODEL_DTYPE_BUFFERS", None)
             if model_dtype_buffers is None and not restore_checkpoint_buffer_dtypes:
@@ -3579,6 +4480,12 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
             model,
             kwargs.get("checkpoint", checkpoint),
             extra_keys=fp8_weight_names if converted_checkpoint is not None else None,
+            key_converter=key_converter if lazy_loaded else None,
+        )
+        _raise_on_unmaterialized_checkpoint_parameters(
+            model,
+            kwargs.get("checkpoint", checkpoint),
+            key_converter=key_converter if lazy_loaded else None,
         )
     finally:
         _cleanup_remapped_checkpoint(converted_checkpoint)
@@ -3943,6 +4850,56 @@ def find_config_seq_len(config_dict, target_keys):
             found = find_config_seq_len(v, target_keys)
             if found is not None:
                 return found
+    return None
+
+
+#: Config keys that declare a model's maximum sequence length, in the order
+#: calibration resolves them. Multimodal wrappers nest the text decoder's
+#: config, so resolution recurses through mappings (#5085).
+POSITION_LIMIT_CONFIG_KEYS = (
+    "max_position_embeddings",
+    "max_sequence_length",
+    "max_seq_len",
+    "n_positions",
+    "seq_length",
+)
+
+
+def resolve_position_limit(config: Any) -> Optional[int]:
+    """Return the sequence length limit ``config`` declares, or ``None``.
+
+    A model's declared limit is the longest sequence it promises to run.
+    Calibration rows are already truncated to it, but a packed replay can be
+    longer than any single row, so callers that build a synthetic sequence must
+    respect the same bound (#5085). Non-positive and non-integer values are
+    ignored, and nested decoder configs are searched when the wrapper does not
+    declare the limit itself.
+    """
+
+    if config is None:
+        return None
+    as_dict = getattr(config, "to_dict", None)
+    if callable(as_dict):
+        try:
+            config = as_dict()
+        except Exception:
+            pass
+    for key in POSITION_LIMIT_CONFIG_KEYS:
+        value = config.get(key) if isinstance(config, dict) else getattr(config, key, None)
+        if value is None:
+            continue
+        try:
+            limit = int(value)
+        except (TypeError, ValueError):
+            continue
+        if limit > 0:
+            return limit
+    if isinstance(config, dict):
+        for value in config.values():
+            if isinstance(value, dict):
+                limit = resolve_position_limit(value)
+                if limit is not None:
+                    return limit
     return None
 
 

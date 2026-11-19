@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import warnings
+from contextlib import nullcontext
 
 import torch
 
@@ -241,8 +242,13 @@ def _nvfp4_mse_quantize_blocks(
     def evaluate(local: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         scale = local.float() * global_scale
         values = _e2m1_nearest_values(blocks / scale)
-        scaled_blocks = torch.ldexp(blocks, -block_exponent)
-        scaled_scale = torch.ldexp(scale, -block_exponent)
+        # ``ldexp`` scales exactly, which ``2**-e`` cannot for subnormal blocks
+        # (the power itself can overflow), but it launches on the *current*
+        # device and faults when ``blocks`` lives on another GPU (#5263). Enter
+        # the tensors' device so the launch targets the right one.
+        with torch.cuda.device(blocks.device) if blocks.is_cuda else nullcontext():
+            scaled_blocks = torch.ldexp(blocks, -block_exponent)
+            scaled_scale = torch.ldexp(scale, -block_exponent)
         reconstructed = values * scaled_scale
         # A zero code reconstructs to exactly zero; avoid 0 * inf when the
         # candidate scale itself overflows.

@@ -9,17 +9,12 @@ description: Construct regression tests for GPT-QModel bug fixes and behavior-ch
 
 ## At a glance
 
-- **What:** a regression that fails on the broken code for the intended reason, exercises the next consumer and the risky state transition, and passes with the fix.
-- **Why:** recent fixes kept testing a helper or the first successful call while the bug lived in a reload, a retry, a second consumer, or another representation, and so they regressed.
-- **When:** every bug fix and behaviour-changing refactor, alongside the domain skills.
-- **Where:** extend the existing family suite under `tests/`; the evidence behind this skill is in `references/2026-11-17-regressions.md`.
-- **How:** write the invariant, prove red then green, pick the applicable transition rows in section 3, and report the evidence table in the PR.
-
-Recent fixes repeatedly covered a helper or the first successful call while
-missing its next consumer, another representation, or a partially completed
-operation. The [audit evidence](references/2026-11-17-regressions.md) separates
-demonstrated regressions from recurring bug families. Use these mechanisms to
-design tests, not the historical implementation as a permanent specification.
+For each bug fix or behaviour-changing refactor, add a red/green regression
+to the existing test family. Exercise the risky transition and its **next
+consumer**, not just the helper or first successful call. Select the applicable
+cases below and record the evidence in the PR. For landed fixes and the tests
+to extend, see the audits from [Nov 17](references/2026-11-17-regressions.md),
+[Nov 18](references/2026-11-18-regressions.md) and [Nov 19](references/2026-11-19-regressions.md).
 
 ## 1. Write the invariant before the patch
 
@@ -62,6 +57,15 @@ Do not mock away the mutation, conversion, replay, or dispatch under test.
 Call-count/source-text assertions are supporting evidence, not substitutes for
 observable tensor values, selected policy, restored state, or released owners.
 
+**Prove the guard runs where it belongs.** When adding or moving a regression,
+check both the CI path filter and the job's pytest selection. Run the affected
+nodes with `pytest -rs` in the intended dependency profile. Keep a CPU policy
+test runnable without optional native dependencies: scope integration imports,
+fixtures and skips to the nodes that need them. For a native-path guard, use
+the backend's actual runtime/build prerequisite and assert which implementation
+served the call. Collection, a skipped node, or a passing fallback is not a
+pass for the target path.
+
 ## 3. Test the relevant transition, not only construction
 
 ### Checkpoint layout, dtype, and model ownership
@@ -88,6 +92,12 @@ modules, `load_state_dict(assign=False/True)`, and offload/restore where used.
   operations are supported. Cleanup may reclaim a resource only after its last
   live consumer releases it; assert both continued usability and eventual
   cleanup, including a failed save followed by retry.
+- When changing a kernel's required checkpoint tensors or their consumers,
+  pair a truncated checkpoint with a complete one from the same family.
+  Remove one required key and assert the loader names it. Load the complete
+  checkpoint through `GPTQModel.load`, check a family-specific `post_init`
+  effect, then run a forward. Include a family without `qweight` and a GPTQ
+  control. For offload changes also exercise the supported meta-backed layer.
 
 Follow [checkpoint serialization](../gptqmodel-checkpoint-serialization/SKILL.md),
 [model plans](../gptqmodel-model-plan-tests/SKILL.md), and
@@ -116,6 +126,15 @@ partially published artifacts as applicable. Then run an ordinary forward or
 same-key retry: checking an empty hook/cache dictionary alone misses unusable
 models and waiters that remain blocked.
 
+For the [cancelled-run contract](../../../docs/cancelled-run-contract.md), test
+both calibrated (e.g. GPTQ) and weight-only (e.g. RTN) loops when the guarantee
+is shared. Leave one layer completed, one in flight, and one unreached; inject
+a one-shot fault at the changed phase, including the final restore if affected.
+Assert the original error, then forward in **ordinary grad mode**: an
+inference-mode probe can hide unrepaired tensors. Check the three layers'
+placement or live offload backing, not a blanket “no meta tensors” rule. A
+runnable model is required; re-quantizing that partially processed model is not.
+
 ### Concurrency, caches, and temporary storage
 
 State the ownership scope explicitly: module, run, process, device, stream, or
@@ -123,6 +142,13 @@ caller lease. Test cold first use, warm reuse, clear/invalidate, and rebuild.
 Use barriers/events to force contention; do not rely on sleeps or a loop that
 merely submits work sequentially. Count builds/releases and inspect retained
 references/storage after work completes, not just peak allocator reservations.
+
+When a compiled model promises release on last reference, run generation
+(and a retrace if affected), then drop all strong owners. Check that a weak
+reference is dead and compare live allocated device bytes with baseline before
+the test calls `gc.collect()` or clears caches. Disable automatic cyclic GC for
+this probe and restore its prior state in `finally`. Installing a wrapper
+alone cannot expose [trace-owned references](../../../tests/test_optimize_dynamo_release_5020.py).
 
 For shared writable scratch, two live streams must have exclusive storage or
 a proven lease lasting until asynchronous consumption completes. An allocation
@@ -161,6 +187,21 @@ rejection tests before mutation. Do not silently accept an option the consumer
 ignores. Select runtime behavior through config/API arguments, never retired
 environment switches.
 
+For public signature or config migrations, search for the retired spelling in
+scripts, README/docs and skill examples as well as Python callers. Exercise
+the replacement through the documented public import and call; parsing a
+snippet cannot catch a removed keyword. Check the old form against the stated
+compatibility policy. Extend the [docs contract tests](../../../tests/test_docs_contract_refs.py)
+for affected examples.
+
+For loader placement, feed the same checkpoint and explicit map through native
+load and the supported Transformers bridge. Include integer ordinal `0` (valid
+but falsey), a nonzero control, and an absent target when exercising map
+resolution. For mixed CPU/accelerator maps, check AUTO selects an offload-safe
+kernel without silently overriding an explicit backend. Inspect the **packed
+buffer's actual device** and run a first forward against a reference; a
+plausible device map or correct logits alone can hide a copy on every call.
+
 ### Calibration representations and repeated replay
 
 Represent the same explicit token rows as each affected supported input form:
@@ -178,6 +219,21 @@ tokenizers, not the assumption that position zero is always a special token.
 Run consecutive batches/layers/parallel branches with distinct context and
 assert no stale mask or KV state leaks between them.
 
+For packed token replay, make row **identity** observable, not just row count.
+For example, use a padded grid `[[11, 12, PAD], [21, 22, 23]]`: kept row 2
+must carry token 21, not PAD. Give each hidden row a distinct marker and assert
+its token-aligned kwargs at the replay consumer against hand-listed pairs.
+Include excluded sinks when applicable and an all-kept control. Do not use the
+production row-index helper to build the expected pairs.
+
+For bounded AWQ capture, route one expert through a plan match, a routed
+mismatch, then another match with a partial quota (e.g. local rows 0 and 2).
+With spare capacity, enumerate every expected row and its replay position.
+At capacity, check which sources survive across early and late batches.
+Exercise single-row quotas over enough multi-token batches to expose both
+all-first and all-centre selection. Test explicit sink exclusion separately
+with a sparse boolean mask and check the surviving rows.
+
 Follow [tokenizer ownership](../gptqmodel-tokenizer-normalization/SKILL.md) for
 reusable normalization and [AWQ safety](../gptqmodel-awq-model-onboarding/SKILL.md)
 for native replay, routing, and source/consumer qualification. Do not duplicate
@@ -189,6 +245,14 @@ Follow the [numerical oracle skill](../gptqmodel-torch-oracle-numerics/SKILL.md)
 its tolerances, packed-code rules, and hardware requirements remain unchanged.
 Cross the **changed mechanism** with supported FP16/BF16/FP32 and dispatch paths,
 including outer autocast and inference mode when they affect it.
+
+For layers supporting activation gradients, pack or load under
+`torch.inference_mode()`, leave that context and run the same layer with
+`x.requires_grad=True`. For a linear layer compare `x.grad` after backward
+against `grad_output @ W` using the fixture's reference weight. Repeat on
+the affected device and dtype where inference selects a fused op, and verify
+the no-grad control still takes that op. If full-graph compilation is
+advertised, execute the compiled forward with `fullgraph=True` too.
 
 - Use cancellation (large product plus opposing bias), range endpoints,
   underflow, and nonfinite inputs where supported. Check wide accumulation and

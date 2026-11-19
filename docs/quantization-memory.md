@@ -107,7 +107,7 @@ flowchart LR
     style NEWREF fill:#f6ffed,stroke:#389e0d
 ```
 
-`_build_chunked_reference_outputs` (`gptqmodel/looper/awq_processor.py:2370`)
+`_build_chunked_reference_outputs` (`gptqmodel/looper/awq_processor.py:3834`)
 still streams the replay batch by batch, so the reference is materialized once
 rather than once per grid step. Peak device memory is unchanged, because the full
 reference is resident during the grid either way.
@@ -256,6 +256,35 @@ host. On a 2-layer EXAONE 4 decoder at 70B dimensions (h8192/i28672, 64 heads,
 Five captures per layer (q/k/v plus gate/up) collapse to two. The wall time of
 that comparison moved in both directions across repeated runs (25.9/34.5 s vs
 32.1/38.1 s in one pair, 45.2 s vs 36.6 s in another), so it is not evidence.
+
+## 6. No caller pins the task Hessian across `quantize()`
+
+`GPTQProcessor.process()` must not hold a reference to the task's accumulator
+while `g.quantize()` runs (#5026). `GPTAQ`/`FOEM` hand their `[C, C]` Hessian to
+the quantizer (`H = self.H; del self.H`) and rebind `H` to the activation-order
+permuted copy, so a caller local (`g_h`, kept for a device assert) was the last
+reference to the original unpermuted fp32 tensor and held it for the whole
+quantize, including the peak where `H`, `dXXT`, the inverse and the native-delta
+product are all live. The device check now reads `g.H.device` through the task.
+
+The same accumulator is released when `quantize()` fails: `process()` calls
+`GPTQ.release_hessian_state()` before re-raising, so a failed or cancelled
+module does not pin `[C, C]` until the processor is torn down. `free()` keeps
+using the same helper, so the success path and the failure path cannot diverge.
+
+Isolated measurement, one 4096 -> 128 `nn.Linear` on an NVIDIA PG506 (fp16,
+4 x 128 calibration tokens; one fp32 `[4096, 4096]` Hessian is 64 MiB), peak
+device allocation for the `quantize()` call:
+
+| Method | Caller holds `g_h` (before) | Reads through the task (after) |
+| --- | --- | --- |
+| GPTAQ | 327.1 MiB | **263.1 MiB** (-64.0) |
+| FOEM | 329.1 MiB | **265.1 MiB** (-64.0) |
+
+The saving is exactly one `4 * C^2` accumulator per module, so it grows with the
+width: 784 MiB on an 8B `down_proj` (C = 14336) and 1.25 GiB at C = 18432.
+Checkpoints stay bitwise identical (GPTQ, GPTAQ and FOEM `state_dict` SHA-256
+equal before and after on the same tiny model).
 
 ## Related reading
 

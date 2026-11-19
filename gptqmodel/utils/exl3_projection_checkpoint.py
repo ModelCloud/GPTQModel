@@ -117,6 +117,7 @@ def build_projection_request(
     family_join: dict[str, Any] | None,
     route_evidence: dict[str, Any] | None,
     zero_route_recovery: dict[str, Any] | None = None,
+    uncalibrated: bool = False,
 ) -> dict[str, Any]:
     """Bind every input capable of changing one packed projection result."""
 
@@ -137,6 +138,11 @@ def build_projection_request(
     # whose natural route count was exactly zero.
     if zero_route_recovery is not None:
         request["zero_route_recovery"] = deepcopy(zero_route_recovery)
+    # A starved projection is quantized by EXL3's uncalibrated `fallback_quant`
+    # path (#4995). That is part of its identity, so it enters the request hash
+    # only when it applies.
+    if uncalibrated:
+        request["uncalibrated"] = True
     clean = _finite_json_value(request, "request")
     clean["request_sha256"] = sha256_bytes(canonical_json_bytes(clean))
     return clean

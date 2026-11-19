@@ -34,7 +34,7 @@ flowchart TD
     style J fill:#fff3cd,stroke:#997404,stroke-width:2px
 ```
 
-`loaded_op` (`gptqmodel/utils/cpp.py:2025`) reads only the extension object's
+`loaded_op` (`gptqmodel/utils/cpp.py:2270`) reads only the extension object's
 own namespace and handle cache. `clear_cache()` resets both, so every
 `clear_*_extension_cache()` invalidates the fast path.
 

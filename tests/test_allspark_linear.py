@@ -96,6 +96,132 @@ def test_allspark_linear_matches_dequant(m, dtype):
     assert rel < 2e-3, f"m={m} relative error {rel.item():.5f}"
 
 
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_biased_prefill_past_int32_workspace_boundary(dtype):
+    """A biased prefill must not size its fused workspace in 32-bit.
+
+    ``grid_x * Mtile * grid_y * Ntile`` is the padded M*N element count. Once
+    rows x out_features exceeds 2^31 it wrapped int32, sign-extended to a huge
+    ``size_t`` and ``torch::empty`` raised a negative dimension. With a single
+    K slice the fused reduction never runs, so the padded FP32 C_tmp buffer
+    must not be materialized at all.
+    """
+    if IS_ROCM or not _kernel_supported():
+        pytest.skip("AllSpark CUDA (Ampere+) GPU required")
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    if properties.total_memory < 8 * 1024**3:
+        pytest.skip("the int32 boundary regression needs at least 8 GiB of device memory")
+    assert _prewarm()
+
+    from gptqmodel.nn_modules.qlinear.allspark import AllSparkLinear
+
+    m, k, n = 131072, 256, 16448
+    assert m * n > 2**31
+    torch.manual_seed(5092)
+    weight = (torch.randn(k, n, dtype=torch.float32, device="cuda") * 0.02).to(dtype)
+    qweight, scales, codes = _pack_gptq_8bit(weight)
+    bias = torch.randn(n, dtype=torch.float32, device="cuda") * 2.0
+
+    mod = AllSparkLinear(
+        bits=8, group_size=-1, desc_act=False, sym=True,
+        in_features=k, out_features=n, bias=True, dtype=dtype,
+    ).cuda().to(dtype)
+    mod.qweight.data.copy_(qweight)
+    mod.scales.data.copy_(scales)
+    mod.bias.data.copy_(bias)
+    mod.post_init()
+
+    x = (torch.randn(m, k, dtype=torch.float32, device="cuda") * 0.02).to(dtype)
+    torch.cuda.synchronize()
+    base = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    out = mod(x)
+    torch.cuda.synchronize()
+    peak = torch.cuda.max_memory_allocated() - base
+    assert out.shape == (m, n)
+    assert out.dtype == dtype
+    assert torch.isfinite(out).all()
+    # The padded M*N FP32 workspace is ~8.6 GiB; the output alone is ~4.3 GiB.
+    # Anything close to the sum means the unused C_tmp buffer was allocated.
+    assert peak < 6 * 1024**3, f"unexpected transient workspace: {peak / 2**30:.2f} GiB"
+
+    dense = ((codes.double() - 128.0) * scales.double()).to(dtype).double()
+    for row in (0, 1, m // 2, m - 1):
+        ref = x[row].double() @ dense + bias.double()
+        rounded = ref.to(dtype)
+        ulp = (torch.nextafter(rounded, torch.full_like(rounded, float("inf"))).double()
+               - rounded.double()).abs()
+        excess = ((out[row].double() - ref).abs() - ulp).clamp_min(0)
+        assert torch.all(excess <= 2e-3 + 2e-3 * ref.abs()), float(excess.max())
+
+
+@pytest.mark.cuda
+def test_biased_splitk_prefill_past_int32_workspace_boundary():
+    """A real K split must address its C_tmp buffer with 64-bit offsets.
+
+    Padded M*N is just over 2^31 here and ``gridDim.z`` is 2, so the fused
+    C_tmp buffer is genuinely materialized. Every per-block C_tmp offset used
+    to be an ``int`` and wrapped past the boundary.
+    """
+    if IS_ROCM or not _kernel_supported():
+        pytest.skip("AllSpark CUDA (Ampere+) GPU required")
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    if properties.total_memory < 20 * 1024**3:
+        pytest.skip("the split-K boundary regression needs at least 20 GiB of device memory")
+    assert _prewarm()
+
+    from gptqmodel.nn_modules.qlinear.allspark import AllSparkLinear
+
+    # Pick a grid whose K-split selection (which depends on the SM count) fails
+    # the n_slice=1 balance test, so the fused split-K path is really taken.
+    sm_count = properties.multi_processor_count
+    grid_y = 65
+    for grid_x in range(2017, 2017 + sm_count + 1):
+        blocks = grid_x * grid_y
+        if blocks * 16384 > 2**31 and (blocks % sm_count) * 2 < sm_count:
+            break
+    else:
+        pytest.skip("no split-K shape triggers the workspace boundary on this SM count")
+    m, k, n = grid_x * 64, 512, grid_y * 256
+    assert m * n > 2**31
+    torch.manual_seed(5093)
+    weight = (torch.randn(k, n, dtype=torch.float32, device="cuda") * 0.02).to(torch.float16)
+    qweight, scales, codes = _pack_gptq_8bit(weight)
+    bias = torch.randn(n, dtype=torch.float32, device="cuda")
+
+    mod = AllSparkLinear(
+        bits=8, group_size=-1, desc_act=False, sym=True,
+        in_features=k, out_features=n, bias=True, dtype=torch.float16,
+    ).cuda()
+    mod.qweight.data.copy_(qweight)
+    mod.scales.data.copy_(scales)
+    mod.bias.data.copy_(bias)
+    mod.post_init()
+
+    x = (torch.randn(m, k, dtype=torch.float32, device="cuda") * 0.02).to(torch.float16)
+    torch.cuda.synchronize()
+    base = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    out = mod(x)
+    torch.cuda.synchronize()
+    peak = torch.cuda.max_memory_allocated() - base
+    assert out.shape == (m, n)
+    assert torch.isfinite(out).all()
+    # The split-K C_tmp is ~8.0 GiB and the output ~4.0 GiB; seeing that peak
+    # proves this call really took the fused split-K path.
+    assert peak > 10 * 1024**3, f"split-K workspace was not materialized: {peak / 2**30:.2f} GiB"
+
+    dense = ((codes.double() - 128.0) * scales.double()).to(torch.float16).double()
+    for row in (0, 1, m // 2, m - 1):
+        ref = x[row].double() @ dense + bias.double()
+        rounded = ref.to(torch.float16)
+        ulp = (torch.nextafter(rounded, torch.full_like(rounded, float("inf"))).double()
+               - rounded.double()).abs()
+        excess = ((out[row].double() - ref).abs() - ulp).clamp_min(0)
+        assert torch.all(excess <= 2e-3 + 2e-3 * ref.abs()), float(excess.max())
+
+
 def _fp32_bias_module(dtype: torch.dtype, *, k: int = 4096, n: int = 128,
                       bias_value: float = -32768.0):
     """AllSparkLinear with unit weights and an FP32 bias outside FP16 range."""

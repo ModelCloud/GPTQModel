@@ -20,6 +20,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.python import has_gil_disabled
 from ...utils.torch import torch_compile
 from ...utils.vptq import (
     unpack_vptq_indices,
@@ -45,11 +46,38 @@ def _as_pair(value: Any, name: str) -> List[int]:
 class VPTQLinear(WeightOnlyQuantLinear):
     """Weight-only VPTQ linear layer with the portable Torch implementation."""
 
+    # Packed codebook indices plus the codebooks that decode them. The
+    # residual/outlier codebooks, their indices, the norm scales and the
+    # permutation exist only when the layer was configured with them, so the
+    # validator skips a suffix whose live tensor is absent.
+    CHECKPOINT_REQUIRED_BUFFERS = (
+        "indices",
+        "centroids.weight",
+        "res_centroids.weight",
+        "outlier_centroids.weight",
+        "outlier_indices",
+        "weight_scale",
+        "weight_bias",
+        "perm",
+    )
+
     # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager, dynamo, aot_eager,
     # inductor and reduce-overhead pass, and an explicit torch.cuda.graph
     # capture succeeds with output matching eager.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all pass. CUDA-graph capture is CUDA-only, so
+    # the portable CPU forward's ceiling is INDUCTOR.
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
     SUPPORTS_GRAPH_CAPTURE = True
+    # Static-cache `generate()` adds one model graph with zero breaks and
+    # decodes 3.5-5.0x faster than eager: Qwen2.5-0.5B-Instruct VPTQ, fp16,
+    # RTX 4090 (sm_89), torch 2.15.0+cu132, 4 left-padded prompts x 32 greedy
+    # tokens: 0.70 s -> 0.14 s (#5102). The layer-local `dequantize` compile
+    # exists on both paths, so the model graph is the delta. AUTO selects this
+    # kernel on ROCm (the CUDA kernel cannot run there), so the previous
+    # unmeasured opt-out cost every ROCm VPTQ checkpoint by default.
+    SUPPORTS_COMPILE = True
 
     SUPPORTS_BACKENDS = [BACKEND.VPTQ_TORCH]
     SUPPORTS_METHODS = [METHOD.VPTQ]
@@ -300,6 +328,21 @@ class VPTQLinear(WeightOnlyQuantLinear):
             # deployments; keep the portable eager path there.
             self.optimized = True
             log.info.once("Optimize: `VPTQLinear` torch.compile skipped on NPU.")
+            return
+
+        if has_gil_disabled():
+            # `dequantize` is one code object shared by every VPTQ layer, so a
+            # per-module `torch.compile` wrapper makes dynamo trace and guard
+            # that code object once per layer. Under free-threading a compiled
+            # call on one layer can then read the cache entry another thread is
+            # still tracing and return silently wrong tensors (#5228); the
+            # model-level forward compile still serves the graph. Re-enable
+            # once dynamo's per-code-object cache is thread-safe.
+            self.optimized = True
+            log.info.once(
+                "Optimize: `VPTQLinear` per-layer torch.compile skipped on "
+                "free-threaded Python (GIL disabled)."
+            )
             return
 
         if backend is None:

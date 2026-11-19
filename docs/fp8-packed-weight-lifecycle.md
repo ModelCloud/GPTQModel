@@ -78,7 +78,7 @@ independent Torch decode and matmul oracle.
 
 ## Measured load peak
 
-A GPT-QModel FP8 export of `HuggingFaceTB/SmolLM2-135M` (210 packed E4M3
+A production FP8 checkpoint of `HuggingFaceTB/SmolLM2-135M` (210 packed E4M3
 weights) loaded with `GPTQModel.load(..., device="cuda")` on an NVIDIA GB10.
 Peak allocated memory is `torch.cuda.max_memory_allocated()`; host peak is the
 process `VmHWM` after the load. Both runs produced the same state-dict SHA-256

@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-import platform
-import sys
-from functools import lru_cache
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -37,10 +35,174 @@ from ._numerics import autocast_active, matmul_fp32_reduce
 
 log = setup_logger()
 
-_MLX_FP8_MIN_ELEMENTS = 60 * 1024 * 1024
-
-
 _FP8_ACTIVATION_QUANT_METHODS = ("none", "per_token")
+
+
+#: ``(hip?, device index, output dtype) -> bool`` answers for the row-wise
+#: ``torch._scaled_mm`` contract, measured once per process.
+_SCALED_MM_ROW_SCALE_SUPPORT: dict = {}
+
+#: ``GPTQMODEL_FP8_SCALED_MM``: ``auto`` (default) measures the contract,
+#: ``on``/``off`` skip the measurement and force the answer. ``off`` keeps a
+#: device with a broken row-wise kernel (for example #5174) on the correct
+#: dequantize + matmul path without paying for a probe; ``on`` is for a
+#: deployment that already knows the kernel is correct.
+_FP8_SCALED_MM_ENV = "GPTQMODEL_FP8_SCALED_MM"
+
+
+def _parse_scaled_mm_override(raw: Optional[str]) -> Optional[bool]:
+    """Parse the ``GPTQMODEL_FP8_SCALED_MM`` override into ``True``/``False``/``None``."""
+
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if value in {"", "auto"}:
+        return None
+    if value in {"1", "true", "on", "yes"}:
+        return True
+    if value in {"0", "false", "off", "no"}:
+        return False
+    raise ValueError(
+        f"`{_FP8_SCALED_MM_ENV}` must be one of auto/on/off, got `{raw}`."
+    )
+
+
+#: Resolved once at import so a traced ``forward`` reads a Python constant
+#: instead of calling ``os.environ`` (an opaque call for dynamo).
+_SCALED_MM_OVERRIDE: Optional[bool] = _parse_scaled_mm_override(
+    os.environ.get(_FP8_SCALED_MM_ENV)
+)
+
+
+def _is_compiling() -> bool:
+    """Whether this call is being traced by ``torch.compile``/``torch.export``."""
+
+    compiler = getattr(torch, "compiler", None)
+    return bool(compiler is not None and compiler.is_compiling())
+
+
+def _probe_must_wait() -> bool:
+    """Whether the current context cannot host a device-to-host capability probe.
+
+    A measurement ends with a device-to-host read of its verdict, and
+    CUDA-graph capture forbids that copy (the pre-#5195 probe also created a
+    ``torch.Generator``, which dynamo cannot trace). Inside either context the
+    answer is therefore "unknown", not "unsupported": callers take the correct
+    fallback and do not cache it, so the fast path is still available to the
+    next eager call.
+    """
+
+    if _is_compiling():
+        return True
+    # ``is_initialized`` avoids creating a CUDA context for a CPU-only load;
+    # an uninitialised context cannot be capturing.
+    if not torch.cuda.is_initialized():
+        return False
+    return torch.cuda.is_current_stream_capturing()
+
+
+def _probe_fp8_codes(rows: int, cols: int, device: torch.device, offset: int) -> torch.Tensor:
+    """Deterministic FP8 codes for the contract probe.
+
+    Every entry is ``n / 16`` for an integer ``n`` in ``1..16``, which is exact
+    in ``float8_e4m3fn``. Unlike ``torch.randn``, this needs no
+    ``torch.Generator``, so the probe is traceable (#5195).
+    """
+
+    index = torch.arange(rows * cols, device=device, dtype=torch.int64)
+    codes = ((index * 7 + offset) % 16 + 1).to(torch.float32) * 0.0625
+    return codes.reshape(rows, cols).to(torch.float8_e4m3fn)
+
+
+def _probe_scaled_mm_row_scale(device: torch.device, out_dtype: torch.dtype) -> torch.Tensor:
+    """Device-side verdict for the row-wise ``_scaled_mm`` contract.
+
+    Returns a 0-dim bool tensor, so measuring performs no host synchronisation:
+    no ``bool()``, no ``torch.allclose`` and no ``torch.Generator``. Only
+    ``_scaled_mm_row_scale_verdict`` reads it, and only outside capture and
+    tracing.
+    """
+
+    rows, inner, cols = 16, 32, 16
+    x_q = _probe_fp8_codes(rows, inner, device, offset=1)
+    w_q = _probe_fp8_codes(cols, inner, device, offset=5)
+    scale_a = torch.linspace(0.5, 1.5, rows, device=device, dtype=torch.float32).reshape(rows, 1)
+    scale_b = torch.linspace(0.5, 1.5, cols, device=device, dtype=torch.float32).reshape(1, cols)
+    reference = (x_q.float() @ w_q.t().float()) * scale_a * scale_b
+    out = torch._scaled_mm(
+        x_q, w_q.t(), scale_a=scale_a, scale_b=scale_b, out_dtype=out_dtype
+    )
+    return torch.isclose(out.float(), reference, rtol=2e-2, atol=1e-2).all()
+
+
+def _scaled_mm_row_scale_verdict(
+    device: torch.device, out_dtype: torch.dtype
+) -> Optional[bool]:
+    """Whether this device computes the row-wise ``_scaled_mm`` contract.
+
+    ``_scaled_mm`` takes ``scale_a=(tokens, 1)`` and ``scale_b=(1, out_features)``
+    and is documented to apply both. On sm_121 with torch 2.11.0+cu130 the
+    ``float16`` output silently drops the row-wise scaling: it returns a result
+    ~1e3x away from ``(A @ B) * scale_a * scale_b`` and raises nothing (#5174),
+    while the same call with ``bfloat16`` output is correct. A caller therefore
+    cannot detect the defect from an exception, and the answer depends on the
+    requested output dtype. The contract is measured once per process, device
+    and output dtype and memoised on the device index, so the per-forward guard
+    costs one dict lookup.
+
+    ``None`` means "this context could not measure it" -- a CUDA-graph capture,
+    a ``torch.compile`` trace, or an allocation failure. It is deliberately not
+    cached: the fallback runs for this call and the next eager call asks again,
+    so a probe that could not run never disables the fast path for the process
+    (#5195).
+    """
+
+    if _SCALED_MM_OVERRIDE is not None:
+        return _SCALED_MM_OVERRIDE
+
+    index = device.index
+    if index is None:  # pragma: no cover - tensors always carry an index
+        index = torch.cuda.current_device()
+    key = (IS_ROCM, index, out_dtype)
+    cached = _SCALED_MM_ROW_SCALE_SUPPORT.get(key)
+    if cached is not None:
+        return cached
+
+    if _probe_must_wait():
+        return None
+
+    try:
+        supported = bool(_probe_scaled_mm_row_scale(device, out_dtype))
+    except torch.cuda.OutOfMemoryError:
+        # An allocation failure says nothing about the kernel contract.
+        return None
+    except Exception:
+        # A build/kernel rejection is a real answer for this combination.
+        supported = False
+
+    if _probe_must_wait():
+        # Defensive: the context turned into capture/tracing mid-measurement.
+        return supported
+
+    _SCALED_MM_ROW_SCALE_SUPPORT[key] = supported
+    if not supported:
+        log.warn.once(
+            "FP8: `torch._scaled_mm` does not compute the row-wise scale contract on "
+            f"this device for `{str(out_dtype).replace('torch.', '')}` output; per-token "
+            "(W8A8) layers use the dequantize + matmul path."
+        )
+    return supported
+
+
+def _scaled_mm_row_scale_supported(device: torch.device, out_dtype: torch.dtype) -> bool:
+    """``True`` only when the contract is known and correct for this device.
+
+    An unmeasured combination (``None`` above) reports ``False`` for this call
+    but stays uncached, so a capture-time or traced call cannot poison the
+    process-wide answer (#5195).
+    """
+
+    return _scaled_mm_row_scale_verdict(device, out_dtype) is True
 
 
 def _normalize_fp8_activation_quant_method(value: Optional[str]) -> str:
@@ -66,10 +228,9 @@ def _normalize_fp8_activation_quant_method(value: Optional[str]) -> str:
 def _normalize_linear_scale_semantics(value: Optional[str]) -> str:
     """Normalize a loaded checkpoint's ``weight_scale_inv`` convention.
 
-    ``FP8Config`` only emits GPT-QModel's own inverse scales, so its
-    normalizer accepts ``inverse`` alone. A loaded HF/DeepSeek checkpoint can
-    additionally store a multiplier under the historical
-    ``weight_scale_inv`` name, which this wrapper must decode.
+    A loaded HF/DeepSeek checkpoint can store a multiplier under the
+    historical ``weight_scale_inv`` name, while legacy GPT-QModel checkpoints
+    store an inverse. This wrapper decodes either.
     """
 
     normalized = "inverse" if value is None else str(value).strip().lower()
@@ -79,46 +240,6 @@ def _normalize_linear_scale_semantics(value: Optional[str]) -> str:
             f"got `{value}`."
         )
     return normalized
-_MLX_FP8_FORMATS = {
-    "float8_e4m3fn",
-    "float8_e5m2",
-    "float8_e4m3fnuz",
-    "float8_e5m2fnuz",
-}
-
-
-@lru_cache(maxsize=1)
-def _mlx_quantization_available() -> bool:
-    if sys.platform != "darwin" or platform.machine() != "arm64":
-        return False
-    try:
-        import mlx.core  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
-def _quantize_fp8_weight_mlx_to_torch(
-    weight: torch.Tensor,
-    *,
-    format: str,
-    weight_scale_method: str,
-    weight_block_size: Optional[Tuple[int, int]],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    import mlx.core as mx
-
-    from ...quantization.mlx_fp8 import quantize_fp8_weight_mlx
-
-    codes, scale_inv = quantize_fp8_weight_mlx(
-        mx.from_dlpack(weight),
-        format=format,
-        weight_scale_method=weight_scale_method,
-        weight_block_size=weight_block_size,
-    )
-    qweight = torch.from_dlpack(codes).cpu().contiguous().view(_fp8_dtype_from_name(format))
-    return qweight, torch.from_dlpack(scale_inv).cpu().contiguous()
-
-
 def _fp8_dtype_from_name(fmt: str) -> torch.dtype:
     return getattr(torch, _normalize_fp8_fmt(fmt))
 
@@ -144,82 +265,19 @@ def _compute_scale_inv(abs_max: torch.Tensor, fp8_max: float) -> torch.Tensor:
     )
 
 
-def _require_finite_fp8_source(weight: torch.Tensor) -> None:
-    if not bool(torch.isfinite(weight).all()):
-        raise ValueError("FP8 quantization requires finite source weights representable as float32.")
-
-
-def quantize_fp8_weight(
-    weight: torch.Tensor,
-    *,
-    format: str = "float8_e4m3fn",
-    weight_scale_method: str = "row",
-    weight_block_size: Optional[Tuple[int, int]] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if weight.ndim != 2:
-        raise ValueError(f"FP8 quantization expects a 2D weight matrix, got shape {tuple(weight.shape)}.")
-
-    format = _normalize_fp8_fmt(format)
-    if format == "float8_e8m0fnu":
-        raise ValueError(
-            "TorchFP8Linear does not quantize dense weights to float8_e8m0fnu; "
-            "use that format only for dequantization of existing checkpoints."
-        )
-    block_size = _normalize_fp8_weight_block_size(weight_block_size)
-    weight_scale_method = _normalize_fp8_weight_scale_method(
-        weight_scale_method,
-        weight_block_size=block_size,
-    )
-    fp8_dtype = _fp8_dtype_from_name(format)
-    fp8_max = torch.finfo(fp8_dtype).max
-
-    weight = weight.to(device="cpu", dtype=torch.float32).contiguous()
-
-    if weight_scale_method == "tensor":
-        abs_max = weight.abs().amax()
-        _require_finite_fp8_source(abs_max)
-        scale_inv = _compute_scale_inv(abs_max, fp8_max)
-        quantized = torch.clamp(weight * scale_inv, min=-fp8_max, max=fp8_max).to(fp8_dtype)
-        return quantized.contiguous(), scale_inv.to(torch.float32)
-
-    if weight_scale_method == "row":
-        abs_max = weight.abs().amax(dim=1)
-        _require_finite_fp8_source(abs_max)
-        scale_inv = _compute_scale_inv(abs_max, fp8_max)
-        quantized = torch.clamp(
-            weight * scale_inv.unsqueeze(1),
-            min=-fp8_max,
-            max=fp8_max,
-        ).to(fp8_dtype)
-        return quantized.contiguous(), scale_inv.to(torch.float32).contiguous()
-
-    if block_size is None:
-        raise ValueError("FP8 block quantization requires `weight_block_size`.")
-
-    block_rows, block_cols = block_size
-    rows, cols = weight.shape
-    if rows % block_rows != 0 or cols % block_cols != 0:
-        raise ValueError(
-            f"FP8 block quantization expects shape {tuple(weight.shape)} to be divisible by block size "
-            f"{block_size}."
-        )
-
-    row_blocks = rows // block_rows
-    col_blocks = cols // block_cols
-    blocks = weight.reshape(row_blocks, block_rows, col_blocks, block_cols)
-    abs_max = blocks.abs().amax(dim=(1, 3))
-    _require_finite_fp8_source(abs_max)
-    scale_inv = _compute_scale_inv(abs_max, fp8_max)
-    scaled = blocks * scale_inv.unsqueeze(1).unsqueeze(3)
-    quantized = torch.clamp(scaled, min=-fp8_max, max=fp8_max).to(fp8_dtype).reshape(rows, cols)
-    return quantized.contiguous(), scale_inv.to(torch.float32).contiguous()
-
-
 class TorchFP8Linear(WeightOnlyQuantLinear):
+    # FP8 stores the scaled weight and its inverse scale; either one missing
+    # decodes to zeros or a wrong scale (the issue measured a 20.2 logit diff).
+    CHECKPOINT_REQUIRED_BUFFERS = ("weight", "weight_scale_inv")
+
     # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager, dynamo, aot_eager,
     # inductor and reduce-overhead pass, and an explicit torch.cuda.graph
     # capture succeeds with output matching eager.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    # CPU, torch 2.16.0.dev20261021+cpu: the CPU forward is plain tensor
+    # math and reaches ``INDUCTOR`` (dynamo/aot_eager/inductor pass); only
+    # the CUDA path is capture-safe, so the base stays ``CUDAGRAPH``.
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
     SUPPORTS_GRAPH_CAPTURE = True
 
     SUPPORTS_BACKENDS = [BACKEND.FP8_TORCH]
@@ -228,6 +286,18 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
     SUPPORTS_BITS = [8]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
+    # Trace-clean: ``forward`` branches only on host-visible constants (device
+    # type, dtypes, shapes, config strings) and every decision that needs a
+    # device-to-host read -- the rowwise ``_scaled_mm`` contract and the
+    # decoded-weight range bound -- is resolved eagerly by
+    # ``_warm_runtime_decisions()`` at load/opt-in, never from the traced or
+    # captured forward (#5195). Measured on
+    # sm_121 (tiny Llama, 4 prompts x 32 greedy tokens): static-cache decode
+    # 0.126 s eager -> 0.055 s compiled (2.3x, 1 graph, 0 breaks); the reporter
+    # of #4669 measured 0.77 s -> 0.175 s on a 4090. FP8 is the format that
+    # gains the most from the static-cache auto-compile, so opting out was a
+    # 4x regression (#4739).
+    SUPPORTS_COMPILE = True
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
@@ -278,6 +348,12 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         # Set when a HIP build cannot cast this format natively, so later forwards
         # go straight to the validated CPU path instead of retrying the GPU cast.
         self._native_dequant_disabled = False
+        # Range-bound cache for the in-dtype weight narrowing. ``_apply`` and
+        # ``_load_from_state_dict`` reset it, and ``post_init`` warms it, so a
+        # captured/traced forward only reads it (#5195).
+        self._decoded_weight_bound_ready = False
+        self._decoded_weight_bound = None
+        self._scale_inv_min = None
 
         if self.weight_scale_method == "block" and self.weight_block_size is not None:
             block_rows, block_cols = self.weight_block_size
@@ -309,6 +385,44 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         if not available_float8_dtype_names():
             return False, RuntimeError("TorchFP8Linear requires a PyTorch build with FP8 dtypes.")
         return True, None
+
+    def post_init(self):
+        """Resolve the host-side runtime decisions after the weight is loaded.
+
+        ``gptqmodel_post_init`` runs this on the final device, which is the last
+        safe moment to measure a capability: a later ``torch.cuda.graph``
+        capture or ``torch.compile`` trace must not synchronise the device
+        (#5195).
+        """
+
+        super().post_init()
+        self._warm_runtime_decisions()
+
+    def _warm_runtime_decisions(self) -> None:
+        """Measure the two device-to-host decisions ``forward`` must not make.
+
+        The rowwise ``_scaled_mm`` contract probe and the decoded-weight FP16
+        range bound both read device memory on the host. Doing that from
+        ``forward`` broke a first-call CUDA-graph capture and a
+        ``torch.compile(fullgraph=True)`` trace (#5195), so both are resolved
+        here, in plain eager code. A capture/trace context is left untouched:
+        it falls back for that call and asks again eagerly.
+        """
+
+        if _probe_must_wait():
+            return
+        weight = getattr(self, "weight", None)
+        scale = getattr(self, "weight_scale_inv", None)
+        if weight is None or scale is None or weight.device.type == "meta":
+            return
+
+        # ``_invalidate_compiled`` clears this cache on every device/dtype move.
+        self._decoded_weight_absmax_bound()
+
+        if self.activation_quant_method != "per_token" or weight.device.type != "cuda":
+            return
+        for out_dtype in self._scaled_mm_out_dtypes():
+            _scaled_mm_row_scale_supported(weight.device, out_dtype)
 
     def smooth_block_size(self) -> int:
         if self.weight_scale_method == "block" and self.weight_block_size is not None:
@@ -363,6 +477,32 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             buffers.append(self.bias)
         return buffers
 
+    @property
+    def qweight(self) -> torch.Tensor:
+        """The packed FP8 weight, under the name PEFT's GPTQ dispatcher reads.
+
+        ``TorchFP8Linear`` stores its codes in ``weight`` (the name the FP8
+        checkpoint and ``WeightOnlyQuantLinear`` use), while every other
+        trainable GPT-QModel kernel keeps them in ``qweight``. PEFT routes each
+        ``BaseQuantLinear`` through ``peft.tuners.lora.gptq.dispatch_gptq``,
+        which does ``target.qweight = target_base_layer.qweight`` and therefore
+        raised ``AttributeError`` before any LoRA training could start (#4948).
+        The setter exists because the dispatcher then writes that same tensor
+        back: ``target`` is this module when it is not already a
+        ``BaseTunerLayer``, so ``target.qweight = ...`` lands here. It rebinds
+        ``weight`` and keeps the slot's kind, so a rebind cannot silently turn a
+        parameter into a plain tensor.
+        """
+
+        return self.weight
+
+    @qweight.setter
+    def qweight(self, value: torch.Tensor) -> None:
+        if "weight" in self._parameters:
+            self.weight = torch.nn.Parameter(value, requires_grad=value.requires_grad)
+        else:
+            self.weight = value
+
     def extra_repr(self) -> str:
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
@@ -382,141 +522,27 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
 
         self.activation_quant_method = _normalize_fp8_activation_quant_method(method)
         self._scaled_mm_hard_disabled = False
+        # The documented W8A8 opt-in: measure the contract now, while the caller
+        # is in plain eager code, so a later capture/trace keeps the fast path
+        # instead of falling back to dequantize + matmul (#5195).
+        self._warm_runtime_decisions()
         return self
 
     def _weight_to_matrix(self, linear: nn.Module) -> torch.Tensor:
         return _weight_to_matrix(linear)
 
-    def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor = None):
-        self.pack_original(linear=linear, scales=scales, zeros=zeros, g_idx=g_idx)
+    def _refuse_fp8_encode(self, *_args, **_kwargs):
+        raise ValueError(
+            "FP8 is load-only: GPT-QModel no longer quantizes or exports FP8 "
+            "weights. Load a production FP8 checkpoint (transformers "
+            "`FineGrainedFP8`, DeepSeek/Qwen block scales, NVIDIA ModelOpt, "
+            "MXFP8, or NVFP8) instead."
+        )
 
-    def pack_block(
-        self,
-        linear: nn.Module,
-        scales: torch.Tensor,
-        zeros: torch.Tensor,
-        g_idx: torch.Tensor = None,
-        block_in: int = 8192,
-        workers: int = 1,
-    ):
-        del block_in, workers
-        self.pack_original(linear=linear, scales=scales, zeros=zeros, g_idx=g_idx)
-
-    def pack_gpu(
-        self,
-        linear: nn.Module,
-        scales: torch.Tensor,
-        zeros: torch.Tensor,
-        g_idx: torch.Tensor = None,
-        *,
-        block_in: int = 8192,
-        device: torch.device | None = None,
-    ):
-        del block_in, device
-        self.pack_original(linear=linear, scales=scales, zeros=zeros, g_idx=g_idx)
-
-    @torch.inference_mode()
-    def pack_original(
-        self,
-        linear: nn.Module,
-        scales: torch.Tensor,
-        zeros: torch.Tensor,
-        g_idx: torch.Tensor = None,
-        *,
-        smooth=None,
-    ):
-        del scales, zeros, g_idx
-
-        from .gguf import _apply_optional_smoother
-
-        weight = self._weight_to_matrix(linear).to(device="cpu", dtype=torch.float32)
-        if smooth is not None:
-            _require_finite_fp8_source(weight)
-        weight = _apply_optional_smoother(
-            weight,
-            smooth=smooth,
-            group_size=self.smooth_block_size(),
-        ).contiguous()
-        if (
-            self.fp8_format in _MLX_FP8_FORMATS
-            and _mlx_quantization_available()
-            and weight.numel() >= _MLX_FP8_MIN_ELEMENTS
-        ):
-            _require_finite_fp8_source(weight)
-            qweight, weight_scale_inv = _quantize_fp8_weight_mlx_to_torch(
-                weight,
-                format=self.fp8_format,
-                weight_scale_method=self.weight_scale_method,
-                weight_block_size=self.weight_block_size,
-            )
-        else:
-            qweight, weight_scale_inv = quantize_fp8_weight(
-                weight,
-                format=self.fp8_format,
-                weight_scale_method=self.weight_scale_method,
-                weight_block_size=self.weight_block_size,
-            )
-
-        if "weight" in self._buffers:
-            self.weight = qweight
-        else:
-            self.register_buffer("weight", qweight)
-
-        if "weight_scale_inv" in self._buffers:
-            self.weight_scale_inv = weight_scale_inv
-        else:
-            self.register_buffer("weight_scale_inv", weight_scale_inv)
-
-        if linear.bias is not None:
-            # Match ``_allocate_buffers`` and the loader's FP32 FP8 bias
-            # buffers: a reload always builds an FP32 bias, so an in-session
-            # module must hold the same dtype or the two run different GEMMs.
-            bias = linear.bias.detach().to(device="cpu", dtype=torch.float32).contiguous()
-            if "bias" in self._buffers:
-                self.bias = bias
-            else:
-                self.register_buffer("bias", bias)
-        else:
-            self.bias = None
-
-        self._scaled_mm_hard_disabled = False
-        self._native_dequant_disabled = False
-        self._invalidate_compiled()
-
-    @torch.inference_mode()
-    def pack_calibrated(self, linear: nn.Module, weight: torch.Tensor, scale_inv: torch.Tensor):
-        """Install an already fitted FP8 payload without recomputing its scales."""
-        if weight.shape != (self.out_features, self.in_features) or weight.dtype != self.fp8_dtype:
-            raise ValueError("Calibrated FP8 weight does not match packed storage geometry or dtype")
-        if scale_inv.shape != self._scale_shape() or scale_inv.dtype != torch.float32:
-            raise ValueError("Calibrated FP8 scale does not match packed storage geometry or dtype")
-        if not torch.isfinite(scale_inv).all() or (scale_inv <= 0).any():
-            raise ValueError("Calibrated FP8 inverse scales must be finite and positive")
-
-        packed_weight = weight.detach().to(device="cpu").contiguous()
-        packed_scale = scale_inv.detach().to(device="cpu").contiguous()
-        if "weight" in self._buffers:
-            self.weight = packed_weight
-        else:
-            self.register_buffer("weight", packed_weight)
-        if "weight_scale_inv" in self._buffers:
-            self.weight_scale_inv = packed_scale
-        else:
-            self.register_buffer("weight_scale_inv", packed_scale)
-        if linear.bias is not None:
-            # Match ``_allocate_buffers`` and the loader's FP32 FP8 bias
-            # buffers: a reload always builds an FP32 bias, so an in-session
-            # module must hold the same dtype or the two run different GEMMs.
-            bias = linear.bias.detach().to(device="cpu", dtype=torch.float32).contiguous()
-            if "bias" in self._buffers:
-                self.bias = bias
-            else:
-                self.register_buffer("bias", bias)
-        else:
-            self.bias = None
-        self._scaled_mm_hard_disabled = False
-        self._native_dequant_disabled = False
-        self._invalidate_compiled()
+    pack = _refuse_fp8_encode
+    pack_block = _refuse_fp8_encode
+    pack_gpu = _refuse_fp8_encode
+    pack_original = _refuse_fp8_encode
 
     def _resolve_target(self, device=None, dtype=None) -> tuple[torch.device, torch.dtype]:
         target_device = self.weight.device if device is None else torch.device(device)
@@ -670,6 +696,33 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         x_q = torch.clamp(x_work * scale_inv, min=-fp8_max, max=fp8_max).to(self.fp8_dtype)
         return x_q, torch.reciprocal(scale_inv).to(torch.float32)
 
+    def _scaled_mm_out_dtype(self, x_flat: torch.Tensor) -> torch.dtype:
+        """Output dtype ``_forward_scaled_mm`` requests, and the probe's key.
+
+        Rowwise scaling is the W8A8 contract: ``scale_a`` is ``(tokens, 1)`` and
+        ``scale_b`` is ``(1, out_features)``. HIP only emits BF16 from that
+        kernel; CUDA can keep FP32 so a bias is added before the final rounding.
+        """
+
+        return torch.bfloat16 if IS_ROCM else (
+            torch.float32 if self.bias is not None else x_flat.dtype
+        )
+
+    def _scaled_mm_out_dtypes(self) -> tuple[torch.dtype, ...]:
+        """Every output dtype ``_scaled_mm_out_dtype`` can return for this layer.
+
+        Mirrors the per-input answer without an input tensor, so the contract
+        can be measured at opt-in/load time. Bias-free CUDA layers request the
+        activation dtype, which is FP16 or BF16; a bias keeps FP32 so the
+        epilogue can add it before the final rounding.
+        """
+
+        if IS_ROCM:
+            return (torch.bfloat16,)
+        if self.bias is not None:
+            return (torch.float32,)
+        return (torch.float16, torch.bfloat16)
+
     def _can_use_scaled_mm(self, x_flat: torch.Tensor) -> bool:
         # ROCm support is decided by the guarded call in ``forward``, not by
         # ``get_device_capability`` (meaningless under HIP).  Measured on gfx1201
@@ -689,6 +742,15 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             # for this weight-only layer when W8A8 was explicitly requested.
             and self.activation_quant_method == "per_token"
             and self.weight_scale_method in {"tensor", "row"}
+            # The W8A8 contract is the row-wise scale layout. Some devices
+            # accept it and return a wrong result without raising (#5174), so
+            # the contract is measured once per process for the exact output
+            # dtype this forward would request. Inside capture/tracing the
+            # answer is unknown, so this call takes the correct fallback
+            # without caching a "no" (#5195).
+            and _scaled_mm_row_scale_supported(
+                x_flat.device, self._scaled_mm_out_dtype(x_flat)
+            )
             and self.fp8_format != "float8_e8m0fnu"
             and x_flat.dtype in {torch.float16, torch.bfloat16}
             and x_flat.shape[-1] == self.in_features
@@ -715,18 +777,20 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         if self._decoded_weight_bound_ready:
             return self._decoded_weight_bound
         bound: Optional[float] = None
+        smallest_scale: Optional[float] = None
         try:
             code_max = float(torch.finfo(self.fp8_dtype).max)
         except (TypeError, ValueError):
             code_max = None
         if code_max is not None and self.weight_scale_inv.numel() > 0:
             scale = self.weight_scale_inv.detach().to(device="cpu", dtype=torch.float32).abs()
+            smallest_scale = float(scale.min())
             if self.weight_scale_semantics == "multiplier":
                 bound = code_max * float(scale.max())
             else:
-                smallest = float(scale.min())
-                bound = float("inf") if smallest == 0.0 else code_max / smallest
+                bound = float("inf") if smallest_scale == 0.0 else code_max / smallest_scale
         self._decoded_weight_bound = bound
+        self._scale_inv_min = smallest_scale
         self._decoded_weight_bound_ready = True
         return bound
 
@@ -737,6 +801,10 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             # cannot overflow it.
             return True
         if dtype != torch.float16:
+            return False
+        if not self._decoded_weight_bound_ready and _probe_must_wait():
+            # Establishing the bound copies the scale to the host. While
+            # capturing/tracing, keep the exact wide path instead (#5195).
             return False
         bound = self._decoded_weight_absmax_bound()
         return bound is not None and bound <= float(torch.finfo(torch.float16).max)
@@ -761,9 +829,146 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             and self._weights_fit_activation_dtype(x_flat.dtype)
         )
 
+    def _inverse_scales_are_nonzero(self) -> bool:
+        """Whether every inverse scale is nonzero, so the epilogue can divide.
+
+        A zero inverse scale decodes a stored code to ``inf``/``NaN`` on the
+        full-weight path. Dividing the product by it would instead turn a zero
+        product into ``NaN`` and a nonzero one into ``inf``, which differs for
+        exactly the rows whose dot product cancels to zero. Those payloads keep
+        the exact reference path.
+        """
+
+        if not self._decoded_weight_bound_ready:
+            if _probe_must_wait():
+                # Unknown while capturing/tracing; keep the exact reference
+                # path instead of synchronising the device (#5195).
+                return False
+            self._decoded_weight_absmax_bound()
+        return self._scale_inv_min is not None and self._scale_inv_min > 0.0
+
+    def _block_scale_matches_weight(self) -> bool:
+        """Whether the block scale has the exact per-block shape of the weight.
+
+        Padded or cropped checkpoint scales are handled by
+        ``_expanded_scale_inv`` on the reference path; the in-dtype block
+        decode only accepts the exact divisible layout.
+        """
+
+        if self.weight_block_size is None:
+            return False
+        block_rows, block_cols = self.weight_block_size
+        rows, cols = self.weight.shape
+        if rows % block_rows or cols % block_cols:
+            return False
+        return self.weight_scale_inv.shape == (rows // block_rows, cols // block_cols)
+
+    def _lean_epilogue_eligible(self, x_flat: torch.Tensor) -> bool:
+        """Whether the scale can move from the weight into an output epilogue.
+
+        This is the range-safe CUDA W8A16 case only. The FP8 codes are cast
+        straight to the activation dtype, the GEMM runs on the transposed view
+        with an FP32 output, and a row/tensor scale is applied to that output.
+        Keeping the unscaled product in FP32 is what makes the epilogue safe:
+        the codes carry the inverse scale, so the unscaled product can be
+        larger than the activation dtype's finite range even when the decoded
+        weight is in range.
+
+        Everything this gate rejects keeps the existing dequantize-then-matmul
+        path bit-for-bit: ROCm (native FP8 casts are not qualified there), the
+        E8M0 format (its CUDA cast produces NaNs), a disabled native cast, a
+        non-range-safe payload, zero inverse scales, padded block scales, and
+        an autograd graph that needs the wide-GEMM ``Function``.
+        """
+
+        if IS_ROCM or self._native_dequant_disabled:
+            return False
+        if self.fp8_format == "float8_e8m0fnu":
+            return False
+        if not self._native_gemm_eligible(x_flat):
+            return False
+        if self.weight_scale_method not in {"row", "tensor", "block"}:
+            return False
+        if torch.is_grad_enabled() and (
+            x_flat.requires_grad
+            or self.weight.requires_grad
+            or self.weight_scale_inv.requires_grad
+        ):
+            return False
+        if (
+            self.weight_scale_semantics == "inverse"
+            and not self._inverse_scales_are_nonzero()
+        ):
+            return False
+        if self.weight_scale_method == "block" and not self._block_scale_matches_weight():
+            return False
+        return True
+
+    def _forward_lean_scaled_matmul(
+        self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Decode FP8 codes straight to the activation dtype and scale the output.
+
+        The cast, and the in-place block scaling, exist only for this call. No
+        decoded weight is stored on the module, so a repeated forward re-reads
+        the packed payload (and observes any mutation of it).
+        """
+
+        device = x_flat.device
+        weight = self.weight
+        if weight.device != device:
+            weight = weight.to(device=device)
+        # FP8 -> FP16/BF16 is exact (both hold more mantissa bits than E4M3 or
+        # E5M2), so this pass does not lose weight precision. The scale is not
+        # applied yet.
+        codes = weight.to(dtype=x_flat.dtype)
+
+        if self.weight_scale_method == "block":
+            block_rows, block_cols = self.weight_block_size
+            rows, cols = codes.shape
+            scale = self.weight_scale_inv
+            if scale.device != device:
+                scale = scale.to(device=device)
+            blocks = codes.view(
+                rows // block_rows, block_rows, cols // block_cols, block_cols
+            )
+            # Keep the scale in FP32: the mixed-dtype in-place op promotes to
+            # FP32, divides there and rounds once into the activation dtype.
+            # The stored code is exact in FP16/BF16, so this is the same
+            # arithmetic as the reference ``weight.float() / scale`` path, but
+            # without the full FP32 weight temporary. ``codes`` was just
+            # allocated for this call, so scaling it in place is safe.
+            if self.weight_scale_semantics == "multiplier":
+                blocks.mul_(scale[:, None, :, None])
+            else:
+                blocks.div_(scale[:, None, :, None])
+            return matmul_fp32_reduce(x_flat, codes.t(), bias=bias)
+
+        output = torch.mm(
+            x_flat.reshape(-1, x_flat.shape[-1]),
+            codes.t(),
+            out_dtype=torch.float32,
+        )
+        scale = self.weight_scale_inv
+        if scale.device != device or scale.dtype != torch.float32:
+            scale = scale.to(device=device, dtype=torch.float32)
+        if self.weight_scale_method == "row":
+            scale = scale.view(-1)
+        if self.weight_scale_semantics == "multiplier":
+            output = output * scale
+        else:
+            output = output / scale
+        if bias is not None:
+            if bias.device != device:
+                bias = bias.to(device=device)
+            output = output + bias.to(dtype=torch.float32)
+        return output.to(x_flat.dtype)
+
     def _forward_dequant_matmul(
         self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
+        if self._lean_epilogue_eligible(x_flat):
+            return self._forward_lean_scaled_matmul(x_flat, bias=bias)
         if not self._native_gemm_eligible(x_flat):
             # Decode into temporary FP32 storage only when narrowing is not
             # range-safe: a decoded FP8 weight above the activation dtype's
@@ -812,6 +1017,8 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         self.optimized = False
         # The decoded-weight range bound is derived from the loaded payload.
         self._decoded_weight_bound_ready = False
+        self._decoded_weight_bound = None
+        self._scale_inv_min = None
 
     def _apply(self, fn, recurse=True):
         # Module.to()/half()/bfloat16() normally cast every floating buffer.
@@ -835,6 +1042,11 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
 
         result = super()._apply(preserve_storage, recurse=recurse)
         self._invalidate_compiled()
+        # A device/dtype move invalidates the range bound and can change the
+        # ``_scaled_mm`` answer (device index, output dtype). Re-resolve both
+        # while still in eager code so the next capture/trace sees a warm
+        # cache (#5195).
+        self._warm_runtime_decisions()
         return result
 
     def _load_from_state_dict(self, *args, **kwargs):
@@ -845,12 +1057,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         weight = self.weight if self.weight.device == x_flat.device else self.weight.to(device=x_flat.device)
         x_q, scale_a = self._quantize_input_for_scaled_mm(x_flat)
         scale_b = self._scaled_mm_weight_scale(device=x_flat.device)
-        # Rowwise scaling is the W8A8 contract: scale_a is (tokens, 1) and
-        # scale_b is (1, out_features). HIP only emits BF16 from that kernel;
-        # CUDA can keep FP32 so a bias is added before the final rounding.
-        out_dtype = torch.bfloat16 if IS_ROCM else (
-            torch.float32 if self.bias is not None else x_flat.dtype
-        )
+        out_dtype = self._scaled_mm_out_dtype(x_flat)
         output = torch._scaled_mm(
             x_q,
             weight.t(),
@@ -905,4 +1112,4 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         return output.reshape(original_shape)
 
 
-__all__ = ["TorchFP8Linear", "quantize_fp8_weight"]
+__all__ = ["TorchFP8Linear"]

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import numbers
 import os
 import random
@@ -136,6 +137,104 @@ def _iter_calibration_rows(dataset):
 
 _CALIBRATION_COLUMNS = ("input_ids", "attention_mask", "text", "messages")
 
+# Extra chat-template inputs a `messages` row may carry. The standard HF layout
+# keeps the tool schemas in `tools` (and RAG templates read `documents`); a
+# columnar mapping must carry them into every row like a plain row does (#4858).
+_TEMPLATE_INPUT_COLUMNS = ("tools", "documents")
+
+# Calibration input kinds a model definition may declare. The default is the
+# token/text path every existing definition uses; `tensor_kwargs` is the opt-in
+# path for models whose forward takes named tensors (Decision Transformer).
+CALIBRATION_INPUT_TOKEN_IDS = "token_ids"
+CALIBRATION_INPUT_TENSOR_KWARGS = "tensor_kwargs"
+_CALIBRATION_INPUT_KINDS = (CALIBRATION_INPUT_TOKEN_IDS, CALIBRATION_INPUT_TENSOR_KWARGS)
+
+
+def calibration_input_kind(qmodel) -> str:
+    """Return the calibration input kind declared by a model definition.
+
+    Only a definition that opts in with ``calibration_inputs = "tensor_kwargs"``
+    changes behavior; every other model keeps the token-id path.
+    """
+
+    kind = getattr(qmodel, "calibration_inputs", CALIBRATION_INPUT_TOKEN_IDS)
+    if kind not in _CALIBRATION_INPUT_KINDS:
+        raise ValueError(
+            f"Unsupported `calibration_inputs` {kind!r} on {type(qmodel).__name__}. "
+            f"Expected one of {_CALIBRATION_INPUT_KINDS}."
+        )
+    return kind
+
+
+def _is_tensor_kwargs_row(value: Any) -> bool:
+    """Return whether ``value`` is a non-empty mapping of tensor values."""
+
+    return (
+        isinstance(value, Mapping)
+        and len(value) > 0
+        and all(torch.is_tensor(item) for item in value.values())
+    )
+
+
+def _prepare_tensor_kwargs_dataset(
+    raw_examples: List[Any],
+    *,
+    calibration_dataset_concat_size: Optional[int],
+    batch_size: int,
+    log,
+) -> List[Dict[str, torch.Tensor]]:
+    """Validate tensor-only calibration rows and return them as batches.
+
+    Each row already carries the model's own batch dimension, so it is one
+    calibration batch. Token-level policies (minimum length, concatenation,
+    length sorting, pad collation) do not apply to named tensors.
+    """
+
+    if calibration_dataset_concat_size:
+        raise ValueError(
+            "Quantize: `CalibrationConfig.concat_size` is token-based and cannot be used "
+            "with a model that declares `calibration_inputs = 'tensor_kwargs'`."
+        )
+
+    batches: List[Dict[str, torch.Tensor]] = []
+    for idx, example in enumerate(raw_examples):
+        if not _is_tensor_kwargs_row(example):
+            if not isinstance(example, Mapping) or len(example) == 0:
+                raise ValueError(
+                    "Quantize: tensor calibration example at index "
+                    f"{idx} must be a non-empty mapping of named tensors, got "
+                    f"{type(example).__name__}."
+                )
+            invalid = [
+                key for key, item in example.items() if not torch.is_tensor(item)
+            ]
+            raise ValueError(
+                f"Quantize: tensor calibration example at index {idx} must hold only "
+                f"torch tensors; keys {invalid} are not tensors."
+            )
+
+        batch: Dict[str, torch.Tensor] = {}
+        for key, value in example.items():
+            if value.ndim == 0:
+                raise ValueError(
+                    f"Quantize: tensor calibration example at index {idx} key `{key}` "
+                    "must be at least 1-D (include the batch dimension)."
+                )
+            batch[key] = value.detach()
+        batches.append(batch)
+
+    if not batches:
+        raise ValueError("Quantize: calibration dataset is empty.")
+
+    if batch_size != 1:
+        log.info(
+            "Calibration: tensor-kwargs rows are passed through one row per batch; "
+            "`batch_size=%s` is ignored.",
+            batch_size,
+        )
+
+    return batches
+
 
 def _column_entries(value: Any) -> Optional[List[Any]]:
     """Return a column's per-row entries as a Python list, else ``None``.
@@ -178,6 +277,23 @@ def _column_entries(value: Any) -> Optional[List[Any]]:
     return None
 
 
+def _hf_dataset_rows(dataset: Any) -> Optional[List[Any]]:
+    """Return an HF dataset's rows as python mappings, or ``None`` if not HF.
+
+    A caller often leaves a display format on the dataset for another pipeline
+    step. Iteration then yields one-row ``pandas.DataFrame`` or
+    ``pyarrow.Table`` objects instead of the documented python rows, and every
+    row was rejected purely because of that format (issue #4882). Clearing the
+    format keeps the same rows, so the rejection depends on the content only.
+    """
+
+    hf_dataset_types = _hf_dataset_types()
+    if not hf_dataset_types or not isinstance(dataset, hf_dataset_types):
+        return None
+    reset_format = getattr(dataset, "with_format", None)
+    return list(reset_format(None) if callable(reset_format) else dataset)
+
+
 def _frame_columns(dataset: Any) -> Optional[Mapping[str, Any]]:
     """Return a DataFrame-like input as a columnar mapping, else ``None``.
 
@@ -195,25 +311,37 @@ def _frame_columns(dataset: Any) -> Optional[Mapping[str, Any]]:
     if getattr(dataset, "columns", None) is None:
         return None
     to_dict = getattr(dataset, "to_dict", None)
-    if not callable(to_dict):
-        return None
-
-    # pandas spells the orientation as a positional argument or ``orient=``;
-    # Polars uses ``as_series=False``. A `to_dict` that understands none of
-    # them is not a row-wise table, so let the iterable handling take it.
-    for args, kwargs in (
-        (("list",), {}),
-        ((), {"orient": "list"}),
-        ((), {"as_series": False}),
-    ):
-        try:
-            mapped = to_dict(*args, **kwargs)
-        except TypeError:
-            continue
-        if isinstance(mapped, Mapping):
-            break
+    if callable(to_dict):
+        # pandas spells the orientation as a positional argument or ``orient=``;
+        # Polars uses ``as_series=False``. A `to_dict` that understands none of
+        # them is not a row-wise table, so let the iterable handling take it.
+        for args, kwargs in (
+            (("list",), {}),
+            ((), {"orient": "list"}),
+            ((), {"as_series": False}),
+        ):
+            try:
+                mapped = to_dict(*args, **kwargs)
+            except TypeError:
+                continue
+            if isinstance(mapped, Mapping):
+                break
+        else:
+            return None
     else:
-        return None
+        # ``pyarrow.Table`` (what ``Dataset.with_format("arrow")[:]`` returns)
+        # has ``columns`` but no ``to_dict``, so it used to fall through to the
+        # iterable handling, where iteration yields one ``ChunkedArray`` per
+        # column and every row is rejected.
+        to_pydict = getattr(dataset, "to_pydict", None)
+        if not callable(to_pydict):
+            return None
+        try:
+            mapped = to_pydict()
+        except Exception:
+            return None
+        if not isinstance(mapped, Mapping):
+            return None
 
     columns: Dict[str, Any] = {}
     for name, value in mapped.items():
@@ -245,6 +373,136 @@ def _unwrap_object_array(value: Any) -> Any:
     return tolist()
 
 
+def _is_single_tool_definition(value: Any) -> bool:
+    """Return True for one tool schema rather than a list of them.
+
+    The marker keys below belong to a tool definition, not to a parameters
+    schema (`{"type": "object", ...}`), so a parameters object is not mistaken
+    for a tool.
+    """
+
+    return isinstance(value, Mapping) and (
+        "function" in value or value.get("type") == "function"
+    )
+
+
+def _normalize_template_input_value(value: Any) -> Any:
+    """Return a ``tools``/``documents`` value a chat template can render.
+
+    Function-calling datasets on the Hub store these columns in two layouts
+    that ``apply_chat_template`` cannot consume verbatim (#4934):
+
+    * a JSON string, because Arrow cannot hold a different struct schema per
+      row. The template rejects the string with ``ValueError``, and the row is
+      then rendered without the schema -- the #4858 symptom;
+    * a list of dicts read from an Arrow ``Dataset``. Arrow unifies the struct
+      schema across rows, so every row's schema gains the other rows'
+      parameter names with a ``None`` value, e.g.
+      ``"properties": {"city": {...}, "tz": null}``. The rendered tool block
+      then silently differs from what inference sends.
+
+    Decode a JSON string and drop dict entries whose value is ``None``. A real
+    JSON-schema ``null`` is the string ``"null"`` (``{"type": "null"}``), so it
+    survives; a ``None`` element inside a list is a legitimate JSON value and
+    is kept as well. The walk copies every container, so the caller's rows are
+    never mutated.
+    """
+
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = bytes(value).decode("utf-8")
+        except UnicodeDecodeError:  # pragma: no cover - non-UTF-8 binary column
+            return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return value
+        try:
+            decoded = json.loads(text)
+        except (TypeError, ValueError):
+            return value
+        # Only a container is a schema or a document list. A document whose
+        # text happens to read as a JSON scalar stays text.
+        if not isinstance(decoded, (Mapping, list, tuple)):
+            return value
+        return _normalize_template_input_value(decoded)
+    # An object-dtype ndarray (`dataset.with_format("numpy")[:]`) holds one
+    # entry per row; unwrap it so the walk sees python containers.
+    value = _unwrap_object_array(value)
+    if isinstance(value, Mapping):
+        return {
+            key: _normalize_template_input_value(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalize_template_input_value(item) for item in value]
+    return value
+
+
+def _normalize_template_input_payload(value: Any, *, key: str) -> Any:
+    """Normalize a template input and present `tools` as the list templates take.
+
+    `apply_chat_template(tools=...)` iterates its argument, so a one-tool
+    dataset whose column holds a single schema object (the layout a JSON-string
+    round trip yields) is rejected outright. `documents` is passed through.
+    """
+
+    normalized = _normalize_template_input_value(value)
+    if key == "tools" and _is_single_tool_definition(normalized):
+        return [normalized]
+    return normalized
+
+
+def _normalize_chat_messages(value: Any) -> Any:
+    """Return a conversation a chat template renders like the plain Python rows.
+
+    The `messages` column of the same function-calling rows #4934 normalized
+    keeps Arrow's unified struct schema (#5082). Arrow stores one struct type
+    per column, so every turn gains a ``None`` value for each key another turn
+    uses -- ``tool_calls`` on user/tool/plain-assistant turns, ``name`` or
+    ``tool_call_id`` where only some rows carry them -- and every tool call's
+    ``arguments`` gains the other rows' argument names. The template then sees
+    a different conversation than the plain Python rows do:
+
+    * Qwen2.5/Qwen3 render ``{"city": "Paris", "query": null}`` instead of
+      ``{"city": "Paris"}``, so every tool-call row is calibrated on tokens
+      inference never emits;
+    * Llama-3.x tests ``'tool_calls' in message``, so the injected
+      ``tool_calls: None`` turns a user turn into a tool call and the template
+      raises ``TypeError: object of type 'NoneType' has no len()``.
+
+    Drop dict entries whose value is ``None``, recursively. Two values are not
+    Arrow padding and are kept:
+
+    * ``content: None`` is how an OpenAI-style tool-call turn spells "no text",
+      and templates such as DeepSeek-R1 test it with ``message.content is
+      none``;
+    * ``arguments`` stored as a JSON string is inserted verbatim by raw-text
+      templates (DeepSeek-R1 writes it into a ``json`` block), so it stays a
+      string rather than being decoded into a mapping.
+
+    A ``None`` element inside a list is a legitimate JSON value and is kept as
+    well. An explicit ``None`` argument value is indistinguishable from Arrow's
+    padding for the same key, so it is dropped too -- the same rule #4934
+    applies to a ``tools`` schema's ``properties``. The walk copies every
+    container, so the caller's rows are never mutated.
+    """
+
+    # An object-dtype ndarray (`dataset.with_format("numpy")[:]`) holds one
+    # entry per row; unwrap it so the walk sees python containers.
+    value = _unwrap_object_array(value)
+    if isinstance(value, Mapping):
+        return {
+            key: _normalize_chat_messages(item)
+            for key, item in value.items()
+            if item is not None or key == "content"
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalize_chat_messages(item) for item in value]
+    return value
+
+
 def _is_batched_column(value: Any) -> bool:
     """Return True when ``value`` holds one entry per calibration row."""
 
@@ -267,6 +525,23 @@ def _is_batched_column(value: Any) -> bool:
     return isinstance(first, Sequence) and not isinstance(first, (str, bytes, bytearray))
 
 
+def _is_conversation_entry(value: Any) -> bool:
+    """Return True when a ``messages`` column entry is itself a conversation.
+
+    A single row stores one conversation as a list of role mappings, so its
+    entries start with a mapping. A column stores one conversation per row, so
+    its entries start with a container: a list/tuple, or the ``ndarray``/
+    ``Series`` row that ``with_format("numpy"|"pandas")[:]`` produces (#4936).
+    """
+
+    if isinstance(value, (str, bytes, bytearray, Mapping)) or torch.is_tensor(value):
+        return False
+    ndim = getattr(value, "ndim", None)
+    if ndim is not None and ndim >= 1:
+        return True
+    return isinstance(value, Sequence)
+
+
 def _is_columnar_mapping(mapping: Mapping) -> bool:
     """Return True when a top-level mapping stores columns instead of one row.
 
@@ -284,7 +559,7 @@ def _is_columnar_mapping(mapping: Mapping) -> bool:
         entries = _column_entries(mapping["messages"])
         if not entries:
             return False
-        return isinstance(entries[0], (list, tuple))
+        return _is_conversation_entry(entries[0])
     return False
 
 
@@ -324,17 +599,96 @@ def _is_dataset_split_mapping(mapping: Mapping) -> bool:
     return all(isinstance(value, hf_dataset_types) for value in mapping.values())
 
 
+def _to_python_containers(value: Any) -> Any:
+    """Return ``value`` with NumPy/pandas containers unwrapped to Python ones.
+
+    A ``Dataset.with_format("numpy")[:]`` row stores ``messages``/``tools`` as
+    ``ndarray`` objects (a 1-D object array of conversations, or a 2-D object
+    array of turns when every conversation has the same length) and pandas
+    stores them as a ``Series`` of arrays. A chat template needs plain lists of
+    dicts: handed an ``ndarray`` it renders the template's default system turn
+    and silently drops the conversation (#4936). Copy the row into plain
+    ``list``/``dict``/``str``/number containers so every input shape renders
+    identically.
+
+    Torch tensors are returned unchanged: the token-id path consumes them and
+    converting them to lists would change how they are classified. The copy is
+    recursive and never mutates the caller's dataset.
+    """
+
+    if torch.is_tensor(value) or isinstance(value, (str, bytes, bytearray)):
+        return value
+    if isinstance(value, Mapping):
+        return {key: _to_python_containers(item) for key, item in value.items()}
+
+    # A NumPy structured array (record array) or one of its ``np.void`` rows
+    # stores the columns by name; ``tolist()`` would turn each row into a bare
+    # tuple and lose the column names.
+    dtype_names = getattr(getattr(value, "dtype", None), "names", None)
+    if dtype_names:
+        if getattr(value, "ndim", 0) == 0:
+            return {
+                name: _to_python_containers(item)
+                for name, item in zip(dtype_names, value.tolist())
+            }
+        return [_to_python_containers(row) for row in value]
+
+    # A pandas ``DataFrame`` row (iterating a pandas-formatted dataset) maps
+    # column names to one-element lists; keep it columnar so the caller's
+    # row/column logic sees the same shape as ``to_dict``.
+    if getattr(value, "columns", None) is not None:
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict):
+            try:
+                mapped = to_dict("list")
+            except TypeError:
+                mapped = None
+            if isinstance(mapped, Mapping):
+                return {key: _to_python_containers(item) for key, item in mapped.items()}
+
+    # ``ndarray`` and pandas ``Series`` expose ``tolist``; a 0-D scalar's
+    # ``tolist()`` returns a Python scalar. A Series of arrays keeps the arrays
+    # in its list, hence the recursion.
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        try:
+            listed = tolist()
+        except Exception:  # pragma: no cover - defensive
+            listed = None
+        if isinstance(listed, list):
+            return [_to_python_containers(item) for item in listed]
+        if listed is not None and not isinstance(listed, (tuple, Mapping)):
+            return listed
+
+    if isinstance(value, tuple):
+        return tuple(_to_python_containers(item) for item in value)
+    if isinstance(value, list):
+        return [_to_python_containers(item) for item in value]
+
+    # A ``pyarrow`` scalar (e.g. from a table that was not routed through
+    # ``_frame_columns``) converts itself with ``as_py``.
+    as_py = getattr(value, "as_py", None)
+    if callable(as_py):
+        try:
+            return _to_python_containers(as_py())
+        except Exception:  # pragma: no cover - defensive
+            return value
+    return value
+
+
 def _columnar_mapping_examples(mapping: Mapping) -> List[Dict[str, Any]]:
     """Split a columnar calibration mapping into one mapping per row.
 
     Object-dtype NumPy columns and pandas ``Series`` columns are indexed through
     ``_column_entries`` so each row receives one element, not the whole column.
+    ``tools``/``documents`` travel with the row so the chat template sees the
+    same schema a plain row would pass (#4858, #4936).
     """
 
     primary = next(name for name in _CALIBRATION_COLUMNS if mapping.get(name) is not None)
 
     columns: Dict[str, Any] = {}
-    for name in _CALIBRATION_COLUMNS:
+    for name in (*_CALIBRATION_COLUMNS, *_TEMPLATE_INPUT_COLUMNS):
         if name not in mapping or mapping[name] is None:
             continue
         entries = _column_entries(mapping[name])
@@ -405,6 +759,9 @@ def prepare_calibration_dataset(
 
     tokenizer = getattr(qmodel, "tokenizer", None)
     support_batch_quantize = getattr(qmodel, "support_batch_quantize", True)
+    # Only a definition that opts into tensor kwargs changes the row handling
+    # below; every text model keeps the token-id path unchanged.
+    tensor_kwargs_inputs = calibration_input_kind(qmodel) == CALIBRATION_INPUT_TENSOR_KWARGS
 
     hf_dataset_types: tuple = _hf_dataset_types()
 
@@ -428,13 +785,16 @@ def prepare_calibration_dataset(
             )
         elif any(name in calibration_dataset for name in ("input_ids", "text", "messages")):
             raw_examples = [calibration_dataset]
+        elif tensor_kwargs_inputs and _is_tensor_kwargs_row(calibration_dataset):
+            # A bare mapping of named tensors is one tensor-kwargs example.
+            raw_examples = [calibration_dataset]
         else:
             raise ValueError(
                 "Quantize: calibration dataset mapping must provide `input_ids`, `text`, "
                 f"or `messages` columns, got keys={list(calibration_dataset.keys())}."
             )
     elif hf_dataset_types and isinstance(calibration_dataset, hf_dataset_types):
-        raw_examples = list(calibration_dataset)
+        raw_examples = _hf_dataset_rows(calibration_dataset)
     elif isinstance(calibration_dataset, list):
         raw_examples = calibration_dataset
     elif isinstance(calibration_dataset, Sequence) and not isinstance(calibration_dataset, (bytes, bytearray)):
@@ -451,8 +811,24 @@ def prepare_calibration_dataset(
             "Expected `asc`, `desc`, `shuffle`, or None."
         )
 
+    if tensor_kwargs_inputs:
+        # Named-tensor rows already carry the model's batch dimension and have no
+        # token length, so the token-level normalization below does not apply.
+        return _prepare_tensor_kwargs_dataset(
+            raw_examples,
+            calibration_dataset_concat_size=calibration_dataset_concat_size,
+            batch_size=batch_size,
+            log=log,
+        )
+
+    # A numpy/pandas-formatted row keeps ``messages``/``tools`` in ``ndarray``/
+    # ``Series`` objects that a chat template cannot render as a conversation
+    # (#4936). Unwrap them once, for every input shape, before templating.
+    raw_examples = [_to_python_containers(example) for example in raw_examples]
+
     message_examples = 0
     message_template_name = None
+    dropped_template_inputs = False
     message_text_fallback_examples = 0
     ignored_source_examples = 0
 
@@ -546,20 +922,9 @@ def prepare_calibration_dataset(
         if mask_tensor.ndim == 1:
             mask_tensor = mask_tensor.unsqueeze(0)
 
-        # An additive/extended mask encodes "attend" as 0 (or a positive bias)
-        # and "masked" as a negative bias. When such a mask is all zeros there
-        # is no padding at all, but ``normalize_seq_mask`` reads 0 as "drop" for
-        # a 0/1 mask and would erase every token. Resolve it here first so only
-        # genuinely masked positions are dropped. A 2-D integer 0/1 mask keeps
-        # the usual meaning: an all-zero row is all padding.
-        if (
-            mask_tensor.dtype != torch.bool
-            and mask_tensor.numel() > 0
-            and torch.count_nonzero(mask_tensor).item() == 0
-            and (mask_tensor.is_floating_point() or mask_tensor.ndim >= 3)
-        ):
-            mask_tensor = torch.ones_like(mask_tensor)
-
+        # ``normalize_seq_mask`` owns the additive-versus-0/1 inference,
+        # including the all-zero unpadded extended mask (#5134), so the
+        # layer-replay and user-calibration paths share one rule.
         try:
             keep_mask = normalize_seq_mask(mask_tensor, seq_len=ids_tensor.shape[-1])
         except ValueError as exc:
@@ -614,20 +979,56 @@ def prepare_calibration_dataset(
         attention_mask = tokenized.get("attention_mask")
         return _pack_ids(input_ids, attention_mask, idx)
 
-    def _tokenize_messages_value(messages_value: Any, idx: int) -> Dict[str, torch.Tensor]:
-        nonlocal message_examples, message_template_name
+    def _tokenize_messages_value(
+        messages_value: Any, idx: int, row: Any = None
+    ) -> Dict[str, torch.Tensor]:
+        nonlocal message_examples, message_template_name, dropped_template_inputs
         _require_tokenizer("calibration data uses the `messages` feature")
         apply_fn, template_name = _get_message_template()
         if apply_fn is None:
             raise ValueError(
                 "tokenizer must expose `apply_template` or `apply_chat_template` to handle `messages` calibration data."
             )
+        # Arrow unifies the `messages` struct schema across rows and turns, so
+        # a user turn carries `tool_calls: None` and every tool call's
+        # `arguments` mapping gains the other rows' argument names (#5082).
+        # Render the conversation inference actually sends, before templating.
+        messages_value = _normalize_chat_messages(messages_value)
+        # A chat row carries more than `messages`: the standard HF layout puts
+        # the tool schemas in `tools` (and RAG templates read `documents`).
+        # Dropping them rendered the row as if no tools were declared, so the
+        # schema block the model sees at inference never reached the Hessian
+        # (#4858).
+        template_inputs = {}
+        if isinstance(row, Mapping):
+            for key in _TEMPLATE_INPUT_COLUMNS:
+                value = row.get(key)
+                if value is not None:
+                    # HF storage layouts (JSON string, Arrow-unified schema with
+                    # injected `null` properties) are normalized back to the
+                    # payload inference sends (#4934).
+                    template_inputs[key] = _normalize_template_input_payload(value, key=key)
         try:
             if template_name == "apply_chat_template":
-                templated = apply_fn(messages_value, tokenize=False, add_generation_prompt=False)
+                templated = apply_fn(
+                    messages_value, tokenize=False, add_generation_prompt=False, **template_inputs
+                )
             else:
-                templated = apply_fn(messages_value, tokenize=False)
+                templated = apply_fn(messages_value, tokenize=False, **template_inputs)
         except TypeError:
+            templated = apply_fn(messages_value)
+        except Exception as exc:
+            # A tokenizer whose template does not use `tools`/`documents`
+            # rejects them (Jinja raises). Keep the row rather than failing the
+            # run, but say so once: the schema is then missing from the tokens.
+            if not template_inputs:
+                raise
+            if not dropped_template_inputs:
+                dropped_template_inputs = True
+                log.warn(
+                    "Quantize: this tokenizer's chat template rejected the calibration row's "
+                    f"{sorted(template_inputs)}; rendering without them: {type(exc).__name__}: {exc}"
+                )
             templated = apply_fn(messages_value)
 
         if templated is None:
@@ -694,7 +1095,7 @@ def prepare_calibration_dataset(
                         "tokenizer must expose `apply_template` or `apply_chat_template`, or calibration data must "
                         "provide `text` when using `messages`."
                     )
-                processed_examples.append(_tokenize_messages_value(example["messages"], idx))
+                processed_examples.append(_tokenize_messages_value(example["messages"], idx, example))
                 continue
             if "text" in example:
                 processed_examples.append(_tokenize_text_value(example["text"], idx))
@@ -790,8 +1191,22 @@ def prepare_calibration_dataset(
             f"Unsupported tokenizer.truncation_side `{truncation_side}`. Expected `left` or `right`."
         )
 
+    # Concatenation packs real tokens into windows of exactly this width, so a
+    # window can only fit the model's position budget when the width does. The
+    # per-row position trim below is then unnecessary: it used to cut a long
+    # document to the budget *before* windowing, discarding everything past it
+    # even though every resulting window was far below the budget (#4892).
+    concat_mode = bool(calibration_dataset_concat_size)
+    if concat_mode and max_positions is not None and calibration_dataset_concat_size > max_positions:
+        raise ValueError(
+            f"Quantize: CalibrationConfig.concat_size={calibration_dataset_concat_size} exceeds "
+            f"{max_positions_source}={max_positions}, so a packed window could never fit the model's "
+            "position budget. Lower `CalibrationConfig.concat_size`."
+        )
+
     dropped_padded_row_count = 0
     too_short_row_count = 0
+    too_short_window_count = 0
 
     for example_index, example in enumerate(calibration_dataset):
         input_ids = _convert_tensor_to_list(example["input_ids"])
@@ -824,7 +1239,7 @@ def prepare_calibration_dataset(
                 )
 
             row_len = len(row_ids)
-            if max_positions is not None and row_len > max_positions:
+            if not concat_mode and max_positions is not None and row_len > max_positions:
                 trimmed_row_count += 1
                 longest_trimmed_row = max(longest_trimmed_row, row_len)
                 rows_changed = True
@@ -844,6 +1259,30 @@ def prepare_calibration_dataset(
                 else:
                     row_ids = row_ids[:max_positions]
                     row_mask = row_mask[:max_positions]
+            else:
+                # Padding is not part of the sample. A row below the position
+                # budget may still be pre-padded by `tokenizer(texts,
+                # padding=True)` / `padding="max_length"`; keeping the pads
+                # makes every capture and per-layer replay forward run at the
+                # padded width and turns the length sort into a no-op (#4889).
+                # Strip the contiguous pad positions at either edge so the sort
+                # and `collate_data` see real lengths and re-pad per batch.
+                # Interior mask zeros describe a caller-built mask rather than
+                # tokenizer padding, so such a row is left untouched.
+                first_real = None
+                last_real = None
+                real_count = 0
+                for pos, keep in enumerate(row_mask):
+                    if keep:
+                        if first_real is None:
+                            first_real = pos
+                        last_real = pos
+                        real_count += 1
+                if first_real is not None and real_count == last_real - first_real + 1:
+                    if first_real != 0 or last_real != row_len - 1:
+                        row_ids = row_ids[first_real : last_real + 1]
+                        row_mask = row_mask[first_real : last_real + 1]
+                        rows_changed = True
 
             # An all-padding row carries no activation statistics: keeping it
             # would only feed the Hessian zeros, so drop it whether or not the
@@ -856,7 +1295,12 @@ def prepare_calibration_dataset(
             # The minimum-length filter is per row and measures real tokens from
             # the attention mask, not the padded width. Otherwise a long first
             # row hides later rows that are mostly padding.
-            if sum(1 for keep in row_mask if keep) <= calibration_data_min_length:
+            #
+            # Concatenation skips it: packing exists to combine short samples
+            # into full windows, and filtering first discarded almost the whole
+            # corpus on a dataset of short utterances (#4892). The filter is
+            # applied to the packed windows instead.
+            if not concat_mode and sum(1 for keep in row_mask if keep) <= calibration_data_min_length:
                 too_short_row_count += 1
                 rows_changed = True
                 continue
@@ -947,7 +1391,7 @@ def prepare_calibration_dataset(
         )
 
     if calibration_dataset_concat_size:
-        _require_tokenizer("`calibration_dataset_concat_size` is specified")
+        _require_tokenizer("`CalibrationConfig.concat_size` is specified")
         concatenated_data = []
         input_ids_buff = []
         attention_mask_buff = []
@@ -971,13 +1415,19 @@ def prepare_calibration_dataset(
         new_line_input_ids_len = len(new_line_input_ids)
 
         def flush_buffer():
-            nonlocal input_ids_buff, attention_mask_buff, current_length
-            concatenated_data.append(
-                {
-                    "input_ids": [input_ids_buff],
-                    "attention_mask": [attention_mask_buff],
-                }
-            )
+            nonlocal input_ids_buff, attention_mask_buff, current_length, too_short_window_count
+            # `min_length` is measured on the packed window here, not on the
+            # source rows: a full window carries `concat_size` real tokens, so
+            # only a near-empty tail window is dropped.
+            if sum(attention_mask_buff) <= calibration_data_min_length:
+                too_short_window_count += 1
+            else:
+                concatenated_data.append(
+                    {
+                        "input_ids": [input_ids_buff],
+                        "attention_mask": [attention_mask_buff],
+                    }
+                )
             input_ids_buff = []
             attention_mask_buff = []
             current_length = 0
@@ -1023,6 +1473,13 @@ def prepare_calibration_dataset(
                 if current_length == calibration_dataset_concat_size:
                     flush_buffer()
 
+        if input_ids_buff and sum(attention_mask_buff) <= calibration_data_min_length:
+            # The tail window never reached a full block and is shorter than the
+            # minimum, so it carries no usable activation statistics.
+            too_short_window_count += 1
+            input_ids_buff = []
+            attention_mask_buff = []
+
         if input_ids_buff:
             padding_length = calibration_dataset_concat_size - len(input_ids_buff)
             if padding_length > 0:
@@ -1046,6 +1503,20 @@ def prepare_calibration_dataset(
                     "input_ids": [input_ids_buff],
                     "attention_mask": [attention_mask_buff],
                 }
+            )
+
+        if too_short_window_count > 0:
+            log.warn(
+                f"Quantize: {too_short_window_count} concatenated calibration windows with "
+                f"<= {calibration_data_min_length} non-padding tokens were removed. "
+                "`min_length` is applied to the packed windows when `concat_size` is set."
+            )
+
+        if not concatenated_data:
+            raise ValueError(
+                "Quantize: concatenation produced no calibration window with more than "
+                f"{calibration_data_min_length} non-padding tokens. "
+                "`CalibrationConfig.concat_size` must be larger than `min_length`."
             )
 
         new_calibration_dataset = concatenated_data

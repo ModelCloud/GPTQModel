@@ -5,15 +5,14 @@ MACaQ/VPTQ/W4A kernels.
 
 Each case builds a real packed module with the family's own ``pack`` /
 ``pack_original`` helper, then measures it with ``tests/kernels/compile_probe.py``
-on the GB10 (sm_121, torch 2.11.0+cu130). Kernels whose native runtime cannot
-build on this host are skipped with the reason their declaration records.
+on the GB10 (sm_121, torch 2.11.0+cu130) and on sm_80 (A100-class, torch
+2.15.0.dev20260928+cu130). Kernels whose native runtime cannot build on the
+host are skipped with the reason their declaration records.
 """
 
 from __future__ import annotations
 
 import importlib.util
-import os
-import shutil
 import warnings
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -98,6 +97,49 @@ def _build_gguf(cls, bits):
     return module, _input(module), True
 
 
+def _build_gguf_cpp():
+    # The ggml CPU kernel reads the same qweight layout and runs on the host.
+    linear = _linear(512, 256, dtype=torch.float32)
+    module = GGUFCppKernel(
+        bits="q4_0", group_size=-1, sym=True, desc_act=False,
+        in_features=512, out_features=256, bias=False,
+    )
+    GGUFTorchLinear.pack_original(module, linear, scales=None, zeros=None)
+    module = module.cpu().eval()
+    return module, torch.randn(ROWS, 512, dtype=torch.float16), False
+
+
+def _build_gguf_cuda():
+    """The ggml CUDA kernel reads the same qweight layout as the torch packer."""
+    linear = _linear(512, 256, dtype=torch.float32)
+    module = GGUFCudaKernel(
+        bits="q4_0", group_size=-1, sym=True, desc_act=False,
+        in_features=512, out_features=256, bias=False,
+    )
+    GGUFTorchLinear.pack_original(module, linear, scales=None, zeros=None)
+    module = module.cuda().eval()
+    return module, _input(module), True
+
+
+def _build_bnb():
+    in_features, out_features = 256, 64
+    linear = _linear(in_features, out_features)
+    module = BitsAndBytesLinear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        dtype=torch.float16,
+    )
+    module.pack_original(linear, scales=None, zeros=None)
+    module = module.cuda().eval()
+    x = torch.randn(ROWS, in_features, dtype=torch.float16, device="cuda")
+    return module, x, True
+
+
 def _build_gguf_torch():
     return _build_gguf(GGUFTorchLinear, "q4_0")
 
@@ -115,7 +157,12 @@ def _build_nf12():
 
 
 def _build_paro(cls):
-    in_features, out_features, group_size = 128, 64, 32
+    # ``group_size=128`` and a non-identity theta/scales are required to reach
+    # the fused rotation op: the identity shortcut returns the input unchanged,
+    # and the fused kernel only accepts group_size 128 with krot 1/8. A smaller
+    # group or an identity rotation silently measured the reference path and
+    # missed the #5225 graph breaks.
+    in_features, out_features, group_size = 256, 64, 128
     linear = _linear(in_features, out_features)
     module = cls(
         bits=4, group_size=group_size, sym=True, desc_act=False,
@@ -125,6 +172,8 @@ def _build_paro(cls):
     groups = in_features // group_size
     scales = torch.rand(out_features, groups, dtype=torch.float16) * 0.03 + 0.01
     module.pack(linear, scales, torch.full((out_features, groups), 8, dtype=torch.int32))
+    module.theta.fill_(0.2)
+    module.channel_scales.mul_(0.75)
     module.post_init()
     module = module.cuda().eval()
     return module, _input(module), True
@@ -211,9 +260,35 @@ def _unavailable(cls) -> Optional[str]:
 
 
 def _paro_unavailable() -> Optional[str]:
-    if os.environ.get("CUDA_HOME") is None and shutil.which("nvcc") is None:
-        return "ParoLinear needs the AWQ CUDA GEMM JIT extension; no CUDA toolkit on this host"
-    return None
+    # ParoLinear packs through the AWQ CUDA GEMM JIT extension. Gate on the
+    # same runtime check the AWQ kernel uses: it resolves the toolkit through
+    # ``torch.utils.cpp_extension.CUDA_HOME`` (which also finds
+    # ``/usr/local/cuda``), so requiring CUDA_HOME or nvcc on PATH skipped this
+    # test on hosts where the extension builds fine (#4981).
+    from gptqmodel.utils.awq import awq_runtime_available, awq_runtime_error
+
+    if awq_runtime_available():
+        return None
+    return (
+        "ParoLinear needs the AWQ CUDA GEMM JIT extension: "
+        f"{awq_runtime_error() or 'not available on this host'}"
+    )
+
+
+def _fp8_capture_supported() -> bool:
+    """Whether this device dequantizes FP8 natively (and so can be captured).
+
+    ``TorchFP8Linear`` declares capture for the native-FP8 path. On a GPU
+    without native FP8 math (sm_80 here) ``dequantize_weight`` round-trips the
+    weight through the host, which a CUDA-graph capture rejects. The compile
+    level is still measured there; only the capture assertion is device-gated.
+    """
+
+    if not torch.cuda.is_available():
+        return False
+    from gptqmodel.quantization.dtype import device_supports_native_fp8
+
+    return device_supports_native_fp8(torch.device("cuda"))
 
 
 def _gguf_cpp_unavailable(cls):
@@ -226,18 +301,18 @@ CASES = [
     Case(QQQLinear, lambda: _pack_qqq(QQQLinear), lambda: _unavailable(QQQLinear)),
     Case(QQQTorchLinear, lambda: _pack_qqq(QQQTorchLinear), lambda: None),
     Case(TorchFP8Linear, _build_fp8, lambda: None),
-    Case(BitsAndBytesLinear, None, lambda: _unavailable(BitsAndBytesLinear)),
+    Case(BitsAndBytesLinear, _build_bnb, lambda: _unavailable(BitsAndBytesLinear)),
     Case(GGUFTorchLinear, _build_gguf_torch, lambda: None),
-    Case(GGUFCppKernel, None, lambda: _gguf_cpp_unavailable(GGUFCppKernel)),
-    Case(GGUFCudaKernel, None, lambda: _gguf_cpp_unavailable(GGUFCudaKernel)),
+    Case(GGUFCppKernel, _build_gguf_cpp, lambda: _gguf_cpp_unavailable(GGUFCppKernel)),
+    Case(GGUFCudaKernel, _build_gguf_cuda, lambda: _gguf_cpp_unavailable(GGUFCudaKernel)),
     Case(GGUFTritonKernel, _build_gguf_triton, lambda: _unavailable(GGUFTritonKernel)),
     Case(NF12Linear, _build_nf12, lambda: None),
-    Case(ParoLinear, None, _paro_unavailable),
+    Case(ParoLinear, lambda: _build_paro(ParoLinear), _paro_unavailable),
     Case(ParoTritonLinear, lambda: _build_paro(ParoTritonLinear), lambda: None),
     Case(MacaqLinear, lambda: _build_macaq(MacaqLinear), lambda: None),
     Case(MacaqTritonLinear, lambda: _build_macaq(MacaqTritonLinear), lambda: None),
     Case(VPTQLinear, lambda: _build_vptq(VPTQLinear), lambda: None),
-    Case(VPTQCudaLinear, None, lambda: _unavailable(VPTQCudaLinear)),
+    Case(VPTQCudaLinear, lambda: _build_vptq(VPTQCudaLinear), lambda: _unavailable(VPTQCudaLinear)),
     Case(W4AFP8Linear, _build_w4a_fp8, lambda: _unavailable(W4AFP8Linear)),
     Case(W4ANVFP4Linear, _build_w4a_nvfp4, lambda: _unavailable(W4ANVFP4Linear)),
 ]
@@ -275,6 +350,12 @@ def test_kernel_reaches_declared_compile_level(case):
     )
 
     if graph_capture_safe(case.cls):
+        if case.cls is TorchFP8Linear and not _fp8_capture_supported():
+            pytest.skip(
+                "TorchFP8Linear: compile level verified, but this device has no "
+                "native FP8 math, so the host-round-trip dequant path cannot be "
+                "captured; capture is declared for the native-FP8 path"
+            )
         assert result.graph_capture is True, (
             f"{case.cls.__name__}: declares SUPPORTS_GRAPH_CAPTURE=True but capture "
             f"failed: {result.graph_capture_error}"

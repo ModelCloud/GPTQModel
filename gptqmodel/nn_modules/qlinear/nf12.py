@@ -91,6 +91,23 @@ def _autocast_narrows_weight_range(
     return not _weight_dtype_is_lossless(autocast_dtype)
 
 
+def _as_normal_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """Return a non-inference copy when ``tensor`` came from InferenceMode.
+
+    ``pack_original()`` / ``load_quant_result()`` run under
+    ``torch.inference_mode()`` and a loader can install a checkpoint inside one
+    too, so the registered buffers would otherwise be inference tensors.
+    Inference tensors cannot be saved for backward, which made every grad-mode
+    forward fail at the decode matmul even though the packed weights are not
+    trainable (#5211).
+    """
+
+    if not tensor.is_inference():
+        return tensor
+    with torch.inference_mode(False):
+        return tensor.clone()
+
+
 def _hip_path(device: torch.device | str) -> bool:
     """True when the device is an RDNA4 GPU that must use the HIP port.
 
@@ -110,10 +127,31 @@ class NF12Linear(WeightOnlyQuantLinear):
     weights apart from the kernel's accumulation order.
     """
 
-    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager only. Dynamo fails on
-    # the `tensor._version` guard, and explicit capture fails because forward
-    # calls `_exp_base()` -> `int(tensor.item())`, a host sync.
+    # The packed mantissas, the escape table and the exponent base are the
+    # complete NF12 payload. A layer with no escapes still publishes an empty
+    # `nf12_escapes` (the writer keeps named empty buffers), so the table is
+    # required even when it has zero rows: the live module's placeholder is
+    # always empty, and only the checkpoint knows whether escapes were used.
+    CHECKPOINT_REQUIRED_BUFFERS = ("nf12_packed", "nf12_escapes", "nf12_exp_base")
+
+    # CPU, torch 2.16.0.dev20261021+cpu: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all pass. Two fixes got there: ``post_init()``
+    # now resolves the exponent base to a Python int (the buffer stays a tensor
+    # so a checkpoint round trip keeps it exact), and ``nf12_codec.decode``
+    # selects escaped groups with a static-shape gather instead of
+    # ``bool(escaped.any())`` / ``int(index.max())`` host reads. The decode is
+    # bit-exact against eager, including checkpoints with escape rows.
+    #
+    # CUDA keeps ``EAGER``: the native ``gptqmodel_nf12.linear`` entry point was
+    # not re-measured on this CPU-only host, so it does not raise the base
+    # declaration.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for this kernel in this change; the INDUCTOR level is opt-in via "
+        "optimize() (#4984 policy unchanged)."
+    )
     SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.NF12]
@@ -237,10 +275,39 @@ class NF12Linear(WeightOnlyQuantLinear):
         self._exp_base_version = None
         self._invalidate_compiled()
 
+    def _normalize_inference_buffers(self) -> None:
+        """Replace buffers installed under ``InferenceMode`` at load time.
+
+        ``pack()``/``load_quant_result()`` already normalise what they install,
+        but a checkpoint loader can assign the tensors directly inside
+        ``torch.inference_mode()`` (#5211). ``dequantize_weight()`` used to
+        re-check ``tensor.is_inference()`` on every forward; dynamo cannot trace
+        that call, so it graph-broke every compiled CPU forward (#5299). The
+        check runs once, when ``post_init()`` binds the checkpoint, so it stays
+        out of ``forward``.
+        """
+
+        for name in ("nf12_packed", "nf12_escapes", "nf12_exp_base", "bias"):
+            tensor = self._buffers.get(name)
+            if isinstance(tensor, torch.Tensor) and tensor.is_inference():
+                setattr(self, name, _as_normal_tensor(tensor))
+
     def _weight_to_matrix(self, linear: nn.Module) -> torch.Tensor:
         return weight_to_matrix(linear)
 
     def _exp_base(self) -> int:
+        if torch.compiler.is_compiling():
+            # ``int(tensor.item())`` is a data-dependent host read, a hard
+            # dynamo graph break. ``post_init()`` (and every eager
+            # ``clear_weight_cache()`` caller) resolves the value once, so a
+            # traced graph reads the Python int instead.
+            value = self._exp_base_value
+            if value is None:
+                raise RuntimeError(
+                    "NF12Linear was compiled before its exponent base was resolved; "
+                    "load the checkpoint (post_init) before torch.compile."
+                )
+            return value
         tensor = self.nf12_exp_base
         if self._exp_base_tensor is not tensor:
             self._exp_base_value = None
@@ -304,8 +371,12 @@ class NF12Linear(WeightOnlyQuantLinear):
             target_device = self.bias.device
         else:
             target_device = torch.device("cpu")
-        packed = result.packed.to(device=target_device, dtype=torch.uint8).contiguous()
-        escapes = result.escapes.to(device=target_device, dtype=torch.int16).contiguous()
+        packed = _as_normal_tensor(
+            result.packed.to(device=target_device, dtype=torch.uint8).contiguous()
+        )
+        escapes = _as_normal_tensor(
+            result.escapes.to(device=target_device, dtype=torch.int16).contiguous()
+        )
         if "nf12_packed" in self._buffers:
             self.nf12_packed = packed
         else:
@@ -314,7 +385,9 @@ class NF12Linear(WeightOnlyQuantLinear):
             self.nf12_escapes = escapes
         else:
             self.register_buffer("nf12_escapes", escapes)
-        base = torch.tensor([result.exp_base], dtype=torch.uint8, device=packed.device)
+        base = _as_normal_tensor(
+            torch.tensor([result.exp_base], dtype=torch.uint8, device=packed.device)
+        )
         if "nf12_exp_base" in self._buffers:
             self.nf12_exp_base = base
         else:
@@ -323,7 +396,9 @@ class NF12Linear(WeightOnlyQuantLinear):
         if source_bias is None and linear is not None:
             source_bias = getattr(linear, "bias", None)
         if source_bias is not None:
-            value = source_bias.detach().to(device=packed.device).contiguous()
+            value = _as_normal_tensor(
+                source_bias.detach().to(device=packed.device).contiguous()
+            )
             if "bias" in self._buffers:
                 self.bias = value
             else:
@@ -335,7 +410,7 @@ class NF12Linear(WeightOnlyQuantLinear):
     # ------------------------------------------------------------------
     # export / inference
     # ------------------------------------------------------------------
-    @torch.inference_mode()
+    @torch.no_grad()
     def dequantize_weight(
         self,
         *,
@@ -345,7 +420,9 @@ class NF12Linear(WeightOnlyQuantLinear):
         """Return the exact decoded BF16 matrix.
 
         This is an explicit export API: callers receive a dense tensor, but it
-        is never installed as an inference cache.
+        is never installed as an inference cache. ``no_grad`` (not
+        ``inference_mode``) keeps the result usable as an autograd operand for
+        the forward's wide path (#5211).
         """
 
         target = self.nf12_packed.device if device is None else torch.device(device)
@@ -388,6 +465,13 @@ class NF12Linear(WeightOnlyQuantLinear):
             weight = nf12_codec.decode(
                 packed, escapes, base, self.out_features, self.in_features
             )
+        # Deliberately no ``_as_normal_tensor`` here: it calls
+        # ``tensor.is_inference()``, which dynamo cannot trace, so wrapping the
+        # decode output graph-broke every compiled CPU forward (#5299). The
+        # buffers are already normalised at install time (``pack`` /
+        # ``load_quant_result``), which is what #5211 needed; when the caller
+        # itself runs under ``inference_mode`` the decoded tensor is an
+        # inference tensor, and that caller cannot need a gradient through it.
         return weight.to(dtype=dtype).contiguous()
 
     def dequantize(self, *, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
@@ -395,6 +479,16 @@ class NF12Linear(WeightOnlyQuantLinear):
 
     def _native_forward(self, x: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor | None:
         if not x.is_cuda or x.dtype != torch.bfloat16:
+            return None
+        # Neither `nf12::linear` nor `nf12_hip::linear` registers an Autograd
+        # formula. Their output still carries a `WarnNotImplemented` grad_fn,
+        # so a grad-mode call looks differentiable but returns `None` for
+        # `x.grad` (with a one-time warning). Any LoRA/PEFT pass through an
+        # NF12 projection would silently lose that gradient. Take the
+        # differentiable decode + matmul path whenever the activation needs a
+        # gradient; inference (`no_grad`/`inference_mode`) keeps the fused
+        # kernel (#5305).
+        if torch.is_grad_enabled() and x.requires_grad:
             return None
         # Native kernels consume BF16 bias. A wider or different bias must stay
         # wide through the fallback epilogue to preserve cancellation and range.
@@ -524,6 +618,10 @@ class NF12Linear(WeightOnlyQuantLinear):
 
     def post_init(self):
         super().post_init()
+        # A checkpoint installed under ``InferenceMode`` hands us inference
+        # tensors; replace them once here instead of checking in ``forward``
+        # (#5211, #5299).
+        self._normalize_inference_buffers()
         # Validate the loaded checkpoint's packing geometry once.
         if self.nf12_packed.shape != (self.out_features, self.in_features * 3 // 2):
             raise ValueError(
@@ -539,6 +637,11 @@ class NF12Linear(WeightOnlyQuantLinear):
                 validate_escape_indices(self.nf12_packed, self.nf12_escapes)
             except ValueError as exc:
                 raise ValueError(f"NF12Linear `{self.name}`: {exc}") from exc
+            # Resolve the exponent base now: it is stored as a tensor so a
+            # checkpoint round trip keeps it exact, but every forward needs a
+            # Python int and `int(tensor.item())` cannot run inside a traced
+            # graph.
+            self._exp_base()
 
     def extra_repr(self) -> str:
         exponent = getattr(self, "nf12_exp_base", None)

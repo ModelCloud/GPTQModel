@@ -174,9 +174,26 @@ def input_rows(x: t.Tensor) -> int:
     batch dimension, so a 4D input has ``B * S * T`` matrix rows.
     """
 
-    if x.ndim == 0:
+    shape = x.shape
+    if len(shape) == 0:
         raise ValueError("Linear input must have at least one dimension")
-    return math.prod(x.shape[:-1])
+    return math.prod(shape[:-1])
+
+
+def _named_tensor(module: nn.Module, name: str):
+    """Resolve a checkpoint tensor name (possibly dotted) without raising.
+
+    ``CHECKPOINT_REQUIRED_BUFFERS`` may name a tensor owned by a submodule
+    (VPTQ's ``centroids.weight``). A suffix whose live tensor is absent is
+    skipped by the checkpoint validator, so this probe skips it too.
+    """
+
+    owner_name, _, leaf = name.rpartition(".")
+    try:
+        owner = module.get_submodule(owner_name) if owner_name else module
+    except AttributeError:
+        return None
+    return getattr(owner, leaf, None)
 
 
 def empty_linear_output(x: t.Tensor, out_features: int) -> t.Tensor:
@@ -192,6 +209,41 @@ def empty_linear_output(x: t.Tensor, out_features: int) -> t.Tensor:
         dtype=x.dtype,
         device=x.device,
     )
+
+
+def detach_cpu_operand(tensor):
+    """Return ``tensor`` as a private allocation instead of a checkpoint view.
+
+    A CPU load keeps quantized tensors as zero-copy views of the shard's
+    ``safetensors`` mapping. The CPU int4 repack replaces ``qweight`` and
+    ``qzeros`` with private tensors, but keeps small per-column metadata
+    (``g_idx``, and ``scales`` on the ATen path) as views of that mapping. A
+    single surviving view pins the whole shard: every page the loader touched
+    stays resident even though the packed weights were replaced, so the model
+    counts its quantized weights twice (#4785).
+
+    These operands are per-column metadata, so one copy at repack time is cheap
+    next to the shard pages it releases. ``None`` and non-tensors pass through
+    unchanged.
+
+    Only a tensor that actually aliases the checkpoint is copied. A storage
+    backed by a mapped file is non-resizable (that is how ``safetensors`` and
+    ``torch.frombuffer`` on an ``mmap`` create it); an ordinary allocation is
+    resizable and is returned unchanged so its object identity survives
+    (``scales`` must stay the loader's tensor, #4395).
+    """
+
+    if tensor is None or not isinstance(tensor, t.Tensor):
+        return tensor
+    if tensor.device.type != "cpu":
+        return tensor
+    try:
+        aliases_checkpoint = not tensor.untyped_storage().resizable()
+    except Exception:
+        return tensor
+    if not aliases_checkpoint:
+        return tensor
+    return tensor.clone()
 
 
 # Packed quantized weights are unpacked through shift operations in several
@@ -339,17 +391,30 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_TRAINING_USE_TORCH_KERNEL: bool = False
 
     # Whether a compiled generation path (transformers' static-cache
-    # auto-compile, a CUDA-graph decode loop) is not a pessimization for this
-    # kernel. False does not mean the forward is untraceable: most kernels
-    # here break the graph on every linear because they call a custom op
-    # without a fake implementation or branch on host values (`data_ptr()`,
-    # `id()`, `._version`) inside `forward`. When capture fails, each decode
-    # step pays for dozens of graph fragments and the guard checks, so the
-    # static cache ends up 2-4x slower than eager (#4669). A kernel opts in
-    # only with a measurement on the hardware it claims; an opt-in on a
-    # graph-breaking kernel whose eager path is already fast is strictly
-    # slower than eager.
+    # auto-compile, a CUDA-graph decode loop) beats this kernel's eager
+    # forward. The bar is *trace-clean*: ``torch.compile(fullgraph=True)`` must
+    # trace the forward with zero graph breaks **and** a compiled decode must
+    # measure faster on the hardware the declaration claims. Either half alone
+    # is not enough: a graph-breaking kernel pays for dozens of graph fragments
+    # and guard checks per decode step (#4669), and a clean trace of a forward
+    # whose eager path is already fast is a wash. A single timing on one
+    # architecture does not qualify a kernel (#4739). The default is False: no
+    # measurement, no opt-in.
     SUPPORTS_COMPILE: bool = False
+
+    # Why a kernel that declares ``SUPPORTS_COMPILE_LEVEL >= INDUCTOR`` still
+    # keeps ``SUPPORTS_COMPILE = False``: the measured loss that makes the
+    # static-cache auto-compile a pessimization for this kernel (#4984). A
+    # compile-capable level and an opted-out policy are two declarations that
+    # drift apart silently otherwise, so an opt-out from a level at or above
+    # ``INDUCTOR`` must record its reason here.
+    # `tests/kernels/test_kernel_compile_protocol.py` enforces the pairing and
+    # `docs/kernel-compile-matrix.md` publishes it. The empty string means "no
+    # reason recorded" and is the right value for a kernel that opts in
+    # (`SUPPORTS_COMPILE = True`) or declares a level below `INDUCTOR`; it is
+    # not `None` because `verify_supports_params()` treats a `None` default as
+    # a declaration every concrete kernel has to repeat.
+    SUPPORTS_COMPILE_EAGER_REASON: str = ""
 
     # Highest `torch.compile` level this kernel's `forward` reaches, measured
     # with the probes in `_compile_support.LEVEL_PROBES`. Every concrete kernel
@@ -364,6 +429,19 @@ class BaseQuantLinear(nn.Module):
     # custom op without a fake implementation can be capture-safe and still
     # fail to trace. Every concrete kernel declares it explicitly.
     SUPPORTS_GRAPH_CAPTURE: bool = False
+
+    # Checkpoint tensor suffixes this kernel cannot rebuild without them.
+    # ``validate_checkpoint_qweights`` fails a load when one is missing, so a
+    # truncated checkpoint raises instead of leaving uninitialized buffers
+    # (#5010). Empty means this kernel does not publish a payload of its own.
+    CHECKPOINT_REQUIRED_BUFFERS: Tuple[str, ...] = ()
+
+    # Required suffixes whose checkpoint entry may be absent when the live
+    # module's buffer is legitimately empty. A per-channel QQQ layer keeps
+    # ``s_group = torch.empty(0)`` because the kernel derives it from
+    # ``s_channel``; checkpoints written before the save de-dup fix (#5126)
+    # omitted that key. Non-empty buffers stay required.
+    CHECKPOINT_OPTIONAL_EMPTY_BUFFERS: Tuple[str, ...] = ()
 
     SUPPORTS_AUTO_PADDING: bool = None
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None
@@ -495,6 +573,16 @@ class BaseQuantLinear(nn.Module):
             #     torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora_test math
             # )
 
+    def checkpoint_required_buffers(self) -> Tuple[str, ...]:
+        """Checkpoint tensor suffixes this module instance cannot rebuild.
+
+        The class declaration is the default. A kernel whose required payload
+        depends on its configuration overrides this (GPTQ activation order
+        needs ``g_idx`` only when ``desc_act`` is set).
+        """
+
+        return self.CHECKPOINT_REQUIRED_BUFFERS
+
     def list_buffers(self) -> List:
         tensors = []
         seen = set()
@@ -508,6 +596,42 @@ class BaseQuantLinear(nn.Module):
                 seen.add(tensor_id)
                 tensors.append(tensor)
         return tensors
+
+    def checkpoint_payload_tensors(self) -> Tuple[t.Tensor, ...]:
+        """Persistent tensors that carry this module's checkpoint payload.
+
+        ``post_init`` reads the payload, so a loader that has replaced it with
+        meta placeholders (disk offload) must materialize the layer first.
+        Every kernel family declares its payload in
+        ``CHECKPOINT_REQUIRED_BUFFERS`` -- the names the checkpoint validator
+        already requires -- so this probe follows that declaration instead of
+        assuming the GPTQ name ``qweight``. A kernel that declares nothing, or
+        whose declared tensors are all absent (a QQQ layer whose derived
+        cache replaced them), falls back to every tensor the module
+        registers.
+        """
+
+        tensors = []
+        for name in self.checkpoint_required_buffers():
+            tensor = _named_tensor(self, name)
+            if isinstance(tensor, t.Tensor):
+                tensors.append(tensor)
+        if not tensors:
+            tensors = self.list_buffers()
+        return tuple(tensors)
+
+    def checkpoint_payload_is_meta(self) -> bool:
+        """Whether this module's checkpoint payload is an offloaded placeholder.
+
+        A disk-offloaded layer owns no resident checkpoint tensors: Accelerate
+        replaces them with meta placeholders and replays the real values from
+        its offload map. ``gptqmodel_post_init`` uses this to route such a
+        layer through ``_post_init_offloaded`` instead of running
+        ``post_init`` on meta. A module with no payload tensors is resident by
+        definition.
+        """
+
+        return any(tensor.is_meta for tensor in self.checkpoint_payload_tensors())
 
     def runtime_device(self) -> Optional[t.device]:
         # Prefer the real quantized storage tensor over adapter scratch buffers.
@@ -555,6 +679,18 @@ class BaseQuantLinear(nn.Module):
         clear = getattr(self, "clear_weight_cache", None)
         if callable(clear):
             clear()
+
+    def materialize_checkpoint_layout_for_export(self) -> bool:
+        """Restore checkpoint buffers a derived cache replaced; True if restored.
+
+        A kernel may drop its checkpoint buffers once the first forward has
+        built a packed cache (QQQ does, #4856). ``named_buffers`` skips a
+        ``None`` buffer, so a save that walks the module tree instead of
+        calling ``state_dict()`` would silently omit the quantized weights
+        (#5010). The export path calls this first.
+        """
+
+        return False
 
     def _load_from_state_dict(self, *args, **kwargs):
         """Restore checkpoint layout, then load, then invalidate derived caches.
@@ -1197,6 +1333,14 @@ class GroupedQuantLinear(BaseQuantLinear):
 
 
 class PackedGroupedQuantLinear(GroupedQuantLinear):
+    # GPTQ/AWQ/Marlin/BitBLAS-family checkpoints publish the packed weight as
+    # `qweight` plus its per-group `scales`; a checkpoint missing either loads
+    # uninitialized buffers (NaN logits). `qzeros` is required whenever the
+    # live kernel owns zero-point storage. AllSpark has no `qzeros` buffer at
+    # all, so the validator skips that suffix for it instead of refusing every
+    # AllSpark load.
+    CHECKPOINT_REQUIRED_BUFFERS = ("qweight", "scales", "qzeros")
+
     def __init__(self, *args, pack_dtype: t.dtype, **kwargs):
         super().__init__(*args, pack_dtype=pack_dtype, **kwargs)
 
@@ -1260,42 +1404,44 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         )
 
     #: CPU int4pack family whose runtime words have a verified inverse:
-    #: ``"gptq"`` or ``"awq"``. ``None`` keeps a full checkpoint snapshot.
+    #: ``"gptq"``, ``"awq"``, ``"avx512_gptq"`` or ``"avx512_awq"``. ``None``
+    #: keeps a full checkpoint snapshot.
     _FUSED_TRAIN_STATE_REBUILD = None
 
     def _can_rebuild_checkpoint_qweight(self) -> bool:
         """Whether the checkpoint ``qweight`` can be rebuilt on demand.
 
-        Only the ATen CPU int4pack permutation has an inverse. The AVX512
-        extension and the XPU packing use different layouts, so their
-        subclasses leave ``_FUSED_TRAIN_STATE_REBUILD`` as ``None``.
+        Only the CPU int4pack permutations have an inverse: the ATen layout
+        (``"gptq"``/``"awq"``) and the AVX512 layouts
+        (``"avx512_gptq"``/``"avx512_awq"``, pure-Torch inverses of the two
+        AVX512-BF16 packers). The XPU packing uses a different layout, so its
+        subclass leaves ``_FUSED_TRAIN_STATE_REBUILD`` as ``None``.
 
         This is only a cheap pre-filter: the clone is dropped by
         ``finalize_fused_train_state`` only after the rebuilt words match the
         checkpoint bytes this module actually carried.
         """
 
-        if self._FUSED_TRAIN_STATE_REBUILD is None:
+        kind = self._FUSED_TRAIN_STATE_REBUILD
+        if kind is None:
             return False
         weight = getattr(self, "qweight", None)
         if not isinstance(weight, t.Tensor) or weight.device.type != "cpu":
             return False
         if weight.dtype != t.int32:
             # The rebuilt words are int32; any other checkpoint dtype keeps
-            # its snapshot.
+            # its snapshot. This runs before the transform, so ``qweight`` is
+            # still the checkpoint tensor here.
             return False
+        if kind in ("avx512_gptq", "avx512_awq"):
+            # ``unpack_hf_int4`` is the verified inverse of ``pack_hf_int4`` and
+            # the AWQ packer is the same kind of pure nibble permutation, so
+            # these paths need no ATen int4pack support and can undo the
+            # ``ret_idx`` channel reorder of a ``desc_act`` checkpoint.
+            return True
         from ._cpu_int4pack_layout import int4pack_block_size
 
         if int4pack_block_size() is None:
-            return False
-        identity = getattr(self, "_ret_idx_is_identity", None)
-        if (
-            self._FUSED_TRAIN_STATE_REBUILD == "gptq"
-            and callable(identity)
-            and not identity()
-        ):
-            # The fused transform reorders the input rows by ``ret_idx``; only
-            # the identity order leaves the packed words invertible here.
             return False
         return True
 
@@ -1307,10 +1453,19 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
             raise RuntimeError(
                 f"{self.__class__.__name__} cannot rebuild its checkpoint qweight"
             )
-        from ._cpu_int4pack_layout import rebuild_awq_qweight, rebuild_gptq_qweight
+        from ._cpu_int4pack_layout import (
+            rebuild_avx512_awq_qweight,
+            rebuild_avx512_qweight,
+            rebuild_awq_qweight,
+            rebuild_gptq_qweight,
+        )
 
         if kind == "awq":
             return rebuild_awq_qweight(self)
+        if kind == "avx512_awq":
+            return rebuild_avx512_awq_qweight(self)
+        if kind == "avx512_gptq":
+            return rebuild_avx512_qweight(self)
         return rebuild_gptq_qweight(self)
 
     def _write_fused_train_state_snapshot(self, destination, prefix: str, keep_vars: bool) -> None:
@@ -1344,19 +1499,27 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
                 destination[prefix + name] = tensor if keep_vars else tensor.detach()
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
-        if self._is_runtime_layout():
-            from ...utils.checkpoint_state import is_checkpoint_serialization
+        # The first forward rewrites `_buffers` (register_buffer for the fused
+        # snapshot, rebinding `qweight`/`qzeros`, and popping the clone in
+        # `finalize_fused_train_state`). Serialize with that transform: without
+        # the lock `nn.Module._save_to_state_dict` iterates a dict that is being
+        # resized ("dictionary changed size during iteration"), and under
+        # free-threading it can also emit the runtime int4pack words under the
+        # checkpoint `qweight` key or drop tensors (issue #4788).
+        with self._cpu_transform_lock:
+            if self._is_runtime_layout():
+                from ...utils.checkpoint_state import is_checkpoint_serialization
 
-            if is_checkpoint_serialization():
-                raise RuntimeError(
-                    f"{self.__class__.__name__} rewrites packed tensors into a "
-                    "kernel-private runtime layout; the original checkpoint tensors "
-                    "cannot be reconstructed. Use `GPTQModel.save()`/`save_quantized()` "
-                    "for a loadable checkpoint, or reload the original checkpoint."
-                )
-        super()._save_to_state_dict(destination, prefix, keep_vars)
-        self._write_fused_train_state_snapshot(destination, prefix, keep_vars)
-        self._write_state_dict_layout_marker(destination, prefix, keep_vars)
+                if is_checkpoint_serialization():
+                    raise RuntimeError(
+                        f"{self.__class__.__name__} rewrites packed tensors into a "
+                        "kernel-private runtime layout; the original checkpoint tensors "
+                        "cannot be reconstructed. Use `GPTQModel.save()`/`save_quantized()` "
+                        "for a loadable checkpoint, or reload the original checkpoint."
+                    )
+            super()._save_to_state_dict(destination, prefix, keep_vars)
+            self._write_fused_train_state_snapshot(destination, prefix, keep_vars)
+            self._write_state_dict_layout_marker(destination, prefix, keep_vars)
 
     def _write_state_dict_layout_marker(self, destination, prefix: str, keep_vars: bool) -> None:
         """Emit the layout code as a tensor so in-process transports keep it.
@@ -1395,6 +1558,14 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         )
 
     def _load_from_state_dict(self, *args, **kwargs):
+        # `restore_fused_train_state` rebinds `qweight`/`qzeros` and the fused
+        # snapshot buffers, so a concurrent first forward must not interleave
+        # with it (issue #4788). The lock is re-entrant, so a nested call from a
+        # save path or from `load_state_dict` is safe.
+        with self._cpu_transform_lock:
+            return self._load_from_state_dict_locked(*args, **kwargs)
+
+    def _load_from_state_dict_locked(self, *args, **kwargs):
         state_dict = args[0] if args else kwargs.get("state_dict")
         prefix = args[1] if len(args) > 1 else kwargs.get("prefix", "")
         missing_keys = args[4] if len(args) > 4 else kwargs.get("missing_keys")
@@ -1629,6 +1800,15 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
                 register_buffers_out_features=register_buffers_out_features,
                 bias_dtype=self.bias_dtype,
             )
+
+    def checkpoint_required_buffers(self) -> Tuple[str, ...]:
+        # Activation-order GPTQ stores the group assignment in `g_idx`; the
+        # kernel cannot derive it from the packed weight. Plain contiguous
+        # quantization derives the canonical mapping, so it stays optional.
+        required = super().checkpoint_required_buffers()
+        if getattr(self, "desc_act", False) and "g_idx" not in required:
+            required = required + ("g_idx",)
+        return required
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
@@ -2075,14 +2255,28 @@ class PackableQuantLinear(GPTQQuantLinear):
         forwards stay O(1).
 
         Subclasses that reorder activations must implement ``_build_ret_idx``.
+
+        The verdict is stored as a plain Python ``bool``: every caller uses it
+        in an ``if``, and ``bool(tensor)`` would force a host read that a
+        traced graph cannot perform. ``tensor_cache_key``
+        (``is_inference``/``_version``/``data_ptr``) is a hard dynamo graph
+        break as well, so a traced forward reads the verdict the eager warmup
+        cached instead of re-keying the buffer.
         """
         cached = getattr(self, "_ret_idx_identity", None)
-        if cached is not None and getattr(self, "_ret_idx_key", None) == tensor_cache_key(self.g_idx):
-            return cached
+        if cached is not None:
+            if t.compiler.is_compiling():
+                return cached
+            if getattr(self, "_ret_idx_key", None) == tensor_cache_key(self.g_idx):
+                return cached
         ret_idx = self._build_ret_idx()
-        identity = t.equal(
-            ret_idx,
-            t.arange(ret_idx.numel(), dtype=ret_idx.dtype, device=ret_idx.device),
+        # ``torch.equal`` already returns a Python ``bool`` (it is not a
+        # 0-dim tensor), so this stays host-side without a tensor ``__bool__``.
+        identity = bool(
+            t.equal(
+                ret_idx,
+                t.arange(ret_idx.numel(), dtype=ret_idx.dtype, device=ret_idx.device),
+            )
         )
         self._ret_idx_identity = identity
         return identity

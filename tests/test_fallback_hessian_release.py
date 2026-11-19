@@ -77,11 +77,15 @@ class TestFallbackReleasesPartials:
         follower.adopt_hessian_from(leader)
         follower.expected_nsamples = EXPECTED_ROWS
 
-        follower_event = follower._deferred_hessian_sources[0][1]
-        source_ref = weakref.ref(follower._deferred_hessian_sources[0][0])
-        leader.free()
-        assert source_ref() is not None
-        assert not follower_event.synchronized
+        # Adoption is the last consumer of the leader's Hessian: the source is
+        # deferred against the follower's ready event and released immediately
+        # (#4430), so nothing survives into the quantization clone. The event the
+        # deferral used is still ``_hessian_ready_event``; only the registry is
+        # already drained when ``adopt_hessian_from`` returns.
+        follower_event = follower._hessian_ready_event
+        source_ref = weakref.ref(leader.H)
+        assert follower._deferred_hessian_sources == []
+        assert follower_event.synchronized
 
         boundary = {}
         original_clone = follower.clone_module
@@ -93,6 +97,8 @@ class TestFallbackReleasesPartials:
             return original_clone(*args, **kwargs)
 
         monkeypatch.setattr(follower, "clone_module", _clone_at_fallback_boundary)
+        leader.free()
+        assert source_ref() is None
         follower.quantize(blocksize=GROUP_SIZE)
 
         assert boundary == {

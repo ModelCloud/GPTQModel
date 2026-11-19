@@ -50,6 +50,11 @@ from torch import nn
 from ..utils.logger import setup_logger
 from .checkpoint_paths import validate_relative_checkpoint_path
 from .p2p import safe_move_to
+from .tied_weights import (
+    retie_tied_weights,
+    snapshot_tied_weights_keys,
+    tensors_equal_in_chunks,
+)
 from .torch import as_torch_device
 
 
@@ -564,6 +569,41 @@ def _ensure_target_storage_on_device_(param: torch.nn.Parameter, device: torch.d
     # asymmetric ROCm link can segfault, so use the direction-aware helper.
     param.data = safe_move_to(param.data, device, copy=True)  # keeps Parameter identity
     return param
+
+
+def _publish_checkpoint_param_(
+    *,
+    target_submodule: torch.nn.Module,
+    rel_name: str,
+    target_param: torch.nn.Parameter,
+    source: torch.Tensor,
+    tensor_device: torch.device,
+    non_blocking: bool,
+) -> torch.nn.Parameter:
+    """Fill a materialized parameter before publishing it on the module.
+
+    A lazy shell owns meta parameters. Installing freshly allocated storage on
+    the module and copying the checkpoint values in a second step leaves
+    ``torch.empty`` memory behind when an interrupt lands between the two.
+    Run-exit recovery uses ``is_meta`` as its only "not loaded" test, so that
+    module is then treated as materialized and the in-session model forwards
+    with uninitialized weights (#5088).
+
+    Build and fill the replacement first; only then swap it onto the module.
+    An interrupt during the copy leaves the old meta parameter in place, which
+    the existing recovery already re-materializes.
+    """
+
+    replacement = _ensure_target_storage_on_device_(target_param, tensor_device)
+    if source.dtype != replacement.dtype:
+        source = source.to(dtype=replacement.dtype)
+    replacement.detach().copy_(
+        source, non_blocking=(non_blocking and source.is_pinned())
+    )
+    if replacement is not target_param:
+        t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
+        setattr(t_parent, leaf, replacement)
+    return replacement
 
 
 class _SplitDimWithInterleave(int):
@@ -1192,14 +1232,29 @@ class LazyTurtle:
         alias_items = self._normalize_runtime_to_checkpoint_renamings(conversion_aliases)
         self._runtime_to_checkpoint_renamings = tuple(alias_items)
         self._runtime_to_checkpoint_converters = self._normalize_runtime_to_checkpoint_converters(conversion_aliases)
+        # These are needed while resolving the tie below: `_checkpoint_shard_path`
+        # takes `_lock` and reads `_active_source_root`. Initializing them after
+        # the snapshot call made the checkpoint comparison raise `AttributeError`,
+        # which the defensive wrapper swallowed as "unknown" -- so a distinct
+        # `lm_head` was never refuted (#4799, #4973).
+        self._lock = threading.RLock()
+        self._active_source_root: Optional[str] = None
+        self._active_source_provenance: Optional[Dict[str, Any]] = None
+        # Resolve tying once from the decoder config and the checkpoint itself.
+        # `materialize_submodule` re-applies this snapshot instead of calling
+        # `tie_weights()`, which would recompute from the wrapper config and
+        # replace a checkpoint's distinct `lm_head` with the embedding (#4799).
+        if target_model is not None:
+            self.tied_weights_keys = snapshot_tied_weights_keys(
+                target_model,
+                checkpoint_has_tensor=self._checkpoint_has_parameter,
+                checkpoint_tensors_equal=self._checkpoint_parameters_equal,
+            )
         # Keep the same placement exclusions declared by the Transformers model.
         no_placement_params = getattr(target_model, "_no_placement_params", ())
         self._no_placement_params = tuple(
             pattern for pattern in (no_placement_params or ()) if isinstance(pattern, str) and pattern
         )
-        self._lock = threading.RLock()
-        self._active_source_root: Optional[str] = None
-        self._active_source_provenance: Optional[Dict[str, Any]] = None
 
     def close(self) -> None:
         """Release the converted checkpoint directory held by this turtle.
@@ -1527,7 +1582,10 @@ class LazyTurtle:
                 skip_module_types=skip_module_types,
             )
         if tie_weights and loaded_entries > 0 and hasattr(target_model, "tie_weights"):
-            target_model.tie_weights()
+            # Re-apply the pairs this checkpoint really ties. Calling
+            # `tie_weights()` here recomputes the mapping from the wrapper
+            # config and ties an untied `lm_head` to the embedding (#4799).
+            retie_tied_weights(target_model)
         return target_submodule
 
     def _convert_checkpoint_source_to_safetensors(
@@ -1643,6 +1701,81 @@ class LazyTurtle:
             )
             weight_map = self._load_weight_map(tempdir)
             return tempdir, weight_map
+
+    def _checkpoint_has_parameter(self, parameter_name: str) -> Optional[bool]:
+        """Return whether the checkpoint stores one runtime parameter name."""
+
+        if "." not in parameter_name:
+            return None
+        module_path, rel_name = parameter_name.rsplit(".", 1)
+        try:
+            source_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(
+                module_path, rel_name
+            )
+        except Exception:  # pragma: no cover - defensive: exotic alias tables
+            return None
+        if expert_index is not None or split_index is not None or split_dim is not None:
+            # A fused/sliced source is not a plain parameter of this module.
+            return None
+        return source_name is not None
+
+    def _checkpoint_parameters_equal(
+        self,
+        target_name: str,
+        source_name: str,
+    ) -> Optional[bool]:
+        """Compare two runtime parameter names in the checkpoint, if both exist.
+
+        A checkpoint that stores a separate `lm_head.weight` with values
+        different from the embedding carries a real head; tying it would replace
+        that head. Values are compared in row chunks so a large vocabulary does
+        not have to be materialized twice.
+        """
+
+        if "." not in target_name or "." not in source_name:
+            return None
+        target_module, target_rel = target_name.rsplit(".", 1)
+        source_module, source_rel = source_name.rsplit(".", 1)
+        try:
+            target_checkpoint, target_expert, target_split, target_dim = self._resolve_checkpoint_tensor_source(
+                target_module, target_rel
+            )
+            source_checkpoint, source_expert, source_split, source_dim = self._resolve_checkpoint_tensor_source(
+                source_module, source_rel
+            )
+        except Exception:  # pragma: no cover - defensive: exotic alias tables
+            return None
+        if (
+            target_checkpoint is None
+            or source_checkpoint is None
+            or target_expert is not None
+            or source_expert is not None
+            or target_split is not None
+            or source_split is not None
+            or target_dim is not None
+            or source_dim is not None
+        ):
+            return None
+        target_shard = self._weight_map.get(target_checkpoint)
+        source_shard = self._weight_map.get(source_checkpoint)
+        if target_shard is None or source_shard is None:
+            return None
+        try:
+            with safe_open(
+                self._checkpoint_shard_path(target_shard, module_path=target_module),
+                framework="pt",
+                device="cpu",
+            ) as target_handle, safe_open(
+                self._checkpoint_shard_path(source_shard, module_path=source_module),
+                framework="pt",
+                device="cpu",
+            ) as source_handle:
+                return tensors_equal_in_chunks(
+                    target_handle.get_slice(target_checkpoint),
+                    source_handle.get_slice(source_checkpoint),
+                )
+        except Exception:  # pragma: no cover - defensive: unreadable shard
+            return None
 
     def has_checkpoint_tensor(
         self,
@@ -1786,6 +1919,21 @@ class LazyTurtle:
 
             return tensors
 
+    def checkpoint_source_aliases(self, runtime_name: str) -> tuple[str, ...]:
+        """Return every source-checkpoint spelling of one runtime tensor name.
+
+        Exposes the same runtime -> checkpoint alias chain the materializers use
+        (declared renamings, the reversed Hugging Face conversion map,
+        base-model-prefix variants and one-to-one converter aliases) so a caller
+        can decide whether a source index entry belongs to the loaded model
+        without loading it (#5029).
+        """
+
+        if not isinstance(runtime_name, str) or not runtime_name:
+            return ()
+        with self._lock:
+            return tuple(self._all_runtime_to_checkpoint_candidates(runtime_name))
+
     def sync_all_meta(
         self,
         *,
@@ -1844,9 +1992,12 @@ class LazyTurtle:
         finally:
             progress.close()
 
-        if tie_after and hasattr(shell_model, "tie_weights") and getattr(shell_model.config, "tie_word_embeddings", False):
+        if tie_after and hasattr(shell_model, "tie_weights"):
             try:
-                shell_model.tie_weights()
+                # Re-apply only the pairs the checkpoint really ties; a
+                # composite wrapper's default flag must not replace a distinct
+                # `lm_head` (#4799).
+                retie_tied_weights(shell_model)
                 log.info("Module: Re-tied embedding weights on shell model after lazy sync")
             except Exception as exc:
                 log.info(f"Module: tie_weights failed: {exc}")
@@ -3784,15 +3935,14 @@ class LazyTurtle:
                                     source_shape=tuple(tensor.shape),
                                 )
                             )
-                        target_param_new = _ensure_target_storage_on_device_(target_param, tensor_device)
-                        if target_param_new is not target_param:
-                            t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
-                            setattr(t_parent, leaf, target_param_new)
-                            target_param = target_param_new
-                        source = tensor.detach()
-                        if source.dtype != target_param.dtype:
-                            source = source.to(dtype=target_param.dtype)
-                        target_param.detach().copy_(source, non_blocking=(non_blocking and source.is_pinned()))
+                        _publish_checkpoint_param_(
+                            target_submodule=target_submodule,
+                            rel_name=rel_name,
+                            target_param=target_param,
+                            source=tensor.detach(),
+                            tensor_device=tensor_device,
+                            non_blocking=non_blocking,
+                        )
                     else:
                         target_buffer = t_bufs.get(rel_name)
                         t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
@@ -3898,15 +4048,14 @@ class LazyTurtle:
                                         split_index=split_index,
                                         split_dim=split_dim,
                                     ))
-                                target_param_new = _ensure_target_storage_on_device_(target_param, tensor_device)
-                                if target_param_new is not target_param:
-                                    t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
-                                    setattr(t_parent, leaf, target_param_new)
-                                    target_param = target_param_new
-                                source = tensor.detach()
-                                if source.dtype != target_param.dtype:
-                                    source = source.to(dtype=target_param.dtype)
-                                target_param.detach().copy_(source, non_blocking=(non_blocking and source.is_pinned()))
+                                _publish_checkpoint_param_(
+                                    target_submodule=target_submodule,
+                                    rel_name=rel_name,
+                                    target_param=target_param,
+                                    source=tensor.detach(),
+                                    tensor_device=tensor_device,
+                                    non_blocking=non_blocking,
+                                )
                             else:
                                 target_buffer = t_bufs.get(rel_name)
                                 t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)

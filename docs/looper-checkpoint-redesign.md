@@ -22,9 +22,10 @@ except CheckpointStopped:
 ```
 
 The adapter supports the GPTQ (including RTN), AWQ, QQQ, Paro, EXL3,
-FP8, GGUF and bitsandbytes processor paths for Llama and Qwen3 MoE, with
-`offload_to_disk=True`. EoRA continuation is supported for GPTQ, AWQ, QQQ
-and Paro, the methods that support EoRA generation without checkpointing.
+GGUF, bitsandbytes, MACaQ and NF12 processor paths for Llama, Qwen2 and
+Qwen3 MoE, with `offload_to_disk=True`. EoRA continuation is supported for
+GPTQ, AWQ, QQQ and Paro, the methods that support EoRA generation without
+checkpointing.
 Packed formats use explicit constructor schemas and the same kernel/config
 validation as ordinary quantization; checkpointing does not enable unavailable
 kernels or deprecated export formats. Other model families, rotation,

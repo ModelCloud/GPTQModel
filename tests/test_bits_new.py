@@ -21,10 +21,13 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
 from typing import Optional  # noqa: E402
 
+import pytest  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
+from parameterized import parameterized  # noqa: E402
 
 from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
@@ -89,9 +92,18 @@ class Test(ModelTest):
 # clear && CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 BITS=8 NATIVE_MODEL_ID=/monster/data/model/Llama-3.2-3B-Instruct pytest tests/test_quant_and_eora.py
 
 
-    def test_quant_and_eora(self):
-        bits = int(os.environ["BITS"])
-        self.NATIVE_MODEL_ID = os.environ["NATIVE_MODEL_ID"]
+    @parameterized.expand([(2,), (3,), (4,), (8,)])
+    def test_quant_and_eora(self, bits):
+        # A local checkpoint keeps this runnable without exported env state
+        # (#4769). An explicit NATIVE_MODEL_ID is honoured verbatim -- it may be
+        # a hub repo id -- so only an absolute path that is absent skips.
+        model_id = os.environ.get("NATIVE_MODEL_ID") or "/monster/data/model/Llama-3.2-1B-Instruct"
+        if os.path.isabs(model_id) and not Path(model_id).exists():
+            pytest.skip(
+                f"local checkpoint {model_id} does not exist; "
+                "set NATIVE_MODEL_ID to a local checkpoint or a hub repo id"
+            )
+        self.NATIVE_MODEL_ID = model_id
 
         print(f"eeeeee gpu: testing {bits}: bits, model: {self.NATIVE_MODEL_ID}")
         group_size = 128

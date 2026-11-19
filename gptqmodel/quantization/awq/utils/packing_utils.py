@@ -5,12 +5,29 @@
 # AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
 
 import math
+import threading
 
 import torch
+import transformers
 
 
 AWQ_ORDER = [0, 2, 4, 6, 1, 3, 5, 7]
 AWQ_REVERSE_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
+
+
+def source_weight_out_in(linear: torch.nn.Module) -> torch.Tensor:
+    """Return ``linear``'s weight in the Linear ``[out_features, in_features]`` layout.
+
+    ``transformers.Conv1D`` (GPT-2 and friends) stores ``[in_features,
+    out_features]``. AWQ pads and groups along the input-channel axis, so every
+    AWQ packer must transpose a Conv1D before packing, exactly like the GPTQ
+    packer does (#4887). A Linear weight is returned unchanged.
+    """
+
+    weight = linear.weight.detach()
+    if isinstance(linear, transformers.pytorch_utils.Conv1D):
+        weight = weight.t()
+    return weight
 
 
 def _pack_contiguous(values: torch.Tensor, bits: int) -> torch.Tensor:
@@ -201,6 +218,97 @@ def unpack_reorder_pack(qweight, qzeros, bits):
     return qweight, qzeros
 
 
+# Extraction offsets for a four-bit decode, in AWQ reverse lane order. The
+# table is derived with device-side arithmetic because a host-to-device copy is
+# rejected inside a CUDA-graph capture and must not run on every portable AWQ
+# forward (#4914). Keep one buffer per device.
+#
+# Two rules govern publication:
+#
+# * A capture records device work instead of running it, so a table first built
+#   inside `torch.cuda.graph(...)` holds uninitialized memory until the graph
+#   is replayed. Publishing it would make every later eager dequant decode with
+#   those zeros after an abandoned capture (#5094). A capture therefore gets an
+#   uncached tensor and only an eager call publishes.
+# * Device arithmetic is only *enqueued* on the caller's current stream.
+#   Publishing it before that work runs let another stream's lock-free cache
+#   hit launch `dequantize_gemm` with uninitialized offsets (#5191). An eager
+#   miss therefore copies a tiny pinned host table with a blocking copy: when
+#   the copy returns, the published values are complete in device memory and
+#   valid on every stream. That is one 64-byte copy once per process and
+#   device, cheaper than creating and synchronizing a private stream for the
+#   same barrier; the warm path is unchanged.
+_AWQ_SHIFTS_CACHE = {}
+_AWQ_SHIFTS_LOCK = threading.Lock()
+
+
+def _is_current_stream_capturing(device: torch.device) -> bool:
+    """Whether a CUDA/ROCm graph capture is recording on this stream."""
+
+    # ROCm also reports its device as ``cuda`` and exposes the same API.
+    if device.type != "cuda":
+        return False
+    is_capturing = getattr(torch.cuda, "is_current_stream_capturing", None)
+    if is_capturing is None:
+        return False
+    try:
+        return bool(is_capturing())
+    except Exception:  # noqa: BLE001 - backend without capture support
+        return False
+
+
+def _awq_shift_values(bits: int) -> list[int]:
+    """Host-side extraction offsets in AWQ reverse lane order."""
+    return [lane * bits for lane in AWQ_REVERSE_ORDER]
+
+
+def _derive_awq_shifts(device: torch.device, bits: int) -> torch.Tensor:
+    """Derive the offsets on ``device`` without reading host memory.
+
+    Used where a host-to-device copy is impossible: a CUDA-graph capture and a
+    ``torch.compile`` trace. The arithmetic is only enqueued, so the caller must
+    not publish the result before the stream has run it.
+    """
+
+    # `AWQ_REVERSE_ORDER[j] == j // 2 + 4 * (j % 2)` for the eight lanes, so
+    # this reproduces `[lane * bits for lane in AWQ_REVERSE_ORDER]` without
+    # reading a host constant on the device.
+    lanes = torch.arange(8, device=device, dtype=torch.int64)
+    return bits * (lanes // 2) + (4 * bits) * (lanes % 2)
+
+
+def _awq_shifts(device: torch.device, bits: int) -> torch.Tensor:
+    """Return the cached four-bit extraction offsets for ``device``."""
+
+    key = (device.type, device.index, bits)
+    cached = _AWQ_SHIFTS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    if torch.compiler.is_compiling():
+        # A traced graph cannot enter the Python lock. The value is a pure
+        # function of device/bits, so derive it without publishing (a state
+        # write); the eager warmup caches the same tensor for later calls.
+        return _derive_awq_shifts(device, bits)
+    capturing = _is_current_stream_capturing(device)
+    with _AWQ_SHIFTS_LOCK:
+        cached = _AWQ_SHIFTS_CACHE.get(key)
+        if cached is None:
+            if capturing:
+                # Recorded, not run: return it uncached and let the graph own it.
+                cached = _derive_awq_shifts(device, bits)
+            elif device.type == "cuda":
+                # A blocking copy from pinned host memory has completed when it
+                # returns, so the published table is valid on every stream.
+                host = torch.tensor(_awq_shift_values(bits), dtype=torch.int64).pin_memory()
+                cached = host.to(device=device, non_blocking=False)
+            else:
+                # CPU and other backends run this arithmetic synchronously.
+                cached = _derive_awq_shifts(device, bits)
+            if not capturing:
+                _AWQ_SHIFTS_CACHE[key] = cached
+        return cached
+
+
 # Upper bound on one tile of INT32 codes inside `dequantize_gemm`. The tile is
 # what keeps the transient footprint of a wide layer proportional to the
 # reconstructed weight instead of a multiple of it; 8 MiB keeps the extra
@@ -239,9 +347,7 @@ def dequantize_gemm(qweight, qzeros, scales, bits, group_size):
     # full-size column gather that `reverse_awq_order` performs.
     shifts = None
     if bits == 4:
-        shifts = torch.tensor(
-            [lane * bits for lane in AWQ_REVERSE_ORDER], dtype=torch.int64, device=device
-        )
+        shifts = _awq_shifts(device, bits)
 
     # Zero points hold one row per group, so they stay small when unpacked once.
     izeros = _unpack_columnwise(qzeros, bits, out_features, dtype=torch.int32, shifts=shifts)

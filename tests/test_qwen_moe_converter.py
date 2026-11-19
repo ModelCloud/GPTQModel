@@ -13,6 +13,7 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3Omni
 
 from gptqmodel.nn_modules.converter import MODULE_CONVERTER_MAP
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.utils.model import thinker_text_model
 
 
 def _make_tiny_moe_config(config_cls):
@@ -126,7 +127,9 @@ def test_qwen3_omni_uses_defuser_for_fused_experts():
 
     model = Qwen3OmniMoeForConditionalGeneration(_make_tiny_qwen3_omni_config())
     convert_model(model, cleanup_original=False, max_layers=1)
-    layer = model.thinker.model.layers[0]
+    # transformers 5.22 nests the thinker decoder under `language_model`;
+    # `thinker_text_model` resolves either layout.
+    layer = thinker_text_model(model).layers[0]
 
     _assert_converted_experts(
         layer,

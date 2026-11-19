@@ -48,6 +48,7 @@ from ...utils.marlin import (
     marlin_runtime_available,
     marlin_runtime_error,
     marlin_sort_g_idx,
+    marlin_stream_workspace,
     marlin_validate_runtime_device,
     replace_parameter,
 )
@@ -58,9 +59,7 @@ from ._compile_support import COMPILE_LEVEL
 
 log = setup_logger()
 
-# SM 7.5 is supported through the FP16-only Turing path.
-_MARLIN_SM75_CAPABILITY = (7, 5)
-_MARLIN_MIN_CAPABILITY = _MARLIN_SM75_CAPABILITY
+_MARLIN_MIN_CAPABILITY = (8, 0)
 
 
 def _g_idx_is_contiguous(g_idx: Optional[torch.Tensor], in_features: int, group_size: int) -> bool:
@@ -109,11 +108,12 @@ class MarlinLinear(GPTQQuantLinear):
 
     REQUIRES_FORMAT_V2 = False
 
-    # Not buildable here: the Marlin torch.ops JIT extension needs CUDA_HOME/nvcc
-    # (both absent), and apply_gptq_marlin_linear has no fake/meta impl, so
-    # dynamo would break. Conservative EAGER; no capture measured.
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): the eager forward and an explicit
+    # ``torch.cuda.graph`` capture both run, and the replayed output matches
+    # eager. ``apply_gptq_marlin_linear`` has no fake/meta implementation, so
+    # ``torch.compile`` still stops at EAGER.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
 
     # The Marlin evaluator adds the bias to its FP32 accumulator before the
     # visible cast, so the buffer keeps its checkpoint width instead of
@@ -311,22 +311,6 @@ class MarlinLinear(GPTQQuantLinear):
         out_features = args.get("out_features")
         desc_act = args.get("desc_act", False)
         group_size = args.get("group_size", -1)
-        device = args.get("device")
-        dtype = args.get("dtype")
-        if dtype == torch.bfloat16 and not IS_ROCM:
-            if isinstance(device, torch.device) and device.type == "cuda":
-                capabilities = (torch.cuda.get_device_capability(device),)
-            elif device == DEVICE.CUDA:
-                capabilities = tuple(
-                    torch.cuda.get_device_capability(index)
-                    for index in range(torch.cuda.device_count())
-                )
-            else:
-                capabilities = ()
-            if _MARLIN_SM75_CAPABILITY in capabilities:
-                return False, NotImplementedError(
-                    "GPTQ Marlin on compute capability 7.5 requires dtype=torch.float16."
-                )
         if in_features is None or out_features is None:
             return True, None
 
@@ -359,7 +343,7 @@ class MarlinLinear(GPTQQuantLinear):
                 raise NotImplementedError("Marlin kernel is not supported on ROCm.")
             if isinstance(device, DEVICE):
                 if not _marlin_all_visible_devices_supported(_MARLIN_MIN_CAPABILITY):
-                    raise NotImplementedError("Marlin kernel only supports compute capability >= 7.5.")
+                    raise NotImplementedError("Marlin kernel only supports compute capability >= 8.0.")
                 return
             target = device if isinstance(device, torch.device) else device.to_torch_device()
             try:
@@ -373,15 +357,11 @@ class MarlinLinear(GPTQQuantLinear):
 
     def post_init(self):
         device = self.qweight.device
-        capability = marlin_validate_runtime_device(
+        marlin_validate_runtime_device(
             device,
             min_capability=_MARLIN_MIN_CAPABILITY,
             backend_name="GPTQ Marlin",
         )
-        if capability == _MARLIN_SM75_CAPABILITY and self.compute_dtype != torch.float16:
-            raise ValueError(
-                "GPTQ Marlin on compute capability 7.5 requires dtype=torch.float16."
-            )
 
         if not marlin_runtime_available(self.compute_dtype):
             raise ModuleNotFoundError(
@@ -414,8 +394,10 @@ class MarlinLinear(GPTQQuantLinear):
 
         self.is_k_full = marlin_is_k_full(effective_desc_act, is_row_parallel=False)
 
-        # Allocate marlin workspace.
+        # Allocate marlin workspace. Each CUDA stream that runs this module
+        # gets its own zeroed copy of these lock counters (#4683).
         self.workspace = marlin_make_workspace_new(device)
+        self._marlin_stream_workspaces = {}
 
         # GPTQModel also accepts group_size=K as channelwise quantization.
         marlin_group_size = (
@@ -548,6 +530,7 @@ class MarlinLinear(GPTQQuantLinear):
         if x.dtype != self.scales.dtype:
             replace_parameter(self, "scales", self.scales.to(dtype=x.dtype))
         bias = self._kernel_bias(x)
+        workspace = marlin_stream_workspace(self)
 
         # Keep aligned layers on the original decode-sensitive call path.
         if self._marlin_tile_padding is None:
@@ -558,7 +541,7 @@ class MarlinLinear(GPTQQuantLinear):
                 weight_zp=self.qzeros,
                 g_idx=self.g_idx,
                 g_idx_sort_indices=self.g_idx_sort_indices,
-                workspace=self.workspace,
+                workspace=workspace,
                 wtype=self.weight_type,
                 output_size_per_partition=self.out_features,
                 input_size_per_partition=self.in_features,
@@ -576,7 +559,7 @@ class MarlinLinear(GPTQQuantLinear):
                 weight_zp=self.qzeros,
                 g_idx=self.g_idx,
                 g_idx_sort_indices=self.g_idx_sort_indices,
-                workspace=self.workspace,
+                workspace=workspace,
                 wtype=self.weight_type,
                 output_size_per_partition=self.out_features,
                 input_size_per_partition=self.in_features,

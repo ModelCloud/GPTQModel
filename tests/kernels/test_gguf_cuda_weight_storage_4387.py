@@ -30,6 +30,13 @@ IN_FEATURES = 896
 OUT_FEATURES = 128
 BITS = "q4_k_m"
 
+# The #5014 dequantizer caches its immutable ``(0, 4)`` uint8 shift table on
+# the device: 2 bytes in one 512-byte allocator block. It is a per-module
+# constant, not a second copy of the packed weight, so the release bound below
+# allows this much before dropping the derived caches. A second packed copy is
+# ``qweight.nbytes`` (73 KiB here), far above this allowance.
+CACHED_CONSTANT_ALLOWANCE = 4096
+
 
 def _require_cuda() -> None:
     if not torch.cuda.is_available():
@@ -100,6 +107,25 @@ def test_forward_leaves_one_device_copy_of_the_packed_weight(bias: bool):
     gc.collect()
     torch.cuda.synchronize()
 
+    # The first forward may retain the #5014 shift table (one 512-byte block),
+    # but not another copy of the packed weight.
+    retained = torch.cuda.memory_allocated()
+    assert retained <= allocated_before - nbytes + CACHED_CONSTANT_ALLOWANCE, (
+        f"the first forward retained {retained - (allocated_before - nbytes)} "
+        f"bytes above the packed-weight release bound; a second device copy "
+        f"would retain {nbytes} bytes (#4387)"
+    )
+
+    # Drop only the module's derived caches. Anything else the forward retained
+    # stays allocated, so this exact bound still proves ``qweight``'s Torch
+    # allocation was released (pre-fix: unchanged).
+    kernel.clear_weight_cache()
+    torch.cuda.synchronize()
+    released_constants = retained - torch.cuda.memory_allocated()
+    assert released_constants <= CACHED_CONSTANT_ALLOWANCE, (
+        f"clear_weight_cache() released {released_constants} bytes, more than "
+        "the module's small device constants"
+    )
     # The Torch allocation of ``qweight`` was released (pre-fix: unchanged).
     assert torch.cuda.memory_allocated() <= allocated_before - nbytes
     weight = kernel._ggml_cuda_weight

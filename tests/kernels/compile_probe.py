@@ -22,7 +22,9 @@ Levels, ascending (see ``gptqmodel/nn_modules/qlinear/_compile_support.py``):
 from __future__ import annotations
 
 import inspect
+import io
 import re
+import tokenize
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -163,11 +165,18 @@ def probe(
         ("inductor", {"backend": "inductor"}),
         ("cudagraph", {"backend": "inductor", "mode": "reduce-overhead"}),
     )
+    cpu_inputs = all(isinstance(arg, torch.Tensor) and arg.device.type == "cpu" for arg in args)
     for name, kwargs in attempts:
-        if not torch.cuda.is_available() and name in ("inductor", "cudagraph"):
-            # Inductor needs device-specific codegen; skip on a CPU-only host.
+        if not torch.cuda.is_available() and name == "cudagraph":
+            # CUDA-graph capture has no CPU equivalent: `mode="reduce-overhead"`
+            # is a CUDA-only graph backend, so this level is CUDA-only by
+            # definition. Inductor *does* codegen for CPU, so it stays probed.
             result.levels[name] = False
-            result.errors[name] = "skipped: no CUDA device"
+            result.errors[name] = "skipped: CUDA graph capture is CUDA-only"
+            continue
+        if name == "inductor" and not torch.cuda.is_available() and not cpu_inputs:
+            result.levels[name] = False
+            result.errors[name] = "skipped: inductor needs a CPU or CUDA device for these inputs"
             continue
         try:
             output = _try_compile(fn, args, **kwargs)
@@ -239,12 +248,14 @@ def protocol_kernels():
     )
 
 
-def skip_without_measurable_device(kernel_cls) -> None:
+def skip_without_measurable_device(kernel_cls, *, device_type: Optional[str] = None) -> None:
     """Skip when the declared level cannot be measured on this host.
 
-    ``INDUCTOR`` and ``CUDAGRAPH`` are CUDA-device levels: on a CPU-only runner
-    the probe reports them as not reached, which is an environment fact rather
-    than a stale declaration.
+    Only ``CUDAGRAPH`` and a CUDA-graph *capture* claim are device-only: both
+    need a CUDA device at measurement time. ``INDUCTOR`` lowers on CPU too, so a
+    CPU-built case that declares it must still run on a CPU-only runner instead
+    of turning into a skip (#5110). Pass ``device_type="cpu"`` for a case whose
+    module is built on the CPU; the per-device override then decides.
     """
 
     from gptqmodel.nn_modules.qlinear._compile_support import (
@@ -253,9 +264,11 @@ def skip_without_measurable_device(kernel_cls) -> None:
         graph_capture_safe,
     )
 
-    declared = compile_level(kernel_cls)
-    needs_device = declared >= COMPILE_LEVEL.INDUCTOR or graph_capture_safe(kernel_cls)
-    if needs_device and not torch.cuda.is_available():
+    declared = compile_level(kernel_cls, device_type=device_type)
+    needs_cuda = declared >= COMPILE_LEVEL.CUDAGRAPH
+    if device_type != "cpu" and graph_capture_safe(kernel_cls):
+        needs_cuda = True
+    if needs_cuda and not torch.cuda.is_available():
         import pytest
 
         pytest.skip(
@@ -263,6 +276,25 @@ def skip_without_measurable_device(kernel_cls) -> None:
             f"{declared.name} / capture={graph_capture_safe(kernel_cls)}, "
             "which needs a CUDA device to measure"
         )
+
+
+def _strip_comments_and_strings(source: str) -> str:
+    """Blank out comments and string literals before the static scan.
+
+    A comment that *documents* a host transfer (``# the op reads data_ptr()``)
+    is not a host transfer, and an error string is not an executed call. Only
+    real code can invalidate a capture, so scan the token stream with
+    ``COMMENT``/``STRING`` tokens removed.
+    """
+
+    skip = {tokenize.COMMENT, tokenize.STRING}
+    pieces: List[str] = []
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            pieces.append(" " if token.type in skip else token.string)
+    except (tokenize.TokenError, IndentationError):
+        return source
+    return "".join(pieces)
 
 
 def graph_unsafe_constructs(kernel_cls: type) -> List[str]:
@@ -275,8 +307,9 @@ def graph_unsafe_constructs(kernel_cls: type) -> List[str]:
         source = inspect.getsource(forward)
     except (OSError, TypeError):
         return []
+    code = _strip_comments_and_strings(source)
     found = []
     for pattern, reason in GRAPH_UNSAFE_PATTERNS.items():
-        if pattern in source:
+        if pattern in code:
             found.append(f"{pattern} ({reason})")
     return found

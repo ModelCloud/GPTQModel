@@ -1,13 +1,13 @@
 {
   "date_utc": "2026-11-07",
-  "scope": "All 57 registered classes inventoried; native fusion numerical qualification covers GPTQ/AWQ only. Other formats remain explicitly ineligible.",
+  "scope": "All 56 registered classes inventoried; native fusion numerical qualification covers GPTQ/AWQ only. Other formats remain explicitly ineligible.",
   "runs": [
     {
       "torch": "2.15.0+cu132",
       "hip": null,
       "python": "3.14.4",
       "accelerator": "NVIDIA GeForce RTX 4090",
-      "registry_class_count": 57,
+      "registry_class_count": 56,
       "rows": [
         {
           "family": "cpu",
@@ -312,19 +312,6 @@
             "cuda"
           ],
           "fusion_layout": "exllamav2",
-          "status": "different_hardware_family"
-        },
-        {
-          "family": "cpu",
-          "kernel": "FP8MlxQuantLinear",
-          "module": "gptqmodel.nn_modules.qlinear.mlx",
-          "methods": [
-            "fp8"
-          ],
-          "declared_devices": [
-            "mps"
-          ],
-          "fusion_layout": null,
           "status": "different_hardware_family"
         },
         {
@@ -1383,19 +1370,6 @@
         },
         {
           "family": "cuda",
-          "kernel": "FP8MlxQuantLinear",
-          "module": "gptqmodel.nn_modules.qlinear.mlx",
-          "methods": [
-            "fp8"
-          ],
-          "declared_devices": [
-            "mps"
-          ],
-          "fusion_layout": null,
-          "status": "different_hardware_family"
-        },
-        {
-          "family": "cuda",
           "kernel": "GGUFCppKernel",
           "module": "gptqmodel.nn_modules.qlinear.gguf_cpp",
           "methods": [
@@ -2032,7 +2006,7 @@
       "hip": "7.16.26385",
       "python": "3.14.10",
       "accelerator": "AMD Radeon AI PRO R9700",
-      "registry_class_count": 57,
+      "registry_class_count": 56,
       "rows": [
         {
           "family": "cpu",
@@ -2337,19 +2311,6 @@
             "cuda"
           ],
           "fusion_layout": "exllamav2",
-          "status": "different_hardware_family"
-        },
-        {
-          "family": "cpu",
-          "kernel": "FP8MlxQuantLinear",
-          "module": "gptqmodel.nn_modules.qlinear.mlx",
-          "methods": [
-            "fp8"
-          ],
-          "declared_devices": [
-            "mps"
-          ],
-          "fusion_layout": null,
           "status": "different_hardware_family"
         },
         {
@@ -3274,19 +3235,6 @@
             "cuda"
           ],
           "fusion_layout": "exllamav2",
-          "status": "different_hardware_family"
-        },
-        {
-          "family": "rocm",
-          "kernel": "FP8MlxQuantLinear",
-          "module": "gptqmodel.nn_modules.qlinear.mlx",
-          "methods": [
-            "fp8"
-          ],
-          "declared_devices": [
-            "mps"
-          ],
-          "fusion_layout": null,
           "status": "different_hardware_family"
         },
         {

@@ -213,7 +213,8 @@ assertion escaped and aborted a forward that raced another thread's
 `ModelLoader.from_pretrained` and `ModelLoader.from_quantized` are wrapped with
 `_serialized_model_load` (`gptqmodel/models/loader.py`), which holds
 `_MODEL_LOAD_LOCK` (an `RLock`) for the whole construction. transformers'
-`from_pretrained` saves, sets and restores `torch.set_default_dtype`
+`from_pretrained` opens a `local_torch_dtype` window that saves, sets and
+restores `torch.set_default_dtype`
 (`transformers/modeling_utils.py`) and builds parameters through meta-device and
 no-init contexts; `from_config` does the same for the quantized shell. Those are
 process-global, so two overlapping loads interleave them and hand back models
@@ -231,6 +232,56 @@ flowchart TD
     E --> B
     I --> D
 ```
+
+Compiled calls do **not** take `_MODEL_LOAD_LOCK`. They take the shared reader
+side of a separate process-global reader/writer lock
+(`_MODEL_GLOBAL_STATE_LOCK`, `gptqmodel/models/loader.py`). The exclusive
+writer side belongs to transformers' `local_torch_dtype` window itself
+(`model_global_state_lock()`): package import calls
+`install_model_global_state_dtype_guard()`
+(`gptqmodel/utils/torch.py`), which wraps that context manager so the writer is
+acquired when the window opens and released when it closes. Construction call
+sites do not take the writer, so the window cannot be widened to a load's weight
+I/O (#5304).
+
+Dynamo's `preserve_global_state` saves and restores the default dtype around
+every trace, and its `GLOBAL_STATE` guard re-reads it on every call. A call that
+re-traces inside a load's bf16 window would restore bf16 after the load restored
+fp32, or fail the load's invariant check (#5127). Holding the load lock for the
+first call only was not enough (#5209); holding it for every call serialized all
+compiled forwards and stalled them for a whole load (#5268). Holding the writer
+around each construction *call* was still wrong for a dense load: that is the
+entire `from_pretrained` body -- weight I/O, dtype casts, device placement,
+packing and kernel post-init -- and stalled every optimized forward for the
+whole load, tens of seconds for a 7B model (#5304). The writer therefore belongs
+to `local_torch_dtype`, the only place that mutates the process-global dtype.
+
+```mermaid
+flowchart LR
+    A["thread 1: load"] --> B["_MODEL_LOAD_LOCK<br/>whole load"]
+    B --> C["weight I/O, dtype casts,<br/>device placement"]
+    C --> D["local_torch_dtype: global-state writer<br/>(default dtype window)"]
+    D --> E["packing, kernel post-init"]
+    E --> F["assert_loaded_model_state"]
+    G["thread 2: compiled call"] --> H["global-state reader"]
+    H --> I["compiled forward"]
+    D -. "excludes" .-> H
+    C -. "does not exclude" .-> H
+    E -. "does not exclude" .-> H
+```
+
+On the reported host a warm `optimize()`d decode step (a 1B GPTQ 4-bit
+checkpoint) measured 16 ms p50 and 20 ms baseline max. With the load in another
+thread the writer was held for 1.50 s of a 1.92 s dense `GPTQModel.load`, and
+the worst decode step was 1516 ms. With the window-scoped writer the same
+measurement is 21 ms of writer hold and the load body overlaps the decode loop;
+the remaining spikes (106-190 ms) are the load's own host work on a
+free-threaded interpreter, not the writer (the dtype window excludes them for
+its 21 ms only).
+
+A load also no longer calls `torch._dynamo.reset()`, which used to discard other
+models' compiled frames and crash a concurrent forward. See
+[torch compile fallback](torch-compile-fallback.md).
 
 `quantize()` itself is not serialized: once a model is loaded, overlapping
 quantization stays supported (section 1).
@@ -323,6 +374,9 @@ and defaults to 1.
 | Dynamo guard fails on a user frame | exception propagates; no double execution |
 | `fullgraph=True` capture failure | exception propagates; no silent fallback |
 | Two `GPTQModel.load()` calls overlap | the second waits, then builds; both models are consistent |
+| A first `TorchLinear` compile overlaps a load | the compile waits for the load lock, then traces with fp32; steady-state forwards stay lock-free |
+| A dense `GPTQModel.load()` overlaps an `optimize()`d forward | the forward waits only for the load's `local_torch_dtype` window, not for weight I/O (#5304) |
+| A construction site forgets to take the writer | impossible: the writer is inside `local_torch_dtype`, not at the call site |
 | A load leaves a mixed dtype, a meta tied weight, or a changed default dtype | `RuntimeError`; the corrupted model is never returned |
 | A float32 parameter is declared by `_keep_in_fp32_modules` / `_keep_in_fp32_modules_strict` | exempt from the dtype checks; still must be materialized |
 | A float32 parameter is *not* declared, or a declared module is left in a half dtype | `RuntimeError`; the corrupted model is never returned |
@@ -330,7 +384,9 @@ and defaults to 1.
 
 ## Validation
 
-The regressions are covered by `tests/test_concurrency_guards.py`,
+The regressions are covered by `tests/test_compile_load_scope_5304.py`,
+`tests/test_quantize_load_global_state_5301.py`,
+`tests/test_compile_lock_scope_5268.py`, `tests/test_concurrency_guards.py`,
 `tests/test_load_state_assertions.py`, `tests/test_concurrent_load.py`,
 `tests/test_hf_init_guard.py`, `tests/test_triton_patch_api.py`,
 `tests/test_awq_triton_cold_jit.py`, and `tests/test_torch_compile_fallback.py`.

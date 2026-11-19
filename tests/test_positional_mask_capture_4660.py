@@ -122,8 +122,13 @@ def _capture(qmodel, layer, example):
     )
 
 
-def _native_layer_inputs(model, example):
-    """The hidden state, mask, and positions the model hands to every block."""
+def _native_layer_inputs(model, example, position_ids=None):
+    """The hidden state, mask, and positions the model hands to every block.
+
+    ``position_ids`` lets the oracle run with the same derived positions the
+    capture uses.  Since #4930 capture derives them from the mask, so the
+    default ``arange`` would only disagree on the pad slots.
+    """
 
     recorded = {}
     outputs = []
@@ -149,11 +154,23 @@ def _native_layer_inputs(model, example):
     )
     try:
         with torch.inference_mode():
-            model(**example, use_cache=False)
+            if position_ids is None:
+                model(**example, use_cache=False)
+            else:
+                model(**example, position_ids=position_ids, use_cache=False)
     finally:
         for handle in handles:
             handle.remove()
     return recorded, outputs
+
+
+def _derived_position_ids(example):
+    """The ids ``generate()``/capture derive from a padded batch mask (#4861)."""
+
+    mask = example["attention_mask"]
+    position_ids = mask.long().cumsum(-1) - 1
+    position_ids.masked_fill_(mask == 0, 1)
+    return position_ids
 
 
 @pytest.mark.parametrize("attn_implementation", ["eager", "sdpa"])
@@ -183,7 +200,9 @@ def test_replayed_layers_reproduce_native_layer_output(attn_implementation):
     model = _gpt2(attn_implementation)
     qmodel = _qmodel(GPT2QModel, model)
     cache = _capture(qmodel, model.transformer.h[0], example)
-    native, outputs = _native_layer_inputs(model, example)
+    native, outputs = _native_layer_inputs(
+        model, example, position_ids=_derived_position_ids(example)
+    )
 
     hidden = cache.layer_inputs[0][0]
     mask = cache.attention_masks[0]

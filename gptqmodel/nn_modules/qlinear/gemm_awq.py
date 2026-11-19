@@ -13,7 +13,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear, empty_linear_output, input_rows
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.packing_utils import AWQ_ORDER, pack_awq_columns
+from ...quantization.awq.utils.packing_utils import AWQ_ORDER, pack_awq_columns, source_weight_out_in
 from ...utils.awq import (
     awq_dequantize_weights,
     awq_gemm_forward,
@@ -154,7 +154,20 @@ class AwqGemmFn(torch.autograd.Function):
                 **({"kernel": kernel} if kernel is not None else {}),
             )
 
+        if out.shape == out_shape:
+            # The GEMM allocated this tensor, so return it as-is: a no-op
+            # `reshape` would still hand autograd a view created inside this
+            # Function, and an in-place update on it is forbidden (#4974).
+            return out
+        # A batched result needs the leading dimensions back. The reshape is a
+        # view created inside this Function, so materialize it only when the
+        # output is autograd-tracked: an untracked result (inference mode or a
+        # forward with no grad-requiring input) accepts an in-place update on
+        # the view, and copying it would add a full-output kernel to every
+        # batched forward (#5086).
         out = out.reshape(out_shape)
+        if any(ctx.needs_input_grad):
+            out = out.clone()
         return out
 
     @staticmethod
@@ -212,11 +225,11 @@ class AwqGEMMLinear(AWQuantLinear):
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemm"
 
-    # Calls the native AWQ GEMM custom op (no fake/meta kernel), so dynamo
-    # breaks. The JIT extension could not build on this host (no
-    # CUDA_HOME/nvcc); EAGER is the conservative static answer.
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output. The native AWQ
+    # GEMM op has no fake/meta kernel, so ``torch.compile`` stops at EAGER.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -414,7 +427,7 @@ class AwqGEMMLinear(AWQuantLinear):
 
         # Gather each input column's group scale/zero in a single pass instead
         # of launching one tiny kernel per input column.
-        weight = linear.weight.data
+        weight = source_weight_out_in(linear)
         group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
         intweight = torch.round(
             (weight.t().float() + scale_zeros.index_select(0, group_index))

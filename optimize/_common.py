@@ -20,10 +20,10 @@ def set_env() -> None:
         os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    os.environ.setdefault(
-        "PYTORCH_ALLOC_CONF",
-        "expandable_segments:True,max_split_size_mb:1024,garbage_collection_threshold:0.5",
-    )
+    # PYTORCH_ALLOC_CONF is left to `import gptqmodel`, which installs the
+    # per-platform default (expandable_segments is off on ROCm, where it corrupts
+    # results after empty_cache()). A value set here would replace it (#5199).
+
     # Kept inline rather than imported from gptqmodel.utils.threads: importing
     # the package helper here would load torch before these defaults exist, and
     # the OpenMP/MKL runtimes read them at load time.
@@ -308,7 +308,4 @@ def add_requant_args(parser: argparse.ArgumentParser) -> None:
         "--no-act-group-aware",
         action="store_true",
         help="Disable activation-group awareness.",
-    )
-    parser.add_argument(
-        "--scale-search", default="activation", help="Scale-search objective."
     )

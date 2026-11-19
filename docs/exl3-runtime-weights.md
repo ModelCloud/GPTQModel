@@ -11,7 +11,7 @@ contract for the generic `EXL3Processor`. The refresh was introduced with
 ## Why the layer inventory is refreshed, not only the subset
 
 One decoder layer is quantized in subsets. After subset `n` is packed,
-`EXL3Processor._stage_runtime_weight` (`gptqmodel/looper/exllamav3_processor.py:2388`)
+`EXL3Processor._stage_runtime_weight` (`gptqmodel/looper/exllamav3_processor.py:2432`)
 replaces that subset's dense weight with a META placeholder and stores a marker
 in `NamedModule.state`. The layer forward that follows still executes every
 module in the layer: earlier subsets are already packed, and later subsets are
@@ -152,3 +152,36 @@ flowchart TD
 
 This page does not add activation padding for non-128-aligned input widths.
 That would require a runtime input boundary and a different stored geometry.
+
+## Process-global torch constants are built outside inference mode
+
+`ExllamaV3TorchLinear` derives its Hadamard matrices, tensor-core permutations
+and codebook LUTs from process-global `functools.lru_cache` factories in
+`gptqmodel/nn_modules/exllamav3_torch.py`. The cache is keyed by device, dtype
+and codebook, never by caller, so whichever forward fills an entry decides the
+tensor kind every later forward receives.
+
+Before #5213 those factories built the constants in the caller's context. The
+first EXL3 torch forward in a process running under `torch.inference_mode()`
+(`generate()`, an eval loop, a server warmup) cached an inference tensor. Every
+later grad-mode forward of **any** model then raised
+`RuntimeError: Inference tensors cannot be saved for backward` in
+`_apply_hadamard_right` until the process restarted. A `.clone()` taken inside
+inference mode is still an inference tensor, so cloning the cached value cannot
+repair the entry; the construction context itself has to be grad-safe.
+
+After #5213 each factory is decorated with `@torch.inference_mode(False)` and
+`@torch.no_grad()` under `@lru_cache`. The constants never need grad, so an
+ordinary tensor is valid in both modes, and the extra context runs only on a
+cache miss (once per device/dtype/codebook key), never per forward.
+
+| | Before | After |
+| --- | --- | --- |
+| Context that fills a cache entry | the caller's mode | `inference_mode(False)` + `no_grad()` |
+| Entry built by an inference-mode forward | inference tensor | ordinary tensor |
+| Grad-mode forward of a second model afterwards | `RuntimeError` in `_apply_hadamard_right` | works |
+| Cache hit | returns whichever kind was built first | always grad-safe |
+
+Regression: `tests/test_exl3_torch_constant_cache_5213.py` warms the cache with
+model A under `inference_mode()`, then forwards a fresh model B in grad mode and
+checks that every cached constant is an ordinary tensor.

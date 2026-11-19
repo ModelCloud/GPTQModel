@@ -16,39 +16,138 @@ than eager; `disable_compile=True` returned it to eager speed (#4669).
 
 ## Flow
 
+The policy runs in `BaseQModel._generation_compile_kwargs()`
+(`gptqmodel/models/base.py:3816`). It never mutates a `generation_config` the
+caller passed: the opt-out is applied to a copy.
+
+### Before #5102
+
+`QQQTorchLinear` (`gptqmodel/nn_modules/qlinear/qqq.py:700`) and `VPTQLinear`
+(`gptqmodel/nn_modules/qlinear/vptq_torch.py:45`) declared
+`SUPPORTS_COMPILE = False`, so `_kernels_support_compile()`
+(`gptqmodel/models/base.py:3772`) answered `False` for every AUTO selection of
+those kernels and the policy injected `disable_compile=True`. The compiled
+path was reachable only when the caller explicitly passed
+`disable_compile=False`.
+
 ```mermaid
 flowchart TD
-    A["GPTQModel.generate(inputs, **kwargs)"] --> B{"runtime generate bound? (sglang)"}
-    B -->|"yes"| C["delegate to the runtime unchanged"]
-    B -->|"no"| D{"caller set disable_compile?"}
-    D -->|"yes (True or False)"| E["keep the caller's choice"]
-    D -->|"no"| F{"caller set compile_config?"}
-    F -->|"yes, as kwarg or on generation_config"| E
-    F -->|"no"| G{"every quantized linear declares SUPPORTS_COMPILE?"}
-    G -->|"yes, or the model is dense"| E
-    G -->|"no"| H["add disable_compile=True for this call"]
-    H --> I["transformers: eager static cache"]
-    E --> J["transformers: the caller's compile policy"]
-    style H fill:#fff3cd,stroke:#997404
+    A["GPTQModel.generate()"] --> B["_generation_compile_kwargs()<br/>base.py:3816"]
+    B --> C{"caller set disable_compile<br/>or compile_config?"}
+    C -->|"yes"| D["keep the caller's choice"]
+    C -->|"no"| E["_kernels_support_compile()<br/>base.py:3772"]
+    E --> F{"every quantized linear<br/>SUPPORTS_COMPILE?"}
+    F -->|"dense model"| D
+    F -->|"QQQTorchLinear=False qqq.py:700<br/>VPTQLinear=False vptq_torch.py:45"| G["inject disable_compile=True"]
+    G --> H["eager static-cache decode<br/>QQQ bf16 2.08 s / VPTQ fp16 0.70 s"]
+    D --> I["transformers compile path<br/>QQQ 0.48 s / VPTQ 0.14 s"]
+    style G fill:#fff3cd,stroke:#997404
+    style H fill:#f8d7da,stroke:#842029
     style I fill:#d1e7dd,stroke:#146c43
-    style E fill:#d1e7dd,stroke:#146c43
 ```
 
-The policy runs in `BaseQModel._generation_compile_kwargs()`. It never mutates a
-`generation_config` the caller passed: the opt-out is applied to a copy.
+### After #5102
+
+Both portable kernels now declare `SUPPORTS_COMPILE = True`, so the default
+policy keeps transformers' auto-compile for them. The FP16-only `QQQLinear`
+CUDA kernel (`qqq.py:189`) and the fused `VPTQCudaLinear`
+(`vptq_cuda.py:30`) keep the opt-out, and `VPTQCudaLinear` re-declares
+`SUPPORTS_COMPILE = False` because it inherits from `VPTQLinear`.
+
+```mermaid
+flowchart TD
+    A["GPTQModel.generate()"] --> B["_generation_compile_kwargs()<br/>base.py:3816"]
+    B --> C{"caller set disable_compile<br/>or compile_config?"}
+    C -->|"yes"| D["keep the caller's choice"]
+    C -->|"no"| E["_kernels_support_compile()<br/>base.py:3772"]
+    E --> F{"every quantized linear<br/>SUPPORTS_COMPILE?"}
+    F -->|"dense, QQQTorchLinear, VPTQLinear"| D
+    F -->|"QQQLinear, VPTQCudaLinear,<br/>MarlinLinear, TorchLinear, ..."| G["inject disable_compile=True"]
+    G --> H["eager static-cache decode"]
+    D --> I["transformers compile path<br/>1 model graph, 0 breaks"]
+    style G fill:#fff3cd,stroke:#997404
+    style I fill:#d1e7dd,stroke:#146c43
+```
+
+### Decision gate
+
+The flag is not inferred from the class name or from a trace alone. A kernel
+only opts in after a model-level static-cache `generate()` traces to one graph
+with zero breaks **and** decodes faster than the eager path on the device it
+claims. A kernel that fails either half stays out and records the measured
+loss in `SUPPORTS_COMPILE_EAGER_REASON`; an opted-in kernel must not keep a
+stale reason.
+
+```mermaid
+flowchart TD
+    M["measure static-cache generate<br/>on the target device"] --> T{"1 model graph,<br/>0 breaks?"}
+    T -->|"no"| O["keep SUPPORTS_COMPILE=False<br/>record the measured loss"]
+    T -->|"yes"| W{"compiled decode faster<br/>than eager?"}
+    W -->|"no"| O
+    W -->|"yes"| Y["SUPPORTS_COMPILE=True<br/>clear SUPPORTS_COMPILE_EAGER_REASON"]
+    O --> S["policy injects disable_compile=True"]
+    Y --> P["policy keeps the auto-compile"]
+    style O fill:#fff3cd,stroke:#997404
+    style S fill:#f8d7da,stroke:#842029
+    style Y fill:#d1e7dd
+    style P fill:#d1e7dd
+```
+
+An ambiguity path is inheritance: `VPTQCudaLinear` is a subclass of
+`VPTQLinear`, so a parent-only opt-in would silently make the fused CUDA
+kernel claim a compiled win it does not have. It re-declares `False` and its
+own measured reason, and `QQQMlxQuantLinear` does the same so the MLX holder
+does not inherit the torch opt-in.
 
 ## Kernel declaration
 
 `BaseQuantLinear.SUPPORTS_COMPILE` (default `False`) is the per-kernel answer to
-"is compiling this forward not a pessimization?". False does not mean
-untraceable — it means the graph breaks and the eager path is fast enough that
-the fragments lose. A kernel opts in only with a measurement on the hardware it
-claims:
+"does compiling this forward beat its eager path?". The bar is **trace-clean**,
+and both halves are required:
+
+1. `torch.compile(..., fullgraph=True)` traces the forward with **zero graph
+   breaks**, and
+2. a compiled decode **measures faster** on the hardware the declaration
+   claims.
+
+A graph-breaking kernel pays for dozens of graph fragments and guard checks per
+decode step, so it loses even when its eager path is slow. A clean trace of a
+forward whose eager path is already fast is a wash, and one timing on one
+architecture does not qualify a kernel (#4739).
+
+A kernel that reaches `INDUCTOR` or higher already satisfies half of that bar,
+so it must answer the other half explicitly: either opt in, or record the
+measured loss in `SUPPORTS_COMPILE_EAGER_REASON`. The protocol test rejects the
+silent case, because that is exactly how `BitsAndBytesLinear` and `MacaqLinear`
+ended up trace-clean and forced eager at the same time (#4984).
 
 | Kernel | `SUPPORTS_COMPILE` | Evidence |
 | --- | --- | --- |
-| `MarlinLinear`, `MarlinAwqLinear`, ExLlamaV2, `TorchLinear`, `TritonV2Linear`, QQQ, FP8, EXL3, Paro | `False` | custom op without a fake impl, or host-side `data_ptr()`/`id()`/`._version` guards in `forward` |
-| `AwqTorchLinear` | `True` | pure-torch reference path; 1.36 s -> 0.76 s on Llama-1B/4090 (#4669), parity on the tiny fixture here. Its subclass `ParoLinear` re-declares `False` because its rotation/GEMM path branches on host row counts |
+| `TorchFP8Linear` | `True` | `fullgraph=True` traces clean (host-visible constants only; the decoded-weight bound is a load-time cache). Static-cache decode 0.126 s -> 0.055 s (2.3x, 1 graph, 0 breaks) on the tiny Llama here (#4739) |
+| `AwqTorchLinear` | `True` | trace-clean since #4737's decode-range guard returns before `tensor_cache_key()` under `is_compiling()`. Static-cache decode 0.174 s -> 0.047 s (1 graph, 0 breaks) on the tiny Llama here; 1.36 s -> 0.76 s on Llama-1B/4090 (#4669). Its subclass `ParoLinear` re-declares `False` because its rotation/GEMM path branches on host row counts |
+| `BitsAndBytesLinear` | `True` | the accelerator path is straight-line: 1 graph, 0 breaks, and a compiled static-cache decode is 2.2-3.5x faster than eager on 4090/5090/R9700. Reproduced here on sm_80 (Qwen2.5-0.5B BnB NF4, 4 prompts x 48 tokens): 1.78 s eager, 1.80 s on the old default path, 0.37 s on the default path after the opt-in (5.5x). AUTO selects this kernel for every BitsAndBytes checkpoint on CUDA, so the opt-out cost 2.2-3.5x by default (#4984) |
+| `MacaqLinear` | `True` | `MACAQ_TORCH` traces to 1 graph with 0 breaks and the compiled decode is 9x faster than its eager torch path (6.67 s -> 0.73 s, #4984). The eager forward still cannot be captured (a host->device table copy), which is why `SUPPORTS_GRAPH_CAPTURE` stays `False`: the policy question is about dynamo, not capture |
+| `QQQTorchLinear` | `True` | the portable torch forward traces to 1 graph with 0 breaks; static-cache decode 2.08 s -> 0.48 s (4.3x) on Qwen2.5-0.5B QQQ bf16, RTX 4090 (sm_89), torch 2.15.0+cu132, 4 prompts x 32 greedy tokens (#5102). The 172-graph reason it used to carry described the FP16-only `QQQLinear` CUDA kernel, not this one |
+| `VPTQLinear` | `True` | the portable torch forward adds 1 model graph with 0 breaks (the layer-local `dequantize` compile exists on both paths); static-cache decode 0.70 s -> 0.14 s (5.1x) on Qwen2.5-0.5B VPTQ fp16, RTX 4090, 4 prompts x 32 greedy tokens (#5102). AUTO selects it on ROCm |
+| `MarlinLinear`, `MarlinAwqLinear`, ExLlamaV2, `TorchLinear`, `TritonV2Linear`, `QQQLinear`, EXL3, `ParoLinear` | `False` | custom op without a fake impl, or host-side `data_ptr()`/`id()`/`._version` guards in `forward` |
+| `VPTQCudaLinear` | `False` | inherits from `VPTQLinear`, so it re-declares the opt-out rather than inheriting it: its static-cache decode recompiles the lazy op loader (23 graphs, 33 breaks) and is 0.60 s -> 1.69 s (1.7x slower) on the RTX 4090 above (#5102) |
+
+A kernel whose `SUPPORTS_COMPILE_LEVEL` is `INDUCTOR` or higher has a traceable,
+lowerable forward, which is the same bar as the policy question above. Opting
+out from there is still allowed (eager really can be faster), but it must record
+the measured loss in `SUPPORTS_COMPILE_EAGER_REASON`, so the two declarations
+cannot drift apart again:
+
+| Kernel | Level | `SUPPORTS_COMPILE` | Recorded reason |
+| --- | --- | --- | --- |
+| `ParoTritonLinear` | `CUDAGRAPH` | `False` | same model-level loss; the single-layer trace is clean, the decode loop is not |
+| `AwqGEMVTritonLinear`, `AwqGEMVTorchLinear` | `CUDAGRAPH` | `False` | explicit-selection-only / CPU-only GEMV paths, never timed under `generate()` |
+| `BitsAndBytesMlxQuantLinear`, `MacaqMlxQuantLinear` | `NOT_APPLICABLE` | `False` | native Metal matmuls; never traced or timed, so they do not inherit the Torch opt-in |
+
+`tests/kernels/test_kernel_compile_protocol.py` rejects a `>= INDUCTOR` kernel
+that opts out without a reason, and `tests/kernels/test_compile_policy_levels_4984.py`
+re-checks the pairing against the measured trace on real hardware (and skips
+kernels this device cannot run).
 
 A dense model has no quantized linear to break the graph, so it keeps whatever
 compile policy the caller chose.
@@ -60,9 +159,68 @@ GB10 (sm_121):
 
 | run | dynamic cache | static cache | static, `disable_compile=True` | dynamo graphs |
 | --- | --- | --- | --- | --- |
-| before (main) | 0.096 s | 0.211 s | 0.103 s | 19 |
-| after | 0.097 s | 0.099 s | 0.099 s | 0 |
-| `AWQ_TORCH` after (declares `True`) | 0.168 s | 0.157-0.257 s | 0.175 s | 20 |
+| Marlin, before #4727 | 0.096 s | 0.211 s | 0.103 s | 19 |
+| Marlin, after #4727 | 0.097 s | 0.099 s | 0.099 s | 0 |
+| `AWQ_TORCH`, after #4737 | 0.171 s | 0.047 s | 0.174 s | 1 |
+| FP8, before #4739 (declares `False`) | 0.123 s | 0.126 s | 0.126 s | 0 |
+| FP8, after #4739 (declares `True`) | 0.123 s | 0.055 s | 0.126 s | 1 |
+
+BitsAndBytes NF4, Qwen2.5-0.5B-Instruct (24 layers), 4 left-padded prompts x 48
+greedy tokens, fp16, PG506 (sm_80), torch 2.15.0.dev+cu130, one shared GPU:
+
+| run | dynamic cache | static cache | static, `disable_compile=True` | static, `disable_compile=False` | dynamo |
+| --- | --- | --- | --- | --- | --- |
+| before #4984 (declares `False`) | 1.873 s | 1.795 s | 1.779 s | 0.607 s | 1 graph, 0 breaks |
+| after #4984 (declares `True`) | 1.961 s | 0.367 s | 2.012 s | 0.311 s | 1 graph, 0 breaks |
+
+The compiled decode reproduced the eager greedy tokens on all four rows here;
+the first compiled call costs 18-35 s of compile time. The two rows are separate
+processes on a shared GPU, so the eager baseline moved (1.78 s vs 2.01 s); the
+point is that the default policy now takes the compiled path instead of adding
+`disable_compile=True`.
+
+### QQQ and VPTQ (#5102)
+
+Measured on RTX 4090 (sm_89), torch 2.15.0+cu132. This host is CUDA-only, so
+the issue's Radeon AI PRO R9700 numbers (QQQ fp16 3.36 s -> 1.29 s, VPTQ fp16
+0.896 s -> 0.333 s) were **not** reproduced here; only the CUDA numbers below
+were measured. Qwen2.5-0.5B-Instruct, 4 left-padded prompts x 32 greedy
+tokens, 3 runs, steady state (3rd run). "eager" forces
+`disable_compile=True`; "compiled" forces `disable_compile=False`; "policy" is
+the default `generate(cache_implementation="static")`.
+
+| kernel / checkpoint | dtype | eager | compiled | speedup | dynamo (compiled) | policy before | policy after |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `QQQTorchLinear`, QQQ, AUTO | bf16 | 2.08 s | 0.48 s | 4.3x | 1 graph, 0 breaks | eager, 2.08 s | 0.53 s (compiled) |
+| `VPTQLinear`, VPTQ, `VPTQ_TORCH` | fp16 | 0.705 s | 0.142 s | 5.0x | 5 graphs, 0 breaks (4 layer-local `dequantize` graphs exist on both paths) | eager, 0.70 s | 0.145 s (compiled) |
+| `VPTQLinear`, VPTQ, `VPTQ_TORCH` | bf16 | 0.718 s | 0.208 s | 3.5x | 5 graphs, 0 breaks (4 + 1 model graph) | eager, 0.72 s | 0.148 s (compiled) |
+| `VPTQCudaLinear`, VPTQ, AUTO (counter-case) | fp16 | 0.602 s | 1.692 s | 0.36x | 23 graphs, 33 breaks | eager, 0.60 s | eager, 0.60 s (unchanged) |
+
+The first compiled call cost 89 s for QQQ in a cold process (22-48 s with a
+warm inductor cache); that is the same one-off cost #5006 accepted for BnB and
+MACaQ. A compiled greedy decode changed 58 of 128 QQQ token positions and 5 of
+128 VPTQ fp16 positions relative to eager, which is the usual inductor
+reduction-order drift; the layer-level QQQ and VPTQ forwards were bit-identical
+to eager (`max_abs = 0`, `max_rel = 0` on the measured layers).
+
+The fused `VPTQCudaLinear` is the counter-case that keeps the opt-out: it
+inherits from `VPTQLinear`, so without an explicit
+`SUPPORTS_COMPILE = False` it would inherit the portable kernel's opt-in and
+claim a compiled win its own decode loop does not have.
+
+`TorchLinear` is deliberately unchanged in this PR. On the same 4090 and GPTQ
+checkpoint, `GPTQ_TORCH` bf16 measured 0.842 s eager -> 0.189 s compiled (4.5x,
+5 graphs, 0 breaks), but fp16 recompiles to 173 graphs (0 breaks) on a
+data-dependent guard and loses: 0.599 s -> 3.746 s (6.3x slower). A class-level
+`SUPPORTS_COMPILE` cannot express that split, and its declared compile level is
+also `EAGER` for the same fp16/CUDA-streaming path, so a correct dtype-aware
+refinement has to make both declarations instance-aware. That is a separate
+change.
+
+Compiling FP8 changes the reduction order, so a compiled greedy decode can pick
+a different token from the eager one on some weights, while staying
+deterministic run to run; `disable_compile=True` still reproduces the dynamic
+tokens exactly. The same holds for the compiled AWQ decode.
 
 The reporter's Llama-1B numbers were larger (0.33 s eager vs 0.98-1.05 s static
 for Marlin).
@@ -90,13 +248,52 @@ still synchronise the host inside `forward`.
 and the per-family `test_kernel_compile_levels_*.py` files re-measure them on
 real hardware with `tests/kernels/compile_probe.py`.
 
+## `optimize()` and `generate()`
+
+`generate()` resolves to the original module's `generate`, and transformers'
+`generate` calls `self(...)` — the module's own `forward`. Wrapping the model in
+a `torch.compile` `OptimizedModule` therefore compiled nothing that `generate()`
+ran: `OptimizedModule.__getattr__` handed `generate` back to the unwrapped
+module (#4669 item 2). `BaseQModel.optimize()` now compiles `forward` in place
+instead of replacing `self.model`, so a direct `model(...)` call and `generate()`
+both enter the compiled path. `self.model` stays the original `nn.Module`; a
+repeated `optimize()` unwraps the previous proxy and recompiles the eager
+callable, so wrappers do not stack. The compile fallback and `fullgraph`
+semantics are unchanged.
+
+This is an explicit opt-in: for a graph-breaking kernel the compiled forward is
+still slower than eager, which is exactly why the static-cache auto-compile is
+off by default for those kernels. Compiling can also change the reduction order
+and therefore a greedy token, as documented for FP8/AWQ above.
+
+### Releasing the compiled model
+
+`optimize()` installs a `_CompiledModelForward` proxy that reaches the model
+through a weak reference, so the proxy itself never closes a
+`model -> forward -> model` cycle (#4937). Torch.compile adds a second, hidden
+holder: every frame dynamo traces builds `VariableTracker` objects, and a graph
+break leaves an `UnspecializedNNModuleVariable` -> `SideEffectsProxyDict` ->
+`DunderDictVariable` cycle that keeps the traced module reachable. Reference
+counting cannot reclaim those cycles, so before #5020 a compiled model kept its
+weights and VRAM after the caller dropped it until a full cyclic
+`gc.collect()` - the whole 0.43 GiB model on Qwen2.5-0.5B, for `GPTQ_TRITON`,
+`GPTQ_TORCH` and `MARLIN` alike.
+
+The proxy now calls `release_compile_trace_garbage()` whenever a compiled call
+traces a new frame (`dynamo_traced_frames()` grew): once per new frame, not per
+token. Only the unreachable cycles are collected, and dynamo's compiled-frame
+cache is left intact, so the next call still takes the compiled path. Dropping
+the model then frees it immediately, with cyclic GC disabled.
+
 ## What remains
 
-- `optimize()` still compiles `self.model`, which `generate()` does not call:
-  `OptimizedModule.__getattr__` resolves `generate` to the original module, so
-  the compiled wrapper is bypassed. Fixing that means compiling the forward
-  `generate()` actually runs, which changes what `self.model` is; it is a
-  separate change.
 - A kernel can flip `SUPPORTS_COMPILE` to `True` after it gains a fake
   implementation for its custom op and moves its identity/version guards out of
   the traced `forward`.
+- `TorchLinear` needs a dtype-aware refinement: bf16 is a compiled win, fp16
+  recompiles on a data-dependent guard and loses. Both the policy flag and the
+  declared compile level are class attributes today, so the refinement has to
+  make both instance-aware first.
+- `VPTQCudaLinear` stays out until its `vptq_dequantize`/`vptq_linear` ops gain
+  fake implementations (its decode loop currently recompiles on the lazy
+  `import_module` loader).

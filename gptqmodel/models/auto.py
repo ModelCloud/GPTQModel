@@ -103,6 +103,7 @@ from .definitions.dbrx import DbrxQModel  # noqa: E402
 from .definitions.dbrx_converted import DbrxConvertedQModel  # noqa: E402
 from .definitions.dots3_note import Dots3NoteQModel  # noqa: E402
 from .definitions.decilm import DeciLMQModel  # noqa: E402
+from .definitions.decision_transformer import DecisionTransformerQModel  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2QModel  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3QModel  # noqa: E402
 from .definitions.deepseek_v32 import DeepSeekV32QModel  # noqa: E402
@@ -237,6 +238,7 @@ from .definitions.qwen3_vl import Qwen3_VLQModel, Qwen3_VL_MoeQModel
 from .definitions.qwen_drive import QwenDriveQModel  # noqa: E402
 from .definitions.qwen4_exp import Qwen4ExpQModel, Qwen4ExpTextQModel  # noqa: E402
 from .definitions.rw import FalconQModel, RwgQModel  # noqa: E402
+from .definitions.sensenova_loop import SenseNovaLoopQModel  # noqa: E402
 from .definitions.solar_open import SolarOpenQModel  # noqa: E402
 from .definitions.solar_open2 import SolarOpen2QModel  # noqa: E402
 from .definitions.smolvlm import SmolVLMQModel  # noqa: E402
@@ -287,6 +289,9 @@ MODEL_MAP = {
     "gpt_neox": GPTNeoXQModel,
     "gptj": GptJQModel,
     "gpt2": GPT2QModel,
+    # Decision Transformer wraps a GPT-2 decoder under `encoder` and has no
+    # tokenizer; see definitions/decision_transformer.py.
+    "decision_transformer": DecisionTransformerQModel,
     "llama": LlamaQModel,
     "smollm3": LlamaQModel,  # llama-compatible quantization module tree
     "smolvlm": SmolVLMQModel,
@@ -445,6 +450,7 @@ MODEL_MAP = {
     "solar_open": SolarOpenQModel,
     "solar_open2": SolarOpen2QModel,
     "spark2_5": Spark2_5QModel,
+    "sensenova_loop": SenseNovaLoopQModel,
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashQModel,
     "locateanything": LocateAnythingQModel,
@@ -641,6 +647,30 @@ def _get_config_load_kwargs(kwargs: dict) -> dict:
     return config_kwargs
 
 
+def select_model_definition(model_type: str, config) -> type:
+    """Return the definition the loader uses for an already-resolved ``config``.
+
+    Mirrors `check_and_get_model_definition` without reading a checkpoint, so
+    tests (for example the meta-device MoE coverage sweep) resolve exactly the
+    definition a real load would pick.
+    """
+
+    model_type = (model_type or "").lower()
+
+    # Unsupported model types use BaseQModel and fail closed unless the caller
+    # supplies an explicit model definition/module tree.
+    definition = MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
+
+    # `kimi_linear` covers two incompatible layouts: the legacy AttnRes/K3
+    # checkpoint that needs the bounded K3 runner, and native Transformers
+    # `KimiLinearForCausalLM` (no AttnRes), which quantizes with the ordinary
+    # looper. Dispatch on config fields rather than on the registry key.
+    if model_type == "kimi_linear" and not is_kimi_k3_config(config):
+        return KimiLinearNativeQModel
+
+    return definition
+
+
 def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_load_kwargs):
     if "gguf_file" not in config_load_kwargs:
         model_dir = normalize_model_id_or_path_for_hf_gguf(
@@ -653,9 +683,7 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code, **config_load_kwargs)
     model_type = config.model_type.lower()
 
-    # Unsupported model types use BaseQModel and fail closed unless the caller
-    # supplies an explicit model definition/module tree.
-    definition = MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
+    definition = select_model_definition(model_type, config)
 
     # `model_type: llava` covers both the Hugging Face composite checkpoint and
     # the original liuhaotian checkpoint, which declares a plain causal-LM
@@ -669,13 +697,6 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
             "Hugging Face `LlavaForConditionalGeneration` checkpoint. Use the "
             "Hugging Face format instead, e.g. `llava-hf/llava-1.5-7b-hf`."
         )
-
-    # `kimi_linear` covers two incompatible layouts: the legacy AttnRes/K3
-    # checkpoint that needs the bounded K3 runner, and native Transformers
-    # `KimiLinearForCausalLM` (no AttnRes), which quantizes with the ordinary
-    # looper. Dispatch on config fields rather than on the registry key.
-    if model_type == "kimi_linear" and not is_kimi_k3_config(config):
-        return KimiLinearNativeQModel
 
     return definition
 
@@ -724,7 +745,8 @@ def _quantize_warmup_devices(quantize_config, device) -> Optional[List[torch.dev
     describes inference placement rather than the quantization pool.
     """
 
-    explicit_devices = _explicit_requested_devices(device)
+    # The quantization pool may span compute capabilities (#4875).
+    explicit_devices = _explicit_requested_devices(device, validate_families=False)
     compute_device_filter = getattr(quantize_config, "compute_device_filter", None)
     if explicit_devices is None and compute_device_filter is None:
         return None
@@ -742,19 +764,19 @@ def _quantize_warmup_devices(quantize_config, device) -> Optional[List[torch.dev
             auto_select_device(None, None)
         )
 
-    candidates = select_forward_devices(base_device)
+    if explicit_devices is not None:
+        # The caller named the exact pool, which may span compute capabilities
+        # for a quantization run (#4875). ``select_forward_devices`` would keep
+        # only the first capability group.
+        candidates = list(explicit_devices)
+    else:
+        candidates = select_forward_devices(base_device)
     if compute_device_filter is not None:
         filtered = compute_device_filter(candidates)
         # The loopers keep the full pool when the filter rejects everything.
         if not filtered:
             return None
         candidates = list(filtered)
-    elif explicit_devices is not None:
-        wanted = {str(target) for target in explicit_devices}
-        subsets = [target for target in candidates if str(target) in wanted]
-        if not subsets:
-            return None
-        candidates = subsets
 
     devices: List[torch.device] = []
     for candidate in candidates:
@@ -992,6 +1014,17 @@ class GPTQModel:
                             break
 
         if is_gptqmodel_quantized:
+            if quantize_config is not None:
+                # A quantized checkpoint's bits/group_size/method/format come
+                # from the checkpoint itself. Forwarding a caller config into
+                # `from_quantized` would either be ignored (the old behavior)
+                # or silently disagree with the tensors on disk (#4945).
+                raise ValueError(
+                    "GPTQModel.load: `quantize_config` cannot be applied to a "
+                    "quantized checkpoint; its quantization settings are read "
+                    "from the checkpoint. Load without `quantize_config` to use "
+                    "them, or pass an unquantized model to quantize."
+                )
             m = cls.from_quantized(
                 model_id_or_path=model_id_or_path,
                 device_map=device_map,
@@ -1032,7 +1065,7 @@ class GPTQModel:
 
         # Weight quantization does not change the cache, so state what context
         # costs as soon as a model is loaded for inference.
-        m.log_kv_cache_estimate()
+        m.log_budget()
 
         return m
 
@@ -1247,101 +1280,6 @@ class GPTQModel:
             module_tree=module_tree,
             **kwargs,
         )
-
-    @staticmethod
-    def export(model_id_or_path: str, target_path: str, format: str, trust_remote_code: bool = False):
-        normalized_format = str(format).strip().lower()
-        if normalized_format not in ("hf", "mlx"):
-            raise ValueError(
-                f"Unsupported export format: {format!r}. Expected 'hf' or 'mlx'."
-            )
-
-        trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
-
-        if normalized_format == "hf":
-            # Export through the checkpoint-level dequantizer: it understands
-            # every stored layout (AWQ, GPTQ, quantized embeddings, legacy
-            # quantize_config.json) instead of assuming a TorchLinear runtime.
-            from ..utils.hub import snapshot_download
-            from ..utils.model_dequant import dequantize_model
-
-            source_path = model_id_or_path
-            if not isdir(source_path):
-                source_path = snapshot_download(repo_id=model_id_or_path)
-            from pathlib import Path
-
-            target = Path(target_path)
-            empty_existing = target.is_dir() and not any(target.iterdir())
-            dequantize_model(
-                source_path,
-                target_path,
-                trust_remote_code=trust_remote_code,
-                resume=empty_existing,
-            )
-            return
-
-        # load config
-        config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
-
-        if not getattr(config, "quantization_config", None):
-            raise ValueError("Model is not quantized")
-
-        gptq_config = config.quantization_config
-
-        method = gptq_config.get("method", gptq_config.get("quant_method", ""))
-        normalized_method = str(method).lower()
-        if normalized_method == METHOD.GGUF.value:
-            backend = BACKEND.GGUF_TORCH
-        elif normalized_method == METHOD.BITSANDBYTES.value:
-            backend = BACKEND.BITSANDBYTES
-        elif normalized_method == METHOD.AWQ.value:
-            backend = BACKEND.AWQ_TORCH
-        elif normalized_method == METHOD.PARO.value:
-            backend = BACKEND.PARO_CUDA
-        elif normalized_method == METHOD.FP8.value:
-            backend = BACKEND.FP8_TORCH
-        elif normalized_method == METHOD.NF12.value:
-            backend = BACKEND.NF12
-        elif normalized_method == METHOD.MACAQ.value:
-            backend = BACKEND.MACAQ_TORCH
-        elif normalized_method == METHOD.EXL3.value:
-            backend = BACKEND.EXL3_TORCH
-        else:
-            backend = BACKEND.GPTQ_TORCH
-
-        # load gptq model
-        gptq_model = GPTQModel.load(
-            model_id_or_path,
-            backend=backend,
-            trust_remote_code=trust_remote_code,
-        )
-
-        if normalized_format == "mlx":
-            try:
-                from mlx_lm.utils import save_config, save_model
-
-                from ..utils.mlx import convert_gptq_to_mlx_weights
-            except ImportError:
-                raise ValueError(
-                    "MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
-
-            mlx_weights, mlx_config = convert_gptq_to_mlx_weights(gptq_model.model_local_path or model_id_or_path, gptq_model, gptq_config,
-                                                                  gptq_model.lm_head, stock_compatible=True)
-
-            if mlx_config.pop("_gptqmodel_group16_runtime", False) or mlx_config.pop(
-                "_gptqmodel_custom_mlx_runtime", False
-            ):
-                raise ValueError(
-                    "MLX export produced a GPT-QModel custom-runtime checkpoint "
-                    "that stock `mlx_lm.load` cannot read; export a supported "
-                    "format or load it through `GPTQModel.load(backend='mlx')`."
-                )
-
-            save_model(target_path, mlx_weights, donate_model=True)
-
-            save_config(mlx_config, config_path=target_path + "/config.json")
-        # save tokenizer to target path
-        gptq_model.tokenizer.save_pretrained(target_path)
 
     class adapter:
         @classmethod

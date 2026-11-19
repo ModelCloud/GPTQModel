@@ -1,0 +1,290 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+
+"""Regression for #4858: a `messages` calibration row keeps its `tools`.
+
+The standard HF tool-calling layout is `{"messages": [...], "tools": [...]}`.
+`_tokenize_messages_value` rendered only `messages`, so the tool schema block
+the model sees at inference never reached the Hessian: on Qwen2.5-0.5B a
+one-tool row produced 101 tokens instead of 236.
+"""
+
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from gptqmodel.utils.calibration import prepare_calibration_dataset
+
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather for a city",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+        },
+    }
+]
+MESSAGES = [
+    {"role": "system", "content": "You answer weather questions precisely."},
+    {"role": "user", "content": "What is the weather in Paris today?"},
+]
+
+
+class _ToolAwareTokenizer:
+    """Renders `tools`/`documents` into the text, like a real chat template."""
+
+    chat_template = "{{ messages }}"
+    pad_token_id = 0
+    padding_side = "right"
+    truncation_side = "right"
+
+    def __init__(self, reject_template_inputs: bool = False):
+        self.reject_template_inputs = reject_template_inputs
+        self.calls = []
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False, **kwargs):
+        self.calls.append(dict(kwargs))
+        if self.reject_template_inputs and kwargs:
+            raise ValueError("this chat template does not use tools")
+        text = " ".join(message["content"] for message in messages)
+        for key in ("tools", "documents"):
+            if key in kwargs:
+                text += f" {key.upper()} {json.dumps(kwargs[key])}"
+        return text
+
+    def __call__(self, text, add_special_tokens=True, return_tensors="pt", **kwargs):
+        tokens = max(1, len(str(text).split()))
+        ids = torch.arange(1, tokens + 1).unsqueeze(0)
+        return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
+
+    def decode(self, ids, skip_special_tokens=False):
+        return " ".join(str(int(token)) for token in ids)
+
+
+def _qmodel(tokenizer):
+    return SimpleNamespace(
+        tokenizer=tokenizer,
+        support_batch_quantize=True,
+        model=SimpleNamespace(config=SimpleNamespace(max_position_embeddings=4096)),
+    )
+
+
+def _prepare(tokenizer, row, **kwargs):
+    kwargs.setdefault("batch_size", 1)
+    kwargs.setdefault("calibration_data_min_length", 0)
+    return prepare_calibration_dataset(_qmodel(tokenizer), [row], **kwargs)
+
+
+def test_tools_are_forwarded_to_the_chat_template():
+    tokenizer = _ToolAwareTokenizer()
+
+    plain = _prepare(tokenizer, {"messages": MESSAGES})
+    with_tools = _prepare(tokenizer, {"messages": MESSAGES, "tools": TOOLS})
+
+    assert tokenizer.calls[-1]["tools"] == TOOLS
+    assert with_tools[0]["input_ids"].shape[-1] > plain[0]["input_ids"].shape[-1]
+
+
+def test_documents_are_forwarded_to_the_chat_template():
+    tokenizer = _ToolAwareTokenizer()
+    documents = [{"title": "doc", "text": "the weather in Paris"}]
+
+    prepared = _prepare(tokenizer, {"messages": MESSAGES, "documents": documents})
+
+    assert tokenizer.calls[-1]["documents"] == documents
+    assert prepared[0]["input_ids"].numel() > 0
+
+
+def test_a_row_without_template_inputs_is_unchanged():
+    tokenizer = _ToolAwareTokenizer()
+
+    _prepare(tokenizer, {"messages": MESSAGES})
+
+    assert tokenizer.calls[-1] == {}
+
+
+class _RecordingLogger:
+    def __init__(self):
+        self.warnings = []
+
+    def info(self, message, *args, **kwargs):
+        pass
+
+    def warn(self, message, *args, **kwargs):
+        self.warnings.append(message % args if args else message)
+
+    warning = warn
+
+
+def test_a_template_that_rejects_tools_keeps_the_row_and_warns():
+    tokenizer = _ToolAwareTokenizer(reject_template_inputs=True)
+    logger = _RecordingLogger()
+
+    prepared = _prepare(tokenizer, {"messages": MESSAGES, "tools": TOOLS}, logger=logger)
+
+    assert prepared[0]["input_ids"].numel() > 0
+    assert any("rejected the calibration row" in message for message in logger.warnings)
+
+
+def test_qwen2_5_renders_the_tool_schema():
+    """Real tokenizer: the rendered row matches `apply_chat_template(tools=...)`."""
+
+    tokenizer = _offline_qwen_tokenizer()
+
+    prepared = _prepare(tokenizer, {"messages": MESSAGES, "tools": TOOLS})
+    ids = prepared[0]["input_ids"][0].tolist()
+
+    expected = tokenizer.apply_chat_template(
+        MESSAGES, tools=TOOLS, tokenize=True, add_generation_prompt=False
+    )
+    # ``tokenize=True`` returns a ``BatchEncoding`` (a ``UserDict``, not a dict).
+    expected_ids = expected["input_ids"] if "input_ids" in expected else expected
+    assert ids == list(expected_ids)
+
+
+# ---------------------------------------------------------------------------
+# #4934: the two layouts a `tools` column takes when it comes from the Hub.
+# ---------------------------------------------------------------------------
+
+
+def test_json_string_tools_are_decoded_before_rendering():
+    """A JSON-string `tools` column is the layout Arrow forces on the Hub."""
+
+    tokenizer = _ToolAwareTokenizer()
+
+    _prepare(tokenizer, {"messages": MESSAGES, "tools": json.dumps(TOOLS)})
+
+    assert tokenizer.calls[-1]["tools"] == TOOLS
+
+
+def test_a_single_json_tool_is_presented_as_a_list():
+    """`apply_chat_template` iterates `tools`, so one tool must be a list."""
+
+    tokenizer = _ToolAwareTokenizer()
+
+    _prepare(tokenizer, {"messages": MESSAGES, "tools": json.dumps(TOOLS[0])})
+
+    assert tokenizer.calls[-1]["tools"] == TOOLS
+
+
+def test_arrow_injected_null_properties_are_dropped():
+    """Arrow unifies the struct schema across rows, adding `null` properties."""
+
+    unified = json.loads(json.dumps(TOOLS[0]))
+    # Arrow unions the struct schema of every row in the column, so a row whose
+    # tool only declares `city` also gains the other rows' `tz` as `null`.
+    unified["function"]["parameters"]["properties"]["tz"] = None
+    tokenizer = _ToolAwareTokenizer()
+
+    _prepare(tokenizer, {"messages": MESSAGES, "tools": [unified]})
+
+    assert tokenizer.calls[-1]["tools"] == TOOLS
+
+
+def test_a_plain_string_documents_value_is_not_parsed_as_json():
+    """Only object/array JSON is decoded; a document string stays a string."""
+
+    tokenizer = _ToolAwareTokenizer()
+
+    _prepare(tokenizer, {"messages": MESSAGES, "documents": "the weather in Paris"})
+
+    assert tokenizer.calls[-1]["documents"] == "the weather in Paris"
+
+
+def test_a_columnar_mapping_keeps_the_tools_column():
+    """`dataset[:]` yields one entry per column; `tools` must survive the split."""
+
+    tokenizer = _ToolAwareTokenizer()
+
+    prepared = prepare_calibration_dataset(
+        _qmodel(tokenizer),
+        {"messages": [MESSAGES, MESSAGES], "tools": [TOOLS, TOOLS]},
+        batch_size=1,
+        calibration_data_min_length=0,
+    )
+
+    assert len(prepared) == 2
+    assert tokenizer.calls[-1]["tools"] == TOOLS
+
+
+def _offline_qwen_tokenizer():
+    """Return a Qwen2.5 tokenizer, or skip when neither repo is cached."""
+
+    from transformers import AutoTokenizer
+
+    for repo_id in ("Qwen/Qwen2.5-0.5B-Instruct", "Qwen/Qwen2.5-0.5B-Instruct-AWQ"):
+        try:
+            return AutoTokenizer.from_pretrained(repo_id, local_files_only=True)
+        except Exception:
+            continue
+    # Raise the skip exception explicitly: a bare ``pytest.skip(...)`` here
+    # would leave the loop's exit as an implicit fall-through return, mixing
+    # explicit and implicit returns in one function.
+    raise pytest.skip.Exception("a Qwen2.5 tokenizer is not available offline")
+
+
+def test_hub_tool_layouts_render_exactly_like_inference():
+    """Every Hub storage layout renders the same ids as `tools=[schema]`."""
+
+    datasets = pytest.importorskip("datasets")
+    tokenizer = _offline_qwen_tokenizer()
+
+    messages = [
+        {"role": "user", "content": "What is the weather in Paris?"},
+        {"role": "assistant", "content": "Sunny."},
+    ]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city" if name == "get_weather" else "tz": {"type": "string"}},
+                },
+            },
+        }
+        for name in ("get_weather", "get_time")
+    ]
+
+    def expected_ids(tool):
+        rendered = tokenizer.apply_chat_template(
+            messages, tools=[tool], tokenize=True, add_generation_prompt=False
+        )
+        return list(rendered["input_ids"] if "input_ids" in rendered else rendered)
+
+    reference = [expected_ids(tool) for tool in tools]
+    dict_rows = [{"messages": messages, "tools": [tool]} for tool in tools]
+    string_rows = [{"messages": messages, "tools": json.dumps(tool)} for tool in tools]
+    dataset = datasets.Dataset.from_list(string_rows)
+
+    cases = {
+        "list rows with dict tools": dict_rows,
+        "list rows with JSON-string tools": string_rows,
+        "HF Dataset rows with dict tools": datasets.Dataset.from_list(dict_rows),
+        "HF Dataset rows with JSON-string tools": dataset,
+        "HF Dataset[:] columnar mapping": dataset[:],
+    }
+    # `dataset.with_format(...)[:]` hands the row over as a NumPy object array,
+    # a pandas Series, or a pyarrow table; the schema must survive all three.
+    for display_format in ("numpy", "pandas", "arrow"):
+        try:
+            cases[f"HF Dataset with_format({display_format!r})[:]"] = dataset.with_format(display_format)[:]
+        except Exception:
+            continue
+
+    for label, calibration_data in cases.items():
+        prepared = prepare_calibration_dataset(
+            _qmodel(tokenizer),
+            calibration_data,
+            batch_size=1,
+            calibration_data_min_length=0,
+        )
+        rendered = [row["input_ids"][0].tolist() for row in prepared]
+        assert rendered == reference, label

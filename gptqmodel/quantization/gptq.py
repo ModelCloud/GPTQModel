@@ -31,7 +31,14 @@ from ..utils.logger import setup_logger
 from ..utils.p2p import p2p_all_enabled, safe_move_to
 from ..utils.rocm import quant_blas_backend
 from .conv_padding import conv_padding_pairs, pad_mode
-from .fallback_smooth import affine_range_with_zero, mse_optimal_quant, smooth_block, symmetric_range
+from .fallback_smooth import (
+    affine_range_with_zero,
+    element_saliency_weights,
+    hessian_column_weights,
+    mse_optimal_quant,
+    smooth_block,
+    symmetric_range,
+)
 from .gar import (
     compose_final_perm,
     compute_global_perm,
@@ -106,6 +113,13 @@ def _log_hessian_verbose() -> bool:
     line noise.
     """
     return env_flag("GPTQMODEL_LOG_HESSIAN")
+
+
+# ``desc_act`` orders the columns by Hessian diagonal, so a handful of
+# massive-activation rows can own the ordering and saturate the columns
+# correlated with them (issue #4742). Rows above this percentile of the
+# row-norm distribution are clamped to it before ``X^T X``.
+SINK_ROW_CAP_PERCENTILE = 99.9
 
 
 _WORKSPACE_LOCKS_GUARD = threading.Lock()
@@ -681,6 +695,19 @@ class GPTQ:
         self, device: torch.device | str | None
     ) -> None:
         target = None if device is None else torch.device(device)
+        if (
+            target is not None
+            and target.type != "cpu"
+            and target.index is None
+        ):
+            raise ValueError(
+                f"GPTQ module `{getattr(self, 'name', '<unknown>')}`: the "
+                "Hessian accumulator device "
+                f"must name a concrete ordinal, got `{target}`. An index-less "
+                "accelerator device resolves to the calling thread's current "
+                "device, so data-parallel workers would key different GPUs "
+                "under the same accumulator entry (#5093)."
+            )
         current = self._hessian_accumulator_device
         if current is not None and target is not None and current != target:
             raise RuntimeError("shared Hessian accumulator ownership changed")
@@ -1074,6 +1101,129 @@ class GPTQ:
                     finally:
                         pass
 
+    def sink_row_cap_median_multiple(self) -> Optional[float]:
+        """Return the sink-row cap multiplier, or ``None`` when it does not apply.
+
+        ``desc_act=True`` disables ``act_group_aware``, and with it the
+        per-group scale protection that keeps a few massive-activation
+        ("attention sink") rows from dominating ``X^T X``. Those rows then own
+        the largest Hessian diagonal entries, so ``desc_act`` quantizes their
+        columns first with a tiny ``Hinv[i, i]``; the resulting error is
+        amplified into every column correlated with the sink and saturates it
+        (issue #4742). Capping each row's norm bounds that contribution while
+        keeping the sink direction in the Hessian.
+
+        The cap is a no-op whenever ``act_group_aware`` is active (the default
+        GPTQ path) so that configuration stays bit-identical.
+        """
+
+        qcfg = getattr(self, "qcfg", None)
+        if qcfg is None or not qcfg.desc_act or qcfg.act_group_aware:
+            return None
+
+        multiple = getattr(qcfg.hessian, "sink_row_cap_median_multiple", None)
+        if multiple is None:
+            return None
+        multiple = float(multiple)
+        if multiple <= 0.0:
+            return None
+        return multiple
+
+    def _sink_row_norms(self, matrix: torch.Tensor, chunk_size: Optional[int]) -> torch.Tensor:
+        """Return per-row fp32 L2 norms, staged chunk-by-chunk (device-only)."""
+
+        rows = matrix.shape[0]
+        norms = torch.empty(rows, dtype=torch.float32, device=matrix.device)
+        # Keep the fp32 staging bounded even when the caller accumulates the
+        # Hessian in one chunk.
+        step = chunk_size if chunk_size is not None else max(1, (1 << 20) // max(1, matrix.shape[1]))
+        step = min(step, rows)
+        for start in range(0, rows, step):
+            stop = min(start + step, rows)
+            norms[start:stop] = torch.linalg.vector_norm(
+                matrix[start:stop], ord=2, dim=1, dtype=torch.float32
+            )
+        return norms
+
+    def resolve_sink_row_cap_threshold(
+        self, matrix: torch.Tensor, chunk_size: Optional[int]
+    ) -> Optional[torch.Tensor]:
+        """Return the scalar sink-row norm cap threshold, or ``None``.
+
+        The threshold is ``min(p99.9 of the row norms, multiple x median)``.
+        The percentile alone is not enough on a small batch, where it *is* the
+        largest row (two sink rows in a 64-row batch sit above p99.9); the
+        median multiple then supplies the bound. On a large calibration window
+        the percentile is the binding term and the cap only touches the few
+        extreme rows.
+
+        The threshold is derived from the whole batch, not per chunk, so the
+        result does not depend on ``HessianConfig.chunk_size``. Row norms are
+        computed chunk-by-chunk in fp32, so the whole matrix is never staged in
+        fp32 just to take the norms.
+
+        Everything is a tensor op: ``compute_hessian_xtx`` runs inside the layer
+        forward hooks, so a ``bool()``/``float()`` here would drain the CUDA
+        queue on every ``add_batch`` (issue #4950). A non-finite or non-positive
+        threshold becomes ``+inf`` (which makes every scale 1) instead of an
+        early ``None``, so the decision never reads the host.
+        """
+
+        multiple = self.sink_row_cap_median_multiple()
+        if multiple is None:
+            return None
+
+        rows = matrix.shape[0]
+        if rows == 0:
+            return None
+
+        norms = self._sink_row_norms(matrix, chunk_size)
+        # One device sort serves both quantiles: two ``kthvalue`` calls cost
+        # ~1.5x more and are the only per-batch work the cap still adds.
+        ordered = torch.sort(norms).values
+        median = ordered[(rows + 1) // 2 - 1]
+        rank = max(1, min(rows, math.ceil(SINK_ROW_CAP_PERCENTILE / 100.0 * rows)))
+        percentile = ordered[rank - 1]
+        threshold = torch.minimum(percentile, median * multiple)
+        # ``main`` returned ``None`` (no cap) on any non-finite row norm or a
+        # non-positive threshold. Folding that into the tensor keeps the
+        # decision identical without a host read.
+        usable = (
+            torch.isfinite(norms).all()
+            & torch.isfinite(threshold)
+            & (threshold > 0.0)
+        )
+        return torch.where(usable, threshold, torch.full_like(threshold, float("inf")))
+
+    def _sink_row_cap_scale_from_threshold(
+        self,
+        matrix: torch.Tensor,
+        threshold: torch.Tensor,
+        chunk_size: Optional[int],
+    ) -> torch.Tensor:
+        """Turn a scalar cap threshold into a per-row clamp scale (device-only)."""
+
+        norms = self._sink_row_norms(matrix, chunk_size)
+        usable_rows = torch.isfinite(norms) & (norms > 0.0)
+        ratio = torch.clamp(
+            threshold / norms.clamp_min(torch.finfo(torch.float32).tiny),
+            max=1.0,
+        )
+        return torch.where(usable_rows, ratio, torch.ones_like(norms))
+
+    def resolve_sink_row_cap_scale(self, matrix: torch.Tensor, chunk_size: Optional[int]) -> Optional[torch.Tensor]:
+        """Return a per-row clamp scale that caps sink-row norms, or ``None``.
+
+        This is a pure function of ``matrix`` (used by the #4742 regression
+        tests). ``compute_hessian_xtx`` resolves the threshold and the scale
+        separately so the threshold never depends on the chunk layout.
+        """
+
+        threshold = self.resolve_sink_row_cap_threshold(matrix, chunk_size)
+        if threshold is None:
+            return None
+        return self._sink_row_cap_scale_from_threshold(matrix, threshold, chunk_size)
+
     def compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
         rows = matrix.shape[0]
         if rows == 0:
@@ -1084,8 +1234,28 @@ class GPTQ:
         self._borrow_workspace_stage_dtype = stage_dtype
         self._borrow_workspace_last_chunk_rows = chunk_size if chunk_size is not None else rows
 
+        threshold = self.resolve_sink_row_cap_threshold(matrix, chunk_size)
+        cap_scale = (
+            self._sink_row_cap_scale_from_threshold(matrix, threshold, chunk_size)
+            if threshold is not None
+            else None
+        )
+
         if chunk_size is None:
+            needs_copy = matrix.dtype != torch.float32
             mat32 = matrix.to(dtype=torch.float32)
+            if cap_scale is not None:
+                # Fold the cap into the fp32 GEMM input instead of switching
+                # to the chunk-workspace lease: an all-ones scale is a
+                # bitwise no-op, and a capped batch keeps the single-GEMM
+                # fast path (issue #4950).
+                # ``matrix.to(float32)`` returns the caller's tensor unchanged
+                # when it is already fp32 (and activations may be shared by
+                # several projections), so this must be out of place.
+                if needs_copy:
+                    mat32.mul_(cap_scale.unsqueeze(1))
+                else:
+                    mat32 = mat32 * cap_scale.unsqueeze(1)
             # Determinism across processes comes from this fp32 X^T X GEMM
             # running on rocBLAS (see ``utils/rocm.py``). The quantization run
             # already holds the override for Hessian methods; this per-call
@@ -1103,6 +1273,10 @@ class GPTQ:
             source = matrix[start:start + rows_this]
             with self.borrow_materialized_chunk_fp32(source, rows_this) as materialized:
                 materialized32 = materialized
+                if cap_scale is not None:
+                    # ``materialized`` is a private workspace copy, so the
+                    # in-place clamp never touches the caller's activations.
+                    materialized32.mul_(cap_scale[start:start + rows_this].unsqueeze(1))
                 with quant_blas_backend(matrix.device):
                     xtx_accum.add_(torch.matmul(materialized32.T, materialized32))
 
@@ -1260,6 +1434,60 @@ class GPTQ:
                 return torch.device(partial_device)
 
             return torch.device("cpu")
+
+    def _captured_hessian_diagonal(
+        self, device: torch.device
+    ) -> Optional[torch.Tensor]:
+        """Fold the captured Hessian state into its diagonal.
+
+        The low-sample fallback only needs the per-channel input energy, so
+        reduce the per-device ``XtX`` partials straight to a ``columns``
+        vector instead of materializing the ``columns ** 2`` matrix that
+        ``finalize_hessian`` would build (#5300). The result follows the same
+        weighting as ``finalize_hessian``: an existing materialized ``H``
+        contributes with its own sample count and each partial contributes
+        ``2 / total_samples``.
+        """
+
+        with self.lock:
+            self._reap_deferred_hessian_sources()
+            previous_samples = self._hessian_total_samples
+            new_samples = sum(self._device_sample_counts.values())
+            total_samples = previous_samples + new_samples
+            if total_samples == 0:
+                return None
+
+            diagonal = torch.zeros(self.columns, dtype=torch.float32, device=device)
+            if (
+                previous_samples
+                and self.H is not None
+                and self.H.dim() == 2
+                and self.H.shape[0] == self.columns
+            ):
+                source = self.H
+                if source.device != device or source.dtype != torch.float32:
+                    source = safe_move_to(source, device, dtype=torch.float32)
+                diagonal.add_(
+                    source.diagonal(),
+                    alpha=float(previous_samples) / float(total_samples),
+                )
+
+            for partial_device in sorted(
+                self._device_hessian_partials, key=_device_reduction_key
+            ):
+                partial = self._device_hessian_partials[partial_device]
+                event = self._device_hessian_partial_ready.get(
+                    torch.device(partial_device)
+                )
+                if event is not None:
+                    if device.type == "cuda":
+                        torch.cuda.current_stream(device).wait_event(event)
+                    else:
+                        event.synchronize()
+                if partial.device != device or partial.dtype != torch.float32:
+                    partial = safe_move_to(partial, device, dtype=torch.float32)
+                diagonal.add_(partial.diagonal(), alpha=2.0 / float(total_samples))
+            return diagonal
 
     def materialize_global_hessian(self, target_device: Optional[torch.device] = None) -> None:
         with self.lock:
@@ -1732,11 +1960,15 @@ class GPTQ:
         strategy: FallbackStrategy,
         blocksize: int,
         target_device: Optional[torch.device] = None,
+        hessian_diag: Optional[torch.Tensor] = None,
     ):
         """Apply a lightweight quantization fallback using the requested strategy.
 
         ``target_device`` is the device the weight clone is quantized on; when
         None it is taken from ``self.H`` if present, else the weight.
+        ``hessian_diag`` supplies the captured Hessian diagonal when the full
+        matrix has already been released (the low-sample fallback path); it is
+        used only when ``self.H`` is absent.
         """
         maxq = 2 ** self.qcfg.bits - 1
         sigma = 3.0
@@ -1752,6 +1984,20 @@ class GPTQ:
         if target_device is None:
             target_device = self.H.device if self.H is not None else self.module.weight.device
         W = self.clone_module(device=target_device)
+        # When the Hessian exists its diagonal is the exact input-channel
+        # importance for the layer's output error, so weight the SmoothMSE
+        # objective with it instead of averaging every channel equally. A
+        # fallback without captured activations uses the weight-magnitude
+        # proxy instead of the harmful uniform mean.
+        col_weights = None
+        if isinstance(smooth_method, SmoothMSE):
+            col_weights = hessian_column_weights(
+                self.H, self.columns, device=target_device
+            )
+            if col_weights is None:
+                col_weights = hessian_column_weights(
+                    hessian_diag, self.columns, device=target_device
+                )
         Q = torch.empty_like(W)
         scale_chunks = []
         zero_chunks = []
@@ -1788,6 +2034,7 @@ class GPTQ:
             block = W[:, start:end]
 
             if isinstance(smooth_method, SmoothMSE):
+                weights = element_saliency_weights(block) if col_weights is None else col_weights[start:end]
                 dequant, scale, zero = mse_optimal_quant(
                     block,
                     self.qcfg,
@@ -1795,6 +2042,7 @@ class GPTQ:
                     steps=mse_steps,
                     maxshrink=mse_maxshrink,
                     eps=SCALE_STORAGE_FLOOR,
+                    weights=weights,
                 )
             else:
                 block_mod, scale_factor = smooth_block(
@@ -2412,12 +2660,22 @@ class GPTQ:
                 f"Quantization: Module `{self.name}` -> "
                 f"Using `{resolved_strategy.value}` fallback quantization (observed {self.nsamples} samples, threshold={threshold_text}{threshold_info}, max_total={self.expected_nsamples})."
             )
-            # The fallback never reads the Hessian: release the fp32 XtX
-            # partials (columns^2 x 4 B each) instead of folding them into a
-            # throwaway zero H. Resolve the compute device first, since the
+            # The fallback does not need the full Hessian: release the fp32
+            # XtX partials (columns^2 x 4 B each) instead of folding them into
+            # a throwaway zero H. Resolve the compute device first, since the
             # clear changes what _select_hessian_target_device returns.
             with self.lock:
                 fallback_device = self._select_hessian_target_device(target_device)
+            # SmoothMSE still needs the per-channel input energy. Reduce the
+            # partials to the diagonal before releasing them; this keeps the
+            # memory win while letting the documented Hessian weighting reach
+            # singleton modules (o_proj/down_proj) as well (#5300).
+            fallback_diag = (
+                self._captured_hessian_diagonal(fallback_device)
+                if isinstance(getattr(self.fallback, "smooth", None), SmoothMSE)
+                else None
+            )
+            with self.lock:
                 self._device_hessian_partials.clear()
                 self._device_hessian_partial_ready.clear()
                 self._device_sample_counts.clear()
@@ -2429,7 +2687,10 @@ class GPTQ:
             self._release_deferred_hessian_sources()
 
             return self._fallback_quantize(
-                resolved_strategy, blocksize, target_device=fallback_device
+                resolved_strategy,
+                blocksize,
+                target_device=fallback_device,
+                hessian_diag=fallback_diag,
             )
         else:
             use_hessian = True
@@ -3110,15 +3371,27 @@ class GPTQ:
         self._borrow_workspace_stage_dtype = None
         self._borrow_workspace_last_chunk_rows = None
 
-    def free(self):
-        # A shared capture stays live until the final projection releases it.
-        # Factor-cache ownership remains projection-local.
+    def release_hessian_state(self) -> None:
+        """Drop the accumulated Hessian and its staging state (idempotent).
+
+        The accumulator is the largest per-module allocation (one fp32
+        ``[columns, columns]`` tensor). :meth:`free` calls this as part of the
+        full success-path teardown, and a failing :meth:`quantize` calls it
+        directly so a failure does not pin the accumulator until the processor
+        is destroyed (#5026). A shared capture stays live until the final
+        projection releases it; factor-cache ownership remains
+        projection-local.
+        """
+
         with self.lock:
             self._shared_hessian_cache = None
             self._shared_hessian_cache_disabled = False
         if not self._hessian_state_released:
             self._hessian_state.release()
             self._hessian_state_released = True
+
+    def free(self):
+        self.release_hessian_state()
         if hasattr(self, "_H_diag"):
             del self._H_diag
         self._device_embedding_counts.clear()

@@ -72,7 +72,7 @@ weight_only = TorchFP8Linear(..., weight_scale_method="tensor")  # W8A16
 weight_only.set_activation_quant_method("per_token")             # explicit W8A8
 ```
 
-`FP8Config` does not emit this keyword, so every recipe and loaded checkpoint
+`FP8Config` does not emit this keyword, so loaded checkpoints
 stays on the W8A16 default. The opt-in is an inference-time module switch for
 callers that want W8A8 and accept its accuracy contract.
 

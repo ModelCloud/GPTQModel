@@ -133,9 +133,27 @@ def rebuild_gptq_qweight(module) -> torch.Tensor:
     The result is ``int32`` in the checkpoint's ``[in_features // pack_factor,
     out_features]`` layout; ``finalize_fused_train_state`` verifies it against
     the pre-transform bytes before the duplicate is dropped.
+
+    A ``desc_act`` checkpoint reorders the input rows by ``ret_idx`` before
+    packing (``weight.index_select(0, ret_idx)``), so the packed codes are in
+    *group* order. ``ret_idx`` is a permutation of ``[0, in_features)`` and the
+    module keeps it, so scattering the codes back with ``index_copy_`` is the
+    exact inverse (#5013).
     """
 
     codes = int4pack_to_codes(module.qweight)  # [out_features, in_features]
+    identity = getattr(module, "_ret_idx_is_identity", None)
+    if callable(identity) and not identity():
+        ret_idx = module._build_ret_idx().to(
+            device=codes.device, dtype=torch.long
+        )
+        if ret_idx.numel() != codes.shape[1]:
+            raise RuntimeError(
+                "CPU int4pack ret_idx does not describe the packed input rows"
+            )
+        restored = torch.empty_like(codes)
+        restored.index_copy_(1, ret_idx, codes)
+        codes = restored
     pack_factor = module.pack_factor
     out_features = module.out_features
     grouped = codes.t().reshape(-1, pack_factor, out_features).to(torch.int32)
@@ -146,6 +164,162 @@ def rebuild_gptq_qweight(module) -> torch.Tensor:
     for index in range(pack_factor):
         packed.bitwise_or_(grouped[:, index, :] << shifts[index])
     return packed
+
+
+def rebuild_avx512_awq_qweight(module) -> torch.Tensor:
+    """Rebuild an AWQ checkpoint ``qweight`` from the AVX512-BF16 runtime words.
+
+    ``TorchCpuAvx512AwqLinear.transform_cpu`` hands the checkpoint words to the
+    extension's ``pack_awq_int4``, which is a pure nibble permutation: it reads
+    the AWQ-interleaved checkpoint words and writes ``uint8 [out_features,
+    in_features // 2]`` where each byte pairs output column ``group * 32 + row``
+    (low nibble) with ``group * 32 + row + 16`` (high nibble) for one input
+    feature. Undoing it only needs the reverse read plus the same
+    ``pack_awq_columns(..., order=AWQ_ORDER)`` interleave the quantizer used, so
+    this path is pure Torch and does not need the extension or AVX512-BF16
+    (#5013).
+
+    The result is verified bitwise against the pre-transform clone by
+    ``finalize_fused_train_state`` before that clone is dropped, so an
+    unexpected layout keeps the snapshot instead of exporting garbage.
+    """
+
+    from ...quantization.awq.utils.packing_utils import AWQ_ORDER, pack_awq_columns
+
+    packed = module.qweight
+    out_features = int(module.out_features)
+    in_features = int(module.in_features)
+    if (
+        not isinstance(packed, torch.Tensor)
+        or packed.dtype != torch.uint8
+        or packed.dim() != 2
+    ):
+        raise RuntimeError(
+            "AVX512 AWQ qweight must be a 2D uint8 tensor of packed nibbles"
+        )
+    if out_features % 32 != 0 or in_features % 2 != 0:
+        raise RuntimeError(
+            "AVX512 AWQ qweight requires out_features % 32 == 0 and an even "
+            f"in_features, got out={out_features} in={in_features}"
+        )
+    groups = out_features // 32
+    k_half = in_features // 2
+    if tuple(packed.shape) != (out_features, k_half):
+        raise RuntimeError(
+            "AVX512 AWQ qweight shape "
+            f"{tuple(packed.shape)} does not match {(out_features, k_half)}"
+        )
+    # ``pack_awq_int4`` writes, per (group, input-feature-pair, output-row):
+    #   byte = code(low_col) | code(high_col) << 4
+    # at ``group * k_half * 32 + (k // 2) * 32 + row * 2 + (k % 2)``, where
+    # ``low_col = group * 32 + row`` and ``high_col = low_col + 16``.
+    blocks = packed.reshape(groups, k_half, 16, 2)
+    low = (blocks & 0x0F).permute(1, 3, 0, 2)  # [k_half, pair, group, row]
+    high = torch.bitwise_right_shift(blocks, 4).permute(1, 3, 0, 2)
+    codes = torch.stack((low, high), dim=3).reshape(in_features, out_features)
+    return pack_awq_columns(codes.to(torch.int32), int(module.bits), order=AWQ_ORDER)
+
+
+def avx512_checkpoint_byte_index(module) -> torch.Tensor | None:
+    """Byte permutation that restores the checkpoint channel order, or ``None``.
+
+    ``ret_idx`` maps runtime input channels to checkpoint channels. When every
+    runtime pair ``(2k, 2k + 1)`` stays adjacent - true for the group-sorted
+    ``g_idx`` the CPU packer consumes - the reorder can run on the checkpoint
+    *bytes*, half the size of the unpacked codes. Any other permutation returns
+    ``None`` so the caller uses the code-level path.
+    """
+
+    in_features = module.in_features
+    ret_idx = module._build_ret_idx()
+    if ret_idx.numel() != in_features:
+        return None
+    starts = ret_idx[0::2]
+    if not torch.equal(ret_idx[1::2], starts + 1):
+        return None
+    if not bool(torch.all(starts % 2 == 0)):
+        return None
+    return (starts // 2).to(torch.long)
+
+
+def _checkpoint_bytes_from_codes(
+    codes: torch.Tensor, out_features: int, in_features: int
+) -> torch.Tensor:
+    """Pack ``[out, in]`` 4-bit codes into checkpoint bytes ``[out, in // 2]``."""
+
+    pairs = codes.reshape(out_features, in_features // 2, 2)
+    return torch.bitwise_or(
+        pairs[..., 0],
+        torch.bitwise_left_shift(pairs[..., 1], 4),
+    )
+
+
+def _checkpoint_words(
+    checkpoint_bytes: torch.Tensor, out_features: int, in_features: int
+) -> torch.Tensor:
+    """View checkpoint bytes as ``[in // 8, out]`` little-endian int32 words."""
+
+    words_per_row = in_features // 8
+    words = (
+        checkpoint_bytes.reshape(out_features, words_per_row, 4)
+        .permute(1, 0, 2)
+        .contiguous()
+    )
+    return words.view(torch.int32).reshape(words_per_row, out_features)
+
+
+def rebuild_avx512_qweight(module) -> torch.Tensor:
+    """Rebuild the GPTQ checkpoint ``qweight`` from the AVX512 runtime words.
+
+    ``TorchCpuAvx512Linear.transform_cpu`` sorts the input channels by GPTQ
+    group (``ret_idx``) and packs with ``pack_hf_int4``. The checkpoint keeps
+    the original channel order, so the inverse restores that order and packs
+    the nibbles back into ``[in_features // pack_factor, out_features]``.
+
+    ``unpack_hf_int4`` is the documented inverse of ``pack_hf_int4``, so this
+    path is pure Torch and works without the ATen int4pack ops. The result is
+    verified against the pre-transform bytes by
+    ``finalize_fused_train_state`` before the duplicate is dropped.
+
+    The checkpoint bytes are built in one pass over the packed tensor and four
+    of them are viewed as one little-endian ``int32`` word, replacing the old
+    ``codes.t().reshape(...)`` plus eight strided shift/OR passes (issue
+    #4884). A ``desc_act`` channel order is applied at the byte level when it
+    keeps input pairs adjacent and at the code level otherwise; both emit the
+    same bytes.
+    """
+
+    from .torch_cpu_avx512 import avx512_checkpoint_bytes, unpack_hf_int4
+
+    out_features = module.out_features
+    in_features = module.in_features
+    checkpoint_bytes = avx512_checkpoint_bytes(
+        module.qweight, out_features=out_features, in_features=in_features
+    )
+    if not module._ret_idx_is_identity():
+        # The transform gathers the input channels; the checkpoint stores them
+        # in their original order, so scatter them back the same way
+        # ``dequantize_weight`` does.
+        byte_index = avx512_checkpoint_byte_index(module)
+        if byte_index is not None:
+            restored_bytes = torch.empty_like(checkpoint_bytes)
+            restored_bytes.index_copy_(1, byte_index, checkpoint_bytes)
+            checkpoint_bytes = restored_bytes
+        else:
+            ret_idx = module._build_ret_idx().to(
+                device=checkpoint_bytes.device, dtype=torch.long
+            )
+            codes = unpack_hf_int4(
+                module.qweight,
+                out_features=out_features,
+                in_features=in_features,
+            )
+            restored = torch.empty_like(codes)
+            restored.index_copy_(1, ret_idx, codes)
+            checkpoint_bytes = _checkpoint_bytes_from_codes(
+                restored, out_features, in_features
+            )
+    return _checkpoint_words(checkpoint_bytes, out_features, in_features)
 
 
 def rebuild_awq_qweight(module) -> torch.Tensor:
@@ -165,6 +339,8 @@ def rebuild_awq_qweight(module) -> torch.Tensor:
 __all__ = [
     "int4pack_block_size",
     "int4pack_to_codes",
+    "rebuild_avx512_awq_qweight",
+    "rebuild_avx512_qweight",
     "rebuild_awq_qweight",
     "rebuild_gptq_qweight",
 ]

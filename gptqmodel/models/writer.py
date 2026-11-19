@@ -23,7 +23,10 @@ from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
-from .._quant_methods import REFUSED_HF_QUANT_METHODS, refused_hf_load_remedy
+from .._quant_methods import (
+    REFUSED_HF_QUANT_METHODS,
+    refused_hf_load_remedy,
+)
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
 from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
@@ -78,13 +81,20 @@ from ..utils.model import (
     find_modules,
     get_model_files_size,
     get_module_by_name,
+    get_module_name,
     get_state_dict_for_save,
+    is_embeddings_module_quantized,
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
     resolve_resave_format_conversion,
     streaming_state_dict_to_shards,
 )
 from ..utils.structure import alias_all_from_turtle_if_meta, alias_from_turtle_for_submodule
+from ..utils.tied_weights import (
+    lm_head_is_tied,
+    retie_tied_weights,
+    word_embeddings_tied,
+)
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
 from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE, EXPERT_INDEX_PLACEHOLDER
@@ -128,7 +138,22 @@ _QUANTIZED_TENSOR_SUFFIXES = (
 )
 
 
-def _validate_export_shell_quantized_slots(model, checkpoint):
+def _export_shell_key_converter(qmodel, model):
+    """Return the checkpoint-to-runtime key converter for the export shell.
+
+    The shell is built from config, so it carries the runtime (Transformers)
+    module names while the checkpoint may use a legacy layout (for example the
+    Transformers 4.x ``language_model.model.layers.*`` keys of a Gemma-3 VL
+    checkpoint). Accelerate matches tensor names verbatim, so the fill has to
+    convert them the same way the native loader does (issue #4802).
+    """
+
+    from .loader import _checkpoint_key_converter
+
+    return _checkpoint_key_converter(type(qmodel), model, to_runtime=True)
+
+
+def _validate_export_shell_quantized_slots(model, checkpoint, key_converter=None):
     """Fail closed when the export shell has no slot for checkpoint quant tensors.
 
     The shell is rebuilt from config and filled from the checkpoint. A
@@ -136,11 +161,18 @@ def _validate_export_shell_quantized_slots(model, checkpoint):
     shell's module tree does not match the checkpoint (the fused-expert MoE
     case before #4589). Accelerate would ignore it and ``save()`` would
     publish a checkpoint missing that payload, so raise instead of writing.
+
+    ``key_converter`` maps checkpoint names to the shell's runtime names. It is
+    required for legacy layouts: a Gemma-3 VL checkpoint stores
+    ``language_model.model.layers.*`` while the shell exposes
+    ``model.language_model.layers.*`` (issue #4802).
     """
 
     checkpoint_keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
     if checkpoint_keys is None:
         return
+    if callable(key_converter):
+        checkpoint_keys = {key_converter(key) for key in checkpoint_keys}
 
     shell_keys = set(model.state_dict().keys())
     dropped = sorted(
@@ -310,6 +342,23 @@ def hf_compat_warnings(
             "and drops `lm_head.weight`, so `AutoModelForCausalLM.from_pretrained` "
             "random-initializes the head and returns garbage logits. Load this "
             "checkpoint with `GPTQModel.load` or vLLM."
+        )
+    if (
+        getattr(quantize_config, "method", None) == METHOD.AWQ
+        and bool(getattr(quantize_config, "dynamic", None))
+    ):
+        warnings.append(
+            "This AWQ checkpoint carries `dynamic` per-module overrides "
+            "(`bits`/`group_size`). A loader that does not install GPT-QModel's "
+            "native AWQ bridge builds every module from the global `bits` and "
+            "`group_size`, so the overrides are ignored: on CPU the checkpoint "
+            "loads with silently wrong logits and on CUDA the Marlin pack raises "
+            "a qzeros shape error. Transformers' own AWQ quantizer only reaches "
+            "the bridge after it has already replaced the layers, so an older "
+            "Transformers or a third-party loader still needs `import gptqmodel` "
+            "before loading. Load this checkpoint with `GPTQModel.load` (or a "
+            "Transformers version with the native AWQ bridge) to honor the "
+            "overrides."
         )
     if (
         getattr(quantize_config, "method", None) == METHOD.AWQ
@@ -744,8 +793,13 @@ def _save_module_replacement_safetensors(
         raise ValueError("Module replacement save requires at least one module prefix.")
 
     config = getattr(model, "config", None)
-    tie_word_embeddings = bool(getattr(config, "tie_word_embeddings", False))
-    if not tie_word_embeddings:
+    # The loaded model's snapshot already resolved tying from the decoder config
+    # and the checkpoint (#4799); the config.json flag is only a fallback.
+    resolved_tie = lm_head_is_tied(model)
+    tie_word_embeddings = word_embeddings_tied(config)
+    if resolved_tie is not None:
+        tie_word_embeddings = resolved_tie
+    elif not tie_word_embeddings:
         source_config_path = os.path.join(turtle_model.model_local_path, "config.json")
         if os.path.exists(source_config_path):
             try:
@@ -995,7 +1049,7 @@ def _load_native_w4a_for_save(model: torch.nn.Module, checkpoint: str, *, activa
         if result.unexpected_keys:
             raise ValueError(f"Unrecognized native W4A tensors: {result.unexpected_keys}")
         seen.update(values)
-    model.tie_weights()
+    retie_tied_weights(model)
     # A tied tensor can legitimately be omitted from safetensors. Every other
     # parameter/buffer must have been loaded, including the calibration bits.
     state = model.state_dict()
@@ -1402,6 +1456,78 @@ def _is_safe_relative_checkpoint_shard(shard_name: str) -> bool:
     return True
 
 
+def _exllamav3_owned_native_source_names(
+    model,
+    checkpoint_source,
+    names,
+) -> Optional[set]:
+    """Return the subset of native source names the loaded model owns (#5029).
+
+    The source index describes the whole on-disk checkpoint, which can contain
+    entries the model never instantiated: layers above a reduced
+    ``num_hidden_layers`` and MTP / next-token heads are the common cases. An
+    exact passthrough that republishes them writes dense state the model does
+    not have, inflating the saved checkpoint and the reload peak.
+
+    An entry is owned when its owning module exists in the loaded model (the
+    model's own state covers that module, possibly under an aliased spelling),
+    or when a runtime parameter/buffer resolves to it through the checkpoint
+    source's runtime -> checkpoint alias chain. ``None`` means ownership cannot
+    be determined, which callers must treat as "keep every entry".
+    """
+
+    candidate_names = {str(name) for name in names}
+    if not candidate_names:
+        return set()
+
+    named_modules = getattr(model, "named_modules", None)
+    named_parameters = getattr(model, "named_parameters", None)
+    if not callable(named_modules) or not callable(named_parameters):
+        return None
+
+    try:
+        module_paths = set()
+        runtime_names = set()
+        for module_name, module in named_modules():
+            module_paths.add(module_name)
+            non_persistent = getattr(module, "_non_persistent_buffers_set", ())
+            for buffer_name, _buffer in module.named_buffers(recurse=False):
+                if buffer_name in non_persistent:
+                    continue
+                runtime_names.add(
+                    f"{module_name}.{buffer_name}" if module_name else buffer_name
+                )
+        runtime_names.update(name for name, _parameter in named_parameters())
+    except Exception:
+        log.debug(
+            "Model save: could not enumerate the loaded model's owned tensors",
+            exc_info=True,
+        )
+        return None
+
+    owned = {
+        name
+        for name in candidate_names
+        if name.rpartition(".")[0] in module_paths
+    }
+    remaining = candidate_names - owned
+    if remaining:
+        # A converted or renamed checkpoint spells the same tensor differently.
+        # Resolve every runtime name through the source's alias chain so an
+        # owned tensor is never dropped just because its runtime spelling
+        # differs from the checkpoint key.
+        alias_resolver = getattr(checkpoint_source, "checkpoint_source_aliases", None)
+        if callable(alias_resolver):
+            for runtime_name in runtime_names:
+                for candidate in alias_resolver(runtime_name):
+                    if candidate in remaining:
+                        owned.add(candidate)
+                        remaining.discard(candidate)
+                if not remaining:
+                    break
+    return owned
+
+
 def _build_exllamav3_checkpoint_passthrough_state_dict(
     owner,
     plan,
@@ -1438,6 +1564,27 @@ def _build_exllamav3_checkpoint_passthrough_state_dict(
     weight_map = checkpoint_source._weight_map
     replaced = set(plan["replaced_source_names"])
     native_names = set(weight_map) - replaced
+    owned_native_names = _exllamav3_owned_native_source_names(
+        owner.model,
+        checkpoint_source,
+        native_names,
+    )
+    if owned_native_names is None:
+        log.info(
+            "Model save: checkpoint ownership is unknown; preserving all %s "
+            "native source tensors.",
+            len(native_names),
+        )
+    else:
+        skipped_native_names = sorted(native_names - owned_native_names)
+        native_names = owned_native_names
+        if skipped_native_names:
+            log.info(
+                "Model save: skipped %s native source tensor(s) the loaded model "
+                "does not own: %s",
+                len(skipped_native_names),
+                skipped_native_names[:8],
+            )
     by_shard: Dict[str, List[str]] = {}
     for name in native_names:
         shard_name = weight_map.get(name)
@@ -2592,6 +2739,10 @@ def ModelWriter(cls):
         model_dtype = get_hf_config_dtype(config)
 
         with model_load_lock(), suspend_hf_weight_init():
+            # Only transformers' ``local_torch_dtype`` window mutates the
+            # process-global default dtype, and that window holds the writer
+            # itself (#5304); compiled forwards may overlap the rest of the
+            # shell rebuild (#5268).
             model = self.loader.from_config(
                 config, dtype=model_dtype
             )
@@ -2618,7 +2769,36 @@ def ModelWriter(cls):
             ignore_modules = [self.lm_head] + self.get_base_modules(model)
             external_inclusions = qcfg.external_module_inclusions()
 
+            # A checkpoint may quantize the input embedding and/or the output
+            # head through `dynamic` (requantize / quantize embed endpoints).
+            # The loader keeps those modules and `make_quant` swaps in a
+            # `TorchQuantEmbeddings`, but this shell only kept `lm_head` when
+            # `qcfg.lm_head` was set, so the re-saved checkpoint had no
+            # `embed_tokens.weight` / `lm_head.weight` for the dense endpoint
+            # and the reload raised (#5207). Detect them exactly like the
+            # loader does so both paths cannot drift.
+            try:
+                input_embeddings = model.get_input_embeddings()
+            except NotImplementedError:
+                input_embeddings = None
+            try:
+                output_embeddings = model.get_output_embeddings()
+            except NotImplementedError:
+                output_embeddings = None
+            input_embed_name = get_module_name(model, input_embeddings) if input_embeddings is not None else None
+            output_embed_name = get_module_name(model, output_embeddings) if output_embeddings is not None else None
+            input_embed_quantized, output_embed_quantized = is_embeddings_module_quantized(
+                model_dir=model_id_or_path,
+                input_embed_name=input_embed_name,
+                output_embed_name=output_embed_name,
+            )
+
             for name in list(modules.keys()):
+                if input_embed_quantized and name == input_embed_name:
+                    continue
+                if output_embed_quantized and name == output_embed_name:
+                    continue
+
                 # allow loading of quantized lm_head
                 if qcfg.lm_head and name == self.lm_head:
                     continue
@@ -2721,8 +2901,12 @@ def ModelWriter(cls):
                         module.qzero_format(
                             format=1 if source_format == FORMAT.GPTQ else 2
                         )
+            shell_key_converter = _export_shell_key_converter(self, model)
             load_checkpoint_in_model_then_tie_weights(
                 model,
+                # The checkpoint may use a legacy layout; fill the shell under
+                # its runtime names (issue #4802).
+                key_converter=shell_key_converter,
                 # Do not cast the export shell. Each quantized module
                 # allocates its buffers in the checkpoint's storage dtype
                 # (packed FP8 weight, FP16 GPTQ scales, FP32 QQQ
@@ -2749,7 +2933,7 @@ def ModelWriter(cls):
                 # offload_buffers=True,
             )
             _validate_export_shell_quantized_slots(
-                model, self.checkpoint_file_name,
+                model, self.checkpoint_file_name, key_converter=shell_key_converter,
             )
             resave_conversion = resolve_resave_format_conversion(qcfg)
             if resave_conversion is not None:

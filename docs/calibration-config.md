@@ -6,7 +6,7 @@
 The looper processors consume the same class; there is no second definition.
 
 ```python
-from gptqmodel import CalibrationConfig, GPTQConfig, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQConfig, GPTQModel
 
 model = GPTQModel.load("Qwen/Qwen3-0.6B", GPTQConfig(bits=4, group_size=128))
 model.quantize(
@@ -47,6 +47,11 @@ take the same object. `quantize()` keeps `tokenizer=`, `backend=`, `adapter=`,
 `embed_quant_config=`, `embed_quant_mode=`, `checkpoint=` and `fuse=` as
 keyword-only arguments: none of them describes calibration data.
 
+* `embed_quant_config=` / `embed_quant_mode=` select endpoint quantization and
+  are only accepted by `requantize()` on a loaded quantized checkpoint. A fresh
+  `quantize()` refuses `INPUT`/`BOTH` and refuses `OUTPUT`/`BOTH` on a tied
+  head before calibration; `OUTPUT` on an untied head still works. See
+  [embed-endpoint-quantize.md](embed-endpoint-quantize.md).
 * `tokenizer=` is not a calibration field. It replaces the model's tokenizer
   (`self.tokenizer`), which tokenizes the calibration text but is also what
   `save()` writes next to the checkpoint and what `generate()` uses.
@@ -120,9 +125,19 @@ to the bound preparer itself, so the minimum length no longer travels through a
   dataset preparation.
 * `adapter_dataset` without a `Lora` adapter raises `ValueError` before any
   layer is quantized (previously the samples were silently ignored).
+* `quantize(embed_quant_mode=QuantizeEmbed.INPUT)` (or `BOTH`) raises
+  `NotImplementedError` before calibration; `quantize(embed_quant_mode=QuantizeEmbed.OUTPUT)`
+  (or `BOTH`) on a tied head raises the tied-head `NotImplementedError`.
+  `requantize()` is unaffected.
 * Norm tuning (`requantize(norm=...)`) and post-quantization EoRA generation
   reject `exclude_attention_sinks` and `adapter_dataset`, which they cannot
   apply.
+* A combined `requantize(embed_quant_mode=..., norm=...)` validates the whole
+  norm half first: the calibration flags, a non-empty
+  `norm_module_names(norm.types, norm.skip)` selection, the tokenizer type and
+  the teacher path/id. Those checks run before the embeddings are re-packed, so
+  a rejected request leaves the model unchanged and a corrected retry works on
+  the same object instead of failing on the already-quantized endpoint.
 
 Tests: `tests/test_calibration_config.py` (validation, the signatures,
 `TypeError` for every removed keyword and for a bare dataset, a tiny-Llama

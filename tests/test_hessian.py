@@ -25,13 +25,6 @@ from gptqmodel.utils.logger import render_table
 from gptqmodel.utils.safe import THREADPOOLCTL
 
 
-######### test_hessian_accumulation_cpu.py ##########
-pytestmark = pytest.mark.skipif(
-    (not torch.cuda.is_available()) or torch.cuda.device_count() <= 6,
-    reason="CUDA device 6 is required for this benchmark test",
-    )
-
-
 @dataclass
 class BenchmarkResult:
     per_batch_seconds: float
@@ -100,8 +93,14 @@ def _benchmark_add_batch(
     return BenchmarkResult(per_batch_seconds=per_batch, total_seconds=total, batches_measured=measured)
 
 
+@pytest.mark.cuda
+@pytest.mark.slow
 def test_hessian_accumulation_cpu_vs_gpu():
-    device = torch.device("cuda", 6)
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required for the pinned-memory CPU-vs-GPU benchmark")
+
+    # The benchmark needs one GPU, not a fixed ordinal (#4768).
+    device = torch.device("cuda", torch.cuda.current_device())
     torch.cuda.set_device(device)
 
     configs: List[Tuple[str, int]] = [
@@ -533,6 +532,7 @@ def _print_benchmark_table(rows: Iterable[Dict[str, float]]) -> None:
     print(render_table(table_rows, headers=headers, tablefmt="github"))
 
 
+@pytest.mark.slow
 def test_hessian_chunk_benchmark_table():
     torch.manual_seed(3)
 
@@ -776,8 +776,8 @@ def test_hessian_merge_multi_gpu_matches_serial():
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.device_count() < 8,
-    reason="requires CUDA devices >= 8 to exercise GPUs 6 and 7",
+    not torch.cuda.is_available() or torch.cuda.device_count() < 2,
+    reason="requires 2 CUDA devices for the multi-GPU merge",
     )
 @torch.no_grad()
 def test_hessian_merge_multi_gpu_with_attention_mask():
@@ -789,8 +789,10 @@ def test_hessian_merge_multi_gpu_with_attention_mask():
     seq_len = 21
     batch_count = 10
 
-    device_serial = torch.device("cuda:6")
-    devices = [torch.device("cuda:6"), torch.device("cuda:7")]
+    # Pick the visible devices by position, never a fixed lab-host ordinal
+    # (#4768).
+    devices = [torch.device("cuda:0"), torch.device("cuda:1")]
+    device_serial = devices[0]
 
     base = torch.nn.Linear(in_features, out_features, bias=False).eval()
     cfg_serial = QuantizeConfig(mock_quantization=True, desc_act=False)

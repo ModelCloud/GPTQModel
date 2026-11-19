@@ -91,6 +91,49 @@ def _sized_calibration_dataset(dataset):
     return dataset
 
 
+def prepare_calibration_dataset_once(calibration: CalibrationConfig):
+    """Return the prepared calibration batches of one run.
+
+    Every calibrated processor of a run must replay the same batch order:
+    GPTAQ/FOEM pair the native capture with the quantized capture by batch
+    index, so preparing the same ``sort="shuffle"`` dataset once per processor
+    would pair unrelated sequences (#4869). ``quantize()`` calls this once and
+    hands the result to every processor in the chain.
+    """
+
+    dataset = calibration.dataset
+    if dataset is None:
+        return None
+
+    prepare_dataset = calibration.prepare_dataset
+    if prepare_dataset is None:
+        raise ValueError(
+            "CalibrationConfig.prepare_dataset must be bound (CalibrationConfig.bind()) "
+            "when calibration data is supplied."
+        )
+
+    prepared = prepare_dataset(
+        calibration_dataset=dataset,
+        calibration_dataset_concat_size=calibration.concat_size,
+        calibration_dataset_sort=calibration.sort,
+        batch_size=calibration.batch_size,
+        calibration_data_min_length=calibration.min_length,
+        calibration_concat_separator=calibration.concat_separator,
+    )
+    # A model-specific ``prepare_dataset`` override may return a one-shot
+    # iterable; normalise it before the checks below and before the per-layer
+    # replay, which needs a reusable dataset.
+    prepared = _sized_calibration_dataset(prepared)
+    if len(prepared) == 0:
+        raise ValueError(
+            "Calibration dataset is empty after CalibrationConfig.prepare_dataset removed "
+            "all samples (for example, every input_ids was shorter than "
+            "CalibrationConfig.min_length). Lower CalibrationConfig.min_length "
+            "or provide longer calibration samples."
+        )
+    return prepared
+
+
 def _reusable_calibration_dataset(dataset):
     """Return a calibration input that more than one processor can prepare.
 
@@ -450,6 +493,12 @@ def get_resolved_module_config(module):
     return getattr(module, "resolved_module_config", None)
 
 
+# Marks a processor whose Device-SMI handles were never opened. Handles are
+# opened on the first metric query, so a processor that never runs starts no
+# sampler thread (#4862). ``{}`` means "opened and nothing was available".
+_DEVICE_SMI_UNINITIALIZED = object()
+
+
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
     """Base lifecycle coordinator shared by all quantization processors."""
@@ -532,8 +581,12 @@ class LoopProcessor:
         current_time = datetime.now().strftime("%m_%d_%Y_%Hh_%Mm_%Ss")
         self.log_tmp_log_file_name = str(self._build_log_file_path(self.name(), current_time))
         self._torch_rocm_memory_devices: List[str] = []
-        self._device_smi_handles = self._init_device_smi_handles()
-        self._cpu_device_smi = self._init_cpu_device_handle()
+        # A ``device_smi.Device`` owns a daemon sampler thread. Open the handles
+        # on the first metric query instead of here: a processor that never
+        # runs -- rejected calibration, a failure before ``loop()``, or a later
+        # processor in the chain failing -- must not start any (#4862).
+        self._device_smi_handles: Any = _DEVICE_SMI_UNINITIALIZED
+        self._cpu_device_smi: Optional[Device] = None
         self._device_metric_failures: Set[str] = set()
 
 
@@ -546,7 +599,8 @@ class LoopProcessor:
             # ``datasets.IterableDataset`` and plain generators are valid
             # calibration inputs but do not implement ``__len__``. Only run the
             # pre-prepare checks when the caller supplied a sized container;
-            # emptiness is verified again on the prepared result below.
+            # emptiness is verified again on the prepared result by
+            # ``prepare_calibration_dataset_once``.
             raw_calibration_size = _calibration_dataset_length(calibration_dataset)
             if raw_calibration_size == 0:
                 raise ValueError("Calibration dataset must not be empty.")
@@ -555,34 +609,11 @@ class LoopProcessor:
                 log.warn(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
                                f"Current: {raw_calibration_size}.")
 
-            if self.calibration.prepare_dataset is None:
-                raise ValueError(
-                    "CalibrationConfig.prepare_dataset must be bound (CalibrationConfig.bind()) "
-                    "when calibration data is supplied."
-                )
-
-            calibration_dataset = self.calibration.prepare_dataset(
-                calibration_dataset=calibration_dataset,
-                calibration_dataset_concat_size=self.calibration.concat_size,
-                calibration_dataset_sort=self.calibration.sort,
-                batch_size=self.calibration.batch_size,
-                calibration_data_min_length=self.calibration.min_length,
-                calibration_concat_separator=self.calibration.concat_separator,
-            )
-
-            # A model-specific ``prepare_dataset`` override may return a
-            # one-shot iterable; normalise it before the checks below and
-            # before the per-layer replay, which needs a reusable dataset.
-            calibration_dataset = _sized_calibration_dataset(calibration_dataset)
+            # ``quantize()`` prepares the batches once per run and hands the
+            # same list to every processor, so processors that pair their
+            # captures by batch index (GPTAQ/FOEM) see one order (#4869).
+            calibration_dataset = prepare_calibration_dataset_once(self.calibration)
             prepared_calibration_size = len(calibration_dataset)
-
-            if prepared_calibration_size == 0:
-                raise ValueError(
-                    "Calibration dataset is empty after CalibrationConfig.prepare_dataset removed "
-                    "all samples (for example, every input_ids was shorter than "
-                    "CalibrationConfig.min_length). Lower CalibrationConfig.min_length "
-                    "or provide longer calibration samples."
-                )
 
             # The size is only knowable after preparation for unsized inputs.
             if raw_calibration_size is None and prepared_calibration_size < min_calibration_dataset_size:
@@ -596,6 +627,7 @@ class LoopProcessor:
             calibration_summary = getattr(
                 calibration_dataset, "gptqmodel_calibration_summary", None
             )
+            token_rows = len(calibration_dataset)
             if calibration_summary is not None:
                 if not isinstance(calibration_summary, dict):
                     raise TypeError(
@@ -625,7 +657,12 @@ class LoopProcessor:
             else:
                 total_input_ids_length = 0
                 max_input_id_length = 0
+                token_rows = 0
                 for row in calibration_dataset:
+                    # Tensor-kwargs calibration (Decision Transformer) carries no
+                    # token ids, so token-length accounting does not apply.
+                    if "input_ids" not in row:
+                        continue
                     input_ids = row["input_ids"]
                     if isinstance(input_ids, torch.Tensor):
                         if input_ids.dim() <= 2:
@@ -637,14 +674,16 @@ class LoopProcessor:
                     else:
                         input_ids_length = len(input_ids)
 
+                    token_rows += 1
                     if input_ids_length > max_input_id_length:
                         max_input_id_length = input_ids_length
                     total_input_ids_length += input_ids_length
-            avg = total_input_ids_length / len(calibration_dataset)
+            if token_rows:
+                avg = total_input_ids_length / token_rows
 
-            if avg < min_calibration_dataset_input_ids_avg_length:
-                log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
-                               f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
+                if avg < min_calibration_dataset_input_ids_avg_length:
+                    log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
+                                   f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
 
             self.num_batches = len(calibration_dataset)
             self.calibration_dataset = calibration_dataset
@@ -1100,6 +1139,20 @@ class LoopProcessor:
 
         return dtype_alias.get(dtype_str, dtype_str)
 
+    def _ensure_device_smi_handles(self) -> None:
+        """Open the Device-SMI handles on the first metric query (#4862).
+
+        Every handle starts a 5 Hz daemon sampler thread. Opening them in
+        ``__init__`` meant a processor that failed calibration validation, or
+        whose run failed before ``loop()``, leaked those threads for the life
+        of the process. Callers already hold ``_device_smi_lock``.
+        """
+
+        if self._device_smi_handles is not _DEVICE_SMI_UNINITIALIZED:
+            return
+        self._device_smi_handles = self._init_device_smi_handles()
+        self._cpu_device_smi = self._init_cpu_device_handle()
+
     def _init_device_smi_handles(self) -> Dict[str, Device]:
         """Create Device-SMI handles except where ROCm VFs use Torch metrics."""
 
@@ -1204,6 +1257,7 @@ class LoopProcessor:
         """Captures current accelerator memory usage in GiB per device."""
 
         with self._device_smi_lock:
+            self._ensure_device_smi_handles()
             snapshot: Dict[str, float] = {}
             for device_id in getattr(self, "_torch_rocm_memory_devices", ()):
                 if device_id in self._device_metric_failures:
@@ -1226,6 +1280,7 @@ class LoopProcessor:
         """Captures current CPU memory usage in GiB when supported."""
 
         with self._device_smi_lock:
+            self._ensure_device_smi_handles()
             if self._cpu_device_smi is None:
                 return None
             metrics = self._safe_query_metric("cpu", self._cpu_device_smi)
@@ -1269,12 +1324,17 @@ class LoopProcessor:
         """Closes all Device-SMI handles owned by this processor."""
 
         with self._device_smi_lock:
-            for handle in self._device_smi_handles.values():
+            handles = self._device_smi_handles
+            if handles is _DEVICE_SMI_UNINITIALIZED:
+                # Never opened: nothing to close, and the processor stays
+                # closed so a released processor cannot start a sampler later.
+                handles = {}
+            for handle in handles.values():
                 try:
                     handle.close()
                 except Exception:
                     log.debug("Failed to close device telemetry handle during cleanup.", exc_info=True)
-            self._device_smi_handles.clear()
+            self._device_smi_handles = {}
 
             if self._cpu_device_smi is not None:
                 try:
@@ -1575,6 +1635,23 @@ class LoopProcessor:
         pass
         #self.offload_to_disk(module=module)
 
+    def finalize_deferred_runtime_weights(self, model: BaseQModel) -> None:
+        """Publish deferred replay weights a cancelled run will not replay.
+
+        A processor may pack a projection and leave the owning module holding a
+        placement placeholder until the layer's next forward materializes the
+        dense replay weight. A stopped or failed run never reaches that
+        forward, so the in-session model keeps a parameter no forward can read.
+        Processors that defer replay state override this hook and materialize
+        it here, before the looper restores the in-flight layer and before the
+        remaining-meta verdict (#5083). The default has nothing to publish.
+
+        ``model`` is the wrapper the packed module is installed into, the same
+        object ``submodule_finalize`` receives.
+        """
+
+        del model
+
     def release_run_workspace(self) -> None:
         """Release process-wide scratch that outlives individual modules.
 
@@ -1584,6 +1661,23 @@ class LoopProcessor:
         """
 
         pass
+
+    def release_failed_run(self) -> None:
+        """Release run resources that ``finalize()`` would otherwise close.
+
+        ``finalize()`` runs only after a successful loop, so a cancelled or
+        failed run used to keep its Device-SMI handles -- and their 5 Hz sampler
+        threads -- alive for the life of the process (#4813). Closing here is
+        idempotent: ``finalize()`` may still run later and finds no handles
+        left, and a repeated release never raises.
+        """
+
+        self._close_device_smi_handles()
+        # ``finalize`` also drops the process-wide Hessian workspace; a failed
+        # run must not keep it pinned until the next successful one.
+        from ..quantization.gptq import release_workspace_cache
+
+        release_workspace_cache()
 
     # last step, after all loop processor is called
     # finalize is called in reverse after all next sequential processes are called
@@ -1624,6 +1718,82 @@ class LoopProcessor:
         """Override point for the processor name shown in logs and reports."""
 
         pass
+
+
+def rehome_failed_run_kernels(gptq_model) -> None:
+    """Best-effort switch of a failed run's packed layers to a runnable kernel.
+
+    The loop packs every finished layer with the calibration-time kernel, which
+    may be accelerator-only (AWQ GEMM, QQQ, GGUF Triton). The success path
+    rehomes them after the loop; a cancelled or failed run must do the same or
+    the next in-session forward raises ``Could not run ... with arguments from
+    the 'CPU' backend`` (#4947). Finished layers of a disk-offloaded run are
+    meta shells, so resolve the device from the rest of the model instead of
+    from their own tensors. Cleanup never masks the cancellation: a rehome
+    failure (for example the save-and-reload guidance) is logged and ignored.
+    """
+
+    from ..models.base import rehome_quantized_kernel
+
+    model = getattr(gptq_model, "model", None)
+    if model is None:
+        return
+
+    device = None
+    for module in model.modules():
+        runtime_device = getattr(module, "runtime_device", None)
+        if not callable(runtime_device):
+            continue
+        try:
+            candidate = runtime_device()
+        except Exception:  # pragma: no cover - defensive
+            continue
+        if candidate is not None and candidate.type != "meta":
+            device = candidate
+            break
+
+    if device is None:
+        for tensor in model.parameters():
+            if tensor.device.type != "meta":
+                device = tensor.device
+                break
+    if device is None:
+        for tensor in model.buffers():
+            if tensor.device.type != "meta":
+                device = tensor.device
+                break
+
+    try:
+        rehome_quantized_kernel(gptq_model, device=device)
+    except Exception:
+        log.warn(
+            "failed to rehome the quantized kernels of a cancelled/failed run",
+            exc_info=True,
+        )
+
+
+def release_failed_run_processors(processors) -> None:
+    """Release every processor a failed run built, best effort (#4862).
+
+    ``quantize()`` can fail while the processor chain is still being built or
+    before a looper exists (calibration validation, checkpoint entry,
+    ``ModuleLooper.__init__``). Nothing calls ``finalize()`` on that path, so
+    the processors already constructed must release their per-run resources
+    here. Each release is independent and must never mask the run failure.
+    """
+
+    for processor in processors or ():
+        release = getattr(processor, "release_failed_run", None)
+        if not callable(release):
+            continue
+        try:
+            release()
+        except Exception:
+            log.warn(
+                "failed to release processor resources while failing the quantization run",
+                exc_info=True,
+            )
+
 
 def get_max_memory() -> str:
     """Returns current accelerator memory usage for the first one or two devices."""

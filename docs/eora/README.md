@@ -48,7 +48,7 @@ from gptqmodel.adapter.adapter import Lora
 
 eora = Lora(
     # for eora generation, path is adapter save path; for load, it is loading path
-    path='docs/eora/Llama-3.2-3B-4bits-eora_rank64_c4 ',
+    path='docs/eora/Llama-3.2-3B-4bits-eora_rank64_c4',
     rank=64,
 )
 

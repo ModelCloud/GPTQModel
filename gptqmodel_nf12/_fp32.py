@@ -27,13 +27,32 @@ except ImportError:  # no Triton (e.g. macOS): the module still imports for the 
 from .api import NF12Weight
 
 
-def _jit(fn):
+# The multi-row gate kernel below is written in Gluon so the accumulator layout
+# (and therefore the reduction tree) is pinned rather than inferred; plain
+# ``tl`` picks warpsPerCTA [2, 2] for a [2, 1024] tile and changes the bits.
+try:
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+except ImportError:  # pragma: no cover - Triton builds without Gluon
+    gluon = None
+    gl = None
+
+
+def _gluon_jit(fn):
+    """Apply ``gluon.jit`` when available; callers check ``gate_rows_error()``."""
+    return fn if gluon is None else gluon.jit(fn)
+
+
+def _jit(fn=None, **options):
     """``triton.jit`` when Triton is available; identity otherwise so import succeeds.
 
     The decorated bodies only need ``tl`` when a launcher runs them, and every
-    launcher calls :func:`_require_triton` first.
+    launcher calls :func:`_require_triton` first. Keyword options such as
+    ``do_not_specialize`` are forwarded to ``triton.jit``.
     """
-    return triton.jit(fn) if triton is not None else fn
+    if fn is None:
+        return lambda inner: _jit(inner, **options)
+    return triton.jit(fn, **options) if triton is not None else fn
 
 
 def _require_triton() -> None:
@@ -173,6 +192,132 @@ def _linear_fp32_gate_planes(
         tl.store(out_ptr + 3 * n + output_row, tl.sum(acc3, 0) + bias)
         tl.store(out_ptr + 4 * n + output_row, tl.sum(acc4, 0) + bias)
         tl.store(out_ptr + 5 * n + output_row, tl.sum(acc5, 0) + bias)
+
+
+@_gluon_jit
+def _gate_rows_x(ptr, row, m: gl.constexpr, rows_m: gl.constexpr):
+    # When rows_m divides m every row of every tile exists: skip the mask and
+    # its zero-fill. The loaded values (and therefore the bits) are the same.
+    if m % rows_m == 0:
+        return gl.load(ptr)
+    else:
+        return gl.load(ptr, mask=row < m, other=0)
+
+
+@_gluon_jit
+def _gate_rows_step(
+    x_row, meta_ptr, low_ptr, low_u32, escapes_ptr, gate, cols, block,
+    acc0, acc1, acc2, acc3, acc4, acc5,
+    m: gl.constexpr, base_m, exp_base: gl.constexpr, rows_m: gl.constexpr,
+    block_k: gl.constexpr,
+):
+    col = block * block_k + cols
+    col2 = gl.expand_dims(col, 0)
+    gate2 = gl.expand_dims(gate, 1)
+    meta = gl.load(meta_ptr + gate2 * 640 + col2 // 8).to(gl.uint32)
+    low = gl.load(low_ptr + gate2 * 5120 + col2).to(gl.uint32)
+    slot = col2 % 8
+    meta_byte = (meta >> (8 * (slot // 2))) & 255
+    high_even = (meta_byte & 0x87) + exp_base
+    high_odd = (((meta_byte << 1) & 0x80) | ((meta_byte >> 3) & 7)) + exp_base
+    high = gl.where(slot % 2 == 0, high_even, high_odd)
+    # A zero meta word is an escaped group; its first low word is the index.
+    escape = meta == 0
+    index = gl.load(low_u32 + (gate2 * 5120 + (col2 // 8) * 8) // 4, escape, other=0)
+    escaped = gl.load(escapes_ptr + index * 8 + slot, escape, other=0).to(gl.uint16, bitcast=True)
+    bits = gl.where(escape, escaped.to(gl.uint32), (high << 8) | low)
+    w = (bits << 16).to(gl.float32, bitcast=True)
+    x0 = _gate_rows_x(x_row + col, base_m, m, rows_m)
+    acc0 = gl.fma(gl.expand_dims(x0, 0), w, acc0)
+    if rows_m > 1:
+        x1 = _gate_rows_x(x_row + 5120 + col, base_m + 1, m, rows_m)
+        acc1 = gl.fma(gl.expand_dims(x1, 0), w, acc1)
+    if rows_m > 2:
+        x2 = _gate_rows_x(x_row + 10240 + col, base_m + 2, m, rows_m)
+        acc2 = gl.fma(gl.expand_dims(x2, 0), w, acc2)
+    if rows_m > 3:
+        x3 = _gate_rows_x(x_row + 15360 + col, base_m + 3, m, rows_m)
+        acc3 = gl.fma(gl.expand_dims(x3, 0), w, acc3)
+    if rows_m > 4:
+        x4 = _gate_rows_x(x_row + 20480 + col, base_m + 4, m, rows_m)
+        acc4 = gl.fma(gl.expand_dims(x4, 0), w, acc4)
+    if rows_m > 5:
+        x5 = _gate_rows_x(x_row + 25600 + col, base_m + 5, m, rows_m)
+        acc5 = gl.fma(gl.expand_dims(x5, 0), w, acc5)
+    return acc0, acc1, acc2, acc3, acc4, acc5
+
+
+@_gluon_jit
+def _linear_fp32_gate_planes_rows(
+    x_ptr, meta_ptr, low_ptr, escapes_ptr, bias_ptr, out_ptr,
+    m: gl.constexpr, n: gl.constexpr, exp_base: gl.constexpr, has_bias: gl.constexpr,
+    rows_n: gl.constexpr, rows_m: gl.constexpr, unroll: gl.constexpr,
+):
+    """B1 plane-kernel arithmetic for ``rows_n`` gate rows x ``rows_m`` inputs per CTA.
+
+    Shapes: ``x`` contiguous FP32 ``[m, 5120]``; ``meta``/``low``/``escapes``
+    the prepared K-contiguous gate view of an ``[n, 5120]`` weight
+    (``prepare_fp32_gate``); ``out`` contiguous FP32 ``[m, n]``. Grid
+    ``(n // rows_n, cdiv(m, rows_m))``, ``num_warps=4``.
+
+    ``_linear_fp32_gate_planes`` gives every CTA one gate row and re-reads all
+    activation rows per CTA, so an M=6 call moves 384 x 120 KiB of activations
+    through L2/L1 for 2.9 MB of packed weight. Here one CTA decodes ``rows_n``
+    gate rows per K step and applies them to ``rows_m`` activation rows held in
+    registers, dividing that traffic by ``rows_n``.
+
+    Arithmetic contract (bit-identical to ``_linear_fp32_gate_planes`` per
+    output, for every ``m``, ``rows_n``, ``rows_m`` and ``unroll``): the
+    accumulator is ``[rows_n, 1024]`` in BlockedLayout([1, 8], [1, 32],
+    [1, 4]), i.e. each gate row's lane axis has exactly the 1-D plane kernel's
+    layout (8 contiguous lanes per thread, 32 threads, 4 warps). Each lane is
+    a 5-step FP32 FMA chain in ascending K order, then ``gl.sum`` along the
+    lane axis performs the same in-thread fold, warp butterfly (16..1) and
+    4-warp combine. Rows are independent; ``m`` only masks activation loads
+    and output stores, so any row count reproduces the B1 bits of each row.
+    """
+    block_k: gl.constexpr = 1024
+    tile: gl.constexpr = gl.BlockedLayout([1, 8], [1, 32], [1, 4], [1, 0])
+    gl.static_assert(gl.num_warps() == 4, "the B1 reduction tree is defined for 4 warps")
+    gl.static_assert(rows_m >= 1 and rows_m <= 6, "rows_m must be 1..6")
+    gl.static_assert(n % rows_n == 0, "rows_n must divide n")
+    gate = gl.program_id(0) * rows_n + gl.arange(0, rows_n, layout=gl.SliceLayout(1, tile))
+    base_m = gl.program_id(1) * rows_m
+    cols = gl.arange(0, block_k, layout=gl.SliceLayout(0, tile))
+    acc0 = gl.full((rows_n, block_k), 0, gl.float32, tile)
+    acc1 = gl.full((rows_n, block_k), 0, gl.float32, tile)
+    acc2 = gl.full((rows_n, block_k), 0, gl.float32, tile)
+    acc3 = gl.full((rows_n, block_k), 0, gl.float32, tile)
+    acc4 = gl.full((rows_n, block_k), 0, gl.float32, tile)
+    acc5 = gl.full((rows_n, block_k), 0, gl.float32, tile)
+    low_u32 = low_ptr.to(gl.pointer_type(gl.uint32))
+    x_row = x_ptr + base_m * 5120
+    if unroll:
+        for block in gl.static_range(5120 // block_k):
+            acc0, acc1, acc2, acc3, acc4, acc5 = _gate_rows_step(
+                x_row, meta_ptr, low_ptr, low_u32, escapes_ptr, gate, cols, block,
+                acc0, acc1, acc2, acc3, acc4, acc5, m, base_m, exp_base, rows_m, block_k)
+    else:
+        for block in range(5120 // block_k):
+            acc0, acc1, acc2, acc3, acc4, acc5 = _gate_rows_step(
+                x_row, meta_ptr, low_ptr, low_u32, escapes_ptr, gate, cols, block,
+                acc0, acc1, acc2, acc3, acc4, acc5, m, base_m, exp_base, rows_m, block_k)
+    if has_bias:
+        bias = gl.load(bias_ptr + gate)
+    else:
+        bias = 0.0
+    out_row = out_ptr + base_m * n + gate
+    gl.store(out_row, gl.sum(acc0, 1) + bias, mask=base_m < m)
+    if rows_m > 1:
+        gl.store(out_row + n, gl.sum(acc1, 1) + bias, mask=base_m + 1 < m)
+    if rows_m > 2:
+        gl.store(out_row + 2 * n, gl.sum(acc2, 1) + bias, mask=base_m + 2 < m)
+    if rows_m > 3:
+        gl.store(out_row + 3 * n, gl.sum(acc3, 1) + bias, mask=base_m + 3 < m)
+    if rows_m > 4:
+        gl.store(out_row + 4 * n, gl.sum(acc4, 1) + bias, mask=base_m + 4 < m)
+    if rows_m > 5:
+        gl.store(out_row + 5 * n, gl.sum(acc5, 1) + bias, mask=base_m + 5 < m)
 
 
 @_jit
@@ -409,14 +554,34 @@ def linear_bf16_fp32(x: torch.Tensor, weight: NF12Weight,
     return out
 
 
-@_jit
+@_jit(do_not_specialize=["m"])
 def _linear_fp32_prefill_gate_tc(
     x_ptr, weight_ptr, bias_ptr, out_ptr,
-    m: tl.constexpr, n: tl.constexpr, k: tl.constexpr,
+    m, n: tl.constexpr, k: tl.constexpr,
     has_bias: tl.constexpr,
     block_m: tl.constexpr, block_n: tl.constexpr, block_k: tl.constexpr,
 ):
-    """Use Ampere Tensor Cores with FP32 inputs and exact BF16 weight values."""
+    """Use Ampere Tensor Cores with FP32 inputs and exact BF16 weight values.
+
+    Shapes: ``x`` is a contiguous FP32 ``[m, k]`` activation, ``weight`` the
+    call-local contiguous BF16 ``[n, k]`` decode of the NF12 gate, ``bias`` an
+    optional FP32 ``[n]`` vector and ``out`` a contiguous FP32 ``[m, n]``
+    result. The grid is ``(cdiv(m, block_m), cdiv(n, block_n))``; each program
+    owns one ``block_m x block_n`` output tile and walks the full ``k`` axis
+    in ``block_k`` steps with one TF32x3 ``tl.dot`` per step.
+
+    ``m`` is the prefill row count and is deliberately a runtime argument that
+    Triton does not specialize (no ``==1`` or ``%16`` variants). It only
+    masks activation loads and output stores; it never enters an address,
+    the K loop trip count, the tile shape or the accumulation order. As a
+    ``tl.constexpr`` it compiled one variant per distinct prefill width
+    (about 1,800 cached variants in production), each new width paying a
+    compile or a disk load on the serving path. ``n`` and ``k`` stay
+    constexpr: they fix the K-loop bounds, pipelining and vectorization, and
+    take one value per gate geometry. A given row therefore runs the same
+    per-element instruction sequence for every ``m``, so results are
+    bit-identical to the former per-width specializations.
+    """
     input_rows = tl.program_id(0) * block_m + tl.arange(0, block_m)
     output_rows = tl.program_id(1) * block_n + tl.arange(0, block_n)
     depth = tl.arange(0, block_k)
@@ -542,3 +707,59 @@ def linear_fp32_staged_b1(x: torch.Tensor, weight: NF12Weight,
     """Fuse FP32 staged rows while retaining each ordinary B1 reduction tree."""
     _require_triton()
     return linear_fp32(x, weight, bias, _staged_b1=True)
+
+
+GATE_ROWS_N = (1, 2, 4, 8)
+GATE_ROWS_M = (1, 2, 3, 4, 5, 6)
+
+
+def gate_rows_error() -> str | None:
+    """Why ``linear_fp32_gate_rows`` cannot run in this environment, or None."""
+    if triton is None:
+        return "linear_fp32_gate_rows needs Triton"
+    if gluon is None:
+        return "linear_fp32_gate_rows needs triton.experimental.gluon"
+    return None
+
+
+def linear_fp32_gate_rows(x: torch.Tensor, weight: NF12Weight,
+                          bias: torch.Tensor | None = None, *,
+                          rows_n: int = 2, rows_m: int = 6, unroll: bool = False,
+                          out: torch.Tensor | None = None) -> torch.Tensor:
+    """FP32 ``x @ weight.T + bias`` for a prepared 128/384x5120 gate, any row count.
+
+    One launch. Every output row is bit-identical to the B1 plane kernel
+    (``linear_fp32`` at M=1 and ``linear_fp32_staged_b1`` at M=6) applied to
+    that row, so a multi-sequence verifier batch reproduces each sequence's B1
+    scores. ``rows_n`` gate rows and ``rows_m`` activation rows share one CTA;
+    they change speed only. Requires :func:`prepare_fp32_gate`.
+    """
+    _require_triton()
+    error = gate_rows_error()
+    if error is not None:
+        raise RuntimeError(error)
+    view = _get_gate_view(weight)
+    n, k = weight.shape
+    if view is None:
+        raise ValueError("linear_fp32_gate_rows requires prepare_fp32_gate(weight)")
+    if not x.is_cuda or x.dtype != torch.float32 or x.shape[-1] != k or x.device != weight.device:
+        raise ValueError("linear_fp32_gate_rows needs a CUDA FP32 [..., 5120] activation on the weight device")
+    if rows_n not in GATE_ROWS_N or n % rows_n or rows_m not in GATE_ROWS_M:
+        raise ValueError(f"rows_n must be one of {GATE_ROWS_N} dividing {n}; rows_m one of {GATE_ROWS_M}")
+    if bias is not None and (bias.dtype != torch.float32 or bias.shape != (n,) or bias.device != x.device):
+        raise ValueError("bias must be FP32 [out_features] on the activation device")
+    x2 = x.contiguous().view(-1, k)
+    m = x2.shape[0]
+    if out is None:
+        out = torch.empty((*x.shape[:-1], n), dtype=torch.float32, device=x.device)
+    elif (out.dtype != torch.float32 or out.shape != (*x.shape[:-1], n)
+          or not out.is_contiguous() or out.device != x.device):
+        raise ValueError("out must be a contiguous FP32 [..., out_features] tensor on the activation device")
+    if m:
+        meta, low, escapes = view
+        _linear_fp32_gate_planes_rows[(n // rows_n, triton.cdiv(m, rows_m))](
+            x2, meta, low, escapes, bias if bias is not None else x2, out,
+            m, n, weight.exp_base, bias is not None, rows_n, rows_m, bool(unroll),
+            num_warps=4,
+        )
+    return out

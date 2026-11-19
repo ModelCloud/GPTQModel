@@ -9,8 +9,10 @@ explicit ``offload_to_disk_path`` grew by one full model per run.
 
 The bundles are the live storage for the quantized modules: a forward after
 ``save()`` still materializes weights from them. Cleanup therefore happens when
-the model is collected, when the run fails, and before the same model starts
-another run -- never at the end of a successful ``save()``.
+the model is collected, when the run fails before any bundle is live, and before
+the same model starts another run -- never at the end of a successful ``save()``.
+A failed run whose finished layers still read their bundles keeps the directory
+until the model is collected (#4807).
 """
 
 from __future__ import annotations

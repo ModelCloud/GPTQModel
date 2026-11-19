@@ -59,7 +59,7 @@ source, and an unresolvable gain is never guessed.
 | Mechanism | Before (origin/main) | After |
 | --- | --- | --- |
 | `prev_op` selection | last width-matching gain norm in the run, regardless of data flow, `gptqmodel/models/base.py:4407` | reverse scan skips names tagged `:postnorm`, `gptqmodel/models/base.py:4432` and `:4443` |
-| Definition metadata | none; LFM3 post-norms were ordinary `:!` leaves | `POST_NORM_FLAG = ":postnorm"` at `gptqmodel/models/base.py:420`, collected by `get_post_norm_modules` at `:1202` |
+| Definition metadata | none; LFM3 post-norms were ordinary `:!` leaves | `POST_NORM_FLAG = ":postnorm"` at `gptqmodel/models/base.py:559`, collected by `get_post_norm_modules` at `:1520` |
 | LFM3 / LFM3-VL / LFM3-Omni tree | `post_operator_norm:!`, `post_ffn_norm:!` | `post_operator_norm:!:postnorm`, `post_ffn_norm:!:postnorm` |
 | Gain probe failure | grep forward source for `1.0+self.weight` and fold as offset, `gptqmodel/quantization/awq/quantize/scale.py:62` (origin/main) | `_norm_gain_offset` raises `UnresolvableGainOffset`, `gptqmodel/quantization/awq/quantize/scale.py:65` |
 | Scale application after probe failure | mutated norm and consumer weights | `apply_scale` logs and skips the group before touching weights or captured features, `gptqmodel/quantization/awq/quantize/scale.py:150` |

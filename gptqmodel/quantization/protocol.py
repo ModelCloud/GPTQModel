@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import difflib
 import math
 import weakref
 from dataclasses import dataclass, field, is_dataclass
@@ -11,7 +12,22 @@ from typing import Any, Callable, Mapping, Optional
 
 import pcre
 
-from .config import FORMAT, METHOD, GGUFBits, GGUFConfig, QuantizeConfig, SmoothMAD
+from .config import (
+    FORMAT,
+    METHOD,
+    GGUFBits,
+    GGUFConfig,
+    QuantizeConfig,
+    SmoothMAD,
+    _gguf_bits_from_components,
+    _gguf_bits_spec_from_format_value,
+    _normalize_gguf_config,
+    _normalize_gguf_public_format,
+    _reject_unknown_payload_keys,
+    _require_bool_value,
+    _smooth_method_default,
+    _validate_smooth_method_payload,
+)
 from .norm_tuning import norm_type_of
 
 
@@ -895,6 +911,67 @@ def _smoothquant_scales(
 register_action(_SMOOTHQUANT_METHOD, _apply_smoothquant_action, validate=_validate_smoothquant_args)
 
 
+# Accepted keys per protocol level, taken from the dataclasses above. A key
+# outside its level used to be read with `data.get(...)` and silently dropped,
+# so a misspelled `export`/`variant`/`prepare`/`stop` compiled to the default
+# GPTQ v1 config instead of the plan the user wrote (#4939).
+_PROTOCOL_ROOT_KEYS = ("version", "stages")
+_PROTOCOL_STAGE_KEYS = ("name", "rules")
+_PROTOCOL_RULE_KEYS = (
+    "match",
+    "aliases",
+    "actions",
+    "stop",
+    "weight",
+    "input",
+    "output",
+    "kv_cache",
+)
+_PROTOCOL_TARGET_KEYS = ("mode", "prepare", "quantize", "export")
+_PROTOCOL_EXPORT_KEYS = ("format", "variant", "impl", "version", "options")
+
+
+def _reject_unknown_protocol_keys(
+    data: Mapping,
+    *,
+    context: str,
+    allowed: tuple[str, ...],
+) -> None:
+    """Reject a key this protocol level does not define, with a close match hint."""
+
+    unknown = sorted(str(key) for key in data if key not in allowed)
+    if not unknown:
+        return
+    details = []
+    for key in unknown:
+        matches = difflib.get_close_matches(key, sorted(allowed), n=1)
+        details.append(f"`{key}`" + (f" (did you mean `{matches[0]}`?)" if matches else ""))
+    accepted = ", ".join(f"`{key}`" for key in sorted(allowed))
+    raise ValueError(
+        f"Quantization protocol: unknown {context} key(s): "
+        + ", ".join(details)
+        + f". Accepted {context} keys: {accepted}."
+    )
+
+
+def _require_protocol_bool(value: Any, *, label: str) -> bool:
+    """Reject a non-bool, reusing the strict check from #4668.
+
+    YAML/JSON quote ``false`` into a string, and ``bool("false")`` is ``True``,
+    so the protocol compiler must not coerce. The hint names the quoting trap
+    because the value is otherwise a valid-looking bool.
+    """
+
+    try:
+        _require_bool_value("Quantization protocol", label, value)
+    except TypeError as exc:
+        raise TypeError(
+            f"{exc} Write a bare YAML/JSON boolean such as `{label}: false`; "
+            "a quoted or numeric value is not a bool."
+        ) from exc
+    return value
+
+
 def _normalize_root(source: Any) -> dict[str, Any]:
     if isinstance(source, ExecutionPlan):
         return {
@@ -902,12 +979,13 @@ def _normalize_root(source: Any) -> dict[str, Any]:
             "stages": list(source.stages),
         }
     if isinstance(source, Mapping):
-        return dict(source)
+        data = dict(source)
+        _reject_unknown_protocol_keys(data, context="root", allowed=_PROTOCOL_ROOT_KEYS)
+        return data
     if is_dataclass(source):
-        return {
-            "version": getattr(source, "version"),
-            "stages": getattr(source, "stages"),
-        }
+        data = {field_name: getattr(source, field_name) for field_name in source.__dataclass_fields__}
+        _reject_unknown_protocol_keys(data, context="root", allowed=_PROTOCOL_ROOT_KEYS)
+        return data
     raise TypeError(
         "Quantization protocol root must be a mapping or dataclass-like object with `version` and `stages`."
     )
@@ -920,6 +998,7 @@ def _normalize_stage(source: Any) -> Stage:
             rules=tuple(_normalize_rule(rule) for rule in source.rules),
         )
     data = _coerce_mapping(source, context="stage")
+    _reject_unknown_protocol_keys(data, context="stage", allowed=_PROTOCOL_STAGE_KEYS)
     name = data.get("name")
     if not name:
         raise ValueError("Stage requires a non-empty `name`.")
@@ -935,7 +1014,7 @@ def _normalize_rule(source: Any) -> Rule:
             match=_normalize_match(source.match),
             aliases=_copy_optional_mapping(source.aliases),
             actions=tuple(_normalize_operation(action) for action in source.actions),
-            stop=bool(source.stop),
+            stop=_require_protocol_bool(source.stop, label="stop"),
             weight=_normalize_target(source.weight),
             input=_normalize_target(source.input),
             output=_normalize_target(source.output),
@@ -943,6 +1022,7 @@ def _normalize_rule(source: Any) -> Rule:
         )
 
     data = _coerce_mapping(source, context="rule")
+    _reject_unknown_protocol_keys(data, context="rule", allowed=_PROTOCOL_RULE_KEYS)
     match = data.get("match")
     if not match:
         raise ValueError("Rule requires a non-empty `match`.")
@@ -951,7 +1031,7 @@ def _normalize_rule(source: Any) -> Rule:
         match=_normalize_match(match),
         aliases=_copy_optional_mapping(data.get("aliases")),
         actions=tuple(_normalize_operation(action) for action in data.get("actions", ())),
-        stop=bool(data.get("stop", False)),
+        stop=_require_protocol_bool(data.get("stop", False), label="stop"),
         weight=_normalize_target(data.get("weight")),
         input=_normalize_target(data.get("input")),
         output=_normalize_target(data.get("output")),
@@ -971,6 +1051,7 @@ def _normalize_target(source: Any) -> Optional[TargetSpec]:
         )
 
     data = _coerce_mapping(source, context="target")
+    _reject_unknown_protocol_keys(data, context="target", allowed=_PROTOCOL_TARGET_KEYS)
     return TargetSpec(
         mode=data.get("mode"),
         prepare=tuple(_normalize_operation(op) for op in data.get("prepare", ()) or ()),
@@ -1055,6 +1136,7 @@ def _normalize_export(source: Any) -> Optional[ExportSpec]:
     if isinstance(source, str):
         return ExportSpec(format=source)
     data = _coerce_mapping(source, context="export")
+    _reject_unknown_protocol_keys(data, context="export", allowed=_PROTOCOL_EXPORT_KEYS)
     options = dict(data.get("options", {}) or {})
     return ExportSpec(
         format=data.get("format"),
@@ -1114,12 +1196,39 @@ def _validate_weight_quantize_args(quantize: QuantizeSpec, method: METHOD) -> No
     unknown = sorted(set(quantize.args) - set(supported))
     if not unknown:
         return
-    unsupported = ", ".join(f"`{key}`" for key in unknown)
+    details = []
+    for key in unknown:
+        matches = difflib.get_close_matches(str(key), sorted(supported), n=1)
+        details.append(f"`{key}`" + (f" (did you mean `{matches[0]}`?)" if matches else ""))
     allowed = ", ".join(f"`{key}`" for key in supported)
     raise ValueError(
         f"{method.value.upper()} weight target has unsupported `weight.quantize` argument(s): "
-        f"{unsupported}. Supported keys: {allowed}."
+        f"{', '.join(details)}. Supported keys: {allowed}."
     )
+
+
+def _reject_unhonored_export(export: Optional[ExportSpec], *, method: METHOD) -> None:
+    """Refuse export fields no compiler reads, instead of dropping them (#4939).
+
+    ``impl`` is accepted: it names the load-time runtime implementation, which
+    is orthogonal to the encoded layout and selected later by the backend.
+    ``version`` and ``options`` describe the layout itself and have no consumer
+    yet, so a non-empty value would silently change nothing.
+    """
+
+    if export is None:
+        return
+    if export.options:
+        requested = ", ".join(f"`{key}`" for key in sorted(export.options))
+        raise NotImplementedError(
+            f"Initial {method.value.upper()} protocol compiler does not yet honor "
+            f"`weight.export.options` (got {requested}); it would be dropped, so it is rejected instead."
+        )
+    if export.version is not None:
+        raise NotImplementedError(
+            f"Initial {method.value.upper()} protocol compiler does not yet honor "
+            f"`weight.export.version` (got {export.version!r}); it would be dropped, so it is rejected instead."
+        )
 
 
 def _compile_gguf_weight_target(weight: TargetSpec, *, matchers: tuple[MatchSpec, ...]) -> GGUFConfig:
@@ -1142,6 +1251,7 @@ def _compile_gguf_weight_target(weight: TargetSpec, *, matchers: tuple[MatchSpec
         raise ValueError("GGUF weight target requires `weight.quantize.bits`.")
 
     export = weight.export
+    _reject_unhonored_export(export, method=METHOD.GGUF)
     if export is not None and export.format not in {None, "gguf"}:
         raise NotImplementedError("Initial GGUF compiler supports only `weight.export.format = \"gguf\"`.")
 
@@ -1174,10 +1284,11 @@ def _compile_quantize_config_weight_target(weight: TargetSpec, *, matchers: tupl
     if bits is None:
         raise ValueError(f"{method.value.upper()} weight target requires `weight.quantize.bits`.")
 
+    _reject_unhonored_export(weight.export, method=method)
     export_format = _resolve_export_format(method=method, export=weight.export)
     dynamic = _compile_negative_match_dynamic(matchers)
     group_size = quantize.args.get("group_size", 128)
-    sym = bool(quantize.args.get("sym", True))
+    sym = _require_protocol_bool(quantize.args.get("sym", True), label="weight.quantize.sym")
 
     kwargs = {
         "method": method,
@@ -1189,11 +1300,15 @@ def _compile_quantize_config_weight_target(weight: TargetSpec, *, matchers: tupl
     }
 
     if "desc_act" in quantize.args or method == METHOD.GPTQ:
-        kwargs["desc_act"] = bool(quantize.args.get("desc_act", False))
+        kwargs["desc_act"] = _require_protocol_bool(
+            quantize.args.get("desc_act", False), label="weight.quantize.desc_act"
+        )
 
     if method == METHOD.GPTQ:
         if "act_group_aware" in quantize.args:
-            kwargs["act_group_aware"] = bool(quantize.args["act_group_aware"])
+            kwargs["act_group_aware"] = _require_protocol_bool(
+                quantize.args["act_group_aware"], label="weight.quantize.act_group_aware"
+            )
 
     return QuantizeConfig(**kwargs)
 
@@ -1209,31 +1324,108 @@ def _compile_supported_smoother(prepare: tuple[OperationSpec, ...]) -> Optional[
         raise NotImplementedError(
             "Initial GGUF compiler supports only `smooth.mad` in `weight.prepare`."
         )
-    k = op.args.get("k")
+
+    if "k" in op.args and "smooth" in op.args:
+        # Picking one silently would ignore the other spelling.
+        raise ValueError(
+            "Quantization protocol: `weight.prepare` cannot set both `k` and a "
+            "`smooth` payload; use `{method: smooth.mad, k: ...}` or "
+            "`{method: smoother, smooth: {type: mad, k: ...}}`."
+        )
+
+    if op.method == "smooth.mad":
+        _reject_unknown_payload_keys(
+            "Quantization protocol",
+            "`weight.prepare.smooth.mad` argument",
+            op.args,
+            ("k", "group_size_threshold"),
+        )
+        k = op.args.get("k")
+        if k is None:
+            k = _smooth_method_default(SmoothMAD, "k")
+        threshold = op.args.get("group_size_threshold")
+        if threshold is None:
+            threshold = _smooth_method_default(SmoothMAD, "group_size_threshold")
+        return SmoothMAD(k=float(k), group_size_threshold=int(threshold))
+
+    _reject_unknown_payload_keys(
+        "Quantization protocol",
+        "`weight.prepare.smoother` argument",
+        op.args,
+        ("smooth",),
+    )
+    smooth_payload = op.args.get("smooth")
+    if smooth_payload is None:
+        return SmoothMAD()
+    if not isinstance(smooth_payload, Mapping):
+        raise TypeError(
+            "Quantization protocol: `weight.prepare.smoother` requires a `smooth` "
+            "mapping such as `{type: mad, k: 2.75}`."
+        )
+
+    method_type = _validate_smooth_method_payload(
+        smooth_payload, owner="Quantization protocol", allow_name=False
+    )
+    if method_type != "mad":
+        raise NotImplementedError("Initial GGUF compiler supports only MAD smoothers.")
+
+    k = smooth_payload.get("k")
     if k is None:
-        smooth_payload = op.args.get("smooth")
-        if isinstance(smooth_payload, Mapping):
-            if smooth_payload.get("type") not in {None, "mad"}:
-                raise NotImplementedError("Initial GGUF compiler supports only MAD smoothers.")
-            k = smooth_payload.get("k")
-    return SmoothMAD(k=2.75 if k is None else float(k))
+        k = _smooth_method_default(SmoothMAD, "k")
+    threshold = smooth_payload.get("group_size_threshold")
+    if threshold is None:
+        threshold = _smooth_method_default(SmoothMAD, "group_size_threshold")
+    return SmoothMAD(k=float(k), group_size_threshold=int(threshold))
 
 
 def _resolve_gguf_public_format(bits: Any, export: Optional[ExportSpec]) -> Optional[str]:
-    variant = export.variant if export is not None else None
+    """Resolve a protocol GGUF ``export.variant`` without dropping its width.
 
+    ``variant`` may be a full subtype (``q4_k_m``, as documented) or the
+    width-less public token (``q_k_m``). Both normalize through the same alias
+    path as ``bits`` so a consistent pair compiles and a genuine width conflict
+    is rejected instead of silently adopting one side (issue #5106).
+    """
+
+    variant = export.variant if export is not None else None
+    bits_width, _, _ = _normalize_gguf_config(bits, None)
+
+    variant_public = _normalize_gguf_public_format(variant)
+    bits_spec = _gguf_bits_spec_from_format_value(bits)
+    variant_bits_spec = _gguf_bits_spec_from_format_value(variant)
+
+    def reject_conflict() -> None:
+        raise ValueError(
+            "GGUF protocol uses incompatible bits/export variant combination: "
+            f"bits={bits}, export.variant={variant}."
+        )
+
+    if variant_bits_spec is not None and variant_bits_spec.bits != bits_width:
+        reject_conflict()
+
+    # When `bits` itself names a full subtype, the variant must resolve to that
+    # same subtype, not merely the same width (for example q4_k_m vs q4_0).
+    if bits_spec is not None and variant_public is not None:
+        variant_effective = variant_bits_spec
+        if variant_effective is None:
+            try:
+                variant_effective = _gguf_bits_from_components(bits_width, variant_public)
+            except ValueError:
+                reject_conflict()
+        if variant_effective != bits_spec:
+            reject_conflict()
+
+    if variant_public is not None:
+        return variant_public
+
+    if isinstance(bits, GGUFBits):
+        return bits.to_public_format()
     if isinstance(bits, str):
         normalized = bits.strip().lower().replace("-", "_")
         if normalized and not normalized.isdigit():
-            bits_spec = GGUFBits.from_string(normalized)
-            public_format = bits_spec.to_public_format()
-            if variant is not None and variant != public_format:
-                raise ValueError(
-                    f"GGUF protocol uses incompatible bits/export variant combination: bits={bits}, export.variant={variant}."
-                )
-            return variant or public_format
+            return GGUFBits.from_string(normalized).to_public_format()
 
-    return variant
+    return None
 
 
 def _is_global_match(matchers: tuple[MatchSpec, ...]) -> bool:

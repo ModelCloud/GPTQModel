@@ -88,6 +88,8 @@ _GGUF_TYPE_INFO = {
     "I32": {"bits": 32, "block_size": 1, "type_size": 4},
     "I64": {"bits": 64, "block_size": 1, "type_size": 8},
     "F64": {"bits": 64, "block_size": 1, "type_size": 8},
+    # OCP FP8 E4M3 scalar type added in ggml 1.0 (one byte per element).
+    "F8_E4M3": {"bits": 8, "block_size": 1, "type_size": 1},
 }
 _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE = {
     "q1_0": "Q1_0",
@@ -190,6 +192,7 @@ _GGUF_TENSOR_QTYPE_BY_VALUE = {
     40: "NVFP4",
     PRISM_Q1_0_G128_VALUE: PRISM_Q1_0_G128_NAME,
     42: "Q2_0",
+    43: "F8_E4M3",
 }
 _GGUF_SIGN_ONLY_LUT = (
     np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1, bitorder="little").astype(np.int8) * 2 - 1
@@ -329,7 +332,10 @@ def _gguf_quantize_q8_0(blocks: np.ndarray) -> np.ndarray:
     d = np.abs(blocks).max(axis=-1, keepdims=True) / 127.0
     with np.errstate(divide="ignore"):
         inv_d = np.where(d == 0, 0, 1.0 / d)
-    qs = np.round(blocks * inv_d).astype(np.int8).view(np.uint8)
+    # ggml's Q8_0 reference rounds ties away from zero, not to nearest-even.
+    # The optional `gguf` package packs Q8_0 with that rule, so the fallback
+    # must emit the same bytes when that dependency is missing.
+    qs = _gguf_roundf(blocks * inv_d).astype(np.int8).view(np.uint8)
     d = d.astype(np.float16).view(np.uint8)
     return np.concatenate([d, qs], axis=-1)
 
@@ -614,6 +620,68 @@ def _gguf_quantize_q6_k(blocks: np.ndarray) -> np.ndarray:
     )
 
 
+_Q8_1_STORED_FIELD_LABELS = ("block scale d", "auxiliary scale-sum s")
+
+
+def _q8_1_unrepresentable_field(
+    field: int, index: int, blocks: int, value: float | None
+) -> ValueError:
+    label = _Q8_1_STORED_FIELD_LABELS[field]
+    source = "" if value is None else f" (block value {value:.7g})"
+    return ValueError(
+        f"GGUF Q8_1 cannot store the {label} in FP16: block {index} of {blocks}{source} "
+        f"falls outside the finite FP16 range +/-{np.finfo(np.float16).max:g}. "
+        "Pack a format whose stored fields cover the block magnitude (for example Q8_0 "
+        "or Q8_K), or keep the block in range."
+    )
+
+
+def _check_q8_1_stored_fields(d: np.ndarray, s: np.ndarray) -> None:
+    """Reject a Q8_1 block whose FP16 fields cannot hold its values.
+
+    ``block_q8_1`` stores ``d`` and ``s = d * sum(qs)`` as FP16. A block of 32
+    values of 3000 has a finite FP16 scale (``d = 23.62``) but a scale-sum of
+    96000, so the cast publishes ``inf`` and any reader that folds ``s`` into
+    the dot product gets a non-finite result. The block dtype is fixed by the
+    format, so the supported input range is narrowed instead of publishing
+    those bytes.
+    """
+
+    for field, value in enumerate((d, s)):
+        with np.errstate(over="ignore", invalid="ignore"):
+            representable = np.isfinite(value.astype(np.float16))
+        if representable.all():
+            continue
+        # d and s are per-block (N, 1), so a flat index is the block index.
+        flat = ~representable.reshape(-1)
+        index = int(np.flatnonzero(flat)[0])
+        raise _q8_1_unrepresentable_field(
+            field, index, int(value.shape[0]), float(value.reshape(-1)[index])
+        )
+
+
+def _check_packed_q8_1_fields(packed: np.ndarray) -> None:
+    """Validate the FP16 header fields of packed Q8_1 bytes.
+
+    ``_quantize_gguf_tensor_numpy`` prefers the installed ``gguf`` reference
+    quantizer or the native ggml bridge before the NumPy fallback, so the same
+    invariant is enforced on the bytes that would be published, not only in the
+    fallback.
+    """
+
+    type_size = _GGUF_TYPE_INFO["Q8_1"]["type_size"]
+    blocks = np.asarray(packed, dtype=np.uint8).reshape(-1, type_size)
+    # The header is the first four bytes of each block: fp16 d, then fp16 s.
+    stored = blocks[:, :4].copy().view(np.float16)
+    unrepresentable = ~np.isfinite(stored)
+    if not unrepresentable.any():
+        return
+    flattened = int(np.flatnonzero(unrepresentable.reshape(-1))[0])
+    index, field = divmod(flattened, 2)
+    # The stored bytes are already non-finite, so no finite value is recoverable.
+    raise _q8_1_unrepresentable_field(field, index, int(blocks.shape[0]), None)
+
+
 def _gguf_quantize_q8_1(blocks: np.ndarray) -> np.ndarray:
     # block_q8_1 = { fp16 d, fp16 s, int8 qs[32] }; s = sum(d * q), used by
     # upstream dot kernels that fold the scale-sum into int8 dot products.
@@ -626,6 +694,7 @@ def _gguf_quantize_q8_1(blocks: np.ndarray) -> np.ndarray:
     # ggml's reference uses roundf (ties away from zero), not nearest-even.
     q = np.copysign(integral + (magnitude - integral >= 0.5), scaled).astype(np.int8)
     s = q.astype(np.float32).sum(axis=1, keepdims=True) * d
+    _check_q8_1_stored_fields(d, s)
     rows = blocks.shape[0]
     out = np.empty((rows, _GGUF_TYPE_INFO["Q8_1"]["type_size"]), dtype=np.uint8)
     out[:, :2] = d.astype(np.float16).view(np.uint8).reshape(rows, 2)
@@ -638,11 +707,39 @@ def _gguf_quantize_q8_k(blocks: np.ndarray) -> np.ndarray:
     # block_q8_K = { fp32 d, int8 qs[256], int16 bsums[16] }; bsums[i] is the
     # int8 code sum of group i (16 elements), used by upstream dot kernels.
     signed_max = np.take_along_axis(blocks, np.abs(blocks).argmax(axis=1, keepdims=True), axis=1)
-    iscale = np.divide(
-        np.float32(-127.0), signed_max, out=np.zeros_like(signed_max), where=signed_max != 0
-    )
-    d = np.divide(np.float32(1.0), iscale, out=np.zeros_like(iscale), where=iscale != 0)
-    q = np.clip(np.rint(blocks * iscale), -127, 127).astype(np.int8)
+    nonzero = signed_max != 0
+    # ggml derives the stored scale as the reciprocal of -127/peak. For a very
+    # small but nonzero peak that reciprocal overflows to Inf in fp32, and
+    # 1/Inf is zero even though -peak/127 is a representable subnormal fp32.
+    # Keep the reciprocal path wherever it is finite so ordinary blocks stay
+    # bit-exact with ggml, and use the direct quotient only for those blocks.
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        iscale = np.divide(
+            np.float32(-127.0), signed_max, out=np.zeros_like(signed_max), where=nonzero
+        )
+        reciprocal_overflow = np.isinf(iscale)
+        d = np.divide(
+            np.float32(1.0),
+            iscale,
+            out=np.zeros_like(iscale),
+            where=nonzero & ~reciprocal_overflow,
+        )
+    if np.any(reciprocal_overflow):
+        direct_d = np.divide(
+            -signed_max, np.float32(127.0), out=np.zeros_like(signed_max), where=nonzero
+        )
+        d = np.where(reciprocal_overflow, direct_d, d)
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        scaled = blocks * iscale
+    if np.any(reciprocal_overflow):
+        # Codes for an overflowing block must come from the stored scale; using
+        # the Inf reciprocal would saturate every nonzero element to +/-127.
+        # The wide division also keeps a subnormal stored scale usable on hosts
+        # that flush subnormal operands.
+        safe_d = np.where(d == 0, np.float32(1.0), d)
+        direct = blocks.astype(np.float64) / safe_d.astype(np.float64)
+        scaled = np.where(reciprocal_overflow, direct, scaled)
+    q = np.clip(np.rint(scaled), -127, 127).astype(np.int8)
     bsums = q.reshape(-1, 16, 16).sum(axis=2).astype(np.int16)
     rows = blocks.shape[0]
     out = np.empty((rows, _GGUF_TYPE_INFO["Q8_K"]["type_size"]), dtype=np.uint8)
@@ -868,6 +965,15 @@ def _dequantize_prism_q1_0_g128_torch(
 
 def _quantize_gguf_tensor_numpy(weight: np.ndarray, tensor_qtype) -> np.ndarray:
     resolved_qtype = _resolve_gguf_tensor_qtype(tensor_qtype)
+    packed = _pack_gguf_tensor_numpy(weight, resolved_qtype)
+    if resolved_qtype == "Q8_1":
+        # The format stores its auxiliary scale-sum in FP16, which no packer can
+        # widen. Reject unreadable bytes whichever packer produced them.
+        _check_packed_q8_1_fields(packed)
+    return packed
+
+
+def _pack_gguf_tensor_numpy(weight: np.ndarray, resolved_qtype: str) -> np.ndarray:
     if _GGUF_AVAILABLE:
         qtype = getattr(gguf_lib.GGMLQuantizationType, resolved_qtype, None)
         try:
@@ -1095,11 +1201,27 @@ def _dequantize_q5_0_numpy(data: np.ndarray) -> np.ndarray:
     return (d * q.astype(np.float32)).reshape(rows.shape[0], -1)
 
 
+def _dequantize_f8_e4m3_numpy(qweight: np.ndarray) -> np.ndarray:
+    if not hasattr(torch, "float8_e4m3fn"):
+        raise NotImplementedError(
+            "Dequantizing GGUF F8_E4M3 requires a Torch build with torch.float8_e4m3fn."
+        )
+    # GGUFReader hands back a read-only view, so copy before wrapping it.
+    rows = np.array(qweight, dtype=np.uint8, copy=True, order="C")
+    return torch.from_numpy(rows).view(torch.float8_e4m3fn).to(torch.float32).numpy()
+
+
 def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
+    # ``data`` may be a strided view (the Triton backend keeps its packed weight
+    # in a transposed storage, #4811) and the block decoders reinterpret the
+    # last axis, which needs a contiguous buffer.
+    data = np.ascontiguousarray(data)
     resolved_qtype = _resolve_gguf_tensor_qtype(tensor_type)
 
     if resolved_qtype == "F32":
         return np.asarray(data, dtype=np.float32)
+    if resolved_qtype == "F8_E4M3":
+        return _dequantize_f8_e4m3_numpy(data)
     if resolved_qtype == "F16":
         return np.asarray(data, dtype=np.float16).astype(np.float32)
     if resolved_qtype == "BF16":
@@ -1173,11 +1295,43 @@ def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
 
 
 class GGUFTorchLinear(WeightOnlyQuantLinear):
+    # GGUF publishes its quantized block payload as the module's only tensor.
+    CHECKPOINT_REQUIRED_BUFFERS = ("qweight",)
+
     # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager runs and an explicit
     # torch.cuda.graph capture succeeds, but dynamo breaks on
     # `tensor.is_inference()` in `tensor_cache_key`, so only EAGER is reachable.
+    #
+    # The capture claim covers the formats whose dense dequant runs entirely on
+    # the device (`GRAPH_CAPTURE_QTYPES`: Q4_0/Q8_0 and the K-quants Q4_K/Q5_K/
+    # Q6_K, i.e. the default `q_k_m`). Q2_K/Q3_K and the remaining codebook
+    # formats dequantize through numpy on the host, so they cannot be captured;
+    # `supports_graph_capture()` answers that per instance (#5014).
+    #
+    # Compile level: CUDA/BF16 is EAGER, so the class-wide default records the
+    # measured CUDA ceiling and CPU is raised through the per-device override.
+    # CPU, torch 2.11.0+cu130: eager=True, graph_breaks=0, and
+    # dynamo/aot_eager/inductor all reach it after two fixes -- the
+    # AVX512-BF16/oneDNN capability probes now publish a process-constant bool
+    # instead of reading `/proc/cpuinfo` (`open()`) and mutating the global
+    # matmul precision under an `RLock` inside the traced region, and
+    # `cpu_bf16x3_matmul()` no longer enters that scope while tracing (the
+    # compiled path runs IEEE FP32, which is the more accurate direction and far
+    # inside the 4-bit quantization error). The CUDA declaration follows the
+    # measurement above: declaring base INDUCTOR over-claimed it (#5110).
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_COMPILE_LEVEL_BY_DEVICE = {"cpu": COMPILE_LEVEL.INDUCTOR}
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "static-cache generate() auto-compile stays off: no CPU win was measured "
+        "for this kernel in this change; the INDUCTOR level is opt-in via "
+        "optimize() (#4984 policy unchanged)."
+    )
     SUPPORTS_GRAPH_CAPTURE = True
+
+    #: GGUF tensor types whose eager forward is safe under an explicit
+    #: ``torch.cuda.CUDAGraph`` capture. Every other type dequantizes through
+    #: numpy on the host and therefore cannot be captured.
+    GRAPH_CAPTURE_QTYPES = frozenset({"Q4_0", "Q8_0", "Q4_K", "Q5_K", "Q6_K"})
 
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TORCH]
     SUPPORTS_METHODS = [METHOD.GGUF]
@@ -1242,6 +1396,12 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         self.gguf_fused_chunk_bytes = kernel.gguf_fused_chunk_bytes
         self._k_scale_overflow_cache: dict[tuple, bool] = {}
         self._k_scale_overflow_cache_source_key = None
+        # Device-resident `uint8` shift tables for the K-quant dequantizers,
+        # keyed by `(device.type, device.index)` then by the shift tuple.
+        # Rebuilding them per forward is a pageable H2D copy that CUDA graph
+        # capture rejects (#5014); `clear_weight_cache` drops them so a device
+        # move or a reload rebuilds on the new device.
+        self._u8_shift_tables: dict[tuple[str, int | None], dict[tuple[int, ...], torch.Tensor]] = {}
 
         super().__init__(
             bits=int(bits_spec),
@@ -1288,6 +1448,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     def clear_weight_cache(self) -> None:
         self._k_scale_overflow_cache = {}
         self._k_scale_overflow_cache_source_key = None
+        self._u8_shift_tables = {}
 
     def post_init(self):
         self.clear_weight_cache()
@@ -1424,9 +1585,60 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         blocks = qweight.contiguous().view(rows, num_blocks, self.gguf_type_size)
         return blocks, rows, num_blocks
 
-    @staticmethod
-    def _u8_shift(values: tuple[int, ...], device: torch.device) -> torch.Tensor:
-        return torch.tensor(values, dtype=torch.uint8, device=device)
+    def _u8_shift(self, values: tuple[int, ...], device: torch.device) -> torch.Tensor:
+        """Return the immutable ``uint8`` shift table for ``values`` on ``device``.
+
+        The K-quant dequantizers right-shift packed codes by a fixed vector of
+        bit counts. Building that vector with ``torch.tensor(..., device=...)``
+        on every forward issues a pageable host-to-device copy per call: an
+        explicit ``torch.cuda.graph`` capture of a K-quant layer then fails with
+        "Cannot copy between CPU and CUDA tensors during CUDA graph capture
+        unless the CPU tensor is pinned", and outside capture the same code
+        costs one to three small copies per layer per forward (#5014).
+
+        The tables are two to eight bytes and never change, so keep one
+        allocation per device for the module's lifetime. `clear_weight_cache`
+        drops them; it only runs on load/train transitions, never per forward,
+        so a warmed-up module captures with a stable allocation.
+        """
+
+        device = torch.device(device)
+        # Key on the device identity rather than on the created tensor:
+        # `torch.device("cuda")` has no index while the tensor lands on
+        # `cuda:N`, and comparing the two would rebuild the table every call.
+        key = (device.type, device.index)
+        all_tables = getattr(self, "_u8_shift_tables", None)
+        if all_tables is None:
+            # A rehomed module (class swap) may not have run `__init__`.
+            all_tables = {}
+            self._u8_shift_tables = all_tables
+        tables = all_tables.get(key)
+        if tables is None:
+            tables = {}
+            all_tables[key] = tables
+        table = tables.get(values)
+        if table is None:
+            table = torch.tensor(values, dtype=torch.uint8, device=device)
+            tables[values] = table
+        return table
+
+    def supports_graph_capture(self) -> bool:
+        """Whether *this* instance's eager forward is CUDA-graph capturable.
+
+        The class declares ``SUPPORTS_GRAPH_CAPTURE = True`` for the formats
+        whose dequant runs on the device. A checkpoint stored in one of the
+        host-dequantized formats (Q2_K/Q3_K and the remaining codebook types)
+        still cannot be captured, so callers that capture a specific layer ask
+        the instance instead of the class (#5014).
+
+        A subclass that turns the class claim off (``GGUFCppKernel``,
+        ``GGUFCudaKernel``) keeps ``False``: this hook may only narrow the
+        declaration, never widen it.
+        """
+
+        if not type(self).SUPPORTS_GRAPH_CAPTURE:
+            return False
+        return self.gguf_tensor_qtype in self.GRAPH_CAPTURE_QTYPES
 
     def _dequantize_q4_0(
         self,
@@ -1495,7 +1707,9 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     ) -> torch.Tensor:
         target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
         weight = _dequantize_sign_only_torch(
-            self.qweight,
+            # ``qweight`` may be a permuted-storage view (#4811); the torch
+            # helper reshapes it, which needs the canonical contiguous order.
+            self.qweight.contiguous(),
             block_size=self.gguf_block_size,
             type_size=self.gguf_type_size,
             device=target_device,
