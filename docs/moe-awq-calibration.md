@@ -150,10 +150,55 @@ flowchart TD
 | --- | --- | --- |
 | Dense projections | `[B, S, H]` | 3-D branch, per-sample keep mask |
 | MoE routing bypass, 2-D shared expert | `[B*S, H]` | 2-D branch, `keep_mask.reshape(-1)` |
-| Natively routed experts | `[routed_rows, H]` (row count unrelated to `B*S`) | MoE block pre-hook zeroes pad rows; zero rows add nothing to `X^T X` |
+| Natively routed experts | `[routed_rows, H]` (row count unrelated to `B*S`) | MoE block pre-hook zeroes pad rows; GPTQ drops them at its expert hook, AWQ in `_drop_padding_only_rows` |
+| MLA `kv_b_proj` latent | `[B, 1, S, kv_lora_rank]` | `align_single_head_capture` drops the unit head axis, then the `[B, S, H]` branch applies |
 
 The MoE block pre-hook returns a new tensor, so the caller's residual input is
 not mutated in place.
+
+QQQ, MACaQ and the EXL3 capture receive their inputs through
+`LoopProcessor.calibration_rows`, which applies the same rule for the layouts
+the mask wrapper cannot place: a flattened `[B*S, H]` full grid is filtered
+with the calibration mask (padding and excluded sinks alike), while natively
+routed `[routed_rows, H]` rows stay unfiltered because they cannot be mapped
+back to a sequence position (#5385).
+
+### AWQ captures the same rows
+
+`AWQProcessor.register_moe_root_capture_hook` registers the same zeroing
+pre-hook, and `_drop_padding_only_rows` removes the zeroed rows from a routed
+expert's capture before it reaches the reservoir or `raw_tokens` (#5337). #4035
+had fixed this for GPTQ only, so AWQ kept every padding row the router sent to
+an expert: at `batch_size > 1` a few experts could be dominated by pad-token
+activations, and DeepSeek-V4 hash layers sent every pad row to the same six
+experts per layer (58-75% of those experts' AWQ sample in a 32-document run).
+
+A capture is a routed subset unless its row count is exactly
+`keep_mask.numel()`: that is the raw `[B*S, H]` grid, which
+`_apply_active_keep_mask_to_feature` filters by the mask itself. AWQ keeps the
+raw batch input (`preserve_batch_keep_mask`) so no other layout can arrive
+already filtered -- a routed subset's row count is unrelated to the mask and
+can even equal `keep_mask.sum()` while still carrying padding (#5360). A real
+activation can be all-zero, so the zero check only finds which rows to drop.
+
+### MLA's single-head latent
+
+transformers' MLA attention calls `kv_b_proj` on `[B, 1, S, kv_lora_rank]`
+(`kv_nope.view(batch_size, 1, seq_length, kv_lora_rank)` in `deepseek_v2/v3`,
+`glm4_moe_lite`, `kimi_linear` and their siblings). Every hook matched a keep
+mask by the leading dims, so `shape[:2]` was `(B, 1)` and the masked path never
+ran: at `batch_size > 1` the padded positions of the whole layer entered that
+one projection's sample while its siblings dropped them, and
+`exclude_attention_sinks` was ignored there too (#5389).
+
+`gptqmodel/utils/attn_mask.py::align_single_head_capture` is the one place that
+recognizes the layout: it squeezes the unit head axis when the batch and
+sequence dims describe the mask, and returns the tensor untouched otherwise. It
+is applied by `apply_keep_mask_bt` (the shared hook wrapper used by QQQ, MACaQ,
+EXL3 and AWQ), `GPTQProcessor.pre_process_fwd_hook`, the GPTAQ/FOEM native
+side, `AWQProcessor._apply_active_keep_mask_to_feature`,
+`LoopProcessor.calibration_rows` and the NVFP4 activation range, so the whole
+layer keeps the same rows again.
 
 ## 4. Routed-expert capture reservoirs
 
@@ -179,6 +224,12 @@ already held; the reservoir therefore never resets mid-layer. Keeping the
 layer-wide budget for every routed expert made the clip search and the replay
 forward run on about five times the rows on OLMoE (#5284).
 
+The cap is a high-water mark. Two captures of one module compute their caps
+under the processor lock and merge under the module lock, so they can merge in
+the opposite order. The merge raises the cap to the buffer's current capacity
+before deciding whether to resize; an older, smaller cap therefore cannot
+evict rows a larger capture already merged (#5333).
+
 ### Merge
 
 The kept set is the `budget_cap` lowest priorities of `kept + captured`. Only
@@ -191,7 +242,8 @@ whose priorities all lose to the largest kept one leaves the buffer untouched.
 flowchart TD
     A["capture: rows, priorities"] --> B{"reservoir exists?"}
     B -- no --> C["allocate budget_cap slots<br/>seed from earlier plan rows"]
-    B -- yes --> D{"used + count <= budget_cap?"}
+    B -- yes --> B1["budget_cap = max(budget_cap, buffer capacity)"]
+    B1 --> D{"used + count <= budget_cap?"}
     D -- yes --> E["append in place"]
     D -- no --> F{"all priorities >= largest kept?"}
     F -- yes --> G["no-op: keep the buffer"]

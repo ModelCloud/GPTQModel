@@ -52,9 +52,9 @@ PLANE_SIG = {
 }
 ROWS_SIG = {
     "x_ptr": "*fp32", "meta_ptr": "*i32", "low_ptr": "*u8", "escapes_ptr": "*i16",
-    "bias_ptr": "*fp32", "out_ptr": "*fp32", "m": "constexpr", "n": "constexpr",
+    "bias_ptr": "*fp32", "out_ptr": "*fp32", "m": "i32", "n": "constexpr",
     "exp_base": "constexpr", "has_bias": "constexpr", "rows_n": "constexpr",
-    "rows_m": "constexpr", "unroll": "constexpr",
+    "rows_m": "constexpr", "unroll": "constexpr", "full_tiles": "constexpr",
 }
 PINNED_LAYOUT = ("#ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [1, 32], "
                  "warpsPerCTA = [1, 4], order = [1, 0]}>")
@@ -81,8 +81,9 @@ def _plane_ptx(m, exp_base, block_k=1024):
 
 def _rows_kernel(m, exp_base, rows_n, rows_m, unroll):
     return _compile(_fp32._linear_fp32_gate_planes_rows, ROWS_SIG, {
-        "m": m, "n": N, "exp_base": exp_base, "has_bias": False,
+        "n": N, "exp_base": exp_base, "has_bias": False,
         "rows_n": rows_n, "rows_m": rows_m, "unroll": unroll,
+        "full_tiles": m % rows_m == 0,
     }, gluon=True)
 
 
@@ -131,10 +132,88 @@ def _emulate(ptx, grid, mem, pointers, m):
     out = np.full((m, N), np.nan, np.float32)
     out_address = mem.alloc(out)
     emulator = Emulator(ptx, mem)
-    args = list(pointers) + [out_address]
+    args = list(pointers) + [out_address, m]
     args += [0] * (len(emulator.params) - len(args))  # Triton scratch pointers
     emulator.run(grid, args)
     return mem.read(out_address, out.nbytes).view(np.float32).reshape(m, N)
+
+
+class _CpuTargetDriver:
+    """Just enough of a Triton driver to bind and compile for sm80, never to launch."""
+
+    def __init__(self):
+        from triton.backends.compiler import GPUTarget
+
+        self.target = GPUTarget("cuda", 80, 32)
+
+    def get_current_device(self):
+        return 0
+
+    def get_current_stream(self, device=None):
+        return 0
+
+    def get_current_target(self):
+        return self.target
+
+    def get_active_torch_device(self):
+        return torch.device("cpu")
+
+
+@pytest.fixture
+def cpu_sm80(tmp_path, monkeypatch):
+    pytest.importorskip("triton.backends.nvidia")
+    from triton.runtime.driver import driver
+
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path))
+    previous = driver._active
+    driver.set_active(_CpuTargetDriver())
+    try:
+        yield
+    finally:
+        driver._active = previous
+
+
+def _warm_rows(kernel, m, rows_n=2, rows_m=6, unroll=False, has_bias=False):
+    args = [torch.float32, torch.int32, torch.uint8, torch.int16,
+            torch.float32, torch.float32, m, N, 55, has_bias, rows_n, rows_m, unroll]
+    if "full_tiles" in {p.name for p in kernel.params}:
+        args.append(m % rows_m == 0)
+    return kernel.warmup(*args, num_warps=4, grid=(1,))
+
+
+def _warm_plane(kernel, m):
+    return kernel.warmup(torch.float32, torch.int32, torch.uint8, torch.int16,
+                         torch.float32, torch.float32,
+                         N, 55, False, m, 1024, num_warps=4, grid=(1,))
+
+
+def test_rows_widths_share_compiled_variants(cpu_sm80):
+    """The row count is a runtime argument; only the mask-skip flag specializes."""
+    kernel = _fp32._linear_fp32_gate_planes_rows
+    params = {p.name: p for p in kernel.params}
+    assert not params["m"].is_constexpr and params["m"].do_not_specialize
+    assert params["n"].is_constexpr and params["rows_m"].is_constexpr
+    assert params["full_tiles"].is_constexpr
+
+    full_widths = (6, 12, 18, 24)
+    before = set(kernel.device_caches[0][0]) if 0 in kernel.device_caches else set()
+    compiled = [_warm_rows(kernel, m) for m in full_widths]
+    assert len(set(kernel.device_caches[0][0]) - before) == 1
+    assert len({id(c) for c in compiled}) == 1
+
+    partial_widths = (7, 13, 19)
+    compiled += [_warm_rows(kernel, m) for m in partial_widths]
+    assert len(set(kernel.device_caches[0][0]) - before) == 2
+    assert len({id(c) for c in compiled}) == 2
+
+    # Negative control: a sibling kernel whose row count is still constexpr
+    # compiles one variant per width, so the cache count above detects a
+    # regression back to per-width specialization.
+    plane = _fp32._linear_fp32_gate_planes
+    plane_before = set(plane.device_caches[0][0]) if 0 in plane.device_caches else set()
+    plane_compiled = [_warm_plane(plane, m) for m in full_widths]
+    assert len(set(plane.device_caches[0][0]) - plane_before) == len(full_widths)
+    assert len({id(c) for c in plane_compiled}) == len(full_widths)
 
 
 @pytest.fixture(scope="module")
@@ -203,7 +282,7 @@ def test_launcher_validates_geometry_and_requires_prepared_view():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-@pytest.mark.parametrize("m", [1, 6, 12, 18, 24])
+@pytest.mark.parametrize("m", [1, 6, 7, 12, 13, 18, 24])
 def test_cuda_rows_kernel_matches_b1_launches_bitwise(m):
     import gptqmodel_nf12 as nf12
 

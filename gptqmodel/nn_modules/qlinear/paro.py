@@ -193,10 +193,10 @@ class ParoLinear(AwqTorchLinear):
     # ``_cpu_transform_lock`` transforms and ``_ensure_cpu_layout`` rewrites are
     # skipped while tracing: the eager warmup builds the layout and the traced
     # graph only reads it (#4885 keeps the lock in eager). The AVX512 extension
-    # op has a registered FakeTensor impl. A biased FP16/BF16 layer that lands
-    # on the ATen path still needs the #4068 FP32 cast, so that case is a
-    # documented eager-only break; compiling before the first eager forward
-    # takes the traceable dense reference instead.
+    # op has a registered FakeTensor impl. A biased FP16/BF16 layer on the ATen
+    # path asks for the wide product and adds the bias afterwards; the #4068
+    # operand cast is a registered custom op (#5110), so that case traces too
+    # (#5332).
     #
     # CUDA keeps ``EAGER``: the native AWQ GEMM entry point was not re-measured
     # on this CPU-only host, so it does not raise the base declaration.
@@ -832,15 +832,14 @@ class ParoLinear(AwqTorchLinear):
         if self._live_cpu_layout() is not None:
             if torch.compiler.is_compiling():
                 # Restoring rewrites the registered buffers, which a traced
-                # graph must not do. A biased FP16/BF16 layer can reach here
-                # because its ATen int4pack product needs the documented #4068
-                # FP32 cast; compiling before the first eager forward keeps the
+                # graph must not do. A layer whose activation dtype or int4pack
+                # availability does not match the warmup-built layout reaches
+                # here; compiling before the first eager forward keeps the
                 # checkpoint layout live and takes this dense path instead.
                 raise RuntimeError(
                     f"{type(self).__name__}: a CPU runtime layout is live and no "
-                    "traceable fused path was selected (a biased FP16/BF16 layer "
-                    "needs the #4068 FP32 cast). Compile the layer before its first "
-                    "eager forward, or run this layer eagerly."
+                    "traceable fused path was selected. Compile the layer before "
+                    "its first eager forward, or run this layer eagerly."
                 )
             self._restore_cpu_checkpoint_layout()
         # Keep the reconstructed grid, the reduction and the stored bias in
@@ -1074,13 +1073,12 @@ class ParoLinear(AwqTorchLinear):
         if torch.compiler.is_compiling():
             # The transform rewrites registered buffers and takes the RLock
             # dynamo cannot enter; a traced graph only reads the eager-built
-            # layout. A biased layer needs the FP32 cast path (#4068), which is
-            # a documented eager-only break, so it falls through to the dense
-            # path instead of being traced.
+            # layout. A biased layer asks for the FP32 product and adds the
+            # bias afterwards, and the #4068 operand cast is a registered
+            # custom op since #5110, so it traces as well.
             if (
                 self._live_cpu_layout() != "aten"
                 or self._cpu_runtime_dtype != x_flat.dtype
-                or self.bias is not None
             ):
                 return None
             int4pack_mm = getattr(self, "_paro_int4pack_mm", None)

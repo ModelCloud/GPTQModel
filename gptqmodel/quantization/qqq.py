@@ -595,7 +595,7 @@ class QQQ:
         if isinstance(self.layer, nn.Linear) or isinstance(
                 self.layer, transformers.Conv1D
         ):
-            if len(inp.shape) == 3:
+            if len(inp.shape) > 2:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
         if isinstance(self.layer, nn.Conv1d):
