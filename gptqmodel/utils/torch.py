@@ -441,8 +441,19 @@ def _dynamo_config():
     return getattr(dynamo, "config", None)
 
 
+_IS_DYNAMO = getattr(getattr(torch, "compiler", None), "is_dynamo_compiling", None)
+_IS_EXPORT = getattr(getattr(torch, "compiler", None), "is_exporting", None)
+
+
 def dynamo_is_compiling() -> bool:
     """Return True when dynamo is already tracing this thread.
+
+    ``torch.compiler.is_compiling()`` is not per-thread: it reads a module-level
+    flag that the compile session sets for the whole process, so every eager
+    thread sees ``True`` while *any* thread compiles (#5427). The constant
+    ``is_dynamo_compiling()`` is ``False`` in eager code and folded to ``True``
+    inside the traced frame, so another thread's session cannot leak in. Export
+    is still process-scoped but single-threaded, so its flag is folded in.
 
     ``torch.compile`` is lazy, so the wrapper ``torch_compile`` installs can be
     entered from inside another ``torch.compile`` trace: transformers compiles
@@ -453,6 +464,8 @@ def dynamo_is_compiling() -> bool:
     overwritten-output corruption (#5224). Nested calls therefore stay
     read-only; the eager body is inlined into the outer graph instead.
     """
+    if _IS_DYNAMO is not None:
+        return bool(_IS_DYNAMO()) or (_IS_EXPORT is not None and bool(_IS_EXPORT()))
     compiler = getattr(torch, "compiler", None)
     is_compiling = getattr(compiler, "is_compiling", None)
     if is_compiling is None:

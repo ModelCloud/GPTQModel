@@ -19,7 +19,7 @@ from ...quantization.awq.utils.packing_utils import (
 )
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ...utils.torch import TORCH_HAS_FUSED_OPS
+from ...utils.torch import TORCH_HAS_FUSED_OPS, dynamo_is_compiling
 from . import AWQuantLinear, detach_cpu_operand
 from ._awq_decode import AwqDecodeRangeMixin
 from ._compile_support import COMPILE_LEVEL
@@ -472,7 +472,7 @@ class TorchFusedAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
         if input_dtype == torch.float32 and x_flat.device.type != "cpu":
             x_flat = x_flat.to(torch.bfloat16)
         runtime_dense = False
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # ``_cpu_transform_lock`` is an ``RLock``: dynamo cannot enter it (a
             # hard graph break), and the one-time ``transform()`` rewrites the
             # packed ``qweight``/``qzeros`` buffers in place, which a traced

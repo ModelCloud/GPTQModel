@@ -22,7 +22,7 @@ from ...nn_modules.qlinear import (
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ...utils.torch import TORCH_HAS_FUSED_OPS
+from ...utils.torch import TORCH_HAS_FUSED_OPS, dynamo_is_compiling
 from ._compile_support import COMPILE_LEVEL
 from ._cpu_int4pack_layout import runtime_int4pack_dense_weight
 from ._fused_train_state import (
@@ -488,7 +488,7 @@ class TorchFusedLinear(PackableQuantLinear):
         return result
 
     def _build_ret_idx(self) -> torch.Tensor:
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # `tensor_cache_key` (`is_inference`/`_version`/`data_ptr`) is a
             # hard dynamo graph break and publishing ``ret_idx`` is a state
             # write a graph must not perform. The eager warmup built it for
@@ -659,7 +659,7 @@ class TorchFusedLinear(PackableQuantLinear):
             torch.float16,
         )
         runtime_dense = False
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # `_cpu_transform_lock` is an ``RLock``: dynamo cannot enter it (a
             # hard graph break), and the one-time ``transform()`` rewrites the
             # packed ``qweight``/``qzeros`` buffers in place, which a traced
@@ -754,7 +754,7 @@ class TorchFusedLinear(PackableQuantLinear):
 
     @torch.no_grad
     def _fused_op_forward(self, x):
-        if not torch.compiler.is_compiling():
+        if not dynamo_is_compiling():
             # Rebuilds ``scales_and_zeros`` from a ``tensor_cache_key``
             # (`is_inference`/`_version`/`data_ptr`), which dynamo cannot trace,
             # and writes module state a graph must not mutate. The eager warmup

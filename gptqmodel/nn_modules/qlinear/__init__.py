@@ -33,6 +33,7 @@ from ...utils.planar_packing import (
     planar_unpack_rows,
 )
 from ...utils.safe import threadpool_limits
+from ...utils.torch import dynamo_is_compiling
 from ..compiled_state import compiled_module_getstate
 from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import QZEROS_FORMAT_BUFFER, _materialize_snapshot_entry
@@ -2265,7 +2266,7 @@ class PackableQuantLinear(GPTQQuantLinear):
         """
         cached = getattr(self, "_ret_idx_identity", None)
         if cached is not None:
-            if t.compiler.is_compiling():
+            if dynamo_is_compiling():
                 return cached
             if getattr(self, "_ret_idx_key", None) == tensor_cache_key(self.g_idx):
                 return cached
