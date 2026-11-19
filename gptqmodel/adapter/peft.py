@@ -14,6 +14,13 @@ from ..utils.logger import setup_logger
 
 log = setup_logger()
 
+# The loader applies plain LoRA `lora_A`/`lora_B` tensors only. A config that
+# declares another PEFT type must be rejected instead of rewritten to LORA in
+# ``Lora.__post_init__``: an IA3/LoHa/LoKr artifact then matches no tensor and
+# the load returns the bare model without an error (#5425). Legacy configs
+# without a `peft_type` keep the historical LoRA assumption.
+SUPPORTED_PEFT_TYPES = frozenset({"LORA"})
+
 # PEFT config keys that this runtime does not implement and whose values change the
 # adapter math. `from_pretrained` must reject these instead of dropping them: a
 # DoRA/aLoRA/QALoRA/CORDA/trainable-token checkpoint loaded as plain LoRA still runs, but produces
@@ -448,6 +455,16 @@ class LoraConfig():
         )
         with open(resolved_path, "r") as file:
             config_dict = json.load(file)
+
+        declared_peft_type = config_dict.get("peft_type")
+        if (
+            declared_peft_type is not None
+            and str(declared_peft_type).strip().upper() not in SUPPORTED_PEFT_TYPES
+        ):
+            raise ValueError(
+                "Adapter: `peft_type` = "
+                f"`{declared_peft_type}` is not supported; only LoRA adapters can be loaded"
+            )
 
         valid_fields = {field.name for field in fields(cls)}
         unknown_keys = sorted(k for k in config_dict if k not in valid_fields)

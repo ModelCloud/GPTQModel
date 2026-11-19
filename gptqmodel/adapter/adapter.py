@@ -73,6 +73,21 @@ def _pattern_override_candidates(
     return [(pattern, patterns[pattern]) for pattern in exact + folded]
 
 
+# PEFT layouts whose tensors the LoRA forward cannot consume. A checkpoint that
+# carries them but no `lora_A`/`lora_B` would attach nothing and run as the bare
+# model, so they are rejected by name too (the config `peft_type` check is the
+# primary guard; this catches a config that lies or predates the field).
+_UNSUPPORTED_PEFT_TENSOR_MARKERS = (
+    (".ia3_l", "IA3"),
+    (".hada_", "LoHa"),
+    (".lokr_", "LoKr"),
+    (".oft_blocks", "OFT"),
+    (".boft_blocks", "BOFT"),
+    (".vera_lambda_", "VeRA"),
+    (".lora_E", "AdaLoRA"),
+)
+
+
 def _reject_unsupported_adapter_tensors(weights: Dict[str, torch.Tensor]) -> None:
     """Fail closed on adapter tensors this runtime cannot apply.
 
@@ -84,6 +99,12 @@ def _reject_unsupported_adapter_tensors(weights: Dict[str, torch.Tensor]) -> Non
     """
 
     for key in weights:
+        for marker, feature in _UNSUPPORTED_PEFT_TENSOR_MARKERS:
+            if marker in key:
+                raise ValueError(
+                    f"Adapter: {feature} adapter tensors are not supported (`{key}`); "
+                    "only LoRA `lora_A`/`lora_B` can be loaded"
+                )
         if ".lora_magnitude_vector" in key:
             raise ValueError(
                 f"Adapter: DoRA is not supported (`lora_magnitude_vector` tensor found: `{key}`)"
