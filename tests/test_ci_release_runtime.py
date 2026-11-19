@@ -307,6 +307,18 @@ def _start_allocator_stub(gpu_ids):
 def _run_ci_tests_loopback(tmp_path, *, extra_args, cuda_visible_devices, gpu_ids):
     tests_dir = tmp_path / "tests"
     tests_dir.mkdir()
+    # The contracts job installs only pytest/pyyaml, so isolate the keepalive
+    # payload's optional host-inventory dependency at its import boundary.
+    stub_dir = tmp_path / "stubs"
+    stub_dir.mkdir()
+    (stub_dir / "device_smi.py").write_text(
+        "class Device:\n"
+        "    def __init__(self, kind):\n"
+        "        self.model = kind\n"
+        "        self.arch = 'x86_64'\n"
+        "        self.name = 'Linux'\n",
+        encoding="utf-8",
+    )
     seen_env = tmp_path / "seen-cuda-visible-devices.txt"
     (tests_dir / "test_ci_lease_probe.py").write_text(
         "import os\n"
@@ -349,6 +361,11 @@ def _run_ci_tests_loopback(tmp_path, *, extra_args, cuda_visible_devices, gpu_id
                 **os.environ,
                 "CUDA_VISIBLE_DEVICES": cuda_visible_devices,
                 "PROBE_OUTPUT": str(seen_env),
+                "PYTHONPATH": os.pathsep.join(
+                    value
+                    for value in (str(stub_dir), os.environ.get("PYTHONPATH", ""))
+                    if value
+                ),
             },
             capture_output=True,
             text=True,
