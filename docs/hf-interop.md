@@ -192,16 +192,19 @@ flowchart TD
 
 `_patch_transformers_awq_gptqmodel_load_bridge` wraps
 `AwqQuantizer.param_needs_quantization` with
-`hf_gptqmodel_awq_tolerated_mismatch` (`gptqmodel/utils/hf_load.py:301`). The
+`hf_gptqmodel_awq_tolerated_mismatch` (`gptqmodel/utils/hf_load.py:314`). The
 guard accepts a mismatch only when the live quantize config is a GPT-QModel
 AWQ checkpoint (an explicit `gptqmodel` quantizer entry, `meta.uri`, or a
 `dynamic` map), the mismatched tensor is one of
 `qweight`/`qzeros`/`scales`/`g_idx`/`bias` on a `BaseQuantLinear`, **and**
 that module's built `bits`/`group_size`/`desc_act`/`sym` disagree with its
 resolved serialized per-module config. The last condition is the same one
-`_awq_modules_ignore_serialized_config` (`gptqmodel/utils/hf_load.py:909`) uses to decide whether
+`_awq_modules_ignore_serialized_config` (`gptqmodel/utils/hf_load.py:922`) uses to decide whether
 `hf_gptqmodel_repair_awq_load` will rebuild the module, so a claimed tensor is
-always one the repair replaces.
+always one the repair replaces. A serialized `group_size` of `-1` is compared
+as the module's `in_features`, which is the effective per-channel group size
+the kernel stores (`_awq_effective_group_size`, `gptqmodel/utils/hf_load.py:303`),
+so per-channel checkpoints are not mistaken for a geometry override.
 
 Everything else keeps Transformers' behavior: dense parameters still raise, an
 explicit third-party quantizer entry wins over the `dynamic` heuristic,

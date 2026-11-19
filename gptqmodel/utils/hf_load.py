@@ -289,13 +289,26 @@ def _awq_module_matches_serialized_config(
         return True
     if int(module.bits) != int(resolved.bits):
         return False
-    if int(module.group_size) != int(resolved.group_size):
+    if _awq_effective_group_size(module, module.group_size) != _awq_effective_group_size(
+        module, resolved.group_size
+    ):
         return False
     if hasattr(module, "desc_act") and bool(module.desc_act) != bool(resolved.desc_act):
         return False
     if hasattr(module, "sym") and bool(module.sym) != bool(resolved.sym):
         return False
     return True
+
+
+def _awq_effective_group_size(module: BaseQuantLinear, group_size) -> int:
+    """Return the group size a kernel actually uses (``-1`` means per-channel)."""
+
+    value = int(group_size)
+    if value == -1:
+        in_features = getattr(module, "in_features", None)
+        if in_features is not None:
+            return int(in_features)
+    return value
 
 
 def hf_gptqmodel_awq_tolerated_mismatch(model: nn.Module, param_name: Optional[str] = None) -> bool:
