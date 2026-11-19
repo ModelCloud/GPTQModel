@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -93,11 +94,11 @@ print(
 """
 
 
-def _build_dynamic_awq_checkpoint(tmp_path):
+def _build_awq_checkpoint(tmp_path, dynamic):
     from transformers import Qwen2Config, Qwen2ForCausalLM
 
     source = tmp_path / "source"
-    checkpoint = tmp_path / "awq-dynamic"
+    checkpoint = tmp_path / ("awq-dynamic" if dynamic else "awq-static")
 
     torch.manual_seed(0)
     config = Qwen2Config(
@@ -123,7 +124,7 @@ def _build_dynamic_awq_checkpoint(tmp_path):
         AWQConfig(
             bits=4,
             group_size=_GROUP_SIZE,
-            dynamic=_DYNAMIC,
+            dynamic=dynamic,
             offload_to_disk=False,
         ),
         backend=BACKEND.TORCH,
@@ -139,8 +140,18 @@ def _build_dynamic_awq_checkpoint(tmp_path):
     manifest = json.loads((checkpoint / "config.json").read_text())["quantization_config"]
     assert manifest["quant_method"] == "awq"
     assert manifest["group_size"] == _GROUP_SIZE
-    assert manifest["dynamic"]
+    assert manifest.get("dynamic") == dynamic
     return checkpoint
+
+
+def _build_dynamic_awq_checkpoint(tmp_path):
+    return _build_awq_checkpoint(tmp_path, _DYNAMIC)
+
+
+def _build_static_awq_checkpoint(tmp_path):
+    """No per-module overrides: this load takes the bridge's no-context branch (#5511)."""
+
+    return _build_awq_checkpoint(tmp_path, None)
 
 
 def _load_in_fresh_interpreter(checkpoint, device):
@@ -241,3 +252,106 @@ def test_awq_bridge_install_is_idempotent():
         "_gptqmodel_load_bridge",
         False,
     )
+
+
+# -- #5511: the no-context branch must not run the native post-init twice ----
+#
+# A checkpoint without ``dynamic`` overrides needs no module rebuild, so the
+# bridge runs ``hf_gptqmodel_finish_awq_load_without_rebuild`` - which already
+# calls ``gptqmodel_post_init`` - and then used to fall through to
+# ``original_post_init``, i.e. ``hf_gptqmodel_post_init`` ->
+# ``gptqmodel_post_init`` again. On CPU the AWQ kernel tolerates the second
+# call; on CUDA ``AwqMarlinLinear`` re-pads an already repacked ``qweight`` and
+# the plain-transformers load of *any* GPT-QModel AWQ checkpoint raises.
+
+
+def _drive_no_context_branch(monkeypatch, native_qcfg):
+    """Call the bridge post-init hook with no load context, recording calls."""
+
+    from transformers.quantizers.quantizer_awq import AwqQuantizer
+
+    import gptqmodel.utils.hf_load as hf_load
+    import gptqmodel.utils.model as model_utils
+
+    native_calls = []
+    real_post_init = model_utils.gptqmodel_post_init
+
+    def counting_post_init(*args, **kwargs):
+        native_calls.append(kwargs.get("quantize_config"))
+        return real_post_init(*args, **kwargs)
+
+    monkeypatch.setattr(model_utils, "gptqmodel_post_init", counting_post_init)
+    monkeypatch.setattr(hf_load, "hf_gptqmodel_repair_awq_load", lambda *a, **k: None)
+    monkeypatch.setattr(
+        hf_load,
+        "hf_gptqmodel_native_awq_config",
+        lambda *a, **k: native_qcfg,
+    )
+    without_rebuild = []
+    monkeypatch.setattr(
+        hf_load,
+        "hf_gptqmodel_finish_awq_load_without_rebuild",
+        lambda model, **kwargs: without_rebuild.append(kwargs.get("qcfg")),
+    )
+
+    model = torch.nn.Module()
+    model.config = SimpleNamespace(_attn_implementation="sdpa")
+    quantizer = SimpleNamespace(
+        quantization_config=SimpleNamespace(desc_act=False),
+    )
+    AwqQuantizer._process_model_after_weight_loading(quantizer, model)
+    return without_rebuild, native_calls
+
+
+def test_static_native_checkpoint_runs_post_init_once(monkeypatch):
+    """The native checkpoint got its post-init from the helper; do not repeat it."""
+
+    from gptqmodel.quantization import QuantizeConfig
+
+    qcfg = QuantizeConfig(bits=4, group_size=_GROUP_SIZE)
+    without_rebuild, native_calls = _drive_no_context_branch(monkeypatch, qcfg)
+
+    assert without_rebuild == [qcfg]
+    assert native_calls == []
+
+
+def test_third_party_checkpoint_still_runs_transformers_post_init(monkeypatch):
+    """A checkpoint that is not ours has no native post-init yet, so keep it."""
+
+    without_rebuild, native_calls = _drive_no_context_branch(monkeypatch, None)
+
+    assert without_rebuild == [None]
+    assert native_calls == [None]
+
+
+@pytest.fixture(scope="module")
+def awq_static_checkpoint(tmp_path_factory):
+    return _build_static_awq_checkpoint(tmp_path_factory.mktemp("awq_static_5511"))
+
+
+def _assert_static_matches_native(checkpoint, device):
+    expected_layers, expected_loss = _native_expectation(checkpoint, device)
+    result = _load_in_fresh_interpreter(checkpoint, device)
+
+    assert result["gptqmodel_imported"] is True
+    assert result["bridge"] is True
+    # Unlike the ``dynamic`` case the bridge does not rebuild the modules here,
+    # so Transformers keeps its own kernel choice (``TorchCpuAvx512AwqLinear``
+    # on CPU against ``GPTQModel.load``'s ``TorchAtenAwqLinear``). The stored
+    # layout and the output are what must match.
+    for index in (0, 1):
+        got, expected = result["layers"][str(index)], expected_layers[index]
+        assert got["group_size"] == expected["group_size"]
+        assert got["qzeros"] == expected["qzeros"]
+    assert result["loss"] == pytest.approx(expected_loss, abs=1e-3)
+
+
+def test_plain_transformers_load_static_awq_on_cpu(awq_static_checkpoint):
+    _assert_static_matches_native(awq_static_checkpoint, "cpu")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_plain_transformers_load_static_awq_on_cuda(awq_static_checkpoint):
+    """Without the #5511 fix this raises ``AWQ qweight shape must be ...``."""
+
+    _assert_static_matches_native(awq_static_checkpoint, "cuda")

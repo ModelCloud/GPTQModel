@@ -912,14 +912,31 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
                 # the RoPE buffers uninitialized (#5433, same symptom as
                 # #5311 for AWQ checkpoints). This is also the path a
                 # third-party checkpoint takes through the prepare fallback.
+                qcfg = hf_gptqmodel_native_awq_config(
+                    model,
+                    checkpoint_files=kwargs.get("checkpoint_files"),
+                )
                 hf_gptqmodel_finish_awq_load_without_rebuild(
                     model,
-                    qcfg=hf_gptqmodel_native_awq_config(
-                        model,
-                        checkpoint_files=kwargs.get("checkpoint_files"),
-                    ),
+                    qcfg=qcfg,
                 )
-                return original_post_init(self, model, **kwargs)
+                if qcfg is None:
+                    # A third-party checkpoint only took the remote-code
+                    # repairs above, so Transformers still owes it the native
+                    # post-init and its own hook is the only place that runs it.
+                    return original_post_init(self, model, **kwargs)
+                # ``qcfg is not None``: the native post-init already ran, with
+                # the serialized config. ``original_post_init`` is
+                # ``hf_gptqmodel_post_init`` -> ``gptqmodel_post_init``, so
+                # calling it here repacks an already-repacked ``qweight`` and
+                # raises ``AWQ qweight shape must be ...`` on CUDA/Marlin
+                # (#5511).
+                #
+                # The one side effect of that hook we do still owe is the
+                # Optimum bridge retry (``hf_gptqmodel_post_init`` installs it
+                # before delegating, #4749); it is idempotent and cheap.
+                _ensure_optimum_gptqmodel_load_bridge()
+                return None
             return hf_gptqmodel_post_init_for_load(model, context)
 
         # Transformers 5.23 records a checkpoint tensor whose shape differs from
