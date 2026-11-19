@@ -122,7 +122,7 @@ from ..utils.model import (
     simple_dispatch_model,
     validate_checkpoint_qweights,
 )
-from ..utils.torch import defuser_conversion_scope, xla_device_count
+from ..utils.torch import xla_device_count
 from ._const import DEVICE, EXPERT_INDEX_PLACEHOLDER, HAS_NPU, normalize_device
 
 
@@ -1151,13 +1151,14 @@ def _maybe_print_module_tree(model) -> None:
         print_module_tree(model=model)
 
 
-# `requirements.txt` pins `defuser>=0.0.31`. Older releases do not split the
+# `requirements.txt` pins `defuser>=0.0.32`. Older releases do not split the
 # fused 3-D expert tensors of afmoe / flint / granitemoe_swa, so their routed
 # experts stay fused and are silently left unquantized; the only symptom is a
 # "0 layer matches" line in the module-coverage report. Defuser 0.0.31 also
 # fixes the GLM-4.x replacement MoE blocks, which crashed on the Transformers
-# 5.22 router tuple.
-DEFUSER_MIN_VERSION = "0.0.31"
+# 5.22 router tuple, and 0.0.32 scopes its accelerator cache flush to the
+# devices a conversion uses, so GPT-QModel no longer patches it (#5105).
+DEFUSER_MIN_VERSION = "0.0.32"
 _defuser_version_warning_emitted = False
 
 
@@ -1342,24 +1343,20 @@ class _DefuserClassPathAliases:
 
 def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     _check_defuser_version()
-    # Defuser's conversion flushes the accelerator cache through
-    # `clear_memory()`, which synchronizes the *current* device when no device
-    # list is supplied. Scope that call to the devices this model actually
-    # occupies so a CPU/meta conversion does not claim cuda:0 on the way to
-    # cuda:1 (#5105).
-    with defuser_conversion_scope(model):
-        with _DefuserClassPathAliases(model):
-            converted = _run_defuser_conversion(cls, model, cleanup_original)
-            _apply_vendored_construction_replacements(model)
+    # Defuser >= 0.0.32 flushes only the devices this model occupies, so a
+    # CPU/meta conversion never claims cuda:0 (#5105).
+    with _DefuserClassPathAliases(model):
+        converted = _run_defuser_conversion(cls, model, cleanup_original)
+        _apply_vendored_construction_replacements(model)
 
-        after_conversion = getattr(cls, "after_defuser_conversion", None)
-        # Model-specific finalizers may also normalize metadata that Defuser does
-        # not own. Run them after the conversion attempt even when the installed
-        # Defuser has no matching registration and reports no structural change.
-        if callable(after_conversion):
-            after_conversion(model)
+    after_conversion = getattr(cls, "after_defuser_conversion", None)
+    # Model-specific finalizers may also normalize metadata that Defuser does
+    # not own. Run them after the conversion attempt even when the installed
+    # Defuser has no matching registration and reports no structural change.
+    if callable(after_conversion):
+        after_conversion(model)
 
-        return converted
+    return converted
 
 
 def _apply_vendored_construction_replacements(model) -> None:
