@@ -402,3 +402,117 @@ def test_eora_export_rank_pattern_reproduces_first_match_dynamic(tmp_path):
         adapter = Lora(rank=base_rank, path=str(tmp_path))
         adapter.post_init(name, CPU)
         assert adapter.rank == rank, name
+
+
+def _write_overflow_adapter(directory, *, source_b, alpha, rank):
+    """A rank-``rank`` adapter with the given stored ``lora_B`` scale."""
+
+    module_key = "model.layers.0.self_attn.q_proj"
+    _write_adapter(
+        directory,
+        config={
+            "r": rank,
+            "lora_alpha": alpha,
+            "use_rslora": False,
+            "target_modules": ["q_proj"],
+        },
+        weights={
+            f"base_model.model.{module_key}.lora_A.weight": torch.ones(
+                (rank, 1), dtype=torch.float16
+            ),
+            f"base_model.model.{module_key}.lora_B.weight": torch.tensor(
+                [[source_b]], dtype=torch.float16
+            ),
+        },
+    )
+    return module_key
+
+
+def test_fp16_scale_fold_does_not_overflow_the_adapter_output(tmp_path):
+    """A fold that overflows FP16 keeps the raw B and scales the product (#5426).
+
+    PEFT multiplies ``alpha / rank`` after both projections, so
+    ``((x @ A.T) @ B.T) * 4`` with ``B = 32768`` and ``x = 0.125`` is a finite
+    16384. Folding the scale into the FP16 storage first turned B into ``inf``
+    and the whole adapter output with it.
+    """
+
+    module_key = _write_overflow_adapter(tmp_path, source_b=32768.0, alpha=4, rank=1)
+    adapter = Lora(rank=1, path=str(tmp_path))
+    adapter.post_init(module_key, CPU)
+
+    assert torch.isfinite(adapter.lora_B).all(), "the load must not fold into inf"
+    assert adapter.lora_B.item() == 32768.0
+
+    x = torch.tensor([[0.125]], dtype=torch.float16)
+    base = torch.zeros((1, 1), dtype=torch.float16)
+    result = adapter.apply(x, base)
+
+    oracle = ((x.double() @ torch.ones((1, 1), dtype=torch.float64)) @ torch.tensor(
+        [[32768.0]], dtype=torch.float64
+    )) * 4.0
+    assert result.item() == 16384.0
+    torch.testing.assert_close(result.double(), oracle, rtol=0, atol=0)
+
+
+def test_fp16_scale_fold_still_applies_when_it_fits(tmp_path):
+    """An in-range fold keeps the fast path and the same effective scale (#5426)."""
+
+    module_key = _write_overflow_adapter(tmp_path, source_b=2.0, alpha=4, rank=1)
+    adapter = Lora(rank=1, path=str(tmp_path))
+    adapter.post_init(module_key, CPU)
+
+    assert adapter.lora_B.item() == 8.0, "an in-range scale is still folded once"
+
+    x = torch.tensor([[0.125]], dtype=torch.float16)
+    base = torch.zeros((1, 1), dtype=torch.float16)
+    result = adapter.apply(x, base)
+    assert result.item() == 1.0
+
+
+def _single_rank_a(rank):
+    """A stored ``lora_A`` (rank, 1) with only rank 0 active."""
+
+    weight = torch.zeros((rank, 1), dtype=torch.float16)
+    weight[0, 0] = 1.0
+    return weight
+
+
+def test_fp16_scale_fold_does_not_flush_a_small_b_to_zero(tmp_path):
+    """A fold that flushes a nonzero B element to zero keeps the raw B (#5426)."""
+
+    module_key = "model.layers.0.self_attn.q_proj"
+    _write_adapter(
+        tmp_path,
+        config={
+            "r": 64,
+            "lora_alpha": 1,
+            "use_rslora": False,
+            "target_modules": ["q_proj"],
+        },
+        weights={
+            # One active rank so the product is a single `B` element.
+            f"base_model.model.{module_key}.lora_A.weight": _single_rank_a(64),
+            f"base_model.model.{module_key}.lora_B.weight": torch.full(
+                (1, 64), 1.0e-6, dtype=torch.float16
+            ),
+        },
+    )
+    adapter = Lora(rank=64, path=str(tmp_path))
+    adapter.post_init(module_key, CPU)
+
+    stored_b = torch.full((1, 64), 1.0e-6, dtype=torch.float16).flatten()[0].item()
+    assert (adapter.lora_B == stored_b).all(), "the fold would flush B to zero"
+    assert adapter.lora_scale == pytest.approx(1 / 64)
+
+    # FP32 activations keep the small product representable; the folded B in
+    # FP16 would have been zero before the multiply.
+    x = torch.ones((1, 1), dtype=torch.float32)
+    base = torch.zeros((1, 1), dtype=torch.float32)
+    result = adapter.apply(x, base)
+    torch.testing.assert_close(
+        result,
+        torch.full((1, 1), stored_b / 64, dtype=torch.float32),
+        rtol=1e-6,
+        atol=1e-12,
+    )

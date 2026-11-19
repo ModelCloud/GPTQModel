@@ -252,6 +252,9 @@ class Lora(Adapter):
         self.lora_A = lora_A
         self.lora_B = lora_B
         self.lora_scale = 1.0
+        # Whether ``lora_scale`` was multiplied into ``lora_B`` at load time.
+        # ``apply()`` multiplies the product when it was not.
+        self._lora_scale_folded = True
         self._lora_config: Optional[LoraConfig] = None
 
     @classmethod
@@ -286,6 +289,11 @@ class Lora(Adapter):
             self.lora_B = self.lora_B.to(device=x.device, dtype=x.dtype)
 
         update = (x @ self.lora_A) @ self.lora_B
+        if not self._lora_scale_folded:
+            # Folding overflowed (or flushed a value) in the adapter dtype, so
+            # the raw B stays stored and the effective scale is applied to the
+            # product, which is the PEFT order (#5426).
+            update = update * self.lora_scale
 
         # fix batch for lora
         # Some kernels do not reshape x, such as marlin / exllama / exllamav2.
@@ -503,11 +511,37 @@ class Lora(Adapter):
         )
         # `lora_B` is already a private contiguous clone from the immutable
         # adapter cache. Fold the scale once here so every forward uses the
-        # PEFT effective scale without adding another multiply.
-        self.lora_B.mul_(self.lora_scale)
+        # PEFT effective scale without adding another multiply, unless the fold
+        # would not survive `lora_B`'s storage dtype (#5426).
+        self._lora_scale_folded = self._fold_scale_into_b()
 
         #print(f"Adapter: lora_A {lora_A.shape}: `{lora_B}`")
         #print(f"Adapter: lora_B {lora_B.shape}: `{lora_B}`")
+
+    def _fold_scale_into_b(self) -> bool:
+        """Fold ``lora_scale`` into ``lora_B`` only when that is lossless enough.
+
+        The fold saves one multiply per forward, but it runs in the adapter's
+        storage dtype. PEFT multiplies the low-rank product by ``alpha / rank``
+        after both projections, so a large ``B`` (or a large scale) can overflow
+        FP16 to ``inf`` even though the scaled product with a small activation
+        is finite (#5426). Folding can also flush a nonzero element to zero.
+
+        Returns ``True`` when the scale was folded into ``lora_B``, ``False``
+        when ``apply()`` must multiply the product instead.
+        """
+
+        scale = float(self.lora_scale)
+        if self.lora_B is None or scale == 1.0:
+            return True
+        with torch.no_grad():
+            folded = self.lora_B * scale
+            if not bool(torch.isfinite(folded).all()):
+                return False
+            if bool(((folded == 0) & (self.lora_B != 0)).any()):
+                return False
+            self.lora_B.mul_(scale)
+        return True
 
     def dynamic_rank_override(self, lora_cfg: LoraConfig, weight_key: str) -> bool:
         """Overrides the adapter rank when the config defines a matching rank pattern."""
