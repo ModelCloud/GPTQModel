@@ -41,10 +41,15 @@ def test_alias_binding_has_no_unqualified_fusion_admission(alias):
         require_fusable_config(definition, alias)
 
 
-@pytest.mark.parametrize("definition", [RwgQModel, FalconQModel])
-def test_exact_parent_registry_proposal(definition):
+@pytest.mark.parametrize(("definition", "omitted"), [
+    (RwgQModel, []),
+    (FalconQModel, [["ln_attn:!"], ["ln_mlp:!"]]),
+])
+def test_exact_parent_registry_proposal(definition, omitted):
     tree = definition._resolve_effective_module_tree(None, None)
-    assert definition.build_layer_modules(tree, include_capture_only=True) == EXPECTED_PLAN["blocks"]
+    assert definition.build_layer_modules(tree, include_capture_only=True) == [
+        block for block in EXPECTED_PLAN["blocks"] if block not in omitted
+    ]
     with definition._module_tree_context(tree):
         assert definition.extract_layers_node() == EXPECTED_PLAN["layers"]
 

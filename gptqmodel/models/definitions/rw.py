@@ -44,10 +44,11 @@ class RwgQModel(BaseQModel):
                 leaves = tree[-1]
                 for name in ("self_attention", "mlp"):
                     leaves[name] = tuple(leaf.replace(":in=x", "") for leaf in leaves[name])
-                if grouped and config.num_ln_in_parallel_attn in (None, 2):
+                if grouped and config.num_ln_in_parallel_attn in (None, 2) and "input_layernorm" in leaves:
                     # Dual-norm layers: `ln_mlp` feeds only the MLP. Declaring it
                     # after attention keeps AWQ from folding the attention input
                     # scale into it (`ln_attn` is the q/k/v producer).
+                    # Falcon's dedicated two-norm tree already has that order.
                     tree[-1] = {
                         name: leaves[name]
                         for name in ("input_layernorm", "ln_attn", "self_attention", "ln_mlp",
