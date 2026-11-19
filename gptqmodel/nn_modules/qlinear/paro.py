@@ -748,9 +748,17 @@ class ParoLinear(AwqTorchLinear):
             or not self._runtime_theta.is_contiguous()
             or not self._runtime_channel_scales.is_contiguous()
         ):
-            self._runtime_theta, self._runtime_channel_scales = (
-                self._rotation_runtime_tensors(device, dtype)
-            )
+            # This cache outlives the call that fills it: the bf16 auto-cache
+            # serves every later forward, including grad-mode ones where the
+            # fused rotation's autograd wrapper saves these tensors for
+            # backward. Tensors created under `torch.inference_mode()` cannot
+            # be saved that way, so an eval/`generate()` warm-up must not
+            # poison the cache (#5317). `inference_mode(False)` restores the
+            # enclosing grad mode, so an ordinary build is unchanged.
+            with torch.inference_mode(False):
+                self._runtime_theta, self._runtime_channel_scales = (
+                    self._rotation_runtime_tensors(device, dtype)
+                )
             self._rotation_runtime_device = device
             self._rotation_runtime_dtype = dtype
             self._rotation_runtime_key = runtime_key
