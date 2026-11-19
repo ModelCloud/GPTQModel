@@ -189,6 +189,24 @@ def _snapshot(entry):
     )
 
 
+def _canonical_snapshot(entry):
+    """Sort the kept rows by provenance; buffer layout is not a contract."""
+    used = int(entry["reservoir_used"])
+    sources = entry["reservoir_sources"][:used].tolist()
+    rows = entry["reservoir_rows"][:used].tolist()
+    order = torch.tensor(
+        sorted(range(used), key=lambda index: (sources[index], rows[index])),
+        dtype=torch.int64,
+    )
+    return (
+        entry["reservoir_buffer"][:used].index_select(0, order),
+        entry["reservoir_priorities"][:used].index_select(0, order),
+        entry["reservoir_sources"][:used].index_select(0, order),
+        entry["reservoir_rows"][:used].index_select(0, order),
+        torch.tensor(used),
+    )
+
+
 def _full_entry(processor, *, rows=CAP, seed=0):
     generator = torch.Generator().manual_seed(seed)
     entry = {}
@@ -234,7 +252,7 @@ def test_a_winning_capture_still_merges(monkeypatch):
         entry, winner, torch.zeros(1, dtype=torch.float64), source_index=7, budget_cap=CAP
     )
 
-    assert len(calls) == 1
+    assert calls
     # The survivor lands in the slot of the row it displaced, not slot 0.
     survivors = (entry["reservoir_sources"] == 7).nonzero(as_tuple=False).flatten()
     assert survivors.numel() == 1
@@ -242,9 +260,11 @@ def test_a_winning_capture_still_merges(monkeypatch):
     assert int(entry["reservoir_used"]) == CAP
 
 
-def test_tied_priorities_take_the_merge_path(monkeypatch):
+def test_tied_priorities_keep_the_kept_row(monkeypatch):
+    """A new row that ties the worst kept priority cannot displace it."""
     processor = _processor()
     entry = _full_entry(processor)
+    before = _snapshot(entry)
     calls = []
     real_topk = torch.topk
     monkeypatch.setattr(torch, "topk", lambda *a, **k: calls.append(a) or real_topk(*a, **k))
@@ -254,7 +274,9 @@ def test_tied_priorities_take_the_merge_path(monkeypatch):
         entry, torch.randn(1, 4), worst_kept.reshape(1), source_index=3, budget_cap=CAP
     )
 
-    assert len(calls) == 1
+    assert calls == []
+    for left, right in zip(before, _snapshot(entry)):
+        assert torch.equal(left, right)
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2])
@@ -275,7 +297,91 @@ def test_merge_matches_the_previous_algorithm(seed):
             reference, rows, priorities, source_index=capture, budget_cap=CAP
         )
 
-    for fast_value, reference_value in zip(_snapshot(fast), _snapshot(reference)):
+    for fast_value, reference_value in zip(
+        _canonical_snapshot(fast), _canonical_snapshot(reference)
+    ):
+        assert torch.equal(fast_value, reference_value)
+
+
+def test_a_realistic_capture_merges_only_its_winners(monkeypatch):
+    """#5324: a routed-expert capture has tens of rows and few winners.
+
+    The merge must compare the kept rows with the winning rows only, not
+    concatenate the whole capture onto the reservoir.
+    """
+    cap = 906
+    processor = _processor()
+    generator = torch.Generator().manual_seed(0)
+    fast, reference = {}, {}
+
+    # 24 routed-expert captures of 75 rows leave the 906-slot reservoir full.
+    for capture in range(24):
+        rows = torch.randn(75, 3, generator=generator)
+        priorities = torch.rand(75, dtype=torch.float64, generator=generator)
+        processor._merge_reservoir_rows(
+            fast, rows, priorities, source_index=capture, budget_cap=cap
+        )
+        _reference_merge(
+            reference, rows, priorities, source_index=capture, budget_cap=cap
+        )
+
+    threshold = fast["reservoir_priorities"][:cap].max()
+    rows = torch.randn(75, 3, generator=generator)
+    priorities = torch.rand(75, dtype=torch.float64, generator=generator) * 0.5 + threshold
+    priorities[10] = threshold / 2
+    priorities[42] = threshold / 3
+    assert int((priorities < threshold).sum()) == 2
+
+    _reference_merge(
+        reference, rows, priorities, source_index=24, budget_cap=cap
+    )
+
+    topk_sizes = []
+    real_topk = torch.topk
+    monkeypatch.setattr(
+        torch,
+        "topk",
+        lambda input, *args, **kwargs: topk_sizes.append(int(input.numel()))
+        or real_topk(input, *args, **kwargs),
+    )
+
+    processor._merge_reservoir_rows(
+        fast, rows, priorities, source_index=24, budget_cap=cap
+    )
+
+    assert topk_sizes
+    # The pre-#5324 path ranked all ``cap + 75`` rows.
+    assert max(topk_sizes) <= cap + 2
+    for fast_value, reference_value in zip(
+        _canonical_snapshot(fast), _canonical_snapshot(reference)
+    ):
+        assert torch.equal(fast_value, reference_value)
+
+
+def test_a_capture_that_beats_every_kept_row_still_merges():
+    """More winners than kept rows cannot fit the drop/insert shortcut."""
+    processor = _processor()
+    cap = 8
+    generator = torch.Generator().manual_seed(0)
+    fast, reference = {}, {}
+
+    rows = torch.randn(cap, 3, generator=generator)
+    priorities = torch.rand(cap, dtype=torch.float64, generator=generator) + 0.5
+    processor._merge_reservoir_rows(
+        fast, rows, priorities, source_index=0, budget_cap=cap
+    )
+    _reference_merge(reference, rows, priorities, source_index=0, budget_cap=cap)
+
+    rows = torch.randn(cap + 2, 3, generator=generator)
+    priorities = torch.rand(cap + 2, dtype=torch.float64, generator=generator) * 0.1
+    processor._merge_reservoir_rows(
+        fast, rows, priorities, source_index=1, budget_cap=cap
+    )
+    _reference_merge(reference, rows, priorities, source_index=1, budget_cap=cap)
+
+    for fast_value, reference_value in zip(
+        _canonical_snapshot(fast), _canonical_snapshot(reference)
+    ):
         assert torch.equal(fast_value, reference_value)
 
 

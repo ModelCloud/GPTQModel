@@ -169,6 +169,15 @@ of rebuilding the model's `ModulePlan` on every capture, and a full reservoir
 short-circuits a capture whose rows all lose to the kept ones instead of
 concatenating and re-ranking the buffer.
 
+The all-losing case is rare on a real routed expert (each of a capture's ~75
+rows survives with probability about `cap / seen`, so *every* row losing is
+under 1% of full-reservoir merges). #5324 therefore prefilters per row: a full
+reservoir keeps only the rows below the worst kept priority and compares just
+those winners with the largest kept rows, copying only the survivors. The kept
+set is the same as the full concat/topk merge; ties keep the kept row. In the
+#5324 CPU simulation (64 experts x 128 captures, ~75 rows per capture into a
+906-row cap) the merge drops from 1.67 s to 0.98 s.
+
 ### Replay geometry failures
 
 The clamp covers the declared limit, but a module can bound its context below
@@ -498,11 +507,14 @@ reproduces #4063's 24.84 / 22.77 exactly, which anchors the harness.
 | `tests/test_awq_gpt_neo_packed_replay_5085.py::test_replay_geometry_error_becomes_a_scale_group_error` | an over-long replay raises `_AWQScaleGroupError`; fallback quantizes every leaf, `fallback=None` propagates |
 | `tests/test_awq_capture_perf_5284.py::test_policy_is_resolved_once_per_module` | the aggregation policy is resolved once per `(class, module_name)`, not once per capture |
 | `tests/test_awq_capture_perf_5284.py::test_a_losing_capture_skips_the_merge` | a full reservoir does not re-rank the buffer for a capture that cannot displace a row |
-| `tests/test_awq_capture_perf_5284.py::test_merge_matches_the_previous_algorithm` | the short-circuit keeps exactly the rows the previous merge kept |
+| `tests/test_awq_capture_perf_5284.py::test_tied_priorities_keep_the_kept_row` | a new row that ties the worst kept priority cannot displace it |
+| `tests/test_awq_capture_perf_5284.py::test_a_realistic_capture_merges_only_its_winners` | a 75-row capture with two winners never ranks the full `cap + 75` concat |
+| `tests/test_awq_capture_perf_5284.py::test_merge_matches_the_previous_algorithm` | the prefilter keeps exactly the rows the previous merge kept |
 | `tests/test_awq_token_row_position_5265.py::test_single_row_quota_keeps_a_bounded_sink_share` | one in eight single-row quotas keeps position 0, the rest keep the batch centre |
 | `tests/test_awq_token_row_position_5265.py::test_single_row_quotas_bound_the_sink_share` | the sink share of a single-row plan stays between 1% and 50% |
 
 The first three `test_awq_gpt_neo_packed_replay_5085.py` nodes fail on `main`
 before the #5085 fix; its geometry-error node asserts the fallback contract
 introduced with it. The `test_awq_capture_perf_5284.py` policy and short-circuit
-nodes fail before #5284, and its equivalence node pins the kept rows.
+nodes fail before #5284, its per-row prefilter and tie nodes fail before #5324,
+and its equivalence node pins the kept rows.

@@ -1518,40 +1518,70 @@ class AWQProcessor(LoopProcessor):
             row_buffer[used:used + count] = row_indices
             used += count
         else:
-            # A full reservoir usually rejects the whole capture: a routed
-            # expert sees one batch per expert per layer, so most merges offer
-            # rows that all lose to the kept ones. Comparing the capture's best
-            # priority with the worst kept priority is O(cap) on host floats and
-            # skips the concat/topk/mask/arange below, which cost ~160 us per
-            # capture -- 8.6 s over a 2-layer MoE run (#5284). The condition is
-            # strict so ties keep the slow path and the kept set is unchanged
-            # for every capture this short-circuits.
-            if used >= budget_cap and count and bool(
-                (priorities > priority_buffer[:used].max()).all()
-            ):
-                entry["reservoir_used"] = used
-                entry["inputs"] = [buffer[:used].unsqueeze(0)]
-                entry.pop("provenance", None)
-                return
-            combined = torch.cat([priority_buffer[:used], priorities])
-            keep = torch.topk(combined, budget_cap, largest=False).indices
-            kept_old = keep[keep < used]
-            kept_new = keep[keep >= used] - used
-            kept_old_mask = torch.zeros((used,), dtype=torch.bool)
-            kept_old_mask[kept_old] = True
-            # Free slots are the never-filled tail plus the kept rows this batch
-            # displaced; the new survivors go straight into them.
-            slots = torch.cat(
-                [
-                    (~kept_old_mask).nonzero(as_tuple=False).flatten(),
-                    torch.arange(used, budget_cap),
-                ]
-            )
-            buffer[slots] = rows.index_select(0, kept_new)
-            priority_buffer[slots] = priorities.index_select(0, kept_new)
-            source_buffer[slots] = source_index
-            row_buffer[slots] = row_indices.index_select(0, kept_new)
-            used = budget_cap
+            # A full reservoir keeps only a handful of a capture's rows: each
+            # new row survives with probability ``cap / seen``, so a routed
+            # expert's capture (tens of rows) usually contributes a few winners
+            # and sometimes none. Testing all rows at once only skips the merge
+            # when *every* row loses, which is <1% of real captures (#5324).
+            # Prefilter to the winning rows instead and merge just those: every
+            # other new row loses to ``cap`` kept rows, so the kept set is the
+            # same. The comparison is strict so a tie keeps the kept row.
+            merge_whole_capture = True
+            if used >= budget_cap and count:
+                kept_priorities = priority_buffer[:used]
+                winners = torch.nonzero(
+                    priorities < kept_priorities.max(), as_tuple=True
+                )[0]
+                winner_count = int(winners.numel())
+                if winner_count == 0:
+                    entry["reservoir_used"] = used
+                    entry["inputs"] = [buffer[:used].unsqueeze(0)]
+                    entry.pop("provenance", None)
+                    return
+                if winner_count < used:
+                    # Exactly ``winner_count`` rows leave the reservoir, and
+                    # they are the largest of the kept rows plus the winners:
+                    # any other kept row is smaller than the top candidates.
+                    # Comparing that small candidate set copies only the
+                    # survivors instead of the whole capture.
+                    merge_whole_capture = False
+                    candidate_slots = torch.topk(
+                        kept_priorities, winner_count, largest=True
+                    ).indices
+                    candidates = torch.cat(
+                        [kept_priorities[candidate_slots], priorities[winners]]
+                    )
+                    dropped = torch.zeros((candidates.numel(),), dtype=torch.bool)
+                    dropped[
+                        torch.topk(candidates, winner_count, largest=True).indices
+                    ] = True
+                    slots = candidate_slots[dropped[:winner_count]]
+                    survivors = winners[~dropped[winner_count:]]
+                    buffer[slots] = rows.index_select(0, survivors)
+                    priority_buffer[slots] = priorities.index_select(0, survivors)
+                    source_buffer[slots] = source_index
+                    row_buffer[slots] = row_indices.index_select(0, survivors)
+                    used = budget_cap
+            if merge_whole_capture:
+                combined = torch.cat([priority_buffer[:used], priorities])
+                keep = torch.topk(combined, budget_cap, largest=False).indices
+                kept_old = keep[keep < used]
+                kept_new = keep[keep >= used] - used
+                kept_old_mask = torch.zeros((used,), dtype=torch.bool)
+                kept_old_mask[kept_old] = True
+                # Free slots are the never-filled tail plus the kept rows this
+                # batch displaced; the new survivors go straight into them.
+                slots = torch.cat(
+                    [
+                        (~kept_old_mask).nonzero(as_tuple=False).flatten(),
+                        torch.arange(used, budget_cap),
+                    ]
+                )
+                buffer[slots] = rows.index_select(0, kept_new)
+                priority_buffer[slots] = priorities.index_select(0, kept_new)
+                source_buffer[slots] = source_index
+                row_buffer[slots] = row_indices.index_select(0, kept_new)
+                used = budget_cap
 
         entry["reservoir_used"] = used
         # ``inputs`` stays a cheap view of the live buffer so capture-time
