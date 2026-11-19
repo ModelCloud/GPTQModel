@@ -19,6 +19,8 @@ the fix. The end-to-end assertions use the model weights rather than the config
 so a future regression cannot pass by only rejecting or only accepting.
 """
 
+from functools import partial
+
 import pytest
 import torch
 
@@ -41,13 +43,13 @@ from gptqmodel.quantization.rtn import RTN
 
 
 CALIBRATED_UNSUPPORTED = [
-    ("gptq", lambda: GPTQConfig(bits=4, group_size=128)),
-    ("qqq", lambda: QQQConfig(bits=4, group_size=128)),
-    ("awq", lambda: AWQConfig(bits=4, group_size=128)),
-    ("paro", lambda: ParoConfig(bits=4, group_size=128)),
-    ("vptq", lambda: VPTQConfig()),
-    ("macaq", lambda: MacaqConfig()),
-    ("exl3", lambda: EXL3Config()),
+    ("gptq", partial(GPTQConfig, bits=4, group_size=128)),
+    ("qqq", partial(QQQConfig, bits=4, group_size=128)),
+    ("awq", partial(AWQConfig, bits=4, group_size=128)),
+    ("paro", partial(ParoConfig, bits=4, group_size=128)),
+    ("vptq", VPTQConfig),
+    ("macaq", MacaqConfig),
+    ("exl3", EXL3Config),
 ]
 
 
@@ -226,17 +228,13 @@ def test_pre_fix_checkpoint_drops_the_unapplied_smoother_on_load():
     """
 
     payload = AWQConfig(bits=4, group_size=128).to_dict()
-    payload["meta"]["preprocessors"] = [
-        {"code": "smoother", "smooth": {"type": "mad", "k": 1.0}}
-    ]
+    payload["meta"]["preprocessors"] = [{"code": "smoother", "smooth": {"type": "mad", "k": 1.0}}]
 
     restored = QuantizeConfig.from_quant_config(payload)
 
     assert isinstance(restored, AWQConfig)
     assert restored.smoother is None
-    assert not any(
-        getattr(item, "code", None) == "smoother" for item in restored.preprocessors
-    )
+    assert not any(getattr(item, "code", None) == "smoother" for item in restored.preprocessors)
     # Re-saving writes a config that no longer claims the option.
     resaved = restored.to_dict()
     assert "preprocessors" not in resaved.get("meta", {}), resaved["meta"]
