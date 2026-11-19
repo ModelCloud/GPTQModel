@@ -67,18 +67,45 @@ def request_json_with_retry(
         timeout: float,
         retries: int,
         retry_delay: float,
+        deadline: float | None = None,
 ) -> object | None:
+    """POST/GET with retries, never running past ``deadline`` (monotonic).
+
+    The allocation loop owns one deadline for the whole wait, so a transport
+    failure cannot restart the clock: every attempt and retry delay is capped
+    to the remaining budget (#5375).
+    """
+
     last_error: Exception | None = None
     for attempt in range(retries + 1):
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None:
+            if remaining <= 0:
+                break
+            timeout = min(timeout, remaining)
         try:
             return request_json(url, method=method, body=body, timeout=timeout)
         except Exception as exc:
             last_error = exc
             if attempt < retries:
-                time.sleep(retry_delay)
+                delay = retry_delay
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    delay = min(delay, remaining)
+                time.sleep(delay)
     if last_error is not None:
         print(f"Request failed after retries: {last_error}")
     return None
+
+
+def _sleep_until(deadline: float, seconds: float) -> None:
+    """Sleep ``seconds`` without overrunning the allocation deadline."""
+
+    delay = min(seconds, max(0.0, deadline - time.monotonic()))
+    if delay > 0:
+        time.sleep(delay)
 
 
 def extract_gpu_ids(response: object | None) -> str:
@@ -193,7 +220,11 @@ def print_status(base_url: str, runner_name: str) -> None:
 
 
 def allocate_gpu(args: argparse.Namespace) -> int:
-    start_s = time.time()
+    # One deadline for the whole wait: an invalid response or a transport
+    # failure used to restart the loop without consulting the timeout, so a
+    # bad allocator answer waited forever (#5375).
+    start_s = time.monotonic()
+    deadline = start_s + float(args.timeout_sec)
     endpoint = f"{normalize_base_url(args.base_url)}/get"
     sm_value = args.sm.strip()
 
@@ -203,7 +234,16 @@ def allocate_gpu(args: argparse.Namespace) -> int:
         f"sm={(sm_value if sm_value and sm_value != '0' else '<not-sent>')}"
     )
 
+    last_resp = ""
     while True:
+        if time.monotonic() >= deadline:
+            print(
+                f"Timed out after {args.timeout_sec}s waiting for GPU "
+                f"(last response={last_resp})"
+            )
+            print_status(args.base_url, args.runner)
+            return 1
+
         request_body = build_get_request(
             runner_name=args.runner,
             run_id=args.run_id,
@@ -225,33 +265,27 @@ def allocate_gpu(args: argparse.Namespace) -> int:
             timeout=args.request_timeout,
             retries=args.retries,
             retry_delay=args.retry_delay,
+            deadline=deadline,
         )
         resp = extract_gpu_ids(response)
+        last_resp = resp
 
         print(f"resp={{{resp}}}")
 
         if not is_valid_gpu_response(resp):
             print(f"Allocator returned invalid response: {resp!r} (temporary error)")
             print_status(args.base_url, args.runner)
-            time.sleep(args.sleep_sec)
+            _sleep_until(deadline, args.sleep_sec)
             continue
 
         if resp.startswith("-") and "," not in resp:
-            elapsed = int(time.time() - start_s)
-            if elapsed >= args.timeout_sec:
-                print(
-                    f"Timed out after {args.timeout_sec}s waiting for GPU "
-                    f"(last response={resp})"
-                )
-                print_status(args.base_url, args.runner)
-                return 1
-
+            elapsed = int(time.monotonic() - start_s)
             print(
                 f"No GPU available (response={resp}). Waiting {args.sleep_sec}s..."
                 f" elapsed={elapsed}s"
             )
             print_status(args.base_url, args.runner)
-            time.sleep(args.sleep_sec)
+            _sleep_until(deadline, args.sleep_sec)
             continue
 
         if args.require_single and "," in resp:
