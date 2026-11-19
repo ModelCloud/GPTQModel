@@ -2724,13 +2724,13 @@ PROCESSOR = {
         "gptqmodel.models.ports.native.glm5_next.processing_glm5_next",
         "Glm5NextProcessor"
     ],
-    "glmasr": [
-        "gptqmodel.models.ports.native.glmasr.processing_glmasr",
-        "GlmAsrProcessor"
-    ],
     "glm_ocr": [
         "gptqmodel.models.ports.native.glm46v.processing_glm46v",
         "Glm46VProcessor"
+    ],
+    "glmasr": [
+        "gptqmodel.models.ports.native.glmasr.processing_glmasr",
+        "GlmAsrProcessor"
     ],
     "got_ocr2": [
         "gptqmodel.models.ports.native.got_ocr2.processing_got_ocr2",

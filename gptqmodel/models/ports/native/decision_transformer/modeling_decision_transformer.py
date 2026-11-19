@@ -1,6 +1,5 @@
 # Vendored from huggingface/transformers v5.23.0 (Apache-2.0) by GPT-QModel.
 # Do not edit by hand except to keep it on the 5.23 ABI; see docs/transformers5-model-ports.md.
-# GPT-QModel: modernized to Transformers 5.23 conventions (no legacy return paths).
 # Copyright 2022 The HuggingFace Team The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,7 +33,6 @@ from ..auto import NativePreTrainedModel  # GPT-QModel: vendored classes are lib
 from transformers.processing_utils import Unpack
 from transformers.pytorch_utils import Conv1D
 from transformers.utils import (
-    can_return_tuple,
     ModelOutput,
     TransformersKwargs,
     auto_docstring,
@@ -540,7 +538,6 @@ class DecisionTransformerModel(DecisionTransformerPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    @can_return_tuple
     @auto_docstring
     def forward(
         self,
@@ -552,8 +549,9 @@ class DecisionTransformerModel(DecisionTransformerPreTrainedModel):
         attention_mask: torch.Tensor | None = None,
         output_hidden_states: bool | None = None,
         output_attentions: bool | None = None,
+        return_dict: bool | None = None,
         **kwargs,
-    ) -> DecisionTransformerOutput:
+    ) -> tuple[torch.Tensor] | DecisionTransformerOutput:
         r"""
         states (`torch.Tensor` of shape `(batch_size, episode_length, state_dim)`):
             The states for each step in the trajectory
@@ -592,21 +590,22 @@ class DecisionTransformerModel(DecisionTransformerPreTrainedModel):
 
         >>> # forward pass
         >>> with torch.no_grad():
-        ...     outputs = model(
+        ...     state_preds, action_preds, return_preds = model(
         ...         states=states,
         ...         actions=actions,
         ...         rewards=rewards,
         ...         returns_to_go=target_return,
         ...         timesteps=timesteps,
         ...         attention_mask=attention_mask,
+        ...         return_dict=False,
         ...     )
-        >>> state_preds, action_preds, return_preds = outputs.state_preds, outputs.action_preds, outputs.return_preds
         ```"""
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         batch_size, seq_length = states.shape[0], states.shape[1]
 
@@ -648,8 +647,9 @@ class DecisionTransformerModel(DecisionTransformerPreTrainedModel):
             position_ids=torch.zeros(stacked_attention_mask.shape, device=device, dtype=torch.long),
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
         )
-        x = encoder_outputs.last_hidden_state
+        x = encoder_outputs[0]
 
         # reshape x so that the second dimension corresponds to the original
         # returns (0), states (1), or actions (2); i.e. x[:,1,t] is the token for s_t
@@ -659,6 +659,8 @@ class DecisionTransformerModel(DecisionTransformerPreTrainedModel):
         return_preds = self.predict_return(x[:, 2])  # predict next return given state and action
         state_preds = self.predict_state(x[:, 2])  # predict next state given state and action
         action_preds = self.predict_action(x[:, 1])  # predict next action given state
+        if not return_dict:
+            return (state_preds, action_preds, return_preds)
 
         return DecisionTransformerOutput(
             last_hidden_state=encoder_outputs.last_hidden_state,

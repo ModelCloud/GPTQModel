@@ -46,6 +46,25 @@ Ports keep the copyright headers of the sources they derive from. Port
 directories carry `NOTICE` files and any license text that differs from the
 repository's Apache-2.0 `LICENSE`.
 
+## Vendored Transformers families
+
+`gptqmodel/models/ports/native/<family>` is generated from the Transformers
+5.23 sources by `scripts/vendor_transformers_ports.py`; the generator is the
+source of truth. GPT-QModel's hand edits (5.23-convention rewrites such as
+`capture_outputs`/`can_return_tuple` instead of legacy return paths) are
+recorded as `scripts/vendor_patches/<family>.patch` and applied after copying,
+and `native/MANIFEST.json` pins each generated file (sha256 and
+`verbatim`/`patched`/`generated`). To change a vendored file, edit it, run
+`python scripts/vendor_transformers_ports.py <transformers/src/transformers> . --record-patches`
+and commit the file with its patch and the manifest.
+`tests/test_native_vendor_manifest.py` regenerates the tree and requires byte
+equality. `tests/test_native_port_parity.py` requires every vendored class to
+equal native Transformers bit-exactly for the default forward,
+`output_hidden_states`, `output_attentions`, `return_dict=False`, a cached
+decode step, the loss and greedy `generate`. A rewrite that cannot reproduce
+native tuple semantics stays verbatim, with an exact
+`STALE_PATTERN_EXCEPTIONS` entry in `tests/test_model_port_policy.py`.
+
 ## Optional dependencies
 
 | Extra | Packages | Used by |

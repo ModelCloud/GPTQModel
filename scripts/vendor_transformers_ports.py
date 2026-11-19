@@ -2,26 +2,48 @@
 # SPDX-License-Identifier: Apache-2.0
 """Vendor Transformers 5.23 model families into gptqmodel/models/ports/native.
 
-Usage: python scripts/vendor_transformers_ports.py <transformers_src_pkg_dir> <repo_root> <family> [<family> ...] [--refresh]\n\nExisting family directories are kept (they carry GPT-QModel modernizations) unless --refresh is given.
+Usage:
+    python scripts/vendor_transformers_ports.py <transformers_src_pkg_dir> <repo_root> <family> [<family> ...] [--refresh]
+    python scripts/vendor_transformers_ports.py <transformers_src_pkg_dir> <repo_root> --all --refresh
+    python scripts/vendor_transformers_ports.py <transformers_src_pkg_dir> <repo_root> --all --record-patches
+
+The generator is the source of truth for the vendored tree. GPT-QModel's hand edits (5.23-convention
+modernizations) live as unified diffs in scripts/vendor_patches/<family>.patch and are applied after
+copying, so ``--all --refresh`` reproduces the committed tree byte for byte. To change a vendored file:
+edit it, run ``--all --record-patches`` (re-derives every patch from the committed tree against fresh
+generator output), and commit the file together with its patch and native/MANIFEST.json.
+Without --refresh, existing family directories are kept. ``--all`` means every vendored family
+directory already present under <repo_root>.
 
 Copies configuration/modeling/processing/... modules verbatim, rewrites framework
 imports (`from ...x` -> `from transformers.x`), keeps sibling-family relative imports
 (`from ..other.x` resolves to ports/native/other), and routes `..auto` to a
 package-local registry. Adds the dependency closure (relative imports and
-SubConfigSpec default model types). Generates ports/native/auto/_registry.py.
+SubConfigSpec default model types). Generates ports/native/auto/_registry.py and
+ports/native/MANIFEST.json (sha256 + verbatim/patched/generated for every generated file).
 """
 
+import difflib
+import hashlib
 import json
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 
-SRC = Path(sys.argv[1])  # .../src/transformers
-REPO = Path(sys.argv[2])
-REQUESTED = [arg for arg in sys.argv[3:] if not arg.startswith("--")]
-MODELS = SRC / "models"
-DEST = REPO / "gptqmodel" / "models" / "ports" / "native"
+PATCHES = Path(__file__).resolve().parent / "vendor_patches"
+NATIVE_PARTS = ("gptqmodel", "models", "ports", "native")
+# Files under ports/native that the generator does not produce.
+HAND_WRITTEN = frozenset({"NOTICE", "__init__.py", "auto/__init__.py", "MANIFEST.json"})
+SRC = MODELS = DEST = None
+
+
+def _configure(src, repo):
+    global SRC, MODELS, DEST
+    SRC = Path(src)  # .../src/transformers
+    MODELS = SRC / "models"
+    DEST = Path(repo).joinpath(*NATIVE_PARTS)
 
 KEEP = re.compile(
     r"^((configuration|modeling|processing|image_processing|video_processing|feature_extraction|tokenization|generation)_.*|english_normalizer)\.py$"
@@ -113,16 +135,134 @@ HEADER = (
 )
 
 
+def verbatim(family):
+    """{file name: text} the generator emits for ``family`` before any GPT-QModel patch."""
+
+    files = {"__init__.py": HEADER}
+    for path in family_files(family):
+        files[path.name] = HEADER + rewrite(path.read_text())
+    return files
+
+
+def make_patch(family, before, after):
+    """Unified diff (a/<family>/<file> -> b/<family>/<file>) of the hand edits to one family."""
+
+    chunks = []
+    for name in sorted(set(before) | set(after)):
+        old, new = before.get(name), after.get(name)
+        if old == new:
+            continue
+        if old is None or new is None:
+            raise SystemExit(f"{family}/{name}: patches may only edit generated files, not add or remove them")
+        for text in (old, new):
+            if not text.endswith("\n"):
+                raise SystemExit(f"{family}/{name}: file must end with a newline")
+        chunks.extend(
+            difflib.unified_diff(
+                old.splitlines(keepends=True), new.splitlines(keepends=True),
+                f"a/{family}/{name}", f"b/{family}/{name}", n=3,
+            )
+        )
+    return "".join(chunks)
+
+
+_HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def apply_patch(files, patch, family):
+    """Apply a unified diff to {name: text} in place; every hunk must match exactly where it says.
+
+    Returns the names of the patched files.
+    """
+
+    lines = patch.splitlines(keepends=True)
+    index, patched = 0, set()
+    while index < len(lines):
+        if not (lines[index].startswith("--- ") and lines[index + 1].startswith("+++ ")):
+            raise SystemExit(f"{family}.patch: expected a file header at line {index + 1}")
+        name = lines[index + 1][len("+++ "):].strip().split("/", 2)[2]
+        if name not in files:
+            raise SystemExit(f"{family}.patch edits {name}, which the generator does not emit")
+        index += 2
+        source = files[name].splitlines(keepends=True)
+        result, cursor = [], 0
+        while index < len(lines) and lines[index].startswith("@@"):
+            match = _HUNK.match(lines[index])
+            old_count = 1 if match.group(2) is None else int(match.group(2))
+            new_count = 1 if match.group(4) is None else int(match.group(4))
+            start = int(match.group(1)) - (0 if old_count == 0 else 1)
+            if start < cursor:
+                raise SystemExit(f"{family}.patch: overlapping hunks in {name}")
+            result.extend(source[cursor:start])
+            cursor = start
+            index += 1
+            while old_count or new_count:
+                tag, body = lines[index][:1], lines[index][1:]
+                if tag in {" ", "-"}:
+                    if cursor >= len(source) or source[cursor] != body:
+                        raise SystemExit(f"{family}.patch does not apply to {name} at line {cursor + 1}; re-record it")
+                    cursor += 1
+                    old_count -= 1
+                if tag in {" ", "+"}:
+                    result.append(body)
+                    new_count -= 1
+                if tag not in {" ", "-", "+"}:
+                    raise SystemExit(f"{family}.patch: bad hunk line {index + 1}")
+                index += 1
+        result.extend(source[cursor:])
+        files[name] = "".join(result)
+        patched.add(name)
+    return patched
+
+
 def vendor(family):
+    """Write ``family`` (verbatim generator output plus its recorded patch); return {name: status}."""
+
+    files = verbatim(family)
+    patch_file = PATCHES / f"{family}.patch"
+    patched = apply_patch(files, patch_file.read_text(), family) if patch_file.exists() else set()
     out = DEST / family
     out.mkdir(parents=True, exist_ok=True)
-    (out / "__init__.py").write_text(HEADER)
-    written = []
-    for path in family_files(family):
-        text = rewrite(path.read_text())
-        (out / path.name).write_text(HEADER + text)
-        written.append(path.name)
-    return written
+    for name, text in files.items():
+        (out / name).write_text(text)
+    return {name: "patched" if name in patched else "verbatim" for name in files}
+
+
+def record_patches(families):
+    """Re-derive every scripts/vendor_patches/<family>.patch from the committed tree."""
+
+    PATCHES.mkdir(exist_ok=True)
+    for family in families:
+        before = verbatim(family)
+        after = {name: (DEST / family / name).read_text() for name in before if (DEST / family / name).exists()}
+        extra = {p.name for p in (DEST / family).glob("*.py")} - set(before)
+        if extra or set(after) != set(before):
+            raise SystemExit(f"{family}: files differ from the generator's set: {sorted(extra or set(before) - set(after))}")
+        patch = make_patch(family, before, after)
+        patch_file = PATCHES / f"{family}.patch"
+        if patch:
+            patch_file.write_text(patch)
+        elif patch_file.exists():
+            patch_file.unlink()
+    for patch_file in PATCHES.glob("*.patch"):
+        if patch_file.stem not in families:
+            raise SystemExit(f"stale patch for a family that is not vendored: {patch_file.name}")
+
+
+def _sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_manifest(statuses):
+    """native/MANIFEST.json: every generated file -> sha256 and verbatim/patched/generated."""
+
+    manifest = {
+        f"{family}/{name}": {"sha256": _sha256(DEST / family / name), "status": status}
+        for family, files in sorted(statuses.items())
+        for name, status in sorted(files.items())
+    }
+    manifest["auto/_registry.py"] = {"sha256": _sha256(DEST / "auto" / "_registry.py"), "status": "generated"}
+    (DEST / "MANIFEST.json").write_text(json.dumps(dict(sorted(manifest.items())), indent=1) + "\n")
 
 
 TASK_TABLES = {
@@ -213,31 +353,83 @@ def registry(families):
     return tables
 
 
-def main():
-    families = closure(REQUESTED)
+def vendored_families():
+    return sorted(p.name for p in DEST.iterdir() if p.is_dir() and p.name not in {"auto", "__pycache__"})
+
+
+def statuses_of(family):
+    patch_file = PATCHES / f"{family}.patch"
+    patched = set()
+    if patch_file.exists():
+        patched = {line[len("+++ "):].strip().split("/", 2)[2] for line in patch_file.read_text().splitlines() if line.startswith("+++ ")}
+    return {name: "patched" if name in patched else "verbatim" for name in verbatim(family)}
+
+
+def generate(src, repo, requested, refresh):
+    """Vendor ``requested`` (plus closure) into <repo>, then write the registry and the manifest."""
+
+    _configure(src, repo)
+    families = closure(requested)
     while True:
         extra = required_families(set(families)) - set(families)
         if not extra:
             break
         families = closure(sorted(set(families) | extra))
     DEST.mkdir(parents=True, exist_ok=True)
-    manifest = {}
-    refresh = "--refresh" in sys.argv
+    written = {}
     for family in families:
-        # Existing families carry GPT-QModel's 5.23 modernizations; never clobber them
-        # unless --refresh is given (a deliberate re-vendor from a new Transformers release).
+        # Existing families are kept unless --refresh is given; with --refresh the recorded
+        # patches re-apply GPT-QModel's 5.23 modernizations on top of the fresh copy.
         if (DEST / family).is_dir() and not refresh:
             continue
-        manifest[family] = vendor(family)
-    reg = registry(sorted(p.name for p in DEST.iterdir() if p.is_dir() and p.name not in {"auto", "__pycache__"}))
+        written[family] = vendor(family)
+    reg = registry(vendored_families())
     (DEST / "auto").mkdir(exist_ok=True)
     (DEST / "auto" / "_registry.py").write_text(
         HEADER + "# Generated: model_type -> (module, class) for vendored families only.\n"
         + "".join(f"{k} = {json.dumps(v, indent=4, sort_keys=True)}\n" for k, v in reg.items())
     )
-    print(json.dumps({"families": len(families), "files": sum(len(v) for v in manifest.values())}))
+    write_manifest({family: written.get(family) or statuses_of(family) for family in vendored_families()})
+    return families, written
+
+
+def differences(generated_root, committed_root):
+    """Generated files (relative paths) whose bytes differ from, or are missing in, the committed tree."""
+
+    generated = Path(generated_root).joinpath(*NATIVE_PARTS)
+    committed = Path(committed_root).joinpath(*NATIVE_PARTS)
+    return sorted(
+        path.relative_to(generated).as_posix()
+        for path in generated.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+        and (not (committed / path.relative_to(generated)).is_file()
+             or path.read_bytes() != (committed / path.relative_to(generated)).read_bytes())
+    )
+
+
+def main(argv):
+    flags = {arg for arg in argv[2:] if arg.startswith("--")}
+    requested = [arg for arg in argv[2:] if not arg.startswith("--")]
+    src, repo = argv[0], argv[1]
+    _configure(src, repo)
+    if "--all" in flags or "--record-patches" in flags:
+        requested = sorted(set(requested) | set(vendored_families()))
+    if "--record-patches" in flags:
+        record_patches(vendored_families())
+        # The recorded patches must reproduce every committed file before the manifest is rewritten.
+        with tempfile.TemporaryDirectory() as tmp:
+            generate(src, tmp, requested, refresh=True)
+            stale = [p for p in differences(tmp, repo) if p != "MANIFEST.json"]
+            if stale:
+                raise SystemExit(f"recorded patches do not reproduce: {stale}")
+        _configure(src, repo)
+        write_manifest({family: statuses_of(family) for family in vendored_families()})
+        print(json.dumps({"patches": sorted(p.stem for p in PATCHES.glob("*.patch"))}))
+        return
+    families, written = generate(src, repo, requested, "--refresh" in flags)
+    print(json.dumps({"families": len(families), "files": sum(len(v) for v in written.values())}))
     print(" ".join(families))
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
