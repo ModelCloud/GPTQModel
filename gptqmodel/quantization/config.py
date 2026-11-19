@@ -6687,15 +6687,16 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         transformers_config = False
         resolved_config_file = None
         for quantize_config_filename in QUANT_CONFIG_FILENAME_COMPAT:
-            resolved_config_file = join(checkpoint_dir, quantize_config_filename)
-            if os.path.exists(resolved_config_file):
+            candidate = join(checkpoint_dir, quantize_config_filename)
+            if os.path.exists(candidate):
+                resolved_config_file = candidate
                 if quantize_config_filename == "config.json":
                     transformers_config = True
                 break
 
         if resolved_config_file is None:
             raise ValueError(
-                "QuantizeConfig: No quantize_config.json, quant_config.json or config.json file was found in the model repository."
+                f"QuantizeConfig: No quantize_config.json, quant_config.json or config.json file was found in {checkpoint_dir}."
             )
 
         with open(resolved_config_file, "r", encoding="utf-8") as f:
