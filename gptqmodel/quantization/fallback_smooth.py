@@ -14,6 +14,7 @@ from .config import (
     QuantizeConfig,
     SmoothLog,
     SmoothMAD,
+    SmoothMethod,
     SmoothMSE,
     SmoothOutlier,
     SmoothPercentile,
@@ -86,6 +87,31 @@ def _clamp_block(block: torch.Tensor, lo: torch.Tensor, hi: torch.Tensor) -> tor
     return torch.max(torch.min(block, hi), lo)
 
 
+def smooth_applies(
+    method: Optional[SmoothMethod],
+    group_size: Optional[int],
+    *,
+    width: Optional[int] = None,
+) -> bool:
+    """Return whether ``method`` is enabled for the effective group size.
+
+    ``group_size=-1`` means one group per row. ``width`` resolves that sentinel
+    so the threshold still sees the real row width; callers that already
+    resolved the effective group size can omit it. A ``None`` group size keeps
+    the legacy "no information, apply" behavior used by direct callers.
+    """
+
+    if method is None:
+        return False
+    if group_size is None:
+        return True
+    if group_size < 0:
+        if width is None:
+            return True
+        group_size = width
+    return group_size >= getattr(method, "group_size_threshold", 0)
+
+
 def smooth_block(
     block: torch.Tensor,
     fallback: Fallback,
@@ -94,11 +120,7 @@ def smooth_block(
     group_size: Optional[int] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     method = getattr(fallback, "smooth", None)
-    if method is None:
-        return block, None
-    if group_size is not None and group_size < 0:
-        group_size = block.shape[1]
-    if group_size is not None and group_size < getattr(method, "group_size_threshold", 0):
+    if not smooth_applies(method, group_size, width=block.shape[1]):
         return block, None
 
     if isinstance(method, SmoothRowCol):

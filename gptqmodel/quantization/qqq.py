@@ -30,6 +30,7 @@ from .fallback_smooth import (
     element_saliency_weights,
     hessian_column_weights,
     mse_optimal_quant,
+    smooth_applies,
     smooth_block,
     symmetric_range,
 )
@@ -413,6 +414,9 @@ class QQQ:
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
         start_time = time.time()
         smooth_method = getattr(self.fallback, "smooth", None)
+        search_mse = isinstance(smooth_method, SmoothMSE) and smooth_applies(
+            smooth_method, group_size
+        )
         mse_steps = 32
         mse_maxshrink = 0.8
         if isinstance(smooth_method, SmoothMSE):
@@ -438,7 +442,7 @@ class QQQ:
         # Without a Hessian, fall back to the weight-magnitude proxy rather
         # than the uniform mean that rewards clipping a row's largest weight.
         col_weights = None
-        if isinstance(smooth_method, SmoothMSE):
+        if search_mse:
             col_weights = hessian_column_weights(
                 getattr(self, "H", None), self.columns, device=W.device
             )
@@ -478,7 +482,7 @@ class QQQ:
             end = min(start + group_size, self.columns)
             block = W[:, start:end]
 
-            if isinstance(smooth_method, SmoothMSE):
+            if search_mse:
                 weights = element_saliency_weights(block) if col_weights is None else col_weights[start:end]
                 dequant, scale, zero = mse_optimal_quant(
                     block,

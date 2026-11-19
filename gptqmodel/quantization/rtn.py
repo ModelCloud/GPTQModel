@@ -18,7 +18,12 @@ from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
 from .config import FORMAT, Fallback, FallbackStrategy, RTNConfig, SmoothMSE
-from .fallback_smooth import element_saliency_weights, mse_optimal_quant, smooth_block
+from .fallback_smooth import (
+    element_saliency_weights,
+    mse_optimal_quant,
+    smooth_applies,
+    smooth_block,
+)
 from .gsq_scalar import gsq_enabled_for, refine_affine_scalar
 from .quantizer import HF_OPTIMUM, SCALE_STORAGE_FLOOR, Quantizer
 
@@ -182,6 +187,9 @@ class RTN:
             self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
         )
         smooth_method = self.qcfg.smooth
+        search_mse = isinstance(smooth_method, SmoothMSE) and smooth_applies(
+            smooth_method, effective_group_size
+        )
         mse_steps = 32
         mse_maxshrink = 0.8
         if isinstance(smooth_method, SmoothMSE):
@@ -207,7 +215,7 @@ class RTN:
                 end = min(start + effective_group_size, self.columns)
                 block = weights[:, start:end]
 
-                if isinstance(smooth_method, SmoothMSE):
+                if search_mse:
                     dequant, scale, zero = mse_optimal_quant(
                         block,
                         self.qcfg,
