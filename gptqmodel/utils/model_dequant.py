@@ -22,7 +22,12 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from ..quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
-from ..quantization.config import dynamic_get, quant_bits_width
+from ..quantization.config import (
+    FORMAT,
+    QUANT_CONFIG_FILENAME_COMPAT,
+    dynamic_get,
+    quant_bits_width,
+)
 from ..quantization.dtype import (
     available_float4_packed_dtypes,
     available_float8_dtype_names,
@@ -1026,8 +1031,30 @@ def _unpack_rows_3bit(packed: torch.Tensor) -> torch.Tensor:
 
 
 def _uses_gptq_v1_qzeros(config: dict) -> bool:
-    checkpoint_format = str(config.get("checkpoint_format") or "gptq").strip().lower()
-    return checkpoint_format in {"gptq", "gemm"}
+    """Return whether ``qzeros`` uses the GPTQ v1 (per-field -1 offset) encoding.
+
+    The checkpoint layout may be declared as ``checkpoint_format`` or as the
+    ``format`` metadata alias (both spellings exist in the wild, and either can
+    live in ``quantize_config.json`` or ``quant_config.json``). Resolve both the
+    way the loader does; only the v1 layouts need the zero correction (#5413).
+    """
+
+    raw_format = config.get("checkpoint_format")
+    if raw_format is None:
+        raw_format = config.get("format")
+    if raw_format is None:
+        # Legacy checkpoints predate the field and are v1.
+        return True
+    if isinstance(raw_format, FORMAT):
+        resolved = raw_format
+    else:
+        try:
+            resolved = FORMAT(str(raw_format).strip().lower())
+        except ValueError:
+            # Unknown spelling: keep the previous v1 default instead of
+            # silently switching the zero semantics.
+            return True
+    return resolved not in {FORMAT.GPTQ_V2, FORMAT.GPTQ_P}
 
 
 def _shift_gptq_qzeros(qzeros: torch.Tensor, bits: int, *, delta: int, planar: bool = False) -> torch.Tensor:
@@ -2038,10 +2065,19 @@ def dequantize_model(
 
     config = load_json(model_path / "config.json")
     quant_cfg = config.get("quantization_config", {}) or {}
-    # Legacy GPTQModel checkpoints persist the quantization payload only in
-    # quantize_config.json. Fill in whichever fields config.json lacks so the
-    # converter sees bits/format/dynamic instead of silently using defaults.
-    legacy_quant_cfg = load_json(model_path / "quantize_config.json")
+    # Legacy GPTQModel checkpoints persist the quantization payload only in a
+    # sidecar. The loader accepts `quantize_config.json` and its
+    # `quant_config.json` alias, so read whichever exists (canonical first, like
+    # `QuantizeConfig.from_pretrained`). Fill in whichever fields config.json
+    # lacks so the converter sees bits/format/dynamic instead of silently using
+    # defaults (#5413).
+    legacy_quant_cfg = {}
+    for sidecar_name in QUANT_CONFIG_FILENAME_COMPAT:
+        if sidecar_name == "config.json":
+            continue
+        legacy_quant_cfg = load_json(model_path / sidecar_name)
+        if legacy_quant_cfg:
+            break
     if legacy_quant_cfg:
         if not quant_cfg:
             quant_cfg = legacy_quant_cfg
