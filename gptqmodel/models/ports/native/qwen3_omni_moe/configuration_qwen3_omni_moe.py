@@ -295,7 +295,6 @@ class Qwen3OmniMoeTalkerCodePredictorConfig(PreTrainedConfig):
     num_code_groups: int = 32
 
     def __post_init__(self, **kwargs):
-        self.sliding_window = self.sliding_window
         if self.num_key_value_heads is None:
             self.num_key_value_heads = self.num_attention_heads
 
@@ -396,7 +395,6 @@ class Qwen3OmniMoeTalkerTextConfig(PreTrainedConfig):
     eos_token_id: int | list[int] | None = None
 
     def __post_init__(self, **kwargs):
-        self.sliding_window = self.sliding_window
         self.mlp_only_layers = [] if self.mlp_only_layers is None else self.mlp_only_layers
         super().__post_init__(**kwargs)
 
