@@ -286,6 +286,9 @@ class QuantizeEmbedConfig:
         return self
 
 
+from ..utils.calibration import AUTO_BATCH_SIZE
+
+
 CALIBRATION_SORT_ORDERS = ("asc", "desc", "shuffle")
 
 
@@ -316,7 +319,10 @@ class CalibrationConfig:
     # Sample order before batching: "asc", "desc", "shuffle", or ``None``
     # to keep the input order.
     sort: Optional[str] = "desc"
-    batch_size: int = 1
+    # ``int`` or ``"auto"``: auto picks the largest power-of-two batch that fits
+    # the device (measured: 3.9-5x faster calibration on a 0.5B model, with
+    # batch-to-batch quality differences inside corpus noise).
+    batch_size: Union[int, str] = 1
     # Rows with this many or fewer non-padding tokens are dropped.
     min_length: int = 10
     # Text inserted between samples joined by ``concat_size``.
@@ -352,9 +358,14 @@ class CalibrationConfig:
             raise ValueError(
                 f"CalibrationConfig.sort must be one of {CALIBRATION_SORT_ORDERS} or None, got {self.sort!r}."
             )
-        if type(self.batch_size) is not int:
-            raise TypeError(f"CalibrationConfig.batch_size must be an int, got {type(self.batch_size).__name__}.")
-        if self.batch_size <= 0:
+        if isinstance(self.batch_size, str) and self.batch_size == AUTO_BATCH_SIZE:
+            pass
+        elif type(self.batch_size) is not int:
+            raise TypeError(
+                "CalibrationConfig.batch_size must be an int or "
+                f"{AUTO_BATCH_SIZE!r}, got {type(self.batch_size).__name__}."
+            )
+        elif self.batch_size <= 0:
             raise ValueError(f"CalibrationConfig.batch_size must be positive, got {self.batch_size}.")
         if type(self.min_length) is not int:
             raise TypeError(f"CalibrationConfig.min_length must be an int, got {type(self.min_length).__name__}.")

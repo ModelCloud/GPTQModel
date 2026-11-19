@@ -94,7 +94,7 @@ from ..utils.backend import (
     normalize_backend,
 )
 from ..utils.backend_config import Backend, resolve_quantize_backend
-from ..utils.calibration import prepare_calibration_dataset
+from ..utils.calibration import AUTO_BATCH_SIZE, auto_batch_size, prepare_calibration_dataset
 from ..utils.checkpoint_paths import resolve_checkpoint_path
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
@@ -411,6 +411,54 @@ def _kv_cache_estimate_for(inner: object, *, dtype: Optional[torch.dtype] = None
         getattr(inner, "config", None),
         dtype=dtype or _module_weight_dtype(inner),
     )
+
+
+def _calibration_row_count(calibration) -> int:
+    """Rows the calibration set will produce, or a conservative estimate."""
+
+    try:
+        return max(1, len(calibration.dataset))
+    except TypeError:
+        return 1
+
+
+def _calibration_tokens_per_row(qmodel, calibration) -> int:
+    """Tokens in a typical calibration row: declared concat size or sampled."""
+
+    if calibration.concat_size:
+        return int(calibration.concat_size)
+
+    try:
+        iterator = iter(calibration.dataset)
+    except TypeError:
+        return 512
+    samples = []
+    for _ in range(4):
+        try:
+            samples.append(next(iterator))
+        except StopIteration:
+            break
+
+    # Tensor-kwargs rows already carry their sequence dimension.
+    for sample in samples:
+        values = getattr(sample, "values", lambda: [])()
+        for value in values:
+            if torch.is_tensor(value) and value.dim() >= 2:
+                return int(value.shape[-2])
+
+    tokenizer = getattr(qmodel, "tokenizer", None)
+    if tokenizer is None or not samples:
+        return 512
+    lengths = []
+    for sample in samples:
+        text = sample if isinstance(sample, str) else (sample.get("text") if isinstance(sample, dict) else None)
+        if not isinstance(text, str):
+            continue
+        try:
+            lengths.append(len(tokenizer(text)["input_ids"]))
+        except Exception:  # pragma: no cover - exotic tokenizers
+            continue
+    return max(lengths) if lengths else 512
 
 
 def _module_weight_dtype(module: object) -> Optional[torch.dtype]:
@@ -2359,6 +2407,52 @@ class BaseQModel(nn.Module):
         if estimate is not None:
             log.info(estimate.format())
 
+    def _auto_calibration_batch_size(self, calibration) -> int:
+        """Pick a calibration batch that fits, or 1 when the device is unmeasurable."""
+
+        config = getattr(getattr(self, "model", None), "config", None)
+        hidden_size = int(getattr(config, "hidden_size", 0) or 0)
+        num_layers = int(getattr(config, "num_hidden_layers", 0) or 0)
+
+        dtype_bytes = 2
+        inner = getattr(self, "model", None)
+        try:
+            for parameter in inner.parameters():
+                if parameter.is_floating_point():
+                    dtype_bytes = parameter.element_size()
+                    break
+        except Exception:  # pragma: no cover - exotic module trees
+            dtype_bytes = 2
+
+        free_bytes = None
+        device = self.quantize_config.device
+        device_type = getattr(device, "type", None) or str(device).split(":")[0].lower()
+        if device_type == "cuda":
+            try:
+                index = getattr(device, "index", None)
+                free_bytes, _total = (
+                    torch.cuda.mem_get_info() if index is None else torch.cuda.mem_get_info(index)
+                )
+            except Exception:  # pragma: no cover - driver edge cases
+                free_bytes = None
+
+        rows = _calibration_row_count(calibration)
+        tokens = _calibration_tokens_per_row(self, calibration)
+        batch = auto_batch_size(
+            rows=rows,
+            tokens_per_row=tokens,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dtype_bytes=dtype_bytes,
+            free_bytes=free_bytes,
+        )
+        where = "device unmeasurable" if free_bytes is None else f"free {free_bytes / 1024 ** 3:.1f} GiB"
+        log.info(
+            "Calibrate: batch_size=auto -> %d (rows=%d, tokens/row=%d, %s)",
+            batch, rows, tokens, where,
+        )
+        return batch
+
     @with_quantization_device_telemetry
     def quantize(
         self,
@@ -2530,6 +2624,8 @@ class BaseQModel(nn.Module):
                 raise ValueError(f"Staged GSQ is unsupported for {self.quantize_config.method}")
 
         batch_size = calibration.batch_size
+        if batch_size == AUTO_BATCH_SIZE:
+            batch_size = self._auto_calibration_batch_size(calibration)
         if not self.support_batch_quantize:
             log.warn("Quantize: batch_size overridden by model class definition to `disabled`")
             batch_size = 1 # but actually disabled
