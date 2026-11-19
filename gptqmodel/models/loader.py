@@ -1710,8 +1710,25 @@ def _is_broken_transformers_dynamic_module_error(exc: Exception) -> bool:
 
 
 def _hf_loader_from_pretrained_with_dynamic_module_retry(loader, model_local_path: str, **kwargs):
+    """Build a model through ``loader.from_pretrained`` under the writer lock.
+
+    transformers runs model construction inside ``local_torch_dtype``, a
+    process-global default-dtype window, and dynamo's ``preserve_global_state``
+    restores that dtype around every trace. A compiled call re-tracing inside
+    the window can therefore restore bf16 after the load restored fp32, or trip
+    ``assert_loaded_model_state`` (#5127/#5209), so construction must exclude
+    compiled forwards.
+
+    The writer is taken here rather than at each call site: before #5291 the
+    load lock covered every construction implicitly, and the quantize-path load
+    with ``offload_to_disk=False`` was the one site that lost that coverage when
+    the lock became a reader/writer split (#5301). Wrapping the call itself
+    keeps a new construction site from being added unguarded.
+    """
+
     try:
-        return loader.from_pretrained(model_local_path, **kwargs)
+        with model_global_state_lock():
+            return loader.from_pretrained(model_local_path, **kwargs)
     except Exception as exc:
         if not _is_broken_transformers_dynamic_module_error(exc):
             raise
@@ -1736,7 +1753,8 @@ def _hf_loader_from_pretrained_with_dynamic_module_retry(loader, model_local_pat
             model_local_path,
             exc,
         )
-        return loader.from_pretrained(model_local_path, **retry_kwargs)
+        with model_global_state_lock():
+            return loader.from_pretrained(model_local_path, **retry_kwargs)
 
 
 def _load_tt_blockfloat_model(model_cls, *, model_local_path, dtype, trust_remote_code=False):
@@ -2405,15 +2423,13 @@ def ModelLoader(cls):
             )
             # transformers' ``from_pretrained`` wraps model construction in
             # ``local_torch_dtype`` (a process-global default-dtype window).
-            # Exclude compiled forwards from that window; the writer is held
-            # for this construction call, not for the rest of the load.
-            with model_global_state_lock():
-                model = _hf_loader_from_pretrained_with_dynamic_module_retry(
-                    cls.loader,
-                    model_local_path,
-                    config=config,
-                    **hf_model_init_kwargs,
-                )
+            # The helper takes the global-state writer for that call.
+            model = _hf_loader_from_pretrained_with_dynamic_module_retry(
+                cls.loader,
+                model_local_path,
+                config=config,
+                **hf_model_init_kwargs,
+            )
             model._model_init_kwargs = hf_model_init_kwargs
             _maybe_print_module_tree(model=model)
             _apply_requested_module_tree(
@@ -2542,14 +2558,13 @@ def ModelLoader(cls):
                     fallback_init_kwargs = model_init_kwargs_without_internal.copy()
                     fallback_init_kwargs.pop("device_map", None)
                     fallback_init_kwargs["low_cpu_mem_usage"] = False
-                    with model_global_state_lock():
-                        model = _hf_loader_from_pretrained_with_dynamic_module_retry(
-                            cls.loader,
-                            model_local_path,
-                            config=config,
-                            **fallback_init_kwargs,
-                            **hf_gguf_load_kwargs,
-                        )
+                    model = _hf_loader_from_pretrained_with_dynamic_module_retry(
+                        cls.loader,
+                        model_local_path,
+                        config=config,
+                        **fallback_init_kwargs,
+                        **hf_gguf_load_kwargs,
+                    )
                     if getattr(model, "config", None) is config:
                         model.config = copy.deepcopy(config)
                     _convert_model_with_defuser(cls, model, cleanup_original=False)
