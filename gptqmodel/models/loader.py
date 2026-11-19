@@ -968,6 +968,34 @@ def _normalize_explicit_placement(device, device_map, max_memory):
     return requested_device_map, explicit_device_map
 
 
+def _dense_placement_device_map(device, device_map, resolved_device):
+    """Return the placement map for the dense (non-quantized) Transformers load.
+
+    Transformers' ``"auto"`` policy fills the first visible accelerator, so an
+    explicit ``device="cpu"`` on a CUDA host silently loaded a CUDA model: the
+    requested device only selected the dtype and was then replaced by ``auto``
+    (#5373). An explicit ``device_map`` still wins; otherwise the requested
+    device becomes a full-model root mapping. A device pool is a layer-wise
+    request with no single root target, so it keeps the auto policy.
+    """
+
+    if device_map:
+        return device_map
+    if device is None or isinstance(resolved_device, tuple):
+        return "auto"
+    # ``_indexed_device_request`` keeps an accelerator ordinal that the family
+    # resolution below drops (``device=1`` resolves to the CUDA family).
+    target = _indexed_device_request(device)
+    if target is None:
+        if isinstance(resolved_device, DEVICE):
+            target = str(resolved_device.to_torch_device())
+        elif isinstance(resolved_device, torch.device):
+            target = str(resolved_device)
+        else:
+            return "auto"
+    return {"": target}
+
+
 def _max_memory_device_name_is_cpu(name: str) -> bool:
     """Whether a normalized ``max_memory`` key is the CPU budget."""
 
@@ -2411,7 +2439,9 @@ def ModelLoader(cls):
                 # come from these arguments rather than the previous load.
                 configure_kernel(kernel)
             hf_model_init_kwargs = dict(model_init_kwargs_without_internal)
-            hf_model_init_kwargs["device_map"] = device_map if device_map else "auto"
+            hf_model_init_kwargs["device_map"] = _dense_placement_device_map(
+                device, device_map, resolved_device
+            )
             set_dtype_compat(hf_model_init_kwargs, dtype)
             hf_model_init_kwargs.update(hf_gguf_load_kwargs)
             if (
