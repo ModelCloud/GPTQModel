@@ -195,6 +195,12 @@ already held; the reservoir therefore never resets mid-layer. Keeping the
 layer-wide budget for every routed expert made the clip search and the replay
 forward run on about five times the rows on OLMoE (#5284).
 
+The cap is a high-water mark. Two captures of one module compute their caps
+under the processor lock and merge under the module lock, so they can merge in
+the opposite order. The merge raises the cap to the buffer's current capacity
+before deciding whether to resize; an older, smaller cap therefore cannot
+evict rows a larger capture already merged (#5333).
+
 ### Merge
 
 The kept set is the `budget_cap` lowest priorities of `kept + captured`. Only
@@ -207,7 +213,8 @@ whose priorities all lose to the largest kept one leaves the buffer untouched.
 flowchart TD
     A["capture: rows, priorities"] --> B{"reservoir exists?"}
     B -- no --> C["allocate budget_cap slots<br/>seed from earlier plan rows"]
-    B -- yes --> D{"used + count <= budget_cap?"}
+    B -- yes --> B1["budget_cap = max(budget_cap, buffer capacity)"]
+    B1 --> D{"used + count <= budget_cap?"}
     D -- yes --> E["append in place"]
     D -- no --> F{"all priorities >= largest kept?"}
     F -- yes --> G["no-op: keep the buffer"]
