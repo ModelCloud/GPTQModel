@@ -21,9 +21,7 @@ import gptqmodel.utils.offload as offload_mod
 import gptqmodel.utils.structure as structure_mod
 from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization.config import AutoDtypeCast
-from gptqmodel.utils.structure import _resolve_qualified_name
 
 
 class _NestedModel(torch.nn.Module):
@@ -118,7 +116,10 @@ def test_resolve_qualified_name_uses_known_path(monkeypatch):
 
     monkeypatch.setattr(structure_mod, "_get_qualified_name", unexpected_scan)
 
-    assert _resolve_qualified_name(model, model.layers[1], "layers.1") == "layers.1"
+    assert (
+        structure_mod._resolve_qualified_name(model, model.layers[1], "layers.1")
+        == "layers.1"
+    )
 
 
 def test_resolve_qualified_name_falls_back_for_stale_path(monkeypatch):
@@ -132,7 +133,10 @@ def test_resolve_qualified_name_falls_back_for_stale_path(monkeypatch):
 
     monkeypatch.setattr(structure_mod, "_get_qualified_name", counted_scan)
 
-    assert _resolve_qualified_name(model, model.layers[1], "layers.2") == "layers.1"
+    assert (
+        structure_mod._resolve_qualified_name(model, model.layers[1], "layers.2")
+        == "layers.1"
+    )
     assert scans == [model.layers[1]]
 
 
@@ -145,7 +149,7 @@ def test_replace_live_submodule_uses_known_path(monkeypatch):
 
     monkeypatch.setattr(structure_mod, "_get_qualified_name", unexpected_scan)
 
-    BaseQModel._replace_live_submodule(
+    base_mod.BaseQModel._replace_live_submodule(
         SimpleNamespace(model=model),
         model.layers[1],
         replacement,
