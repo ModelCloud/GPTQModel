@@ -4,8 +4,10 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import torch
+from torch import nn
 
 from gptqmodel.models.auto import MODEL_MAP
+from gptqmodel.models.definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.ports.native.qwen2_moe.configuration_qwen2_moe import Qwen2MoeConfig
 from gptqmodel.models.ports.native.qwen2_moe.modeling_qwen2_moe import Qwen2MoeForCausalLM
@@ -144,6 +146,22 @@ def test_qwen3_omni_uses_defuser_for_fused_experts():
         hidden_size=model.config.get_text_config().hidden_size,
         dtype=next(layer.mlp.experts[0].gate_proj.parameters()).dtype,
     )
+
+
+def test_qwen3_omni_pre_lm_head_norm_resolves_before_model_load():
+    # The class declaration must resolve in the installed layout before
+    # `after_model_load` rewrites it from the runtime decoder prefix.
+    model = Qwen3OmniMoeForConditionalGeneration(_make_tiny_qwen3_omni_config())
+    instance = object.__new__(Qwen3OmniMoeGPTQ)
+    nn.Module.__init__(instance)
+    instance.model = model
+
+    resolved = instance._resolved_pre_lm_head_norm_candidates()
+
+    assert resolved == [
+        (model.thinker.model.language_model.norm, "thinker.model.language_model.norm")
+    ]
+
 
 def test_awq_single_bit_validation_allows_skip_only_dynamic_rules():
     ok, err = AwqTorchLinear.validate(

@@ -72,7 +72,7 @@ class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, OmniThinkerCheckpointLayoutMixin, T
 
     dynamic_expert_index = "num_experts"
 
-    pre_lm_head_norm_module = "thinker.model.norm"
+    pre_lm_head_norm_module = "thinker.model.language_model.norm"
 
     # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()

@@ -140,6 +140,14 @@ def _materialize_snapshot_entry(module: nn.Module, entry):
     """Return the checkpoint tensor described by a snapshot entry."""
 
     if isinstance(entry, RebuiltCheckpointTensor):
+        live = getattr(module, "qweight", None)
+        if isinstance(live, torch.Tensor) and live.device.type == "meta":
+            # A move to ``meta`` discarded the runtime words, so the inverse
+            # cannot read them. The checkpoint layout is still known from the
+            # descriptor, and a meta tensor carries only shape/dtype anyway.
+            # Rebuilding here would run the inverse (and its ``aten::equal``
+            # identity check) against meta tensors.
+            return torch.empty(entry.shape, dtype=entry.dtype, device=live.device)
         tensor = module._rebuild_checkpoint_qweight()
         if not isinstance(tensor, torch.Tensor):
             raise RuntimeError(

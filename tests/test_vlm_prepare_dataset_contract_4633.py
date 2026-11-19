@@ -127,16 +127,15 @@ def test_pretokenized_rows_never_reach_the_processor(cls, monkeypatch):
     monkeypatch.setattr(cls, "load_processor", _fail_load_processor, raising=False)
     model = _make_model(cls)
     rows = [
-        {"input_ids": list(range(100, 140)), "attention_mask": [1] * 40},
-        # The base path strips edge padding and preserves the interior mask.
-        {"input_ids": list(range(200, 246)), "attention_mask": [0] + _CALLER_MASK},
+        {"input_ids": [0] + list(range(100, 140)), "attention_mask": [0] + [1] * 40},
+        {"input_ids": list(range(200, 245)), "attention_mask": _CALLER_MASK},
     ]
 
     batches = model.prepare_dataset(rows, batch_size=1)
 
     assert [batch["input_ids"].tolist() for batch in batches] == [
         [list(range(100, 140))],
-        [list(range(201, 246))],
+        [list(range(200, 245))],
     ]
     assert batches[1]["attention_mask"].tolist() == [_CALLER_MASK]
 
@@ -150,15 +149,15 @@ def test_columnar_mapping_is_unpacked_not_rendered_as_key_names(cls, monkeypatch
 
     batches = model.prepare_dataset(
         {
-            "input_ids": [list(range(100, 140)), list(range(200, 246))],
-            "attention_mask": [[1] * 40, [0] + _CALLER_MASK],
+            "input_ids": [[0] + list(range(100, 140)), list(range(200, 245))],
+            "attention_mask": [[0] + [1] * 40, _CALLER_MASK],
         },
         batch_size=1,
     )
 
     assert [batch["input_ids"].tolist() for batch in batches] == [
         [list(range(100, 140))],
-        [list(range(201, 246))],
+        [list(range(200, 245))],
     ]
     assert batches[1]["attention_mask"].tolist() == [_CALLER_MASK]
 
