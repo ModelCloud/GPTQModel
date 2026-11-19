@@ -2193,6 +2193,16 @@ def ModelWriter(cls):
             self.tokenizer.save_pretrained(save_dir)
         if hasattr(self, "processor") and isinstance(self.processor, ProcessorMixin):
             self.processor.save_pretrained(save_dir)
+        # Generation settings are part of the save contract: a reload reads
+        # `generation_config.json`, and the module-replacement path previously
+        # copied only the source checkpoint's files. Mirror the standard and
+        # tt-blockfloat writers so live edits survive (#5387).
+        generation_config = getattr(self.model, "generation_config", None)
+        can_generate = getattr(self.model, "can_generate", None)
+        if generation_config is not None and (
+            not callable(can_generate) or can_generate()
+        ):
+            _save_generation_config(generation_config, save_dir)
 
     cls.save_quantized_embeddings = save_quantized_embeddings
 
