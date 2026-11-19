@@ -236,6 +236,7 @@ GPT-QModel no longer hooks the Transformers load after dispatch, so a
 | Native MoE / `dynamic` / GPT-QModel-only checkpoint loaded by plain Transformers | Unsupported; save-time `hf_compat_warnings` names `GPTQModel.load` |
 | Legacy-layout quantized VL checkpoint | Keys remapped; checkpoint loads and runs |
 | AWQ module with non-divisible `in_features` | Retuned group size before calibration |
+| AWQ `qzeros` or `scales` shape differs from the built module | `GPTQModel.load` rejects the mismatch for grouped and per-channel checkpoints |
 | Native save of a source with `auto_map` | `auto_map` removed; config loads natively |
 | Keyword `max_memory` budget on a mixed-capability host | Kernel selection is not refused before the budget applies |
 
@@ -250,4 +251,5 @@ GPT-QModel no longer hooks the Transformers load after dispatch, so a
 | `tests/test_checkpoint_compat.py::test_saved_config_drops_auto_map_when_remote_code_is_not_copied` | `auto_map` is dropped only when `.py` files are not copied |
 | `tests/test_legacy_vl_checkpoint_load.py` | Legacy keys convert both directions and a real legacy VL checkpoint loads |
 | `tests/test_awq_dynamic_group_size.py::test_awq_retunes_group_size_before_calibration_for_non_divisible_in_features` | 448-wide AWQ module retunes to 64 before the weight-mean step |
+| `tests/test_awq_native_shape_guard_5345.py` | Valid grouped and per-channel buffers load, and a shape mismatch in either buffer raises |
 | `tests/test_hf_bridge_mixed_capability_5084.py` | A keyword map is not validated before `max_memory`; an explicit mixed map is |
