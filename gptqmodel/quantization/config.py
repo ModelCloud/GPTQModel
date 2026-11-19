@@ -1784,8 +1784,15 @@ class SmoothMSE(SmoothMethod):
     steps: int = 32
     maxshrink: float = 0.8
 
-    def __init__(self, steps: int = 32, maxshrink: float = 0.8, group_size_threshold: int = 128):
-        """Configure search granularity for MSE-based shrinking."""
+    def __init__(self, steps: int = 32, maxshrink: float = 0.8, group_size_threshold: int = 0):
+        """Configure search granularity for MSE-based shrinking.
+
+        The search runs per group, so it has no reason to skip small groups.
+        The shared ``128`` default belongs to the clipping smoothers, whose
+        statistics are unreliable on short groups; inheriting it here made
+        ``SmoothMSE()`` a silent no-op at the common g32/g64 sizes (#5530).
+        An explicit threshold is still honored.
+        """
 
         super().__init__(name="mse", group_size_threshold=group_size_threshold)
         owner = type(self).__name__
