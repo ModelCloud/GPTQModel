@@ -274,10 +274,14 @@ def test_misspelled_fallback_keys_are_rejected(payload, bad_key, hint):
 
 
 def test_smoother_dict_defaults_match_the_dataclasses():
-    """``smoother="mad"`` must not use a second, drifting ``k`` literal."""
+    """``smoother="mad"`` must not use a second, drifting ``k`` literal.
 
-    from_dict = GPTQConfig(smoother="mad").smoother.smooth
-    from_type = GPTQConfig(smoother={"type": "mad"}).smoother.smooth
+    The weight-only RTN config owns `smoother`: the calibrated GPTQ configs
+    refuse it because their solve never applies it (#5302).
+    """
+
+    from_dict = RTNConfig(bits=4, smoother="mad").smoother.smooth
+    from_type = RTNConfig(bits=4, smoother={"type": "mad"}).smoother.smooth
     direct = SmoothMAD()
 
     assert isinstance(from_dict, SmoothMAD)
@@ -286,14 +290,16 @@ def test_smoother_dict_defaults_match_the_dataclasses():
 
 
 def test_valid_smoother_and_fallback_dicts_still_compile():
-    assert GPTQConfig(smoother={"type": "mad", "k": 1.0}).smoother.smooth.k == pytest.approx(1.0)
+    assert RTNConfig(bits=4, smoother={"type": "mad", "k": 1.0}).smoother.smooth.k == pytest.approx(1.0)
 
-    wrapped = GPTQConfig(smoother={"smooth": {"type": "percentile", "percentile": 95}}).smoother.smooth
+    wrapped = RTNConfig(
+        bits=4, smoother={"smooth": {"type": "percentile", "percentile": 95}}
+    ).smoother.smooth
     assert isinstance(wrapped, SmoothPercentile)
     assert wrapped.percentile == pytest.approx(95.0)
 
-    thresholded = GPTQConfig(
-        smoother={"type": "mad", "group_size_threshold": 64}
+    thresholded = RTNConfig(
+        bits=4, smoother={"type": "mad", "group_size_threshold": 64}
     ).smoother.smooth
     assert thresholded.group_size_threshold == 64
 
@@ -314,7 +320,7 @@ def test_valid_smoother_and_fallback_dicts_still_compile():
 
 
 def test_smoother_and_fallback_round_trip_still_works():
-    config = GPTQConfig(
+    config = RTNConfig(
         bits=4,
         group_size=128,
         smoother={"type": "mad", "k": 2.5},
@@ -328,5 +334,24 @@ def test_smoother_and_fallback_round_trip_still_works():
 
     assert isinstance(restored.smoother.smooth, SmoothMAD)
     assert restored.smoother.smooth.k == pytest.approx(2.5)
+    assert isinstance(restored.fallback.smooth, SmoothPercentile)
+    assert restored.fallback.smooth.percentile == pytest.approx(95.0)
+
+
+def test_gptq_still_round_trips_the_fallback_smoother_it_applies():
+    """`fallback.smooth` is applied by the GPTQ fallback path (#5302 control)."""
+
+    config = GPTQConfig(
+        bits=4,
+        group_size=128,
+        fallback={
+            "strategy": "rtn",
+            "threshold": "5%",
+            "smooth": {"type": "percentile", "percentile": 95},
+        },
+    )
+    restored = QuantizeConfig.from_quant_config(config.to_dict())
+
+    assert restored.smoother is None
     assert isinstance(restored.fallback.smooth, SmoothPercentile)
     assert restored.fallback.smooth.percentile == pytest.approx(95.0)

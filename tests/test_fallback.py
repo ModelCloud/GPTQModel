@@ -44,9 +44,17 @@ def test_dict_fallback_keeps_the_dataclass_threshold_default():
     for config_cls in (GPTQConfig, AWQConfig):
         plain = config_cls(bits=4, group_size=128)
         assert plain.fallback.threshold == default
-        for override in ({"strategy": "rtn"}, {"smooth": "mad"}):
+        for override in ({"strategy": "rtn"},):
             config = config_cls(bits=4, group_size=128, fallback=override)
             assert config.fallback.threshold == default, (config_cls.__name__, override)
+
+    # Only GPTQ/QQQ apply a fallback smoother; AWQ's fallback never did, and
+    # its `fallback.smooth` is refused (#5302).
+    for override in ({"strategy": "rtn"}, {"smooth": "mad"}):
+        config = GPTQConfig(bits=4, group_size=128, fallback=override)
+        assert config.fallback.threshold == default, override
+    with pytest.raises(ValueError, match="fallback.smooth"):
+        AWQConfig(bits=4, group_size=128, fallback={"smooth": "mad"})
 
     # An explicit threshold still wins.
     explicit = GPTQConfig(bits=4, group_size=128, fallback={"threshold": "2.0%"})
