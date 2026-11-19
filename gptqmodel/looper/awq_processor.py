@@ -1499,9 +1499,21 @@ class AWQProcessor(LoopProcessor):
         The dynamic path captures every row of the batch, so it defaults to
         ``arange(count)``; the token-row plan path keeps only the sampled
         ``local_indices`` and must pass them so replay kwargs stay aligned.
+
+        The budget only grows, but two captures of one module can compute
+        their caps under the processor lock and then merge under the module
+        lock in the opposite order. A merge with an older, smaller cap must
+        therefore never resize the buffer down: that would keep only the
+        ``budget_cap`` lowest priorities of the rows already merged and drop
+        the rest for good. Raising the cap to the buffer's high-water mark
+        keeps a stale merge from evicting rows a larger capture already
+        merged (#5333).
         """
 
         buffer = entry.get("reservoir_buffer")
+        if buffer is not None:
+            budget_cap = max(int(budget_cap), int(buffer.shape[0]))
+            entry["max_tokens"] = budget_cap
         if (
             buffer is None
             or buffer.shape[0] != budget_cap
