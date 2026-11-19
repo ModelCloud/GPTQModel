@@ -113,12 +113,15 @@ def _expert_quant_digest(checkpoint: Path) -> str:
 
 
 # sha256 of every expert qweight/qzeros/scales tensor produced by GPT-QModel
-# 0aa2d4b48 (Defuser's construction-time ``Linear*SparseMoeBlock``, i.e. the
-# ``run_routed_experts`` loop) for the tiny checkpoints below on CPU torch.
-# The pre-fix token-major ``linear_loop`` order produced different scales.
+# main (556f4b22d; Transformers' own classes with Defuser's construction-time
+# ``Linear*SparseMoeBlock``, i.e. the ``run_routed_experts`` loop) for the tiny
+# checkpoints below on CPU torch. The pre-fix token-major ``linear_loop`` order
+# produced different scales. These track main's AWQ output: when main
+# deliberately changes AWQ numerics, regenerate them by running this test's
+# quantization on a main checkout (the vendored classes must still match).
 _MAIN_AWQ_EXPERT_DIGESTS = {
-    "mixtral": "e6b9f0be54e59a9a6adab36e6b3526de28c71a90b8eed4df4c4a7e06d74239e7",
-    "qwen3_moe": "b3c5ff83332495ca0793457dac6e57649198fbc93a8e07fb3db30f1866c6b9e1",
+    "mixtral": "96206e02419dd6eac36143a3b65e91a4e34b15475ef6efcfd7070e3db94ed2a3",
+    "qwen3_moe": "23b14c84e921198df0b3c9535c4a12c9ef39588d6077049da4cfaa8fa4a51d0d",
 }
 
 
