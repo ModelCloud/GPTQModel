@@ -233,14 +233,22 @@ def hessian_column_weights(hessian: Optional[torch.Tensor], columns: int, *, dev
 
     ``H[i, i]`` accumulates the squared input activation of channel ``i`` over
     the calibration batch, so it is the exact per-channel weight for the
-    diagonal approximation of the layer's output error. Return ``None`` when
-    no Hessian was captured so the caller keeps the calibration-free path.
+    diagonal approximation of the layer's output error. A caller that already
+    reduced the Hessian to its diagonal may pass that 1-D vector directly;
+    only the diagonal is needed, so a fallback can avoid materializing the
+    ``columns ** 2`` matrix (#5300). Return ``None`` when no Hessian was
+    captured so the caller keeps the calibration-free path.
     """
-    if hessian is None or hessian.dim() != 2:
+    if hessian is None:
         return None
-    if hessian.shape[0] != columns or hessian.shape[1] != columns:
+    if hessian.dim() == 2:
+        if hessian.shape[0] != columns or hessian.shape[1] != columns:
+            return None
+        diag = hessian.diagonal()
+    elif hessian.dim() == 1 and hessian.numel() == columns:
+        diag = hessian
+    else:
         return None
-    diag = hessian.diagonal()
     if device is not None:
         diag = diag.to(device=device)
     return torch.nan_to_num(diag.float(), nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
