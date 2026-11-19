@@ -64,7 +64,7 @@ def _dynamic_cache_bytes(estimate, tokens):
             continue
         span = min(tokens, layer.window - 1) if layer.window else tokens
         elements += layer.dims * span
-    return elements * estimate.itemsize
+    return elements * estimate.kv_element_bytes
 
 
 def _assert_matches_transformers(config, model_cls, tokens):
@@ -81,14 +81,14 @@ def test_llama4_scout_chunked_layers_are_capped_at_the_chunk_size():
     config = Llama4TextConfig()
     estimate = _estimate(config)
     per_layer = 2 * 8 * 128 * 2
-    assert estimate.exact is True
+    assert estimate.is_exact is True
     assert estimate.growing_layers == 48
     assert estimate.sliding_layers == 36
     assert estimate.window == 8192
-    assert estimate.bytes_per_token == 12 * per_layer
-    assert estimate.bytes_for(131072) == (36 * 8192 + 12 * 131072) * per_layer
+    assert estimate.kv_bytes_per_token == 12 * per_layer
+    assert estimate.kv_bytes_for(131072) == (36 * 8192 + 12 * 131072) * per_layer
     naive_full_context = 48 * 131072 * per_layer
-    assert naive_full_context / estimate.bytes_for(131072) >= 3
+    assert naive_full_context / estimate.kv_bytes_for(131072) >= 3
 
 
 def test_llama4_chunked_attention_matches_the_allocated_cache():
@@ -108,9 +108,9 @@ def test_llama4_chunked_attention_matches_the_allocated_cache():
     estimate = _assert_matches_transformers(config, Llama4ForCausalLM, 256)
     per_layer = 2 * 2 * 16 * 2
     assert estimate.sliding_layers == 3
-    assert estimate.bytes_per_token == per_layer
-    assert estimate.bytes_for(256) == (3 * 16 + 256) * per_layer
-    assert (4 * 256 * per_layer) / estimate.bytes_for(256) >= 3
+    assert estimate.kv_bytes_per_token == per_layer
+    assert estimate.kv_bytes_for(256) == (3 * 16 + 256) * per_layer
+    assert (4 * 256 * per_layer) / estimate.kv_bytes_for(256) >= 3
 
 
 @pytest.mark.parametrize(
@@ -138,12 +138,12 @@ def test_implicit_sliding_window_without_layer_types(config):
     """#4542: no ``layer_types`` plus a window means every layer is sliding."""
 
     estimate = _estimate(config)
-    assert estimate.exact is True
+    assert estimate.is_exact is True
     assert estimate.sliding_layers == 2
     assert estimate.window == 16
-    assert estimate.bytes_per_token == 0
-    per_layer = estimate.layers[0].dims * estimate.itemsize
-    assert (2 * 128 * per_layer) / estimate.bytes_for(128) == 8
+    assert estimate.kv_bytes_per_token == 0
+    per_layer = estimate.layers[0].dims * estimate.kv_element_bytes
+    assert (2 * 128 * per_layer) / estimate.kv_bytes_for(128) == 8
 
 
 def test_mistral_implicit_sliding_matches_the_allocated_cache():
@@ -153,19 +153,19 @@ def test_mistral_implicit_sliding_matches_the_allocated_cache():
         head_dim=16, sliding_window=16,
     )
     estimate = _assert_matches_transformers(config, MistralForCausalLM, 64)
-    assert estimate.bytes_per_token == 0
-    assert estimate.bytes_for(64) == 2 * 16 * estimate.layers[0].dims * estimate.itemsize
+    assert estimate.kv_bytes_per_token == 0
+    assert estimate.kv_bytes_for(64) == 2 * 16 * estimate.layers[0].dims * estimate.kv_element_bytes
 
 
 def test_mistral_full_config_is_bounded_at_32k_context():
     """#4542: the issue's table expects 512 MiB at 32k, not 16 GiB at 128k."""
 
     estimate = _estimate(MistralConfig(num_hidden_layers=32, sliding_window=4096))
-    per_layer = estimate.layers[0].dims * estimate.itemsize
-    assert estimate.bytes_per_token == 0
-    assert estimate.bytes_for(32768) == 32 * 4096 * per_layer
-    assert estimate.bytes_for(32768) == 512 * 1024 * 1024
-    assert (32 * 32768 * per_layer) / estimate.bytes_for(32768) == 8
+    per_layer = estimate.layers[0].dims * estimate.kv_element_bytes
+    assert estimate.kv_bytes_per_token == 0
+    assert estimate.kv_bytes_for(32768) == 32 * 4096 * per_layer
+    assert estimate.kv_bytes_for(32768) == 512 * 1024 * 1024
+    assert (32 * 32768 * per_layer) / estimate.kv_bytes_for(32768) == 8
 
 
 def test_gemma4_per_layer_view_supplies_distinct_global_head_shapes():
@@ -190,12 +190,12 @@ def test_gemma4_per_layer_view_supplies_distinct_global_head_shapes():
     assert not isinstance(config.per_layer_config, (list, tuple))
 
     estimate = _estimate(config)
-    assert estimate.exact is True
+    assert estimate.is_exact is True
     assert estimate.growing_layers == 60
     assert estimate.sliding_layers == 50
     # 10 global layers * 2 (K and V) * 4 heads * 512 head_dim * 2 bytes.
-    assert estimate.bytes_per_token == 10 * 2 * 4 * 512 * 2 == 80 * _KIB
-    assert estimate.bytes_for(131072) == (
+    assert estimate.kv_bytes_per_token == 10 * 2 * 4 * 512 * 2 == 80 * _KIB
+    assert estimate.kv_bytes_for(131072) == (
         50 * 1024 * (2 * 16 * 256) + 10 * 131072 * (2 * 4 * 512)
     ) * 2
 
@@ -268,12 +268,12 @@ def test_gemma3n_kv_shared_tail_is_not_counted():
         hidden_size_per_layer_input=0,
     )
     estimate = _estimate(config)
-    assert estimate.exact is True
+    assert estimate.is_exact is True
     assert estimate.shared_layers == 10
     assert estimate.growing_layers == 20
     assert estimate.sliding_layers == 16
-    assert estimate.bytes_per_token == 4 * 2 * 2 * 256 * 2 == 8 * _KIB
-    assert "10 KV-shared layer(s)" in estimate.format()
+    assert estimate.kv_bytes_per_token == 4 * 2 * 2 * 256 * 2 == 8 * _KIB
+    assert "10 KV-shared layer(s)" in estimate.describe()
 
 
 def test_gemma3n_measured_cache_skips_the_shared_tail():
@@ -319,4 +319,4 @@ def test_gemma4_e2b_combines_per_layer_shapes_and_kv_sharing():
     assert estimate.shared_layers == 20
     assert estimate.growing_layers == 15
     assert estimate.sliding_layers == 12
-    assert estimate.bytes_per_token == 3 * 2 * 1 * 512 * 2 == 6 * _KIB
+    assert estimate.kv_bytes_per_token == 3 * 2 * 1 * 512 * 2 == 6 * _KIB

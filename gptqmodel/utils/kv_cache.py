@@ -109,17 +109,26 @@ class LayerCache:
 
 @dataclass(frozen=True)
 class KVCacheEstimate:
+    """Per-context KV-cache cost implied by a config.
+
+    Every number here is an **estimate** derived from the declared shapes and
+    the weight dtype - nothing is measured from a running engine. Names carry
+    their units (``kv_bytes_per_token``, ``max_context_tokens``) so a caller
+    does not have to read this class to know what a value counts.
+    """
+
     layers: Tuple[LayerCache, ...]
     dtype: torch.dtype
     mtp_layers: int = 0
+    context_limit: Optional[int] = None
     unclassified: Tuple[str, ...] = field(default_factory=tuple)
 
     @property
-    def itemsize(self) -> int:
+    def kv_element_bytes(self) -> int:
         return _DTYPE_ITEMSIZE[self.dtype]
 
     @property
-    def exact(self) -> bool:
+    def is_exact(self) -> bool:
         return not self.unclassified and all(layer.kind != "unknown" for layer in self.layers)
 
     @property
@@ -157,7 +166,7 @@ class KVCacheEstimate:
         return kinds.pop() if len(kinds) == 1 else "mixed"
 
     @property
-    def bytes_per_token(self) -> int:
+    def kv_bytes_per_token(self) -> int:
         """Asymptotic growth: the sliding branch stops, the compressed one does not."""
 
         elements = 0.0
@@ -166,46 +175,109 @@ class KVCacheEstimate:
                 elements += layer.dims
             if layer.compress_rate and layer.compressed_dims:
                 elements += layer.compressed_dims / layer.compress_rate
-        return int(round(elements)) * self.itemsize
+        return int(round(elements)) * self.kv_element_bytes
 
-    def bytes_for(self, tokens: int, *, batch_size: int = 1) -> int:
-        tokens = max(0, int(tokens))
+    def kv_bytes_for(self, context_tokens: int, *, batch_size: int = 1) -> int:
+        context_tokens = max(0, int(context_tokens))
         batch = max(1, int(batch_size))
         elements = 0
         for layer in self.layers:
             if layer.dims > 0:
-                span = min(tokens, layer.window) if layer.window else tokens
+                span = min(context_tokens, layer.window) if layer.window else context_tokens
                 elements += layer.dims * span
             if layer.compress_rate and layer.compressed_dims:
-                entries = (tokens + layer.compress_rate - 1) // layer.compress_rate
+                entries = (context_tokens + layer.compress_rate - 1) // layer.compress_rate
                 elements += layer.compressed_dims * entries
-        return elements * self.itemsize * batch
+        return elements * self.kv_element_bytes * batch
 
-    def tokens_for(self, budget_bytes: int, *, batch_size: int = 1) -> int:
-        """Largest context whose cache fits in ``budget_bytes`` (monotonic search)."""
+    def max_context_tokens(self, kv_budget_bytes: int, *, batch_size: int = 1) -> int:
+        """Largest usable context for ``budget_bytes`` at ``batch_size``.
 
-        budget = max(0, int(budget_bytes)) // max(1, int(batch_size))
+        Capped by the model's own context limit: a cache that would fit 160k
+        tokens is still only usable up to ``max_position_embeddings``, and
+        answering past it would be a planning error, not a rounding one.
+        """
+
+        budget = max(0, int(kv_budget_bytes)) // max(1, int(batch_size))
         if budget <= 0 or not self.growing_layers:
             return 0
-        low, high = 0, 1 << 20
+        low, high = 0, self.context_limit or (1 << 20)
         while low < high:
             mid = (low + high + 1) // 2
-            if self.bytes_for(mid) <= budget:
+            if self.kv_bytes_for(mid) <= budget:
                 low = mid
             else:
                 high = mid - 1
         return low
 
-    def format(self, contexts: Sequence[int] = (8192, 32768)) -> str:
+    def max_sequences(self, kv_budget_bytes: int, context_tokens: int) -> int:
+        """How many sequences of ``context_tokens`` fit in ``kv_budget_bytes``."""
+
+        per_sequence = self.kv_bytes_for(context_tokens, batch_size=1)
+        if per_sequence <= 0:
+            return 0
+        return max(0, int(kv_budget_bytes)) // per_sequence
+
+    def context_batch_plan(self, kv_budget_bytes: int, batches: Sequence[int] = (1, 2, 4, 8, 16, 32)) -> Tuple[Tuple[int, int], ...]:
+        """``(batch_size, max_context_tokens)`` per batch size, dropping empty rows."""
+
+        rows = []
+        for batch in batches:
+            context = self.max_context_tokens(kv_budget_bytes, batch_size=batch)
+            if context > 0:
+                rows.append((int(batch), int(context)))
+        return tuple(rows)
+
+    def format_plan_rows(self, rows: Sequence[Tuple[int, int]], *,
+                         kv_budget_bytes: Optional[int] = None,
+                         suffix: str = "") -> str:
+        """One line from precomputed ``(batch_size, max_context_tokens)`` rows.
+
+        ``kv_budget_bytes`` labels the line with the budget the rows came from.
+        It is optional because a sharded caller plans each device separately and
+        has no single whole-model number that those rows correspond to.
+        """
+
+        if not rows:
+            head = f"KV plan: {human_bytes(kv_budget_bytes)} " if kv_budget_bytes is not None else "KV plan: "
+            return head + "fits no usable context" + suffix
+
+        # Rows are ordered by increasing batch, so contexts never grow; equal
+        # neighbours collapse into "up to N seq".
+        groups: list[list[int]] = []
+        for batch, context in rows:
+            if groups and groups[-1][0] == context:
+                groups[-1][1] = batch
+            else:
+                groups.append([context, batch])
+
+        parts = [
+            f"{human_tokens(context)} ctx up to {batch} seq" if batch > 1
+            else f"{human_tokens(context)} ctx at 1 seq"
+            for context, batch in groups
+        ]
+        capped = " (model limit)" if self.context_limit and rows[0][1] >= self.context_limit else ""
+        prefix = f"KV plan: {human_bytes(kv_budget_bytes)} -> " if kv_budget_bytes is not None else "KV plan: "
+        return prefix + ", ".join(parts) + capped + suffix
+
+    def format_context_batch_plan(self, kv_budget_bytes: int, batches: Sequence[int] = (1, 2, 4, 8, 16, 32)) -> str:
+        """One line: what this budget buys, collapsing equal context widths."""
+
+        return self.format_plan_rows(
+            self.context_batch_plan(kv_budget_bytes, batches),
+            kv_budget_bytes=int(kv_budget_bytes),
+        )
+
+    def describe(self, contexts: Sequence[int] = (8192, 32768)) -> str:
         parts_of_shape = [f"{self.growing_layers} growing layer(s)"]
         if self.sliding_layers:
             parts_of_shape.append(f"{self.sliding_layers} sliding")
         shape = ", ".join(parts_of_shape) + f", {self.layer_type}"
-        parts = [f"KV cache: {_human(self.bytes_per_token)}/token ({shape}, {_dtype_name(self.dtype)})"]
+        parts = [f"KV cache: {human_bytes(self.kv_bytes_per_token)}/token ({shape}, {_dtype_name(self.dtype)})"]
         for context in contexts:
-            parts.append(f"{_tokens_name(context)} ctx {_human(self.bytes_for(context))}")
+            parts.append(f"{human_tokens(context)} ctx {human_bytes(self.kv_bytes_for(context))}")
         if self.sliding_layers and self.window:
-            parts.append(f"{self.sliding_layers} sliding layer(s) capped at {_tokens_name(self.window)}")
+            parts.append(f"{self.sliding_layers} sliding layer(s) capped at {human_tokens(self.window)}")
         if self.linear_layers:
             parts.append(f"{self.linear_layers} linear-attention layer(s) hold constant state")
         if self.block_layers:
@@ -223,13 +295,13 @@ def _dtype_name(dtype: torch.dtype) -> str:
     return str(dtype).replace("torch.", "")
 
 
-def _tokens_name(tokens: int) -> str:
+def human_tokens(tokens: int) -> str:
     if tokens >= 1024 and tokens % 1024 == 0:
         return f"{tokens // 1024}k"
     return str(tokens)
 
 
-def _human(num_bytes: int) -> str:
+def human_bytes(num_bytes: int) -> str:
     value = float(num_bytes)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if value < 1024 or unit == "TiB":
@@ -400,6 +472,7 @@ def estimate_kv_cache(
     unclassified_all: list[str] = []
     mtp_total = 0
     resolved_dtype = None
+    limits = []
     for source in stacks:
         partial = _estimate_for_stack(source, dtype=dtype)
         if partial is None:
@@ -408,6 +481,8 @@ def estimate_kv_cache(
         unclassified_all.extend(partial.unclassified)
         mtp_total += partial.mtp_layers
         resolved_dtype = resolved_dtype or partial.dtype
+        if partial.context_limit:
+            limits.append(partial.context_limit)
 
     if not all_layers:
         return None
@@ -415,6 +490,7 @@ def estimate_kv_cache(
         layers=tuple(all_layers),
         dtype=resolved_dtype or torch.float16,
         mtp_layers=mtp_total,
+        context_limit=min(limits) if limits else None,
         unclassified=tuple(dict.fromkeys(unclassified_all)),
     )
 
@@ -534,10 +610,14 @@ def _estimate_for_stack(
     if all(layer.kind == "unknown" for layer in resolved):
         return None
 
+    limit = _safe_get(source, "max_position_embeddings")
+    limit = int(limit) if isinstance(limit, int) and limit > 0 else None
+
     return KVCacheEstimate(
         layers=tuple(resolved),
         dtype=resolved_dtype,
         mtp_layers=mtp,
+        context_limit=limit,
         unclassified=tuple(dict.fromkeys(unclassified)),
     )
 
