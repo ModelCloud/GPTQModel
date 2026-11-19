@@ -2193,6 +2193,16 @@ def ModelWriter(cls):
             self.tokenizer.save_pretrained(save_dir)
         if hasattr(self, "processor") and isinstance(self.processor, ProcessorMixin):
             self.processor.save_pretrained(save_dir)
+        # Generation settings are part of the save contract. The auxiliary-file
+        # copy above only reproduces what the source checkpoint already had, so
+        # edits made on the live model (``max_new_tokens`` and friends) would be
+        # dropped unless the live config is serialized here (#5387).
+        generation_config = getattr(self.model, "generation_config", None)
+        can_generate = getattr(self.model, "can_generate", None)
+        if generation_config is not None and (
+            not callable(can_generate) or can_generate()
+        ):
+            _save_generation_config(generation_config, save_dir)
 
     cls.save_quantized_embeddings = save_quantized_embeddings
 
