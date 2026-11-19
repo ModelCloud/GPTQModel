@@ -168,6 +168,15 @@ def linear_fp32_staged_b1(x: torch.Tensor, weight: NF12Weight,
     return impl(x, weight, bias)
 
 
+def linear_fp32_gate_rows(x: torch.Tensor, weight: NF12Weight,
+                          bias: torch.Tensor | None = None, *, rows_n: int = 2,
+                          rows_m: int = 6, unroll: bool = False) -> torch.Tensor:
+    """One launch for any row count of a prepared gate; each row has B1 plane-kernel bits."""
+    from ._fp32 import linear_fp32_gate_rows as impl
+
+    return impl(x, weight, bias, rows_n=rows_n, rows_m=rows_m, unroll=unroll)
+
+
 def prepare_fp32_gate(weight: NF12Weight) -> None:
     """Prepare a lossless compressed view for 128/384x5120 FP32 B1 routers."""
     from ._fp32 import prepare_fp32_gate as impl
