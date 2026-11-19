@@ -42,9 +42,16 @@ from gptqmodel.models.ports.native.auto import AutoConfig as NativeAutoConfig
 from gptqmodel.utils.model import get_layers_with_prefixes
 
 
+# Model types whose default config is dispatched by ``auto.py`` to a definition
+# other than their ``MODEL_MAP`` entry (a plain ``kimi_linear`` config has no
+# AttnRes fields, so it selects ``KimiLinearNativeQModel``; see ``_definition_for``).
+_DEFAULT_CONFIG_DEFINITIONS = {"kimi_linear": KimiLinearNativeQModel}
+
+
 def _auto_config(model_type, **kwargs):
     """Build the default config with the class the definition's loader expects."""
-    loader = getattr(MODEL_MAP.get(model_type), "loader", None)
+    definition = _DEFAULT_CONFIG_DEFINITIONS.get(model_type) or MODEL_MAP.get(model_type)
+    loader = getattr(definition, "loader", None)
     if isinstance(loader, LocalModelLoader) and loader.config_class.startswith("gptqmodel.models.ports.native."):
         return NativeAutoConfig.for_model(model_type, **kwargs)
     return transformers.AutoConfig.for_model(model_type, **kwargs)

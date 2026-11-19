@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from gptqmodel import CalibrationConfig, GPTQModel, QuantizeEmbed
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeEmbed
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantEmbeddings
 from gptqmodel.quantization import FORMAT
 from gptqmodel.quantization.config import QuantizeConfig
@@ -166,10 +166,16 @@ def test_requantize_input_embedding_keeps_bf16_and_runs_in_session():
     ids=["input", "output", "both"],
 )
 def test_requantized_endpoints_can_be_resaved(mode):
-    """A loaded checkpoint with a quantized endpoint must be savable again (#5207)."""
+    """A loaded checkpoint with a quantized endpoint must be savable again (#5207).
+
+    Every load pins one kernel: automatic selection may pick a different int4
+    kernel on reload (``TorchAtenLinear`` vs ``TorchLinear``), whose
+    accumulation order rounds bf16 logits one step apart. With one kernel the
+    in-session, reloaded and re-saved models must agree exactly.
+    """
 
     checkpoint = _quantized_checkpoint()
-    model = GPTQModel.load(checkpoint, device="cpu", dtype=torch.bfloat16)
+    model = GPTQModel.load(checkpoint, device="cpu", dtype=torch.bfloat16, backend=BACKEND.TORCH)
     dynamic = dict(model.quantize_config.dynamic or {})
     for name in (model.get_input_embeddings_name(), model.get_output_embeddings_name() or model.lm_head):
         dynamic[name] = {"bits": 4, "group_size": 32, "sym": True, "desc_act": False}
@@ -185,17 +191,17 @@ def test_requantized_endpoints_can_be_resaved(mode):
     with torch.inference_mode():
         expected = model.model(input_ids=ids).logits
 
-    reloaded = GPTQModel.load(first, device="cpu", dtype=torch.bfloat16)
+    reloaded = GPTQModel.load(first, device="cpu", dtype=torch.bfloat16, backend=BACKEND.TORCH)
     # The re-save shell used to rebuild dense endpoints and then fail with
     # "does not provide tensors for model.embed_tokens.weight / lm_head.weight".
     second = str(Path(tempfile.mkdtemp(prefix="requant_embed_5116_s2_")) / "second")
     reloaded.save(second)
 
-    again = GPTQModel.load(second, device="cpu", dtype=torch.bfloat16)
+    again = GPTQModel.load(second, device="cpu", dtype=torch.bfloat16, backend=BACKEND.TORCH)
     with torch.inference_mode():
         actual = again.model(input_ids=ids).logits
     assert actual.dtype == torch.bfloat16
-    assert torch.allclose(actual, expected, atol=2e-3, rtol=0)
+    assert torch.equal(actual, expected)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the placement check")

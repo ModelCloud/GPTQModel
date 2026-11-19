@@ -197,11 +197,23 @@ def test_old_binding_reproduces_release_failure_then_retry(tmp_path, monkeypatch
     marker = poison(tmp_path)
     definition = CLASSES[family][3]
     original = definition.loader
+    bound = CLASSES[family][2]
     with monkeypatch.context() as broken:
         broken.setattr(definition, "loader", replace(original, tokenizer_class=None))
-        with pytest.raises(ValueError, match="not available natively"):
-            load_hf_tokenizer(tmp_path, model_config=config, trust_remote_code=False, local_files_only=True)
-    assert type(load_hf_tokenizer(tmp_path, model_config=config, local_files_only=True)) is CLASSES[family][2]
+        if family == "internlm":
+            # The release declares a tokenizer that exists only as checkpoint Python.
+            with pytest.raises(ValueError, match="exists only as checkpoint Python"):
+                load_hf_tokenizer(tmp_path, model_config=config, trust_remote_code=False, local_files_only=True)
+        else:
+            # Transformers 5.23 lists internlm2 among models with an incorrect hub
+            # tokenizer class and selects the generic backend, which diverges from
+            # the release tokenizer on NUL bytes: the reason the definition binds it.
+            generic = load_hf_tokenizer(tmp_path, model_config=config, trust_remote_code=False, local_files_only=True)
+            assert type(generic).__name__ == "TokenizersBackend"
+            release = bound.from_pretrained(tmp_path, local_files_only=True)
+            assert generic.encode("Hello world!") == release.encode("Hello world!")
+            assert generic.encode("a\x00b") != release.encode("a\x00b")
+    assert type(load_hf_tokenizer(tmp_path, model_config=config, local_files_only=True)) is bound
     assert not marker.exists()
 
 

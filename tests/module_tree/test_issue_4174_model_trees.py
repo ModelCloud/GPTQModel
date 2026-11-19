@@ -36,9 +36,14 @@ from gptqmodel.models.ports.native.phi3.modeling_phi3 import Phi3ForCausalLM
 from gptqmodel.utils.model import get_layers_with_prefixes
 
 
-def _auto_config(model_type, **kwargs):
-    """Build the default config with the class the definition's loader expects."""
-    loader = getattr(MODEL_MAP.get(model_type), "loader", None)
+def _auto_config(model_type, definition=None, **kwargs):
+    """Build the default config with the class the definition's loader expects.
+
+    ``definition`` names the class that will load it when that is not the
+    ``MODEL_MAP`` entry (``auto.py`` dispatches plain ``kimi_linear`` configs to
+    ``KimiLinearNativeQModel``).
+    """
+    loader = getattr(definition or MODEL_MAP.get(model_type), "loader", None)
     if isinstance(loader, LocalModelLoader) and loader.config_class.startswith("gptqmodel.models.ports.native."):
         return NativeAutoConfig.for_model(model_type, **kwargs)
     return transformers.AutoConfig.for_model(model_type, **kwargs)
@@ -402,7 +407,7 @@ def test_kimi_linear_native_has_no_phantom_rotary_path():
     definition = KimiLinearNativeQModel
     assert definition.rotary_embedding is None
 
-    config = _auto_config("kimi_linear")
+    config = _auto_config("kimi_linear", definition=definition)
     with torch.device("meta"):
         model = definition.loader.from_config(config)
     assert not hasattr(model.model, "rotary_emb")

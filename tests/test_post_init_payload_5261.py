@@ -439,6 +439,8 @@ def _kernel_factories():
 def test_payload_contract_covers_kernels_without_qweight(kernel):
     """The meta probe follows the family payload, not a GPTQ attribute."""
 
+    if kernel == "bnb":
+        pytest.importorskip("bitsandbytes", reason="BitsAndBytesLinear needs the optional bitsandbytes package")
     module = _kernel_factories()[kernel]()
     payload = module.checkpoint_payload_tensors()
 
