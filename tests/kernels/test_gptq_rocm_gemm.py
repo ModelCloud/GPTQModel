@@ -1,21 +1,33 @@
 # GPU=-1 for the mocked architecture/gate cases below; the kernel-oracle cases
 # carry ``pytest.mark.cuda`` and skip without a matching ROCm device.
+import importlib.util
+
 import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear import torch as torch_linear_mod
 from gptqmodel.nn_modules.qlinear._numerics import _can_fuse_hip_bias
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear, _rocm_arch_name
-from gptqmodel.nn_modules.triton_utils.gptq_gemm import (
-    MAX_IN_FEATURES,
-    SMALL_M_MAX,
-    gate_limits,
-    gptq_gemm,
-    launch_config,
-)
 from gptqmodel.utils import arch
 from gptqmodel.utils.arch import gemm_fused_dtypes
-from tests.kernels._gptq_gemm_pre_rewrite import pre_rewrite_gptq_gemm
+
+
+# The fused kernels (and the pre-rewrite reference) import Triton; the launch
+# tables they share with ``TorchLinear`` are only reachable through them.
+HAS_TRITON = importlib.util.find_spec("triton") is not None
+if HAS_TRITON:
+    from gptqmodel.nn_modules.triton_utils.gptq_gemm import (
+        MAX_IN_FEATURES,
+        SMALL_M_MAX,
+        gate_limits,
+        gptq_gemm,
+        launch_config,
+    )
+    from tests.kernels._gptq_gemm_pre_rewrite import pre_rewrite_gptq_gemm
+else:
+    # Only referenced by parametrize lists of cases marked ``requires_triton``.
+    SMALL_M_MAX = None
+requires_triton = pytest.mark.skipif(not HAS_TRITON, reason="Triton is not installed")
 
 
 # Registered fused families. Each kernel case is skipped unless the running
@@ -63,6 +75,7 @@ def _fake_rocm_device(monkeypatch, name):
     return torch.device("cuda:0")
 
 
+@requires_triton
 @pytest.mark.parametrize(
     ("arch_name", "expected"),
     [
@@ -96,6 +109,7 @@ def test_launch_config_table(arch_name, expected):
     assert gate_limits(arch_name) == (expected[5], expected[6])
 
 
+@requires_triton
 def test_cdna4_launch_constants_unchanged():
     # The gfx950 tuning is a compatibility contract: do not drift these values.
     cfg = launch_config("gfx950")
@@ -106,6 +120,7 @@ def test_cdna4_launch_constants_unchanged():
     assert MAX_IN_FEATURES == 5120
 
 
+@requires_triton
 def test_rdna4_launch_is_measured_not_a_cdna_placeholder():
     # gfx120* has its own measured tile: the wider (32, 32) CTA wins on wave32
     # and must not silently collapse back to the CDNA (16, 16) values.
@@ -120,6 +135,7 @@ def test_rdna4_launch_is_measured_not_a_cdna_placeholder():
         assert launch_config(name) == rdna
 
 
+@requires_triton
 def test_gate_limits_reject_unregistered_arch():
     # Ada and Blackwell are registered (see test_launch_config_table);
     # everything else that is not an explicit sm_*/gfx* target must keep the
@@ -147,9 +163,10 @@ def _cpu_module(in_features: int = 256, out_features: int = 128) -> TorchLinear:
 @pytest.mark.parametrize(
     ("arch_name", "expect_fused", "expect_gate"),
     [
-        ("gfx950", True, (16, 5120)),
-        ("gfx1201:sramecc+", True, (16, 17408)),
-        ("gfx1250", True, (16, 17408)),
+        # The fused gate is read from the Triton kernel's launch table.
+        pytest.param("gfx950", True, (16, 5120), marks=requires_triton),
+        pytest.param("gfx1201:sramecc+", True, (16, 17408), marks=requires_triton),
+        pytest.param("gfx1250", True, (16, 17408), marks=requires_triton),
         ("gfx942", False, (0, 0)),
         ("gfx1100", False, (0, 0)),
         ("gfx9999", False, (0, 0)),
@@ -408,6 +425,7 @@ def _assert_gemm_case(dtype, shape, group_size, desc_act, bias, bits, m):
             )
 
 
+@requires_triton
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("shape,group_size,desc_act,bias,bits", [
@@ -430,6 +448,7 @@ def test_gfx950_gptq_gemm_matches_independent_torch_oracle(
     _assert_gemm_case(dtype, shape, group_size, desc_act, bias, bits, m)
 
 
+@requires_triton
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("shape,group_size,desc_act,bias,bits", [
@@ -448,6 +467,7 @@ def test_gfx1201_gptq_gemm_matches_independent_torch_oracle(
     _assert_gemm_case(dtype, shape, group_size, desc_act, bias, bits, m)
 
 
+@requires_triton
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("desc_act", [False, True])
@@ -483,12 +503,14 @@ def test_fused_gemm_split_off_is_bitwise_equal_to_pre_rewrite(
         assert torch.equal(old(None), new(None))
 
 
+@requires_triton
 @pytest.mark.cuda
 def test_gfx950_gptq_gemm_gate_band():
     _require_gpu_arch("gfx950")
     _assert_gemm_gate_band()
 
 
+@requires_triton
 @pytest.mark.cuda
 def test_gfx1201_gptq_gemm_gate_band():
     _require_gpu_arch("gfx1201")

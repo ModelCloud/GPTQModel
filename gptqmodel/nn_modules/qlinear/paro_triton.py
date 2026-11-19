@@ -17,11 +17,6 @@ import torch
 
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT
-from ...quantization.paro.modules.triton.gemm import (
-    paro_dequantize_triton,
-    paro_gemm_triton_decode,
-    paro_gemm_triton_prefill,
-)
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
 from ...utils.kernel import resolve_kernel_config
@@ -29,6 +24,23 @@ from ...utils.rocm import IS_ROCM
 from ._compile_support import COMPILE_LEVEL
 from ._numerics import _wants_fp32_reduce, matmul_fp32_reduce
 from .paro import ParoLinear
+
+
+# Triton is optional. Without it the kernel class must still import so the
+# registry (and the docs compile matrix generated from it) describes every
+# shipped kernel on every host; ``validate_once`` then reports it unavailable.
+try:
+    from ...quantization.paro.modules.triton.gemm import (
+        paro_dequantize_triton,
+        paro_gemm_triton_decode,
+        paro_gemm_triton_prefill,
+    )
+except ModuleNotFoundError as exc:  # pragma: no cover - exercised without Triton
+    if (exc.name or "").partition(".")[0] != "triton":
+        raise
+    paro_dequantize_triton = None
+    paro_gemm_triton_decode = None
+    paro_gemm_triton_prefill = None
 
 
 class ParoTritonLinear(ParoLinear):
@@ -110,6 +122,9 @@ class ParoTritonLinear(ParoLinear):
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         """Validate the Triton and GPU runtime prerequisites once per process."""
+        if paro_gemm_triton_decode is None:
+            return False, ImportError("Paro Triton requires the `triton` package.")
+
         from packaging import version
         from triton import __version__ as triton_version
 

@@ -11,6 +11,10 @@ and never calls the Triton kernel.  Verified for bits 2/4/8 in FP16 and BF16.
 import pytest
 import torch
 
+
+# Every case here exercises a Triton kernel module that imports Triton.
+pytest.importorskip("triton")
+
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.triton_utils.dequant import (
     _DEFAULT_DEQUANT_LAUNCH,

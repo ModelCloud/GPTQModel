@@ -12,6 +12,10 @@ Triton kernel or reuses its intermediates.
 import pytest
 import torch
 
+
+# Every case here exercises a Triton kernel module that imports Triton.
+pytest.importorskip("triton")
+
 from gptqmodel.quantization.paro.modules.triton import gemm as paro_gemm
 from gptqmodel.utils import arch
 

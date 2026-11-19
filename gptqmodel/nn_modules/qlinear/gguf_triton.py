@@ -137,6 +137,104 @@ _Q1_0_G128_SM80_U32_DECODE_2048_TO_6144_CONFIG = {
 }
 
 
+# The SM89 fixed Q4_K/Q5_K/Q6_K launch table is plain data read by the module-level
+# selectors below, which are importable (and unit-tested) without Triton.
+#
+# ------------------------------------------------------------------
+# SM89 (RTX 4090) fixed launch configs for the Q4_K/Q5_K/Q6_K fused
+# kernels.  Measured on one RTX 4090 (torch 2.15.0+cu132, Triton 3.9.0),
+# FP16, 4-bit group 128 (KxN), as ``hot / 256 MiB L2-flushed`` medians with
+# ``torch.cuda.synchronize`` around every launch, against the kernel's own
+# autotuned ``best_config``:
+#
+#   Q4_K  (1024,128)    blocks=4   rows 1/8/64/127: 1.10x-1.15x
+#   Q4_K  (2048,1024)   blocks=8   rows 1/8/64 all faster
+#   Q4_K  (2048,2048)   blocks=8   rows 1/8/64/127 all faster
+#   Q4_K  (4096,4096)   blocks=16  rows 8/64/127 faster; rows 1 slower
+#   Q4_K  (4096,11008)  blocks=16  rows 8/64/127 faster; rows 1 slower
+#   Q5_K  (2048,2048)   blocks=8   rows 1/8/64/127 all faster
+#   Q5_K  (4096,4096)   blocks=16  rows 8/64/127 faster; rows 1 slower
+#   Q5_K  (4096,11008)  blocks=16  rows 8/64/127 faster; rows 1 slower
+#   Q6_K  (1024,128)    blocks=4   rows 1/8/64/127: 1.07x-1.13x
+#   Q6_K  (2048,1024)   blocks=8   rows 1/8/64/127 all faster
+#   Q6_K  (2048,2048)   blocks=8   rows 1/8/64/127 all faster
+#   Q6_K  (4096,4096)   blocks=16  rows 8/64/127 faster; rows 1 slower
+#   Q6_K  (4096,11008)  blocks=16  rows 8/64/127 faster; rows 1 slower
+#
+# Keys are the *padded* in_features the dispatcher sees (GGUF blocks are
+# 256 wide, so a 896-wide projection is padded to 1024 before the kernel).
+# The narrow entries were re-measured on the padded 1024-wide input after
+# an unpadded 896-wide probe produced out-of-bounds reads: only the padded
+# numbers are claimed (1.07x-1.15x, bit-identical to autotuned).
+#
+# Only those exact (in_features, out_features) shapes are wired: a fixed
+# tile that was not measured on the exact shape could silently lose, and
+# the autotuned path is always available.  Rows 2..7 and rows > 127 were
+# not swept and stay autotuned.  Where the large-block decode tile lost in
+# both hot and flushed medians (rows 1 with >= 16 K blocks: the autotuner
+# picks a 2-stage tile that also survives the L2 flush, e.g. Q4_K
+# 4096x4096 auto 50.2/65.5 us vs the best fixed 53.2/83.8 us) it is
+# deliberately left on the autotuned generic kernel.
+_GGUF_SM89_QK_SHAPES = {
+    "Q4_K": {
+        1: {
+            (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
+            (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
+            (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
+        },
+        "mid": {
+            (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 4096): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 11008): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+        },
+        "large": {
+            (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (2048, 2048): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 4096): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 11008): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "num_warps": 8, "num_stages": 2},
+        },
+    },
+    "Q5_K": {
+        1: {
+            (2048, 2048): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
+        },
+        "mid": {
+            (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 4096): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 11008): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+        },
+        "large": {
+            (2048, 2048): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 4096): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 11008): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+        },
+    },
+    "Q6_K": {
+        1: {
+            (1024, 128): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 8, "num_stages": 2},
+            (2048, 1024): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 8, "num_stages": 2},
+            (2048, 2048): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 8, "num_stages": 2},
+        },
+        "mid": {
+            (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 4096): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 11008): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+        },
+        "large": {
+            (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (2048, 1024): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (2048, 2048): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 4096): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+            (4096, 11008): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+        },
+    },
+}
+
 
 def triton_available() -> bool:
     return _TRITON_AVAILABLE
@@ -303,100 +401,6 @@ if _TRITON_AVAILABLE:
     ]
     _GGUF_TRITON_LARGE_NUM_BLOCKS = 16
 
-    # ------------------------------------------------------------------
-    # SM89 (RTX 4090) fixed launch configs for the Q4_K/Q5_K/Q6_K fused
-    # kernels.  Measured on one RTX 4090 (torch 2.15.0+cu132, Triton 3.9.0),
-    # FP16, 4-bit group 128 (KxN), as ``hot / 256 MiB L2-flushed`` medians with
-    # ``torch.cuda.synchronize`` around every launch, against the kernel's own
-    # autotuned ``best_config``:
-    #
-    #   Q4_K  (1024,128)    blocks=4   rows 1/8/64/127: 1.10x-1.15x
-    #   Q4_K  (2048,1024)   blocks=8   rows 1/8/64 all faster
-    #   Q4_K  (2048,2048)   blocks=8   rows 1/8/64/127 all faster
-    #   Q4_K  (4096,4096)   blocks=16  rows 8/64/127 faster; rows 1 slower
-    #   Q4_K  (4096,11008)  blocks=16  rows 8/64/127 faster; rows 1 slower
-    #   Q5_K  (2048,2048)   blocks=8   rows 1/8/64/127 all faster
-    #   Q5_K  (4096,4096)   blocks=16  rows 8/64/127 faster; rows 1 slower
-    #   Q5_K  (4096,11008)  blocks=16  rows 8/64/127 faster; rows 1 slower
-    #   Q6_K  (1024,128)    blocks=4   rows 1/8/64/127: 1.07x-1.13x
-    #   Q6_K  (2048,1024)   blocks=8   rows 1/8/64/127 all faster
-    #   Q6_K  (2048,2048)   blocks=8   rows 1/8/64/127 all faster
-    #   Q6_K  (4096,4096)   blocks=16  rows 8/64/127 faster; rows 1 slower
-    #   Q6_K  (4096,11008)  blocks=16  rows 8/64/127 faster; rows 1 slower
-    #
-    # Keys are the *padded* in_features the dispatcher sees (GGUF blocks are
-    # 256 wide, so a 896-wide projection is padded to 1024 before the kernel).
-    # The narrow entries were re-measured on the padded 1024-wide input after
-    # an unpadded 896-wide probe produced out-of-bounds reads: only the padded
-    # numbers are claimed (1.07x-1.15x, bit-identical to autotuned).
-    #
-    # Only those exact (in_features, out_features) shapes are wired: a fixed
-    # tile that was not measured on the exact shape could silently lose, and
-    # the autotuned path is always available.  Rows 2..7 and rows > 127 were
-    # not swept and stay autotuned.  Where the large-block decode tile lost in
-    # both hot and flushed medians (rows 1 with >= 16 K blocks: the autotuner
-    # picks a 2-stage tile that also survives the L2 flush, e.g. Q4_K
-    # 4096x4096 auto 50.2/65.5 us vs the best fixed 53.2/83.8 us) it is
-    # deliberately left on the autotuned generic kernel.
-    _GGUF_SM89_QK_SHAPES = {
-        "Q4_K": {
-            1: {
-                (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
-                (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
-                (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
-            },
-            "mid": {
-                (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 4096): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 11008): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-            },
-            "large": {
-                (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (2048, 2048): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 4096): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 11008): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "num_warps": 8, "num_stages": 2},
-            },
-        },
-        "Q5_K": {
-            1: {
-                (2048, 2048): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 2},
-            },
-            "mid": {
-                (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 4096): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 11008): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-            },
-            "large": {
-                (2048, 2048): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 4096): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 11008): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-            },
-        },
-        "Q6_K": {
-            1: {
-                (1024, 128): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 8, "num_stages": 2},
-                (2048, 1024): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 8, "num_stages": 2},
-                (2048, 2048): {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "num_warps": 8, "num_stages": 2},
-            },
-            "mid": {
-                (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (2048, 1024): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (2048, 2048): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 4096): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 11008): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-            },
-            "large": {
-                (1024, 128): {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (2048, 1024): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (2048, 2048): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 4096): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-                (4096, 11008): {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-            },
-        },
-    }
 
     @triton_jit
     def _gguf_q1_0_g128_fused_matmul_kernel_impl(

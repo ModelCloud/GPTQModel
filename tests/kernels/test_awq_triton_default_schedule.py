@@ -118,6 +118,8 @@ _ROWS = 16
 
 
 def _build_module(**kwargs):
+    # Construction runs the kernel's validate_once, which requires Triton.
+    pytest.importorskip("triton")
     return AwqGEMMTritonLinear(
         bits=4,
         group_size=_GROUP,

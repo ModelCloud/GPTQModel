@@ -22,6 +22,9 @@ real hardware; this file checks the declaration surface and its static
 consistency.
 """
 
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -210,6 +213,37 @@ def test_docs_matrix_matches_the_declarations():
         assert row["compiled_generation_reason"] == want["compiled_generation_reason"], (
             f"{name}: docs policy reason is stale"
         )
+
+
+def test_registry_does_not_depend_on_triton_being_installed():
+    """The docs matrix lists every shipped kernel, so the registry must too.
+
+    ``ParoTritonLinear`` used to import its Triton GEMM at module scope, so on a
+    host without Triton the class never registered and the matrix check failed
+    with ``stale=['ParoTritonLinear']``. Block Triton in a fresh interpreter and
+    require the kernel to register and report itself unavailable instead.
+    """
+
+    script = textwrap.dedent(
+        """
+        import sys
+        sys.modules["triton"] = None
+        from gptqmodel.utils import importer
+        from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
+        names = {cls.__name__ for cls in importer._registry_kernel_classes()}
+        assert "ParoTritonLinear" in names, sorted(names)
+        ok, err = ParoTritonLinear.validate_once()
+        assert ok is False and isinstance(err, ImportError), (ok, err)
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 class _CommentOnlyKernel(torch.nn.Module):

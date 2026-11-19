@@ -3,6 +3,10 @@
 import pytest
 import torch
 
+
+# Every case here exercises a Triton kernel module that imports Triton.
+pytest.importorskip("triton")
+
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.triton_utils.gptq_gemv import (
     GEMV_BLOCK_N,
