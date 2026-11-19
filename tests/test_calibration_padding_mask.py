@@ -182,3 +182,50 @@ def test_capture_skips_position_ids_when_the_model_does_not_accept_them():
     )
 
     assert "position_ids" not in call
+
+
+def test_columnar_float_0_1_mask_matches_the_list_form():
+    """A fully padded float row must stay padding in the columnar form (#5368)."""
+
+    payload = {
+        "input_ids": torch.tensor([[1, 2], [3, 4]]),
+        "attention_mask": torch.tensor([[1.0, 1.0], [0.0, 0.0]]),
+    }
+
+    columnar = prepare_calibration_dataset(_qmodel(), payload, calibration_data_min_length=0)
+    listed = prepare_calibration_dataset(_qmodel(), [payload], calibration_data_min_length=0)
+
+    assert [(row["input_ids"].tolist(), row["attention_mask"].tolist()) for row in columnar] == [
+        (row["input_ids"].tolist(), row["attention_mask"].tolist()) for row in listed
+    ]
+    assert len(columnar) == 1
+    assert columnar[0]["input_ids"].tolist() == [[1, 2]]
+
+
+def test_columnar_all_zero_float_mask_stays_an_additive_attend_all_mask():
+    """With no 0/1 sentinel the column is additive, so zero means attend (#5134)."""
+
+    payload = {
+        "input_ids": torch.tensor([[1, 2], [3, 4]]),
+        "attention_mask": torch.tensor([[0.0, 0.0], [0.0, 0.0]]),
+    }
+
+    prepared = prepare_calibration_dataset(_qmodel(), payload, calibration_data_min_length=0)
+
+    assert len(prepared) == 2
+    for row in prepared:
+        assert row["attention_mask"].tolist() == [[1, 1]]
+
+
+def test_columnar_additive_mask_keeps_its_negative_sentinel():
+    payload = {
+        "input_ids": torch.tensor([[1, 2], [3, 4]]),
+        "attention_mask": torch.tensor([[0.0, 0.0], [0.0, -10000.0]]),
+    }
+
+    prepared = prepare_calibration_dataset(_qmodel(), payload, calibration_data_min_length=0)
+
+    assert len(prepared) == 2
+    assert prepared[0]["attention_mask"].tolist() == [[1, 1]]
+    assert prepared[1]["input_ids"].tolist() == [[3]]
+    assert prepared[1]["attention_mask"].tolist() == [[1]]

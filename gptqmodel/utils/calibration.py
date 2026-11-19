@@ -726,6 +726,34 @@ def _to_python_containers(value: Any) -> Any:
     return value
 
 
+def _columnar_attention_mask_is_binary(column) -> bool:
+    """Return whether a columnar attention mask uses the 0/1 convention.
+
+    A floating-point all-zero row on its own is read as an additive mask that
+    attends everything (#5134). Inside a column whose other rows carry ``1``,
+    the column is plainly a 0/1 mask, so an all-zero row means "all padding".
+    The convention has to be decided from the whole column before the split;
+    deciding it per row made a padded row fully attended (#5368).
+    """
+
+    saw_one = False
+    for entry in column:
+        if entry is None:
+            continue
+        try:
+            values = torch.as_tensor(entry)
+        except (TypeError, ValueError):
+            return False
+        if values.dtype == torch.bool or values.is_complex():
+            return False
+        if values.is_floating_point() and not bool(torch.isfinite(values).all()):
+            return False
+        if bool((values < 0).any()) or bool((values > 1).any()):
+            return False
+        saw_one = saw_one or bool((values == 1).any())
+    return saw_one
+
+
 def _columnar_mapping_examples(mapping: Mapping) -> List[Dict[str, Any]]:
     """Split a columnar calibration mapping into one mapping per row.
 
@@ -755,6 +783,15 @@ def _columnar_mapping_examples(mapping: Mapping) -> List[Dict[str, Any]]:
                 f"Quantize: calibration mapping column `{name}` has {column_length} rows, "
                 f"expected {row_count} (same as `{primary}`)."
             )
+
+    mask_column = columns.get("attention_mask")
+    if mask_column is not None and _columnar_attention_mask_is_binary(mask_column):
+        # Pin the column's 0/1 convention as integers so the per-row mask
+        # normalizer keeps an all-zero row as all-padding (#5368).
+        columns["attention_mask"] = [
+            None if entry is None else torch.as_tensor(entry).to(torch.int64)
+            for entry in mask_column
+        ]
 
     return [
         {name: column[row_index] for name, column in columns.items()}
