@@ -120,9 +120,20 @@ def _expert_quant_digest(checkpoint: Path) -> str:
 # produced different scales. These track main's AWQ output: when main
 # deliberately changes AWQ numerics, regenerate them by running this test's
 # quantization on a main checkout (the vendored classes must still match).
+#
+# The mixtral scale search lands on different (equally valid) scales depending
+# on the host's CPU math kernels, independent of thread count: main and this
+# branch agree byte-for-byte on each host, but an AVX2 host (AMD EPYC 7V13)
+# yields 96206e02 while the maintainer host yields b9a9ecfd. Each value below
+# was verified against a main checkout on its host; qwen3_moe agrees on both.
 _MAIN_AWQ_EXPERT_DIGESTS = {
-    "mixtral": "b9a9ecfd674b9e42f666491dbfbe16141062a1b7511b0484ffaad2ccc6da66a0",
-    "qwen3_moe": "23b14c84e921198df0b3c9535c4a12c9ef39588d6077049da4cfaa8fa4a51d0d",
+    "mixtral": frozenset({
+        "b9a9ecfd674b9e42f666491dbfbe16141062a1b7511b0484ffaad2ccc6da66a0",
+        "96206e02419dd6eac36143a3b65e91a4e34b15475ef6efcfd7070e3db94ed2a3",
+    }),
+    "qwen3_moe": frozenset({
+        "23b14c84e921198df0b3c9535c4a12c9ef39588d6077049da4cfaa8fa4a51d0d",
+    }),
 }
 
 
@@ -165,4 +176,4 @@ def test_tiny_moe_awq_expert_scales_match_routed_loop_reference(family, tmp_path
     )
     model.save(quantized)
 
-    assert _expert_quant_digest(quantized) == _MAIN_AWQ_EXPERT_DIGESTS[family]
+    assert _expert_quant_digest(quantized) in _MAIN_AWQ_EXPERT_DIGESTS[family]
