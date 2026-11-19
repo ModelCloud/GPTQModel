@@ -36,6 +36,7 @@ from gptqmodel.quantization.rtn import RTN
 
 MAXQ = 15
 GROUP_SIZE = 128
+DEVICES = ["cpu"] + [f"cuda:{i}" for i in range(torch.cuda.device_count())]
 
 
 def _rtn_dequant(block: torch.Tensor, smooth, *, sym: bool = True) -> torch.Tensor:
@@ -221,6 +222,79 @@ def test_gptq_fallback_follows_the_hessian_not_weight_magnitude():
     assert _weighted_error(dequant, block, weights).mean() < _weighted_error(
         baseline, block, weights
     ).mean() - 1e-6
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_gptq_fallback_uses_batches_added_after_finalize_hessian(monkeypatch, device):
+    """A finalized Hessian must not hide batches captured after it (#5365).
+
+    ``finalize_hessian()`` materializes ``self.H`` from the samples seen so
+    far. Later ``add_batch()`` calls only update the partials. The fallback
+    must weight its search by the diagonal reduced from the live capture, not
+    by the older ``self.H`` snapshot.
+    """
+
+    torch.manual_seed(0)
+    block = torch.randn(8, GROUP_SIZE) * 0.2
+    block[:, 0] = 20.0
+    block[:, 1] = 1.3
+
+    first = torch.zeros(1, GROUP_SIZE, device=device)
+    first[0, 0] = 1.0
+    second = torch.zeros(1, GROUP_SIZE, device=device)
+    second[0, 1] = 100.0
+
+    def make_task():
+        source = torch.nn.Linear(GROUP_SIZE, block.shape[0], bias=False).to(device)
+        with torch.no_grad():
+            source.weight.copy_(block)
+        config = GPTQConfig(
+            bits=4,
+            group_size=GROUP_SIZE,
+            sym=True,
+            fallback=Fallback(
+                threshold=100, strategy=FallbackStrategy.RTN, smooth=SmoothMSE()
+            ),
+            offload_to_disk=False,
+        )
+        task = GPTQ(source, config)
+        task.quantizer.configure(perchannel=True)
+        task.expected_nsamples = 2
+        return task
+
+    control = make_task()
+    control.add_batch(first, None)
+    control.add_batch(second, None)
+
+    early = make_task()
+    early.add_batch(first, None)
+    early.finalize_hessian()
+    early.add_batch(second, None)
+
+    # The trigger: H holds only the first batch and the second is pending.
+    assert control.H is None
+    assert early.H is not None
+    assert early._hessian_dirty
+    assert control.nsamples == early.nsamples == 2
+
+    # Independently sum the squared activations of the two explicit rows.
+    expected = torch.zeros(GROUP_SIZE, device=device)
+    expected[0] = 1.0
+    expected[1] = 100.0**2
+
+    captured = _spy_mse_weights(monkeypatch, gptq_module)
+
+    control_quantized, *_ = control.quantize(blocksize=GROUP_SIZE)
+    assert len(captured) == 1
+    control_weights = captured.pop()
+
+    early_quantized, *_ = early.quantize(blocksize=GROUP_SIZE)
+    assert len(captured) == 1
+    early_weights = captured.pop()
+
+    _assert_weights_follow_hessian(control_weights, expected)
+    _assert_weights_follow_hessian(early_weights, expected)
+    torch.testing.assert_close(early_quantized, control_quantized, rtol=0, atol=0)
 
 
 def _captured_inputs(rows: int = 32) -> torch.Tensor:
