@@ -17,7 +17,12 @@ from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
 from . import AWQuantLinear, detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
-from ._fused_train_state import capture_fused_train_state, finalize_fused_train_state
+from ._fused_train_state import (
+    capture_fused_train_state,
+    finalize_fused_train_state,
+    fused_autograd_needs_dense,
+    restore_fused_train_state,
+)
 from ._numerics import matmul_fp32_reduce
 from .torch_aten_kernel import TorchAtenLinear
 from .torch_cpu_avx512 import _fake_gemm_int4_qzero_group_scaled, unpack_hf_int4
@@ -316,7 +321,17 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
             linear_mode = self.linear_mode
         else:
             with self._cpu_transform_lock:
-                if (
+                force_dense = fused_autograd_needs_dense(self, x_flat)
+                if force_dense:
+                    # The fused op has no backward. Restore the checkpoint
+                    # layout so this call can take the differentiable dequant
+                    # path; a later inference forward transforms again (#5314).
+                    if not restore_fused_train_state(self):
+                        raise RuntimeError(
+                            f"{type(self).__name__} cannot provide a gradient after the fused "
+                            "inference transform because the checkpoint layout cannot be restored."
+                        )
+                if not force_dense and (
                     not self.training
                     and not x_flat.requires_grad
                     and self.linear_mode is None
@@ -327,7 +342,7 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
                     capture_fused_train_state(self)
                     self.transform("cpu")
                     self.linear_mode = "inference"
-                elif self.linear_mode is None:
+                elif not force_dense and self.linear_mode is None:
                     self.linear_mode = "train"
             linear_mode = self.linear_mode
 

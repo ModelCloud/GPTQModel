@@ -28,6 +28,7 @@ from ._fused_train_state import (
     bind_runtime_qzeros,
     capture_fused_train_state,
     finalize_fused_train_state,
+    fused_autograd_needs_dense,
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
@@ -666,7 +667,17 @@ class TorchFusedLinear(PackableQuantLinear):
             linear_mode = self.linear_mode
         else:
             with self._cpu_transform_lock:
-                if (
+                force_dense = fused_autograd_needs_dense(self, x)
+                if force_dense:
+                    # The fused op has no backward. Restore the checkpoint
+                    # layout so this call can take the differentiable dequant
+                    # path; a later inference forward transforms again (#5314).
+                    if not restore_fused_train_state(self):
+                        raise RuntimeError(
+                            f"{type(self).__name__} cannot provide a gradient after the fused "
+                            "inference transform because the checkpoint layout cannot be restored."
+                        )
+                if not force_dense and (
                     not self.training
                     and not x.requires_grad
                     and self.linear_mode is None
@@ -682,7 +693,7 @@ class TorchFusedLinear(PackableQuantLinear):
                         # self.torch_fused_op.forward = torch.compile(
                         #     self.torch_fused_op.forward, options={"max_autotune": True}
                         # )
-                elif self.linear_mode is None:
+                elif not force_dense and self.linear_mode is None:
                     self.linear_mode = LinearMode.TRAIN
             linear_mode = self.linear_mode
 
