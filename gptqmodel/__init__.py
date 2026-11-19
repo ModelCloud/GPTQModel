@@ -883,6 +883,8 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
         @wraps(original_post_init)
         def _post_init_with_gptqmodel_bridge(self, model, **kwargs):
             from .utils.hf_load import (
+                hf_gptqmodel_finish_awq_load_without_rebuild,
+                hf_gptqmodel_native_awq_config,
                 hf_gptqmodel_post_init_for_load,
                 hf_gptqmodel_repair_awq_load,
             )
@@ -902,6 +904,21 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
                     dtype=kwargs.get("dtype"),
                 )
             if context is None:
+                # Nothing needed rebuilding: Transformers built every module
+                # from the serialized config (a native checkpoint without
+                # ``dynamic``), or the checkpoint is not ours. The context-free
+                # native post-init still has to run - the legacy remote-code
+                # repairs are not Transformers' job, and skipping them leaves
+                # the RoPE buffers uninitialized (#5433, same symptom as
+                # #5311 for AWQ checkpoints). This is also the path a
+                # third-party checkpoint takes through the prepare fallback.
+                hf_gptqmodel_finish_awq_load_without_rebuild(
+                    model,
+                    qcfg=hf_gptqmodel_native_awq_config(
+                        model,
+                        checkpoint_files=kwargs.get("checkpoint_files"),
+                    ),
+                )
                 return original_post_init(self, model, **kwargs)
             return hf_gptqmodel_post_init_for_load(model, context)
 
