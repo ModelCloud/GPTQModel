@@ -1295,17 +1295,35 @@ class TorchQuantEmbeddings(TorchLinear):
     #: dtype; returning it promoted a BF16 residual stream to FP32 and made a
     #: bf16 ``lm_head`` reject the activations (#5116). Set from the embedding
     #: the module replaced, or from the model dtype on a requantize.
-    _embedding_output_dtype: Optional[torch.dtype] = None
+    #:
+    #: The value is held by a zero-element non-persistent buffer, not a plain
+    #: attribute: ``.to()``/``.float()``/``.half()`` only convert parameters and
+    #: buffers, so an attribute kept the pre-cast dtype and the embedding then
+    #: fed BF16 activations into the FP32 layers ``model.float()`` produced
+    #: (#5394).
+    _EMBEDDING_OUTPUT_DTYPE_BUFFER = "_embedding_output_dtype_anchor"
 
     def set_embedding_output_dtype(self, dtype: Optional[torch.dtype]) -> None:
         """Record the dtype this embedding must return to the residual stream."""
 
-        self._embedding_output_dtype = dtype
+        name = self._EMBEDDING_OUTPUT_DTYPE_BUFFER
+        anchor = self._buffers.get(name)
+        if dtype is None:
+            # Reset to the scale dtype, which is the historical fallback and
+            # keeps following later module casts.
+            if anchor is not None:
+                self._buffers[name] = torch.zeros(0, dtype=self.scales.dtype)
+            return
+        if anchor is None:
+            self.register_buffer(name, torch.zeros(0, dtype=dtype), persistent=False)
+        else:
+            self._buffers[name] = anchor.to(dtype)
 
     def embedding_output_dtype(self) -> torch.dtype:
         """The dtype ``forward`` returns: the recorded one, else the scale dtype."""
 
-        return self._embedding_output_dtype or self.scales.dtype
+        anchor = self._buffers.get(self._EMBEDDING_OUTPUT_DTYPE_BUFFER)
+        return anchor.dtype if anchor is not None else self.scales.dtype
 
     def _embedding_row_decode_state(self):
         """Per-vocabulary index metadata for row decode, derived from packed tensors.
