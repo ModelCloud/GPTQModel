@@ -102,8 +102,6 @@ class DiffusionGenerationMixin:
 
         nfe = 0
         diffusion_lm = self.config.dlm_paradigm != "autoregressive"
-
-        diffusion_lm = self.config.dlm_paradigm != "autoregressive"
         # Initial causal prefill produces the KV cache and the next-block seed.
         if causal_context:
             diffusion_lm = False
