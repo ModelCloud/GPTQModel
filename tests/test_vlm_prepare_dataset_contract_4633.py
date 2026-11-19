@@ -128,16 +128,15 @@ def test_pretokenized_rows_never_reach_the_processor(cls, monkeypatch):
     model = _make_model(cls)
     rows = [
         {"input_ids": list(range(100, 140)), "attention_mask": [1] * 40},
-        # An interior mask zero is a caller-built mask, which the base path
-        # keeps as given; edge zeros are padding it strips (#4889).
-        {"input_ids": list(range(200, 245)), "attention_mask": _CALLER_MASK},
+        # The base path strips edge padding and preserves the interior mask.
+        {"input_ids": list(range(200, 246)), "attention_mask": [0] + _CALLER_MASK},
     ]
 
     batches = model.prepare_dataset(rows, batch_size=1)
 
     assert [batch["input_ids"].tolist() for batch in batches] == [
         [list(range(100, 140))],
-        [list(range(200, 245))],
+        [list(range(201, 246))],
     ]
     assert batches[1]["attention_mask"].tolist() == [_CALLER_MASK]
 
@@ -151,16 +150,17 @@ def test_columnar_mapping_is_unpacked_not_rendered_as_key_names(cls, monkeypatch
 
     batches = model.prepare_dataset(
         {
-            "input_ids": [list(range(100, 140)), list(range(200, 245))],
-            "attention_mask": [[1] * 40, _CALLER_MASK],
+            "input_ids": [list(range(100, 140)), list(range(200, 246))],
+            "attention_mask": [[1] * 40, [0] + _CALLER_MASK],
         },
         batch_size=1,
     )
 
     assert [batch["input_ids"].tolist() for batch in batches] == [
         [list(range(100, 140))],
-        [list(range(200, 245))],
+        [list(range(201, 246))],
     ]
+    assert batches[1]["attention_mask"].tolist() == [_CALLER_MASK]
 
 
 @pytest.mark.parametrize(

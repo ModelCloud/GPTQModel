@@ -144,15 +144,15 @@ def test_vlm_pretokenized_mapping_rows_take_base_text_path(cls, monkeypatch):
     model = _make_model(cls)
     rows = [
         {"input_ids": list(range(12)), "attention_mask": [1] * 12},
-        # An interior mask zero is a caller-built mask, which the base path
-        # keeps as given; edge zeros are padding it strips (#4889).
-        {"input_ids": list(range(13)), "attention_mask": [1] * 6 + [0] + [1] * 6},
+        # The base path strips edge padding and preserves the interior mask.
+        {"input_ids": list(range(14)), "attention_mask": [0] + [1] * 6 + [0] + [1] * 6},
     ]
 
     batches = model.prepare_dataset(rows, batch_size=1)
 
     assert len(batches) == 2
     assert [batch["input_ids"].shape for batch in batches] == [(1, 12), (1, 13)]
+    assert batches[1]["input_ids"].tolist() == [list(range(1, 14))]
     assert batches[1]["attention_mask"].tolist() == [[1] * 6 + [0] + [1] * 6]
 
 

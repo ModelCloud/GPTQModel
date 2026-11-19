@@ -13,6 +13,7 @@ coverage of every called ``nn.Linear`` for the audited definitions.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -370,6 +371,51 @@ _FLOW_BUILDERS = {
 }
 
 
+_EAGER_MAMBA_KERNELS = {
+    "transformers.models.jamba.modeling_jamba": (
+        "causal_conv1d_fn",
+        "causal_conv1d_update",
+        "mamba_inner_fn",
+        "mamba_selective_scan",
+        "mamba_selective_state_update",
+    ),
+    "transformers.models.nemotron_h.modeling_nemotron_h": (
+        "mamba2_chunk_scan",
+        "mamba2_split_conv1d_scan_combined",
+        "mamba2_selective_state_update",
+    ),
+}
+
+
+@contextmanager
+def _eager_torch_mamba_kernels():
+    """Pin the Torch Mamba reference for one CPU forward.
+
+    ``transformers`` resolves ``mamba_ssm``/``causal_conv1d`` at import time and
+    those kernels are CUDA-only. The decorator keeps the undecorated Torch
+    reference on ``__wrapped__``; this data-flow probe runs on CPU, so it must
+    use that reference rather than hand a CPU tensor to a CUDA kernel.
+    """
+
+    import importlib
+
+    saved = []
+    try:
+        for module_path, names in _EAGER_MAMBA_KERNELS.items():
+            module = importlib.import_module(module_path)
+            for name in names:
+                wrapper = getattr(module, name, None)
+                reference = getattr(wrapper, "__wrapped__", None)
+                if wrapper is None or reference is None:
+                    continue
+                saved.append((module, name, wrapper))
+                setattr(module, name, reference)
+        yield
+    finally:
+        for module, name, wrapper in reversed(saved):
+            setattr(module, name, wrapper)
+
+
 def _is_routing_dependent(name: str) -> bool:
     return (
         ".experts." in name
@@ -410,41 +456,42 @@ def _observed_linear_edges(model, layers, indices):
             handles.append(module.register_forward_pre_hook(record(name), with_kwargs=True))
 
         try:
-            with torch.no_grad():
-                model(input_ids=ids, use_cache=False)
-            baseline = dict(captured)
+            with _eager_torch_mamba_kernels():
+                with torch.no_grad():
+                    model(input_ids=ids, use_cache=False)
+                baseline = dict(captured)
 
-            for producer_index, (producer, module) in enumerate(tracked.items()):
-                captured.clear()
-                generator = torch.Generator().manual_seed(
-                    1000 + 100 * layer_index + producer_index
-                )
+                for producer_index, (producer, module) in enumerate(tracked.items()):
+                    captured.clear()
+                    generator = torch.Generator().manual_seed(
+                        1000 + 100 * layer_index + producer_index
+                    )
 
-                def perturb(module, args, output, _generator=generator):
-                    scale = output.detach().float().std().clamp_min(1e-3)
-                    noise = torch.randn(
-                        output.shape,
-                        generator=_generator,
-                        dtype=output.dtype,
-                        device=output.device,
-                    ) * scale
-                    return output + noise
+                    def perturb(module, args, output, _generator=generator):
+                        scale = output.detach().float().std().clamp_min(1e-3)
+                        noise = torch.randn(
+                            output.shape,
+                            generator=_generator,
+                            dtype=output.dtype,
+                            device=output.device,
+                        ) * scale
+                        return output + noise
 
-                handle = module.register_forward_hook(perturb)
-                try:
-                    with torch.no_grad():
-                        model(input_ids=ids, use_cache=False)
-                finally:
-                    handle.remove()
+                    handle = module.register_forward_hook(perturb)
+                    try:
+                        with torch.no_grad():
+                            model(input_ids=ids, use_cache=False)
+                    finally:
+                        handle.remove()
 
-                for consumer, value in captured.items():
-                    if consumer == producer:
-                        continue
-                    reference = baseline.get(consumer)
-                    if reference is None:
-                        continue
-                    if not torch.allclose(reference, value, atol=1e-6, rtol=1e-4):
-                        edges.add((producer, consumer))
+                    for consumer, value in captured.items():
+                        if consumer == producer:
+                            continue
+                        reference = baseline.get(consumer)
+                        if reference is None:
+                            continue
+                        if not torch.allclose(reference, value, atol=1e-6, rtol=1e-4):
+                            edges.add((producer, consumer))
         finally:
             for handle in handles:
                 handle.remove()
