@@ -2051,6 +2051,38 @@ def resolve_dense_target_dtype(config: dict) -> torch.dtype:
     return torch.bfloat16
 
 
+def _reject_overlapping_directories(model_path: Path, output_path: Path) -> None:
+    """Refuse an export whose output tree overlaps the source checkpoint.
+
+    ``resume=True`` trusts files already present in the output directory as
+    completed dense shards. When the output resolves to the source checkpoint,
+    those "completed" files are the quantized source, so the export reports
+    success while rewriting the source ``config.json`` and index as dense
+    metadata and leaving the packed weight bytes in place (#5424). Equivalent
+    spellings (``.``/``..``, symlinks) must be rejected too, and an output
+    directory nested in the source would be copied into itself by
+    ``copy_aux_files()``.
+    """
+
+    source = model_path.expanduser().resolve()
+    target = output_path.expanduser().resolve()
+    if target == source:
+        raise ValueError(
+            f"Input and output directories resolve to the same path ({source}). "
+            "Dequantization must write to a separate directory."
+        )
+    if source in target.parents:
+        raise ValueError(
+            f"Output directory {target} is inside the source checkpoint {source}. "
+            "Dequantization must write to a separate directory."
+        )
+    if target in source.parents:
+        raise ValueError(
+            f"Source checkpoint {source} is inside the output directory {target}. "
+            "Dequantization must write to a separate directory."
+        )
+
+
 def dequantize_model(
     model_path: Path | str,
     output_path: Path | str,
@@ -2062,6 +2094,7 @@ def dequantize_model(
 ) -> None:
     model_path = Path(model_path)
     output_path = Path(output_path)
+    _reject_overlapping_directories(model_path, output_path)
 
     if output_path.exists() and not resume:
         raise FileExistsError(f"Output path {output_path} already exists")

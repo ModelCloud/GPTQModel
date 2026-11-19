@@ -73,6 +73,21 @@ def _pattern_override_candidates(
     return [(pattern, patterns[pattern]) for pattern in exact + folded]
 
 
+# PEFT layouts whose tensors the LoRA forward cannot consume. A checkpoint that
+# carries them but no `lora_A`/`lora_B` would attach nothing and run as the bare
+# model, so they are rejected by name too (the config `peft_type` check is the
+# primary guard; this catches a config that lies or predates the field).
+_UNSUPPORTED_PEFT_TENSOR_MARKERS = (
+    (".ia3_l", "IA3"),
+    (".hada_", "LoHa"),
+    (".lokr_", "LoKr"),
+    (".oft_blocks", "OFT"),
+    (".boft_blocks", "BOFT"),
+    (".vera_lambda_", "VeRA"),
+    (".lora_E", "AdaLoRA"),
+)
+
+
 def _reject_unsupported_adapter_tensors(weights: Dict[str, torch.Tensor]) -> None:
     """Fail closed on adapter tensors this runtime cannot apply.
 
@@ -84,6 +99,12 @@ def _reject_unsupported_adapter_tensors(weights: Dict[str, torch.Tensor]) -> Non
     """
 
     for key in weights:
+        for marker, feature in _UNSUPPORTED_PEFT_TENSOR_MARKERS:
+            if marker in key:
+                raise ValueError(
+                    f"Adapter: {feature} adapter tensors are not supported (`{key}`); "
+                    "only LoRA `lora_A`/`lora_B` can be loaded"
+                )
         if ".lora_magnitude_vector" in key:
             raise ValueError(
                 f"Adapter: DoRA is not supported (`lora_magnitude_vector` tensor found: `{key}`)"
@@ -394,11 +415,27 @@ class Lora(Adapter):
         lora_cfg = self.adapter_config()
         if lora_cfg is None:
             return True
-        return module_matches_targets(
+        if module_matches_targets(
             module_name,
             lora_cfg.target_modules,
             lora_cfg.exclude_modules,
-        )
+        ):
+            return True
+        # Legacy EoRA exports wrote the target list and tensor keys in lowercase
+        # (`wqkv` for `Wqkv`). `has_weights` already accepts that spelling, but
+        # this target check is evaluated first and rejected the module. Accept
+        # the lowercase spelling only when the adapter's tensor pair confirms
+        # it, so canonical PEFT files keep case-sensitive targeting (#5418).
+        lowered = module_name.lower()
+        if lowered == module_name:
+            return False
+        if not module_matches_targets(
+            lowered,
+            lora_cfg.target_modules,
+            lora_cfg.exclude_modules,
+        ):
+            return False
+        return self.has_weights(module_name)
 
     def has_weights(self, module_name: str) -> bool:
         """Whether the adapter source has both A and B tensors for a module."""
