@@ -15,7 +15,7 @@ from collections import defaultdict
 from contextlib import ExitStack
 from functools import reduce
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Iterable, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Iterable, Optional, Sequence, Tuple
 
 import torch
 from safetensors import safe_open
@@ -69,10 +69,20 @@ _UNDECODABLE_METHODS = frozenset(
     }
 )
 
+#: Output file that records which shards a resumed export completed and the
+#: checkpoint identity they were produced from. A resume must never trust an
+#: output file just because its name matches the source shard (#5396).
+_RESUME_MANIFEST_NAME = "gptqmodel_dequant_resume.json"
+
 # Quantization-only metadata must not survive into a dense export: leaving it
 # behind makes loaders route the dense checkpoint back through from_quantized.
 _DENSE_OUTPUT_EXCLUDED_FILES = frozenset(
-    {"quantize_config.json", "quant_config.json", "quant_log.csv"}
+    {
+        "quantize_config.json",
+        "quant_config.json",
+        "quant_log.csv",
+        _RESUME_MANIFEST_NAME,
+    }
 )
 
 # Reuse the shared dtype registries so checkpoint detection stays aligned with
@@ -118,6 +128,111 @@ def load_json(path: Path) -> dict:
 def write_json(path: Path, payload: dict) -> None:
     with path.open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
+
+
+_RESUME_MANIFEST_VERSION = 1
+
+
+def _resume_identity(
+    model_path: Path,
+    files: Sequence[str],
+    target_dtype: torch.dtype,
+) -> dict:
+    """Describe the export a resume may continue.
+
+    The source is identified by its resolved path and every shard's name, size
+    and mtime, which is cheap (no weight hashing) and changes when the user
+    points the same output directory at another checkpoint.
+    """
+
+    shards = []
+    for name in sorted(files):
+        try:
+            stat = (model_path / name).stat()
+            shards.append([name, stat.st_size, stat.st_mtime_ns])
+        except OSError:
+            shards.append([name, None, None])
+    return {
+        "version": _RESUME_MANIFEST_VERSION,
+        "source": {"path": str(model_path.expanduser().resolve()), "shards": shards},
+        "layout": list(files),
+        "target_dtype": str(target_dtype).split(".")[-1],
+    }
+
+
+def _write_resume_manifest(
+    output_path: Path,
+    identity: dict,
+    completed: Sequence[str],
+) -> None:
+    """Atomically publish the shards this export has finished."""
+
+    payload = dict(identity)
+    payload["completed"] = sorted(set(completed))
+    tmp_path = output_path / f".{_RESUME_MANIFEST_NAME}.tmp"
+    write_json(tmp_path, payload)
+    tmp_path.replace(output_path / _RESUME_MANIFEST_NAME)
+
+
+def _is_readable_safetensors(path: Path) -> bool:
+    """Validate a shard header before handing the file to ``safe_open``.
+
+    The Rust binding aborts the process on a corrupt header instead of raising,
+    so a resumed shard has to be checked in Python first (#5396).
+    """
+
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            raw = handle.read(8)
+            if len(raw) != 8:
+                return False
+            header_len = int.from_bytes(raw, "little")
+            if header_len <= 0 or header_len > size - 8:
+                return False
+            header = handle.read(header_len)
+            if len(header) != header_len:
+                return False
+            return isinstance(json.loads(header), dict)
+    except (OSError, ValueError):
+        return False
+
+
+def _reusable_resume_shards(output_path: Path, identity: dict) -> set:
+    """Completed shards that belong to *this* export, or an empty set."""
+
+    payload = load_json(output_path / _RESUME_MANIFEST_NAME)
+    if not isinstance(payload, dict) or not payload:
+        return set()
+    if payload.get("version") != identity["version"]:
+        return set()
+    if payload.get("layout") != identity["layout"]:
+        LOG.warning(
+            "Resume manifest at `%s` describes a different shard layout; "
+            "rebuilding the export.",
+            output_path / _RESUME_MANIFEST_NAME,
+        )
+        return set()
+    if payload.get("target_dtype") != identity["target_dtype"]:
+        LOG.warning(
+            "Resume manifest at `%s` was written for dtype %s, not %s; "
+            "rebuilding the export.",
+            output_path / _RESUME_MANIFEST_NAME,
+            payload.get("target_dtype"),
+            identity["target_dtype"],
+        )
+        return set()
+    if payload.get("source") != identity["source"]:
+        LOG.warning(
+            "Resume manifest at `%s` was written for a different source "
+            "checkpoint; rebuilding the export.",
+            output_path / _RESUME_MANIFEST_NAME,
+        )
+        return set()
+    completed = payload.get("completed")
+    if not isinstance(completed, list):
+        return set()
+    return {str(name) for name in completed if isinstance(name, str)}
 
 
 def list_safetensor_files(model_path: Path) -> Tuple[list, Optional[dict]]:
@@ -2256,6 +2371,16 @@ def dequantize_model(
         else None
     )
 
+    # A resume continues only the export this directory already holds. The
+    # manifest binds it to the source checkpoint, the shard layout and the
+    # target dtype; without one, an output file whose name matches a source
+    # shard may belong to a different model or dtype (#5396).
+    resume_identity = _resume_identity(model_path, files, target_dtype)
+    resume_shards = (
+        _reusable_resume_shards(output_path, resume_identity) if resume else set()
+    )
+    completed_shards: list = []
+
     try:
         for idx, filename in enumerate(files):
             path = model_path / filename
@@ -2263,18 +2388,36 @@ def dequantize_model(
             # A per-layer layout keeps its shards in `model.layers.N/`
             # subdirectories, so the parent has to exist before the write.
             output_file.parent.mkdir(parents=True, exist_ok=True)
-            if resume and output_file.exists():
-                # Opening the shard validates its safetensors header before it
-                # is accepted as complete. Tensor views are memory-mapped, so
-                # collecting names and sizes does not load the shard into RAM.
-                with safe_open(output_file, framework="pt", device="cpu") as existing_reader:
-                    for name in existing_reader.keys():
-                        tensor = existing_reader.get_tensor(name)
-                        weight_map[str(name)] = filename
-                        total_size += tensor.element_size() * tensor.numel()
-                LOG.debug("Reusing completed output shard '%s'", filename)
-                pb.subtitle(f"{filename} (existing)").next().draw()
-                continue
+            if resume and filename in resume_shards and output_file.exists():
+                # A shard the manifest does not list, or one that cannot be
+                # read, is rebuilt instead of trusted (#5396).
+                if not _is_readable_safetensors(output_file):
+                    LOG.warning(
+                        "Rebuilding unreadable output shard '%s'", filename
+                    )
+                else:
+                    try:
+                        with safe_open(
+                            output_file, framework="pt", device="cpu"
+                        ) as existing_reader:
+                            existing = [
+                                (str(name), existing_reader.get_tensor(name))
+                                for name in existing_reader.keys()
+                            ]
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        LOG.warning(
+                            "Rebuilding unreadable output shard '%s': %s",
+                            filename,
+                            exc,
+                        )
+                    else:
+                        for name, tensor in existing:
+                            weight_map[name] = filename
+                            total_size += tensor.element_size() * tensor.numel()
+                        completed_shards.append(filename)
+                        LOG.debug("Reusing completed output shard '%s'", filename)
+                        pb.subtitle(f"{filename} (existing)").next().draw()
+                        continue
             LOG.debug("Processing shard '%s' for format %s on device %s", filename, fmt, open_device)
             if fmt in {"fp8", "nvfp8"}:
                 with safe_open(path, framework="pt", device=open_device) as reader:
@@ -2352,6 +2495,8 @@ def dequantize_model(
                 save_file(tensors, str(output_file))
                 weight_map.update({str(name): filename for name in tensors})
                 total_size += sum(t.element_size() * t.numel() for t in tensors.values())
+                completed_shards.append(filename)
+                _write_resume_manifest(output_path, resume_identity, completed_shards)
             else:
                 # Auxiliary-only shards disappear once dense weights are emitted elsewhere.
                 LOG.debug("Skipping empty output shard '%s' after dequantization", filename)
@@ -2360,6 +2505,9 @@ def dequantize_model(
         if tensor_lookup is not None:
             tensor_lookup.close()
         pb.close()
+
+    # Publish the final set even when every shard was auxiliary-only.
+    _write_resume_manifest(output_path, resume_identity, completed_shards)
 
     if index is not None:
         new_index = dict(index)
