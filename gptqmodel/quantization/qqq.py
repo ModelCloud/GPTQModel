@@ -403,7 +403,11 @@ class QQQ:
 
         return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
 
-    def _fallback_quantize(self, strategy: FallbackStrategy):
+    def _fallback_quantize(
+        self,
+        strategy: FallbackStrategy,
+        hessian_diag: Optional[torch.Tensor] = None,
+    ):
         maxq = 2 ** self.qcfg.bits - 1
         sigma = 3.0
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
@@ -433,11 +437,15 @@ class QQQ:
         # it so SmoothMSE does not clip weights that feed outlier activations.
         # Without a Hessian, fall back to the weight-magnitude proxy rather
         # than the uniform mean that rewards clipping a row's largest weight.
-        col_weights = (
-            hessian_column_weights(self.H, self.columns, device=W.device)
-            if isinstance(smooth_method, SmoothMSE)
-            else None
-        )
+        col_weights = None
+        if isinstance(smooth_method, SmoothMSE):
+            col_weights = hessian_column_weights(
+                getattr(self, "H", None), self.columns, device=W.device
+            )
+            if col_weights is None:
+                col_weights = hessian_column_weights(
+                    hessian_diag, self.columns, device=W.device
+                )
         Q = torch.empty_like(W)
         scale_chunks = []
         zero_chunks = []
@@ -872,13 +880,22 @@ class QQQ:
                 extra,
                 self.expected_nsamples,
             )
-            # The fallback is data-independent: release the Hessian instead of
-            # carrying a near-singular matrix into the block loop.
+            # The fallback grid is data-independent, but SmoothMSE still
+            # weights its search by the captured input-channel energy. Keep
+            # only the diagonal (``columns`` floats) before releasing the
+            # near-singular matrix (#5300).
+            hessian_diag = (
+                self.H.diagonal().detach().clone()
+                if isinstance(getattr(self.fallback, "smooth", None), SmoothMSE)
+                else None
+            )
             self.H = None
             self._materialized_samples = 0
             self._device_hessian_partials.clear()
             self._device_sample_counts.clear()
-            return self._fallback_quantize(resolved_strategy)
+            return self._fallback_quantize(
+                resolved_strategy, hessian_diag=hessian_diag
+            )
 
         percdamp = self.qcfg.damp_percent
         groupsize = self.qcfg.group_size

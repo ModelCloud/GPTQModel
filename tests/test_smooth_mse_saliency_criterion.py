@@ -18,15 +18,19 @@ consumer-level outcome, not only the helper's return value.
 import pytest
 import torch
 
+import gptqmodel.quantization.gptq as gptq_module
+import gptqmodel.quantization.qqq as qqq_module
 from gptqmodel.quantization.config import (
     Fallback,
     FallbackStrategy,
     GPTQConfig,
+    QQQConfig,
     RTNConfig,
     SmoothMSE,
 )
 from gptqmodel.quantization.fallback_smooth import mse_optimal_quant
 from gptqmodel.quantization.gptq import GPTQ
+from gptqmodel.quantization.qqq import QQQ
 from gptqmodel.quantization.rtn import RTN
 
 
@@ -217,3 +221,108 @@ def test_gptq_fallback_follows_the_hessian_not_weight_magnitude():
     assert _weighted_error(dequant, block, weights).mean() < _weighted_error(
         baseline, block, weights
     ).mean() - 1e-6
+
+
+def _captured_inputs(rows: int = 32) -> torch.Tensor:
+    """Calibration rows with one channel carrying most of the energy."""
+
+    torch.manual_seed(5300)
+    inputs = torch.randn(rows, GROUP_SIZE)
+    inputs[:, 3] *= 25.0
+    return inputs
+
+
+def _spy_mse_weights(monkeypatch, module) -> list:
+    captured = []
+    original = module.mse_optimal_quant
+
+    def spy(block, qcfg, maxq, **kwargs):
+        captured.append(kwargs.get("weights"))
+        return original(block, qcfg, maxq, **kwargs)
+
+    monkeypatch.setattr(module, "mse_optimal_quant", spy)
+    return captured
+
+
+def _expected_diagonal(task) -> torch.Tensor:
+    """The reduction ``_captured_hessian_diagonal`` performs, from the partials."""
+
+    total = task.nsamples
+    diagonal = sum(
+        partial.diagonal() for partial in task._device_hessian_partials.values()
+    )
+    return (diagonal * (2.0 / float(total))).float()
+
+
+def _assert_weights_follow_hessian(weights, expected):
+    assert weights is not None
+    assert weights.numel() == expected.numel()
+    torch.testing.assert_close(
+        weights / weights.sum(),
+        expected / expected.sum(),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+def test_gptq_quantize_fallback_uses_the_captured_hessian_diagonal(monkeypatch):
+    """The real ``quantize()`` path must not drop H before the fallback (#5300).
+
+    Singleton modules (``o_proj``/``down_proj``) have no shared-input H, so
+    the fallback used to clear the partials and silently switch to the
+    weight-magnitude proxy. Capture what ``mse_optimal_quant`` receives.
+    """
+
+    inputs = _captured_inputs()
+    source = torch.nn.Linear(GROUP_SIZE, 8, bias=False)
+    config = GPTQConfig(
+        bits=4,
+        group_size=GROUP_SIZE,
+        sym=True,
+        fallback=Fallback(
+            threshold=10**9, strategy=FallbackStrategy.RTN, smooth=SmoothMSE()
+        ),
+        offload_to_disk=False,
+    )
+    task = GPTQ(source, config)
+    task.quantizer.configure(perchannel=True)
+    task.expected_nsamples = inputs.shape[0]
+    for batch in inputs.split(8):
+        task.add_batch(batch, None)
+    assert task.H is None
+
+    expected = _expected_diagonal(task)
+    captured = _spy_mse_weights(monkeypatch, gptq_module)
+    task.quantize(blocksize=GROUP_SIZE)
+
+    assert captured, "the fallback never reached mse_optimal_quant"
+    _assert_weights_follow_hessian(captured[0], expected)
+
+
+def test_qqq_quantize_fallback_uses_the_captured_hessian_diagonal(monkeypatch):
+    """QQQ released H before the threshold fallback, so SmoothMSE saw no H."""
+
+    inputs = _captured_inputs()
+    source = torch.nn.Linear(GROUP_SIZE, 8, bias=False)
+    config = QQQConfig(
+        bits=4,
+        group_size=GROUP_SIZE,
+        sym=True,
+        fallback=Fallback(threshold=10**9, smooth=SmoothMSE()),
+        offload_to_disk=False,
+    )
+    task = QQQ(source, config)
+    task.quantizer.configure(
+        bits=config.bits, perchannel=True, sym=config.sym, groupsize=config.group_size
+    )
+    task.expected_nsamples = inputs.shape[0]
+    for batch in inputs.split(8):
+        task.add_batch(batch, None)
+    assert task.H is None
+
+    expected = _expected_diagonal(task)
+    captured = _spy_mse_weights(monkeypatch, qqq_module)
+    task.quantize(blocksize=GROUP_SIZE)
+
+    assert captured, "the fallback never reached mse_optimal_quant"
+    _assert_weights_follow_hessian(captured[0], expected)

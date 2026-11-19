@@ -1435,6 +1435,60 @@ class GPTQ:
 
             return torch.device("cpu")
 
+    def _captured_hessian_diagonal(
+        self, device: torch.device
+    ) -> Optional[torch.Tensor]:
+        """Fold the captured Hessian state into its diagonal.
+
+        The low-sample fallback only needs the per-channel input energy, so
+        reduce the per-device ``XtX`` partials straight to a ``columns``
+        vector instead of materializing the ``columns ** 2`` matrix that
+        ``finalize_hessian`` would build (#5300). The result follows the same
+        weighting as ``finalize_hessian``: an existing materialized ``H``
+        contributes with its own sample count and each partial contributes
+        ``2 / total_samples``.
+        """
+
+        with self.lock:
+            self._reap_deferred_hessian_sources()
+            previous_samples = self._hessian_total_samples
+            new_samples = sum(self._device_sample_counts.values())
+            total_samples = previous_samples + new_samples
+            if total_samples == 0:
+                return None
+
+            diagonal = torch.zeros(self.columns, dtype=torch.float32, device=device)
+            if (
+                previous_samples
+                and self.H is not None
+                and self.H.dim() == 2
+                and self.H.shape[0] == self.columns
+            ):
+                source = self.H
+                if source.device != device or source.dtype != torch.float32:
+                    source = safe_move_to(source, device, dtype=torch.float32)
+                diagonal.add_(
+                    source.diagonal(),
+                    alpha=float(previous_samples) / float(total_samples),
+                )
+
+            for partial_device in sorted(
+                self._device_hessian_partials, key=_device_reduction_key
+            ):
+                partial = self._device_hessian_partials[partial_device]
+                event = self._device_hessian_partial_ready.get(
+                    torch.device(partial_device)
+                )
+                if event is not None:
+                    if device.type == "cuda":
+                        torch.cuda.current_stream(device).wait_event(event)
+                    else:
+                        event.synchronize()
+                if partial.device != device or partial.dtype != torch.float32:
+                    partial = safe_move_to(partial, device, dtype=torch.float32)
+                diagonal.add_(partial.diagonal(), alpha=2.0 / float(total_samples))
+            return diagonal
+
     def materialize_global_hessian(self, target_device: Optional[torch.device] = None) -> None:
         with self.lock:
             self._reap_deferred_hessian_sources()
@@ -1906,11 +1960,15 @@ class GPTQ:
         strategy: FallbackStrategy,
         blocksize: int,
         target_device: Optional[torch.device] = None,
+        hessian_diag: Optional[torch.Tensor] = None,
     ):
         """Apply a lightweight quantization fallback using the requested strategy.
 
         ``target_device`` is the device the weight clone is quantized on; when
         None it is taken from ``self.H`` if present, else the weight.
+        ``hessian_diag`` supplies the captured Hessian diagonal when the full
+        matrix has already been released (the low-sample fallback path); it is
+        used only when ``self.H`` is absent.
         """
         maxq = 2 ** self.qcfg.bits - 1
         sigma = 3.0
@@ -1931,11 +1989,15 @@ class GPTQ:
         # objective with it instead of averaging every channel equally. A
         # fallback without captured activations uses the weight-magnitude
         # proxy instead of the harmful uniform mean.
-        col_weights = (
-            hessian_column_weights(self.H, self.columns, device=target_device)
-            if isinstance(smooth_method, SmoothMSE)
-            else None
-        )
+        col_weights = None
+        if isinstance(smooth_method, SmoothMSE):
+            col_weights = hessian_column_weights(
+                self.H, self.columns, device=target_device
+            )
+            if col_weights is None:
+                col_weights = hessian_column_weights(
+                    hessian_diag, self.columns, device=target_device
+                )
         Q = torch.empty_like(W)
         scale_chunks = []
         zero_chunks = []
@@ -2598,12 +2660,22 @@ class GPTQ:
                 f"Quantization: Module `{self.name}` -> "
                 f"Using `{resolved_strategy.value}` fallback quantization (observed {self.nsamples} samples, threshold={threshold_text}{threshold_info}, max_total={self.expected_nsamples})."
             )
-            # The fallback never reads the Hessian: release the fp32 XtX
-            # partials (columns^2 x 4 B each) instead of folding them into a
-            # throwaway zero H. Resolve the compute device first, since the
+            # The fallback does not need the full Hessian: release the fp32
+            # XtX partials (columns^2 x 4 B each) instead of folding them into
+            # a throwaway zero H. Resolve the compute device first, since the
             # clear changes what _select_hessian_target_device returns.
             with self.lock:
                 fallback_device = self._select_hessian_target_device(target_device)
+            # SmoothMSE still needs the per-channel input energy. Reduce the
+            # partials to the diagonal before releasing them; this keeps the
+            # memory win while letting the documented Hessian weighting reach
+            # singleton modules (o_proj/down_proj) as well (#5300).
+            fallback_diag = (
+                self._captured_hessian_diagonal(fallback_device)
+                if isinstance(getattr(self.fallback, "smooth", None), SmoothMSE)
+                else None
+            )
+            with self.lock:
                 self._device_hessian_partials.clear()
                 self._device_hessian_partial_ready.clear()
                 self._device_sample_counts.clear()
@@ -2615,7 +2687,10 @@ class GPTQ:
             self._release_deferred_hessian_sources()
 
             return self._fallback_quantize(
-                resolved_strategy, blocksize, target_device=fallback_device
+                resolved_strategy,
+                blocksize,
+                target_device=fallback_device,
+                hessian_diag=fallback_diag,
             )
         else:
             use_hessian = True
