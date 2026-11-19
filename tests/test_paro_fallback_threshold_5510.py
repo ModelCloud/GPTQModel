@@ -22,7 +22,6 @@ import torch
 
 from gptqmodel.looper import paro_processor as paro_processor_module
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.looper.paro_processor import ParoProcessor
 from gptqmodel.quantization.config import Fallback, FallbackStrategy, ParoConfig
 from gptqmodel.quantization.paro.optimization import (
     ParoOptimizationResult,
@@ -32,7 +31,7 @@ from gptqmodel.quantization.paro.optimization import (
 
 
 def _processor(*, threshold, total_tokens=1000, opt_scope="module"):
-    processor = object.__new__(ParoProcessor)
+    processor = object.__new__(paro_processor_module.ParoProcessor)
     processor.lock = threading.Lock()
     processor._batch_tls = threading.local()
     processor.tasks = {}
