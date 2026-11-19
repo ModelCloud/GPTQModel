@@ -1498,6 +1498,26 @@ def _portable_fallback(quant_method: METHOD, fmt: FORMAT, families):
     return None
 
 
+def _dynamic_bits_supported(kernel: Type[BaseQuantLinear], bits: int, dynamic) -> bool:
+    """Return whether ``kernel`` declares support for every dynamic width.
+
+    Mirrors ``BaseQuantLinear._validate_dynamic_bits`` so callers can tell
+    whether a per-module width is the only thing the kernel rejects.
+    """
+
+    if not dynamic:
+        return True
+    supported = getattr(kernel, "SUPPORTS_BITS", None) or []
+    for pattern_dict in dynamic.values():
+        width = (pattern_dict or {}).get("bits", bits)
+        if len(supported) == 1:
+            if width != bits:
+                return False
+        elif width not in supported:
+            return False
+    return True
+
+
 def select_quant_linear(
         bits,
         group_size: int,
@@ -1781,6 +1801,22 @@ def select_quant_linear(
     if is_sharded and not supports_sharded_load:
         raise ValueError(f"Selected backend `{backend}` with kernel `{qlinear.__name__}` does not support sharded checkpoints.")
 
+    # AWQ resolves the pack kernel per module
+    # (`AWQProcessor._resolve_qlinear_kernel`): a module whose `dynamic` width
+    # the native CUDA GEMM kernel cannot unpack is packed with the portable
+    # `AwqTorchLinear` instead. The model-wide candidate is only the default for
+    # the modules that do match it, so it must be validated against the global
+    # width and not against a per-module width it will never pack (#5408).
+    # GEMV/GEMV_FAST have no such per-module width fallback and stay gated.
+    gate_dynamic = dynamic
+    if (
+        pack
+        and quant_method == METHOD.AWQ
+        and format == FORMAT.GEMM
+        and not _dynamic_bits_supported(qlinear, bits, dynamic)
+    ):
+        gate_dynamic = None
+
     validate, err = validate_candidate(qlinear,
         bits=bits,
         group_size=group_size,
@@ -1788,7 +1824,7 @@ def select_quant_linear(
         sym=sym,
         pack_dtype=pack_dtype,
         dtype=dtype,
-        dynamic=dynamic,
+        dynamic=gate_dynamic,
         trainable=trainable,
         adapter=adapter,
     )

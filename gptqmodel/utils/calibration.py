@@ -70,6 +70,56 @@ CalibrationInputType = Union[
 ]
 
 
+#: Sentinel accepted by ``CalibrationConfig.batch_size``.
+AUTO_BATCH_SIZE = "auto"
+
+#: Auto batching never picks more rows than this in one forward. Measured on a
+#: 0.5B model: 1 -> 8 -> 16 -> 32 rows took 180s -> 46s -> 36s -> 38s, so the
+#: curve is flat past 16 while activation memory keeps growing.
+AUTO_BATCH_MAX_ROWS = 16
+
+#: Activation bytes per token per layer, measured rather than derived: a 0.5B
+#: model (24 layers, hidden 896, bf16) held ~30 MB per 260-token row, i.e.
+#: 260 * 896 * 24 * 2 bytes * ~2.7. A factor of 3 keeps some headroom.
+AUTO_BATCH_ACTIVATION_FACTOR = 3
+
+#: Only this share of the free device memory may go to calibration activations.
+AUTO_BATCH_MEMORY_SHARE = 0.25
+
+
+def auto_batch_size(
+    *,
+    rows: int,
+    tokens_per_row: int,
+    hidden_size: int,
+    num_layers: int,
+    dtype_bytes: int,
+    free_bytes: Optional[int],
+    max_rows: int = AUTO_BATCH_MAX_ROWS,
+) -> int:
+    """Largest power-of-two batch that fits, never below 1.
+
+    ``free_bytes=None`` (no CUDA) keeps the conservative single row: on a device
+    we cannot measure, guessing a batch is how a calibration run turns into an
+    OOM halfway through.
+    """
+
+    if rows <= 0:
+        return 1
+    limit = min(int(rows), max(1, int(max_rows)))
+    if free_bytes is None:
+        return 1
+
+    per_row = max(1, int(tokens_per_row)) * max(1, int(hidden_size)) * max(1, int(num_layers))
+    per_row *= max(1, int(dtype_bytes)) * AUTO_BATCH_ACTIVATION_FACTOR
+    budget = max(0, int(free_bytes)) * AUTO_BATCH_MEMORY_SHARE
+
+    batch = 1
+    while batch * 2 <= limit and batch * 2 * per_row <= budget:
+        batch *= 2
+    return batch
+
+
 def batched(iterable, batch_size: int, process_func=None):
     """Yield fixed-size batches from ``iterable`` after optional processing."""
 

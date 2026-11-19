@@ -342,7 +342,11 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
                     capture_fused_train_state(self)
                     self.transform("cpu")
                     self.linear_mode = "inference"
-                elif not force_dense and self.linear_mode is None:
+                elif not force_dense and self.linear_mode is None and self.training:
+                    # Only a training-mode forward pins the dense path until
+                    # `eval()` clears the latch. An eval-mode grad forward takes
+                    # the dense path for this call only: latching here made every
+                    # later no-grad forward dequantize the weight (#5392).
                     self.linear_mode = "train"
             linear_mode = self.linear_mode
 

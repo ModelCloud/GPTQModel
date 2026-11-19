@@ -1361,6 +1361,12 @@ class AWQProcessor(LoopProcessor):
                 # slot index is what the replay kwargs index by.
                 source_index = len(entry.setdefault("batch_row_counts", []))
                 entry["batch_row_counts"].append(length)
+                # The reservoir priority seed is the calibration batch id, not
+                # this slot: data-parallel captures arrive in whatever order the
+                # replicas finish, and the slot would then select different
+                # rows run to run (#5432).
+                priority_key = self._reservoir_priority_key(source_index, batch_index)
+                entry.setdefault("priority_keys", []).append(priority_key)
                 entry["raw_tokens"] = entry.get("raw_tokens", 0) + length
                 entry["max_tokens"] = plan.max_tokens
                 entry.setdefault("batch_indices", []).append(batch_index)
@@ -1380,7 +1386,7 @@ class AWQProcessor(LoopProcessor):
                 if entry.get("reservoir_buffer") is not None:
                     budget_cap = self._reservoir_budget_cap(configured_max_tokens, plan, entry)
                     row_indices = torch.tensor(prov_rows, dtype=torch.int64)
-                    priorities = self._reservoir_priorities(source_index, length).index_select(
+                    priorities = self._reservoir_priorities(priority_key, length).index_select(
                         0, row_indices
                     )
                     entry["max_tokens"] = budget_cap
@@ -1434,6 +1440,11 @@ class AWQProcessor(LoopProcessor):
 
             source_idx = len(entry.setdefault("batch_row_counts", []))
             entry["batch_row_counts"].append(length)
+            # Seed by the calibration batch id so a data-parallel capture order
+            # cannot change which rows survive (#5432); the slot stays the
+            # provenance/replay key below.
+            priority_key = self._reservoir_priority_key(source_idx, batch_index)
+            entry.setdefault("priority_keys", []).append(priority_key)
             entry["raw_tokens"] = entry.get("raw_tokens", 0) + length
             # Size the reservoir from this module's own captures, the current
             # one included, so a routed expert keeps the pre-#5175 per-expert
@@ -1448,7 +1459,7 @@ class AWQProcessor(LoopProcessor):
         # capture on one lock, which dominated AWQ quantize time on MoE models
         # (#5233). ``self.lock`` is not reentrant, so only the O(1) bookkeeping
         # above runs under it.
-        new_priorities = self._reservoir_priorities(source_idx, length)
+        new_priorities = self._reservoir_priorities(priority_key, length)
         with module_lock:
             self._merge_reservoir_rows(
                 entry,
@@ -1499,19 +1510,35 @@ class AWQProcessor(LoopProcessor):
         return budget_cap if budget_cap > 0 else 906
 
     @staticmethod
-    def _reservoir_priorities(source_index: int, count: int) -> torch.Tensor:
+    def _reservoir_priority_key(source_index: int, batch_index: Optional[int]) -> int:
+        """Return the deterministic priority seed for one capture.
+
+        The calibration batch index is the only capture identifier that does
+        not depend on arrival order: data-parallel capture replays batches on
+        replicas and the hooks fire in whatever order they finish (#5432). Fall
+        back to the capture slot when no batch index is known, which is what
+        cache-less runs used before the seed was tied to the batch.
+        """
+
+        if batch_index is None:
+            return int(source_index)
+        return int(batch_index)
+
+    @staticmethod
+    def _reservoir_priorities(seed_key: int, count: int) -> torch.Tensor:
         """Return one deterministic uniform priority per captured row.
 
         A per-batch seed keeps the priorities independent and identically
         uniform across batches, which is what makes the lowest-priority
         survivors a uniform sample of the whole stream. The seed is derived from
-        the capture slot, so the same calibration run always keeps the same
-        rows.
+        the calibration batch index (see ``_reservoir_priority_key``), so the
+        same calibration batches always keep the same rows regardless of the
+        order their captures arrive in.
         """
 
         generator = torch.Generator(device="cpu")
         generator.manual_seed(
-            (0x9E3779B97F4A7C15 * (int(source_index) + 1) + 0x165667B19E3779F9)
+            (0x9E3779B97F4A7C15 * (int(seed_key) + 1) + 0x165667B19E3779F9)
             & 0x7FFFFFFFFFFFFFFF
         )
         return torch.rand(count, generator=generator, dtype=torch.float64)
@@ -1695,6 +1722,7 @@ class AWQProcessor(LoopProcessor):
             return
 
         counts = entry.get("batch_row_counts") or []
+        keys = entry.get("priority_keys") or []
         priorities = torch.empty((rows.shape[0],), dtype=torch.float64)
         per_source: Dict[int, torch.Tensor] = {}
         for index, (source, row) in enumerate(provenance):
@@ -1702,7 +1730,10 @@ class AWQProcessor(LoopProcessor):
             row = int(row)
             if source not in per_source:
                 count = int(counts[source]) if source < len(counts) else row + 1
-                per_source[source] = self._reservoir_priorities(source, max(count, row + 1))
+                # Use the seed this capture recorded at merge time; the slot is
+                # only a fallback for entries written before it was tracked.
+                seed_key = int(keys[source]) if source < len(keys) else source
+                per_source[source] = self._reservoir_priorities(seed_key, max(count, row + 1))
             priorities[index] = per_source[source][row]
 
         if rows.shape[0] > budget_cap:
