@@ -64,6 +64,9 @@ FAMILY_MODEL_TYPES = [
     "falcon_mamba",
     "gemma4_text",
     "hrm_text",
+    # Issue #5371: the attention input norm also feeds the sigmoid gate and
+    # must not be folded into `o_proj`.
+    "lfm3",
     # Issue #4121 items 7-10: trees that folded across a nonlinearity or a
     # residual. `olmo_hybrid` alternates pre-norm linear-attention layers with
     # post-norm full-attention layers, so one static tree cannot describe both.
@@ -236,6 +239,9 @@ def _tiny_config(model_type):
         # indexes `None`. Exercise the short-convolution and attention mixers.
         kwargs["layer_types"] = ["conv", "full_attention"]
         kwargs["num_dense_layers"] = 1
+    if model_type == "lfm3" and "layer_types" in fields:
+        # LFM3's default two-layer layout is conv-only; exercise both mixers.
+        kwargs["layer_types"] = ["conv", "full_attention"]
     for key in ("head_dim", "rotary_dim"):
         if key in fields:
             kwargs[key] = 8

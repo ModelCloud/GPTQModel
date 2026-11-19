@@ -144,6 +144,8 @@ after folding a neutral scale):
 | Gemma2 MLP fold, layer-output relative L2 | 0.561 | < 1e-5 |
 | LFM3 conv/FFN `prev_op` | `post_operator_norm` / `post_ffn_norm` | `operator_norm` / `ffn_norm` |
 | LFM3 layer-output relative L2 | 0.569 (fixture) / 0.688 (real model, issue #4002) | 1.57e-07 |
+| LFM3 attention fold targets | `operator_norm` -> Q/K/V/O; `g_proj` gate uncompensated (issue #5371) | `operator_norm` -> Q/K/V with `g_proj` consumer; `o_proj` plain |
+| LFM3 attention layer-output relative L2 | 0.313 (fixture, issue #5371) | 2.8e-07 |
 | `MuseSparkTextInputScaledRMSNorm` fold relative L2 | 0.113 (fp32) | scale skipped; output unchanged |
 | Gemma-3-1B AWQ4 wikitext-2 PPL, `max(s) ≈ 1.4e3` | 848.5 | 67.8 |
 | Gemma-3-1B RTN4 / base PPL (same harness) | 72.6 / 59.6 | 72.6 / 59.6 |
