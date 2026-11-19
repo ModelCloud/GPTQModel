@@ -321,3 +321,166 @@ def test_quantize_config_from_pretrained_keeps_parse_errors(tmp_path):
 
     with pytest.raises(json.JSONDecodeError):
         QuantizeConfig.from_pretrained(str(tmp_path))
+
+
+# --------------------------------------------------------------------------- #
+# Multimodal processors follow the same subfolder as the config and weights.
+#
+# `GPTQModel.load(parent, subfolder="nested")` forwards `subfolder` to the
+# Transformers model loader but used to construct the wrapper with the
+# repository root. `BaseQModel.__init__` then called
+# `AutoProcessor.from_pretrained(root)`, so a checkpoint stored entirely under
+# `parent/nested` either raised "Unrecognized processing class" or silently
+# used an unrelated root processor. The fixtures below put a different valid
+# processor at the root so a silent fallback cannot pass.
+# --------------------------------------------------------------------------- #
+
+_GEMMA3_SPECIAL_TOKENS = {
+    "boi_token": "<start_of_image>",
+    "eoi_token": "<end_of_image>",
+    "image_token": "<image_soft_token>",
+}
+
+
+def _gemma3_wordlevel_tokenizer():
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from transformers import PreTrainedTokenizerFast
+
+    vocab = {"<unk>": 0, "<bos>": 1, "<eos>": 2, "<pad>": 3, "hello": 4, "world": 5}
+    tokenizer = Tokenizer(models.WordLevel(vocab=vocab, unk_token="<unk>"))
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    return PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        bos_token="<bos>",
+        eos_token="<eos>",
+        unk_token="<unk>",
+        pad_token="<pad>",
+        extra_special_tokens=_GEMMA3_SPECIAL_TOKENS,
+    )
+
+
+def _write_gemma3_processor(directory: Path, *, image_seq_length: int) -> None:
+    """Write a valid Gemma3 processor whose marker is `image_seq_length`."""
+    from transformers import Gemma3ImageProcessorPil, Gemma3Processor
+
+    directory.mkdir(parents=True, exist_ok=True)
+    processor = Gemma3Processor(
+        # The PIL backend keeps the fixture usable in CPU images without
+        # torchvision; AutoProcessor selects it automatically on load.
+        image_processor=Gemma3ImageProcessorPil(size={"height": 28, "width": 28}),
+        tokenizer=_gemma3_wordlevel_tokenizer(),
+        chat_template="{% for message in messages %}{{ message['content'] }}{% endfor %}",
+        image_seq_length=image_seq_length,
+    )
+    processor.save_pretrained(directory)
+
+
+def _write_gemma3_checkpoint(directory: Path) -> None:
+    """Write a tiny local Gemma3 VL checkpoint with its processor files."""
+    import torch
+    from transformers import Gemma3Config, Gemma3ForConditionalGeneration
+
+    config = Gemma3Config(
+        text_config={
+            "vocab_size": 512,
+            "hidden_size": 16,
+            "intermediate_size": 32,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 8,
+            "max_position_embeddings": 64,
+            "sliding_window": 32,
+            "layer_types": ["full_attention"],
+            "pad_token_id": 3,
+            "bos_token_id": 1,
+            "eos_token_id": 2,
+        },
+        vision_config={
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "image_size": 28,
+            "patch_size": 14,
+        },
+        mm_tokens_per_image=4,
+    )
+    directory.mkdir(parents=True, exist_ok=True)
+    torch.manual_seed(0)
+    Gemma3ForConditionalGeneration(config).save_pretrained(directory)
+    _write_gemma3_processor(directory, image_seq_length=4)
+
+
+def _quantize_gemma3(source: Path, destination: Path) -> None:
+    """Quantize the tiny checkpoint on CPU and save it under `destination`."""
+    import torch
+
+    from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
+
+    wrapped = GPTQModel.load(
+        str(source),
+        quantize_config=QuantizeConfig(
+            bits=4,
+            group_size=-1,
+            desc_act=False,
+            sym=True,
+            device="cpu",
+        ),
+        backend=BACKEND.GPTQ_TORCH,
+    )
+    wrapped.quantize(
+        CalibrationConfig(
+            dataset=[
+                {
+                    "input_ids": torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=torch.long),
+                    "attention_mask": torch.ones((1, 8), dtype=torch.long),
+                }
+            ],
+            batch_size=1,
+            min_length=1,
+        ),
+        backend=BACKEND.GPTQ_TORCH,
+    )
+    wrapped.save(destination)
+    # Saving copies the checkpoint's own processor files; rewrite them so the
+    # nested processor is the marker the assertion reads.
+    _write_gemma3_processor(destination, image_seq_length=4)
+
+
+def test_public_load_reads_the_processor_from_the_requested_subfolder(tmp_path):
+    """The dense loader must hand the wrapper the selected checkpoint directory."""
+    from transformers import AutoProcessor
+
+    from gptqmodel import GPTQModel
+
+    nested = tmp_path / "nested"
+    _write_gemma3_checkpoint(nested)
+    # A different valid processor at the root: a silent root fallback returns
+    # `image_seq_length=8` instead of raising.
+    _write_gemma3_processor(tmp_path, image_seq_length=8)
+
+    # Control: Transformers itself resolves the nested processor.
+    assert AutoProcessor.from_pretrained(tmp_path, subfolder="nested").image_seq_length == 4
+
+    direct = GPTQModel.load(str(nested), device="cpu")
+    assert direct.processor.image_seq_length == 4
+
+    selected = GPTQModel.load(str(tmp_path), subfolder="nested", device="cpu")
+    assert selected.processor.image_seq_length == 4
+
+
+def test_quantized_load_reads_the_processor_from_the_requested_subfolder(tmp_path):
+    """`from_quantized` must hand the wrapper the same directory it reads tensors from."""
+    from gptqmodel import GPTQModel
+
+    parent = tmp_path / "parent"
+    nested = parent / "nested"
+    source = tmp_path / "source"
+    _write_gemma3_checkpoint(source)
+    _quantize_gemma3(source, nested)
+    _write_gemma3_processor(parent, image_seq_length=8)
+
+    loaded = GPTQModel.load(str(parent), subfolder="nested", device="cpu")
+
+    assert loaded.processor.image_seq_length == 4
