@@ -2596,6 +2596,9 @@ def ModelLoader(cls):
         tokenizer_trust_remote_code = model_init_kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
         config_load_kwargs = {**get_config_selection_kwargs(model_init_kwargs_without_internal), **hf_gguf_load_kwargs}
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs_without_internal)
+        # Hooks read files directly. Config, processor and writer lookups keep
+        # the repository root and selection kwargs as separate inputs.
+        checkpoint_dir = resolve_checkpoint_subfolder(model_local_path, config_load_kwargs.get("subfolder"))
         trust_remote_code = resolve_trust_remote_code(
             model_local_path, trust_remote_code=trust_remote_code, **config_load_kwargs
         )
@@ -2749,7 +2752,7 @@ def ModelLoader(cls):
             _call_before_model_load(
                 cls,
                 trust_remote_code=trust_remote_code,
-                model_local_path=model_local_path,
+                model_local_path=checkpoint_dir,
                 load_quantized_model=False,
             )
             # transformers' ``from_pretrained`` wraps model construction in
@@ -2857,7 +2860,7 @@ def ModelLoader(cls):
             _call_before_model_load(
                 cls,
                 trust_remote_code=trust_remote_code,
-                model_local_path=model_local_path,
+                model_local_path=checkpoint_dir,
                 load_quantized_model=False,
             )
             from ..utils.hf import build_shell_model
@@ -3408,7 +3411,7 @@ def ModelLoader(cls):
                 )
 
                 model = load_model_by_vllm(
-                    model=model_local_path,
+                    model=checkpoint_dir,
                     trust_remote_code=trust_remote_code,
                     **kwargs_without_internal,
                 )
@@ -3429,7 +3432,7 @@ def ModelLoader(cls):
                     resolved_dtype=dtype,
                 )
                 model, hf_config = load_model_by_sglang(
-                    model=model_local_path,
+                    model=checkpoint_dir,
                     trust_remote_code=trust_remote_code,
                     config=config,
                     **sglang_kwargs,
@@ -3534,7 +3537,7 @@ def ModelLoader(cls):
             _call_before_model_load(
                 cls,
                 trust_remote_code=trust_remote_code,
-                model_local_path=model_local_path,
+                model_local_path=checkpoint_dir,
                 load_quantized_model=True,
             )
 
@@ -3656,7 +3659,7 @@ def ModelLoader(cls):
                 input_embed_name = get_module_name(model, input_embeddings) if input_embeddings is not None else None
                 output_embed_name = get_module_name(model, output_embeddings) if output_embeddings is not None else None
                 input_embed_quantized, output_embed_quantized = is_embeddings_module_quantized(
-                    model_dir=model_local_path,
+                    model_dir=checkpoint_dir,
                     input_embed_name=input_embed_name,
                     output_embed_name=output_embed_name,
                 )
