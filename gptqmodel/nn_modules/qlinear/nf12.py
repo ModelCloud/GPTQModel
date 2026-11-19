@@ -456,6 +456,16 @@ class NF12Linear(WeightOnlyQuantLinear):
     def _native_forward(self, x: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor | None:
         if not x.is_cuda or x.dtype != torch.bfloat16:
             return None
+        # Neither `nf12::linear` nor `nf12_hip::linear` registers an Autograd
+        # formula. Their output still carries a `WarnNotImplemented` grad_fn,
+        # so a grad-mode call looks differentiable but returns `None` for
+        # `x.grad` (with a one-time warning). Any LoRA/PEFT pass through an
+        # NF12 projection would silently lose that gradient. Take the
+        # differentiable decode + matmul path whenever the activation needs a
+        # gradient; inference (`no_grad`/`inference_mode`) keeps the fused
+        # kernel (#5305).
+        if torch.is_grad_enabled() and x.requires_grad:
+            return None
         # Native kernels consume BF16 bias. A wider or different bias must stay
         # wide through the fallback epilogue to preserve cancellation and range.
         if bias is not None and bias.dtype != x.dtype:
