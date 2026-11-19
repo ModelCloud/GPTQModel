@@ -148,6 +148,7 @@ jobs:
           python .github/scripts/ci_workflow.py list-tests \
             --ignored-test-files "$IGNORED_TEST_FILES" \
             --test-regex "${{ github.event.inputs.test_regex }}" \
+            --python-version '3.14.10t' \
             > "$plan_file"
 
           python - "$plan_file" <<'PY' >> "$GITHUB_OUTPUT"
@@ -182,8 +183,19 @@ jobs:
               shards = plan[f"{group}_matrix_shards"]
               print(f"{group} tests: {len(entries)} in {len(shards)} shard(s)")
           print(f"MLX test files: {len(plan['mlx_files'])}")
+          for name, reason in sorted(plan.get("gated_tests", {}).items()):
+              print(f"gated off this lane: {name} ({reason})")
           PY
           echo "Ignored Test files: $IGNORED_TEST_FILES"
+
+      # A pinned wheel with a foreign ABI fails here, before any GPU is
+      # allocated, instead of at the install step of every affected job (#5420).
+      - name: Check resolved wheel tags
+        run: |
+          uv pip install pyyaml packaging
+          python .github/scripts/ci_deps.py check-tags \
+            --plan "$RUNNER_TEMP/unit-test-plan.json" \
+            --python-version '3.14.10t'
 
   cpu:
     needs:
