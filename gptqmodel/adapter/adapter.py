@@ -415,11 +415,27 @@ class Lora(Adapter):
         lora_cfg = self.adapter_config()
         if lora_cfg is None:
             return True
-        return module_matches_targets(
+        if module_matches_targets(
             module_name,
             lora_cfg.target_modules,
             lora_cfg.exclude_modules,
-        )
+        ):
+            return True
+        # Legacy EoRA exports wrote the target list and tensor keys in lowercase
+        # (`wqkv` for `Wqkv`). `has_weights` already accepts that spelling, but
+        # this target check is evaluated first and rejected the module. Accept
+        # the lowercase spelling only when the adapter's tensor pair confirms
+        # it, so canonical PEFT files keep case-sensitive targeting (#5418).
+        lowered = module_name.lower()
+        if lowered == module_name:
+            return False
+        if not module_matches_targets(
+            lowered,
+            lora_cfg.target_modules,
+            lora_cfg.exclude_modules,
+        ):
+            return False
+        return self.has_weights(module_name)
 
     def has_weights(self, module_name: str) -> bool:
         """Whether the adapter source has both A and B tensors for a module."""
