@@ -6,15 +6,22 @@ import shlex
 import sys
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from ci_common import append_github_env
+
+
+# GitHub Actions expands at most 256 jobs from one matrix, and a reusable
+# workflow input payload may not exceed 65,535 characters. Keep every emitted
+# matrix at the documented expansion limit so each shard can be handed to the
+# reusable workflow as one input.
+DEFAULT_MAX_MATRIX_ENTRIES = 256
 
 
 def split_csv(raw: str | None) -> list[str]:
@@ -345,13 +352,44 @@ def build_test_matrices(
     }
 
 
+def split_matrix_entries(
+        entries: list[dict[str, str]],
+        max_entries: int = DEFAULT_MAX_MATRIX_ENTRIES,
+) -> list[list[dict[str, str]]]:
+    if max_entries < 1:
+        raise ValueError(f"max matrix entries must be positive: {max_entries}")
+    return [
+        entries[offset:offset + max_entries]
+        for offset in range(0, len(entries), max_entries)
+    ]
+
+
+def validate_matrix_shards(
+        group: str,
+        entries: list[dict[str, str]],
+        shards: list[list[dict[str, str]]],
+        max_entries: int = DEFAULT_MAX_MATRIX_ENTRIES,
+) -> None:
+    if max_entries < 1:
+        raise ValueError(f"max matrix entries must be positive: {max_entries}")
+    oversized = [len(shard) for shard in shards if len(shard) > max_entries]
+    if oversized:
+        raise ValueError(
+            f"{group} matrix shards exceed the {max_entries}-entry expansion limit: {oversized}"
+        )
+    flattened = [entry for shard in shards for entry in shard]
+    if flattened != entries:
+        raise ValueError(f"{group} matrix shards do not cover the planned entries in order")
+
+
 def build_test_plan(
         *,
         ignored_test_files: str | list[str],
         test_names: str,
         test_regex: str,
         tests_root: str | Path,
-) -> dict[str, list[dict[str, str]] | list[str]]:
+        max_matrix_entries: int = DEFAULT_MAX_MATRIX_ENTRIES,
+) -> dict[str, list[dict[str, str]] | list[list[dict[str, str]]] | list[str] | int]:
     cpu_tests, torch_tests, model_tests, mlx_tests = list_tests(
         ignored_test_files=ignored_test_files,
         test_names=test_names,
@@ -363,12 +401,20 @@ def build_test_plan(
         torch_tests=torch_tests,
         model_tests=model_tests,
     )
+    matrix_shards: dict[str, list[list[dict[str, str]]]] = {}
+    for group in ("cpu", "torch", "model"):
+        matrix = matrices[f"{group}_matrix"]
+        shards = split_matrix_entries(matrix, max_matrix_entries)
+        validate_matrix_shards(group, matrix, shards, max_matrix_entries)
+        matrix_shards[f"{group}_matrix_shards"] = shards
     return {
         "cpu_files": cpu_tests,
         "torch_files": torch_tests,
         "model_files": model_tests,
         "mlx_files": mlx_tests,
         **matrices,
+        **matrix_shards,
+        "max_matrix_entries": max_matrix_entries,
     }
 
 
@@ -408,6 +454,7 @@ def cmd_list_tests(args: argparse.Namespace) -> int:
         test_names=args.test_names,
         test_regex=args.test_regex,
         tests_root=args.tests_root,
+        max_matrix_entries=args.max_matrix_entries,
     )
     print(json.dumps(test_plan))
     return 0
@@ -474,6 +521,7 @@ def main() -> int:
     list_parser.add_argument("--test-names", default=os.getenv("TEST_NAMES", ""))
     list_parser.add_argument("--test-regex", default=os.getenv("TEST_REGEX", ".*"))
     list_parser.add_argument("--tests-root", default="tests")
+    list_parser.add_argument("--max-matrix-entries", type=int, default=DEFAULT_MAX_MATRIX_ENTRIES)
 
     resolve_parser = subparsers.add_parser("resolve-env")
     resolve_parser.add_argument("--yaml-file", default=Path(__file__).with_name("test.yaml"))

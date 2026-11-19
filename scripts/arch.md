@@ -12,7 +12,7 @@
 - `ci_workflow.py check-vm` computes `ip`, `run_id`, `install_ts`, and matrix parallelism, then writes them to `GITHUB_OUTPUT`.
 
 2. `list-test-files`
-- `ci_workflow.py list-tests` scans `tests/`, filters ignored and regex-matched cases, splits them into torch/model/mlx buckets, and builds shared env matrices from `deps.yaml` and `test.yaml`.
+- `ci_workflow.py list-tests` scans `tests/`, filters ignored and regex-matched cases, splits them into torch/model/mlx buckets, builds shared env matrices from `deps.yaml` and `test.yaml`, and shards each matrix below GitHub's 256-job expansion limit. The workflow writes the plan to a file and hands one shard at a time to the reusable workflow; the plan is never stored in an environment variable.
 
 3. `prepare`
 - `ci_workflow.py prepare-common-envs` deduplicates shared env rows, creates or refreshes those uv envs in parallel, installs base requirements, and syncs the repo-scoped git dependencies.
