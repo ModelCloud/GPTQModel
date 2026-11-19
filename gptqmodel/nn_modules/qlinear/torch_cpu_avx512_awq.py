@@ -15,6 +15,7 @@ from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
 from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
+from ...utils.torch import dynamo_is_compiling
 from . import AWQuantLinear, detach_cpu_operand
 from ._awq_decode import AwqDecodeRangeMixin
 from ._compile_support import COMPILE_LEVEL
@@ -339,7 +340,7 @@ class TorchCpuAvx512AwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # ``_cpu_transform_lock`` is an ``RLock``: dynamo cannot enter it (a
             # hard graph break), and the one-time ``transform()`` rewrites the
             # packed ``qweight``/``qzeros`` buffers in place, which a traced

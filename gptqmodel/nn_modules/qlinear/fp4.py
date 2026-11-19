@@ -11,6 +11,7 @@ import torch.nn.functional as F
 
 from ...models._const import DEVICE
 from ...quantization.dtype import dequantize_f4_e2m1
+from ...utils.torch import dynamo_is_compiling
 from ._numerics import (
     bias_narrows_losslessly,
     linear_needs_wide_bias,
@@ -182,7 +183,7 @@ class TorchFP4Linear(nn.Module):
         inside an already-captured graph.
         """
 
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             return self._narrow_decode_at_load
         scale = self.weight_scale
         if scale.device.type == "cuda" and torch.cuda.is_current_stream_capturing():

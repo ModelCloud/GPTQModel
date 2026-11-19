@@ -13,6 +13,7 @@ before adding the bias returns inf; a correct one returns the FP16-rounded
 import pytest
 import torch
 import torch.nn as nn
+from compile_state_utils import under_compile
 
 from gptqmodel.looper.linear_mode import LinearMode
 from gptqmodel.nn_modules.qlinear._numerics import matmul_fp32_reduce
@@ -549,9 +550,5 @@ def test_cpu_awq_fallback_compiled_decode_matches_eager(cls_name):
     module = _awq_overflow_fixture(_cpu_awq_class(cls_name), out_features=out_features)
     assert module._decode_dtype_for_activation(torch.float16) is torch.float32
 
-    original = torch.compiler.is_compiling
-    torch.compiler.is_compiling = lambda: True
-    try:
+    with under_compile():
         assert module._decode_dtype_for_activation(torch.float16) is torch.float32
-    finally:
-        torch.compiler.is_compiling = original

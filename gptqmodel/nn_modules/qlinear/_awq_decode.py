@@ -5,6 +5,7 @@
 
 import torch
 
+from ...utils.torch import dynamo_is_compiling
 from ._runtime_cache import tensor_cache_key
 
 
@@ -53,7 +54,7 @@ class AwqDecodeRangeMixin:
         # the cache key: `tensor_cache_key` reads `.is_inference()`/`data_ptr()`
         # on the host, which dynamo rejects and a CUDA-graph capture cannot
         # cross.
-        if torch.compiler.is_compiling() or (
+        if dynamo_is_compiling() or (
             scales.device.type == "cuda" and torch.cuda.is_current_stream_capturing()
         ):
             precomputed = getattr(self, "_decode_range_fits_by_dtype", None)

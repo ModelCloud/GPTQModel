@@ -98,6 +98,19 @@ mid-window (issue #5390). The writer is held for the switch only, never for the
 whole quantization. A caller that is already inside a compiled call holds the
 shared side and skips it instead of deadlocking.
 
+The lock cannot fix the other half of that hazard: "am I being traced" itself.
+`torch.compiler.is_compiling()` reads a module-level flag that the compile
+session sets for the whole process, so every eager thread in the process sees
+`True` while *any* thread compiles (#5427). Kernels that took their trace-only
+branch on that signal (NF12's exponent-base cache fill, the `optimize()` proxy's
+eager short-circuit, the `_awq_shifts`/`ret_idx` caches) therefore degraded or
+crashed whenever an unrelated thread compiled. Every call site now goes through
+`utils/torch.py:dynamo_is_compiling()`, which uses
+`torch.compiler.is_dynamo_compiling()`: a constant `False` in eager code that
+dynamo folds to `True` inside the traced frame, so another thread's session
+cannot leak in. `torch.compiler.is_exporting()` is folded in for export, which
+is process-scoped but single-threaded.
+
 The guards stay scoped where they are entered. #4092 narrows
 `quant_blas_backend` to the Hessian/linalg phase; the counting works for that
 placement too, because it depends only on entry and exit, not on which phase
