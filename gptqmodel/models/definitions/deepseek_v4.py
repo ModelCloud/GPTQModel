@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from numbers import Integral
 from pathlib import Path
 from types import MethodType
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -1579,7 +1579,11 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
             )
         return layer
 
-    def pre_quantize(self, module: nn.Module) -> nn.Module:
+    def pre_quantize(
+        self,
+        module: nn.Module,
+        module_path: Optional[str] = None,
+    ) -> nn.Module:
         """Keep each packed target layer lazy for per-leaf materialization.
 
         Subset planning materializes checkpoint-backed leaves through their
@@ -1597,7 +1601,7 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
         layers = getattr(getattr(self.model, "model", None), "layers", ())
         if any(module is layer for layer in layers) and self._keeps_packed_target_layer_lazy():
             return module
-        return super().pre_quantize(module)
+        return super().pre_quantize(module, module_path=module_path)
 
     def _keeps_packed_target_layer_lazy(self) -> bool:
         """Whether this run uses the decoder-aware packed-floatx layer boundary."""
@@ -3409,11 +3413,15 @@ class DeepSeekV4MTPQuantizationModel(DeepSeekV4QModel):
             },
         )
 
-    def pre_quantize(self, module: nn.Module) -> nn.Module:
+    def pre_quantize(
+        self,
+        module: nn.Module,
+        module_path: Optional[str] = None,
+    ) -> nn.Module:
         """Decode the exact auxiliary block body, excluding unused heads."""
 
         if module not in self.model.mtp:
-            return super().pre_quantize(module)
+            return super().pre_quantize(module, module_path=module_path)
         device = torch.device(self.quantize_config.device)
         source_dtype = getattr(self.model.config, "dtype", torch.bfloat16)
         if not isinstance(source_dtype, torch.dtype):

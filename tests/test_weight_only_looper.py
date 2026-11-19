@@ -156,7 +156,7 @@ class _FakeQModel:
     def simple_layer_modules(self, **_kwargs):
         return [["linear"]]
 
-    def pre_quantize(self, module):
+    def pre_quantize(self, module, module_path=None):
         return module
 
     def post_quantize(self, module):

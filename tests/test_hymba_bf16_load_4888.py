@@ -62,7 +62,9 @@ def test_stage_inputs_capture_materializes_the_root_bare_parameter():
         def get_modules_with_direct_meta_tensors(self, wrapped):
             return HymbaQModel.get_modules_with_direct_meta_tensors(wrapped)
 
-        def shell_direct_meta_materialize(self, *, target_submodule, device=None):
+        def shell_direct_meta_materialize(
+            self, *, target_submodule, device=None, module_path=None
+        ):
             calls.append((target_submodule, device))
             target_submodule.register_parameter(
                 "memory_tokens",
