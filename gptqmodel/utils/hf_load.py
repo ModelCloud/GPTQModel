@@ -944,6 +944,83 @@ def _awq_modules_ignore_serialized_config(model: nn.Module, qcfg: QuantizeConfig
     return False
 
 
+def _native_awq_config_from_dir(checkpoint_path: str) -> Optional[QuantizeConfig]:
+    """The serialized config when ``checkpoint_path`` is a native AWQ checkpoint."""
+
+    try:
+        qcfg = QuantizeConfig.from_pretrained(checkpoint_path)
+    except (KeyError, OSError, TypeError, ValueError):
+        return None
+    if qcfg.method != METHOD.AWQ or not _is_native_gptqmodel_config(qcfg):
+        return None
+    return qcfg
+
+
+def hf_gptqmodel_native_awq_config(
+    model: nn.Module,
+    *,
+    checkpoint_files=None,
+) -> Optional[QuantizeConfig]:
+    """The serialized config when this is a native GPT-QModel AWQ checkpoint.
+
+    ``None`` means the checkpoint is not ours (a third-party AWQ checkpoint, or
+    a non-AWQ load) and the caller must leave Transformers' own path alone.
+    Kept separate from :func:`hf_gptqmodel_repair_awq_load` because a native
+    checkpoint whose modules Transformers already built correctly still needs
+    the native post-init steps (#5433).
+    """
+
+    checkpoint_path = _resolve_checkpoint_dir(model, checkpoint_files)
+    if checkpoint_path is None:
+        return None
+    return _native_awq_config_from_dir(checkpoint_path)
+
+
+def hf_gptqmodel_finish_awq_load_without_rebuild(
+    model: nn.Module,
+    *,
+    qcfg: Optional[QuantizeConfig] = None,
+) -> None:
+    """Run the native post-init steps that do not need a rebuilt module set.
+
+    Transformers' AWQ loader builds every module from the serialized
+    ``bits``/``group_size`` when the checkpoint has no ``dynamic`` overrides, so
+    :func:`hf_gptqmodel_repair_awq_load` has nothing to rebuild and returns
+    ``None``. The bridge used to treat that as "not our load" and fall through
+    to ``original_post_init``, which skipped the steps below: the RoPE buffers
+    transformers 5 materializes with ``torch.empty_like`` stayed uninitialized
+    and ``generate()`` lost its transformers-4 adapter (#5433, same symptom as
+    #5311 for AWQ checkpoints of legacy remote-code families).
+
+    ``qcfg`` is the serialized config for a native GPT-QModel checkpoint; it is
+    ``None`` for a third-party checkpoint, which only needs the shared
+    remote-code repairs (its modules are not ours to re-configure).
+    """
+
+    from ..models.loader import _set_paged_attention_safe_cuda_graphs, _setup_rotation_online_had
+    from .hf import apply_legacy_remote_code_fixups
+    from .importer import validate_device_map_capability_groups
+    from .model import gptqmodel_post_init
+
+    if qcfg is not None:
+        model.quantize_config = qcfg
+        gptqmodel_post_init(model, use_act_order=qcfg.desc_act, quantize_config=qcfg)
+        # Rotated checkpoints fuse an orthogonal Q and an exact Hadamard H into
+        # the weights; the H has to be re-applied to activations at inference.
+        _setup_rotation_online_had(model, resolve_model_rotation(qcfg))
+        # Paged Flash Attention is not CUDA-graph capture safe; the normal
+        # loader opts paged models out so `generate_batch` works unpatched.
+        _set_paged_attention_safe_cuda_graphs(model)
+        validate_device_map_capability_groups(getattr(model, "hf_device_map", None))
+
+    # Legacy remote-code families need the same two repairs the native loader
+    # applies: transformers 5 leaves checkpoint-absent rotary buffers
+    # uninitialized when the class overrides ``_init_weights`` (EXAONE-3.0,
+    # DeciLM, ...), and changed the ``generate()`` cache contract those classes
+    # implement.
+    apply_legacy_remote_code_fixups(model)
+
+
 def hf_gptqmodel_repair_awq_load(
     model: nn.Module,
     *,
@@ -966,18 +1043,16 @@ def hf_gptqmodel_repair_awq_load(
     config and kernel class, moves the loaded tensors into it, and returns the
     context for the native post-init. Returns ``None`` when the checkpoint is
     not a GPT-QModel-native AWQ checkpoint or when the modules Transformers
-    built already match the serialized config, so those loads keep their
-    existing path.
+    built already match the serialized config. In the latter case the caller
+    still owes the model the context-free native post-init; see
+    :func:`hf_gptqmodel_finish_awq_load_without_rebuild` (#5433).
     """
 
     checkpoint_path = _resolve_checkpoint_dir(model, checkpoint_files)
     if checkpoint_path is None:
         return None
-    try:
-        qcfg = QuantizeConfig.from_pretrained(checkpoint_path)
-    except (KeyError, OSError, TypeError, ValueError):
-        return None
-    if qcfg.method != METHOD.AWQ or not _is_native_gptqmodel_config(qcfg):
+    qcfg = _native_awq_config_from_dir(checkpoint_path)
+    if qcfg is None:
         return None
 
     quantized_module_names = _awq_checkpoint_module_names(checkpoint_path, checkpoint_files)
