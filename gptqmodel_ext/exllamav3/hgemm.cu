@@ -64,7 +64,7 @@ void hgemm
     // restore the handle's default before the allocation is released, exactly
     // as ATen's own scoped-workspace guard does.  The cuBLAS handle is
     // per-thread, so no other thread observes this pointer.
-    at::Tensor workspace = at::empty({WORKSPACE_SIZE}, a.options().dtype(at::kByte));
+    at::Tensor workspace = at::empty({WORKSPACE_SIZE}, at::options(a).dtype(at::kByte));
     cublas_check(cublasSetWorkspace(cublas_handle, workspace.data_ptr(), WORKSPACE_SIZE));
     struct WorkspaceRestore
     {
