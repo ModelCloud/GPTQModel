@@ -109,7 +109,8 @@ jobs:
           bash .github/scripts/ci_unit_activate_uv_env.sh \
             "${{ matrix.test_script }}" \
             "${{ github.run_id }}" \
-            "${{ github.run_attempt }}"
+            "${{ github.run_attempt }}" \
+            "${{ matrix.test_group }}"
 
       - name: Install package from source
         env:
@@ -180,8 +181,14 @@ jobs:
       - name: Run tests
         run: |
           extra_args=()
+          if [[ "${SKIP_GPU_ALLOCATION}" == "true" ]]; then
+            # CPU-only, XPU and NPU jobs never hold a GPU lease.
+            extra_args+=(--clear-cuda)
+          else
+            extra_args+=(--gpu-lease)
+          fi
           if [[ "${XPU_MODE}" == "true" ]]; then
-            extra_args+=(--clear-cuda --xpu-mode)
+            extra_args+=(--xpu-mode)
           fi
           if [[ "${{ matrix.include_model_test_mode }}" == "true" ]]; then
             extra_args+=(--model-test-mode "${MODEL_TEST_MODE}")
