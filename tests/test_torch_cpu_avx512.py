@@ -645,7 +645,9 @@ def test_layer_fp16_dense_fallback_preserves_input_dtype():
     output = layer(x)
 
     assert output.dtype == torch.float16
-    assert layer.linear_mode == "train"
+    # ``linear_mode`` is only resolved for training forwards
+    # (``torch_aten_kernel``) and this layer is in eval; the fallback is
+    # observable through the untransformed payload and the FP16 result.
     assert layer._cpu_transformed is False
     torch.testing.assert_close(output, reference, atol=0.25, rtol=0.02)
 
@@ -810,15 +812,18 @@ def test_fused_bias_validation():
         )
     with pytest.raises(RuntimeError, match="bias out_features"):
         kernel(x, packed, zeros, scales, group_size, torch.zeros(out_features + 1))
-    with pytest.raises(RuntimeError, match="Meta tensors"):
-        kernel(
-            x,
-            packed,
-            zeros,
-            scales,
-            group_size,
-            torch.empty(out_features, device="meta"),
-        )
+    # Meta construction dispatches to the registered FakeTensor impl (#5075),
+    # so it never reaches the native argument validation above.
+    meta_out = kernel(
+        x.to("meta"),
+        packed.to("meta"),
+        zeros.to("meta"),
+        scales.to("meta"),
+        group_size,
+        torch.empty(out_features, device="meta"),
+    )
+    assert meta_out.device.type == "meta"
+    assert meta_out.shape == (1, out_features)
 
 
 def test_kernel_empty_batch_and_validation():
