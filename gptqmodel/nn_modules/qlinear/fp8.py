@@ -999,13 +999,20 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             and fp8_block_decode_supported(
                 weight,
                 scale.to(dtype=torch.float32) if scale.dtype != torch.float32 else scale,
+                fp8_format=self.fp8_format,
                 block_size=block,
                 dtype=dtype,
             )
         )
         fused = (
             decode
-            and fp8_block_gemv_payload_supported(weight, scale, block_size=block, dtype=dtype)
+            and fp8_block_gemv_payload_supported(
+                weight,
+                scale,
+                fp8_format=self.fp8_format,
+                block_size=block,
+                dtype=dtype,
+            )
             # The fused product keeps the codes in the activation dtype through
             # the whole reduction, so it needs the same range safety
             # ``_native_gemm_eligible`` asks for on the row/tensor epilogue.
