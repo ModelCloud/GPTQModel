@@ -16,24 +16,24 @@ inheritance.
 
 ## The trainable set
 
-| Kernel | Method | Where it trains | Why it is in the set |
+| Kernel | Method | Devices (`SUPPORTS_DEVICES`) | Why it is in the set |
 | --- | --- | --- | --- |
-| `TorchLinear` (`gptq_torch`) | GPTQ | CPU, CUDA | Portable GPTQ reference; the supported fine-tuning path |
+| `TorchLinear` (`gptq_torch`) | GPTQ | CPU, CUDA, ROCm, XPU, NPU, MPS | Portable GPTQ reference; the supported fine-tuning path |
 | `TritonV2Linear` (`gptq_triton_v2`) | GPTQ | CUDA | Triton GPTQ with the tiled transpose backward |
-| `AwqTorchLinear` (`awq_torch`, HF alias `torch_awq`) | AWQ | CPU, CUDA | Portable AWQ GEMM reader; PEFT target names depend on it |
+| `AwqTorchLinear` (`awq_torch`, HF alias `torch_awq`) | AWQ | CPU, CUDA, ROCm, XPU, NPU, MPS | Portable AWQ GEMM reader; PEFT target names depend on it |
 | `AwqGEMMLinear` | AWQ | CUDA | AWQ GEMM with the packed decode backward |
-| `AwqGEMMTritonLinear` | AWQ | CUDA | Triton AWQ GEMM |
-| `AwqGEMVTritonLinear` | AWQ | CUDA | Triton AWQ GEMV (`_AwqGemvTritonFn.backward`) |
+| `AwqGEMMTritonLinear` | AWQ | CUDA, ROCm | Triton AWQ GEMM |
+| `AwqGEMVTritonLinear` | AWQ | CUDA, ROCm | Triton AWQ GEMV (`_AwqGemvTritonFn.backward`) |
 | `TorchFusedLinear` (`torch_fused`) | GPTQ | CPU, XPU | Intel fused GPTQ |
 | `TorchFusedAwqLinear` (`torch_fused`) | AWQ | CPU, XPU | Intel fused AWQ |
-| `TorchAtenLinear` (`torch_aten`) | GPTQ | CPU, XPU | ATen int4pack GPTQ |
-| `TorchAtenAwqLinear` (`torch_aten`) | AWQ | CPU, XPU | ATen int4pack AWQ |
+| `TorchAtenLinear` (`torch_aten`) | GPTQ | CPU | ATen int4pack GPTQ |
+| `TorchAtenAwqLinear` (`torch_aten`) | AWQ | CPU | ATen int4pack AWQ |
 | `TorchCpuAvx512Linear` (`gptq_torch_cpu_avx512`) | GPTQ | CPU | AVX512-BF16 GPTQ; PEFT training fix #3480 |
 | `TorchCpuAvx512AwqLinear` (`awq_torch_cpu_avx512`) | AWQ | CPU | AVX512-BF16 AWQ |
-| `TorchFP8Linear` | FP8 | CPU, CUDA | FP8 PEFT (W8A16 decode with an input-gradient path) |
-| `GGUFTorchLinear` | GGUF | CPU, CUDA | Torch GGUF reader used by PEFT recipes |
-| `ParoLinear` | Paro | CPU, CUDA | Paro keeps its own differentiable rotation parameters |
-| `ParoTritonLinear` | Paro | CUDA | Triton Paro |
+| `TorchFP8Linear` | FP8 | CPU, CUDA, ROCm, XPU, MPS | FP8 PEFT (W8A16 decode with an input-gradient path) |
+| `GGUFTorchLinear` | GGUF | CPU, CUDA, ROCm, XPU, NPU, MPS | Torch GGUF reader used by PEFT recipes |
+| `ParoLinear` | Paro | CPU, CUDA, ROCm, XPU, NPU, MPS | Paro keeps its own differentiable rotation parameters |
+| `ParoTritonLinear` | Paro | CUDA, ROCm | Triton Paro |
 
 Everything else — Marlin, Machete, ExLlamaV2, ExLlamaV3, QQQ, MACaQ, NF12,
 VPTQ, BitBLAS, bitsandbytes, Swordfish, AllSpark, GGUF C++/Triton, MLX, TNN,
