@@ -662,6 +662,16 @@ def hf_gptqmodel_post_init_for_load(
     # silently wrong outputs, so mirror the normal loader's post-init step.
     _setup_rotation_online_had(model, resolve_model_rotation(qcfg))
 
+    # Legacy remote-code families need the same two repairs the native loader
+    # applies: transformers 5 leaves checkpoint-absent rotary buffers
+    # uninitialized when the class overrides ``_init_weights`` (EXAONE-3.0,
+    # DeciLM, ...), and changed the ``generate()`` cache contract those classes
+    # implement. Without them a checkpoint that ``GPTQModel.load`` reads
+    # correctly produces garbage RoPE frequencies through transformers (#5311).
+    from .hf import apply_legacy_remote_code_fixups
+
+    apply_legacy_remote_code_fixups(model)
+
     # Paged Flash Attention is not CUDA-graph capture safe; the normal loader
     # opts paged models out of graph capture so ``generate_batch`` /
     # ``init_continuous_batching`` work without a caller-side monkey patch.

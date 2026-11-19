@@ -98,7 +98,7 @@ from ..utils.calibration import prepare_calibration_dataset
 from ..utils.checkpoint_paths import resolve_checkpoint_path
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
-from ..utils.hf import autofix_hf_model_config, install_legacy_generation_compat
+from ..utils.hf import apply_legacy_remote_code_fixups, autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.kv_cache import KVCacheEstimate, estimate_kv_cache
 from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
@@ -126,7 +126,6 @@ from ..utils.structure import (
     _get_qualified_name,
     alias_direct_meta_from_turtle_for_submodule,
     alias_from_turtle_for_submodule,
-    restore_init_owned_rotary_buffers,
 )
 from ..utils.tied_weights import (
     lm_head_is_tied,
@@ -1275,19 +1274,21 @@ class BaseQModel(nn.Module):
         # the default `_init_weights`. Restore constructor-owned rotary buffers
         # here so every load path (native eval, quantization, quantized reload)
         # sees real RoPE frequencies instead of uninitialized memory.
-        restored_rotary_buffers = restore_init_owned_rotary_buffers(self.model)
+        # transformers 5 also always hands `generate()`'s cache to the remote
+        # `prepare_inputs_for_generation`, even before the first prefill, and
+        # replaced the tuple/attribute cache interface those implementations
+        # were written against. Both repairs are shared with the Transformers
+        # bridge through one helper so neither path can miss one (#5311).
+        restored_rotary_buffers, legacy_generation_compat = apply_legacy_remote_code_fixups(
+            self.model
+        )
         if restored_rotary_buffers:
             log.debug(
                 "Model: restored %d init-owned rotary buffer(s) for `%s`.",
                 restored_rotary_buffers,
                 type(self.model).__name__,
             )
-        # transformers 5 always hands `generate()`'s cache to the remote
-        # `prepare_inputs_for_generation`, even before the first prefill, and
-        # replaced the tuple/attribute cache interface those implementations
-        # were written against. Install the shared legacy adapter here so every
-        # load path (native eval, quantization, quantized reload) gets it.
-        if install_legacy_generation_compat(self.model):
+        if legacy_generation_compat:
             log.debug(
                 "Model: installed legacy generate() adapter for `%s`.",
                 type(self.model).__name__,

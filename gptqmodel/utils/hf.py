@@ -2453,6 +2453,32 @@ def _cache_sequence_length(cache: Any) -> int:
         return 0
 
 
+def apply_legacy_remote_code_fixups(model: Any) -> tuple[int, bool]:
+    """Run the post-load repairs legacy remote-code families need.
+
+    transformers 5 materializes checkpoint-absent non-persistent buffers with
+    ``torch.empty_like`` and re-derives a native rotary module's ``inv_freq``
+    only in the default ``_init_weights``; a remote-code class that overrides
+    ``_init_weights`` (EXAONE-3.0, DeciLM, ...) keeps uninitialized memory
+    (#4093 item 10). transformers 5 also changed the ``generate()`` cache
+    contract those classes implement (#5154).
+
+    Both repairs are no-ops when a model does not need them. They live in one
+    helper because the native loader and the Transformers bridge have to apply
+    the same set: the bridge skipped them and produced garbage RoPE
+    frequencies on a checkpoint that ``GPTQModel.load`` read correctly (#5311).
+
+    Returns ``(restored_rotary_buffers, installed_generation_adapter)``.
+    """
+
+    # Imported lazily: ``structure`` imports model helpers that pull this module.
+    from .structure import restore_init_owned_rotary_buffers
+
+    restored = restore_init_owned_rotary_buffers(model)
+    installed = install_legacy_generation_compat(model)
+    return restored, installed
+
+
 def install_legacy_generation_compat(model: Any) -> bool:
     """Restore the transformers-4 KV-cache contract for remote-code decoders.
 
