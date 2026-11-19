@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
+
 import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear, _swizzle_scales, nvfp4_input
-from gptqmodel.nn_modules.qlinear.w4a_nvfp4_triton import nvfp4_decode, nvfp4_pack_and_swizzle
 from gptqmodel.quantization.activation_floatx import (
     NVFP4ActivationHeadroom,
     nvfp4_block_qdq,
@@ -13,6 +14,13 @@ from gptqmodel.quantization.activation_floatx import (
 )
 from gptqmodel.quantization.config import QuantizeConfig
 from tests.w4a_hardware_marks import GLUON_FP8, NVFP4_HARDWARE
+
+
+# The fused pack/decode kernels need Triton; every case that calls them carries
+# ``GLUON_FP8``, which already requires Triton. The config, headroom and
+# replay cases below run on CPU without it.
+if importlib.util.find_spec("triton") is not None:
+    from gptqmodel.nn_modules.qlinear.w4a_nvfp4_triton import nvfp4_decode, nvfp4_pack_and_swizzle
 
 
 # Every CUDA case in this file consumes the NVFP4 carrier, which this release
