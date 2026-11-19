@@ -43,7 +43,7 @@ class XverseQModel(LlamaQModel):
             blocks["mlp:moe"] = experts
         return tree
 
-    def pre_quantize(self, module):
+    def pre_quantize(self, module, module_path: str | None = None):
         if self.model.config.pretraining_tp > 1:
             raise ValueError("XVERSE pretraining_tp > 1 uses dense weight slices; quantization is not qualified")
-        return super().pre_quantize(module)
+        return super().pre_quantize(module, module_path=module_path)

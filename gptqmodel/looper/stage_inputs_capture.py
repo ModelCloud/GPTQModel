@@ -89,6 +89,7 @@ class StageInputsCapture:
                 self.gptq_model.shell_direct_meta_materialize(
                     target_submodule=module,
                     device=device,
+                    module_path=module_name,
                 )
 
     def _resolve_forward_device(

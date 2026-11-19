@@ -45,6 +45,34 @@ def _rank_pattern_matches(pattern: str, weight_key: str, *, ignore_case: bool = 
     return pcre.compile(rf"(.*\.)?({pattern})$", flags).match(weight_key) is not None
 
 
+def _pattern_override_candidates(
+    patterns: Dict[str, object], weight_key: str
+) -> List[Tuple[str, object]]:
+    """List ``(pattern, value)`` in PEFT's precedence order for ``weight_key``.
+
+    Exact, case-sensitive matches come first, in declaration order, because
+    that is the order PEFT itself applies. The legacy case-insensitive fallback
+    runs only when no pattern matched exactly: trying it per pattern let an
+    earlier lowercase rule capture a later rule's canonical mixed-case module
+    (`alpha_pattern={"proj": 8, "Proj": 2}` applied 8 to `block.Proj`, #5422).
+
+    The fallback keeps its old reach: it applies only when the pattern or the
+    module name is written in lowercase, which is what a legacy GPT-QModel
+    export produces. A canonical pattern is never case-folded onto a canonical
+    name.
+    """
+
+    exact: List[str] = []
+    folded: List[str] = []
+    for pattern in patterns:
+        if _rank_pattern_matches(pattern, weight_key):
+            exact.append(pattern)
+        elif pattern == pattern.lower() or weight_key == weight_key.lower():
+            if _rank_pattern_matches(pattern, weight_key, ignore_case=True):
+                folded.append(pattern)
+    return [(pattern, patterns[pattern]) for pattern in exact + folded]
+
+
 def _reject_unsupported_adapter_tensors(weights: Dict[str, torch.Tensor]) -> None:
     """Fail closed on adapter tensors this runtime cannot apply.
 
@@ -224,6 +252,9 @@ class Lora(Adapter):
         self.lora_A = lora_A
         self.lora_B = lora_B
         self.lora_scale = 1.0
+        # Whether ``lora_scale`` was multiplied into ``lora_B`` at load time.
+        # ``apply()`` multiplies the product when it was not.
+        self._lora_scale_folded = True
         self._lora_config: Optional[LoraConfig] = None
 
     @classmethod
@@ -258,6 +289,11 @@ class Lora(Adapter):
             self.lora_B = self.lora_B.to(device=x.device, dtype=x.dtype)
 
         update = (x @ self.lora_A) @ self.lora_B
+        if not self._lora_scale_folded:
+            # Folding overflowed (or flushed a value) in the adapter dtype, so
+            # the raw B stays stored and the effective scale is applied to the
+            # product, which is the PEFT order (#5426).
+            update = update * self.lora_scale
 
         # fix batch for lora
         # Some kernels do not reshape x, such as marlin / exllama / exllamav2.
@@ -475,11 +511,37 @@ class Lora(Adapter):
         )
         # `lora_B` is already a private contiguous clone from the immutable
         # adapter cache. Fold the scale once here so every forward uses the
-        # PEFT effective scale without adding another multiply.
-        self.lora_B.mul_(self.lora_scale)
+        # PEFT effective scale without adding another multiply, unless the fold
+        # would not survive `lora_B`'s storage dtype (#5426).
+        self._lora_scale_folded = self._fold_scale_into_b()
 
         #print(f"Adapter: lora_A {lora_A.shape}: `{lora_B}`")
         #print(f"Adapter: lora_B {lora_B.shape}: `{lora_B}`")
+
+    def _fold_scale_into_b(self) -> bool:
+        """Fold ``lora_scale`` into ``lora_B`` only when that is lossless enough.
+
+        The fold saves one multiply per forward, but it runs in the adapter's
+        storage dtype. PEFT multiplies the low-rank product by ``alpha / rank``
+        after both projections, so a large ``B`` (or a large scale) can overflow
+        FP16 to ``inf`` even though the scaled product with a small activation
+        is finite (#5426). Folding can also flush a nonzero element to zero.
+
+        Returns ``True`` when the scale was folded into ``lora_B``, ``False``
+        when ``apply()`` must multiply the product instead.
+        """
+
+        scale = float(self.lora_scale)
+        if self.lora_B is None or scale == 1.0:
+            return True
+        with torch.no_grad():
+            folded = self.lora_B * scale
+            if not bool(torch.isfinite(folded).all()):
+                return False
+            if bool(((folded == 0) & (self.lora_B != 0)).any()):
+                return False
+            self.lora_B.mul_(scale)
+        return True
 
     def dynamic_rank_override(self, lora_cfg: LoraConfig, weight_key: str) -> bool:
         """Overrides the adapter rank when the config defines a matching rank pattern."""
@@ -489,18 +551,14 @@ class Lora(Adapter):
             for k, v in lora_cfg.rank_pattern.items():
                 assert isinstance(k, str) and isinstance(v, int)
                 assert v > 0 # check for invalid rank range
-                # Match the pattern exactly as written: full name, then suffix,
-                # then regex. Lowercasing here silently missed canonical
-                # mixed-case module names and inverted regex escapes.
-                matched = _rank_pattern_matches(k, weight_key)
-                if not matched and (k != k.lower() or weight_key != weight_key.lower()):
-                    # Legacy GPT-QModel exports lowercased module names. Retry
-                    # case-insensitively without rewriting the pattern.
-                    matched = _rank_pattern_matches(k, weight_key, ignore_case=True)
-                if matched:
-                    self.rank = v
-                    log.info(f"Adapter: Base Lora `rank` = `{self.rank}` has been overridden by `{k}` due to dynamic `LoraConfig.rank_pattern` control.")
-                    return True
+            # Exact case-sensitive matches first, then the legacy fallback; see
+            # `_pattern_override_candidates` (#5422).
+            for pattern, override in _pattern_override_candidates(
+                lora_cfg.rank_pattern, weight_key
+            ):
+                self.rank = override
+                log.info(f"Adapter: Base Lora `rank` = `{self.rank}` has been overridden by `{pattern}` due to dynamic `LoraConfig.rank_pattern` control.")
+                return True
 
         return False
 
@@ -523,16 +581,17 @@ class Lora(Adapter):
                         f"Adapter: `alpha_pattern[{pattern!r}]` must be a positive real, "
                         f"actual = `{override}`."
                     )
-                matched = _rank_pattern_matches(pattern, weight_key)
-                if not matched and (pattern != pattern.lower() or weight_key != weight_key.lower()):
-                    matched = _rank_pattern_matches(pattern, weight_key, ignore_case=True)
-                if matched:
-                    alpha = float(override)
-                    log.info(
-                        f"Adapter: Base Lora `alpha` = `{base_alpha}` has been overridden by "
-                        f"`{pattern}` due to dynamic `LoraConfig.alpha_pattern` control."
-                    )
-                    break
+            # Exact case-sensitive matches first, then the legacy fallback; see
+            # `_pattern_override_candidates` (#5422).
+            for pattern, override in _pattern_override_candidates(
+                lora_cfg.alpha_pattern, weight_key
+            ):
+                alpha = float(override)
+                log.info(
+                    f"Adapter: Base Lora `alpha` = `{base_alpha}` has been overridden by "
+                    f"`{pattern}` due to dynamic `LoraConfig.alpha_pattern` control."
+                )
+                break
 
         return alpha
 

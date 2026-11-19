@@ -84,7 +84,9 @@ def test_paro_quantize_config_dispatches_constructor():
     assert cfg.quant_method == METHOD.PARO
     assert cfg.format == FORMAT.PARO
     assert cfg.krot == 8
-    assert cfg.opt_batch_size == 128
+    # #5306: 128 rows cost +0.44% Llama-3.2-1B PPL even with the stage LRs
+    # scaled from the 64-row reference, so the default stays at 64.
+    assert cfg.opt_batch_size == 64
     assert cfg.opt_optimizer == "adamw"
     assert cfg.opt_weight_decay == pytest.approx(0.01)
     assert cfg.opt_betas == pytest.approx((0.9, 0.95))

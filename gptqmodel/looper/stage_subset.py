@@ -968,6 +968,7 @@ def _run_single_subset_pass(
             module,
             cur_layer_device,
             projection_modules=full,
+            module_path=layer_descriptor,
         )
         for named_module in subset.values():
             if isinstance(named_module, NamedModule):

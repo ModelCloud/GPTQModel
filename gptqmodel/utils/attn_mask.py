@@ -79,6 +79,32 @@ def normalize_seq_mask(mask: torch.Tensor | None, seq_len: int | None = None) ->
     return m.to(dtype=torch.bool)
 
 
+def align_single_head_capture(
+    x: torch.Tensor | None, keep_mask: torch.Tensor | None
+) -> torch.Tensor | None:
+    """Return an MLA latent capture as ``[B, S, ...]`` so a keep mask can match it.
+
+    transformers' MLA attention expands the compressed KV latent as a
+    single-head ``[B, 1, S, kv_lora_rank]`` tensor before calling ``kv_b_proj``
+    (``modeling_deepseek_v2/v3``, ``glm4_moe_lite``, ``kimi_linear`` and
+    siblings). Every capture hook matches a mask by its leading dims, so
+    ``shape[:2]`` is ``(B, 1)`` and the padded positions of the whole layer went
+    into that one projection's sample (#5389). Dropping the unit head axis
+    makes the existing ``[B, S, ...]`` handling apply unchanged.
+
+    Returns ``x`` untouched unless it is exactly a single-head 4-D capture whose
+    batch and sequence dims describe ``keep_mask``; no copy is made.
+    """
+
+    if not torch.is_tensor(x) or not torch.is_tensor(keep_mask):
+        return x
+    if x.dim() != 4 or x.shape[1] != 1 or keep_mask.ndim != 2:
+        return x
+    if (int(x.shape[0]), int(x.shape[2])) != (int(keep_mask.shape[0]), int(keep_mask.shape[1])):
+        return x
+    return x.squeeze(1)
+
+
 def apply_keep_mask_bt(x: torch.Tensor, keep_mask_bs: torch.Tensor | None) -> torch.Tensor:
     """
     Apply [B, S] keep-mask to a tensor x of shape [B, S, ...].
@@ -88,6 +114,7 @@ def apply_keep_mask_bt(x: torch.Tensor, keep_mask_bs: torch.Tensor | None) -> to
     if keep_mask_bs is None or x.dim() < 2:
         return x
 
+    x = align_single_head_capture(x, keep_mask_bs)
     B, S = x.size(0), x.size(1)
     if keep_mask_bs.shape != (B, S):
         raise AssertionError(f"Mask shape {keep_mask_bs.shape} does not match leading dims {(B, S)} of x={tuple(x.shape)}")

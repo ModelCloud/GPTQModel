@@ -98,10 +98,10 @@ class Raon1MiniQModel(BaseQModel):
             )
         return super().quantize(*args, **kwargs)
 
-    def pre_quantize(self, module):
+    def pre_quantize(self, module, module_path: str | None = None):
         if self.model.config.raon_mxfp8_config:
             raise NotImplementedError("Raon MXFP8 source re-quantization is not qualified.")
-        return super().pre_quantize(module)
+        return super().pre_quantize(module, module_path=module_path)
 
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
         # Let the base hook consume the captured per-layer-type mask/rotary state

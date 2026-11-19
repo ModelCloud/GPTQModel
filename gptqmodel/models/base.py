@@ -128,6 +128,7 @@ from ..utils.structure import (
     LazyTurtle,
     _get_parent_and_leaf_by_path,
     _get_qualified_name,
+    _resolve_qualified_name,
     alias_direct_meta_from_turtle_for_submodule,
     alias_from_turtle_for_submodule,
     restore_init_owned_rotary_buffers,
@@ -4314,6 +4315,7 @@ class BaseQModel(nn.Module):
                     target_model=self.model,
                     target_submodule=module,
                     recurse=False,
+                    module_path=module_name,
                 )
             if not checkpoint_tensors:
                 checkpoint_tensors = dict(module.state_dict(keep_vars=True))
@@ -4336,7 +4338,9 @@ class BaseQModel(nn.Module):
                 target_dtype=decoder_cfg.target_dtype,
                 module_name=module_name,
             )
-            self._replace_live_submodule(module, decoded_module)
+            self._replace_live_submodule(
+                module, decoded_module, module_path=module_name
+            )
             decoded_count += 1
 
         return decoded_count
@@ -4365,6 +4369,7 @@ class BaseQModel(nn.Module):
                     target_model=self.model,
                     target_submodule=module,
                     recurse=False,
+                    module_path=module_name,
                 )
             if not checkpoint_tensors:
                 checkpoint_tensors = dict(module.state_dict(keep_vars=True))
@@ -4409,7 +4414,9 @@ class BaseQModel(nn.Module):
                     quant_source=decoded_module,
                     device=target_device,
                 )
-            self._replace_live_submodule(module, forward_module)
+            self._replace_live_submodule(
+                module, forward_module, module_path=module_name
+            )
             decoded_count += 1
 
         return decoded_count
@@ -4433,6 +4440,7 @@ class BaseQModel(nn.Module):
                     target_model=self.model,
                     target_submodule=module,
                     recurse=False,
+                    module_path=module_name,
                 )
             if not checkpoint_tensors:
                 checkpoint_tensors = dict(module.state_dict(keep_vars=True))
@@ -5217,21 +5225,33 @@ class BaseQModel(nn.Module):
                 devices = list(filtered)
         return as_torch_device(devices[0] if devices else base_device)
 
-    def pre_quantize(self, module: nn.Module) -> nn.Module:
+    def pre_quantize(
+        self,
+        module: nn.Module,
+        module_path: Optional[str] = None,
+    ) -> nn.Module:
         if get_device(module) == META or _module_has_meta_tensors(module):
             device = self._pre_quantize_device()
-            if self._materialize_floatx_layer_shell(module, device):
+            if self._materialize_floatx_layer_shell(
+                module, device, module_path=module_path
+            ):
                 return module
             return self.shell_module_materialize(
                 target_submodule=module,
                 device=device,
+                module_path=module_path,
             )
         elif get_device(module) == CPU and self.quantize_config.device != CPU:
             return move_to(module, device=self._pre_quantize_device())
         else:
             return module
 
-    def _materialize_floatx_layer_shell(self, module: nn.Module, device: torch.device) -> bool:
+    def _materialize_floatx_layer_shell(
+        self,
+        module: nn.Module,
+        device: torch.device,
+        module_path: Optional[str] = None,
+    ) -> bool:
         """Materialize one lazy layer without copying packed floatx storage into dense shells.
 
         Layer staging happens before its quantizable children have ``NamedModule``
@@ -5249,20 +5269,33 @@ class BaseQModel(nn.Module):
         device = as_torch_device(device)
 
         decoded_any = False
+        # Resolve the layer path once, then derive every child path from its
+        # ``named_modules()`` walk.  Looking each child up in the whole model
+        # made floatx shell materialization grow with layer depth.
+        layer_path = _resolve_qualified_name(self.model, module, module_path)
+        module_paths: Dict[int, str] = {}
+        for relative_name, candidate in module.named_modules():
+            full_name = (
+                f"{layer_path}.{relative_name}" if relative_name else layer_path
+            )
+            module_paths.setdefault(id(candidate), full_name)
         # Traverse leaves first, because replacement invalidates the old
         # submodule's qualified path in the live model tree.
         for submodule in reversed(list(module.modules())):
             if submodule is module or not hasattr(submodule, "weight"):
                 continue
+            module_name = module_paths.get(id(submodule))
+            if module_name is None:
+                module_name = _get_qualified_name(self.model, submodule)
             checkpoint_tensors = self.turtle_model.checkpoint_tensors_for_submodule(
                 target_model=self.model,
                 target_submodule=submodule,
                 recurse=False,
+                module_path=module_name,
             )
             weight = checkpoint_tensors.get("weight")
             if not isinstance(weight, torch.Tensor):
                 continue
-            module_name = _get_qualified_name(self.model, submodule)
             if self._decoder_weight_format(
                 weight=weight,
                 checkpoint_tensors=checkpoint_tensors,
@@ -5275,7 +5308,10 @@ class BaseQModel(nn.Module):
                 target_dtype=decoder_cfg.target_dtype,
                 module_name=module_name,
             )
-            self._replace_live_submodule(submodule, decoded)
+            self._replace_live_submodule(
+                submodule, decoded, module_path=module_name
+            )
+            module_paths[id(decoded)] = module_name
             decoded_any = True
 
         if not decoded_any:
@@ -5284,7 +5320,11 @@ class BaseQModel(nn.Module):
         # Materialize normal direct tensors (norm weights, etc.) after every
         # packed leaf has been replaced by a shape-compatible dense shell.
         for submodule in module.modules():
-            self.shell_direct_meta_materialize(target_submodule=submodule, device=device)
+            self.shell_direct_meta_materialize(
+                target_submodule=submodule,
+                device=device,
+                module_path=module_paths.get(id(submodule)),
+            )
         move_to(module, device=device)
         return True
 
@@ -5357,10 +5397,17 @@ class BaseQModel(nn.Module):
         self,
         current_submodule: nn.Module,
         replacement: nn.Module,
+        module_path: Optional[str] = None,
     ) -> nn.Module:
-        """Replace one live model submodule in place and return the replacement."""
+        """Replace one live model submodule in place and return the replacement.
 
-        module_path = _get_qualified_name(self.model, current_submodule)
+        ``module_path`` lets callers that already hold the dotted name skip the
+        full-tree scan in ``_get_qualified_name``.
+        """
+
+        module_path = _resolve_qualified_name(
+            self.model, current_submodule, module_path
+        )
         parent, leaf = _get_parent_and_leaf_by_path(self.model, module_path)
         setattr(parent, leaf, replacement)
         return replacement
@@ -5412,7 +5459,9 @@ class BaseQModel(nn.Module):
         replacement = cast_source_module(module, spec)
         named_module.state["auto_dtype_cast_source_spec"] = spec
         named_module.state["auto_dtype_cast_was_applied"] = True
-        replacement = self._replace_live_submodule(module, replacement)
+        replacement = self._replace_live_submodule(
+            module, replacement, module_path=named_module.full_name
+        )
         source_bias = getattr(module, "bias", None)
         source_bytes = module.weight.numel() * module.weight.element_size()
         if isinstance(source_bias, torch.Tensor):
@@ -6091,6 +6140,7 @@ class BaseQModel(nn.Module):
             target_model=self.model,
             target_submodule=target_submodule,
             recurse=False,
+            module_path=named_module.full_name,
         )
         weight = checkpoint_tensors.get("weight")
         if not isinstance(weight, torch.Tensor):
@@ -6127,7 +6177,11 @@ class BaseQModel(nn.Module):
                 target_dtype=target_dtype,
             )
             if fp8_module is not None:
-                replacement = self._replace_live_submodule(target_submodule, fp8_module)
+                replacement = self._replace_live_submodule(
+                    target_submodule,
+                    fp8_module,
+                    module_path=named_module.full_name,
+                )
                 forward_mode = "native"
                 reason = "validated_native_fp8"
             else:
@@ -6140,7 +6194,11 @@ class BaseQModel(nn.Module):
                 target_dtype=target_dtype,
             )
             if fp4_module is not None:
-                replacement = self._replace_live_submodule(target_submodule, fp4_module)
+                replacement = self._replace_live_submodule(
+                    target_submodule,
+                    fp4_module,
+                    module_path=named_module.full_name,
+                )
                 forward_mode = "native"
                 reason = "validated_native_nvfp4"
             else:
@@ -6161,7 +6219,11 @@ class BaseQModel(nn.Module):
                 quant_source=quant_source,
                 device=device,
             )
-            replacement = self._replace_live_submodule(target_submodule, decoded_forward)
+            replacement = self._replace_live_submodule(
+                target_submodule,
+                decoded_forward,
+                module_path=named_module.full_name,
+            )
 
         if forward_mode == "native":
             log.info(
@@ -7091,6 +7153,8 @@ class BaseQModel(nn.Module):
             module_path: Optional[str] = None,
     ) -> torch.nn.Module:
         device = as_torch_device(device)
+        if module_path is None and named_module is not None:
+            module_path = named_module.full_name
         with self._turtle_lock:
             if role == "forward" and named_module is not None and named_module.state.get("auto_dtype_cast_source_spec") is not None:
                 return target_submodule
@@ -7117,6 +7181,7 @@ class BaseQModel(nn.Module):
                             target_model=self.model,
                             target_submodule=quant_source_template,
                             recurse=False,
+                            module_path=module_path,
                         )
                     quant_source = self._build_decoder_quant_source_module(
                         quant_source_template,
@@ -7134,7 +7199,11 @@ class BaseQModel(nn.Module):
                         source_format=(decoder_plan.get("runtime_plan") or {}).get("source_format", "auto"),
                     )
 
-                module = self._replace_live_submodule(target_submodule, quant_source)
+                module = self._replace_live_submodule(
+                    target_submodule,
+                    quant_source,
+                    module_path=module_path,
+                )
                 if source_spec is not None:
                     from ..utils.auto_dtype_cast import release_packed_source_storage
 
@@ -7155,6 +7224,7 @@ class BaseQModel(nn.Module):
                     target_model=self.model,
                     target_submodule=target_submodule,
                     recurse=False,
+                    module_path=module_path,
                 )
                 weight = checkpoint_tensors.get("weight")
                 if isinstance(weight, torch.Tensor):
@@ -7202,6 +7272,7 @@ class BaseQModel(nn.Module):
             self,
             target_submodule: torch.nn.Module,
             device: Optional[torch.device] = None,
+            module_path: Optional[str] = None,
     ):
         if device is not None:
             device = as_torch_device(device)
@@ -7213,6 +7284,7 @@ class BaseQModel(nn.Module):
                 turtle_model=self.turtle_model,
                 target_submodule=target_submodule,
                 device=device,
+                module_path=module_path,
             )
 
     ## overrides nn.module.train()

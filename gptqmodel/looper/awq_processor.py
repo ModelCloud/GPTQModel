@@ -55,7 +55,11 @@ from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_by_name, get_op_name
 from ..quantization.awq.utils.packing_utils import source_weight_out_in
 from ..quantization.config import FORMAT, METHOD, CalibrationConfig, MSEConfig, QuantizeConfig, resolve_quant_format
-from ..utils.attn_mask import exclude_attention_sinks, normalize_seq_mask
+from ..utils.attn_mask import (
+    align_single_head_capture,
+    exclude_attention_sinks,
+    normalize_seq_mask,
+)
 from ..utils.ctx import ctx
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
@@ -414,24 +418,40 @@ def _is_recurrent_attention_layer_type(layer_type: Optional[str]) -> bool:
     return builder is create_recurrent_attention_mask
 
 
-def _kernel_shape_supported(kernel, in_features: int, out_features: int) -> bool:
+def _kernel_shape_supported(
+    kernel, in_features: int, out_features: int, group_size: Optional[int] = None
+) -> bool:
     """Return whether ``kernel`` declares it can pack this module shape.
 
     Uses the kernel's own static shape contract
     (``SUPPORTS_{IN,OUT}_FEATURES_DIVISIBLE_BY`` through
-    ``_validate_shape_constraints``) rather than the full ``validate``: the full
-    check also probes runtime availability, and a shape decision must not depend
-    on whether a JIT extension happens to be built.
+    ``_validate_shape_constraints``) plus, when the kernel has one, its static
+    group-size/shape rule (``_validate_group_size_shape``), rather than the full
+    ``validate``: the full check also probes runtime availability, and a shape
+    decision must not depend on whether a JIT extension happens to be built.
     """
 
     check = getattr(kernel, "_validate_shape_constraints", None)
-    if not callable(check):
-        return True
-    try:
-        ok, _ = check(in_features=in_features, out_features=out_features)
-    except Exception:
-        return False
-    return bool(ok)
+    if callable(check):
+        try:
+            ok, _ = check(in_features=in_features, out_features=out_features)
+        except Exception:
+            return False
+        if not ok:
+            return False
+    group_check = getattr(kernel, "_validate_group_size_shape", None)
+    if group_size is not None and callable(group_check):
+        try:
+            ok, _ = group_check(
+                in_features=in_features,
+                out_features=out_features,
+                group_size=group_size,
+            )
+        except Exception:
+            return False
+        if not ok:
+            return False
+    return True
 
 
 def _resolve_module_sym(qcfg, module_name: Optional[str], resolved_cfg=None) -> bool:
@@ -495,6 +515,13 @@ class AWQProcessor(LoopProcessor):
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
+        # AWQ masks every capture itself in `_apply_active_keep_mask_to_feature`,
+        # which also recognizes the `[B*S, H]` and MLA single-head layouts. Keep
+        # the raw activation here so a routed-expert subset stays
+        # distinguishable from a capture that was already filtered: a routed
+        # subset can coincidentally have exactly `keep_mask.sum()` rows while
+        # still carrying padding (#5360).
+        self.preserve_batch_keep_mask = True
         self.avg_losses = []
         self.nsamples = 0
         self._nsamples_total = 0
@@ -723,14 +750,14 @@ class AWQProcessor(LoopProcessor):
         """
 
         target_format = self._module_format(module_name, resolved_cfg=resolved_cfg)
+        group_size = self._module_group_size(module_name, resolved_cfg=resolved_cfg)
         # RCO can allocate a different width per module. The CUDA GEMM/GEMV
         # kernels unpack 4-bit codes only, so a non-4-bit module must use the
         # portable torch kernel, which packs and runs 2-8 bits.
         if target_format == FORMAT.GEMM:
             if (
                 self._module_bits(module_name, resolved_cfg=resolved_cfg) != 4
-                or self._module_group_size(module_name, resolved_cfg=resolved_cfg)
-                not in AwqGEMMLinear.SUPPORTS_GROUP_SIZE
+                or group_size not in AwqGEMMLinear.SUPPORTS_GROUP_SIZE
             ):
                 return AwqTorchLinear
         if target_format == self.format:
@@ -741,9 +768,21 @@ class AWQProcessor(LoopProcessor):
                     module_name,
                     in_features=in_features,
                     out_features=out_features,
+                    group_size=group_size,
                     resolved_cfg=resolved_cfg,
                 )
-        return self._select_qlinear_kernel_for_format(target_format)
+        # The format-only selection above cannot see the module shape, and a
+        # per-channel GEMM module only packs when `out_features` is a multiple
+        # of `in_features` (#5391). Apply the same shape fallback here so a GQA
+        # `k_proj`/`v_proj`/`down_proj` does not reach `create_quant_module`.
+        return self._portable_kernel_for_shape(
+            self._select_qlinear_kernel_for_format(target_format),
+            module_name,
+            in_features=in_features,
+            out_features=out_features,
+            group_size=group_size,
+            resolved_cfg=resolved_cfg,
+        )
 
     def _portable_kernel_for_shape(
         self,
@@ -752,6 +791,7 @@ class AWQProcessor(LoopProcessor):
         *,
         in_features: Optional[int],
         out_features: Optional[int],
+        group_size: Optional[int] = None,
         resolved_cfg=None,
     ):
         """Fall back to ``AwqTorchLinear`` when ``kernel`` rejects the shape.
@@ -773,9 +813,9 @@ class AWQProcessor(LoopProcessor):
 
         if kernel is AwqTorchLinear or in_features is None or out_features is None:
             return kernel
-        if _kernel_shape_supported(kernel, in_features, out_features):
+        if _kernel_shape_supported(kernel, in_features, out_features, group_size):
             return kernel
-        if not _kernel_shape_supported(AwqTorchLinear, in_features, out_features):
+        if not _kernel_shape_supported(AwqTorchLinear, in_features, out_features, group_size):
             # Neither kernel packs the shape: keep the requested one so the
             # module-specific error still names it.
             return kernel
@@ -1805,13 +1845,14 @@ class AWQProcessor(LoopProcessor):
         keep_mask = getattr(tls, "value", None)
         if not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
             return feature
-        # A `[B * S, H]` capture is filtered by the mask itself, and the
-        # all-expert path already stores exactly the kept rows. Only a routed
-        # subset (pads routed to this expert, real rows elsewhere) has a row
-        # count that matches neither. A real activation can be all-zero, so
-        # the row count is the discriminator, not the zeros alone.
-        row_count = int(feature.shape[0])
-        if row_count in (int(keep_mask.numel()), int(keep_mask.sum())):
+        # A `[B * S, H]` capture is filtered by the mask itself in
+        # `_apply_active_keep_mask_to_feature`. Anything else is a routed subset
+        # (pads routed to this expert, real rows elsewhere), whose row count is
+        # unrelated to the mask: it can even equal `keep_mask.sum()` while still
+        # containing padding, so the count is only used to recognize the full
+        # grid (#5360). A real activation can be all-zero, so the zero check
+        # alone cannot decide either.
+        if int(feature.shape[0]) == int(keep_mask.numel()):
             return feature
 
         padding_present = getattr(tls, "mask_has_padding", None)
@@ -1839,6 +1880,7 @@ class AWQProcessor(LoopProcessor):
         if not torch.is_tensor(feature) or not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
             return feature
 
+        feature = align_single_head_capture(feature, keep_mask)
         keep_mask = keep_mask.to(device=feature.device, dtype=torch.bool)
         if feature.dim() >= 3 and tuple(feature.shape[:2]) == tuple(keep_mask.shape):
             flattened = feature.reshape(-1, *feature.shape[2:])

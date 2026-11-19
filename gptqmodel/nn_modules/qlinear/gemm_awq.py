@@ -248,14 +248,22 @@ class AwqGEMMLinear(AWQuantLinear):
             return True, None
 
     @classmethod
-    def _validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
-        ok, err = super()._validate(**args)
-        if not ok:
-            return ok, err
+    def _validate_group_size_shape(
+        cls,
+        *,
+        in_features: Optional[int] = None,
+        out_features: Optional[int] = None,
+        group_size: Optional[int] = None,
+    ) -> Tuple[bool, Optional[Exception]]:
+        """Return whether this kernel packs ``out_features`` for ``group_size``.
 
-        group_size = args.get("group_size")
-        in_features = args.get("in_features")
-        out_features = args.get("out_features")
+        Split out of ``_validate`` so kernel selection can apply the same rule
+        without probing runtime availability: a per-channel (``-1``) module
+        packs only when ``out_features`` is a multiple of ``in_features``, so a
+        GQA ``k_proj``/``v_proj``/``down_proj`` cannot use the CUDA GEMM kernel
+        (#5391).
+        """
+
         effective_group_size = (
             in_features if group_size == -1 and in_features is not None else group_size
         )
@@ -273,6 +281,18 @@ class AwqGEMMLinear(AWQuantLinear):
                 f"got out_features={out_features}, group_size={effective_group_size}"
             )
         return True, None
+
+    @classmethod
+    def _validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+        ok, err = super()._validate(**args)
+        if not ok:
+            return ok, err
+
+        return cls._validate_group_size_shape(
+            in_features=args.get("in_features"),
+            out_features=args.get("out_features"),
+            group_size=args.get("group_size"),
+        )
 
     def __init__(
         self,

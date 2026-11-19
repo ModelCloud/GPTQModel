@@ -734,6 +734,27 @@ class ParoProcessor(LoopProcessor):
             return False
         return bool(getattr(self.qcfg, "opt_stage_cudagraph", False))
 
+    def _stage_learning_rates(self) -> tuple[float, float, float]:
+        """Return the three stage LRs scaled for the optimizer batch size.
+
+        ``opt_batch_size`` sets how many rows one optimizer step covers, so the
+        number of steps per epoch is ``rows / opt_batch_size``. At a fixed LR a
+        larger batch therefore moves the parameters less per epoch: #5279
+        raised the default from 64 to 128 and cost Llama-3.2-1B about 1% PPL
+        (#5306). Scale linearly from the 64-row reference, so a step covers
+        twice the rows and moves twice as far and the per-epoch update is
+        unchanged. Batches at or below the reference keep the LR they always
+        had.
+        """
+
+        batch_size = float(getattr(self.qcfg, "opt_batch_size", 64) or 64)
+        scale = max(1.0, batch_size / 64.0)
+        return (
+            float(self.qcfg.opt_rotation_lr) * scale,
+            float(self.qcfg.opt_weight_lr) * scale,
+            float(self.qcfg.opt_quantizer_lr) * scale,
+        )
+
     def _optimizer_param_group_kwargs(self) -> Dict[str, object]:
         """Return shared optimizer hyperparameters for Paro stage param groups."""
         qcfg = getattr(self, "qcfg", None)
@@ -2340,6 +2361,7 @@ class ParoProcessor(LoopProcessor):
         optim_modules: dict[str, _ParoOptimLinear] = {}
         original_modules: dict[str, torch.nn.Module] = {}
         optimizer_group_kwargs = self._optimizer_param_group_kwargs()
+        rotation_lr, weight_lr, quantizer_lr = self._stage_learning_rates()
         try:
             for param in layer.parameters():
                 param.requires_grad_(False)
@@ -2358,10 +2380,10 @@ class ParoProcessor(LoopProcessor):
                 replay_batches_train=replay_batches_train,
                 replay_batches_val=replay_batches_val,
                 param_groups=[
-                    {"params": [optim_module.channel_scales_opt], "lr": self.qcfg.opt_rotation_lr, **optimizer_group_kwargs}
+                    {"params": [optim_module.channel_scales_opt], "lr": rotation_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ] + [
-                    {"params": [optim_module.theta], "lr": self.qcfg.opt_rotation_lr, **optimizer_group_kwargs}
+                    {"params": [optim_module.theta], "lr": rotation_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ],
                 epochs=int(self.qcfg.opt_rotation_epochs),
@@ -2377,10 +2399,10 @@ class ParoProcessor(LoopProcessor):
                 replay_batches_train=replay_batches_train,
                 replay_batches_val=replay_batches_val,
                 param_groups=[
-                    {"params": [optim_module.weight], "lr": self.qcfg.opt_weight_lr, **optimizer_group_kwargs}
+                    {"params": [optim_module.weight], "lr": weight_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ] + [
-                    {"params": optim_module.quantizer.optim_params(), "lr": self.qcfg.opt_quantizer_lr, **optimizer_group_kwargs}
+                    {"params": optim_module.quantizer.optim_params(), "lr": quantizer_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                     if optim_module.quantizer is not None
                 ],
@@ -2470,6 +2492,7 @@ class ParoProcessor(LoopProcessor):
                 attention_masks_val,
             ) = self._group_dataset_for_device(state, next(layer_clone.parameters()).device)
             optimizer_group_kwargs = self._optimizer_param_group_kwargs()
+            rotation_lr, weight_lr, quantizer_lr = self._stage_learning_rates()
 
             self._run_group_stage(
                 layer_clone,
@@ -2485,10 +2508,10 @@ class ParoProcessor(LoopProcessor):
                 position_ids_val=position_ids_val,
                 attention_masks_val=attention_masks_val,
                 param_groups=[
-                    {"params": [optim_module.channel_scales_opt], "lr": self.qcfg.opt_rotation_lr, **optimizer_group_kwargs}
+                    {"params": [optim_module.channel_scales_opt], "lr": rotation_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ] + [
-                    {"params": [optim_module.theta], "lr": self.qcfg.opt_rotation_lr, **optimizer_group_kwargs}
+                    {"params": [optim_module.theta], "lr": rotation_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ],
                 epochs=int(self.qcfg.opt_rotation_epochs),
@@ -2511,10 +2534,10 @@ class ParoProcessor(LoopProcessor):
                 position_ids_val=position_ids_val,
                 attention_masks_val=attention_masks_val,
                 param_groups=[
-                    {"params": [optim_module.weight], "lr": self.qcfg.opt_weight_lr, **optimizer_group_kwargs}
+                    {"params": [optim_module.weight], "lr": weight_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ] + [
-                    {"params": optim_module.quantizer.optim_params(), "lr": self.qcfg.opt_quantizer_lr, **optimizer_group_kwargs}
+                    {"params": optim_module.quantizer.optim_params(), "lr": quantizer_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                     if optim_module.quantizer is not None
                 ],

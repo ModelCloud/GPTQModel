@@ -31,7 +31,8 @@ def _checkpoint_filler(model):
 
     values = {}
 
-    def materialize(*, target_submodule, device):
+    def materialize(*, target_submodule, device, module_path):
+        assert model.get_submodule(module_path) is target_submodule
         for submodule in target_submodule.modules():
             for attr, param in list(submodule.named_parameters(recurse=False)):
                 if not param.is_meta:

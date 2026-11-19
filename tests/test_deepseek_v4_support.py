@@ -309,7 +309,7 @@ def test_auto_decoder_materializes_unquantized_linear_subclass_with_its_forward(
     monkeypatch.setattr(
         harness,
         "_replace_live_submodule",
-        lambda _current, replacement: replacement,
+        lambda _current, replacement, module_path=None: replacement,
     )
 
     replacement = harness._prepare_auto_decoder_forward_module(

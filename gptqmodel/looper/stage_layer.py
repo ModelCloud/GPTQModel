@@ -739,7 +739,9 @@ def run_layer_stage(
         # track the current object before that call as well as after it.
         looper._track_inflight_layer(module, inflight_home)
 
-        module = looper.gptq_model.pre_quantize(module)
+        module = looper.gptq_model.pre_quantize(
+            module, module_path=layer_name or None
+        )
         looper._track_inflight_layer(module, inflight_home)
 
         embedding_module_name = None
@@ -857,6 +859,7 @@ def run_layer_stage(
                 module,
                 cur_layer_device,
                 projection_modules=full,
+                module_path=layer_descriptor,
             )
             # Recovery must use the same forward topology as the original
             # capture.  In particular, DeepSeek's router can make different
@@ -1262,6 +1265,7 @@ def run_layer_stage(
                     module,
                     cur_layer_device,
                     projection_modules=full,
+                    module_path=layer_descriptor,
                 )
                 for relative_name, native_module in full.items():
                     if isinstance(native_module, NamedModule):
@@ -1465,6 +1469,7 @@ def run_layer_stage(
                                             offload_to_disk(
                                                 model=looper.gptq_model.model,
                                                 module=target_module,
+                                                module_name=module_full_name,
                                                 disk_path=offload_path,
                                                 # The on-disk bundle is the only record a
                                                 # resumed run can restore from, so never
