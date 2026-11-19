@@ -497,10 +497,14 @@ def test_ordinary_models_preserve_tokenicers_serialized_preference(tmp_path, mon
         return [tokenizer(text, add_special_tokens=False).input_ids for text in probes]
 
     assert ids(serialized) != ids(legacy), "fixture must exercise class/serialized tokenization disagreement"
-    # Some Transformers versions recognize this simple ByteLevel fixture in
-    # AutoTokenizer already. Inject only its legacy class choice, keeping both
-    # real tokenizers and Tokenicer's preference/normalization consumer intact.
-    monkeypatch.setattr(AutoTokenizer, "from_pretrained", lambda *args, **kwargs: legacy)
+    # Transformers 5.23 class selection (mirrored by NativeTokenizer) already
+    # recognizes this ByteLevel fixture. Inject only the legacy class choice
+    # into the package selector, keeping both real tokenizers and Tokenicer's
+    # preference/normalization consumer intact.
+    from gptqmodel.models.ports.native.auto import NativeTokenizer
+    from gptqmodel.models.ports.native.llama.tokenization_llama import LlamaTokenizer as VendoredLlamaTokenizer
+
+    monkeypatch.setattr(NativeTokenizer, "tokenizer_class", classmethod(lambda cls, *args, **kwargs: VendoredLlamaTokenizer))
     options = {} if prefer_serialized is None else {"prefer_serialized_tokenizer": prefer_serialized}
     loaded = load_hf_tokenizer(str(tmp_path), model_config=config, pad_tokens=["<pad>"], **options)
     assert ids(loaded) == ids(serialized if prefer_serialized is None else legacy)
