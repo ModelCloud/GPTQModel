@@ -504,11 +504,17 @@ def _quantize_weight_only(source: Path, destination: Path, config) -> None:
 
 
 def _fp8_checkpoint(source: Path, destination: Path) -> None:
-    """Publish a dense checkpoint in a production FP8 layout (row, multiplier).
+    """Publish a dense checkpoint in the load-only FP8 layout (row, inverse).
 
     FP8 is load-only since #5242, so the fixture cannot come from ``quantize()``
-    (#5271). It is encoded with the same reference encoder the FP8 kernel tests
-    use, and the checkpoint declares the production scale convention.
+    (#5271). ``quantize_fp8_weight`` stores ``448 / amax`` under
+    ``weight_scale_inv`` and the wrapper divides it back on decode, so the
+    checkpoint declares ``weight_scale_semantics: "inverse"`` (#5325).
+
+    Only the decoder projections are quantized. The tiny source ties ``lm_head``
+    to ``embed_tokens``; quantizing the head as well stored an FP8 ``lm_head``
+    whose scale the loader never applies, so the logits decoded ~1e4x too large
+    while a finite-logits assertion still passed (#5325).
     """
     from transformers import AutoModelForCausalLM
 
@@ -516,28 +522,32 @@ def _fp8_checkpoint(source: Path, destination: Path) -> None:
 
     model = AutoModelForCausalLM.from_pretrained(str(source))
     linear_prefixes = {
-        name for name, module in model.named_modules() if isinstance(module, nn.Linear)
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, nn.Linear) and name.startswith("model.layers.")
     }
-    state = {}
-    for name, tensor in model.state_dict().items():
+    # ``state_dict()`` returns the tied embedding/head tensors twice, sharing one
+    # storage; safetensors refuses to write that. Clone every tensor and drop
+    # the tie in the config so the head stays a dense copy of the embeddings.
+    state = {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
+    for name in list(state):
         prefix, _, leaf = name.rpartition(".")
-        if leaf == "weight" and prefix in linear_prefixes and tensor.dim() == 2:
-            quantized, scale_inv = quantize_fp8_weight(tensor, weight_scale_method="row")
+        if leaf == "weight" and prefix in linear_prefixes:
+            quantized, scale_inv = quantize_fp8_weight(state[name], weight_scale_method="row")
             state[f"{prefix}.weight"] = quantized
             state[f"{prefix}.weight_scale_inv"] = scale_inv
-        else:
-            state[name] = tensor
 
     shutil.copytree(source, destination)
     save_file(state, str(destination / "model.safetensors"), metadata={"format": "pt"})
     config_path = destination / "config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["tie_word_embeddings"] = False
     config["quantization_config"] = {
         "method": "fp8",
         "quant_method": "fp8",
         "format": "float8_e4m3fn",
         "weight_scale_method": "row",
-        "weight_scale_semantics": "multiplier",
+        "weight_scale_semantics": "inverse",
     }
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
@@ -574,10 +584,26 @@ def test_truncated_weight_only_checkpoint_fails_closed(
     _tiny_qwen2(source)
     build_checkpoint(source, checkpoint)
 
+    input_ids = torch.tensor([[1, 3, 4, 5]])
     model = GPTQModel.load(str(checkpoint), device="cpu")
     with torch.inference_mode():
-        logits = model.model(input_ids=torch.tensor([[1, 3, 4, 5]]), use_cache=False).logits
+        logits = model.model(input_ids=input_ids, use_cache=False).logits
     assert torch.isfinite(logits).all()
+    # A payload whose scale is mis-declared (or dropped) still decodes to finite
+    # logits that are orders of magnitude too large, which the old assertion
+    # accepted (#5325). Pin the decode against the dense source as well.
+    from transformers import AutoModelForCausalLM
+
+    dense_model = AutoModelForCausalLM.from_pretrained(str(source)).eval()
+    with torch.inference_mode():
+        dense_logits = dense_model(input_ids=input_ids, use_cache=False).logits.float()
+    torch.testing.assert_close(
+        logits.float(),
+        dense_logits,
+        rtol=0,
+        atol=0.05 * float(dense_logits.abs().max()),
+    )
+    del dense_model
     del model
 
     for suffix in required:

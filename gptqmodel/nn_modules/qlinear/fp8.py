@@ -25,6 +25,14 @@ from ...quantization.dtype import (
     device_supports_native_fp8,
 )
 from ...utils.backend import BACKEND
+from ...utils.fp8_block_triton import (
+    TRITON_FP8_FORMATS,
+    fp8_block_decode,
+    fp8_block_decode_supported,
+    fp8_block_gemv,
+    fp8_block_gemv_payload_supported,
+    triton_fp8_available,
+)
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import TORCH_HAS_COMPILE, torch_compile
@@ -36,6 +44,15 @@ from ._numerics import autocast_active, matmul_fp32_reduce
 log = setup_logger()
 
 _FP8_ACTIVATION_QUANT_METHODS = ("none", "per_token")
+
+#: Activation row counts served by the fused block-scale product instead of
+#: the single-pass decode plus a GEMM. The decode-in-the-loop tiling is
+#: bandwidth-bound, so it wins at decode sizes; a general GEMM overtakes it from
+#: roughly M=128 on narrow projections and M=256 on wide ones (measured on
+#: sm_89 across K/N from 4096/1024 to 14336/4096).
+_FUSED_DECODE_MAX_ROWS = 64
+_FUSED_DECODE_MAX_ROWS_WIDE = 192
+_FUSED_DECODE_WIDE_OUT_FEATURES = 2048
 
 
 #: ``(hip?, device index, output dtype) -> bool`` answers for the row-wise
@@ -348,6 +365,11 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         # Set when a HIP build cannot cast this format natively, so later forwards
         # go straight to the validated CPU path instead of retrying the GPU cast.
         self._native_dequant_disabled = False
+        # The block-scale decode plan is payload-derived; ``_invalidate_compiled``
+        # raises the generation so a reload/move cannot reuse a stale answer.
+        self._fp8_block_plan_generation = 0
+        self._fp8_block_plan_key = None
+        self._fp8_block_plan_value = (False, False)
         # Range-bound cache for the in-dtype weight narrowing. ``_apply`` and
         # ``_load_from_state_dict`` reset it, and ``post_init`` warms it, so a
         # captured/traced forward only reads it (#5195).
@@ -904,6 +926,201 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             return False
         return True
 
+    def _block_decode_plan(
+        self, device: torch.device, dtype: torch.dtype
+    ) -> tuple[bool, bool]:
+        """Payload facts for the block-scale decode, computed once per payload.
+
+        The checks below inspect shapes and read the smallest scale tensor on
+        the host, which is far too slow for a per-forward gate. They depend
+        only on the stored payload and its placement, so the answer is cached
+        and invalidated by ``_invalidate_compiled`` and by a weight/scale
+        rebind (the cache key carries both storage addresses). Returns
+        ``(decode, fused)``.
+        """
+
+        weight = self.weight
+        scale = self.weight_scale_inv
+        key = (
+            weight.data_ptr(),
+            scale.data_ptr(),
+            device,
+            dtype,
+            scale.dtype,
+            self._native_dequant_disabled,
+            self._fp8_block_plan_generation,
+        )
+        if self._fp8_block_plan_key == key:
+            return self._fp8_block_plan_value
+
+        if _probe_must_wait():
+            # Deciding needs the smallest scale on the host. Inside a graph
+            # capture or a trace that copy is forbidden, so this call takes
+            # the portable decode and does not cache the answer.
+            return (False, False)
+        value = self._compute_block_decode_plan(device=device, dtype=dtype)
+        self._fp8_block_plan_key = key
+        self._fp8_block_plan_value = value
+        return value
+
+    def _compute_block_decode_plan(
+        self, *, device: torch.device, dtype: torch.dtype
+    ) -> tuple[bool, bool]:
+        if self.weight_scale_method != "block" or self.weight_block_size is None:
+            return (False, False)
+        if self.fp8_format not in TRITON_FP8_FORMATS:
+            return (False, False)
+        if self._native_dequant_disabled:
+            return (False, False)
+        weight = self.weight
+        scale = self.weight_scale_inv
+        if weight.device != device or scale.device != device:
+            return (False, False)
+        if not self._block_scale_matches_weight():
+            return (False, False)
+        if self.weight_scale_semantics == "inverse" and not self._inverse_scales_are_nonzero():
+            # A zero inverse scale decodes a code to inf and can turn a zero
+            # product into NaN. Keep the exact reference path for it.
+            return (False, False)
+        if not triton_fp8_available(device):
+            return (False, False)
+        block_rows, block_cols = self.weight_block_size
+        block = (int(block_rows), int(block_cols))
+        # A checkpoint may store the tiny per-block scale narrower than FP32;
+        # the forward converts one small tensor per call, so the plan only needs
+        # the float kind, not the exact storage width.
+        decode = (
+            scale.is_floating_point()
+            and fp8_block_decode_supported(
+                weight,
+                scale.to(dtype=torch.float32) if scale.dtype != torch.float32 else scale,
+                block_size=block,
+                dtype=dtype,
+            )
+        )
+        fused = (
+            decode
+            and fp8_block_gemv_payload_supported(weight, scale, block_size=block, dtype=dtype)
+            # Same range-safety question ``_native_gemm_eligible`` answers for
+            # the row/tensor epilogue: the fused product keeps the codes in the
+            # activation dtype, so a decoded weight outside that dtype's finite
+            # range has to take the single-pass decode.
+            and self._native_gemm_eligible_dtype(dtype)
+        )
+        return (decode, fused)
+
+    def _native_gemm_eligible_dtype(self, dtype: torch.dtype) -> bool:
+        """``_native_gemm_eligible`` for a dtype instead of a live tensor.
+
+        ``autocast_active`` stays a per-forward check; every other input is a
+        property of the payload, so the cached block-decode plan can hold it.
+        """
+
+        return dtype in (torch.float16, torch.bfloat16) and self._weights_fit_activation_dtype(
+            dtype
+        )
+
+    def _block_decode_eligible(
+        self, x_flat: torch.Tensor, *, fused: bool
+    ) -> bool:
+        """Whether the Triton block decode may serve this call.
+
+        The decode keeps the reference arithmetic (FP32 scale application, one
+        rounding into the activation dtype), so it is selected on the same
+        payloads the portable block decode accepts. What it cannot do is run
+        inside a traced/exported graph: the launch is an opaque Python call, so
+        ``torch.compile``/``export`` keep the Torch decode and its exact graph
+        behaviour. CUDA-graph capture is fine; the launch is graph-safe.
+
+        ``fused`` selects the W8A16 product that folds the decode into the
+        GEMM. It needs the exact divisible 128-wide block layout, a range-safe
+        payload, and no autograd graph; everything else uses the single-pass
+        decode followed by ``matmul_fp32_reduce``.
+        """
+
+        if self.weight_scale_method != "block" or _is_compiling():
+            return False
+        if not x_flat.is_contiguous() or x_flat.device != self.weight.device:
+            return False
+        if x_flat.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            return False
+        decode, fused_ok = self._block_decode_plan(x_flat.device, x_flat.dtype)
+        if not decode:
+            return False
+        if not fused:
+            return True
+        if not fused_ok or autocast_active(x_flat.device.type):
+            return False
+        limit = (
+            _FUSED_DECODE_MAX_ROWS_WIDE
+            if self.out_features >= _FUSED_DECODE_WIDE_OUT_FEATURES
+            else _FUSED_DECODE_MAX_ROWS
+        )
+        if x_flat.shape[0] > limit:
+            # A measured crossover: past these row counts a general GEMM beats
+            # this kernel's decode-in-the-loop tiling, so the single-pass
+            # decode is the faster of the two.
+            return False
+        return not (
+            torch.is_grad_enabled()
+            and (
+                x_flat.requires_grad
+                or self.weight.requires_grad
+                or self.weight_scale_inv.requires_grad
+            )
+        )
+
+    def _forward_block_decode(
+        self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Single-pass block decode, then the shared FP32-reduced GEMM.
+
+        The decoded weight is a temporary of this call only: it is released
+        when the forward returns, so no decoded or expanded weight outlives its
+        consuming operation.
+        """
+
+        device = x_flat.device
+        weight = self.weight
+        scale = self.weight_scale_inv
+        if weight.device != device:
+            weight = weight.to(device=device)
+        if scale.device != device or scale.dtype != torch.float32:
+            # The per-block scale is tiny next to the payload, and the kernel
+            # divides in FP32 like the reference decode.
+            scale = scale.to(device=device, dtype=torch.float32)
+        block_rows, block_cols = self.weight_block_size
+        codes = fp8_block_decode(
+            weight,
+            scale,
+            block_size=(int(block_rows), int(block_cols)),
+            inverse=self.weight_scale_semantics != "multiplier",
+            dtype=x_flat.dtype,
+        )
+        return matmul_fp32_reduce(x_flat, codes.t(), bias=bias)
+
+    def _forward_block_gemv(
+        self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Block-scaled W8A16 product with no decoded-weight temporary."""
+
+        device = x_flat.device
+        weight = self.weight
+        scale = self.weight_scale_inv
+        if weight.device != device:
+            weight = weight.to(device=device)
+        if scale.device != device or scale.dtype != torch.float32:
+            scale = scale.to(device=device, dtype=torch.float32)
+        block_rows, block_cols = self.weight_block_size
+        return fp8_block_gemv(
+            x_flat,
+            weight,
+            scale,
+            block_size=(int(block_rows), int(block_cols)),
+            inverse=self.weight_scale_semantics != "multiplier",
+            bias=bias,
+        )
+
     def _forward_lean_scaled_matmul(
         self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
@@ -927,8 +1144,8 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             block_rows, block_cols = self.weight_block_size
             rows, cols = codes.shape
             scale = self.weight_scale_inv
-            if scale.device != device:
-                scale = scale.to(device=device)
+            if self._block_decode_eligible(x_flat, fused=False):
+                return self._forward_block_decode(x_flat, bias=bias)
             blocks = codes.view(
                 rows // block_rows, block_rows, cols // block_cols, block_cols
             )
@@ -967,6 +1184,15 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
     def _forward_dequant_matmul(
         self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
+        # Block scales cannot move into an output epilogue, so a block-scaled
+        # payload takes a fused product (no decoded temporary at all) or the
+        # single-pass Triton decode here. Both run before the range-safe gate
+        # because that gate owns the row/tensor epilogue and the FP32 fallback,
+        # not this block layout.
+        if self._block_decode_eligible(x_flat, fused=True):
+            return self._forward_block_gemv(x_flat, bias=bias)
+        if self._block_decode_eligible(x_flat, fused=False):
+            return self._forward_block_decode(x_flat, bias=bias)
         if self._lean_epilogue_eligible(x_flat):
             return self._forward_lean_scaled_matmul(x_flat, bias=bias)
         if not self._native_gemm_eligible(x_flat):
@@ -1015,6 +1241,10 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
     def _invalidate_compiled(self) -> None:
         self._compiled_forward = None
         self.optimized = False
+        # A new payload, device or dtype invalidates the cached decode plan.
+        self._fp8_block_plan_generation = getattr(self, "_fp8_block_plan_generation", 0) + 1
+        self._fp8_block_plan_key = None
+        self._fp8_block_plan_value = (False, False)
         # The decoded-weight range bound is derived from the loaded payload.
         self._decoded_weight_bound_ready = False
         self._decoded_weight_bound = None

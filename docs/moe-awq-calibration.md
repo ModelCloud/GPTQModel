@@ -150,10 +150,26 @@ flowchart TD
 | --- | --- | --- |
 | Dense projections | `[B, S, H]` | 3-D branch, per-sample keep mask |
 | MoE routing bypass, 2-D shared expert | `[B*S, H]` | 2-D branch, `keep_mask.reshape(-1)` |
-| Natively routed experts | `[routed_rows, H]` (row count unrelated to `B*S`) | MoE block pre-hook zeroes pad rows; zero rows add nothing to `X^T X` |
+| Natively routed experts | `[routed_rows, H]` (row count unrelated to `B*S`) | MoE block pre-hook zeroes pad rows; GPTQ drops them at its expert hook, AWQ in `_drop_padding_only_rows` |
 
 The MoE block pre-hook returns a new tensor, so the caller's residual input is
 not mutated in place.
+
+### AWQ captures the same rows
+
+`AWQProcessor.register_moe_root_capture_hook` registers the same zeroing
+pre-hook, and `_drop_padding_only_rows` removes the zeroed rows from a routed
+expert's capture before it reaches the reservoir or `raw_tokens` (#5337). #4035
+had fixed this for GPTQ only, so AWQ kept every padding row the router sent to
+an expert: at `batch_size > 1` a few experts could be dominated by pad-token
+activations, and DeepSeek-V4 hash layers sent every pad row to the same six
+experts per layer (58-75% of those experts' AWQ sample in a 32-document run).
+
+A capture is treated as a routed subset only when its row count matches neither
+`keep_mask.numel()` (the raw `[B*S, H]` grid, filtered by the mask itself) nor
+`keep_mask.sum()` (the all-expert path, which already stores exactly the kept
+rows). A real activation can be all-zero, so the row count is the
+discriminator and the zero check only finds which rows to drop.
 
 ## 4. Routed-expert capture reservoirs
 
@@ -179,6 +195,12 @@ already held; the reservoir therefore never resets mid-layer. Keeping the
 layer-wide budget for every routed expert made the clip search and the replay
 forward run on about five times the rows on OLMoE (#5284).
 
+The cap is a high-water mark. Two captures of one module compute their caps
+under the processor lock and merge under the module lock, so they can merge in
+the opposite order. The merge raises the cap to the buffer's current capacity
+before deciding whether to resize; an older, smaller cap therefore cannot
+evict rows a larger capture already merged (#5333).
+
 ### Merge
 
 The kept set is the `budget_cap` lowest priorities of `kept + captured`. Only
@@ -191,7 +213,8 @@ whose priorities all lose to the largest kept one leaves the buffer untouched.
 flowchart TD
     A["capture: rows, priorities"] --> B{"reservoir exists?"}
     B -- no --> C["allocate budget_cap slots<br/>seed from earlier plan rows"]
-    B -- yes --> D{"used + count <= budget_cap?"}
+    B -- yes --> B1["budget_cap = max(budget_cap, buffer capacity)"]
+    B1 --> D{"used + count <= budget_cap?"}
     D -- yes --> E["append in place"]
     D -- no --> F{"all priorities >= largest kept?"}
     F -- yes --> G["no-op: keep the buffer"]

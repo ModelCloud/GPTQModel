@@ -401,9 +401,10 @@ class ExllamaV3Linear(nn.Module):
         BF16's 8-bit significand is a subset of FP16's 11-bit one, so every BF16
         value inside FP16's finite range converts exactly. Above ``_FP16_SAFE_AMAX`` a
         row is divided by the smallest power of two that brings it back inside
-        the bound, and the kernel output row is multiplied back. The Hadamard
-        rotation and the GEMM accumulation stay inside FP16's range, and
-        power-of-two scaling is exact, so only the FP16 cast rounds.
+        the bound, and the kernel output row is multiplied back. The input
+        Hadamard rotation stays inside FP16's range, and power-of-two scaling
+        is exact, so only the FP16 cast rounds. The GEMM writes FP32, so an
+        output row above FP16's range is not rounded to inf (#5331).
 
         The scale is per row, not per tensor: a single outlier token (the BOS
         massive activation on a prefill, for example) would otherwise divide
@@ -527,10 +528,15 @@ class ExllamaV3Linear(nn.Module):
             if prepared is not None:
                 inner = self._ensure_inner()
                 native_input, output_scale = prepared
+                # The GEMM accumulates in FP32 and can write FP32 directly
+                # (`hgemm` and the small-batch kernel both support it). Asking
+                # for FP16 here bounds only the input, not the dot product: an
+                # in-range row can still exceed 65504 and become inf/NaN
+                # (#5331). Keep the result in FP32 until the BF16 re-scale.
                 native_result = inner.forward(
                     native_input,
                     {},
-                    out_dtype=torch.float16,
+                    out_dtype=torch.float32,
                 )
                 if output_scale is not None:
                     fused = _try_fused_rescale(

@@ -229,7 +229,7 @@ class FOEM(GPTQ):
                 native_inp = native_inp.unsqueeze(0)
 
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
-            if len(inp.shape) == 3:
+            if len(inp.shape) > 2:
                 inp = inp.reshape((-1, inp.shape[-1]))
                 if self.gptaq:
                     native_inp = native_inp.reshape((-1, inp.shape[-1]))
