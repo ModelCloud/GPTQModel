@@ -467,8 +467,8 @@ class TorchLinear(PackableQuantLinear):
 
         # Compile the unbound function: compiling the bound method would store a
         # strong reference to this module inside the compiled wrapper (#4847).
-        # Construction imports dynamo and the first trace restores the process
-        # default dtype, so share the loader's global-state lock (#5127).
+        # Construction imports dynamo and changes its process-global config, so
+        # take the global-state writer while installing (#5127, #5268).
         with model_global_state_lock():
             compiled = torch_compile(type(self).dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
             self.dequantize_weight = _CompiledDequantizeWeight(compiled, self)

@@ -170,6 +170,21 @@ if _installed_rocm_blas_env is not None:
 # Fail loudly (once) on ROCm releases older than the supported floor.
 warn_unsupported_rocm()
 
+
+def _patch_transformers_local_torch_dtype_global_state():
+    """Hold the model-global-state writer for the default-dtype window only.
+
+    transformers opens a process-global ``torch.set_default_dtype`` window for
+    each construction. Published version of the fix (#5304): only the window is
+    exclusive, so a compiled forward no longer waits for a dense load's weight
+    I/O, dtype casts and device placement.
+    """
+
+    from .utils.torch import install_model_global_state_dtype_guard
+
+    install_model_global_state_dtype_guard()
+
+
 from .utils import has_gil_disabled
 from .utils.env import env_flag
 from .utils.kernel import get_kernel_config
@@ -379,6 +394,9 @@ class _LazyDeviceThreadPoolProxy:
 
 
 DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
+
+_patch_transformers_local_torch_dtype_global_state()
+
 
 def exllama_set_max_input_length(model, max_input_length: int):
     """Resize exllama scratch buffers through the legacy package-root API."""

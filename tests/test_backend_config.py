@@ -147,8 +147,8 @@ def test_public_entry_points_forward_typed_selection(monkeypatch, tmp_path, entr
     from gptqmodel.models import auto
 
     captured = {}
-    # Current GPTQModel.load logs the KV-cache estimate on the returned model.
-    result = SimpleNamespace(log_kv_cache_estimate=lambda: None)
+    # Current GPTQModel.load logs the resource budget on the returned model.
+    result = SimpleNamespace(log_budget=lambda: None)
 
     def receive(**kwargs):
         captured.update(kwargs)

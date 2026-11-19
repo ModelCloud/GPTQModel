@@ -608,6 +608,7 @@ def test_awq_pack_token_rows_ignores_empty_captures_during_quota_allocation():
 
     assert raw == 2
     assert packed.shape == (1, 1, 4)
+    # A single-row quota keeps the batch's first row when it is the only one.
     assert torch.equal(packed[0, 0], populated[0, 0])
 
     all_empty, all_empty_raw = AWQProcessor._pack_token_rows(

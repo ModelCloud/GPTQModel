@@ -474,10 +474,12 @@ class ExllamaV3Linear(nn.Module):
         # its inputs live on another GPU, which is the normal state for a
         # ``device_map`` split or an explicit ``cuda:1`` placement (#5263).
         # ``2**exponent`` is exact for every integer exponent here, and only
-        # the rows above the FP16 bound reach this value.
+        # the rows above the FP16 bound reach this value. The exponent is
+        # widened to float32 first so the process default dtype cannot clip a
+        # large ``2**exponent`` to inf (#5297).
         output_scale = torch.where(
             row_amax > _FP16_SAFE_AMAX,
-            torch.pow(2.0, exponent).to(row_amax.dtype),
+            torch.pow(2.0, exponent.to(torch.float32)).to(row_amax.dtype),
             torch.ones_like(row_amax),
         )
         return (x / output_scale).to(torch.float16), output_scale

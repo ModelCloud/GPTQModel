@@ -360,6 +360,7 @@ def test_awq_token_row_quotas_skip_empty_batches():
 
     quotas, local = AWQProcessor._compute_token_row_quotas([0, 7, 3], 1)
     assert quotas == [0, 1, 0]
+    # The first single-row quota keeps row 0; later ones keep the centre.
     assert local[1].tolist() == [0]
 
     quotas, local = AWQProcessor._compute_token_row_quotas([0, 7, 3], 4)

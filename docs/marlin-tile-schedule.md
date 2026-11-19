@@ -27,7 +27,13 @@ flowchart TD
     E -- "no" --> F["keep the table's tile"]
     E -- "yes" --> G{"m_tiles * n_tiles * 4 <= sms?"}
     G -- "no" --> F
-    G -- "yes" --> H{"{128, 64, 128}: is_valid_config and\nget_marlin_kernel != MarlinDefault?"}
+    G -- "yes" --> G1{"sms > 128?"}
+    G1 -- "yes (RTX 5090)" --> H
+    G1 -- "no (128-SM Ada)" --> G2{"narrow splits K over\n>= 2 blocks per tile?"}
+    G2 -- "no" --> F
+    G2 -- "yes" --> G4{"16-row tile, prob_k > 4096 and\nnarrow split < 4?"}
+    G4 -- "yes" --> F
+    G4 -- "no" --> H{"{128, 64, 128}: is_valid_config and\nget_marlin_kernel != MarlinDefault?"}
     H -- "no" --> F
     H -- "yes" --> I["small-grid tile {128, 64, 128}"]
     D -- "no valid tile" --> X["retry with fewer thread_m_blocks\n(unchanged)"]
@@ -38,7 +44,7 @@ flowchart TD
 
     classDef new fill:#e6f4ea,stroke:#137333,color:#111
     classDef fail fill:#fce8e6,stroke:#c5221f,color:#111
-    class G,H,I new
+    class G,G1,G2,G4,H,I new
     class X fail
 ```
 
@@ -48,11 +54,27 @@ full-SM sm_80 tables (`marlin_prefers_full_sm80`) and Ada's narrow FP32 AWQ
 schedule (`narrow_splitk_arch`, `narrow_fp32_awq`) were tuned separately and
 keep their own tile.
 
+`gptq_marlin_gemm(..., thread_k=..., thread_n=..., num_threads=...)` forwards
+an explicit tile through the existing manual branch; the defaults keep the
+shape planner. Tests use it to launch both tiles on identical operands.
+
+The tile-count test alone ignored K and the 256-thread tile it replaced
+(#5281). On 128-SM Ada parts `N=4096` sits exactly on the `<=` boundary, so
+every large-K down projection took the narrow tile although the wide tile
+already had enough split-K work per SM. Those parts therefore keep the
+override only while the narrow tile still splits K over at least two
+threadblocks per output tile, and a 16-row wide tile is kept for long K
+unless the narrow tile still splits K at least four ways.
+Parts with more than 128 SMs keep the original choice: on the 170-SM RTX 5090
+the narrow tile measured faster for every 16-row shape in the table below.
+
 ## Before and after
 
 | Situation | Before | After |
 | --- | --- | --- |
 | Auto tile with `m_tiles * n_tiles * 4 <= sms` | table tile, for example `{64, 256, 256}` for M > 16 | `{128, 64, 128}` |
+| 128-SM part, large K, narrow tile would not split K | `{128, 64, 128}` | table tile |
+| 128-SM part, 16-row table tile, `K > 4096`, narrow split < 4 | `{128, 64, 128}` | table tile |
 | Narrow tile not valid for the shape, or not instantiated | table tile | table tile |
 | Full-SM sm_80 board, or sm_89 narrow FP32 AWQ shape | table / forced tile | unchanged |
 | Manual `thread_k` / `thread_n` | manual tile | unchanged |
@@ -83,3 +105,24 @@ are unchanged. The two down projections at M=128 (14336x4096 and 18944x3584)
 measured +0..+4% in this run. They could not be re-run on an idle GPU, so
 they are not verified either way. Performance on other architectures has not
 been measured.
+
+#5281 retuned the 128-SM boundary. RTX 4090 (sm_89, 128 SMs), GPTQ 4-bit g128
+FP16, CUDA-graph timing, minimum of seven interleaved rounds of 100 calls on a
+shared host. `wide` is the pre-#5216 tile, `narrow` the #5216 tile:
+
+| shape (K x N) | M | wide us | narrow us | narrow/wide | chosen |
+|---|---|---|---|---|---|
+| 14336x4096 | 4 | 11.00 | 12.85 | 1.17x | wide |
+| 14336x4096 | 16 | 14.54 | 19.11 | 1.31x | wide |
+| 14336x4096 | 128 | 61.39 | 76.85 | 1.25x | wide |
+| 11008x4096 | 16 | 12.09 | 14.21 | 1.18x | wide |
+| 11008x4096 | 128 | 49.94 | 58.34 | 1.17x | wide |
+| 8192x4096 | 16 | 10.09 | 10.79 | 1.07x | wide |
+| 8192x4096 | 128 | 38.84 | 43.57 | 1.12x | wide |
+| 28672x8192 | 64 | 146.24 | 169.83 | 1.16x | wide |
+| 4096x4096 | 64 | 29.43 | 14.41 | 0.49x | narrow |
+| 4096x1024 | 64 | 86.50 | 13.45 | 0.15x | narrow |
+| 3584x512 | 64 | 61.40 | 17.80 | 0.29x | narrow |
+
+BF16 on the same part showed the same pattern (14336x4096 at M=16: 15.22 us
+wide vs 19.78 us narrow; 4096x1024 at M=64: 92.00 us vs 14.04 us).

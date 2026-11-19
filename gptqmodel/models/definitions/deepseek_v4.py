@@ -399,6 +399,8 @@ class DeepSeekV4MTPAuxiliary:
             raise ValueError(
                 "DeepSeek V4 MTP auxiliary loading requires a local checkpoint snapshot"
             )
+        # The shell's own ``local_torch_dtype`` window takes the writer
+        # (#5304); the rest of its construction stays concurrent.
         shell = DeepSeekV4MTPAuxiliaryShell(config, device=device)
         turtle = LazyTurtle.maybe_create(
             model_local_path=model_local_path,

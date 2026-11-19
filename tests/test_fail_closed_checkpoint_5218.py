@@ -19,6 +19,7 @@ missing tensor. Tensors the kernel derives (``g_idx`` without activation order,
 from __future__ import annotations
 
 import dataclasses
+import json
 import shutil
 from pathlib import Path
 from typing import Callable, Tuple
@@ -502,6 +503,45 @@ def _quantize_weight_only(source: Path, destination: Path, config) -> None:
     model.save(str(destination))
 
 
+def _fp8_checkpoint(source: Path, destination: Path) -> None:
+    """Publish a dense checkpoint in a production FP8 layout (row, multiplier).
+
+    FP8 is load-only since #5242, so the fixture cannot come from ``quantize()``
+    (#5271). It is encoded with the same reference encoder the FP8 kernel tests
+    use, and the checkpoint declares the production scale convention.
+    """
+    from transformers import AutoModelForCausalLM
+
+    from tests.fp8_test_utils import quantize_fp8_weight
+
+    model = AutoModelForCausalLM.from_pretrained(str(source))
+    linear_prefixes = {
+        name for name, module in model.named_modules() if isinstance(module, nn.Linear)
+    }
+    state = {}
+    for name, tensor in model.state_dict().items():
+        prefix, _, leaf = name.rpartition(".")
+        if leaf == "weight" and prefix in linear_prefixes and tensor.dim() == 2:
+            quantized, scale_inv = quantize_fp8_weight(tensor, weight_scale_method="row")
+            state[f"{prefix}.weight"] = quantized
+            state[f"{prefix}.weight_scale_inv"] = scale_inv
+        else:
+            state[name] = tensor
+
+    shutil.copytree(source, destination)
+    save_file(state, str(destination / "model.safetensors"), metadata={"format": "pt"})
+    config_path = destination / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["quantization_config"] = {
+        "method": "fp8",
+        "quant_method": "fp8",
+        "format": "float8_e4m3fn",
+        "weight_scale_method": "row",
+        "weight_scale_semantics": "multiplier",
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+
 def _drop(checkpoint: Path, suffix: str) -> None:
     path = checkpoint / "model.safetensors"
     state = load_file(str(path))
@@ -510,23 +550,29 @@ def _drop(checkpoint: Path, suffix: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("case_name", "config_factory", "required"),
+    ("case_name", "build_checkpoint", "required"),
     [
-        ("fp8", lambda: _fp8_config(), ("weight", "weight_scale_inv")),
-        ("nf12", lambda: _nf12_config(), ("nf12_packed", "nf12_escapes", "nf12_exp_base")),
+        ("fp8", _fp8_checkpoint, ("weight", "weight_scale_inv")),
+        (
+            "nf12",
+            lambda source, destination: _quantize_weight_only(
+                source, destination, _nf12_config()
+            ),
+            ("nf12_packed", "nf12_escapes", "nf12_exp_base"),
+        ),
     ],
 )
 def test_truncated_weight_only_checkpoint_fails_closed(
-    tmp_path, case_name, config_factory, required
+    tmp_path, case_name, build_checkpoint, required
 ):
-    """End-to-end: quantize, save, drop one tensor, and load the checkpoint."""
+    """End-to-end: publish, drop one tensor, and load the checkpoint."""
 
     from gptqmodel import GPTQModel
 
     source = tmp_path / "source"
     checkpoint = tmp_path / "checkpoint"
     _tiny_qwen2(source)
-    _quantize_weight_only(source, checkpoint, config_factory())
+    build_checkpoint(source, checkpoint)
 
     model = GPTQModel.load(str(checkpoint), device="cpu")
     with torch.inference_mode():
@@ -541,12 +587,6 @@ def test_truncated_weight_only_checkpoint_fails_closed(
         with pytest.raises(ValueError, match="Missing required quantized weights") as exc:
             GPTQModel.load(str(truncated), device="cpu")
         assert f"model.layers.0.self_attn.q_proj.{suffix}" in str(exc.value)
-
-
-def _fp8_config():
-    from gptqmodel.quantization.config import FP8Config
-
-    return FP8Config(device="cpu")
 
 
 def _nf12_config():

@@ -288,7 +288,8 @@ describe a checkpoint you load, and `GPTQModel.quantize()` refuses it with a
 A loaded checkpoint may use `float8_e4m3fn` or `float8_e5m2`. Legacy
 GPT-QModel checkpoints that store an inverse scale still load when they
 declare `weight_scale_semantics="inverse"`; that spelling is accepted on load
-and never written. There is no `gptqmodel_fp8` alias.
+and never written. The legacy `quant_method: "gptqmodel_fp8"` name is also
+accepted on load and normalized to `fp8`; it is never written again.
 
 `TorchFP8Linear` is **weight-only (W8A16)**: the packed FP8 weight tile is
 dequantized for the current matmul and activations keep their FP16/BF16 input

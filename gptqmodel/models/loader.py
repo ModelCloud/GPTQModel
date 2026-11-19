@@ -122,7 +122,11 @@ from ..utils.model import (
     simple_dispatch_model,
     validate_checkpoint_qweights,
 )
-from ..utils.torch import xla_device_count
+from ..utils.torch import (
+    _ModelGlobalStateLock,
+    defuser_conversion_scope,
+    xla_device_count,
+)
 from ._const import DEVICE, EXPERT_INDEX_PLACEHOLDER, HAS_NPU, normalize_device
 
 
@@ -1893,6 +1897,17 @@ def compare_versions(installed_version, required_version, operator):
 # through this lock; ``quantize()`` on already-loaded models stays concurrent.
 _MODEL_LOAD_LOCK = threading.RLock()
 
+# Compiled calls only read the process-global torch state (dynamo's
+# ``GLOBAL_STATE`` guard reads the default dtype on every call), while
+# transformers' construction changes it. This reader/writer lock lets compiled
+# forwards run concurrently and holds the writer only for the
+# ``local_torch_dtype`` window that saves/sets/restores the dtype -- not for a
+# load's weight I/O, packing or kernel post-init (#5268, #5304). The window
+# itself takes the writer (``gptqmodel.utils.torch``), so no call site can widen
+# it. It is separate from ``_MODEL_LOAD_LOCK`` so load-vs-load serialization
+# does not serialize inference.
+_MODEL_GLOBAL_STATE_LOCK = _ModelGlobalStateLock()
+
 
 def model_load_lock():
     """Return the process-wide, re-entrant lock guarding model construction.
@@ -1907,11 +1922,34 @@ def model_load_lock():
     return _MODEL_LOAD_LOCK
 
 
+def model_global_state_lock():
+    """Return the process-wide reader/writer lock for torch's default dtype.
+
+    Compiled calls take the shared reader side (``.reader()``); transformers'
+    ``local_torch_dtype`` window -- the only code that saves, sets and restores
+    ``torch.set_default_dtype`` -- takes the exclusive writer side (``with``).
+    Look the lock up through this accessor so tests and callers share one
+    object.
+    """
+
+    return _MODEL_GLOBAL_STATE_LOCK
+
+
 def _serialized_model_load(method):
     """Serialize a model-construction entry point across threads."""
 
     @wraps(method)
     def wrapper(*args, **kwargs):
+        if model_global_state_lock().holds_reader():
+            # The calling thread is inside a compiled call, which holds the
+            # shared side of the global-state lock. A load needs the writer;
+            # waiting for it here could deadlock against another load that
+            # holds the model-load lock and is waiting for this reader. Fail
+            # loudly instead of hanging the process.
+            raise RuntimeError(
+                "a model load cannot start inside a compiled call: the compiled "
+                "call holds the shared model-global-state lock"
+            )
         with model_load_lock():
             return method(*args, **kwargs)
 
@@ -2016,6 +2054,23 @@ def _is_broken_transformers_dynamic_module_error(exc: Exception) -> bool:
 
 
 def _hf_loader_from_pretrained_with_dynamic_module_retry(loader, model_local_path: str, **kwargs):
+    """Build a model through ``loader.from_pretrained``.
+
+    transformers runs model construction inside ``local_torch_dtype``, a
+    process-global default-dtype window, and dynamo's ``preserve_global_state``
+    restores that dtype around every trace. A compiled call re-tracing inside
+    the window can therefore restore bf16 after the load restored fp32, or trip
+    ``assert_loaded_model_state`` (#5127/#5209), so that window must exclude
+    compiled forwards.
+
+    The writer is taken by ``local_torch_dtype`` itself (#5304), not here: the
+    window is milliseconds of a load, while the surrounding call is the whole
+    dense load (weight I/O, dtype casts, device placement, packing and kernel
+    post-init). Taking it here stalled every optimized forward for the full
+    load duration. The window-level guard also covers each call site and the
+    quantize path automatically, so a new site cannot be added unguarded.
+    """
+
     try:
         return loader.from_pretrained(model_local_path, **kwargs)
     except Exception as exc:
@@ -2698,6 +2753,9 @@ def ModelLoader(cls):
                 model_local_path=model_local_path,
                 load_quantized_model=False,
             )
+            # transformers' ``from_pretrained`` wraps model construction in
+            # ``local_torch_dtype`` (a process-global default-dtype window).
+            # The helper takes the global-state writer for that call.
             model = _hf_loader_from_pretrained_with_dynamic_module_retry(
                 cls.loader,
                 model_local_path,
@@ -3493,6 +3551,11 @@ def ModelLoader(cls):
             set_dtype_compat(args, dtype)
 
             try:
+                # ``from_config`` opens transformers' ``local_torch_dtype``
+                # window, and that window holds the model-global-state writer
+                # (#5304). Nothing else in this call is exclusive, so weight
+                # I/O, packing and kernel post-init stay concurrent with
+                # optimized forwards (#5209, #5268).
                 model = cls.loader.from_config(
                     config, trust_remote_code=trust_remote_code, **args
                 )

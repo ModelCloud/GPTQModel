@@ -2732,6 +2732,10 @@ def ModelWriter(cls):
         model_dtype = get_hf_config_dtype(config)
 
         with model_load_lock(), suspend_hf_weight_init():
+            # Only transformers' ``local_torch_dtype`` window mutates the
+            # process-global default dtype, and that window holds the writer
+            # itself (#5304); compiled forwards may overlap the rest of the
+            # shell rebuild (#5268).
             model = self.loader.from_config(
                 config, dtype=model_dtype, trust_remote_code=trust_remote_code
             )

@@ -28,6 +28,7 @@ from packaging import version
 
 from .._quant_methods import (
     GGUF_EXPORT_QUANT_METHOD,
+    LEGACY_FP8_QUANT_METHOD,
     LEGACY_PARO_QUANT_METHOD,
 )
 from ..adapter.adapter import Lora, normalize_adapter
@@ -1528,6 +1529,31 @@ def _validate_smooth_number(
     return number
 
 
+def _validate_finite_float(
+    owner: str,
+    field: str,
+    value: Any,
+    *,
+    minimum: Optional[float] = None,
+    range_text: str = "non-negative",
+) -> float:
+    """Validate a calibration option that must be finite and in range.
+
+    ``NaN`` comparisons are always false, so a plain ``value < minimum`` check
+    lets ``NaN`` through and the feature silently disables itself later
+    (#5307). Validate the normalized float instead.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{owner}: `{field}` must be a number, got {value!r}.")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{owner}: `{field}` must be a finite number, got {value!r}.")
+    if minimum is not None and number < minimum:
+        raise ValueError(f"{owner}: `{field}` must be {range_text}, got {value!r}.")
+    return number
+
+
 def _validate_smooth_int(
     owner: str,
     field: str,
@@ -1716,6 +1742,7 @@ class SmoothMSE(SmoothMethod):
     +----------------+-------------------------------------------+
     | steps (N)      | number of shrink candidates               |
     | maxshrink (S)  | smallest range multiplier                 |
+    | objective      | importance-weighted weight error          |
     | effect         | more steps = better fit, slower           |
     +----------------+-------------------------------------------+
     """
@@ -2051,24 +2078,21 @@ class HessianConfig:
 
         multiple = self.sink_row_cap_median_multiple
         if multiple is not None:
-            if isinstance(multiple, bool) or not isinstance(multiple, (int, float)):
-                raise ValueError(
-                    "HessianConfig: `sink_row_cap_median_multiple` must be a number or None."
-                )
-            if multiple < 0:
-                raise ValueError(
-                    "HessianConfig: `sink_row_cap_median_multiple` must be non-negative."
-                )
-            self.sink_row_cap_median_multiple = float(multiple)
+            self.sink_row_cap_median_multiple = _validate_finite_float(
+                "HessianConfig",
+                "sink_row_cap_median_multiple",
+                multiple,
+                minimum=0.0,
+            )
 
         if self.chunk_size is not None:
-            if not isinstance(self.chunk_size, int):
+            if isinstance(self.chunk_size, bool) or not isinstance(self.chunk_size, int):
                 raise ValueError("HessianConfig: `chunk_size` must be an integer or None.")
             if self.chunk_size <= 0:
                 raise ValueError("HessianConfig: `chunk_size` must be a positive integer.")
 
         if self.chunk_bytes is not None:
-            if not isinstance(self.chunk_bytes, int):
+            if isinstance(self.chunk_bytes, bool) or not isinstance(self.chunk_bytes, int):
                 raise ValueError("HessianConfig: `chunk_bytes` must be an integer or None.")
             if self.chunk_bytes <= 0:
                 raise ValueError("HessianConfig: `chunk_bytes` must be a positive integer amount of bytes.")
@@ -2150,9 +2174,9 @@ class MSEConfig:
     )
 
     def __post_init__(self):
-        if not isinstance(self.norm, (int, float)) or isinstance(self.norm, bool):
-            raise ValueError("MSEConfig: `norm` must be a number.")
-        self.norm = float(self.norm)
+        self.norm = _validate_finite_float(
+            "MSEConfig", "norm", self.norm, minimum=0.0
+        )
         self.grid_budget = _normalize_budget_bytes(self.grid_budget, "grid_budget")
         self.clip_grid_budget = _normalize_budget_bytes(self.clip_grid_budget, "clip_grid_budget")
 
@@ -2474,8 +2498,9 @@ class GPTAQConfig:
     device: Union[str, torch.device] = field(default="auto")
 
     def __post_init__(self):
-        if not isinstance(self.alpha, (int, float)):
-            raise ValueError("GPTAQConfig: `alpha` must be a numeric value.")
+        self.alpha = _validate_finite_float(
+            "GPTAQConfig", "alpha", self.alpha, minimum=0.0
+        )
         if isinstance(self.device, str):
             if not self.device:
                 raise ValueError("GPTAQConfig: `device` must be a non-empty string or torch.device.")
@@ -2515,10 +2540,12 @@ class FOEMConfig:
     device: Union[str, torch.device] = field(default="auto")
 
     def __post_init__(self):
-        if not isinstance(self.alpha, (int, float)):
-            raise ValueError("FOEMConfig: `alpha` must be a numeric value.")
-        if not isinstance(self.beta, (int, float)):
-            raise ValueError("FOEMConfig: `beta` must be a numeric value.")
+        self.alpha = _validate_finite_float(
+            "FOEMConfig", "alpha", self.alpha, minimum=0.0
+        )
+        self.beta = _validate_finite_float(
+            "FOEMConfig", "beta", self.beta, minimum=0.0
+        )
         if isinstance(self.device, str):
             if not self.device:
                 raise ValueError("FOEMConfig: `device` must be a non-empty string or torch.device.")
@@ -4184,6 +4211,10 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
         value = value.lower()
         if value == LEGACY_PARO_QUANT_METHOD:
             return METHOD.PARO
+        if value == LEGACY_FP8_QUANT_METHOD:
+            # Checkpoints written between #5181 and #5242 publish this alias.
+            # It is read-only compatibility: exports always write `fp8`.
+            return METHOD.FP8
         if value == FORMAT.MARLIN:
             return METHOD.GPTQ
         if value == FORMAT.BITBLAS:
@@ -4788,6 +4819,31 @@ def _validate_dynamic_smoothers(owner, layer_name: str, layer_dict: Mapping) -> 
                 f"smoother: {exc}"
             ) from exc
 
+    # A per-module rule is merged when the module is first matched, so a
+    # smoother the quantizer never applies would be recorded and ignored just
+    # like the top-level field (#5302). Reject the keys whose only consumer is
+    # the weight-only packing path.
+    method = getattr(owner, "method", None)
+    if not isinstance(method, METHOD) or method not in _CALIBRATED_METHODS:
+        return
+    if _is_weight_only_lifecycle(owner):
+        return
+    for key in ("smoother", "smooth"):
+        if _has_smoother(layer_dict.get(key)):
+            raise _unapplied_smoother_error(
+                owner.__class__.__name__,
+                method,
+                f"dynamic['{layer_name}'].{key}",
+            )
+    if method not in _FALLBACK_SMOOTHER_METHODS:
+        fallback = layer_dict.get("fallback")
+        if isinstance(fallback, Mapping) and _has_smoother(fallback.get("smooth")):
+            raise _unapplied_smoother_error(
+                owner.__class__.__name__,
+                method,
+                f"dynamic['{layer_name}'].fallback.smooth",
+            )
+
 
 def _default_damp_percent(method: METHOD) -> float:
     # QQQ has no activation-group-aware calibration, so a single massive
@@ -5273,6 +5329,7 @@ class QuantizeConfigMeta(type):
             # payload keeps its `weight_only` marker and is not read as AWQ.
             kwargs = _lift_serialized_meta_fields(kwargs)
             target_cls = _resolve_quantize_config_class(kwargs)
+            kwargs = _drop_unapplied_smoothers(kwargs, target_cls)
             target_kwargs = _prepare_target_quantize_config_kwargs(target_cls, kwargs)
             return type.__call__(target_cls, *args, **target_kwargs)
         # A concrete class rebuilt from its own `to_dict()` payload must keep
@@ -5395,6 +5452,269 @@ def validate_rotation_format(
         f"`{resolved}`, whose kernels ignore the online Hadamard. Quantize without "
         "`rotation`, or use a GPTQ config."
     )
+
+
+#: Methods whose quantizer runs a calibrated solve. Their weight mathematics
+#: has no weight-smoothing step: only the GPTQ/QQQ fallback path smooths, and
+#: that path reads `fallback.smooth`. The top-level `smoother` belongs to the
+#: weight-only recipes (RTN and the direct GGUF/BitsAndBytes packers), so a
+#: calibrated config that carries one persists a setting no tensor ever sees
+#: (issue #5302).
+_CALIBRATED_METHODS = frozenset(
+    {
+        METHOD.GPTQ,
+        METHOD.QQQ,
+        METHOD.AWQ,
+        METHOD.PARO,
+        METHOD.VPTQ,
+        METHOD.MACAQ,
+        METHOD.EXL3,
+    }
+)
+
+#: Calibrated methods whose fallback path does read a smoother. The others
+#: have no smoothing step anywhere, so pointing at `fallback` would be wrong.
+_FALLBACK_SMOOTHER_METHODS = frozenset({METHOD.GPTQ, METHOD.QQQ})
+
+#: Methods whose weight-only lifecycle reads `smooth` in its own packing path.
+#: RTN shares ``METHOD.GPTQ`` with GPTQ, so ``uses_weight_only_lifecycle()`` is
+#: the authoritative test and the method set is only a cheap negative filter.
+_WEIGHT_ONLY_METHODS = frozenset(
+    {
+        METHOD.GGUF,
+        METHOD.BITSANDBYTES,
+        METHOD.NF12,
+        METHOD.FP8,
+        METHOD.TT_BLOCKFLOAT,
+    }
+)
+
+
+def _is_weight_only_lifecycle(qcfg: Any) -> bool:
+    """Return whether ``qcfg`` packs through the weight-only lifecycle."""
+
+    checker = getattr(qcfg, "uses_weight_only_lifecycle", None)
+    if callable(checker):
+        return bool(checker())
+    return getattr(qcfg, "method", None) in _WEIGHT_ONLY_METHODS
+
+
+def _unapplied_smoother_error(owner: Any, method: METHOD, field: str) -> ValueError:
+    """Build the rejection for a smoother the calibrated quantizer ignores."""
+
+    if method in _FALLBACK_SMOOTHER_METHODS:
+        remedy = (
+            "Set it on `fallback=Fallback(smooth=...)` instead: the fallback path is "
+            "the only part of this quantizer that applies a smoother."
+        )
+    else:
+        remedy = (
+            "Remove it: this quantizer has no weight-smoothing step, so the option "
+            "changes no weight. The weight-only RTN/GGUF/BitsAndBytes `smooth=` "
+            "recipe is the one that applies a smoother."
+        )
+    return ValueError(
+        f"{owner}: `{field}` is not applied by the {method.value.upper()} quantizer; "
+        "the calibrated solve has no weight-smoothing step, so the option would only "
+        f"be persisted in the checkpoint. {remedy}"
+    )
+
+
+def _has_smoother(value: Any) -> bool:
+    """Return whether a smoother payload names a real smoothing method."""
+
+    if value is None:
+        return False
+    if isinstance(value, SmootherConfig):
+        return value.smooth is not None
+    if isinstance(value, SmoothMethod):
+        return True
+    if isinstance(value, Mapping):
+        if value.get("smooth") is not None:
+            return True
+        return any(key in value for key in ("type", "name"))
+    return True
+
+
+def validate_smoother_support(qcfg: Any) -> None:
+    """Reject a configured smoother on a calibrated method that ignores it (#5302).
+
+    ``smoother=``/``smooth=`` (and a ``SmootherConfig`` in ``preprocessors``,
+    which normalizes into ``smoother``) is a field of ``PreProcessorConfig``,
+    so every calibrated config accepted and persisted it. AWQ, Paro, VPTQ,
+    MACaQ and EXL3 never read it; GPTQ and QQQ read only ``fallback.smooth``.
+    ``GPTQConfig(bits=4, smoother=SmoothMAD(k=1.0))`` therefore quantized
+    bit-identically to no smoother while the checkpoint recorded that clipping
+    had run.
+
+    Reject the request where it is made, exactly like the protocol compiler
+    refuses ``weight.prepare`` for these methods, instead of shipping a no-op.
+    Weight-only methods are unaffected: they read ``smooth`` in their own path.
+    Checkpoint loading is handled by ``_drop_unapplied_smoothers`` so a config
+    written before this fix still describes the weights it actually produced.
+    """
+
+    method = getattr(qcfg, "method", None)
+    if not isinstance(method, METHOD) or method not in _CALIBRATED_METHODS:
+        return
+    if _is_weight_only_lifecycle(qcfg):
+        return
+
+    owner = type(qcfg).__name__
+    if _has_smoother(getattr(qcfg, "smoother", None)):
+        raise _unapplied_smoother_error(owner, method, "smoother")
+    fallback = getattr(qcfg, "fallback", None)
+    if method not in _FALLBACK_SMOOTHER_METHODS and _has_smoother(
+        getattr(fallback, "smooth", None)
+    ):
+        raise _unapplied_smoother_error(owner, method, "fallback.smooth")
+
+
+def _drop_unapplied_smoothers(payload: Dict[str, Any], target_cls: type) -> Dict[str, Any]:
+    """Honor the weights of a checkpoint written before the #5302 rejection.
+
+    The smoother was never applied by these quantizers, so a checkpoint that
+    records one still contains plain (unsmoothed) weights. Dropping the claim
+    on load keeps that checkpoint usable and makes its config describe what
+    actually produced the tensors, instead of failing a load that used to work.
+    """
+
+    method = payload.get(METHOD_FIELD_CODE, payload.get(QUANT_METHOD_FIELD, METHOD.GPTQ))
+    try:
+        method = _normalize_quant_method(method)
+    except (TypeError, ValueError):
+        return payload
+    if method not in _CALIBRATED_METHODS:
+        return payload
+    # A `weight_only`/GGUF/FP8/BnB/NF12 payload is a weight-only recipe, whose
+    # packing path reads `smooth` itself. The classes are resolved by name so
+    # this helper can stay above their definitions.
+    if _peek_weight_only_method(payload.get("weight_only")) is not None:
+        return payload
+    weight_only_classes = tuple(
+        cls
+        for cls in (
+            globals().get("RTNConfig"),
+            globals().get("GGUFConfig"),
+            globals().get("BitsAndBytesConfig"),
+            globals().get("FP8Config"),
+            globals().get("NF12Config"),
+            globals().get("TTBlockfloatConfig"),
+        )
+        if isinstance(cls, type)
+    )
+    if weight_only_classes and issubclass(target_cls, weight_only_classes):
+        return payload
+
+    dropped = []
+
+    if _has_smoother(payload.get("smoother")):
+        payload = {key: value for key, value in payload.items() if key != "smoother"}
+        dropped.append("smoother")
+    if _has_smoother(payload.get("smooth")):
+        payload = {key: value for key, value in payload.items() if key != "smooth"}
+        dropped.append("smooth")
+    fallback = payload.get("fallback")
+    if (
+        method not in _FALLBACK_SMOOTHER_METHODS
+        and isinstance(fallback, Mapping)
+        and _has_smoother(fallback.get("smooth"))
+    ):
+        payload = dict(payload)
+        payload["fallback"] = {
+            key: value for key, value in fallback.items() if key not in ("smooth",)
+        }
+        dropped.append("fallback.smooth")
+
+    preprocessors = payload.get("preprocessors")
+    if isinstance(preprocessors, list):
+        kept = []
+        for entry in preprocessors:
+            code = None
+            smooth = None
+            if isinstance(entry, SmootherConfig):
+                code, smooth = PreProcessorCode.SMOOTHER.value, entry.smooth
+            elif isinstance(entry, SmoothMethod):
+                code, smooth = PreProcessorCode.SMOOTHER.value, entry
+            elif isinstance(entry, Mapping):
+                code = str(entry.get("code", "")).strip().lower()
+                smooth = entry.get("smooth")
+                if code == "" and _has_smoother(entry):
+                    code, smooth = PreProcessorCode.SMOOTHER.value, entry
+            elif isinstance(entry, str):
+                normalized = entry.strip().lower()
+                if normalized not in {
+                    PreProcessorCode.AUTO_MODULE_DECODER.value,
+                    PreProcessorCode.TENSOR_PARALLEL_PADDER.value,
+                }:
+                    code, smooth = PreProcessorCode.SMOOTHER.value, entry
+            if code == PreProcessorCode.SMOOTHER.value and _has_smoother(smooth):
+                dropped.append("preprocessors[smoother]")
+                continue
+            kept.append(entry)
+        if len(kept) != len(preprocessors):
+            payload = dict(payload)
+            payload["preprocessors"] = kept
+
+    meta_payload = payload.get(META_FIELD)
+    if isinstance(meta_payload, Mapping):
+        meta_preprocessors = meta_payload.get("preprocessors")
+        if isinstance(meta_preprocessors, list):
+            kept = [
+                entry
+                for entry in meta_preprocessors
+                if not (
+                    isinstance(entry, Mapping)
+                    and str(entry.get("code", "")).strip().lower()
+                    == PreProcessorCode.SMOOTHER.value
+                    and _has_smoother(entry.get("smooth"))
+                )
+            ]
+            if len(kept) != len(meta_preprocessors):
+                payload = dict(payload)
+                updated_meta = dict(meta_payload)
+                if kept:
+                    updated_meta["preprocessors"] = kept
+                else:
+                    updated_meta.pop("preprocessors", None)
+                payload[META_FIELD] = updated_meta
+                dropped.append("meta.preprocessors[smoother]")
+
+    dynamic = payload.get("dynamic")
+    if isinstance(dynamic, Mapping):
+        cleaned = {}
+        changed = False
+        for pattern, override in dynamic.items():
+            if isinstance(override, Mapping):
+                blocked = {
+                    key
+                    for key in ("smoother", "smooth")
+                    if _has_smoother(override.get(key))
+                }
+                if method not in _FALLBACK_SMOOTHER_METHODS and isinstance(
+                    override.get("fallback"), Mapping
+                ) and _has_smoother(override["fallback"].get("smooth")):
+                    blocked.add("fallback")
+                if blocked:
+                    override = {
+                        key: value for key, value in override.items() if key not in blocked
+                    }
+                    changed = True
+                    dropped.extend(f"dynamic[{pattern}].{key}" for key in sorted(blocked))
+            cleaned[pattern] = override
+        if changed:
+            payload = dict(payload)
+            payload["dynamic"] = cleaned
+
+    if dropped:
+        log.warn(
+            "QuantizeConfig: %s does not apply a smoother; dropping %s from the loaded "
+            "checkpoint config. The recorded option never changed a weight, so the "
+            "stored tensors are unchanged (issue #5302).",
+            target_cls.__name__,
+            ", ".join(sorted(set(dropped))),
+        )
+    return payload
 
 
 @dataclass
@@ -5900,6 +6220,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         # layouts; reject the option before any run starts (issue #4666).
         validate_rotation_format(self)
 
+        # A smoother is persisted by every config but applied by few. Refuse the
+        # request where the quantizer would silently ignore it (issue #5302).
+        validate_smoother_support(self)
+
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.
         if self.model_rotation and self.offload_to_disk:
@@ -6280,6 +6604,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             normalized[FORMAT_FIELD_CODE] = None
 
         target_cls = cls if cls not in {BaseQuantizeConfig, QuantizeConfig} else _resolve_quantize_config_class(normalized)
+        normalized = _drop_unapplied_smoothers(normalized, target_cls)
         normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, normalized)
         if target_cls is RTNConfig:
             normalized = _normalize_rtn_kwargs(normalized)
@@ -6945,7 +7270,10 @@ class ParoConfig(PreProcessorConfig):
     opt_finetune_epochs: int = field(default=10)
     opt_train_samples: int = field(default=2048)
     opt_validation_samples: int = field(default=64)
-    opt_batch_size: int = field(default=64)
+    # Replay the sampled calibration rows in larger optimizer steps: the stage
+    # loop is launch-bound, so the step count (not the row count) drives wall
+    # time. Every row is still visited once per epoch, see `_chunk_rows`.
+    opt_batch_size: int = field(default=128)
     opt_rotation_lr: float = field(default=0.05)
     opt_weight_lr: float = field(default=1e-5)
     opt_quantizer_lr: float = field(default=1e-6)
@@ -8274,6 +8602,10 @@ class EXL3Config(PreProcessorConfig):
         # A rotated model is only loadable and only correct on the GPTQ
         # layouts; reject the option before any run starts (issue #4666).
         validate_rotation_format(self)
+
+        # EXL3 does not delegate to `BaseQuantizeConfig.__post_init__`, so it
+        # must refuse an ignored smoother explicitly (issue #5302).
+        validate_smoother_support(self)
 
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.

@@ -37,8 +37,8 @@ GROUP_SIZE = 128
 DEVICES = ["cpu"] + [f"cuda:{i}" for i in range(torch.cuda.device_count())]
 
 
-def _endpoint_baseline_mse(block: torch.Tensor, *, sym: bool) -> torch.Tensor:
-    """Per-row MSE of the plain ``p = 1`` quantization, in float64."""
+def _endpoint_baseline_dequant(block: torch.Tensor, *, sym: bool) -> torch.Tensor:
+    """The plain ``p = 1`` grid, in float64."""
     ref = block.double()
     if sym:
         hi = ref.abs().amax(dim=1, keepdim=True)
@@ -54,7 +54,24 @@ def _endpoint_baseline_mse(block: torch.Tensor, *, sym: bool) -> torch.Tensor:
     scale = ((hi - lo) / MAXQ).clamp_min(1e-8)
     z = zero if sym else torch.round(-lo / scale)
     codes = (ref / scale + z).round().clamp(0, MAXQ)
-    return ((codes - z) * scale - ref).pow(2).mean(dim=1)
+    return (codes - z) * scale
+
+
+def _endpoint_baseline_mse(block: torch.Tensor, *, sym: bool) -> torch.Tensor:
+    """Per-row MSE of the plain ``p = 1`` quantization, in float64."""
+    baseline = _endpoint_baseline_dequant(block, sym=sym)
+    return (baseline - block.double()).pow(2).mean(dim=1)
+
+
+def _saliency_weighted_mse(block: torch.Tensor, dequant: torch.Tensor) -> torch.Tensor:
+    """Per-row SmoothMSE objective: squared error weighted by ``|w| + mean(|w|)``."""
+    ref = block.double()
+    magnitude = ref.abs()
+    weights = magnitude + magnitude.mean(dim=1, keepdim=True)
+    error = (dequant.double() - ref).pow(2)
+    total = weights.sum(dim=1)
+    uniform = error.mean(dim=1)
+    return torch.where(total > 0, (error * weights).sum(dim=1) / total.clamp_min(1e-12), uniform)
 
 
 def _mse(block: torch.Tensor, dequant: torch.Tensor) -> torch.Tensor:
@@ -148,22 +165,33 @@ CONSUMERS = {"rtn": (RTNConfig, _rtn_dequant), "gptq": (GPTQConfig, _gptq_dequan
 def test_smooth_mse_consumers_return_a_grid_no_worse_than_the_baseline(
     consumer, sym, device
 ):
-    """``rtn.py``, ``gptq.py`` and ``qqq.py`` share the same search contract."""
+    """``rtn.py``, ``gptq.py`` and ``qqq.py`` share the same weighted contract.
+
+    Without a captured Hessian every consumer uses the calibration-free
+    ``|w| + mean(|w|)`` saliency, so the comparison must use that objective;
+    the uniform weight MSE is no longer the quantity the search minimizes.
+    """
     config_cls, dequantize = CONSUMERS[consumer]
     block = torch.cat(
         [CASES["normal"], CASES["negative_constant"], CASES["all_zero"], CASES["mixed_sign"]],
         dim=0,
     ).to(device)
+    # RTN applies `smooth` itself; the calibrated GPTQ/QQQ configs are driven
+    # by `fallback.smooth` and refuse the top-level field (#5302).
+    smooth_kwargs = {"smooth": SmoothMSE()} if consumer == "rtn" else {}
     qcfg = config_cls(
         bits=4,
         group_size=GROUP_SIZE,
         sym=sym,
-        smooth=SmoothMSE(),
         fallback=Fallback(strategy=FallbackStrategy.RTN, smooth=SmoothMSE()),
         offload_to_disk=False,
+        **smooth_kwargs,
     )
-    searched = _mse(block, dequantize(block, qcfg))
-    baseline = _endpoint_baseline_mse(block.cpu(), sym=sym)
-    assert bool((searched <= baseline + 1e-9).all()), (
-        f"{consumer} sym={sym}: MSE {searched.tolist()} exceeds baseline {baseline.tolist()}"
+    searched = _saliency_weighted_mse(block.cpu(), dequantize(block, qcfg).cpu())
+    baseline = _saliency_weighted_mse(
+        block.cpu(), _endpoint_baseline_dequant(block.cpu(), sym=sym)
+    )
+    assert bool((searched <= baseline * (1.0 + 1e-6) + 1e-9).all()), (
+        f"{consumer} sym={sym}: weighted MSE {searched.tolist()} exceeds "
+        f"baseline {baseline.tolist()}"
     )

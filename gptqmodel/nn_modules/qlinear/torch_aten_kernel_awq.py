@@ -24,6 +24,7 @@ from ._fused_train_state import (
     bind_runtime_qzeros,
     capture_fused_train_state,
     finalize_fused_train_state,
+    fused_autograd_needs_dense,
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
@@ -387,7 +388,17 @@ class TorchAtenAwqLinear(AWQuantLinear):
             linear_mode = self.linear_mode
         else:
             with self._cpu_transform_lock:
-                if (
+                force_dense = fused_autograd_needs_dense(self, x)
+                if force_dense:
+                    # The fused op has no backward. Restore the checkpoint
+                    # layout so this call can take the differentiable dequant
+                    # path; a later inference forward transforms again (#5314).
+                    if not restore_fused_train_state(self):
+                        raise RuntimeError(
+                            f"{type(self).__name__} cannot provide a gradient after the fused "
+                            "inference transform because the checkpoint layout cannot be restored."
+                        )
+                if not force_dense and (
                     not self.training
                     and not x.requires_grad
                     and self.linear_mode is None
@@ -406,7 +417,7 @@ class TorchAtenAwqLinear(AWQuantLinear):
                     capture_fused_train_state(self)
                     self.transform(x.device.type, dtype=x.dtype)
                     self.linear_mode = "inference"
-                elif self.linear_mode is None:
+                elif not force_dense and self.linear_mode is None:
                     self.linear_mode = "train"
             linear_mode = self.linear_mode
 

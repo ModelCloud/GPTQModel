@@ -101,7 +101,7 @@ def test_supported_model_resolves_without_raising(model_type):
     assert estimate.dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64)
     assert any(entry in _ATTENTION_TYPES for entry in (estimate.unclassified or ())) is False
     # Growth is monotonic in the token count.
-    assert estimate.bytes_for(2048) >= estimate.bytes_for(1024) >= 0
+    assert estimate.kv_bytes_for(2048) >= estimate.kv_bytes_for(1024) >= 0
 
 
 def _tiny_llama_like(model_type, **overrides):
@@ -143,4 +143,4 @@ def test_prediction_matches_the_cache_transformers_allocates(model_type, overrid
             if tensor is not None:
                 measured += tensor.numel() * tensor.element_size()
 
-    assert measured == estimate.bytes_for(tokens)
+    assert measured == estimate.kv_bytes_for(tokens)

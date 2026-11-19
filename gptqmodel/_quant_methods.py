@@ -13,6 +13,21 @@ quantization package.
 # `quant_method: "gguf"` (plus `method: "gguf"`) keep loading in GPT-QModel.
 GGUF_EXPORT_QUANT_METHOD = "gptqmodel_gguf"
 
+# Checkpoints written by GPT-QModel's removed FP8 exporter (between #5181 and
+# #5242) publish this method. It is accepted on load and normalized to
+# `METHOD.FP8` so those checkpoints keep working, but new checkpoints never
+# publish it: FP8 is load-only and the standard `fp8` name belongs to
+# transformers' `FineGrainedFP8`.
+LEGACY_FP8_QUANT_METHOD = "gptqmodel_fp8"
+
+# transformers' `FineGrainedFP8` reads `weight_scale_inv` as a multiplier.
+# Every GPT-QModel FP8 export stores the inverse convention, and released
+# checkpoints up to v7.11.2 publish the standard `fp8` name with
+# `weight_scale_semantics: "inverse"`. Refuse that combination as well; no
+# production FP8 producer writes it.
+FP8_QUANT_METHOD = "fp8"
+INVERSE_WEIGHT_SCALE_SEMANTICS = "inverse"
+
 
 # Checkpoints written before the rename store this method and format name. It
 # is accepted on load so those checkpoints keep working; new checkpoints only
@@ -34,6 +49,7 @@ REFUSED_HF_QUANT_METHODS = {
     # of returning a bf16 `nn.Linear` full of int8 codes (#4664).
     "bitsandbytes": "BitsAndBytes",
     "exl3": "EXL3",
+    LEGACY_FP8_QUANT_METHOD: "FP8",
     "macaq": "MACaQ MXFP4",
     "paro": "Paro",
     LEGACY_PARO_QUANT_METHOD: "Paro",
@@ -52,6 +68,7 @@ REFUSED_HF_QUANT_METHODS = {
 REFUSED_HF_QUANT_METHOD_REMEDIES = {
     "bitsandbytes": "`GPTQModel.load`",
     "exl3": "`GPTQModel.load` with the ExLlamaV3 backend",
+    LEGACY_FP8_QUANT_METHOD: "`GPTQModel.load`",
     "macaq": "`GPTQModel.load`",
     "paro": "`GPTQModel.load`",
     LEGACY_PARO_QUANT_METHOD: "`GPTQModel.load`",
@@ -66,12 +83,39 @@ REFUSED_HF_QUANT_METHOD_REMEDIES = {
 REFUSED_HF_QUANT_METHOD_SUPPORT_ROWS = {
     "bitsandbytes": "BitsAndBytes",
     "exl3": "Exllama V3 / EXL3",
+    LEGACY_FP8_QUANT_METHOD: "FP8",
     "macaq": "MACaQ (MXFP4 W4A4)",
     "paro": "Paro",
     LEGACY_PARO_QUANT_METHOD: "Paro",
     "qqq": "QQQ",
     "nf12": "NF12",
 }
+
+
+def _config_field(config, name: str):
+    """Read one quantization-config field from a dict or config object."""
+
+    if isinstance(config, dict):
+        return config.get(name)
+    return getattr(config, name, None)
+
+
+def is_legacy_inverse_fp8_config(config) -> bool:
+    """Whether a standard ``fp8`` config declares GPT-QModel's inverse scale.
+
+    transformers' ``FineGrainedFP8`` treats ``weight_scale_inv`` as a
+    multiplier, so a checkpoint with this marker cannot be loaded by plain
+    transformers without silently decoding the wrong weights. The marker is
+    only written by GPT-QModel's removed FP8 exporter.
+    """
+
+    if _config_field(config, "quant_method") != FP8_QUANT_METHOD:
+        return False
+    semantics = _config_field(config, "weight_scale_semantics")
+    return (
+        isinstance(semantics, str)
+        and semantics.strip().lower() == INVERSE_WEIGHT_SCALE_SEMANTICS
+    )
 
 
 def refused_hf_load_remedy(method: str) -> str:

@@ -372,7 +372,8 @@ def _discover_compressed_tensors_module_schemes(
     )
 
     # ``from_config`` mutates process-global torch state (default dtype,
-    # init hooks); serialize it against loads/saves with the shared lock.
+    # init hooks); serialize it against loads/saves with the shared lock. Its
+    # own ``local_torch_dtype`` window takes the global-state writer (#5304).
     from ..models.loader import model_load_lock
 
     local_loader = local_model_loader(config.model_type)

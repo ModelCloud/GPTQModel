@@ -68,53 +68,73 @@ _PARO_AWQ_SPLIT_K = 4
 
 # The split-K AWQ GEMM and dequantize + cuBLAS cross over at a row count that
 # depends on the projection shape. The dense route pays a fixed dequantize
-# cost proportional to ``in_features * out_features``, while the native route
-# pays one FP32 split-K partial slab per row. A global 640-row threshold (the
-# #5164 fix for #5096) therefore sent the 641-2000 row band to cuBLAS even
-# where the native kernel is still faster (issue #5210).
+# cost proportional to ``in_features * out_features`` (the dequantized weight
+# bytes), while the native route pays one FP32 split-K partial slab per row.
+# A global 640-row threshold (the #5164 fix for #5096) sent the 641-2000 row
+# band to cuBLAS where the native kernel is still faster (issue #5210); the
+# first shape-aware fit then clamped every small wide projection to a
+# 2048-row floor and regressed the 1024-2047 row band (issue #5260).
 #
-# Measured on SM 12.0 (RTX 5090, torch 2.15.0+cu132, FP16/BF16, group_size
-# 128, synthetic g128 layers). The crossover is ~2400 rows for 4096x4096,
-# ~2050 for 4096x14336, ~2750 for 14336x4096, ~1290 for 896x4864 and ~3900
-# for 4864x896. The aspect/width fit below reproduces those crossovers to
-# within ~5% for the 7-8B projection shapes and is deliberately conservative
-# for the small wide projection: it never selects cuBLAS before the measured
-# crossover, so the 641-2000 row band keeps the native kernel. The 4096-row
-# ceiling preserves #5096's wide-prefill escape for every shape. See
-# docs/paro.md#native-prefill-dispatch.
-_PARO_AWQ_DENSE_MIN_ROWS = 2048
-_PARO_AWQ_DENSE_ROWS_AT_4096 = 2400
+# Measured on SM 8.9 (RTX 4090, torch 2.15.0+cu132, FP16, group_size 128,
+# synthetic g128 layers), both routes interleaved in one process, min of
+# nine to forty-one blocks. The crossover is ~800 rows for 896x4864, ~870 for
+# 1536x8960, ~960 for 2048x8192, ~1340 for 4096x14336, ~1490 for 4096x4096,
+# ~1900 for 2048x2048, ~2300 for 14336x4096 and 4864x896, ~2000 for
+# 8192x2048 and ~3100 for 8960x1536. Small layers pay a fixed cuBLAS small-M
+# penalty while large layers pay more dequantize work, so the size response
+# is a V-shape in log size around the 4096x4096 anchor. The fit reproduces
+# the wide and square crossovers within ~10%; the narrow tall shapes are
+# conservative heuristics because cuBLAS switches kernels between adjacent
+# row counts. It keeps the 641-row native choice from #5210 for the 7-8B
+# shapes, and the 4096-row ceiling preserves #5096's wide-prefill escape.
+# See docs/paro.md#shape-aware-crossover.
+_PARO_AWQ_DENSE_FLOOR_ROWS = 768
 _PARO_AWQ_DENSE_MAX_ROWS = 4096
-_PARO_AWQ_DENSE_ASPECT_EXP = 0.15
-_PARO_AWQ_DENSE_WIDTH_EXP = 0.2
+_PARO_AWQ_DENSE_ROWS_AT_4096 = 1342
+_PARO_AWQ_DENSE_ASPECT_EXP = 0.304
+_PARO_AWQ_DENSE_SIZE_EXP = 0.357
+_PARO_AWQ_DENSE_SMALL_SIZE_EXP = 0.098
+_PARO_AWQ_DENSE_NARROW_OUT = 2048
+_PARO_AWQ_NARROW_OUT_EXP = 0.219
+_PARO_AWQ_DENSE_SIZE_ANCHOR = 4096 * 4096
 
 
 def paro_awq_dense_min_rows(in_features: int, out_features: int) -> int:
     """Rows from which dequantize + cuBLAS beats the native split-K AWQ GEMM.
 
-    The measured crossover grows with the input width and shrinks with the
-    output width: a wide ``down_proj``-like layer amortizes the dequantize
-    cost sooner, while a narrow output makes the cuBLAS GEMM relatively less
-    efficient. The fit is anchored at 2400 rows for 4096x4096 and clamped to
-    ``[2048, 4096]`` so the historical 641-row band never takes the dense
-    route. It is a host-side integer decision, not a device probe, so the same
-    shape always selects the same path.
+    The measured crossover has three drivers: the aspect ratio, the layer size
+    ``in_features * out_features`` (the dequantized weight bytes), and the
+    output width. Small layers pay a fixed cuBLAS small-M penalty, so the size
+    term is a V-shape in log size around the 4096x4096 anchor: below it the
+    threshold grows as the layer shrinks, above it the threshold grows with
+    the dequantize work. A narrow output width makes the cuBLAS GEMM less
+    efficient and raises the threshold further.
+
+    It is a host-side integer decision, not a device probe, so the same shape
+    always selects the same path. The floor keeps the 641-row native choice
+    from #5210; the 4096-row ceiling preserves #5096's wide-prefill escape.
     """
 
     if in_features <= 0 or out_features <= 0:
-        return _PARO_AWQ_DENSE_MIN_ROWS
-    aspect = in_features / out_features
-    # A narrow output makes the dense GEMM less efficient, so it needs more
-    # rows to pay off. A wide output does not move the crossover below the
-    # 4096x4096 anchor: both routes scale with ``in_features * out_features``.
-    width = max(1.0, 4096.0 / out_features)
+        return _PARO_AWQ_DENSE_FLOOR_ROWS
+    size = (in_features * out_features) / _PARO_AWQ_DENSE_SIZE_ANCHOR
+    size_exp = (
+        _PARO_AWQ_DENSE_SIZE_EXP
+        if size >= 1.0
+        else -_PARO_AWQ_DENSE_SMALL_SIZE_EXP
+    )
+    narrow = max(1.0, _PARO_AWQ_DENSE_NARROW_OUT / out_features)
     rows = (
         _PARO_AWQ_DENSE_ROWS_AT_4096
-        * aspect**_PARO_AWQ_DENSE_ASPECT_EXP
-        * width**_PARO_AWQ_DENSE_WIDTH_EXP
+        * (in_features / out_features) ** _PARO_AWQ_DENSE_ASPECT_EXP
+        * size**size_exp
+        * narrow**_PARO_AWQ_NARROW_OUT_EXP
     )
     return int(
-        min(_PARO_AWQ_DENSE_MAX_ROWS, max(_PARO_AWQ_DENSE_MIN_ROWS, round(rows)))
+        min(
+            _PARO_AWQ_DENSE_MAX_ROWS,
+            max(_PARO_AWQ_DENSE_FLOOR_ROWS, round(rows)),
+        )
     )
 
 
@@ -728,9 +748,17 @@ class ParoLinear(AwqTorchLinear):
             or not self._runtime_theta.is_contiguous()
             or not self._runtime_channel_scales.is_contiguous()
         ):
-            self._runtime_theta, self._runtime_channel_scales = (
-                self._rotation_runtime_tensors(device, dtype)
-            )
+            # This cache outlives the call that fills it: the bf16 auto-cache
+            # serves every later forward, including grad-mode ones where the
+            # fused rotation's autograd wrapper saves these tensors for
+            # backward. Tensors created under `torch.inference_mode()` cannot
+            # be saved that way, so an eval/`generate()` warm-up must not
+            # poison the cache (#5317). `inference_mode(False)` restores the
+            # enclosing grad mode, so an ordinary build is unchanged.
+            with torch.inference_mode(False):
+                self._runtime_theta, self._runtime_channel_scales = (
+                    self._rotation_runtime_tensors(device, dtype)
+                )
             self._rotation_runtime_device = device
             self._rotation_runtime_dtype = dtype
             self._rotation_runtime_key = runtime_key

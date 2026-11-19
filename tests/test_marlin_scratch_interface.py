@@ -52,6 +52,33 @@ def test_capacity_query_forwards_executed_dimensions(monkeypatch, dtype):
     assert marlin_utils.marlin_scratch_sizes(a, 17, 320, True, True) == (1234, 5440)
 
 
+@pytest.mark.parametrize("dtype,suffix", [(torch.float16, "fp16"), (torch.bfloat16, "bf16")])
+def test_explicit_tile_appends_arguments(monkeypatch, dtype, suffix):
+    """An explicit tile appends three ints after the optional scratch pair."""
+
+    calls = []
+
+    def resolve(*, dtype, op_name):
+        assert op_name == "gptq_marlin_gemm_" + suffix
+
+        def op(*args):
+            calls.append(args)
+            return torch.empty(args[11], args[12], dtype=dtype)
+
+        return op
+
+    monkeypatch.setattr(marlin_utils, "_marlin_resolve_op", resolve)
+    out = marlin_utils.gptq_marlin_gemm(
+        torch.ones(1, 128, dtype=dtype), None, torch.zeros(8, 128, dtype=torch.int32),
+        None, torch.ones(1, 64, dtype=dtype), None, None, None, None,
+        torch.zeros(1, dtype=torch.int32), scalar_types.uint4b8, 1, 64, 128,
+        thread_k=128, thread_n=64, num_threads=128)
+    assert out.shape == (1, 64)
+    assert len(calls[0]) == 23
+    assert calls[0][-5:-3] == (None, None)
+    assert calls[0][-3:] == (128, 64, 128)
+
+
 def schemas(path):
     source = path.read_text()
     result = []

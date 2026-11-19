@@ -122,6 +122,7 @@ from ..utils.model import (
 from ..utils.model_dequant import infer_block_shape
 from ..utils.p2p import safe_module_to
 from ..utils.quant_metadata import UnsupportedMetadata, describe_unsupported_metadata, find_unsupported_metadata
+from ..utils.resource_budget import DeviceBudget, ResourceBudget, device_memory_bytes
 from ..utils.rocm import IS_ROCM, quant_blas_backend
 from ..utils.structure import (
     LazyTurtle,
@@ -407,6 +408,117 @@ def _log_quantize_summary(
 
 
 
+def _parameter_devices(inner: object) -> Dict[int, int]:
+    """(measured) Weight bytes per device index, meta tensors skipped.
+
+    Parameters and buffers whose storage does not live on a CUDA device are
+    reported under ``-1`` so a CPU or meta-only model still has a measured
+    weight total.
+    """
+
+    per_device: Dict[int, int] = {}
+    try:
+        tensors = list(inner.parameters()) + list(inner.buffers())
+    except Exception:  # pragma: no cover - exotic module trees
+        return per_device
+    for tensor in tensors:
+        if getattr(tensor, "is_meta", False):
+            continue
+        device = getattr(tensor, "device", None)
+        index = device.index if getattr(device, "type", None) == "cuda" and device.index is not None else -1
+        per_device[index] = per_device.get(index, 0) + tensor.numel() * tensor.element_size()
+    return per_device
+
+
+def _device_budgets(per_device: Dict[int, int]) -> Tuple[DeviceBudget, ...]:
+    """(measured) One DeviceBudget per device that holds weights."""
+
+    budgets = []
+    for index, weights in sorted(per_device.items()):
+        free, total = (None, None) if index < 0 else device_memory_bytes(index)
+        budgets.append(DeviceBudget(index=index, free_bytes=free, total_bytes=total, weights_bytes=weights))
+    return tuple(budgets)
+
+
+def _layer_device_indices(wrapper: object, inner: object,
+                          layer_count: int) -> Optional[Tuple[int, ...]]:
+    """(measured) Device index of each decoder layer, or None when unresolvable.
+
+    The layer paths live on the quantization wrapper (`BaseQModel`), while the
+    modules themselves live on the HF model it wraps - the split that made an
+    earlier revision return None for every real model.
+    """
+
+    extract = getattr(wrapper, "extract_layers_node", None)
+    if not callable(extract):
+        return None
+    try:
+        paths = list(extract())
+    except Exception:  # pragma: no cover - exotic definitions
+        return None
+    if not paths:
+        return None
+
+    # A definition may name the same decoder stack more than once: VL wrappers
+    # expose both ``model.language_model.layers`` and ``language_model.layers``,
+    # which resolve to one ModuleList. Accept every resolvable path only when
+    # they name the same modules; distinct stacks (HRM's L/H modules) stay
+    # unresolved instead of being guessed.
+    stacks = []
+    for path in paths:
+        for candidate in (inner, getattr(inner, "model", None)):
+            if candidate is None or not hasattr(candidate, "get_submodule"):
+                continue
+            try:
+                stacks.append(candidate.get_submodule(path))
+                break
+            except Exception:
+                continue
+    if not stacks:
+        return None
+    layers = stacks[0]
+    for other in stacks[1:]:
+        try:
+            same = len(other) == len(layers) and all(a is b for a, b in zip(layers, other))
+        except TypeError:  # a path that names a module rather than a stack
+            same = False
+        if not same:
+            return None
+
+    indices = []
+    for layer in layers:
+        tensors = list(layer.parameters()) + list(layer.buffers())
+        device = None
+        for tensor in tensors:
+            if getattr(tensor, "is_meta", False):
+                continue
+            device = getattr(tensor, "device", None)
+            break
+        index = device.index if getattr(device, "type", None) == "cuda" and device.index is not None else -1
+        indices.append(index)
+    if len(indices) != layer_count:
+        return None
+    return tuple(indices)
+
+
+def _budget_for(inner: object, *, wrapper: object = None, reserve: float = 0.1,
+                dtype: Optional[torch.dtype] = None) -> ResourceBudget:
+    """Resource budget for a decoder module: measured per-device numbers + estimates."""
+
+    per_device = _parameter_devices(inner)
+    estimate = _kv_cache_estimate_for(inner, dtype=dtype)
+    layer_devices = None
+    if estimate is not None:
+        layer_devices = _layer_device_indices(wrapper if wrapper is not None else inner,
+                                              inner, len(estimate.layers))
+    return ResourceBudget(
+        devices=_device_budgets(per_device),
+        kv_cache=estimate,
+        layer_devices=layer_devices,
+        reserve_fraction=reserve,
+    )
+
+
 def _kv_cache_estimate_for(inner: object, *, dtype: Optional[torch.dtype] = None) -> Optional[KVCacheEstimate]:
     """KV-cache estimate for a decoder module, dtype taken from its weights."""
 
@@ -499,15 +611,21 @@ class _CompiledModelForward:
         reused the compiled cache adds no frames and needs no collection.
         """
 
-        traced = dynamo_traced_frames()
-        if traced == self._traced_frames:
-            return
         if dynamo_is_compiling():
             # An outer ``torch.compile`` (transformers' static-cache generate)
             # is tracing this call. ``gc.collect`` is untraceable, so running it
             # here is a graph break per model call (#5224), and collecting while
             # dynamo still holds the trace's trackers is the wrong time. Leave
             # the count unchanged so the next eager call releases the garbage.
+            return
+        # Read the counter only after the trace check: dynamo traces this
+        # method when an outer compile calls through the proxy, and a traced
+        # read of ``counters["frames"]`` installs a guard on dynamo's global
+        # frame counter. Every later compile bumps that counter, so the guard
+        # failed on the next call and every static-cache ``generate()``
+        # re-traced forever (#5266).
+        traced = dynamo_traced_frames()
+        if traced == self._traced_frames:
             return
         self._traced_frames = traced
         release_compile_trace_garbage()
@@ -2347,24 +2465,27 @@ class BaseQModel(nn.Module):
 
         warn_fused_unit_dynamic_conflicts(module_names, self.quantize_config)
 
-    def kv_cache_estimate(self, *, dtype: Optional[torch.dtype] = None) -> Optional[KVCacheEstimate]:
-        """Per-token KV-cache cost of this model, or None when the config hides it.
+    def budget(self, *, reserve: float = 0.1, dtype: Optional[torch.dtype] = None) -> ResourceBudget:
+        """What this model costs on the current device.
 
-        Weight quantization does not change the cache, so this is the number a
-        user needs after loading to decide how much context fits next to the
-        weights. The dtype defaults to the dtype of the model's own weights: a
-        cache is as large as the activations that fill it, and
-        ``config.torch_dtype`` is usually unset.
+        Measured numbers (weight storage, a device-memory snapshot) sit next to
+        the estimated KV-cache footprint, and every accessor on the result says
+        which kind it is. ``reserve`` is the share of free device memory held
+        back from the KV budget.
         """
 
-        return _kv_cache_estimate_for(getattr(self, "model", None), dtype=dtype)
+        return _budget_for(getattr(self, "model", None), wrapper=self, reserve=reserve, dtype=dtype)
 
-    def log_kv_cache_estimate(self) -> None:
-        """Log the KV-cache cost once, when the config supports the estimate."""
+    def kv_cache_estimate(self, *, dtype: Optional[torch.dtype] = None) -> Optional[KVCacheEstimate]:
+        """The estimated KV-cache slice of :meth:`budget` (kept as a shortcut)."""
 
-        estimate = _kv_cache_estimate_for(getattr(self, "model", None))
-        if estimate is not None:
-            log.info(estimate.format())
+        return _budget_for(getattr(self, "model", None), wrapper=self, dtype=dtype).kv_cache
+
+    def log_budget(self) -> None:
+        """Log the resource budget once, marked measured vs estimated."""
+
+        for line in _budget_for(getattr(self, "model", None), wrapper=self).describe():
+            log.info(line)
 
     @with_quantization_device_telemetry
     def quantize(
@@ -2951,7 +3072,7 @@ class BaseQModel(nn.Module):
         # copies are gone once the loop returns, but PyTorch keeps the pinned
         # blocks cached (non-swappable ``RssShmem``) for the process lifetime.
         release_pinned_host_cache()
-        self.log_kv_cache_estimate()
+        self.log_budget()
         return result
 
     @staticmethod

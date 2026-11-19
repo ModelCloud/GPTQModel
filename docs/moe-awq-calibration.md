@@ -155,6 +155,50 @@ flowchart TD
 The MoE block pre-hook returns a new tensor, so the caller's residual input is
 not mutated in place.
 
+## 4. Routed-expert capture reservoirs
+
+A routed expert sees a different number of tokens in every batch, so its
+captures can never be concatenated into the token-row plan the dense modules
+use. Each expert therefore keeps a bounded **priority reservoir**: every
+captured row gets a deterministic uniform priority seeded from its capture
+slot, and the buffer holds the `budget_cap` lowest priorities seen so far. That
+is the deterministic equivalent of Algorithm R, so a batch keeps a share
+proportional to its length regardless of where it falls in the stream, and the
+memory stays `O(budget_cap)`.
+
+### Capacity
+
+| Situation | `budget_cap` |
+| --- | --- |
+| Definition declares `max_tokens` | that value, clamped to the position limit |
+| Routed expert, no declaration | `max(largest capture, capture count)` — the pre-#5175 per-expert budget |
+| No capture history yet | the layer-wide token-row plan budget, clamped to the position limit |
+
+The expert budget only grows, and a growing buffer carries every row it
+already held; the reservoir therefore never resets mid-layer. Keeping the
+layer-wide budget for every routed expert made the clip search and the replay
+forward run on about five times the rows on OLMoE (#5284).
+
+### Merge
+
+The kept set is the `budget_cap` lowest priorities of `kept + captured`. Only
+the `overflow` largest kept rows can be displaced — any other kept row already
+has `overflow` kept rows at or above it — so the merge selects the drop set
+from those plus the capture and writes only the rows that survive. A capture
+whose priorities all lose to the largest kept one leaves the buffer untouched.
+
+```mermaid
+flowchart TD
+    A["capture: rows, priorities"] --> B{"reservoir exists?"}
+    B -- no --> C["allocate budget_cap slots<br/>seed from earlier plan rows"]
+    B -- yes --> D{"used + count <= budget_cap?"}
+    D -- yes --> E["append in place"]
+    D -- no --> F{"all priorities >= largest kept?"}
+    F -- yes --> G["no-op: keep the buffer"]
+    F -- no --> H["drop set = top overflow of<br/>(top overflow kept) + capture"]
+    H --> I["write only the surviving captured rows"]
+```
+
 ## Failure and ambiguity contract
 
 | Situation | Behaviour |

@@ -237,7 +237,12 @@ def test_concurrent_from_config_cannot_change_default_dtype(tmp_path):
 
 
 class _SignallingLock:
-    """Re-entrant lock that records when another thread has to wait for it."""
+    """Re-entrant lock that records when another thread has to wait for it.
+
+    The compiled-call side asks for ``reader()``; this stand-in grants it the
+    same exclusive lock so a test can still observe the wait. The real
+    ``_ModelGlobalStateLock`` grants shared readers.
+    """
 
     def __init__(self):
         self._lock = threading.RLock()
@@ -255,6 +260,12 @@ class _SignallingLock:
     def __enter__(self):
         self.acquire()
         return self
+
+    def reader(self):
+        return self
+
+    def holds_reader(self) -> bool:
+        return False
 
     def __exit__(self, *_exc):
         self.release()
@@ -341,7 +352,7 @@ def test_first_compile_cannot_restore_dtype_over_a_concurrent_load(tmp_path, mon
     torch.set_default_dtype(original_dtype)
 
     lock = _SignallingLock()
-    monkeypatch.setattr(loader_module, "_MODEL_LOAD_LOCK", lock)
+    monkeypatch.setattr(loader_module, "_MODEL_GLOBAL_STATE_LOCK", lock)
 
     load_bf16 = threading.Event()
     compile_restore = threading.Event()

@@ -84,7 +84,7 @@ def test_paro_quantize_config_dispatches_constructor():
     assert cfg.quant_method == METHOD.PARO
     assert cfg.format == FORMAT.PARO
     assert cfg.krot == 8
-    assert cfg.opt_batch_size == 64
+    assert cfg.opt_batch_size == 128
     assert cfg.opt_optimizer == "adamw"
     assert cfg.opt_weight_decay == pytest.approx(0.01)
     assert cfg.opt_betas == pytest.approx((0.9, 0.95))
@@ -715,6 +715,78 @@ def test_paro_stage_skips_dead_pre_epoch_train_eval(monkeypatch, stage_runner_na
     # validation pass, which is why the validation count is a lower bound.
     assert "train" not in seen_splits
     assert seen_splits.count("val") >= epochs
+
+
+def test_paro_chunk_rows_covers_every_row_exactly_once():
+    """Guard #5246: a larger step batch must still replay the full row budget.
+
+    #5246 recovers the post-#5175 quantize speed by replaying the same 2048-row
+    calibration budget in fewer, larger optimizer steps. The speedup is only
+    correct while every epoch still visits each sampled row exactly once: a
+    chunker that skipped or duplicated rows would silently shrink or reweight
+    the calibration set. `_chunk_rows` is the single place that decides the
+    row split, so pin its coverage contract for divisible, ragged and
+    oversized step batches.
+    """
+
+    rows = torch.arange(2048, dtype=torch.float32).unsqueeze(1)
+    for batch_size in (1, 63, 64, 128, 160, 2047, 2048, 4096):
+        batches = list(paro_optimization._chunk_rows(rows, batch_size))
+        replayed = torch.cat(batches, dim=0)
+        assert torch.equal(replayed, rows), f"row coverage changed at batch_size={batch_size}"
+        assert all(batch.shape[0] <= batch_size for batch in batches)
+
+
+def test_paro_stage_runs_one_step_per_chunk_and_covers_each_epoch():
+    """Guard #5246: the step batch sets the step count, not the row coverage.
+
+    The stage must run exactly ``ceil(rows / batch_size)`` optimizer steps per
+    epoch, and the rows handed to those steps must concatenate back to the
+    full training budget in order. This is the invariant the #5246 speedup
+    relies on: fewer steps, identical data.
+    """
+
+    class _RowRecorder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.eye(2, dtype=torch.float32))
+            self.train_batches = []
+
+        def forward(self, x):
+            if x.shape[0] == batch_size:
+                self.train_batches.append(x.detach().clone())
+            return x @ self.weight
+
+        def reset_masked_angles(self):
+            return None
+
+    rows = 2048
+    epochs = 2
+    batch_size = 128
+    inputs = torch.arange(rows, dtype=torch.float32).unsqueeze(1).repeat(1, 2)
+    targets = inputs.clone()
+    model = _RowRecorder()
+
+    paro_optimization._run_stage_gptqmodel_impl(
+        model=model,
+        inputs_train=inputs,
+        targets_train=targets,
+        inputs_val=inputs[:4],
+        targets_val=targets[:4],
+        param_groups=[{"params": [model.weight], "lr": 0.1}],
+        epochs=epochs,
+        batch_size=batch_size,
+        optimizer_name="adamw",
+    )
+
+    steps_per_epoch = rows // batch_size
+    assert len(model.train_batches) == epochs * steps_per_epoch
+    for epoch in range(epochs):
+        epoch_rows = torch.cat(
+            model.train_batches[epoch * steps_per_epoch : (epoch + 1) * steps_per_epoch],
+            dim=0,
+        )
+        assert torch.equal(epoch_rows, inputs)
 
 
 def test_paro_fold_epoch_loss_matches_host_fp64_fold():

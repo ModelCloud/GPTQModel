@@ -354,6 +354,20 @@ def restore_fused_train_state(module: nn.Module) -> bool:
     return True
 
 
+def fused_autograd_needs_dense(module: nn.Module, x: torch.Tensor) -> bool:
+    """Whether a latched fused inference path must yield to autograd.
+
+    The fused CPU kernels run under ``no_grad``. Taking one while the caller
+    needs a gradient silently detaches the output (#5314), so the forward must
+    use the differentiable dequant path for that call instead.
+    """
+
+    if not (torch.is_grad_enabled() and x.requires_grad):
+        return False
+    mode = getattr(module, "linear_mode", None)
+    return getattr(mode, "value", mode) == "inference"
+
+
 def reset_fused_runtime_state(module: nn.Module) -> None:
     """Forget that the live operands are in a kernel's runtime layout.
 
@@ -572,6 +586,7 @@ __all__ = [
     "finalize_fused_train_state",
     "classify_fused_state_layout",
     "discard_fused_train_state",
+    "fused_autograd_needs_dense",
     "materialize_fused_runtime_state",
     "refinalize_fused_state_after_apply",
     "reset_fused_runtime_state",
