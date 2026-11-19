@@ -4,6 +4,7 @@ set -euo pipefail
 test_script="${1:?test_script is required}"
 run_id="${2:?run_id is required}"
 run_attempt="${3:?run_attempt is required}"
+test_group="${4:-}"
 
 uv pip install pyyaml
 torch_version="$(sed -n 's/^torch==\(.*\)+cu132$/\1/p' .github/ci/torch-cu132.txt)"
@@ -15,7 +16,9 @@ env_output="$(python .github/scripts/ci_workflow.py resolve-env \
   --shell)"
 eval "$env_output"
 
-python .github/scripts/ci_workflow.py resolve-test-runtime --test-name "$test_script"
+python .github/scripts/ci_workflow.py resolve-test-runtime \
+  --test-name "$test_script" \
+  --test-group "$test_group"
 test_cache_key="$test_script"
 test_cache_key="${test_cache_key//\//_}"
 test_cache_key="${test_cache_key//./_}"

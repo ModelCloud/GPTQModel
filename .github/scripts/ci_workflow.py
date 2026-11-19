@@ -506,12 +506,23 @@ def build_test_plan(
     }
 
 
-def resolve_test_runtime(test_name: str, tests_root: str | Path = "tests") -> TestRuntime:
+def resolve_test_runtime(
+        test_name: str,
+        tests_root: str | Path = "tests",
+        test_group: str = "",
+) -> TestRuntime:
     normalized = normalize_test_name(test_name)
     test_path = test_path_from_name(normalized, tests_root=tests_root)
     xpu_mode = "xpu" in normalized
     npu_mode = is_npu_test_name(normalized)
-    skip_gpu_allocation = xpu_mode or npu_mode or has_no_gpu_marker(test_path)
+    # A CPU matrix entry never holds a GPU lease, even when its file lacks the
+    # `# GPU=-1` marker used by the automatic planner.
+    skip_gpu_allocation = (
+        test_group == "cpu"
+        or xpu_mode
+        or npu_mode
+        or has_no_gpu_marker(test_path)
+    )
     return TestRuntime(
         test_name=normalized,
         test_path=str(test_path),
@@ -576,13 +587,20 @@ def cmd_resolve_env(args: argparse.Namespace) -> int:
 
 
 def cmd_resolve_test_runtime(args: argparse.Namespace) -> int:
-    runtime = resolve_test_runtime(args.test_name, tests_root=args.tests_root)
+    runtime = resolve_test_runtime(
+        args.test_name,
+        tests_root=args.tests_root,
+        test_group=args.test_group,
+    )
     skip_gpu = str(runtime.skip_gpu_allocation).lower()
     xpu_mode = str(runtime.xpu_mode).lower()
 
     append_github_env("TEST_FILE", runtime.test_path)
     append_github_env("SKIP_GPU_ALLOCATION", skip_gpu)
     append_github_env("XPU_MODE", xpu_mode)
+    if runtime.skip_gpu_allocation:
+        # Keep the whole job CPU-only, not just the pytest subprocess.
+        append_github_env("CUDA_VISIBLE_DEVICES", "")
 
     if args.shell:
         print(f"TEST_FILE={shlex.quote(runtime.test_path)}")
@@ -629,6 +647,7 @@ def main() -> int:
     runtime_parser = subparsers.add_parser("resolve-test-runtime")
     runtime_parser.add_argument("--test-name", required=True)
     runtime_parser.add_argument("--tests-root", default="tests")
+    runtime_parser.add_argument("--test-group", default="")
     runtime_parser.add_argument("--shell", action="store_true")
 
     versions_parser = subparsers.add_parser("loop-versions")
