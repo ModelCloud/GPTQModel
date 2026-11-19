@@ -89,8 +89,9 @@ For `batch_size=1` that is one longest-sample equivalent, so 512 rows for a
 a 4096-document corpus keep the same per-module replay tensor. The extra row per
 batch guarantees every non-empty calibration batch contributes at least one row
 when the budget is at least the batch count; below that, evenly spaced batches
-contribute one row each. `_pack_token_rows` samples evenly inside each batch and
-is deterministic for a fixed capture order.
+contribute one row each, taken from the centre of the batch rather than its
+first (BOS) position (#5265). `_pack_token_rows` samples evenly inside each batch
+and is deterministic for a fixed capture order.
 
 The position-limit clamp (#5085) is required because the packed rows are
 replayed as **one** sequence. Without it `batch_size > 1` asks for about
@@ -131,6 +132,39 @@ flowchart TD
 
 `_cap_token_rows` caches `resolve_position_limit` once per processor, so the
 budget path costs no per-module config walk.
+
+### Routed-expert reservoir
+
+A routed expert sees a different number of rows per batch, so it never matches
+the precomputed plan and every capture goes to the uniform priority reservoir
+(`AWQProcessor._merge_reservoir_rows`). The reservoir is sized by
+`_reservoir_budget_cap` from the **layer-wide** budget, not from the expert's
+own captures: `max(largest_batch, batches)`, which is 906 rows for a
+128-document, 2500-character C4 calibration. Before #5175 each expert was sized
+from its own captures (about 185 rows in the same run), so a MoE run now runs
+the clip search on roughly 5x more rows per expert. That is the accuracy/latency
+trade-off of the bounded capture, and it dominates MoE AWQ quantize time
+(`_search_best_clip` 12.9 s -> 68.5 s in a contended run, #5284).
+
+A model that wants the smaller sample back can declare it per module through
+`awq_input_feature_aggregation`, which is already honoured by both the plan and
+the reservoir:
+
+```python
+@classmethod
+def awq_input_feature_aggregation(cls, module_name):
+    if module_name.startswith("mlp.experts."):
+        return {"mode": "token_rows", "max_tokens": 256}
+    return super().awq_input_feature_aggregation(module_name)
+```
+
+The value is clamped by the position limit like every other budget.
+
+Two per-capture costs are not part of that trade-off and are optimized away
+(#5284): the aggregation policy is memoized per `(class, module_name)` instead
+of rebuilding the model's `ModulePlan` on every capture, and a full reservoir
+short-circuits a capture whose rows all lose to the kept ones instead of
+concatenating and re-ranking the buffer.
 
 ### Replay geometry failures
 
@@ -459,6 +493,11 @@ reproduces #4063's 24.84 / 22.77 exactly, which anchors the harness.
 | `tests/test_awq_gpt_neo_packed_replay_5085.py::test_awq_gpt_neo_batch_of_two_quantizes_within_the_limit` | native GPT-Neo, two 40-token rows against a 64-position limit: every packed replay stays within the limit and all 12 leaves pack |
 | `tests/test_awq_gpt_neo_packed_replay_5085.py::test_control_batch_of_one_keeps_every_row` | a single document under the limit still replays all 40 rows |
 | `tests/test_awq_gpt_neo_packed_replay_5085.py::test_replay_geometry_error_becomes_a_scale_group_error` | an over-long replay raises `_AWQScaleGroupError`; fallback quantizes every leaf, `fallback=None` propagates |
+| `tests/test_awq_capture_perf_5284.py::test_policy_is_resolved_once_per_module` | the aggregation policy is resolved once per `(class, module_name)`, not once per capture |
+| `tests/test_awq_capture_perf_5284.py::test_a_losing_capture_skips_the_merge` | a full reservoir does not re-rank the buffer for a capture that cannot displace a row |
+| `tests/test_awq_capture_perf_5284.py::test_merge_matches_the_previous_algorithm` | the short-circuit keeps exactly the rows the previous merge kept |
 
-The first three nodes fail on `main` before the fix; the geometry-error node
-asserts the fallback contract introduced with it.
+The first three `test_awq_gpt_neo_packed_replay_5085.py` nodes fail on `main`
+before the #5085 fix; its geometry-error node asserts the fallback contract
+introduced with it. The `test_awq_capture_perf_5284.py` policy and short-circuit
+nodes fail before #5284, and its equivalence node pins the kept rows.

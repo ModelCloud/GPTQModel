@@ -1155,20 +1155,49 @@ class AWQProcessor(LoopProcessor):
         self.nsamples = total_tokens
 
     def _feature_aggregation_policy(self, module_name: str) -> Optional[Dict[str, Any]]:
-        """Return an optional model-specific activation aggregation policy."""
+        """Return an optional model-specific activation aggregation policy.
+
+        The selector is a pure function of the model class and the module name,
+        but the default implementation rebuilds the model's ``ModulePlan`` on
+        every call. ``_record_input_feature`` asks for it once per captured
+        module per batch -- 51k times on a 2-layer MoE run, 3.4 s of pure plan
+        rebuilding (#5284) -- so the resolved policy is memoized per
+        ``(class, module_name)``. The memo keeps a strong reference to the model
+        it was resolved for, so a reused processor cannot answer for a
+        different model through a recycled ``id``.
+        """
 
         selector = getattr(self.gptq_model, "awq_input_feature_aggregation", None)
         if not callable(selector):
             return None
-        policy = selector(module_name)
-        if policy is None:
-            return None
-        if not isinstance(policy, Mapping):
-            raise TypeError(
-                "awq_input_feature_aggregation must return a mapping or None "
-                f"for {module_name!r}, got {type(policy).__name__}."
-            )
-        return dict(policy)
+        memo = getattr(self, "_feature_aggregation_policies", None)
+        if memo is None:
+            memo = {}
+            self._feature_aggregation_policies = memo
+        # The selector's own identity is part of the key, so a monkeypatched or
+        # otherwise replaced selector is never answered from another one's cache.
+        selector_function = getattr(selector, "__func__", selector)
+        try:
+            key = (type(self.gptq_model), selector_function, module_name)
+            hash(key)
+        except TypeError:
+            key = None
+        cached = memo.get(key) if key is not None else None
+        if cached is not None and cached[0] is self.gptq_model:
+            policy = cached[1]
+        else:
+            policy = selector(module_name)
+            if policy is not None and not isinstance(policy, Mapping):
+                raise TypeError(
+                    "awq_input_feature_aggregation must return a mapping or None "
+                    f"for {module_name!r}, got {type(policy).__name__}."
+                )
+            policy = None if policy is None else dict(policy)
+            if key is not None:
+                memo[key] = (self.gptq_model, policy)
+        # Callers may keep or mutate the mapping; hand out a fresh copy so the
+        # memoized value cannot be changed from outside.
+        return None if policy is None else dict(policy)
 
     def _record_input_feature(
         self,
@@ -1489,6 +1518,21 @@ class AWQProcessor(LoopProcessor):
             row_buffer[used:used + count] = row_indices
             used += count
         else:
+            # A full reservoir usually rejects the whole capture: a routed
+            # expert sees one batch per expert per layer, so most merges offer
+            # rows that all lose to the kept ones. Comparing the capture's best
+            # priority with the worst kept priority is O(cap) on host floats and
+            # skips the concat/topk/mask/arange below, which cost ~160 us per
+            # capture -- 8.6 s over a 2-layer MoE run (#5284). The condition is
+            # strict so ties keep the slow path and the kept set is unchanged
+            # for every capture this short-circuits.
+            if used >= budget_cap and count and bool(
+                (priorities > priority_buffer[:used].max()).all()
+            ):
+                entry["reservoir_used"] = used
+                entry["inputs"] = [buffer[:used].unsqueeze(0)]
+                entry.pop("provenance", None)
+                return
             combined = torch.cat([priority_buffer[:used], priorities])
             keep = torch.topk(combined, budget_cap, largest=False).indices
             kept_old = keep[keep < used]
