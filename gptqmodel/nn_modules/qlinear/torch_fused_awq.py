@@ -30,6 +30,7 @@ from ._fused_train_state import (
     finalize_fused_train_state,
     fused_autograd_needs_dense,
     refinalize_fused_state_after_apply,
+    refresh_runtime_zero_offsets,
     restore_fused_train_state,
 )
 from ._numerics import linear_wide_bias, matmul_fp32_reduce
@@ -299,6 +300,10 @@ class TorchFusedAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
         # dtype so a later forward or save cannot persist a narrowed scale
         # (issue #4178).
         compute_scales = self.scales.to(dtype=compute_dtype).contiguous()
+        # Keep the checkpoint zero codes: the affine offsets installed below
+        # are derived from ``scales`` and must be rebuilt if the caller changes
+        # them (#5372).
+        self._cpu_zero_codes = izeros.reshape_as(self.scales)
         zeros = (zero_offset - izeros.reshape_as(compute_scales).float()) * compute_scales.float()
         self.qzeros = zeros.to(device=self.qweight.device, dtype=compute_dtype).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(compute_scales, self.qzeros)
@@ -311,6 +316,10 @@ class TorchFusedAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
         # loader's tensors and pin the shard mapping (#4785).
         self.scales = detach_cpu_operand(self.scales)
         self.bias = detach_cpu_operand(getattr(self, "bias", None))
+        # Record the inputs the installed affine offsets were derived from so a
+        # later scale-only change can rebuild them (#5372).
+        self._fused_scale_key = tensor_cache_key(self.scales)
+        self._fused_zero_key = tensor_cache_key(self.qzeros)
 
     def transform_xpu_awq(self, dtype):
         # Unpack AWQ weights directly to integer form
@@ -410,16 +419,34 @@ class TorchFusedAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
         current = getattr(self, "scales_and_zeros", None)
         dtype = current.dtype if isinstance(current, torch.Tensor) else scales.dtype
         dtype = torch.promote_types(dtype, torch.promote_types(scales.dtype, qzeros.dtype))
+        scale_key = tensor_cache_key(scales)
+        recomputed = None
+        if (
+            scale_key != getattr(self, "_fused_scale_key", None)
+            and tensor_cache_key(qzeros) == getattr(self, "_fused_zero_key", None)
+        ):
+            # Only ``scales`` changed. The live ``qzeros`` are affine offsets
+            # derived from the previous scale, so rebuild them from the
+            # checkpoint zero codes instead of republishing the stale pair
+            # (#5372). A replaced or edited ``qzeros`` is an explicit offset
+            # and keeps the historical meaning.
+            recomputed = refresh_runtime_zero_offsets(self, bits=self.bits, dtype=dtype)
+            if recomputed is not None:
+                qzeros = recomputed
         self.scales_and_zeros = pack_scales_and_zeros(scales.to(dtype), qzeros.to(dtype))
         # ``qzeros`` is byte-identical to the packed metadata's zero column.
         # Keep it as a view instead of a second allocation, then key the cache
         # on the view that is actually installed.
         if bind_runtime_qzeros(self):
             key = tuple(tensor_cache_key(tensor) for tensor in (qweight, scales, self.qzeros))
+        elif recomputed is not None:
+            self.qzeros = qzeros
         self.torch_fused_op = Int4PackedOp(
             self.qweight, self.scales_and_zeros, self.group_size
         ).eval()
         self._fused_state_key = key
+        self._fused_scale_key = scale_key
+        self._fused_zero_key = tensor_cache_key(self.qzeros)
 
     def _apply(self, fn, recurse: bool = True):
         """Re-finalize the checkpoint layout after an invalidating move.
