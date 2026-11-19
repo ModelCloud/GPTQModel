@@ -1,246 +1,242 @@
-# coding=utf-8
-# Copyright 2024 The HuggingFace Inc. team.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""
-Processor class for LocateAnything.
-"""
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+# Clean-room implementation from cleanroom/locateanything/SPEC.md; see NOTICE.
+"""Prompt templating, media fetching and placeholder expansion for LocateAnything."""
 
+from __future__ import annotations
+
+import importlib.util
+import json
+import logging
 import math
 import os
 import re
 import tempfile
-import time
-from functools import lru_cache
-from typing import Any, List, Optional, Union
-from urllib.parse import urlsplit
+from urllib.parse import urlparse
 
 import numpy as np
 import torch
 from PIL import Image
-from torchvision import io, transforms
-from torchvision.transforms import InterpolationMode
 from transformers.feature_extraction_utils import BatchFeature
-from transformers.image_utils import ImageInput
-from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
-from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
-from transformers.utils import logging
-from transformers.video_utils import VideoInput
+from transformers.processing_utils import ProcessorMixin
 
+from ....utils.image import ImageFetchError, load_bytes_from_url, load_image_from_url
 from ....utils.image import fetch_image as _fetch_local_image
-from ....utils.image import load_bytes_from_url, load_image_from_url
+from .image_processing_locateanything import LocateAnythingImageProcessor
 
 
-logger = logging.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
-FPS = 2.0
-MAX_FRAMES = 64
-VIDEO_TOTAL_PIXELS = 25913856  # Override per video via video_total_pixels, never environment.
 # Upper bound for one remote image or video download.
 REMOTE_MEDIA_MAX_BYTES = 64 * 1024 * 1024
+DEFAULT_VIDEO_TOTAL_PIXELS = 25913856
+DEFAULT_SAMPLE_FPS = 2.0
+DEFAULT_MAX_FRAMES = 64
+
+_ORDINALS = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth")
+_DEFAULT_SYSTEM = "<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n"
+_PROCESSOR_DICT_KEYS = (
+    "chat_template",
+    "image_token",
+    "video_token",
+    "merge_kernel_size",
+    "image_placeholder",
+    "video_placeholder",
+    "image_start_token",
+    "image_end_token",
+)
 
 
-def to_rgb(pil_image: Image.Image) -> Image.Image:
-    if pil_image.mode == "RGBA":
-        white_background = Image.new("RGB", pil_image.size, (255, 255, 255))
-        white_background.paste(pil_image, mask=pil_image.split()[3])  # Use alpha channel as mask
-        return white_background
-    return pil_image.convert("RGB")
+# ----------------------------------------------------------------------------------------------
+# Media fetching
+# ----------------------------------------------------------------------------------------------
+
+def _is_remote(source) -> bool:
+    return isinstance(source, str) and source.startswith(("http://", "https://"))
 
 
-def _is_remote(path) -> bool:
-    return isinstance(path, str) and path.startswith(("http://", "https://"))
+def _to_rgb(image: Image.Image) -> Image.Image:
+    if image.mode == "RGBA":
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        background.paste(image, mask=image.split()[3])
+        return background
+    if image.mode != "RGB":
+        return image.convert("RGB")
+    return image
 
 
-def fetch_image(ele: dict[str, str | Image.Image]) -> Image.Image:
-    image = ele["image"] if "image" in ele else ele["image_url"]
-    if _is_remote(image):
-        # Streamed, byte-capped, SSRF-filtered fetch; every redirect hop is re-validated.
-        image_obj = load_image_from_url(image, max_bytes=REMOTE_MEDIA_MAX_BYTES)
+def fetch_image(ele: dict) -> Image.Image:
+    source = ele["image"] if "image" in ele else ele["image_url"]
+    if _is_remote(source):
+        image = load_image_from_url(source, max_bytes=REMOTE_MEDIA_MAX_BYTES)
     else:
-        image_obj = _fetch_local_image({"image": image})
-    return to_rgb(image_obj)
+        image = _fetch_local_image({"image": source})
+    return _to_rgb(image)
 
 
-def get_video_frame_indices(
-    ele: dict,
-    total_frames: int,
-    video_fps: int | float,
-) -> tuple[torch.Tensor, float]:
-    target_fps = ele.get("fps", FPS)
-    max_frames = ele.get("max_frames", MAX_FRAMES)
-
-    nframes = (total_frames / video_fps) * target_fps
-    nframes = int(round(nframes))
-    nframes = max(1, nframes)
-
-    if nframes > max_frames:
-        nframes = max_frames
-
-    nframes = min(nframes, total_frames)
-
-    if nframes == total_frames:
-        idx = torch.arange(total_frames).long()
+def get_video_frame_indices(ele: dict, total_frames: int, video_fps: float):
+    """Uniformly sample frame indices at ``ele['fps']`` frames per second."""
+    target_fps = ele.get("fps", DEFAULT_SAMPLE_FPS)
+    count = max(1, round(total_frames / video_fps * target_fps))
+    count = min(count, ele.get("max_frames", DEFAULT_MAX_FRAMES), total_frames)
+    if count == total_frames:
+        indices = list(range(total_frames))
     else:
-        idx = torch.linspace(0, total_frames - 1, nframes).round().long()
+        indices = torch.linspace(0, total_frames - 1, count).round().long().tolist()
+    sample_fps = count / max(total_frames, 1e-6) * video_fps
+    return indices, sample_fps
 
-    sample_fps = nframes / max(total_frames, 1e-6) * video_fps
 
-    return idx, sample_fps
+def _read_video_torchvision(ele: dict):
+    import torchvision.io
 
-def _read_video_torchvision(
-    ele: dict,
-) -> (torch.Tensor, float, list):
-    """read video using torchvision.io.read_video and return also per-frame timestamps"""
-    video_path = ele["video"]
-    st = time.time()
-
-    video, audio, info = io.read_video(
-        video_path,
-        start_pts=ele.get("video_start", 0.0),
+    video_start = ele.get("video_start", 0.0)
+    video, _audio, info = torchvision.io.read_video(
+        ele["video"],
+        start_pts=video_start,
         end_pts=ele.get("video_end", None),
         pts_unit="sec",
         output_format="TCHW",
     )
-    total_frames, video_fps = video.size(0), info["video_fps"]
-    logger.info(f"torchvision:  {video_path=}, {total_frames=}, {video_fps=}, time={time.time() - st:.3f}s")
-
-    idx, sample_fps = get_video_frame_indices(ele, total_frames, video_fps)
-
-    start_time = ele.get("video_start", 0.0)
-    timestamps = (start_time + idx.to(torch.float32) / video_fps).tolist()
-
-    video = video[idx]
-    return video, sample_fps, timestamps
+    video_fps = info["video_fps"]
+    indices, sample_fps = get_video_frame_indices(ele, video.size(0), video_fps)
+    timestamps = [video_start + index / video_fps for index in indices]
+    return video[indices], sample_fps, timestamps
 
 
-def is_decord_available() -> bool:
-    import importlib.util
-    return importlib.util.find_spec("decord") is not None
-
-def _read_video_decord(
-    ele: dict,
-) -> (torch.Tensor, float, list):
-    """read video using decord.VideoReader and return also per-frame timestamps"""
+def _read_video_decord(ele: dict):
     import decord
-    video_path = ele["video"]
-    st = time.time()
-    vr = decord.VideoReader(video_path)
 
-    total_frames, video_fps = len(vr), vr.get_avg_fps()
-    logger.info(f"decord:  {video_path=}, {total_frames=}, {video_fps=}, time={time.time() - st:.3f}s")
-
-    idx_tensor, sample_fps = get_video_frame_indices(ele, total_frames, video_fps)
-    idx = idx_tensor.tolist()
-
-    start_time = ele.get("video_start", 0.0)
-    timestamps = [start_time + i / video_fps for i in idx]
-
-    video = vr.get_batch(idx).asnumpy()
-    video = torch.tensor(video).permute(0, 3, 1, 2)  # Convert to TCHW format
-
-    return video, sample_fps, timestamps
+    reader = decord.VideoReader(ele["video"])
+    video_fps = reader.get_avg_fps()
+    video_start = ele.get("video_start", 0.0)
+    indices, sample_fps = get_video_frame_indices(ele, len(reader), video_fps)
+    frames = torch.from_numpy(reader.get_batch(indices).asnumpy()).permute(0, 3, 1, 2)
+    timestamps = [video_start + index / video_fps for index in indices]
+    return frames, sample_fps, timestamps
 
 
+# Looked up at call time so a reader can be replaced per backend name.
 VIDEO_READER_BACKENDS = {
-    "decord": _read_video_decord,
     "torchvision": _read_video_torchvision,
+    "decord": _read_video_decord,
 }
 
 
-@lru_cache(maxsize=1)
-def get_video_reader_backend() -> str:
-    if is_decord_available():
-        video_reader_backend = "decord"
-    else:
-        video_reader_backend = "torchvision"
-    return video_reader_backend
+def _default_video_backend() -> str:
+    return "decord" if importlib.util.find_spec("decord") is not None else "torchvision"
 
 
-def fetch_video(ele: dict, return_video_sample_fps: bool = False, video_reader_backend: str = "torchvision") -> torch.Tensor | list[Image.Image]:
-    """
-    Fetches video, samples frames, resizes based on video_total_pixels, and returns as Tensor (TCHW).
-    """
-    if _is_remote(ele["video"]):
-        # Readers would otherwise stream an unbounded URL themselves.
-        data = load_bytes_from_url(ele["video"], max_bytes=REMOTE_MEDIA_MAX_BYTES)
-        suffix = os.path.splitext(urlsplit(ele["video"]).path)[1]
-        with tempfile.NamedTemporaryFile(suffix=suffix) as handle:
-            handle.write(data)
-            handle.flush()
-            return fetch_video({**ele, "video": handle.name}, return_video_sample_fps, video_reader_backend)
-    if isinstance(ele["video"], str):
-        if ele["video"].startswith("file://"):
-            ele = {**ele, "video": ele["video"][7:]}
-        video_reader_backend = video_reader_backend if video_reader_backend is not None else get_video_reader_backend()
+def fetch_video(ele: dict, return_video_sample_fps: bool = False, video_reader_backend="torchvision"):
+    source = ele["video"]
+
+    if isinstance(source, (list, tuple)):
+        extra = {key: value for key, value in ele.items() if key != "video"}
+        frames = [fetch_image({**extra, "image": frame}) for frame in source]
+        if return_video_sample_fps:
+            return frames, ele.get("fps", DEFAULT_SAMPLE_FPS), [-1] * len(frames)
+        return frames
+
+    if _is_remote(source):
+        data = load_bytes_from_url(source, max_bytes=REMOTE_MEDIA_MAX_BYTES)
+        suffix = os.path.splitext(urlparse(source).path)[1]
+        handle = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
         try:
-            video, sample_fps, timestamps = VIDEO_READER_BACKENDS[video_reader_backend](ele)
-        except Exception as e:
-            logger.warning(f"video_reader_backend {video_reader_backend} error, use torchvision as default, msg: {e}")
-            video, sample_fps, timestamps = VIDEO_READER_BACKENDS["torchvision"](ele)
+            with handle:
+                handle.write(data)
+            return fetch_video(
+                {**ele, "video": handle.name},
+                return_video_sample_fps=return_video_sample_fps,
+                video_reader_backend=video_reader_backend,
+            )
+        finally:
+            os.unlink(handle.name)
 
-        nframes, _, height, width = video.shape
+    path = source[len("file://"):] if source.startswith("file://") else source
+    request = {**ele, "video": path}
+    backend = video_reader_backend or _default_video_backend()
+    try:
+        video, sample_fps, timestamps = VIDEO_READER_BACKENDS[backend](request)
+    except Exception as exc:
+        logger.warning("LocateAnything video reader %r failed (%s); retrying with torchvision", backend, exc)
+        video, sample_fps, timestamps = VIDEO_READER_BACKENDS["torchvision"](request)
 
-        video_total_pixels = ele.get("video_total_pixels", VIDEO_TOTAL_PIXELS)
-        current_pixels = nframes * height * width
+    frames, _channels, height, width = video.shape
+    max_pixels = ele.get("video_total_pixels", DEFAULT_VIDEO_TOTAL_PIXELS)
+    if frames * height * width > max_pixels:
+        from torchvision.transforms import InterpolationMode
+        from torchvision.transforms import functional as F
 
-        if current_pixels > video_total_pixels:
-            scale_factor = math.sqrt(video_total_pixels / current_pixels)
-            new_height = int(height * scale_factor)
-            new_width = int(width * scale_factor)
+        scale = math.sqrt(max_pixels / (frames * height * width))
+        video = F.resize(
+            video,
+            [int(height * scale), int(width * scale)],
+            interpolation=InterpolationMode.BICUBIC,
+            antialias=True,
+        )
+    video = video.float()
+    if return_video_sample_fps:
+        return video, sample_fps, timestamps
+    return video
 
-            video = transforms.functional.resize(
-                video,
-                [new_height, new_width],
-                interpolation=InterpolationMode.BICUBIC,
-                antialias=True,
-            ).float()
+
+def extract_vision_info(conversations) -> list[dict]:
+    if conversations and isinstance(conversations[0], dict):
+        conversations = [conversations]
+    infos = []
+    for conversation in conversations:
+        for message in conversation:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for ele in content:
+                if not isinstance(ele, dict):
+                    continue
+                if (
+                    "image" in ele
+                    or "image_url" in ele
+                    or "video" in ele
+                    or ele.get("type") in ("image", "image_url", "video")
+                ):
+                    infos.append(ele)
+    return infos
+
+
+def process_vision_info(conversations, return_video_kwargs: bool = False, video_reader_backend="torchvision"):
+    images, videos, fps_list, timestamps_list = [], [], [], []
+    for ele in extract_vision_info(conversations):
+        if "image" in ele or "image_url" in ele:
+            images.append(fetch_image(ele))
+        elif "video" in ele:
+            video, fps, timestamps = fetch_video(
+                ele, return_video_sample_fps=True, video_reader_backend=video_reader_backend
+            )
+            videos.append(video)
+            fps_list.append(fps)
+            timestamps_list.append(timestamps)
         else:
-            video = video.float()
+            raise ValueError("image, image_url or video should be in content.")
+    images = images or None
+    videos = videos or None
+    if return_video_kwargs:
+        return images, videos, {"fps": fps_list, "timestamps": timestamps_list}
+    return images, videos
 
-        if return_video_sample_fps:
-            return video, sample_fps, timestamps
-        return video
 
-    else:
-        assert isinstance(ele["video"], (list, tuple))
-        process_info = ele.copy()
-        process_info.pop("type", None)
-        process_info.pop("video", None)
+def _video_tensor_to_frames(video: torch.Tensor) -> list[Image.Image]:
+    frames = []
+    for frame in video:
+        if frame.is_floating_point():
+            frame = frame.to(torch.uint8) if frame.max() > 1 else (frame * 255).to(torch.uint8)
+        else:
+            frame = frame.to(torch.uint8)
+        frames.append(Image.fromarray(frame.permute(1, 2, 0).cpu().numpy()))
+    return frames
 
-        images = [
-            fetch_image({"image": video_element, **process_info})
-            for video_element in ele["video"]
-        ]
 
-        nframes = len(images)
-        timestamps = [-1 for i in range(nframes)]
-
-        # For list of images, we return list of PIL images directly,
-        # the processor will handle conversion to tensor later.
-        if return_video_sample_fps:
-            return images, process_info.get("fps", 2.0), timestamps
-        return images
-
-class LocateAnythingProcessorKwargs(ProcessingKwargs, total=False):
-    _defaults = {
-        "text_kwargs": {
-            "padding": False,
-        },
-        "images_kwargs": {},
-        "videos_kwargs": {},
-    }
-
+# ----------------------------------------------------------------------------------------------
+# Processor
+# ----------------------------------------------------------------------------------------------
 
 class LocateAnythingProcessor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer"]
@@ -253,204 +249,107 @@ class LocateAnythingProcessor(ProcessorMixin):
         "videos_kwargs",
         "text_kwargs",
     ]
-    image_processor_class = "BaseImageProcessor"
-    tokenizer_class = "AutoTokenizer"
 
     def __init__(
         self,
         image_processor=None,
         tokenizer=None,
         chat_template=None,
-        image_token='<IMG_CONTEXT>',
-        video_token='<IMG_CONTEXT>',
+        image_token="<IMG_CONTEXT>",
+        video_token="<IMG_CONTEXT>",
         merge_kernel_size=(2, 2),
-        image_placeholder='image',
-        video_placeholder='video',
-        image_start_token='<img>',
-        image_end_token='</img>',
+        image_placeholder="image",
+        video_placeholder="video",
+        image_start_token="<img>",
+        image_end_token="</img>",
         **kwargs,
     ):
-        self.image_token = tokenizer.image_token if hasattr(tokenizer, "image_token") else image_token
-        self.video_token = tokenizer.video_token if hasattr(tokenizer, "video_token") else video_token
-        self.image_token_id = (
-            tokenizer.image_token_id
-            if getattr(tokenizer, "image_token_id", None)
-            else tokenizer.convert_tokens_to_ids(self.image_token)
+        self.image_token = getattr(tokenizer, "image_token", None) or image_token
+        self.video_token = getattr(tokenizer, "video_token", None) or video_token
+        self.image_token_id = getattr(tokenizer, "image_token_id", None) or tokenizer.convert_tokens_to_ids(
+            self.image_token
         )
-        self.video_token_id = (
-            tokenizer.video_token_id
-            if getattr(tokenizer, "video_token_id", None)
-            else tokenizer.convert_tokens_to_ids(self.video_token)
+        self.video_token_id = getattr(tokenizer, "video_token_id", None) or tokenizer.convert_tokens_to_ids(
+            self.video_token
         )
+        self.merge_kernel_size = list(merge_kernel_size)
         self.image_placeholder = image_placeholder
         self.video_placeholder = video_placeholder
-        self.merge_kernel_size = merge_kernel_size
         self.image_start_token = image_start_token
         self.image_end_token = image_end_token
+        super().__init__(image_processor, tokenizer, chat_template=chat_template, **kwargs)
 
-        super().__init__(image_processor, tokenizer, chat_template=chat_template)
+    # -- serialization ------------------------------------------------------------------------
 
+    def save_pretrained(self, save_directory, **kwargs):
+        if os.path.isfile(save_directory):
+            raise ValueError(f"Provided path ({save_directory}) should be a directory, not a file")
+        os.makedirs(save_directory, exist_ok=True)
+        files = super().save_pretrained(save_directory, **kwargs)
+        self.image_processor.save_pretrained(save_directory)
+        return files
 
-    def replace_media_placeholder(self, text, image_list, video_list, timestamps_list, fps_list, **output_kwargs):
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
+        from transformers.utils import cached_file
 
-        num_of_images_in_this_sample = 0
-        num_of_videos_in_this_sample = 0
-        pattern = re.compile(rf"<({self.image_placeholder}|{self.video_placeholder})-(\d+)>")
-        unified_frame_list = []
+        from ....utils.hf import load_hf_tokenizer
 
-        def replace_in_text(text):
-            def repl(match):
-                nonlocal unified_frame_list
-                nonlocal num_of_images_in_this_sample
-                nonlocal num_of_videos_in_this_sample
-                media_type = match.group(1)
-                idx_in_list = int(match.group(2)) - 1
-                idx_mapper = {0: "first", 1: "second", 2: "third", 3: "fourth", 4: "fifth", 5: "sixth", 6: "seventh", 7: "eighth", 8: "ninth", 9: "tenth"}
+        kwargs.pop("trust_remote_code", None)
+        kwargs.pop("code_revision", None)
+        config = kwargs.pop("config", None)
+        tokenizer = kwargs.pop("tokenizer", None)
+        if tokenizer is None:
+            if config is None:
+                from .configuration_locateanything import LocateAnythingConfig
 
-                if media_type == 'image':
-                    # Call LocateAnythingImageProcessor with a single image in a list
-                    image_inputs = self.image_processor(images=[image_list[idx_in_list]], **output_kwargs["images_kwargs"])
-
-                    num_of_tokens_list = [int(h * w) // (self.image_processor.merge_kernel_size[0] * self.image_processor.merge_kernel_size[1]) for h, w in image_inputs['image_grid_hws']]
-
-                    special_placeholder = f"<image {idx_in_list+1}>{self.image_start_token}{self.image_token * num_of_tokens_list[0]}{self.image_end_token}"
-                    unified_frame_list.append(image_inputs)
-                    num_of_images_in_this_sample += 1
-
-                elif media_type == 'video':
-                    video_obj = video_list[idx_in_list]
-
-                    # Convert Tensor TCHW to list of PIL Images for the ImageProcessor
-                    if isinstance(video_obj, torch.Tensor):
-                        # video_obj is [T, C, H, W], float, likely 0-255 or standardized
-                        # LocateAnythingImageProcessor expects PIL or 0-255 inputs usually.
-                        # We need to convert back to PIL or List[Tensor] compatible with make_list_of_images
-                        video_frames = []
-                        for i in range(video_obj.shape[0]):
-                            frame = video_obj[i] # [C, H, W]
-                            # Assuming fetch_video returns float tensors.
-                            # If they are 0-255, convert to uint8.
-                            if frame.dtype.is_floating_point and frame.max() > 1.0:
-                                frame = frame.byte()
-                            elif frame.dtype.is_floating_point:
-                                frame = (frame * 255).byte()
-
-                            img = transforms.ToPILImage()(frame)
-                            video_frames.append(img)
-                    elif isinstance(video_obj, list):
-                        # Already list of PIL images
-                        video_frames = video_obj
-                    else:
-                        raise ValueError("Unsupported video format")
-
-                    # Call ImageProcessor with list of frames
-                    video_inputs = self.image_processor(images=video_frames, **output_kwargs["videos_kwargs"])
-
-                    # Calculate tokens per frame
-                    num_of_tokens_list = [int(h * w) // (self.image_processor.merge_kernel_size[0] * self.image_processor.merge_kernel_size[1]) for h, w in video_inputs['image_grid_hws']]
-
-                    if timestamps_list is not None and -1 not in timestamps_list:
-                        frame_timestamps = timestamps_list[idx_in_list]
-                    else:
-                        frame_timestamps = None
-                    sampled_fps = fps_list[idx_in_list] if fps_list is not None else None
-
-                    if frame_timestamps is not None:
-                        # Ensure lengths match (sometimes rounding might cause off-by-one if not careful, but usually safe here)
-                        if len(frame_timestamps) != len(num_of_tokens_list):
-                             logger.warning(f"Timestamp mismatch: {len(frame_timestamps)} vs {len(num_of_tokens_list)}")
-                             min_len = min(len(frame_timestamps), len(num_of_tokens_list))
-                             frame_timestamps = frame_timestamps[:min_len]
-                             num_of_tokens_list = num_of_tokens_list[:min_len]
-
-                        special_placeholder = [f"Frame-{i+1}-{frame_timestamps[i]:.2f}s: {self.image_start_token}{self.image_token * num_of_tokens}{self.image_end_token}" for i, num_of_tokens in enumerate(num_of_tokens_list)]
-                    else:
-                        special_placeholder = [f"Frame-{i+1}: {self.image_start_token}{self.image_token * num_of_tokens}{self.image_end_token}" for i, num_of_tokens in enumerate(num_of_tokens_list)]
-
-                    if sampled_fps is not None:
-                        special_placeholder = f"The {idx_mapper[idx_in_list]} video sampled with {sampled_fps:.2f} fps: " + "".join(special_placeholder)
-                    else:
-                        special_placeholder = f"The {idx_mapper[idx_in_list]} video: " + "".join(special_placeholder)
-
-                    unified_frame_list.append(video_inputs)
-                    num_of_videos_in_this_sample += 1
-                else:
-                    raise ValueError(f'Unknown media type: {media_type}')
-                return special_placeholder
-            return pattern.sub(repl, text)
-
-        text = replace_in_text(text)
-
-        if len(unified_frame_list) > 0:
-            # Concatenate all pixel values from all images/videos in this sample
-            pixel_values = torch.cat([frame['pixel_values'] for frame in unified_frame_list], dim=0)
-            # Concatenate grid hws
-            image_grid_hws = np.concatenate([frame['image_grid_hws'] for frame in unified_frame_list], axis=0)
-        else:
-            pixel_values = torch.empty(0)
-            image_grid_hws = np.empty(0)
-
-        return text, pixel_values, image_grid_hws, num_of_images_in_this_sample, num_of_videos_in_this_sample
-
-    def __call__(
-        self,
-        images: ImageInput = None,
-        text: Union[TextInput, PreTokenizedInput, List[TextInput], List[PreTokenizedInput]] = None,
-        audio=None,
-        videos: VideoInput = None,
-        **kwargs: Unpack[LocateAnythingProcessorKwargs],
-    ) -> BatchFeature:
-        output_kwargs = self._merge_kwargs(
-            LocateAnythingProcessorKwargs,
-            tokenizer_init_kwargs=self.tokenizer.init_kwargs,
-            **kwargs,
-        )
-
-        if isinstance(text, str):
-            text_list = [text]
-        elif not isinstance(text, list) or not text or not all(isinstance(item, str) for item in text):
-            raise ValueError("Invalid input text. Please provide a string, or a list of strings")
-        elif isinstance(text, list) and isinstance(text[0], str):
-            text_list = text
-
-        if images is None: images = []
-        if videos is None: videos = []
-
-        pixel_values_list = []
-        image_grid_hws_list = []
-        new_sample_list = []
-        image_start_idx = 0
-        video_start_idx = 0
-        timestamps_batch = output_kwargs['videos_kwargs'].pop("timestamps", None)
-        fps_batch = output_kwargs['videos_kwargs'].pop("fps", None)
-
-        for sample in text_list:
-            timestamps_list = timestamps_batch[video_start_idx:] if timestamps_batch is not None else None
-            fps_list = fps_batch[video_start_idx:] if fps_batch is not None else None
-
-            sample, pixel_values, image_grid_hws, num_of_images_in_this_sample, num_of_videos_in_this_sample = self.replace_media_placeholder(
-                sample, images[image_start_idx:], videos[video_start_idx:], timestamps_list, fps_list, **output_kwargs
+                config = LocateAnythingConfig.from_pretrained(pretrained_model_name_or_path)
+            tokenizer = load_hf_tokenizer(
+                pretrained_model_name_or_path,
+                model_config=config,
+                trust_remote_code=False,
             )
-            new_sample_list.append(sample)
+        image_processor = LocateAnythingImageProcessor.from_pretrained(pretrained_model_name_or_path)
 
-            if pixel_values.numel() > 0:
-                pixel_values_list.append(pixel_values)
-                image_grid_hws_list.append(image_grid_hws)
+        processor_dict = {}
+        processor_file = cached_file(
+            pretrained_model_name_or_path,
+            "processor_config.json",
+            _raise_exceptions_for_missing_entries=False,
+        )
+        if processor_file is not None:
+            with open(processor_file, encoding="utf-8") as handle:
+                processor_dict = json.load(handle)
+        if processor_dict.get("chat_template") is None:
+            template_file = cached_file(
+                pretrained_model_name_or_path,
+                "chat_template.jinja",
+                _raise_exceptions_for_missing_entries=False,
+            )
+            if template_file is not None:
+                with open(template_file, encoding="utf-8") as handle:
+                    processor_dict["chat_template"] = handle.read()
+        processor_dict = {key: processor_dict[key] for key in _PROCESSOR_DICT_KEYS if key in processor_dict}
+        return cls.from_args_and_dict([image_processor, tokenizer], processor_dict, **kwargs)
 
-            image_start_idx += num_of_images_in_this_sample
-            video_start_idx += num_of_videos_in_this_sample
+    @classmethod
+    def from_args_and_dict(cls, args, processor_dict, **kwargs):
+        processor_dict = dict(processor_dict)
+        for key in ("processor_class", "auto_map", *cls.attributes):
+            processor_dict.pop(key, None)
+        processor_dict.update(kwargs)
+        init_names = cls.__init__.__code__.co_varnames[1: cls.__init__.__code__.co_argcount]
+        unused, valid = cls.validate_init_kwargs(processor_config=processor_dict, valid_kwargs=init_names)
+        processor = cls(*args, **valid)
+        for key, value in unused.items():
+            if hasattr(processor, key):
+                setattr(processor, key, value)
+        return processor
 
-        image_inputs = {}
-        if len(pixel_values_list) > 0:
-            # Concatenate across the batch
-            image_inputs['pixel_values'] = torch.cat(pixel_values_list, dim=0)
-            image_inputs['image_grid_hws'] = np.concatenate(image_grid_hws_list, axis=0)
-
-        video_inputs = {} # Video data is merged into image_inputs now
-        text_inputs = self.tokenizer(new_sample_list, **output_kwargs["text_kwargs"])
-
-        return BatchFeature(data={**text_inputs, **image_inputs, **video_inputs},
-                            tensor_type=output_kwargs["text_kwargs"].get("return_tensors"))
+    @property
+    def model_input_names(self):
+        names = list(self.tokenizer.model_input_names) + list(self.image_processor.model_input_names)
+        return list(dict.fromkeys(names))
 
     def batch_decode(self, *args, **kwargs):
         return self.tokenizer.batch_decode(*args, **kwargs)
@@ -458,172 +357,224 @@ class LocateAnythingProcessor(ProcessorMixin):
     def decode(self, *args, **kwargs):
         return self.tokenizer.decode(*args, **kwargs)
 
-    @property
-    def model_input_names(self):
-        tokenizer_input_names = self.tokenizer.model_input_names
-        image_processor_input_names = self.image_processor.model_input_names
-        return list(dict.fromkeys(tokenizer_input_names + image_processor_input_names))
-
-    def save_pretrained(self, save_directory, **kwargs):
-        if os.path.isfile(save_directory):
-            raise ValueError(f"Provided path ({save_directory}) should be a directory, not a file")
-        os.makedirs(save_directory, exist_ok=True)
-        outputs = super().save_pretrained(save_directory, **kwargs)
-        # TF5 embeds image metadata in processor_config.json. Also retain the
-        # independently loadable asset used by the pinned released checkpoint.
-        self.image_processor.save_pretrained(save_directory, **kwargs)
-        return outputs
-
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
-        # Pin each component directly. Processor/AutoImageProcessor maps from a
-        # checkpoint never participate, including under trust + safety bypass.
-        from ....utils.hf import load_hf_tokenizer
-        from .configuration_locateanything import LocateAnythingConfig
-        from .image_processing_locateanything import LocateAnythingImageProcessor
-        kwargs.pop("trust_remote_code", None)
-        kwargs.pop("code_revision", None)
-        config = kwargs.pop("config", None)
-        if config is None:
-            config = LocateAnythingConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
-        tokenizer = kwargs.pop("tokenizer", None)
-        if tokenizer is None:
-            tokenizer = load_hf_tokenizer(os.fspath(pretrained_model_name_or_path), model_config=config,
-                                          trust_remote_code=False, **kwargs)
-        image_processor = LocateAnythingImageProcessor.from_pretrained(pretrained_model_name_or_path, **kwargs)
-        metadata, _ = cls.get_processor_dict(pretrained_model_name_or_path, **kwargs)
-        accepted = ("chat_template", "image_token", "video_token", "merge_kernel_size", "image_placeholder",
-                    "video_placeholder", "image_start_token", "image_end_token")
-        options = {name: metadata[name] for name in accepted if name in metadata}
-        return cls(image_processor=image_processor, tokenizer=tokenizer, **options)
-
-    def process_vision_info(
-        self,
-        conversations: list[dict] | list[list[dict]],
-        return_video_kwargs: bool = False,
-        video_reader_backend: str = "torchvision",
-    ) -> tuple[list[Image.Image] | None, list[torch.Tensor | list[Image.Image]] | None, Optional[dict]]:
-
-        vision_infos = self.extract_vision_info(conversations)
-        image_inputs = []
-        video_inputs = []
-        video_sample_fps_list = []
-        video_timestamps_list = []
-
-        for vision_info in vision_infos:
-            if "image" in vision_info or "image_url" in vision_info:
-                image_inputs.append(fetch_image(vision_info))
-            elif "video" in vision_info:
-                video_input, video_sample_fps, video_timestamps = fetch_video(vision_info, return_video_sample_fps=True, video_reader_backend=video_reader_backend)
-                video_sample_fps_list.append(video_sample_fps)
-                video_inputs.append(video_input)
-                video_timestamps_list.append(video_timestamps)
-            else:
-                raise ValueError("image, image_url or video should in content.")
-
-        if len(image_inputs) == 0:
-            image_inputs = None
-        if len(video_inputs) == 0:
-            video_inputs = None
-
-        if return_video_kwargs:
-            return image_inputs, video_inputs, {'fps': video_sample_fps_list, 'timestamps': video_timestamps_list}
-        return image_inputs, video_inputs
-
-    def extract_vision_info(self, conversations: list[dict] | list[list[dict]]) -> list[dict]:
-        vision_infos = []
-        if isinstance(conversations[0], dict):
-            conversations = [conversations]
-        for conversation in conversations:
-            for message in conversation:
-                if isinstance(message["content"], list):
-                    for ele in message["content"]:
-                        if (
-                            "image" in ele
-                            or "image_url" in ele
-                            or "video" in ele
-                            or ele["type"] in ("image", "image_url", "video")
-                        ):
-                            vision_infos.append(ele)
-        return vision_infos
+    # -- templating ---------------------------------------------------------------------------
 
     def py_apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
-        assert not tokenize, "tokenize is not supported yet"
-        result = ""
-        image_count = 0
-        video_count = 0
-
-        message_text = ""
-        for idx, message in enumerate(messages):
-            if message.get('role') != 'user': continue
-            content = message.get('content')
+        assert not tokenize, "LocateAnythingProcessor.py_apply_chat_template only renders text"
+        user_text = ""
+        for message in messages:
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
             if isinstance(content, str):
-                message_text += content
+                user_text += content
             elif isinstance(content, list):
                 for item in content:
-                    if isinstance(item, dict) and "text" in item:
-                        message_text += item["text"]
-                    elif isinstance(item, str):
-                        message_text += item
+                    if isinstance(item, str):
+                        user_text += item
+                    elif isinstance(item, dict) and item.get("type") == "text":
+                        user_text += item.get("text", "")
 
-        for idx, message in enumerate(messages):
-            if idx == 0 and message.get('role') != 'system':
-                result += "<|im_start|>system\n"
-                result += "You are a helpful assistant.\n"
-                result += "<|im_end|>\n"
-
-            result += f"<|im_start|>{message.get('role', '')}\n"
-            content = message.get('content')
-
+        rendered = ""
+        image_count = 0
+        video_count = 0
+        for index, message in enumerate(messages):
+            if index == 0 and message.get("role") != "system":
+                rendered += _DEFAULT_SYSTEM
+            rendered += f"<|im_start|>{message['role']}\n"
+            content = message.get("content")
             if isinstance(content, str):
-                result += content
-                result += "<|im_end|>\n"
-            else:
+                rendered += content
+            elif isinstance(content, list):
                 for item in content:
-                    if (isinstance(item, dict) and (item.get('type') == 'image' or 'image' in item or 'image_url' in item)):
+                    if isinstance(item, str):
+                        rendered += item
+                        continue
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "image" or "image" in item or "image_url" in item:
                         image_count += 1
-                        candidate_token = f"<image-{image_count}>"
-                        if candidate_token not in message_text:
-                            result += candidate_token
-                    elif (isinstance(item, dict) and (item.get('type') == 'video' or 'video' in item)):
+                        tag = f"<{self.image_placeholder}-{image_count}>"
+                        if tag not in user_text:
+                            rendered += tag
+                    elif item.get("type") == "video" or "video" in item:
                         video_count += 1
-                        candidate_token = f"<video-{video_count}>"
-                        if candidate_token not in message_text:
-                            result += candidate_token
-                    elif isinstance(item, dict) and 'text' in item:
-                        result += item['text']
-                    elif isinstance(item, str):
-                        result += item
-                result += "<|im_end|>\n"
-
+                        tag = f"<{self.video_placeholder}-{video_count}>"
+                        if tag not in user_text:
+                            rendered += tag
+                    elif item.get("type") == "text":
+                        rendered += item.get("text", "")
+            rendered += "<|im_end|>\n"
         if add_generation_prompt:
-            result += "<|im_start|>assistant\n"
+            rendered += "<|im_start|>assistant\n"
+        return rendered
 
-        return result
+    @staticmethod
+    def extract_vision_info(conversations):
+        return extract_vision_info(conversations)
 
+    @staticmethod
+    def process_vision_info(conversations, return_video_kwargs=False, video_reader_backend="torchvision"):
+        return process_vision_info(
+            conversations,
+            return_video_kwargs=return_video_kwargs,
+            video_reader_backend=video_reader_backend,
+        )
 
-    @classmethod
-    def from_args_and_dict(cls, args, processor_dict: dict[str, Any], **kwargs):
-        processor_dict = processor_dict.copy()
-        return_unused_kwargs = kwargs.pop("return_unused_kwargs", False)
+    # -- placeholder expansion ----------------------------------------------------------------
 
-        if "processor_class" in processor_dict:
-            del processor_dict["processor_class"]
+    def _media_tokens(self, grid) -> int:
+        kh, kw = self.image_processor.merge_kernel_size
+        return int(grid[0]) * int(grid[1]) // (kh * kw)
 
-        unused_kwargs = cls.validate_init_kwargs(processor_config=processor_dict, valid_kwargs=cls.valid_kwargs)
-        processor = cls(*args, **processor_dict)
+    def _media_segment(self, count: int) -> str:
+        return self.image_start_token + self.image_token * count + self.image_end_token
 
-        for key in set(kwargs.keys()):
-            if hasattr(processor, key):
-                setattr(processor, key, kwargs.pop(key))
+    def replace_media_placeholder(self, text, image_list, video_list, timestamps_list, fps_list, **kwargs):
+        images_kwargs = kwargs["images_kwargs"]
+        videos_kwargs = kwargs["videos_kwargs"]
+        image_list = list(image_list or [])
+        video_list = list(video_list or [])
+        pattern = re.compile(
+            rf"<({re.escape(self.image_placeholder)}|{re.escape(self.video_placeholder)})-(\d+)>"
+        )
+        pixel_values, grids = [], []
+        counts = {"image": 0, "video": 0}
 
-        if isinstance(unused_kwargs, dict):
-            kwargs.update(unused_kwargs)
-        logger.info(f"Processor {processor}")
-        if return_unused_kwargs:
-            return processor, kwargs
+        def expand(match):
+            kind = "image" if match.group(1) == self.image_placeholder else "video"
+            number = int(match.group(2))
+            if number < 1:
+                raise IndexError(f"{kind} placeholder index must be 1-based, got {number}")
+            if kind == "image":
+                replacement = self._expand_image(number, image_list[number - 1], images_kwargs, pixel_values, grids)
+            else:
+                replacement = self._expand_video(
+                    number, video_list[number - 1], timestamps_list, fps_list, videos_kwargs, pixel_values, grids
+                )
+            counts[kind] += 1
+            return replacement
+
+        text = pattern.sub(expand, text)
+        if pixel_values:
+            pixel_values = torch.cat(pixel_values, dim=0)
+            grids = np.concatenate(grids, axis=0)
         else:
-            return processor
+            pixel_values = torch.tensor([])
+            grids = np.array([])
+        return text, pixel_values, grids, counts["image"], counts["video"]
+
+    def _run_image_processor(self, images, options, pixel_values, grids):
+        options = {key: value for key, value in options.items() if key != "return_tensors"}
+        outputs = self.image_processor(images, **options)
+        pixel_values.append(torch.as_tensor(outputs["pixel_values"]))
+        grid = np.asarray(outputs["image_grid_hws"])
+        grids.append(grid)
+        return grid
+
+    def _expand_image(self, number, image, options, pixel_values, grids):
+        grid = self._run_image_processor(image, options, pixel_values, grids)
+        return f"<image {number}>" + self._media_segment(self._media_tokens(grid[0]))
+
+    def _expand_video(self, number, video, timestamps_list, fps_list, options, pixel_values, grids):
+        frames = _video_tensor_to_frames(video) if torch.is_tensor(video) else list(video)
+        timestamps = None
+        if timestamps_list is not None and -1 not in timestamps_list:
+            timestamps = list(timestamps_list[number - 1])
+            if len(timestamps) != len(frames):
+                logger.warning(
+                    "LocateAnything video %d has %d frames but %d timestamps; truncating to the shorter",
+                    number, len(frames), len(timestamps),
+                )
+                keep = min(len(timestamps), len(frames))
+                timestamps = timestamps[:keep]
+                frames = frames[:keep]
+        fps = None
+        if fps_list is not None and number - 1 < len(fps_list):
+            fps = fps_list[number - 1]
+
+        if not 1 <= number <= len(_ORDINALS):
+            raise ValueError(f"LocateAnything supports at most {len(_ORDINALS)} videos per sample")
+        ordinal = _ORDINALS[number - 1]
+        prefix = f"The {ordinal} video sampled with {fps:.2f} fps: " if fps is not None else f"The {ordinal} video: "
+
+        grid = self._run_image_processor(frames, options, pixel_values, grids)
+        segments = []
+        for index, frame_grid in enumerate(grid):
+            label = f"Frame-{index + 1}-{timestamps[index]:.2f}s: " if timestamps is not None else f"Frame-{index + 1}: "
+            segments.append(label + self._media_segment(self._media_tokens(frame_grid)))
+        return prefix + "".join(segments)
+
+    # -- call ---------------------------------------------------------------------------------
+
+    _IMAGE_OPTION_KEYS = ("patch_size", "in_token_limit", "image_mean", "image_std", "merge_kernel_size")
+
+    def _split_kwargs(self, kwargs):
+        text_kwargs = {"padding": False, **dict(kwargs.pop("text_kwargs", None) or {})}
+        images_kwargs = dict(kwargs.pop("images_kwargs", None) or {})
+        videos_kwargs = dict(kwargs.pop("videos_kwargs", None) or {})
+        for key, value in kwargs.items():
+            if key in self._IMAGE_OPTION_KEYS:
+                images_kwargs.setdefault(key, value)
+                videos_kwargs.setdefault(key, value)
+            else:
+                text_kwargs[key] = value
+        return text_kwargs, images_kwargs, videos_kwargs
+
+    def __call__(self, images=None, text=None, audio=None, videos=None, **kwargs):
+        del audio
+        text_kwargs, images_kwargs, videos_kwargs = self._split_kwargs(kwargs)
+        if isinstance(text, str):
+            text = [text]
+        if not isinstance(text, list) or not text or not all(isinstance(item, str) for item in text):
+            raise ValueError("Invalid input text. Please provide a string, or a list of strings")
+
+        timestamps = videos_kwargs.pop("timestamps", None)
+        fps = videos_kwargs.pop("fps", None)
+        if images is None:
+            images = []
+        elif not isinstance(images, (list, tuple)):
+            images = [images]
+        videos = [] if videos is None else list(videos)
+
+        expanded, pixel_values, grids = [], [], []
+        images_used = 0
+        videos_used = 0
+        for sample in text:
+            sample_text, sample_pixels, sample_grids, num_images, num_videos = self.replace_media_placeholder(
+                sample,
+                list(images)[images_used:],
+                videos[videos_used:],
+                None if timestamps is None else timestamps[videos_used:],
+                None if fps is None else fps[videos_used:],
+                images_kwargs=images_kwargs,
+                videos_kwargs=videos_kwargs,
+            )
+            expanded.append(sample_text)
+            if num_images or num_videos:
+                pixel_values.append(sample_pixels)
+                grids.append(sample_grids)
+            images_used += num_images
+            videos_used += num_videos
+
+        return_tensors = text_kwargs.get("return_tensors")
+        data = dict(self.tokenizer(expanded, **text_kwargs))
+        if pixel_values:
+            data["pixel_values"] = torch.cat(pixel_values, dim=0)
+            data["image_grid_hws"] = np.concatenate(grids, axis=0)
+        return BatchFeature(data=data, tensor_type=return_tensors)
 
 
-__all__ = ["LocateAnythingProcessor"]
+__all__ = [
+    "ImageFetchError",
+    "LocateAnythingProcessor",
+    "REMOTE_MEDIA_MAX_BYTES",
+    "VIDEO_READER_BACKENDS",
+    "extract_vision_info",
+    "fetch_image",
+    "fetch_video",
+    "get_video_frame_indices",
+    "load_bytes_from_url",
+    "load_image_from_url",
+    "process_vision_info",
+]

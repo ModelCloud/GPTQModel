@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from test_locateanything_local_port import tiny_config
+from test_locateanything_cleanroom_fixtures import tiny_config
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from gptqmodel.models.auto import MODEL_MAP

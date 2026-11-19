@@ -1,45 +1,15 @@
-LocateAnything Transformers 5 adaptation for GPT-QModel
+LocateAnything port for GPT-QModel
+==================================
 
-Upstream: https://huggingface.co/nvidia/LocateAnything-3B
-Revision: c32291ca5e996f5a7a485845b4f57a233936bba0
-Project: https://github.com/NVlabs/Eagle/tree/main/Embodied
+The Python modules in this directory are an independent implementation written by
+ModelCloud.ai under the Apache License 2.0. They were written in a clean-room process
+from a behavioral specification (configuration fields, tensor names and shapes, and the
+observable numerical behavior of the model), not from the original source code.
 
-The full NVIDIA License from the pinned source repository is reproduced in
-LICENSE, without modification. Its section 3.3 applies to the Work and its
-derivatives, including this adaptation:
+The implementation is compatible with the format of the published NVIDIA
+LocateAnything checkpoints (for example nvidia/LocateAnything-3B): it reads the same
+config.json fields and state-dict keys. Model weights are not part of this repository and
+remain under the terms their publisher distributes them with.
 
-"The Work and any derivative works thereof only may be used or intended for use
-non-commercially. Notwithstanding the foregoing, NVIDIA Corporation and its
-affiliates may use the Work and any derivative works commercially. As used
-herein, 'non-commercially' means for research or evaluation purposes only."
-
-The license's original wording and typography in LICENSE are authoritative.
-The GPT-QModel repository's Apache-2.0 license does not supersede this use
-restriction. No additional terms in this adaptation remove section 3.3.
-
-Preserved source-file attributions:
-
-- configuration_locateanything.py: InternVL; Copyright (c) 2023 OpenGVLab;
-  original MIT notice retained verbatim.
-- modeling_locateanything.py: NVIDIA; Copyright (c) 2025 NVIDIA;
-  original MIT-style notice retained verbatim.
-- modeling_qwen2.py: Copyright 2024 The Qwen team, Alibaba Group and the
-  HuggingFace Inc. team. All rights reserved. Original Apache-2.0 notice
-  retained verbatim. The native Transformers Qwen components are imported
-  under their own Apache-2.0 license, reproduced in the repository root LICENSE.
-- processing_locateanything.py: Copyright 2024 The HuggingFace Inc. team;
-  original Apache-2.0 notice retained verbatim.
-- modeling_vit.py, image_processing_locateanything.py, generate_utils.py,
-  mask_sdpa_utils.py: Copyright (c) 2026, NVIDIA CORPORATION. All rights
-  reserved. Original NVIDIA proprietary-rights notices retained verbatim.
-
-The source-file MIT/Apache notices do not override the accompanying NVIDIA
-repository license. ModelCloud's changes adapt these files to
-Transformers 5, package-owned resolution, current cache APIs and safe media
-metadata serialization. No checkpoint Python is imported or downloaded at
-runtime. Optional third-party media/kernel packages retain their own licenses.
-
-Integration handoff: preserve this NOTICE and the full NVIDIA LICENSE in source
-and binary distributions; identify the noncommercial research/evaluation
-restriction in the central port coverage table and PR description.
-Do not describe LocateAnything as unqualified Apache-2.0 support.
+The Qwen2/Qwen3 decoder building blocks are imported from GPT-QModel's vendored
+Apache-2.0 Transformers 5.23 families in ../native/qwen2 and ../native/qwen3.

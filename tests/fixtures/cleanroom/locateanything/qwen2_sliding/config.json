@@ -1,0 +1,110 @@
+{
+  "architectures": [
+    "LocateAnythingForConditionalGeneration"
+  ],
+  "box_end_token_id": 33,
+  "box_start_token_id": 32,
+  "coord_end_token_id": 31,
+  "coord_start_token_id": 16,
+  "downsample_ratio": 0.5,
+  "dtype": "float32",
+  "image_token_index": 59,
+  "loss_version": "v1",
+  "mlp_checkpoint": false,
+  "model_type": "locateanything",
+  "none_token_id": 36,
+  "ref_end_token_id": 35,
+  "ref_start_token_id": 34,
+  "template": null,
+  "text_config": {
+    "_name_or_path": "",
+    "architectures": [
+      "Qwen2ForCausalLM"
+    ],
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "block_size": 6,
+    "bos_token_id": null,
+    "causal_attn": false,
+    "chunk_size_feed_forward": 0,
+    "dtype": null,
+    "eos_token_id": 2,
+    "head_dim": 8,
+    "hidden_act": "silu",
+    "hidden_size": 32,
+    "id2label": {
+      "0": "LABEL_0",
+      "1": "LABEL_1"
+    },
+    "initializer_range": 0.02,
+    "intermediate_size": 64,
+    "is_encoder_decoder": false,
+    "label2id": {
+      "LABEL_0": 0,
+      "LABEL_1": 1
+    },
+    "layer_types": [
+      "sliding_attention",
+      "sliding_attention"
+    ],
+    "max_position_embeddings": 128,
+    "max_window_layers": 0,
+    "model_type": "qwen2",
+    "null_token_id": 61,
+    "num_attention_heads": 4,
+    "num_hidden_layers": 2,
+    "num_key_value_heads": 2,
+    "output_attentions": false,
+    "output_hidden_states": false,
+    "pad_token_id": 0,
+    "problem_type": null,
+    "return_dict": true,
+    "rms_norm_eps": 1e-06,
+    "rope_parameters": {
+      "rope_theta": 1000000.0,
+      "rope_type": "default"
+    },
+    "sliding_window": 2,
+    "switch_token_id": 62,
+    "text_mask_token_id": 60,
+    "tie_word_embeddings": false,
+    "use_cache": true,
+    "use_sliding_window": true,
+    "vocab_size": 64
+  },
+  "tie_word_embeddings": false,
+  "transformers_version": "5.23.0",
+  "use_backbone_lora": 0,
+  "use_llm_lora": 0,
+  "vision_config": {
+    "_name_or_path": "",
+    "architectures": null,
+    "chunk_size_feed_forward": 0,
+    "dtype": null,
+    "hidden_size": 16,
+    "id2label": {
+      "0": "LABEL_0",
+      "1": "LABEL_1"
+    },
+    "init_pos_emb_height": 4,
+    "init_pos_emb_width": 4,
+    "intermediate_size": 24,
+    "is_encoder_decoder": false,
+    "label2id": {
+      "LABEL_0": 0,
+      "LABEL_1": 1
+    },
+    "merge_kernel_size": [
+      2,
+      2
+    ],
+    "model_type": "moonvit",
+    "num_attention_heads": 2,
+    "num_hidden_layers": 2,
+    "output_attentions": false,
+    "output_hidden_states": false,
+    "patch_size": 2,
+    "problem_type": null,
+    "return_dict": true
+  }
+}

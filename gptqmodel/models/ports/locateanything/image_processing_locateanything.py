@@ -1,127 +1,114 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+# Clean-room implementation from cleanroom/locateanything/SPEC.md; see NOTICE.
+"""Native-resolution patch image processor for LocateAnything."""
 
-"""Image processor class for KimiVL."""
+from __future__ import annotations
 
 import math
-from typing import Optional, Union
 
 import numpy as np
 import torch
 from PIL import Image
-from torchvision.transforms import functional as TF
 from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
-from transformers.image_utils import ImageInput, make_list_of_images, valid_images
-from transformers.utils import TensorType
 
 
-MEAN = (0.5, 0.5, 0.5)
-STD = (0.5, 0.5, 0.5)
+# The vision tower's 2D rotary table covers at most this many patches per side.
+_MAX_GRID_SIDE = 512
 
 
 class LocateAnythingImageProcessor(BaseImageProcessor):
+    """Resize each image to whole merge cells and cut it into ``patch_size`` patches."""
+
     model_type = "locateanything"
+    model_input_names = ["pixel_values", "image_grid_hws"]
 
     def __init__(
         self,
         patch_size: int = 14,
-        image_mean: tuple[float, float, float] = MEAN,
-        image_std: tuple[float, float, float] = STD,
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
         in_token_limit: int = 4096,
-        merge_kernel_size: tuple[int, int] = (2, 2),
+        merge_kernel_size=(2, 2),
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.in_token_limit = in_token_limit
         self.patch_size = patch_size
-        self.image_mean = image_mean
-        self.image_std = image_std
-        self.merge_kernel_size = merge_kernel_size
+        self.image_mean = list(image_mean)
+        self.image_std = list(image_std)
+        self.in_token_limit = in_token_limit
+        self.merge_kernel_size = list(merge_kernel_size)
 
-    def rescale(
-        self, image: Image.Image, merge_kernel_size: tuple[int, int] = (2, 2)
-    ) -> Image.Image:
-        w, h = image.size
-        patch_size = self.patch_size
+    def to_dict(self):
+        return {
+            "image_mean": list(self.image_mean),
+            "image_std": list(self.image_std),
+            "in_token_limit": self.in_token_limit,
+            "merge_kernel_size": list(self.merge_kernel_size),
+            "patch_size": self.patch_size,
+            "image_processor_type": type(self).__name__,
+        }
 
-        if (w // patch_size) * (h // patch_size) > self.in_token_limit:
-            scale = math.sqrt(self.in_token_limit / ((w // patch_size) * (h // patch_size)))
-            new_w, new_h = int(w * scale), int(h * scale)
-            image = image.resize((new_w, new_h), Image.Resampling.BICUBIC)
-
-        new_w, new_h = image.size
-        pad_size_h = merge_kernel_size[0] * patch_size
-        pad_size_w = merge_kernel_size[1] * patch_size
-
-        target_w = math.ceil(new_w / pad_size_w) * pad_size_w
-        target_h = math.ceil(new_h / pad_size_h) * pad_size_h
-
-        if target_w != new_w or target_h != new_h:
-            image = image.resize((target_w, target_h), Image.Resampling.BICUBIC)
-
-        w, h = image.size
-        if w // patch_size >= 512 or h // patch_size >= 512:
+    def _resize_to_cells(self, image: Image.Image, patch_size: int, in_token_limit: int, merge) -> Image.Image:
+        width, height = image.size
+        tokens = (width // patch_size) * (height // patch_size)
+        if tokens > in_token_limit:
+            scale = math.sqrt(in_token_limit / tokens)
+            image = image.resize((int(width * scale), int(height * scale)), Image.Resampling.BICUBIC)
+            width, height = image.size
+        cell_h = merge[0] * patch_size
+        cell_w = merge[1] * patch_size
+        target = (math.ceil(width / cell_w) * cell_w, math.ceil(height / cell_h) * cell_h)
+        if target != (width, height):
+            image = image.resize(target, Image.Resampling.BICUBIC)
+        width, height = image.size
+        if width // patch_size >= _MAX_GRID_SIDE or height // patch_size >= _MAX_GRID_SIDE:
             raise ValueError("Exceed pos emb")
-
         return image
 
-    def to_tensor(self, image: Image.Image) -> torch.Tensor:
-        return TF.to_tensor(image.convert("RGB"))
+    def _to_patches(self, image: Image.Image, patch_size: int, mean, std):
+        from torchvision.transforms import functional as F
 
-    def normalize(self, image: torch.Tensor) -> torch.Tensor:
-        return TF.normalize(image, self.image_mean, self.image_std)
+        tensor = F.to_tensor(image.convert("RGB"))
+        tensor = F.normalize(tensor, mean, std)
+        channels, height, width = tensor.shape
+        grid_h, grid_w = height // patch_size, width // patch_size
+        patches = (
+            tensor.view(channels, grid_h, patch_size, grid_w, patch_size)
+            .permute(1, 3, 0, 2, 4)
+            .reshape(grid_h * grid_w, channels, patch_size, patch_size)
+        )
+        return patches, (grid_h, grid_w)
 
-    def patchify(self, image: torch.Tensor) -> tuple[torch.Tensor, list[int, int]]:
-        patch_size = self.patch_size
-        C, H, W = image.shape
-        patches = image.reshape(C, H // patch_size, patch_size, W // patch_size, patch_size)
-        patches = patches.permute(1, 3, 0, 2, 4)
-        patches = patches.contiguous().view(-1, C, patch_size, patch_size)
-        grid_hw = (H // patch_size, W // patch_size)
-        return patches, grid_hw
-
-    def _preprocess(self, image: ImageInput) -> tuple[torch.Tensor, list[int, int]]:
-        """
-        Preprocess image and patchify it.
-        Args:
-            image (`ImageInput`):
-                Image to preprocess. Expects pixel values ranging from 0 to 255. If pixel values range from 0 to 1, set `do_rescale=False`.
-        Returns:
-            patches: torch.Tensor
-            grid_hw: list[int, int]
-        """
-        image = self.rescale(image, self.merge_kernel_size)
-        image = self.to_tensor(image)
-        image = self.normalize(image)
-        patches, grid_hw = self.patchify(image)
-        return patches, grid_hw
-
-    def preprocess(
-        self,
-        images: ImageInput,
-        return_tensors: Optional[Union[str, TensorType]] = None,
-        **kwargs,
-    ) -> BatchFeature:
-        images = make_list_of_images(images)
-
-        if not valid_images(images):
+    def preprocess(self, images, return_tensors=None, **kwargs):
+        if not isinstance(images, (list, tuple)):
+            images = [images]
+        images = list(images)
+        if not images or not all(isinstance(image, Image.Image) for image in images):
             raise ValueError(
-                "Invalid image type. Must be of type PIL.Image.Image, numpy.ndarray, "
-                "torch.Tensor, tf.Tensor or jax.ndarray."
+                "Invalid image type. LocateAnythingImageProcessor expects a PIL image or a list of PIL images."
             )
+        patch_size = kwargs.get("patch_size") or self.patch_size
+        in_token_limit = kwargs.get("in_token_limit") or self.in_token_limit
+        merge = kwargs.get("merge_kernel_size") or self.merge_kernel_size
+        mean = list(kwargs.get("image_mean") or self.image_mean)
+        std = list(kwargs.get("image_std") or self.image_std)
 
-        pixel_values, image_grid_hws = [], []
+        pixel_values, grids = [], []
         for image in images:
-            patches, image_grid_hw = self._preprocess(image)
+            image = self._resize_to_cells(image, patch_size, in_token_limit, merge)
+            patches, grid = self._to_patches(image, patch_size, mean, std)
             pixel_values.append(patches)
-            image_grid_hws.append(image_grid_hw)
-        pixel_values = torch.concat(pixel_values, dim=0)
-        image_grid_hws = np.array(image_grid_hws)
-        data = {"pixel_values": pixel_values, "image_grid_hws": image_grid_hws}
+            grids.append(grid)
 
+        data = {
+            "pixel_values": torch.cat(pixel_values, dim=0),
+            "image_grid_hws": np.array(grids, dtype=np.int64),
+        }
         return BatchFeature(data=data, tensor_type=return_tensors)
+
+    def __call__(self, images, return_tensors=None, **kwargs):
+        return self.preprocess(images, return_tensors=return_tensors, **kwargs)
+
+
+__all__ = ["LocateAnythingImageProcessor"]

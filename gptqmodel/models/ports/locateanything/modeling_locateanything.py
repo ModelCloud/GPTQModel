@@ -1,250 +1,120 @@
-# --------------------------------------------------------
-# NVIDIA
-# Copyright (c) 2025 NVIDIA
-# Licensed under The MIT License [see LICENSE for details]
-# --------------------------------------------------------
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+# Clean-room implementation from cleanroom/locateanything/SPEC.md; see NOTICE.
+"""LocateAnything vision-language model and its localization decoding loop (SPEC sections 1, 4, 5, 8)."""
 
-import time
-from typing import Optional
+from __future__ import annotations
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
-from torch.nn import CrossEntropyLoss
-from transformers.cache_utils import Cache
-from transformers.generation import GenerationMixin
+from transformers import initialization as init
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import add_start_docstrings, can_return_tuple, is_flash_attn_2_available, logging
+from transformers.utils import can_return_tuple
 
-from .configuration_locateanything import LocateAnythingConfig
-from .generate_utils import (
-    get_token_ids_from_config,
-    handle_pattern,
-    sample_tokens,
-)
-from .modeling_qwen2 import Qwen2ForCausalLM, Qwen3ForCausalLM
-from .modeling_vit import MoonVitPretrainedModel
+from .configuration_locateanything import LocateAnythingConfig, normalize_attn_implementation
+from .generate_utils import build_token_ids, handle_pattern, select_multi_position
+from .modeling_decoder import LocateAnythingQwen2ForCausalLM, LocateAnythingQwen3ForCausalLM
+from .modeling_vit import MoonViTPositionTable, MoonViTPreTrainedModel
 
 
-logger = logging.get_logger(__name__)
+_GENERATION_MODES = ("fast", "slow", "hybrid")
 
 
-LOCATEANYTHING_START_DOCSTRING = r"""
-    This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
-    library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
-    etc.)
-    This model is also a PyTorch [torch.nn.Module](https://pytorch.org/docs/stable/nn.html#torch.nn.Module) subclass.
-    Use it as a regular PyTorch Module and refer to the PyTorch documentation for all matter related to general usage
-    and behavior.
-    Parameters:
-        config ([`LocateAnythingConfig`]):
-            Model configuration class with all the parameters of the model. Initializing with a config file does not
-            load the weights associated with the model, only the configuration. Check out the
-            [`~PreTrainedModel.from_pretrained`] method to load the model weights.
-"""
+def _decoder_architecture(config: LocateAnythingConfig) -> str:
+    architectures = getattr(config.text_config, "architectures", None) or ["Qwen2ForCausalLM"]
+    return architectures[0]
 
-@add_start_docstrings(
-    "The bare LocateAnything Model outputting raw hidden-states without any specific head on top.",
-    LOCATEANYTHING_START_DOCSTRING,
-)
+
+def _wrap_lora(module: nn.Module, rank: int, target_modules: list[str], task_type: str | None = None):
+    from peft import LoraConfig, get_peft_model
+
+    lora_config = LoraConfig(
+        r=rank,
+        lora_alpha=2 * rank,
+        lora_dropout=0.05,
+        target_modules=target_modules,
+        task_type=task_type,
+    )
+    return get_peft_model(module, lora_config)
+
+
 class LocateAnythingPreTrainedModel(PreTrainedModel):
     config_class = LocateAnythingConfig
+    config: LocateAnythingConfig
     base_model_prefix = "model"
-    main_input_name = 'input_ids'
+    main_input_name = "input_ids"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["Qwen2DecoderLayer"]
-    _skip_keys_device_placement = "past_key_values"
-    _supports_flash_attn = False
     _supports_sdpa = True
+    _supports_flash_attn = False
+    _skip_keys_device_placement = "past_key_values"
 
-    def _check_and_adjust_attn_implementation(self, attn_implementation, is_init_check=False, **kwargs):
-        if attn_implementation == "magi":
-            attn_implementation = "sdpa"
-        if attn_implementation not in (None, "eager", "sdpa"):
-            raise ValueError("LocateAnything's block-diffusion wrapper supports eager or sdpa attention")
-        return super()._check_and_adjust_attn_implementation(attn_implementation, is_init_check, **kwargs)
+    def _check_and_adjust_attn_implementation(self, attn_implementation, is_init_check=False, allow_all_kernels=False):
+        attn_implementation = normalize_attn_implementation(attn_implementation)
+        return super()._check_and_adjust_attn_implementation(
+            attn_implementation, is_init_check=is_init_check, allow_all_kernels=allow_all_kernels
+        )
 
     def _init_weights(self, module):
-        std = getattr(self.config, 'initializer_range', None) or self.config.text_config.initializer_range
+        std = getattr(self.config, "initializer_range", None)
+        if std is None:
+            std = self.config.text_config.initializer_range
         if isinstance(module, (nn.Linear, nn.Conv2d)):
-            module.weight.data.normal_(mean=0.0, std=std)
+            init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
-                module.bias.data.zero_()
+                init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
+            init.normal_(module.weight, mean=0.0, std=std)
+            if module.padding_idx is not None and not getattr(module.weight, "_is_hf_initialized", False):
+                init.zeros_(module.weight[module.padding_idx])
+        elif isinstance(module, MoonViTPositionTable):
+            init.normal_(module.weight, mean=0.0, std=std)
+        else:
+            super()._init_weights(module)
 
 
-class LocateAnythingForConditionalGeneration(LocateAnythingPreTrainedModel, GenerationMixin):
-    config_class = LocateAnythingConfig
+class LocateAnythingForConditionalGeneration(LocateAnythingPreTrainedModel):
     _tied_weights_keys = {"language_model.lm_head.weight": "language_model.model.embed_tokens.weight"}
 
-    def __init__(self, config: LocateAnythingConfig, vision_model=None, language_model=None):
+    def __init__(self, config: LocateAnythingConfig):
+        config._attn_implementation = normalize_attn_implementation(config._attn_implementation)
         super().__init__(config)
-
+        architecture = _decoder_architecture(config)
+        self._no_split_modules = ["Qwen3DecoderLayer"] if "Qwen3" in architecture else ["Qwen2DecoderLayer"]
         self.template = config.template
         self.mlp_checkpoint = config.mlp_checkpoint
-
-        logger.info(f'mlp_checkpoint: {self.mlp_checkpoint}')
-        if vision_model is not None:
-            self.vision_model = vision_model
-        else:
-            if config.vision_config.model_type == 'moonvit':
-                vision_attn_impl = getattr(config.vision_config, '_attn_implementation', None) or 'sdpa'
-                if vision_attn_impl == 'flash_attention_2' and not is_flash_attn_2_available():
-                    logger.warning_once(
-                        "flash_attn is not available for MoonViT inference; falling back to sdpa."
-                    )
-                    vision_attn_impl = 'sdpa'
-                config.vision_config._attn_implementation = vision_attn_impl
-                self.vision_model = MoonVitPretrainedModel(config.vision_config)
-            else:
-                raise ValueError(f'Unsupported vision model type: {config.vision_config.model_type}. Only moonvit is supported.')
-
-        text_attn_impl = (
-            getattr(config.text_config, '_attn_implementation', None)
-            or getattr(config, '_attn_implementation', None)
-            or 'sdpa'
-        )
-        config.text_config._attn_implementation = text_attn_impl
-
-        if language_model is not None:
-            self.language_model = language_model
-        else:
-            if config.text_config.architectures[0] == 'Qwen2ForCausalLM':
-                self.language_model = Qwen2ForCausalLM(config.text_config)
-            elif config.text_config.architectures[0] == 'Qwen3ForCausalLM':
-                self.language_model = Qwen3ForCausalLM(config.text_config)
-            else:
-                raise ValueError(f'Unsupported language model architecture: {config.text_config.architectures[0]}. Only Qwen2ForCausalLM and Qwen3ForCausalLM are supported.')
-
-        vit_hidden_size = config.vision_config.hidden_size
-        llm_hidden_size = config.text_config.hidden_size
-
-        # MLP for moonvit (without pixel_shuffle_back, direct mapping)
-        self.mlp1 = nn.Sequential(
-                nn.LayerNorm(vit_hidden_size*4),
-                nn.Linear(vit_hidden_size*4, llm_hidden_size),
-                nn.GELU(),
-                nn.Linear(llm_hidden_size, llm_hidden_size)
-            )
         self.image_token_index = config.image_token_index
-        self.neftune_alpha = None
+
+        vision_width = config.vision_config.hidden_size
+        text_width = config.text_config.hidden_size
+        self.vision_model = MoonViTPreTrainedModel(config.vision_config)
+        self.mlp1 = nn.Sequential(
+            nn.LayerNorm(4 * vision_width, eps=1e-5),
+            nn.Linear(4 * vision_width, text_width),
+            nn.GELU(),
+            nn.Linear(text_width, text_width),
+        )
+        if "Qwen3" in architecture:
+            self.language_model = LocateAnythingQwen3ForCausalLM(config.text_config)
+        else:
+            self.language_model = LocateAnythingQwen2ForCausalLM(config.text_config)
 
         if config.use_backbone_lora:
-            self.wrap_backbone_lora(r=config.use_backbone_lora, lora_alpha=2 * config.use_backbone_lora)
-
-        self.use_llm_lora = config.use_llm_lora
+            self.vision_model = _wrap_lora(
+                self.vision_model, config.use_backbone_lora, ["wqkv", "wo", "fc0", "fc1"]
+            )
         if config.use_llm_lora:
-            self.wrap_llm_lora(r=config.use_llm_lora, lora_alpha=2 * config.use_llm_lora)
+            self.language_model = _wrap_lora(
+                self.language_model,
+                config.use_llm_lora,
+                ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+                task_type="CAUSAL_LM",
+            )
 
-        self.token_ids = get_token_ids_from_config(config)
+        self.token_ids = build_token_ids(config)
         self.post_init()
-
-        # Set _no_split_modules dynamically based on the actual LLM architecture
-        arch = config.text_config.architectures[0] if hasattr(config.text_config, 'architectures') and config.text_config.architectures else 'Qwen2ForCausalLM'
-        if 'Qwen3' in arch:
-            self._no_split_modules = ["Qwen3DecoderLayer"]
-        else:
-            self._no_split_modules = ["Qwen2DecoderLayer"]
-
-
-    def wrap_backbone_lora(self, r=128, lora_alpha=256, lora_dropout=0.05):
-        from peft import LoraConfig, get_peft_model
-        lora_config = LoraConfig(
-            r=r,
-            target_modules=['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.out_proj',
-                            'mlp.fc1', 'mlp.fc2'],
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout,
-        )
-        self.vision_model = get_peft_model(self.vision_model, lora_config)
-        self.vision_model.print_trainable_parameters()
-
-    def wrap_llm_lora(self, r=128, lora_alpha=256, lora_dropout=0.05):
-        from peft import LoraConfig, get_peft_model
-        lora_config = LoraConfig(
-            r=r,
-            target_modules=['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
-                            'mlp.gate_proj', 'mlp.down_proj', 'mlp.up_proj'],
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout,
-            task_type='CAUSAL_LM'
-        )
-        self.language_model = get_peft_model(self.language_model, lora_config)
-        self.language_model.enable_input_require_grads()
-        self.language_model.print_trainable_parameters()
-        self.use_llm_lora = True
-
-
-    @can_return_tuple
-    def forward(
-            self,
-            pixel_values: Optional[torch.Tensor] = None,
-            input_ids: torch.LongTensor = None,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            image_grid_hws: Optional[torch.Tensor] = None,
-            image_flags: Optional[torch.Tensor] = None,
-            past_key_values: Optional[Cache] = None,
-            labels: Optional[torch.LongTensor] = None,
-            use_cache: Optional[bool] = None,
-            **kwargs,
-    ) -> CausalLMOutputWithPast:
-        vit_embeds = None
-        if pixel_values is not None:
-            features = self.extract_feature(pixel_values, image_grid_hws)
-            if image_flags is not None and image_flags.sum() > 0:
-                filtered, index = [], 0
-                for flag in image_flags:
-                    count = int(flag)
-                    if count:
-                        filtered.extend(features[index:index + count])
-                    index += count or 1
-                features = filtered
-            if features and input_ids is not None and (input_ids == self.image_token_index).any():
-                vit_embeds = self.mlp1(torch.cat(features, dim=0))
-
-        outputs = self.language_model(
-            input_ids=input_ids,
-            visual_features=vit_embeds if vit_embeds is not None and len(vit_embeds) else None,
-            image_token_index=self.image_token_index,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            **kwargs,
-        )
-        logits = outputs.logits
-
-        loss = None
-        if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.language_model.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
-
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
-
-
-    def extract_feature(self, pixel_values, image_grid_hws):
-        vit_embeds = self.vision_model(pixel_values=pixel_values, grid_hws=image_grid_hws)
-
-        return vit_embeds
 
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
@@ -258,254 +128,211 @@ class LocateAnythingForConditionalGeneration(LocateAnythingPreTrainedModel, Gene
     def set_output_embeddings(self, new_embeddings):
         self.language_model.set_output_embeddings(new_embeddings)
 
+    def get_decoder(self):
+        return self.language_model.get_decoder()
+
     def set_decoder(self, decoder):
         self.language_model.set_decoder(decoder)
 
-    def get_decoder(self):
-        return self.language_model.get_decoder()
+    def extract_feature(self, pixel_values: torch.Tensor, image_grid_hws) -> list[torch.Tensor]:
+        return self.vision_model(pixel_values, torch.as_tensor(image_grid_hws))
+
+    @staticmethod
+    def _filter_by_flags(features: list[torch.Tensor], image_flags) -> list[torch.Tensor]:
+        if image_flags is None:
+            return features
+        flags = [int(flag) for flag in torch.as_tensor(image_flags).flatten().tolist()]
+        if sum(flags) <= 0:
+            return features
+        kept, cursor = [], 0
+        for flag in flags:
+            if flag > 0:
+                kept.extend(features[cursor : cursor + flag])
+                cursor += flag
+            else:
+                cursor += 1
+        return kept
+
+    @can_return_tuple
+    def forward(
+        self,
+        pixel_values: torch.Tensor | None = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        image_grid_hws: torch.Tensor | None = None,
+        image_flags: torch.Tensor | None = None,
+        past_key_values=None,
+        labels: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
+        **kwargs,
+    ) -> CausalLMOutputWithPast:
+        visual_features = None
+        if pixel_values is not None:
+            features = self._filter_by_flags(self.extract_feature(pixel_values, image_grid_hws), image_flags)
+            if features and input_ids is not None and bool((input_ids == self.image_token_index).any()):
+                visual_features = self.mlp1(torch.cat(features, dim=0))
+
+        outputs = self.language_model(
+            input_ids=input_ids,
+            visual_features=visual_features,
+            image_token_index=self.image_token_index,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            **kwargs,
+        )
+        logits = outputs.logits
+        loss = None
+        if labels is not None:
+            vocab_size = self.config.text_config.vocab_size
+            shift_logits = logits[:, :-1].reshape(-1, vocab_size)
+            shift_labels = labels[:, 1:].reshape(-1).to(shift_logits.device)
+            loss = F.cross_entropy(shift_logits, shift_labels)
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
     @torch.no_grad()
     def generate(
         self,
-        pixel_values: Optional[torch.FloatTensor] = None,
-        input_ids: Optional[torch.FloatTensor] = None,
-        attention_mask: Optional[torch.LongTensor] = None,
-        visual_features: Optional[torch.FloatTensor] = None,
-        image_grid_hws: Optional[torch.Tensor] = None,
-        tokenizer = None,
-        n_future_tokens: int = 6,
-        **generate_kwargs,
-    ) -> torch.LongTensor:
-
-        verbose = generate_kwargs.pop('verbose', False)
-        start_time = time.time()
-        prefill_time = None
-
+        pixel_values=None,
+        input_ids=None,
+        attention_mask=None,
+        visual_features=None,
+        image_grid_hws=None,
+        tokenizer=None,
+        n_future_tokens=6,
+        **kwargs,
+    ):
+        """Localization decoding: speculative block (MTP) rounds with an autoregressive fallback."""
+        del attention_mask
         if input_ids is None:
-            input_ids = generate_kwargs.pop('inputs', None)
+            input_ids = kwargs.pop("inputs", None)
         if input_ids is None:
-            raise ValueError('input_ids is required')
-        if n_future_tokens != getattr(self.config.text_config, 'block_size', 6):
-            raise ValueError('n_future_tokens must match text_config.block_size')
+            raise ValueError("input_ids is required")
+        block_size = getattr(self.config.text_config, "block_size", 6)
+        if n_future_tokens != block_size:
+            raise ValueError(f"n_future_tokens ({n_future_tokens}) must equal the block size ({block_size})")
         if pixel_values is not None:
             pixel_values = pixel_values.to(device=self.vision_model.device, dtype=self.vision_model.dtype)
         if tokenizer is None:
-            raise ValueError('LocateAnything localization generation requires tokenizer')
-        # Convert numpy array to tensor if needed
+            raise ValueError("A tokenizer is required for LocateAnything localization generate")
         if isinstance(image_grid_hws, np.ndarray):
-            image_grid_hws = torch.from_numpy(image_grid_hws).to(pixel_values.device, dtype=torch.int32)
+            image_grid_hws = torch.from_numpy(image_grid_hws).to(torch.int32)
+        assert input_ids.shape[0] == 1, "LocateAnything localization generate supports batch size 1"
+        assert kwargs.get("use_cache"), "LocateAnything localization generate requires use_cache=True"
+        mode = kwargs.get("generation_mode", "hybrid")
+        assert mode in _GENERATION_MODES, f"generation_mode must be one of {_GENERATION_MODES}"
+        verbose = bool(kwargs.get("verbose", False))
 
-        batch_size, seq_len = input_ids.shape
-        assert batch_size == 1, 'only batch size = 1 is supported now'
-        assert generate_kwargs.get('use_cache', False), "Only use_cache=True is supported."
+        token_ids = self.token_ids
+        mask_token_id = token_ids["default_mask_token_id"]
+        prompt_len = input_ids.shape[1]
+        max_len = min(tokenizer.model_max_length, prompt_len + kwargs.get("max_new_tokens", 2048))
 
-        generated = input_ids.clone()
-        total_gen_length = min(tokenizer.model_max_length, seq_len + generate_kwargs.get('max_new_tokens', 2048))
-        iter_round = 0
-        past_key_values = None
+        if visual_features is None and pixel_values is not None and image_grid_hws is not None:
+            features = self.extract_feature(pixel_values, image_grid_hws)
+            visual_features = self.mlp1(torch.cat(features, dim=0)) if features else None
 
-        # Extract visual features once before the loop
-        if visual_features is not None:
-            vit_embeds = visual_features
-        elif pixel_values is not None:
-            vit_embeds = self.extract_feature(pixel_values, image_grid_hws)
-        else:
-            vit_embeds = None
+        language_model = self.language_model
+        device = input_ids.device
+        generated = input_ids
+        cache = None
+        use_mtp = mode != "slow"
+        first_call = True
+        history = []
+        switches = 0
+        mtp_rounds = 0
+        ar_rounds = 0
 
-        if image_grid_hws is not None:
-            vit_embeds = torch.cat(vit_embeds, dim=0)
-            vit_embeds = self.mlp1(vit_embeds)
-
-        # ==================== Generation Mode ====================
-        # 'fast'   : MTP only, never fall back to AR
-        # 'slow'   : AR only, pure auto-regressive decoding
-        # 'hybrid' : MTP first, fall back to AR on error, switch back on box_end
-        generation_mode = generate_kwargs.get('generation_mode', 'hybrid')
-        assert generation_mode in ('fast', 'slow', 'hybrid'), \
-            f"Unsupported generation_mode='{generation_mode}'. Use 'fast', 'slow', or 'hybrid'."
-
-        sampling_history = []
-
-
-        use_mtp = generation_mode in ('fast', 'hybrid')
-        switch_to_ar_count = 0
-
-        # Pre-allocate mask tokens and position ids
-        default_mask_token_id = self.token_ids['default_mask_token_id']
-        pre_mask_tokens = torch.full(
-            (batch_size, n_future_tokens - 1),
-            default_mask_token_id,
-            dtype=generated.dtype,
-            device=generated.device
-        )
-        max_possible_len = total_gen_length + n_future_tokens
-        full_position_ids = torch.arange(0, max_possible_len, device=generated.device).unsqueeze(0)
-
-
-        def _prepare_inputs_in_mtp(generated):
-            generated_with_mask = torch.cat(
-                (
-                    generated,
-                    generated[:, -1].unsqueeze(1),
-                    pre_mask_tokens
-                ),
-                dim=1
-            ) # [batch_size, seq_len + 1 +  n_future_tokens - 1]
-
-            # Update pe for kvcache
-            start_idx = past_key_values.get_seq_length() if past_key_values is not None else 0
-            position_ids = full_position_ids[:, start_idx : generated_with_mask.size(1)].clone()
-            position_ids[0, -n_future_tokens:] -= 1
-
-            prepare_inputs = self.language_model.prepare_inputs_for_generation(
-                generated_with_mask,
-                past_key_values,
-                None,
-                inputs_embeds=None,
+        while generated.shape[1] < max_len:
+            length = generated.shape[1]
+            if use_mtp:
+                window = torch.full((1, block_size - 1), mask_token_id, dtype=generated.dtype, device=device)
+                sequence = torch.cat([generated, generated[:, -1:], window], dim=1)
+                positions = torch.arange(sequence.shape[1], device=device)
+                positions[-block_size:] -= 1
+            else:
+                sequence = generated
+                positions = torch.arange(length, device=device)
+            model_inputs = language_model.prepare_inputs_for_generation(
+                sequence,
+                past_key_values=cache,
+                attention_mask=None,
+                position_ids=positions.unsqueeze(0),
                 use_cache=True,
-                position_ids=position_ids
             )
-            return prepare_inputs
+            if first_call:
+                model_inputs["visual_features"] = visual_features
+                model_inputs["image_token_index"] = self.image_token_index
+                first_call = False
+            outputs = language_model(**model_inputs)
+            cache = outputs.past_key_values
+            excess = cache.get_seq_length() - length
+            if excess > 0:
+                cache.crop(-excess)
 
-
-        def _prepare_input_in_ar(generated):
-            start_idx = past_key_values.get_seq_length() if past_key_values is not None else 0
-            position_ids = full_position_ids[:, start_idx : generated.size(1)]
-            prepare_inputs = self.language_model.prepare_inputs_for_generation(
-                generated,
-                past_key_values,
-                None,
-                inputs_embeds=None,
-                use_cache=True,
-                position_ids=position_ids
-            )
-            return prepare_inputs
-
-
-        def _sample_token_in_mtp(generated, outputs):
-            """Sample tokens using MTP (Multi-Token Prediction) mode."""
-            next_token_logits = outputs.logits[:, -n_future_tokens:, :]
-            probs, confidence, x0, box_avg = sample_tokens(
-                next_token_logits, generated, self.token_ids, keep_k=5, **generate_kwargs
-            )
-
-            is_box_empty = (box_avg[0] == 0).all()
-            new_tokens = x0[0] if is_box_empty else box_avg[0]
-
-            out_pattern = handle_pattern(new_tokens, self.token_ids, generation_mode)
-            out_type = out_pattern['type']
-            out_token = torch.tensor(out_pattern['tokens'], dtype=x0.dtype, device=x0.device)
-
-            return out_type, out_token
-
-
-        def _sample_token_in_ar(generated, outputs):
-            """Sample a single token using AR (Auto-Regressive) mode."""
-            next_token_logits = outputs.logits[:, -1:, :]
-            probs, confidence, x0, _ = sample_tokens(
-                next_token_logits, generated, self.token_ids, **generate_kwargs
-            )
-
-            out_token = x0[0]
-            out_type = 'continue_ar'
-            token_val = out_token[0].item()
-
-            box_end_token_id = self.token_ids['box_end_token_id']
-            coord_start_token_id = self.token_ids['coord_start_token_id']
-            coord_end_token_id = self.token_ids['coord_end_token_id']
-            none_token_id = self.token_ids['none_token_id']
-            im_end_token_id = self.token_ids['im_end_token_id']
-
-            if generation_mode == 'hybrid':
-                # Hybrid AR phase: detect box boundaries to switch back to MTP
-                if token_val == box_end_token_id:
-                    out_type = 'box_end_ar'
-                elif coord_start_token_id <= token_val <= coord_end_token_id or token_val == none_token_id:
-                    out_type = 'coord_ar'
+            if use_mtp:
+                mtp_rounds += 1
+                logits = outputs.logits[:, -block_size:]
+                _probs, _confidence, chosen, box = select_multi_position(
+                    logits, generated, token_ids, **kwargs
+                )
+                box_row = box[0]
+                candidate = chosen[0] if bool((box_row == 0).all()) else box_row
+                result = handle_pattern(candidate.tolist(), token_ids, generation_mode=mode)
+                kind = result["type"]
+                tokens = list(result["tokens"])
+            else:
+                ar_rounds += 1
+                logits = outputs.logits[:, -1:]
+                _probs, _confidence, chosen, _box = select_multi_position(
+                    logits, generated, token_ids, **kwargs
+                )
+                token = int(chosen.reshape(-1)[-1])
+                if mode == "hybrid":
+                    if token == token_ids["box_end_token_id"]:
+                        kind = "box_end_ar"
+                    elif (
+                        token_ids["coord_start_token_id"] <= token <= token_ids["coord_end_token_id"]
+                        or token == token_ids["none_token_id"]
+                    ):
+                        kind = "coord_ar"
+                    else:
+                        kind = "im_end"
                 else:
-                    out_type = 'im_end'
-            else:
-                # Slow mode: pure AR, only stop on im_end
-                if token_val == im_end_token_id:
-                    out_type = 'im_end'
+                    kind = "im_end" if token == token_ids["im_end_token_id"] else "continue_ar"
+                tokens = [token]
 
-            return out_type, out_token
-
-
-        # Generate loop
-        while generated.size(1) < total_gen_length:
-            iter_round += 1
-
-            # Step 1: Prepare inputs
-            if use_mtp:
-                prepare_inputs = _prepare_inputs_in_mtp(generated)
-            else:
-                prepare_inputs = _prepare_input_in_ar(generated)
-
-            if iter_round == 1:
-                prepare_inputs.update({
-                    'visual_features': vit_embeds,
-                    'image_token_index': self.config.image_token_index,
-                })
-
-            # Step 2: Model forward & update KV cache
-            with torch.no_grad():
-                outputs = self.language_model(**prepare_inputs)
-
-            past_key_values = outputs.past_key_values
-            # TF5.23 crop() accepts a negative token count, not TF4's target
-            # length. Retain the real prefix and discard speculative MTP slots.
-            speculative = past_key_values.get_seq_length() - generated.shape[1]
-            if speculative > 0:
-                past_key_values.crop(-speculative)
-
-            # Step 3: Sample tokens
-            if use_mtp:
-                out_type, out_token = _sample_token_in_mtp(generated, outputs)
-            else:
-                out_type, out_token = _sample_token_in_ar(generated, outputs)
-
+            appended = torch.tensor([tokens], dtype=generated.dtype, device=device)
+            generated = torch.cat([generated, appended], dim=1)
             if verbose:
-                sampling_history.append(('ar' if 'ar' in out_type else 'mtp', tokenizer.decode(out_token, skip_special_tokens=False)))
-
-            generated = torch.cat([generated, out_token.unsqueeze(0)], dim=1)
-
-            # Step 4: Mode switching & termination
-            if out_type == 'im_end':
+                history.append(("ar" if "ar" in kind else "mtp", tokenizer.decode(tokens)))
+            if kind == "im_end":
                 break
-
-            if generation_mode == 'hybrid':
-                if out_type == 'error_box':
+            if mode == "hybrid":
+                if kind == "error_box":
                     use_mtp = False
-                    switch_to_ar_count += 1
-                elif out_type == 'box_end_ar':
+                    switches += 1
+                elif kind == "box_end_ar":
                     use_mtp = True
-            # fast mode: use_mtp stays True always
-            # slow mode: use_mtp stays False always
 
-            if prefill_time is None:
-                prefill_time = time.time() - start_time
-
-        # Decode and return
-        generated_ids = generated[:, seq_len:]
-        response = tokenizer.batch_decode(generated_ids, skip_special_tokens=False)
-
+        response = tokenizer.batch_decode(generated[:, prompt_len:], skip_special_tokens=False)[0]
         if verbose:
-            end_time = time.time()
-            num_tokens = generated_ids.size(1)
-            num_boxes = response[0].count("<box>")
-            total_time = end_time - start_time
+            new_tokens = generated.shape[1] - prompt_len
+            info = (
+                f"mode={mode} new_tokens={new_tokens} mtp_rounds={mtp_rounds} "
+                f"ar_rounds={ar_rounds} switches={switches}"
+            )
+            print(info)
+            return response, history, info
+        return response
 
-            out_info =  f"\nStatistic Info, num_tokens={num_tokens}; " + \
-                    f"generate_time(s)={total_time:.4f}; " + \
-                    f"tps={(num_tokens / total_time):.4f}; " + \
-                    f"forward_step={iter_round}; " + \
-                    f"num_boxes={num_boxes}; " + \
-                    f"bps={(num_boxes / total_time):.4f}; " + \
-                    f"prefill_time={(prefill_time):.4f}; " + \
-                    f"switch_to_ar={switch_to_ar_count}\n"
-            print(out_info)
 
-            return response[0], sampling_history, out_info
-
-        return response[0]
+__all__ = ["LocateAnythingForConditionalGeneration", "LocateAnythingPreTrainedModel"]

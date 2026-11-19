@@ -1,0 +1,458 @@
+{
+ "description": "Qwen2 decoder, every layer sliding_attention, window 2",
+ "hf_generate_error": "RuntimeError: The size of tensor a (2) must match the size of tensor b (6) at non-singleton dimension 3",
+ "localization_generate": {
+  "text_slow": {
+   "response": "51,49,49,57,18,12,18,35,57,34,18,12",
+   "mtp_rounds": [],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     3,
+     3
+    ],
+    [
+     1,
+     4
+    ],
+    [
+     1,
+     5
+    ],
+    [
+     1,
+     6
+    ],
+    [
+     1,
+     7
+    ],
+    [
+     1,
+     8
+    ],
+    [
+     1,
+     9
+    ],
+    [
+     1,
+     10
+    ],
+    [
+     1,
+     11
+    ],
+    [
+     1,
+     12
+    ],
+    [
+     1,
+     13
+    ],
+    [
+     1,
+     14
+    ]
+   ]
+  },
+  "image_slow": {
+   "response": "18,35,57,34,18,12,18,35,57,34,18,12",
+   "mtp_rounds": [],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     9,
+     9
+    ],
+    [
+     1,
+     10
+    ],
+    [
+     1,
+     11
+    ],
+    [
+     1,
+     12
+    ],
+    [
+     1,
+     13
+    ],
+    [
+     1,
+     14
+    ],
+    [
+     1,
+     15
+    ],
+    [
+     1,
+     16
+    ],
+    [
+     1,
+     17
+    ],
+    [
+     1,
+     18
+    ],
+    [
+     1,
+     19
+    ],
+    [
+     1,
+     20
+    ]
+   ]
+  },
+  "text_fast": {
+   "response": "1,48,48,48,48,48,48,48,48,48,48,48",
+   "mtp_rounds": [
+    {
+     "kind": "mtp",
+     "candidate": [
+      1,
+      48,
+      48,
+      48,
+      48,
+      48
+     ],
+     "type": "ref_object",
+     "tokens": [
+      1,
+      48,
+      48,
+      48,
+      48,
+      48
+     ]
+    },
+    {
+     "kind": "mtp",
+     "candidate": [
+      48,
+      48,
+      48,
+      48,
+      48,
+      48
+     ],
+     "type": "ref_object",
+     "tokens": [
+      48,
+      48,
+      48,
+      48,
+      48,
+      48
+     ]
+    }
+   ],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     9,
+     9
+    ],
+    [
+     12,
+     15
+    ]
+   ]
+  },
+  "image_fast": {
+   "response": "31,48,48,48,48,48,48,48,48,48,48,48",
+   "mtp_rounds": [
+    {
+     "kind": "mtp",
+     "candidate": [
+      31,
+      48,
+      48,
+      48,
+      48,
+      48
+     ],
+     "type": "ref_object",
+     "tokens": [
+      31,
+      48,
+      48,
+      48,
+      48,
+      48
+     ]
+    },
+    {
+     "kind": "mtp",
+     "candidate": [
+      48,
+      48,
+      48,
+      48,
+      48,
+      48
+     ],
+     "type": "ref_object",
+     "tokens": [
+      48,
+      48,
+      48,
+      48,
+      48,
+      48
+     ]
+    }
+   ],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     15,
+     15
+    ],
+    [
+     12,
+     21
+    ]
+   ]
+  },
+  "text_hybrid": {
+   "response": "1,48,48,48,48,48,48,48,48,48,48,48",
+   "mtp_rounds": [
+    {
+     "kind": "mtp",
+     "candidate": [
+      1,
+      48,
+      48,
+      48,
+      48,
+      48
+     ],
+     "type": "ref_object",
+     "tokens": [
+      1,
+      48,
+      48,
+      48,
+      48,
+      48
+     ]
+    },
+    {
+     "kind": "mtp",
+     "candidate": [
+      48,
+      48,
+      48,
+      48,
+      48,
+      48
+     ],
+     "type": "ref_object",
+     "tokens": [
+      48,
+      48,
+      48,
+      48,
+      48,
+      48
+     ]
+    }
+   ],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     9,
+     9
+    ],
+    [
+     12,
+     15
+    ]
+   ]
+  },
+  "image_hybrid": {
+   "response": "31,48,48,48,48,48,48,48,48,48,48,48",
+   "mtp_rounds": [
+    {
+     "kind": "mtp",
+     "candidate": [
+      31,
+      48,
+      48,
+      48,
+      48,
+      48
+     ],
+     "type": "ref_object",
+     "tokens": [
+      31,
+      48,
+      48,
+      48,
+      48,
+      48
+     ]
+    },
+    {
+     "kind": "mtp",
+     "candidate": [
+      48,
+      48,
+      48,
+      48,
+      48,
+      48
+     ],
+     "type": "ref_object",
+     "tokens": [
+      48,
+      48,
+      48,
+      48,
+      48,
+      48
+     ]
+    }
+   ],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     15,
+     15
+    ],
+    [
+     12,
+     21
+    ]
+   ]
+  },
+  "rigged_slow": {
+   "response": "32,32,32,32,32,32,32,32",
+   "mtp_rounds": [],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     3,
+     3
+    ],
+    [
+     1,
+     4
+    ],
+    [
+     1,
+     5
+    ],
+    [
+     1,
+     6
+    ],
+    [
+     1,
+     7
+    ],
+    [
+     1,
+     8
+    ],
+    [
+     1,
+     9
+    ],
+    [
+     1,
+     10
+    ]
+   ]
+  },
+  "rigged_fast": {
+   "response": "32,32,32,32,32,32,32,32,32,32,32,32",
+   "mtp_rounds": [
+    {
+     "kind": "mtp",
+     "candidate": [
+      32,
+      32,
+      32,
+      32,
+      32,
+      32
+     ],
+     "type": "coord_box",
+     "tokens": [
+      32,
+      32,
+      32,
+      32,
+      32,
+      32
+     ]
+    },
+    {
+     "kind": "mtp",
+     "candidate": [
+      32,
+      32,
+      32,
+      32,
+      32,
+      32
+     ],
+     "type": "coord_box",
+     "tokens": [
+      32,
+      32,
+      32,
+      32,
+      32,
+      32
+     ]
+    }
+   ],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     9,
+     9
+    ],
+    [
+     12,
+     15
+    ]
+   ]
+  },
+  "rigged_hybrid": {
+   "response": "32,32",
+   "mtp_rounds": [
+    {
+     "kind": "mtp",
+     "candidate": [
+      32,
+      32,
+      32,
+      32,
+      32,
+      32
+     ],
+     "type": "error_box",
+     "tokens": [
+      32
+     ]
+    }
+   ],
+   "forward_calls_[input_len,cache_len_after_forward]": [
+    [
+     9,
+     9
+    ],
+    [
+     1,
+     4
+    ]
+   ]
+  }
+ },
+ "config_overrides_note": "see config.json; model_type/architecture=Qwen2ForCausalLM"
+}
