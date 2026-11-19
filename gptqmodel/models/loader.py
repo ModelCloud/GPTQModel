@@ -124,7 +124,6 @@ from ..utils.model import (
 )
 from ..utils.torch import (
     _ModelGlobalStateLock,
-    defuser_conversion_scope,
     xla_device_count,
 )
 from ._const import DEVICE, EXPERT_INDEX_PLACEHOLDER, HAS_NPU, normalize_device
