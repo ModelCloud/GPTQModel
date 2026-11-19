@@ -235,6 +235,25 @@ def _reusable_resume_shards(output_path: Path, identity: dict) -> set:
     return {str(name) for name in completed if isinstance(name, str)}
 
 
+def _previous_resume_files(output_path: Path) -> set:
+    """Shard names the previous export in this directory reported as written.
+
+    The manifest is this tool's own record, so every listed name was written by
+    an earlier ``dequantize_model`` call into the same directory. A rebuild uses
+    this to remove the previous layout's files: a stale ``model.safetensors``
+    next to a new sharded index is what ``from_pretrained`` prefers, so the
+    resumed directory would load the previous model (#5502).
+    """
+
+    payload = load_json(output_path / _RESUME_MANIFEST_NAME)
+    if not isinstance(payload, dict):
+        return set()
+    completed = payload.get("completed")
+    if not isinstance(completed, list):
+        return set()
+    return {str(name) for name in completed if isinstance(name, str)}
+
+
 def list_safetensor_files(model_path: Path) -> Tuple[list, Optional[dict]]:
     index_path = model_path / "model.safetensors.index.json"
     if index_path.exists():
@@ -2382,6 +2401,13 @@ def dequantize_model(
     resume_shards = (
         _reusable_resume_shards(output_path, resume_identity) if resume else set()
     )
+    # A rebuild must not leave the previous layout's shards behind: the new
+    # index names only the new files, but `from_pretrained` prefers a bare
+    # `model.safetensors` over an index, so a stale single-file export would
+    # win over the new sharded one (#5502).
+    stale_resume_files = (
+        _previous_resume_files(output_path) - set(files) if resume else set()
+    )
     completed_shards: list = []
 
     try:
@@ -2521,6 +2547,17 @@ def dequantize_model(
     new_index["metadata"] = metadata
     new_index["weight_map"] = weight_map
     write_json(output_path / "model.safetensors.index.json", new_index)
+
+    # Publish the new layout first, then drop the files only the previous one
+    # used. Deleting after the index exists means an interrupted rebuild keeps
+    # the old files instead of losing them before the new export is complete.
+    for stale_name in sorted(stale_resume_files):
+        stale_path = output_path / stale_name
+        if stale_path.is_file():
+            stale_path.unlink()
+            LOG.info(
+                "Removed stale export shard `%s` left by the previous layout", stale_name
+            )
 
     new_config = dict(config)
     from .mimo import is_mimo_mixed_source
