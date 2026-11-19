@@ -1231,8 +1231,90 @@ def _defuser_bound_forwards(module, state):
         for name in ("forward", "_old_forward")
         if isinstance(method := state.get(name), MethodType)
         and method.__self__ is module
-        and method.__func__.__module__.startswith("defuser.")
+        and (method.__func__.__module__.startswith("defuser.") or method.__func__ is _routed_experts_forward)
     }
+
+
+# Defuser's construction-time replacement blocks whose expert loop is
+# ``defuser.modeling.unfused_moe.common.run_routed_experts`` (or the identical
+# Glm4MoeLite loop). GPT-QModel builds the vendored block and converts its
+# experts afterwards, so the converted experts get ``_routed_experts_forward``,
+# which feeds every expert the same token rows in the same order as that loop.
+_ROUTED_EXPERTS_REPLACEMENTS = frozenset({
+    "defuser.modeling.unfused_moe.mixtral.LinearMixtralSparseMoeBlock",
+    "defuser.modeling.unfused_moe.qwen2_moe.LinearQwen2MoeSparseMoeBlock",
+    "defuser.modeling.unfused_moe.qwen3_moe.LinearQwen3MoeSparseMoeBlock",
+    "defuser.modeling.unfused_moe.qwen3_next.LinearQwen3NextSparseMoeBlock",
+    "defuser.modeling.unfused_moe.qwen3_omni_moe.LinearQwen3OmniMoeThinkerTextSparseMoeBlock",
+    "defuser.modeling.unfused_moe.qwen3_omni_moe.LinearQwen3OmniMoeTalkerTextSparseMoeBlock",
+    "defuser.modeling.unfused_moe.glm4_moe_lite.LinearGlm4MoeLiteMoE",
+})
+
+
+def _routed_experts_forward(self, hidden_states, top_k_index, top_k_weights):
+    """Run Defuser-converted per-expert linears in the eager routed-loop order.
+
+    Matches ``run_routed_experts`` (and the Transformers eager experts loop):
+    experts are visited in ascending index, each expert receives its token rows
+    ordered by top-k slot and then token (``torch.where`` over the
+    ``[top_k, tokens]`` mask), and weighted outputs are accumulated with
+    ``index_add_``. Calibration statistics that depend on row order (AWQ scale
+    search) therefore stay bit-identical to the replacement block.
+    """
+
+    shape = hidden_states.shape
+    hidden_dim = shape[-1]
+    hidden_states = hidden_states.reshape(-1, hidden_dim)
+    top_k_index = top_k_index.reshape(hidden_states.shape[0], -1)
+    top_k_weights = top_k_weights.reshape(hidden_states.shape[0], -1).to(hidden_states.dtype)
+    final_hidden_states = torch.zeros_like(hidden_states)
+
+    expert_mask = torch.nn.functional.one_hot(top_k_index, num_classes=self.num_experts).permute(2, 1, 0)
+    expert_hit = torch.nonzero(expert_mask.sum(dim=(-1, -2)), as_tuple=False).flatten()
+    for expert_idx in expert_hit.tolist():
+        expert = getattr(self, str(expert_idx))
+        top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+        current_state = hidden_states[token_idx]
+        if hasattr(expert, "gate_proj"):
+            gate_out = expert.gate_proj(current_state)
+            up_out = expert.up_proj(current_state)
+            if hasattr(self, "_apply_gate"):
+                current = self._apply_gate(torch.cat([gate_out, up_out], dim=-1))
+            else:
+                current = self.act_fn(gate_out) * up_out
+        else:
+            current = self.act_fn(expert.up_proj(current_state))
+        current = expert.down_proj(current) * top_k_weights[token_idx, top_k_pos, None]
+        final_hidden_states.index_add_(0, token_idx, current.to(final_hidden_states.dtype))
+
+    return final_hidden_states.reshape(shape)
+
+
+def _bind_converted_experts_forwards(model, routed_blocks) -> None:
+    """Make every Defuser-converted experts module carry its own forward.
+
+    Defuser unfuses ``@use_experts_implementation`` experts in place and sets
+    ``config._experts_implementation = "linear_loop"``; the class forward then
+    resolves that name in Transformers' ``ALL_EXPERTS_FUNCTIONS`` on every call,
+    which only holds the entry in the process that ran the conversion. Binding
+    the implementation on the instance (as Defuser itself does for its
+    declarative ``experts_defuse`` specs) keeps the converted model
+    self-contained: pickled models load and run in a fresh process, and the
+    instance forward pickles by reference through ``_reduce_defused_module``.
+    """
+
+    from defuser.modeling.moe_experts_interface import LINEAR_LOOP_IMPL, linear_loop_experts_forward
+
+    routed_experts = {id(getattr(block, "experts", None)) for block in routed_blocks}
+    for module in model.modules():
+        if "forward" in vars(module) or "0" not in module._modules:
+            continue
+        if not hasattr(type(module).forward, "__wrapped__"):
+            continue
+        if getattr(getattr(module, "config", None), "_experts_implementation", None) != LINEAR_LOOP_IMPL:
+            continue
+        forward = _routed_experts_forward if id(module) in routed_experts else linear_loop_experts_forward
+        module.forward = MethodType(forward, module)
 
 
 def _reduce_defused_module(module, protocol):
@@ -1347,7 +1429,8 @@ def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     # CPU/meta conversion never claims cuda:0 (#5105).
     with _DefuserClassPathAliases(model):
         converted = _run_defuser_conversion(cls, model, cleanup_original)
-        _apply_vendored_construction_replacements(model)
+        routed_blocks = _apply_vendored_construction_replacements(model)
+        _bind_converted_experts_forwards(model, routed_blocks)
 
     after_conversion = getattr(cls, "after_defuser_conversion", None)
     # Model-specific finalizers may also normalize metadata that Defuser does
@@ -1359,7 +1442,7 @@ def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     return converted
 
 
-def _apply_vendored_construction_replacements(model) -> None:
+def _apply_vendored_construction_replacements(model) -> list:
     """Give vendored classes Defuser's construction-time block replacements.
 
     ``defuser.replace_fused_blocks()`` swaps ``transformers.models`` classes
@@ -1371,6 +1454,8 @@ def _apply_vendored_construction_replacements(model) -> None:
     with the replacement block's parameter names; a dense replacement (for
     example ``Glm4vTextMLP`` -> ``LinearGlm4vTextMLP``) splits ``gate_up_proj``
     with Defuser's own runtime split, which has the replacement's forward.
+    Returns the MoE blocks whose replacement runs the routed expert loop, so
+    their converted experts can keep that loop's token order.
     """
 
     from defuser.model_registry import MODEL_CONFIG, PATCH
@@ -1378,21 +1463,26 @@ def _apply_vendored_construction_replacements(model) -> None:
 
     model_type = getattr(getattr(model, "config", None), "model_type", None)
     if not callable(getattr(model, "modules", None)):
-        return
+        return []
     # Defuser 0.0.31's replace_fused_blocks consumes pairs of dotted class paths.
-    replaced = set()
+    replaced = {}
     for original, replacement in MODEL_CONFIG.get(model_type, {}).get(PATCH.REPLACE_MODULE, ()):
         if not isinstance(original, str) or not isinstance(replacement, str):
             raise TypeError(f"Defuser replacement entries for {model_type!r} must be pairs of dotted class paths.")
-        replaced.add(original)
+        replaced[original] = replacement
+    routed_blocks = []
     if not replaced:
-        return
+        return routed_blocks
     for module in list(model.modules()):
         module_class = type(module)
-        if f"{module_class.__module__}.{module_class.__name__}" not in replaced:
+        replacement = replaced.get(f"{module_class.__module__}.{module_class.__name__}")
+        if replacement is None:
             continue
+        if replacement in _ROUTED_EXPERTS_REPLACEMENTS:
+            routed_blocks.append(module)
         if isinstance(getattr(module, "gate_up_proj", None), torch.nn.Linear):
             patch_split_gate_up_mlp(module, variant="standard")
+    return routed_blocks
 
 
 def _run_defuser_conversion(cls, model, cleanup_original: bool) -> bool:
