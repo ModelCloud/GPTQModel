@@ -57,6 +57,7 @@ class LoopedLayerCaptureMixin:
                 self.shell_direct_meta_materialize(
                     target_submodule=module,
                     device=device,
+                    module_path=module_name,
                 )
 
         for layer, layer_name in zip(layers, layer_names):
@@ -204,7 +205,11 @@ class LoopedLayerCaptureMixin:
         self._looped_input_caches.append(cache)
         return cache
 
-    def pre_quantize(self, module: torch.nn.Module) -> torch.nn.Module:
+    def pre_quantize(
+        self,
+        module: torch.nn.Module,
+        module_path: Optional[str] = None,
+    ) -> torch.nn.Module:
         """Point the shared cache at the invocations of the layer being quantized."""
 
         per_layer = getattr(self, "_looped_per_layer", None)
@@ -216,7 +221,7 @@ class LoopedLayerCaptureMixin:
                 cache.position_ids = bucket["position_ids"]
                 cache.attention_masks = bucket["attention_masks"]
                 cache.src_inputs = []
-        return super().pre_quantize(module)
+        return super().pre_quantize(module, module_path=module_path)
 
     def after_quantize(self) -> None:
         """Release the looped calibration captures after the loop completes."""

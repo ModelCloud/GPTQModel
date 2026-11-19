@@ -64,7 +64,7 @@ flowchart TD
 | Path | Weight traffic per forward | Enabled when |
 | --- | --- | --- |
 | `_forward_block_gemv` (`gptqmodel/utils/fp8_block_triton.py`) | reads the 1 B/element payload once; no decoded temporary | block payload, `float8_e4m3fn`/`float8_e5m2`, CUDA, FP16/BF16 activations, exact divisible 128-wide column blocks, range-safe FP16 bound, no autograd graph, row count at or below the measured fused limit |
-| `_forward_block_decode` | reads 1 B/element, writes the activation dtype once | the same payload conditions without the fused kernel's row/GEMM/grad limits |
+| `_forward_block_decode` | reads 1 B/element, writes the activation dtype once | the same payload conditions without the fused kernel's row/GEMM/grad limits, and a decoded weight that narrows into the activation dtype without overflow |
 | `_forward_lean_scaled_matmul` | reads 1 B/element, no decoded temporary | row/tensor scales (unchanged, #5146) |
 | portable decode | the two-pass cast and scale | every payload the predicates above reject: E8M0, AMD `fnuz` formats, padded/cropped block scales, non-CUDA, ROCm, `torch.compile`/`export`, non-contiguous activations |
 
@@ -82,9 +82,13 @@ kernel. The two thresholds are measured, not tuned per call:
 
 - A zero inverse scale decodes a code to `inf` and can turn a zero product
   into `NaN`, so those payloads keep the exact portable reference path.
-- The fused product narrows codes into the activation dtype, so a payload whose
-  decoded weight exceeds the FP16 finite range takes the single-pass decode
-  (which rounds once and is not range-safe either) or the FP32 fallback.
+- The single-pass decode writes the decoded weight in the activation dtype, so
+  a payload whose decoded weight exceeds the FP16 finite range (for example
+  65536, above the FP16 maximum of 65504) would store `inf` and turn a finite
+  dot product into `NaN` (#5405). Those payloads keep the exact FP32 fallback,
+  which decodes and multiplies in FP32 and narrows only the result. The fused
+  product carries the same requirement; BF16 and FP32 keep the FP32 exponent
+  range and are unaffected.
 - `torch.compile`/`export` never see the launch. The decode plan is declined
   inside a trace, so the traced graph keeps the Torch decode, and
   `SUPPORTS_COMPILE_LEVEL` is unchanged. CUDA-graph capture is supported: the
@@ -103,6 +107,8 @@ kernel. The two thresholds are measured, not tuned per call:
 | `...::test_block_decode_keeps_no_decoded_weight_after_forward` | The single-pass temporary is released before the forward returns and is not retained on the module |
 | `...::test_block_decode_declines_unsupported_payloads` | Non-Triton devices, padded block scales, non-contiguous activations and row/tensor payloads keep the portable decode |
 | `...::test_block_decode_tiles_are_the_measured_ones` | The launch tiles are the measured ones |
+| `...::test_block_decode_keeps_an_out_of_fp16_range_payload_finite` | A decoded weight of 65536 (both scale conventions) stays finite and exact in FP16/BF16/FP32; the FP16 payload leaves the single-pass decode, BF16/FP32 keep it; fails on the pre-fix tree with `non-finite output for torch.float16: tensor([[nan, ...]])` |
+| `...::test_block_decode_range_gate_keeps_the_in_range_fast_path` | The range gate does not move an in-range payload off the fused product: one fused launch, no single-pass decode |
 | `tests/kernels/test_fp8_kernel.py`, `tests/test_fp8_dequant_inplace.py`, `tests/test_fp8_packed_weight_lifecycle.py`, `tests/test_rocm_fp8_gating.py` | Existing FP8 forward, decode arithmetic, storage lifecycle and ROCm gating behaviour |
 
 Measured on sm_89 (torch 2.15.0+cu132, Triton 3.9) with an L2 flush before each

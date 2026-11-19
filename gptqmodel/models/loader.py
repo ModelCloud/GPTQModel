@@ -2266,6 +2266,14 @@ def ModelLoader(cls):
 
         tokenizer_trust_remote_code = model_init_kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs_without_internal)
+        # The wrapper owns the processor and auxiliary-file lookup. A nested
+        # checkpoint keeps all of them beside the config and weights, so pass
+        # the resolved directory instead of the repository root. Config,
+        # tokenizer and weight loading keep forwarding ``subfolder`` to
+        # Transformers; this value is only the wrapper's checkpoint root.
+        checkpoint_dir = resolve_checkpoint_subfolder(
+            model_local_path, model_init_kwargs_without_internal.get("subfolder")
+        )
         trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
 
         model_init_kwargs_without_internal["trust_remote_code"] = trust_remote_code
@@ -2421,7 +2429,7 @@ def ModelLoader(cls):
             # Load a non-quantized model, but do not perform quantization. For example, for evaluation.
             _call_before_model_load(
                 cls,
-                model_local_path=model_local_path,
+                model_local_path=checkpoint_dir,
                 load_quantized_model=False,
             )
             # transformers' ``from_pretrained`` wraps model construction in
@@ -2449,7 +2457,7 @@ def ModelLoader(cls):
                 quantize_config=quantize_config,
                 tokenizer=tokenizer,
                 trust_remote_code=trust_remote_code,
-                model_local_path=model_local_path,
+                model_local_path=checkpoint_dir,
             )
             _set_paged_attention_safe_cuda_graphs(instance.model)
 
@@ -2524,7 +2532,7 @@ def ModelLoader(cls):
 
             _call_before_model_load(
                 cls,
-                model_local_path=model_local_path,
+                model_local_path=checkpoint_dir,
                 load_quantized_model=False,
             )
             from ..utils.hf import build_shell_model
@@ -2652,7 +2660,7 @@ def ModelLoader(cls):
             quantize_config=quantize_config,
             tokenizer=tokenizer,
             trust_remote_code=trust_remote_code,
-            model_local_path=model_local_path,
+            model_local_path=checkpoint_dir,
         )
         _set_paged_attention_safe_cuda_graphs(instance.model)
 
@@ -2848,21 +2856,23 @@ def ModelLoader(cls):
         # loader binds (qweight/qzeros/scales/g_idx): it stores packed mantissa
         # codes plus one exponent per block of 16 values. Route it before any
         # GPTQ parsing, otherwise every decoder layer reads as missing. The
+        # probe and the build both use the resolved checkpoint directory, so
+        # `subfolder=` selects the same artifact as passing that directory
+        # directly instead of falling through to the GPTQ config parser. The
         # guards above still apply -- this path builds the model through
         # transformers like any other, so the same version and
         # trust_remote_code rules hold.
         from .solver_format_checkpoint import load_checkpoint, read_manifest
         from .tt_blockfloat_loader import is_tt_blockfloat_checkpoint
 
-        solution_dir = resolve_checkpoint_subfolder(model_local_path, kwargs_without_internal.get("subfolder", ""))
-        if read_manifest(solution_dir).get("quant_method") == "solver_format":
+        if read_manifest(checkpoint_dir).get("quant_method") == "solver_format":
             if (requested_device_map is not None
                     or (requested_device is not None and str(requested_device) != "cpu")
                     or backend != BACKEND.AUTO or fuse or adapter is not None or max_memory is not None):
                 raise ValueError("Solver/format checkpoints currently require CPU, AUTO backend, and no fusion/adapter")
-            return load_checkpoint(cls, solution_dir, dtype=dtype)
+            return load_checkpoint(cls, checkpoint_dir, dtype=dtype)
 
-        if is_tt_blockfloat_checkpoint(model_local_path):
+        if is_tt_blockfloat_checkpoint(checkpoint_dir):
             if requested_device_map is not None or (
                 requested_device is not None
                 and str(requested_device).split(":")[0].lower() != "cpu"
@@ -2878,7 +2888,7 @@ def ModelLoader(cls):
                 )
             return _load_tt_blockfloat_model(
                 cls,
-                model_local_path=model_local_path,
+                model_local_path=checkpoint_dir,
                 dtype=dtype,
                 trust_remote_code=trust_remote_code,
             )
@@ -3080,7 +3090,7 @@ def ModelLoader(cls):
                 )
 
                 model = load_model_by_vllm(
-                    model=model_local_path,
+                    model=checkpoint_dir,
                     trust_remote_code=trust_remote_code,
                     **kwargs_without_internal,
                 )
@@ -3101,7 +3111,7 @@ def ModelLoader(cls):
                     resolved_dtype=dtype,
                 )
                 model, hf_config = load_model_by_sglang(
-                    model=model_local_path,
+                    model=checkpoint_dir,
                     trust_remote_code=trust_remote_code,
                     config=config,
                     **sglang_kwargs,
@@ -3117,7 +3127,7 @@ def ModelLoader(cls):
                 qlinear_kernel=None,
                 load_quantized_model=True,
                 trust_remote_code=trust_remote_code,
-                model_local_path=model_local_path,
+                model_local_path=checkpoint_dir,
             )
             instance._runtime_generate = runtime_generate
             _set_paged_attention_safe_cuda_graphs(instance.model)
@@ -3203,7 +3213,7 @@ def ModelLoader(cls):
         with suspend_hf_weight_init():
             _call_before_model_load(
                 cls,
-                model_local_path=model_local_path,
+                model_local_path=checkpoint_dir,
                 load_quantized_model=True,
             )
 
@@ -3336,7 +3346,7 @@ def ModelLoader(cls):
                 input_embed_name = get_module_name(model, input_embeddings) if input_embeddings is not None else None
                 output_embed_name = get_module_name(model, output_embeddings) if output_embeddings is not None else None
                 input_embed_quantized, output_embed_quantized = is_embeddings_module_quantized(
-                    model_dir=model_local_path,
+                    model_dir=checkpoint_dir,
                     input_embed_name=input_embed_name,
                     output_embed_name=output_embed_name,
                 )
@@ -3962,7 +3972,7 @@ def ModelLoader(cls):
             qlinear_kernel=qlinear_kernel,
             load_quantized_model=True,
             trust_remote_code=trust_remote_code,
-            model_local_path=model_local_path,
+            model_local_path=checkpoint_dir,
             effective_module_tree=effective_module_tree,
         )
         if backend == BACKEND.MLX:

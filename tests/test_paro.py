@@ -2697,9 +2697,14 @@ def test_paro_prewarm_rotation_extension_skips_unsupported_configs(monkeypatch):
     """Guard the explicit prewarm helper so startup only pays for real fused-kernel cases."""
     calls = []
 
+    # Patch the seam `prewarm_paro_rotation_extension` actually calls. Patching
+    # the extension object's `load` only worked while the module global
+    # `_ROTATION_EXTENSION_READY` was still False: once any earlier test in the
+    # session loaded the extension, `_load_rotation_extension()` short-circuits
+    # on that flag and never reaches `.load` (#5430).
     monkeypatch.setattr(
-        paro_utils_module._PARO_ROTATION_EXTENSION,
-        "load",
+        paro_utils_module,
+        "_load_rotation_extension",
         lambda: calls.append("load") or True,
     )
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
@@ -2718,6 +2723,27 @@ def test_paro_prewarm_rotation_extension_skips_unsupported_configs(monkeypatch):
     )
     assert prewarm_paro_rotation_extension(fused_rotation=True, group_size=128, krot=8) is True
     assert calls == ["load"]
+
+
+def test_paro_prewarm_reports_true_when_the_extension_is_already_loaded(monkeypatch):
+    """A prewarm after an earlier load must succeed without probing or rebuilding (#5430).
+
+    This is the process state that made the config-gating test above fail: a
+    real fused rotation ran earlier in the session, so the module global is
+    already True and the loader returns before touching the JIT extension.
+    """
+    probes = []
+
+    monkeypatch.setattr(paro_utils_module, "_ROTATION_EXTENSION_READY", True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        paro_utils_module,
+        "_extension_api",
+        lambda: SimpleNamespace(is_available=lambda name: probes.append(name) or True),
+    )
+
+    assert prewarm_paro_rotation_extension(fused_rotation=True, group_size=128, krot=8) is True
+    assert probes == []
 
 
 def test_paro_clear_rotation_extension_cache_delegates_to_shared_loader(monkeypatch):

@@ -386,7 +386,9 @@ class EoraProcessor(LoopProcessor):
         del self._segment_accumulators
         del self._module_target_devices
 
-        # hack: store loras into model until `save()` is called
+        # Store the generated adapters on the model for its lifetime: every
+        # `save()` exports this same adapter, and the writer no longer deletes
+        # the only copy after the first export (#5354).
         model.lora_results = self.results()
 
         super().finalize(model=model, **kwargs)

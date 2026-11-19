@@ -17,32 +17,36 @@ the pattern text, because folding changes more than letter case.
 
 ```mermaid
 flowchart TD
-    A["dynamic_rank_override(rank_pattern, weight_key)"] --> B["for each pattern and rank"]
-    B --> C["exact: weight_key equals pattern"]
-    C -- match --> HIT["select this rank"]
-    C -- no --> D["suffix: weight_key endswith pattern"]
-    D -- match --> HIT
-    D -- no --> E["regex: pcre.compile(pattern).search(weight_key)"]
-    E -- match --> HIT
-    E -- no --> F{"pattern or name has uppercase?"}
-    F -- no --> MISS["next pattern"]
-    F -- yes --> G["legacy retry: fold literals, regex with IGNORECASE"]
-    G -- match --> HIT
-    G -- no --> MISS
-    MISS --> B
-    HIT --> Z["self.rank = rank, return True"]
-    style G fill:#ffd,stroke:#a80
+    A["dynamic_rank_override / dynamic_alpha_override"] --> B["pass 1: every pattern, in declaration order"]
+    B --> C["_rank_pattern_matches(pattern, weight_key)"]
+    C -- match --> HIT["select this override"]
+    C -- no, more patterns --> B
+    C -- no, patterns exhausted --> D["pass 2: every pattern, in declaration order"]
+    D --> E{"pattern or name written in lowercase?"}
+    E -- no --> MISS["skip: canonical pattern is never case-folded"]
+    E -- yes --> F["legacy retry: _rank_pattern_matches(..., ignore_case=True)"]
+    F -- match --> HIT
+    F -- no --> MISS
+    MISS --> D
+    HIT --> Z["rank: self.rank = value, return True<br/>alpha: return the override"]
+    style F fill:#ffd,stroke:#a80
+    style MISS fill:#eef,stroke:#36c
 ```
 
-The yellow node is the only case-folding step, and it is a separate fallback:
-it runs only after the exact spelling fails, and only when one of the two
-strings actually contains an uppercase letter. It folds the two literal
-comparisons and passes `pcre.IGNORECASE` to the regex engine; the pattern
-string itself is handed to the engine unchanged, so `\S`, `\D`, and `\W` keep
-their meaning.
+Both passes walk the patterns in declaration order, so the result is PEFT's
+first-match rule for canonical payloads. The case-insensitive retry is a
+separate pass rather than a per-pattern fallback: trying it inside pass 1 let
+an earlier lowercase rule capture a later rule's canonical mixed-case module
+(`alpha_pattern={"proj": 8, "Proj": 2}` applied 8 to `block.Proj`, where PEFT
+applies 2 — #5422). The yellow node is still the only case-folding step, it
+still only runs when one of the two strings is written in lowercase, and it
+still passes the pattern text to the engine unchanged, so `\S`, `\D`, and
+`\W` keep their meaning.
 
-`_rank_pattern_matches` (`gptqmodel/adapter/adapter.py:26`) owns the three
-checks; `dynamic_rank_override` (`:325`) owns the ordering and the fallback.
+`_rank_pattern_matches` (`gptqmodel/adapter/adapter.py:28`) owns the match
+test, `_pattern_override_candidates` owns the two-pass order, and
+`dynamic_rank_override` / `dynamic_alpha_override` consume the resulting
+candidate list.
 
 ## Previous flow
 

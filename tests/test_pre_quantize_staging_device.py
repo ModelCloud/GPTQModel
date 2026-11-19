@@ -57,7 +57,7 @@ def _stage_device(monkeypatch, model, layer):
 
     staged = []
 
-    def fake_materialize(self, module, device):
+    def fake_materialize(self, module, device, module_path=None):
         staged.append(device)
         return True
 
@@ -79,7 +79,7 @@ def test_shell_materialize_gets_filtered_device(monkeypatch):
     monkeypatch.setattr(
         BaseQModel,
         "_materialize_floatx_layer_shell",
-        lambda self, module, device: False,
+        lambda self, module, device, module_path=None: False,
     )
     seen = []
 

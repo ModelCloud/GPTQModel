@@ -14,6 +14,7 @@ from .config import (
     QuantizeConfig,
     SmoothLog,
     SmoothMAD,
+    SmoothMSE,
     SmoothOutlier,
     SmoothPercentile,
     SmoothPercentileAsymmetric,
@@ -158,7 +159,20 @@ def smooth_block(
         lin_threshold = (torch.exp(threshold * log_mu) - 1.0) / mu
         return torch.clamp(block_f, -lin_threshold, lin_threshold).to(block.dtype), None
 
-    return block, None
+    if isinstance(method, SmoothMSE):
+        # The MSE search needs the quantizer's code grid and saliency, so only
+        # the RTN/GPTQ/QQQ loops can apply it; they branch before calling this
+        # helper. The direct GGUF/BitsAndBytes packers call it too, and a silent
+        # no-op saved un-smoothed weights under MSE metadata (#5383).
+        raise ValueError(
+            "SmoothMSE requires the quantizer's MSE search and is not available "
+            "to the direct packers; use a clipping smoother such as SmoothMAD, "
+            "or quantize through RTN/GPTQ/QQQ."
+        )
+
+    # Fail closed: silently returning the block unchanged would advertise a
+    # preprocessor the packed weights never received.
+    raise ValueError(f"smooth_block does not implement {type(method).__name__}")
 
 
 def _eval_mse(block_f, min_val, max_val, base_zero, qcfg, maxq, shrink, eps, weights=None):

@@ -1967,8 +1967,11 @@ class GPTQ:
         ``target_device`` is the device the weight clone is quantized on; when
         None it is taken from ``self.H`` if present, else the weight.
         ``hessian_diag`` supplies the captured Hessian diagonal when the full
-        matrix has already been released (the low-sample fallback path); it is
-        used only when ``self.H`` is absent.
+        matrix has already been released (the low-sample fallback path). When
+        present it is preferred over ``self.H``: the diagonal is reduced from
+        the live capture immediately before this call, so it also includes
+        batches captured after an earlier ``finalize_hessian()``, while
+        ``self.H`` is only the last finalized snapshot.
         """
         maxq = 2 ** self.qcfg.bits - 1
         sigma = 3.0
@@ -1992,11 +1995,11 @@ class GPTQ:
         col_weights = None
         if isinstance(smooth_method, SmoothMSE):
             col_weights = hessian_column_weights(
-                self.H, self.columns, device=target_device
+                hessian_diag, self.columns, device=target_device
             )
             if col_weights is None:
                 col_weights = hessian_column_weights(
-                    hessian_diag, self.columns, device=target_device
+                    self.H, self.columns, device=target_device
                 )
         Q = torch.empty_like(W)
         scale_chunks = []

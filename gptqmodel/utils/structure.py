@@ -548,6 +548,36 @@ def _get_qualified_name(root: torch.nn.Module, obj: torch.nn.Module) -> str:
             return name
     raise ValueError("Could not find the given module within the target model.")
 
+
+def _resolve_qualified_name(
+    root: torch.nn.Module,
+    obj: torch.nn.Module,
+    module_path: Optional[str] = None,
+) -> str:
+    """Return ``obj``'s dotted path, trusting a caller-provided path when valid.
+
+    ``_get_qualified_name`` walks the whole tree.  The quantization loop already
+    holds the dotted path (``NamedModule.full_name``) and calling the scan once
+    per module makes per-layer cost grow with model depth.  Resolve the supplied
+    path directly and keep the full scan only as a fallback for stale or
+    missing names.
+    """
+
+    if module_path:
+        try:
+            resolved = root.get_submodule(module_path)
+        except (AttributeError, IndexError, KeyError):
+            resolved = None
+        if resolved is obj:
+            return module_path
+        log.warning(
+            "Provided module path `%s` does not resolve to the target module; "
+            "falling back to a full named_modules() lookup.",
+            module_path,
+        )
+    return _get_qualified_name(root, obj)
+
+
 def _get_parent_and_leaf_by_path(root: torch.nn.Module, dotted: str):
     if "." in dotted:
         parent_path, leaf = dotted.rsplit(".", 1)
@@ -1545,8 +1575,9 @@ class LazyTurtle:
         show_progress: bool = True,
         skip_module_types: tuple[type, ...] = (),
     ) -> torch.nn.Module:
-        if module_path is None:
-            module_path = _get_qualified_name(target_model, target_submodule)
+        module_path = _resolve_qualified_name(
+            target_model, target_submodule, module_path
+        )
 
         # Build only the ancestor chain plus the descendant subtree for the target
         # module. _resolve_prefer_transposed_hint only needs these entries, so a full
@@ -1783,6 +1814,7 @@ class LazyTurtle:
         target_model: nn.Module,
         target_submodule: nn.Module,
         rel_name: str = "weight",
+        module_path: Optional[str] = None,
     ) -> bool:
         """Return whether the checkpoint owns `rel_name` for one shell submodule.
 
@@ -1793,7 +1825,9 @@ class LazyTurtle:
         exactly the case the shell cannot discover through parameter identity.
         """
 
-        path = _get_qualified_name(target_model, target_submodule)
+        path = _resolve_qualified_name(
+            target_model, target_submodule, module_path
+        )
         with self._lock:
             source_name, _expert_index, _split_index, _split_dim = (
                 self._resolve_checkpoint_tensor_source(path, rel_name)
@@ -1806,10 +1840,13 @@ class LazyTurtle:
         target_model: nn.Module,
         target_submodule: nn.Module,
         recurse: bool = False,
+        module_path: Optional[str] = None,
     ) -> Dict[str, torch.Tensor]:
         """Load checkpoint tensors for one shell submodule without mutating it."""
 
-        path = _get_qualified_name(target_model, target_submodule)
+        path = _resolve_qualified_name(
+            target_model, target_submodule, module_path
+        )
         with self._lock:
             tensors = self._load_checkpoint_tensors_for_module_path(
                 module_path=path,
@@ -2011,6 +2048,7 @@ class LazyTurtle:
         target_model: nn.Module,
         target_submodule: nn.Module,
         device: Optional[torch.device] = None,
+        module_path: Optional[str] = None,
     ):
         """Materialize only direct meta params/buffers for one shell submodule."""
 
@@ -2019,7 +2057,9 @@ class LazyTurtle:
             if device.type == "meta":
                 raise ValueError("materialize_direct_meta_tensors() does not support meta target devices.")
 
-        path = _get_qualified_name(target_model, target_submodule)
+        path = _resolve_qualified_name(
+            target_model, target_submodule, module_path
+        )
         with self._lock, torch.inference_mode():
             self._materialize_direct_meta_tensors(
                 shell_sub=target_submodule,
@@ -4533,6 +4573,7 @@ def alias_direct_meta_from_turtle_for_submodule(
     target_submodule: torch.nn.Module,
     *,
     device: Optional[torch.device] = None,
+    module_path: Optional[str] = None,
 ):
     """Materialize only direct meta params/buffers for one shell submodule."""
 
@@ -4545,6 +4586,7 @@ def alias_direct_meta_from_turtle_for_submodule(
         target_model=target_model,
         target_submodule=target_submodule,
         device=device,
+        module_path=module_path,
     )
 
 def _is_meta_tensor(t: torch.Tensor) -> bool:

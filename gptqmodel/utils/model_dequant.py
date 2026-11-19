@@ -15,14 +15,19 @@ from collections import defaultdict
 from contextlib import ExitStack
 from functools import reduce
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Iterable, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Iterable, Optional, Sequence, Tuple
 
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
 from ..quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
-from ..quantization.config import dynamic_get, quant_bits_width
+from ..quantization.config import (
+    FORMAT,
+    QUANT_CONFIG_FILENAME_COMPAT,
+    dynamic_get,
+    quant_bits_width,
+)
 from ..quantization.dtype import (
     available_float4_packed_dtypes,
     available_float8_dtype_names,
@@ -64,10 +69,20 @@ _UNDECODABLE_METHODS = frozenset(
     }
 )
 
+#: Output file that records which shards a resumed export completed and the
+#: checkpoint identity they were produced from. A resume must never trust an
+#: output file just because its name matches the source shard (#5396).
+_RESUME_MANIFEST_NAME = "gptqmodel_dequant_resume.json"
+
 # Quantization-only metadata must not survive into a dense export: leaving it
 # behind makes loaders route the dense checkpoint back through from_quantized.
 _DENSE_OUTPUT_EXCLUDED_FILES = frozenset(
-    {"quantize_config.json", "quant_config.json", "quant_log.csv"}
+    {
+        "quantize_config.json",
+        "quant_config.json",
+        "quant_log.csv",
+        _RESUME_MANIFEST_NAME,
+    }
 )
 
 # Reuse the shared dtype registries so checkpoint detection stays aligned with
@@ -113,6 +128,111 @@ def load_json(path: Path) -> dict:
 def write_json(path: Path, payload: dict) -> None:
     with path.open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
+
+
+_RESUME_MANIFEST_VERSION = 1
+
+
+def _resume_identity(
+    model_path: Path,
+    files: Sequence[str],
+    target_dtype: torch.dtype,
+) -> dict:
+    """Describe the export a resume may continue.
+
+    The source is identified by its resolved path and every shard's name, size
+    and mtime, which is cheap (no weight hashing) and changes when the user
+    points the same output directory at another checkpoint.
+    """
+
+    shards = []
+    for name in sorted(files):
+        try:
+            stat = (model_path / name).stat()
+            shards.append([name, stat.st_size, stat.st_mtime_ns])
+        except OSError:
+            shards.append([name, None, None])
+    return {
+        "version": _RESUME_MANIFEST_VERSION,
+        "source": {"path": str(model_path.expanduser().resolve()), "shards": shards},
+        "layout": list(files),
+        "target_dtype": str(target_dtype).split(".")[-1],
+    }
+
+
+def _write_resume_manifest(
+    output_path: Path,
+    identity: dict,
+    completed: Sequence[str],
+) -> None:
+    """Atomically publish the shards this export has finished."""
+
+    payload = dict(identity)
+    payload["completed"] = sorted(set(completed))
+    tmp_path = output_path / f".{_RESUME_MANIFEST_NAME}.tmp"
+    write_json(tmp_path, payload)
+    tmp_path.replace(output_path / _RESUME_MANIFEST_NAME)
+
+
+def _is_readable_safetensors(path: Path) -> bool:
+    """Validate a shard header before handing the file to ``safe_open``.
+
+    The Rust binding aborts the process on a corrupt header instead of raising,
+    so a resumed shard has to be checked in Python first (#5396).
+    """
+
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            raw = handle.read(8)
+            if len(raw) != 8:
+                return False
+            header_len = int.from_bytes(raw, "little")
+            if header_len <= 0 or header_len > size - 8:
+                return False
+            header = handle.read(header_len)
+            if len(header) != header_len:
+                return False
+            return isinstance(json.loads(header), dict)
+    except (OSError, ValueError):
+        return False
+
+
+def _reusable_resume_shards(output_path: Path, identity: dict) -> set:
+    """Completed shards that belong to *this* export, or an empty set."""
+
+    payload = load_json(output_path / _RESUME_MANIFEST_NAME)
+    if not isinstance(payload, dict) or not payload:
+        return set()
+    if payload.get("version") != identity["version"]:
+        return set()
+    if payload.get("layout") != identity["layout"]:
+        LOG.warning(
+            "Resume manifest at `%s` describes a different shard layout; "
+            "rebuilding the export.",
+            output_path / _RESUME_MANIFEST_NAME,
+        )
+        return set()
+    if payload.get("target_dtype") != identity["target_dtype"]:
+        LOG.warning(
+            "Resume manifest at `%s` was written for dtype %s, not %s; "
+            "rebuilding the export.",
+            output_path / _RESUME_MANIFEST_NAME,
+            payload.get("target_dtype"),
+            identity["target_dtype"],
+        )
+        return set()
+    if payload.get("source") != identity["source"]:
+        LOG.warning(
+            "Resume manifest at `%s` was written for a different source "
+            "checkpoint; rebuilding the export.",
+            output_path / _RESUME_MANIFEST_NAME,
+        )
+        return set()
+    completed = payload.get("completed")
+    if not isinstance(completed, list):
+        return set()
+    return {str(name) for name in completed if isinstance(name, str)}
 
 
 def list_safetensor_files(model_path: Path) -> Tuple[list, Optional[dict]]:
@@ -1026,8 +1146,30 @@ def _unpack_rows_3bit(packed: torch.Tensor) -> torch.Tensor:
 
 
 def _uses_gptq_v1_qzeros(config: dict) -> bool:
-    checkpoint_format = str(config.get("checkpoint_format") or "gptq").strip().lower()
-    return checkpoint_format in {"gptq", "gemm"}
+    """Return whether ``qzeros`` uses the GPTQ v1 (per-field -1 offset) encoding.
+
+    The checkpoint layout may be declared as ``checkpoint_format`` or as the
+    ``format`` metadata alias (both spellings exist in the wild, and either can
+    live in ``quantize_config.json`` or ``quant_config.json``). Resolve both the
+    way the loader does; only the v1 layouts need the zero correction (#5413).
+    """
+
+    raw_format = config.get("checkpoint_format")
+    if raw_format is None:
+        raw_format = config.get("format")
+    if raw_format is None:
+        # Legacy checkpoints predate the field and are v1.
+        return True
+    if isinstance(raw_format, FORMAT):
+        resolved = raw_format
+    else:
+        try:
+            resolved = FORMAT(str(raw_format).strip().lower())
+        except ValueError:
+            # Unknown spelling: keep the previous v1 default instead of
+            # silently switching the zero semantics.
+            return True
+    return resolved not in {FORMAT.GPTQ_V2, FORMAT.GPTQ_P}
 
 
 def _shift_gptq_qzeros(qzeros: torch.Tensor, bits: int, *, delta: int, planar: bool = False) -> torch.Tensor:
@@ -1511,8 +1653,6 @@ def convert_bitsandbytes_shard(
     quant_cfg: dict,
     ignored_layers: Iterable[str] = (),
 ) -> Dict[str, torch.Tensor]:
-    bnb = _get_bitsandbytes_dependencies()
-
     tensors: Dict[str, torch.Tensor] = {}
     keys = list(reader.keys())
     key_set = set(keys)
@@ -1543,6 +1683,10 @@ def convert_bitsandbytes_shard(
             continue
 
         if key.endswith(".weight") and (key[:-len(".weight")] + ".weight_quant_state") in key_set:
+            # The optional dependency is imported only by an actual packed
+            # decode. Ignored-only fixtures (e.g. the ignored-layer regression)
+            # must keep running in the base test environment (#5417).
+            bnb = _get_bitsandbytes_dependencies()
             prefix = key[:-len(".weight")]
             payload = {
                 "absmax": reader.get_tensor(prefix + ".weight_absmax"),
@@ -1561,6 +1705,7 @@ def convert_bitsandbytes_shard(
             continue
 
         if key.endswith(".weight") and (key[:-len(".weight")] + ".weight_scb") in key_set:
+            bnb = _get_bitsandbytes_dependencies()
             prefix = key[:-len(".weight")]
             deq = bnb.functional.int8_vectorwise_dequant(
                 tensor,
@@ -1730,6 +1875,32 @@ def _dequantize_awq_gemv_fast(qweight, zeros, scales, bits: int, group_size: int
     return (codes.to(torch.float32).t() * scale + offset).t().contiguous()
 
 
+def _complete_module_buffers(
+    prefix: str,
+    buffers: Dict[str, torch.Tensor],
+    required: Iterable[str],
+    tensor_lookup: Optional["_ShardTensorLookup"],
+) -> Dict[str, torch.Tensor]:
+    """Fill a module's packed buffers from the checkpoint index.
+
+    GPT-QModel's writer can split one module's ``qweight``/``qzeros``/``scales``/
+    ``g_idx`` across indexed files. The converter sees one file at a time, so a
+    buffer that is missing locally is read from the shard the index names
+    instead of being reported as an incomplete module (#5398).
+    """
+
+    if tensor_lookup is None:
+        return dict(buffers)
+    complete = dict(buffers)
+    for name in required:
+        if name in complete:
+            continue
+        key = f"{prefix}.{name}"
+        if tensor_lookup.has_tensor(key):
+            complete[name] = tensor_lookup.get_tensor(key)
+    return complete
+
+
 def convert_awq_file(
     path: Path,
     target_dtype: torch.dtype,
@@ -1737,6 +1908,7 @@ def convert_awq_file(
     *,
     config: Optional[dict] = None,
     ignored_layers: Iterable[str] = (),
+    tensor_lookup: Optional["_ShardTensorLookup"] = None,
 ) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     module_buffers: Dict[str, Dict[str, torch.Tensor]] = defaultdict(dict)
@@ -1774,12 +1946,21 @@ def convert_awq_file(
     default_bits = int((config or {}).get("bits", 4))
     default_group_size = int((config or {}).get("group_size", -1))
     for prefix, buf in module_buffers.items():
+        # The shard that carries the packed payload emits the one dense weight;
+        # a shard holding only a companion buffer must not duplicate it.
+        owns_module = "qweight" in buf
+        buf = _complete_module_buffers(
+            prefix, buf, ("qweight", "qzeros", "scaled_zeros", "scales"), tensor_lookup
+        )
         zeros_key = "qzeros"
         if layout == "gemv_fast" and "scaled_zeros" in buf:
             zeros_key = "scaled_zeros"
         missing = {k for k in ("qweight", "scales", zeros_key) if k not in buf}
         if missing:
             raise KeyError(f"Incomplete AWQ buffers for module {prefix}: missing {missing}")
+        if not owns_module:
+            LOG.debug("AWQ module '%s' is emitted by the shard that owns its qweight", prefix)
+            continue
 
         qweight = buf["qweight"]
         scales = buf["scales"]
@@ -1820,6 +2001,7 @@ def convert_gptq_file(
     *,
     ignored_layers: Iterable[str] = (),
     preserved_prefixes: tuple[str, ...] = (),
+    tensor_lookup: Optional["_ShardTensorLookup"] = None,
 ) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     module_buffers: Dict[str, Dict[str, torch.Tensor]] = defaultdict(dict)
@@ -1856,9 +2038,18 @@ def convert_gptq_file(
                 tensors[key] = finalize_for_save(tensor, target_dtype)
 
     for prefix, buf in module_buffers.items():
+        # The shard that carries the packed payload emits the one dense weight;
+        # a shard holding only a companion buffer must not duplicate it.
+        owns_module = "qweight" in buf
+        buf = _complete_module_buffers(
+            prefix, buf, ("qweight", "qzeros", "scales", "g_idx"), tensor_lookup
+        )
         missing = {k for k in ("qweight", "qzeros", "scales", "g_idx") if k not in buf}
         if missing:
             raise KeyError(f"Incomplete GPTQ buffers for module {prefix}: missing {missing}")
+        if not owns_module:
+            LOG.debug("GPTQ module '%s' is emitted by the shard that owns its qweight", prefix)
+            continue
 
         qweight = buf["qweight"]
         qzeros = buf["qzeros"]
@@ -1977,19 +2168,35 @@ def copy_aux_files(
     *,
     dirs_exist_ok: bool = False,
 ) -> None:
+    """Copy the checkpoint's non-weight files into the dense export.
+
+    ``skip`` holds checkpoint-relative paths (the shard names the export has
+    just rewritten), including the nested ones a per-layer layout uses. The walk
+    has to compare those full relative paths: matching only the top-level entry
+    name let a source layer shard be copied over the dense file written for the
+    same path (#5412).
+    """
+
     skipped_dirs = {".cache", ".git", "__pycache__"}
-    for item in model_path.iterdir():
-        if item.name in skip:
+    skip_paths = {Path(str(name).replace("\\", "/")).as_posix() for name in skip}
+    for item in sorted(model_path.rglob("*")):
+        if item.is_dir():
             continue
+        relative = item.relative_to(model_path).as_posix()
         # Local snapshots can carry hub/VCS caches that are not model files and
         # may be read-only; they are never part of the exported checkpoint.
-        if item.is_dir() and item.name in skipped_dirs:
+        if any(part in skipped_dirs for part in relative.split("/")[:-1]):
             continue
-        target = output_path / item.name
-        if item.is_dir():
-            shutil.copytree(item, target, dirs_exist_ok=dirs_exist_ok)
-        else:
-            shutil.copy2(item, target)
+        if relative in skip_paths:
+            continue
+        target = output_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() and not dirs_exist_ok:
+            raise FileExistsError(
+                f"Auxiliary output path already exists: {target}. "
+                "Pass resume=True to merge into an existing export."
+            )
+        shutil.copy2(item, target)
 
 
 _DENSE_TARGET_DTYPES = {
@@ -2021,6 +2228,38 @@ def resolve_dense_target_dtype(config: dict) -> torch.dtype:
     return torch.bfloat16
 
 
+def _reject_overlapping_directories(model_path: Path, output_path: Path) -> None:
+    """Refuse an export whose output tree overlaps the source checkpoint.
+
+    ``resume=True`` trusts files already present in the output directory as
+    completed dense shards. When the output resolves to the source checkpoint,
+    those "completed" files are the quantized source, so the export reports
+    success while rewriting the source ``config.json`` and index as dense
+    metadata and leaving the packed weight bytes in place (#5424). Equivalent
+    spellings (``.``/``..``, symlinks) must be rejected too, and an output
+    directory nested in the source would be copied into itself by
+    ``copy_aux_files()``.
+    """
+
+    source = model_path.expanduser().resolve()
+    target = output_path.expanduser().resolve()
+    if target == source:
+        raise ValueError(
+            f"Input and output directories resolve to the same path ({source}). "
+            "Dequantization must write to a separate directory."
+        )
+    if source in target.parents:
+        raise ValueError(
+            f"Output directory {target} is inside the source checkpoint {source}. "
+            "Dequantization must write to a separate directory."
+        )
+    if target in source.parents:
+        raise ValueError(
+            f"Source checkpoint {source} is inside the output directory {target}. "
+            "Dequantization must write to a separate directory."
+        )
+
+
 def dequantize_model(
     model_path: Path | str,
     output_path: Path | str,
@@ -2032,16 +2271,26 @@ def dequantize_model(
 ) -> None:
     model_path = Path(model_path)
     output_path = Path(output_path)
+    _reject_overlapping_directories(model_path, output_path)
 
     if output_path.exists() and not resume:
         raise FileExistsError(f"Output path {output_path} already exists")
 
     config = load_json(model_path / "config.json")
     quant_cfg = config.get("quantization_config", {}) or {}
-    # Legacy GPTQModel checkpoints persist the quantization payload only in
-    # quantize_config.json. Fill in whichever fields config.json lacks so the
-    # converter sees bits/format/dynamic instead of silently using defaults.
-    legacy_quant_cfg = load_json(model_path / "quantize_config.json")
+    # Legacy GPTQModel checkpoints persist the quantization payload only in a
+    # sidecar. The loader accepts `quantize_config.json` and its
+    # `quant_config.json` alias, so read whichever exists (canonical first, like
+    # `QuantizeConfig.from_pretrained`). Fill in whichever fields config.json
+    # lacks so the converter sees bits/format/dynamic instead of silently using
+    # defaults (#5413).
+    legacy_quant_cfg = {}
+    for sidecar_name in QUANT_CONFIG_FILENAME_COMPAT:
+        if sidecar_name == "config.json":
+            continue
+        legacy_quant_cfg = load_json(model_path / sidecar_name)
+        if legacy_quant_cfg:
+            break
     if legacy_quant_cfg:
         if not quant_cfg:
             quant_cfg = legacy_quant_cfg
@@ -2118,26 +2367,57 @@ def dequantize_model(
             device=open_device,
             weight_map=index.get("weight_map", {}) if isinstance(index, dict) else None,
         )
-        if fmt in {"fp8", "nvfp8", "nvfp4", "mxfp4", "mxfp8", "mixed-mx"}
+        if fmt in {"fp8", "nvfp8", "nvfp4", "mxfp4", "mxfp8", "mixed-mx", "gptq", "awq"}
         else None
     )
+
+    # A resume continues only the export this directory already holds. The
+    # manifest binds it to the source checkpoint, the shard layout and the
+    # target dtype; without one, an output file whose name matches a source
+    # shard may belong to a different model or dtype (#5396).
+    resume_identity = _resume_identity(model_path, files, target_dtype)
+    resume_shards = (
+        _reusable_resume_shards(output_path, resume_identity) if resume else set()
+    )
+    completed_shards: list = []
 
     try:
         for idx, filename in enumerate(files):
             path = model_path / filename
             output_file = output_path / filename
-            if resume and output_file.exists():
-                # Opening the shard validates its safetensors header before it
-                # is accepted as complete. Tensor views are memory-mapped, so
-                # collecting names and sizes does not load the shard into RAM.
-                with safe_open(output_file, framework="pt", device="cpu") as existing_reader:
-                    for name in existing_reader.keys():
-                        tensor = existing_reader.get_tensor(name)
-                        weight_map[str(name)] = filename
-                        total_size += tensor.element_size() * tensor.numel()
-                LOG.debug("Reusing completed output shard '%s'", filename)
-                pb.subtitle(f"{filename} (existing)").next().draw()
-                continue
+            # A per-layer layout keeps its shards in `model.layers.N/`
+            # subdirectories, so the parent has to exist before the write.
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+            if resume and filename in resume_shards and output_file.exists():
+                # A shard the manifest does not list, or one that cannot be
+                # read, is rebuilt instead of trusted (#5396).
+                if not _is_readable_safetensors(output_file):
+                    LOG.warning(
+                        "Rebuilding unreadable output shard '%s'", filename
+                    )
+                else:
+                    try:
+                        with safe_open(
+                            output_file, framework="pt", device="cpu"
+                        ) as existing_reader:
+                            existing = [
+                                (str(name), existing_reader.get_tensor(name))
+                                for name in existing_reader.keys()
+                            ]
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        LOG.warning(
+                            "Rebuilding unreadable output shard '%s': %s",
+                            filename,
+                            exc,
+                        )
+                    else:
+                        for name, tensor in existing:
+                            weight_map[name] = filename
+                            total_size += tensor.element_size() * tensor.numel()
+                        completed_shards.append(filename)
+                        LOG.debug("Reusing completed output shard '%s'", filename)
+                        pb.subtitle(f"{filename} (existing)").next().draw()
+                        continue
             LOG.debug("Processing shard '%s' for format %s on device %s", filename, fmt, open_device)
             if fmt in {"fp8", "nvfp8"}:
                 with safe_open(path, framework="pt", device=open_device) as reader:
@@ -2182,6 +2462,7 @@ def dequantize_model(
                     open_device,
                     config=quant_cfg,
                     ignored_layers=ignored_layers,
+                    tensor_lookup=tensor_lookup,
                 )
             elif fmt == "gptq":
                 tensors = convert_gptq_file(
@@ -2190,6 +2471,7 @@ def dequantize_model(
                     quant_cfg,
                     open_device,
                     ignored_layers=ignored_layers,
+                    tensor_lookup=tensor_lookup,
                     preserved_prefixes=("model.mtp.",) if (
                         config.get("model_type") == "mimo_v2"
                         and config.get("mimo_mtp_source_quantization_config")
@@ -2213,6 +2495,8 @@ def dequantize_model(
                 save_file(tensors, str(output_file))
                 weight_map.update({str(name): filename for name in tensors})
                 total_size += sum(t.element_size() * t.numel() for t in tensors.values())
+                completed_shards.append(filename)
+                _write_resume_manifest(output_path, resume_identity, completed_shards)
             else:
                 # Auxiliary-only shards disappear once dense weights are emitted elsewhere.
                 LOG.debug("Skipping empty output shard '%s' after dequantization", filename)
@@ -2221,6 +2505,9 @@ def dequantize_model(
         if tensor_lookup is not None:
             tensor_lookup.close()
         pb.close()
+
+    # Publish the final set even when every shard was auxiliary-only.
+    _write_resume_manifest(output_path, resume_identity, completed_shards)
 
     if index is not None:
         new_index = dict(index)

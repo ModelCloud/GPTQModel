@@ -286,6 +286,9 @@ class QuantizeEmbedConfig:
         return self
 
 
+from ..utils.calibration import AUTO_BATCH_SIZE
+
+
 CALIBRATION_SORT_ORDERS = ("asc", "desc", "shuffle")
 
 
@@ -316,7 +319,10 @@ class CalibrationConfig:
     # Sample order before batching: "asc", "desc", "shuffle", or ``None``
     # to keep the input order.
     sort: Optional[str] = "desc"
-    batch_size: int = 1
+    # ``int`` or ``"auto"``: auto picks the largest power-of-two batch that fits
+    # the device (measured: 3.9-5x faster calibration on a 0.5B model, with
+    # batch-to-batch quality differences inside corpus noise).
+    batch_size: Union[int, str] = 1
     # Rows with this many or fewer non-padding tokens are dropped.
     min_length: int = 10
     # Text inserted between samples joined by ``concat_size``.
@@ -352,9 +358,14 @@ class CalibrationConfig:
             raise ValueError(
                 f"CalibrationConfig.sort must be one of {CALIBRATION_SORT_ORDERS} or None, got {self.sort!r}."
             )
-        if type(self.batch_size) is not int:
-            raise TypeError(f"CalibrationConfig.batch_size must be an int, got {type(self.batch_size).__name__}.")
-        if self.batch_size <= 0:
+        if isinstance(self.batch_size, str) and self.batch_size == AUTO_BATCH_SIZE:
+            pass
+        elif type(self.batch_size) is not int:
+            raise TypeError(
+                "CalibrationConfig.batch_size must be an int or "
+                f"{AUTO_BATCH_SIZE!r}, got {type(self.batch_size).__name__}."
+            )
+        elif self.batch_size <= 0:
             raise ValueError(f"CalibrationConfig.batch_size must be positive, got {self.batch_size}.")
         if type(self.min_length) is not int:
             raise TypeError(f"CalibrationConfig.min_length must be an int, got {type(self.min_length).__name__}.")
@@ -1554,13 +1565,37 @@ def _validate_finite_float(
     return number
 
 
+def _validate_group_size(owner: str, value: Any) -> int:
+    """Validate `group_size`: ``-1`` (per-channel) or a positive integer.
+
+    The shared ``group_size != -1 and group_size <= 0`` check is always false
+    for ``NaN``, so a non-finite value used to slip through and the packing
+    path either divided by it or silently fell back to per-channel (#5437).
+    Non-finite and non-integral values are rejected here; the existing
+    supported-set check still produces its own message for out-of-range
+    integers.
+    """
+
+    if isinstance(value, bool):
+        raise ValueError(f"{owner}: `group_size` must be an integer, got {value!r}.")
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{owner}: `group_size` must be a finite integer, got {value!r}.")
+        if not value.is_integer():
+            raise ValueError(f"{owner}: `group_size` must be an integer, got {value!r}.")
+        return int(value)
+    if not isinstance(value, int):
+        raise ValueError(f"{owner}: `group_size` must be an integer, got {value!r}.")
+    return value
+
+
 def _validate_smooth_int(
     owner: str,
     field: str,
     value: Any,
     *,
     minimum: Optional[int] = None,
-    range_text: str,
+    range_text: str = "a valid integer",
 ) -> int:
     """Validate one integer smoother parameter."""
 
@@ -4824,9 +4859,29 @@ def _validate_dynamic_smoothers(owner, layer_name: str, layer_dict: Mapping) -> 
     # like the top-level field (#5302). Reject the keys whose only consumer is
     # the weight-only packing path.
     method = getattr(owner, "method", None)
-    if not isinstance(method, METHOD) or method not in _CALIBRATED_METHODS:
+    if not isinstance(method, METHOD):
         return
     if _is_weight_only_lifecycle(owner):
+        # The weight-only packing path reads only the top-level `smooth`, so a
+        # per-module `fallback.smooth` is recorded and ignored, and a
+        # lossless/load-only format has no smoothing step at all (#5401).
+        fallback = layer_dict.get("fallback")
+        if isinstance(fallback, Mapping) and _has_smoother(fallback.get("smooth")):
+            raise _weight_only_fallback_smoother_error(
+                owner.__class__.__name__,
+                method,
+                f"dynamic['{layer_name}'].fallback.smooth",
+            )
+        if method in _SMOOTHERLESS_WEIGHT_ONLY_METHODS:
+            for key in ("smoother", "smooth"):
+                if _has_smoother(layer_dict.get(key)):
+                    raise _smootherless_weight_only_error(
+                        owner.__class__.__name__,
+                        method,
+                        f"dynamic['{layer_name}'].{key}",
+                    )
+        return
+    if method not in _CALIBRATED_METHODS:
         return
     for key in ("smoother", "smooth"):
         if _has_smoother(layer_dict.get(key)):
@@ -5478,6 +5533,14 @@ _CALIBRATED_METHODS = frozenset(
 #: have no smoothing step anywhere, so pointing at `fallback` would be wrong.
 _FALLBACK_SMOOTHER_METHODS = frozenset({METHOD.GPTQ, METHOD.QQQ})
 
+#: Weight-only methods whose packing path never applies a top-level `smooth`.
+#: NF12 is a lossless format and refuses one at pack time; the Tenstorrent
+#: block-float and FP8 packers have no smoothing step at all. Rejecting here
+#: fails at construction instead of after a model load (#5401).
+_SMOOTHERLESS_WEIGHT_ONLY_METHODS = frozenset(
+    {METHOD.NF12, METHOD.TT_BLOCKFLOAT, METHOD.FP8}
+)
+
 #: Methods whose weight-only lifecycle reads `smooth` in its own packing path.
 #: RTN shares ``METHOD.GPTQ`` with GPTQ, so ``uses_weight_only_lifecycle()`` is
 #: the authoritative test and the method set is only a cheap negative filter.
@@ -5538,6 +5601,27 @@ def _has_smoother(value: Any) -> bool:
     return True
 
 
+def _weight_only_fallback_smoother_error(owner: Any, method: METHOD, field: str) -> ValueError:
+    """Build the rejection for a weight-only `fallback.smooth` (#5401)."""
+
+    return ValueError(
+        f"{owner}: `{field}` is not applied by the {method.value.upper()} quantizer; "
+        "its weight-only packing path reads only the top-level smoother, so the "
+        "option would only be persisted in the checkpoint. "
+        "Set it on `smoother=`/`smooth=` instead."
+    )
+
+
+def _smootherless_weight_only_error(owner: Any, method: METHOD, field: str) -> ValueError:
+    """Build the rejection for a smoother a lossless weight-only format cannot use."""
+
+    return ValueError(
+        f"{owner}: `{field}` is not supported by the {method.value.upper()} quantizer; "
+        "this format has no weight-smoothing step, so the option changes no weight "
+        "and is refused instead of failing later during packing. Remove it."
+    )
+
+
 def validate_smoother_support(qcfg: Any) -> None:
     """Reject a configured smoother on a calibrated method that ignores it (#5302).
 
@@ -5551,18 +5635,40 @@ def validate_smoother_support(qcfg: Any) -> None:
 
     Reject the request where it is made, exactly like the protocol compiler
     refuses ``weight.prepare`` for these methods, instead of shipping a no-op.
-    Weight-only methods are unaffected: they read ``smooth`` in their own path.
+    Weight-only methods keep their top-level ``smooth`` (RTN, GGUF and
+    BitsAndBytes apply it in their own packing path), but a ``fallback.smooth``
+    there is rejected too: only the GPTQ/QQQ fallback branch reads it, so a
+    weight-only config that records one claims smoothing its weights never got
+    (#5401). Lossless/load-only weight-only formats (NF12, Tenstorrent
+    block-float, FP8) apply no smoother at all, so their top-level ``smoother``
+    is refused at construction rather than at pack time.
     Checkpoint loading is handled by ``_drop_unapplied_smoothers`` so a config
     written before this fix still describes the weights it actually produced.
     """
 
     method = getattr(qcfg, "method", None)
-    if not isinstance(method, METHOD) or method not in _CALIBRATED_METHODS:
-        return
-    if _is_weight_only_lifecycle(qcfg):
+    if not isinstance(method, METHOD):
         return
 
     owner = type(qcfg).__name__
+    if _is_weight_only_lifecycle(qcfg):
+        # The weight-only packing path reads the top-level `smooth` only. The
+        # GPTQ/QQQ fallback branch is the sole consumer of `fallback.smooth`, so
+        # a weight-only config that records one persists a claim its weights do
+        # not honour (#5401, the same class as #5302).
+        fallback = getattr(qcfg, "fallback", None)
+        if _has_smoother(getattr(fallback, "smooth", None)):
+            raise _weight_only_fallback_smoother_error(owner, method, "fallback.smooth")
+        if method in _SMOOTHERLESS_WEIGHT_ONLY_METHODS and (
+            _has_smoother(getattr(qcfg, "smoother", None))
+            or _has_smoother(getattr(qcfg, "smooth", None))
+        ):
+            raise _smootherless_weight_only_error(owner, method, "smoother")
+        return
+
+    if method not in _CALIBRATED_METHODS:
+        return
+
     if _has_smoother(getattr(qcfg, "smoother", None)):
         raise _unapplied_smoother_error(owner, method, "smoother")
     fallback = getattr(qcfg, "fallback", None)
@@ -5570,6 +5676,20 @@ def validate_smoother_support(qcfg: Any) -> None:
         getattr(fallback, "smooth", None)
     ):
         raise _unapplied_smoother_error(owner, method, "fallback.smooth")
+
+
+def _warn_dropped_smoothers(target_cls: type, dropped: list) -> None:
+    """Report the smoothers removed from a loaded checkpoint config."""
+
+    if not dropped:
+        return
+    log.warn(
+        "QuantizeConfig: %s does not apply a smoother; dropping %s from the loaded "
+        "checkpoint config. The recorded option never changed a weight, so the "
+        "stored tensors are unchanged (issue #5302).",
+        target_cls.__name__,
+        ", ".join(sorted(set(dropped))),
+    )
 
 
 def _drop_unapplied_smoothers(payload: Dict[str, Any], target_cls: type) -> Dict[str, Any]:
@@ -5586,13 +5706,13 @@ def _drop_unapplied_smoothers(payload: Dict[str, Any], target_cls: type) -> Dict
         method = _normalize_quant_method(method)
     except (TypeError, ValueError):
         return payload
-    if method not in _CALIBRATED_METHODS:
-        return payload
     # A `weight_only`/GGUF/FP8/BnB/NF12 payload is a weight-only recipe, whose
-    # packing path reads `smooth` itself. The classes are resolved by name so
-    # this helper can stay above their definitions.
-    if _peek_weight_only_method(payload.get("weight_only")) is not None:
-        return payload
+    # packing path reads only the top-level `smooth`. `fallback.smooth` belongs
+    # to the GPTQ/QQQ fallback branch, so a weight-only payload that records one
+    # describes smoothing its weights never got (#5401). Lossless/load-only
+    # formats have no smoothing step at all, so their top-level smoother is
+    # dropped too. The classes are resolved by name so this helper can stay
+    # above their definitions.
     weight_only_classes = tuple(
         cls
         for cls in (
@@ -5605,7 +5725,59 @@ def _drop_unapplied_smoothers(payload: Dict[str, Any], target_cls: type) -> Dict
         )
         if isinstance(cls, type)
     )
-    if weight_only_classes and issubclass(target_cls, weight_only_classes):
+    if _peek_weight_only_method(payload.get("weight_only")) is not None or (
+        weight_only_classes and issubclass(target_cls, weight_only_classes)
+    ):
+        weight_only_dropped = []
+        fallback = payload.get("fallback")
+        if isinstance(fallback, Mapping) and _has_smoother(fallback.get("smooth")):
+            payload = dict(payload)
+            payload["fallback"] = {
+                key: value for key, value in fallback.items() if key != "smooth"
+            }
+            weight_only_dropped.append("fallback.smooth")
+        if method in _SMOOTHERLESS_WEIGHT_ONLY_METHODS:
+            for key in ("smoother", "smooth"):
+                if _has_smoother(payload.get(key)):
+                    payload = {
+                        name: value for name, value in payload.items() if name != key
+                    }
+                    weight_only_dropped.append(key)
+        dynamic = payload.get("dynamic")
+        if isinstance(dynamic, Mapping):
+            cleaned = {}
+            changed = False
+            for pattern, override in dynamic.items():
+                if isinstance(override, Mapping):
+                    blocked = set()
+                    if isinstance(override.get("fallback"), Mapping) and _has_smoother(
+                        override["fallback"].get("smooth")
+                    ):
+                        blocked.add("fallback")
+                    if method in _SMOOTHERLESS_WEIGHT_ONLY_METHODS:
+                        blocked.update(
+                            key
+                            for key in ("smoother", "smooth")
+                            if _has_smoother(override.get(key))
+                        )
+                    if blocked:
+                        override = {
+                            key: value
+                            for key, value in override.items()
+                            if key not in blocked
+                        }
+                        changed = True
+                        weight_only_dropped.extend(
+                            f"dynamic[{pattern}].{key}" for key in sorted(blocked)
+                        )
+                cleaned[pattern] = override
+            if changed:
+                payload = dict(payload)
+                payload["dynamic"] = cleaned
+        _warn_dropped_smoothers(target_cls, weight_only_dropped)
+        return payload
+
+    if method not in _CALIBRATED_METHODS:
         return payload
 
     dropped = []
@@ -5708,14 +5880,7 @@ def _drop_unapplied_smoothers(payload: Dict[str, Any], target_cls: type) -> Dict
             payload = dict(payload)
             payload["dynamic"] = cleaned
 
-    if dropped:
-        log.warn(
-            "QuantizeConfig: %s does not apply a smoother; dropping %s from the loaded "
-            "checkpoint config. The recorded option never changed a weight, so the "
-            "stored tensors are unchanged (issue #5302).",
-            target_cls.__name__,
-            ", ".join(sorted(set(dropped))),
-        )
+    _warn_dropped_smoothers(target_cls, dropped)
     return payload
 
 
@@ -6180,6 +6345,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                     checkpoint_format=format_family,
                 )
 
+        self.group_size = _validate_group_size(self.__class__.__name__, self.group_size)
         if self.group_size != -1 and self.group_size <= 0:
             raise ValueError(_resolve_dynamic_group_size_error())
 
@@ -6653,15 +6819,16 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         transformers_config = False
         resolved_config_file = None
         for quantize_config_filename in QUANT_CONFIG_FILENAME_COMPAT:
-            resolved_config_file = join(checkpoint_dir, quantize_config_filename)
-            if os.path.exists(resolved_config_file):
+            candidate = join(checkpoint_dir, quantize_config_filename)
+            if os.path.exists(candidate):
+                resolved_config_file = candidate
                 if quantize_config_filename == "config.json":
                     transformers_config = True
                 break
 
         if resolved_config_file is None:
             raise ValueError(
-                "QuantizeConfig: No quantize_config.json, quant_config.json or config.json file was found in the model repository."
+                f"QuantizeConfig: No quantize_config.json, quant_config.json or config.json file was found in {checkpoint_dir}."
             )
 
         with open(resolved_config_file, "r", encoding="utf-8") as f:
@@ -6971,8 +7138,12 @@ class GPTQConfig(PreProcessorConfig):
             self.damp_auto_increment = _default_damp_auto_increment(self.method)
         if not (0 < self.damp_percent < 1):
             raise ValueError("QuantizeConfig: `damp_percent` must between 0 and 1.")
-        if self.damp_auto_increment < 0:
-            raise ValueError("QuantizeConfig:: `damp_auto_increment` must greater than 0.")
+        self.damp_auto_increment = _validate_finite_float(
+            "QuantizeConfig",
+            "damp_auto_increment",
+            self.damp_auto_increment,
+            minimum=0.0,
+        )
 
         self.hessian = _normalize_hessian(self.hessian)
         self.gptaq = _normalize_gptaq(self.gptaq)
@@ -7362,20 +7533,42 @@ class ParoConfig(PreProcessorConfig):
         self.opt_train_samples = int(self.opt_train_samples)
         self.opt_validation_samples = int(self.opt_validation_samples)
         self.opt_batch_size = int(self.opt_batch_size)
-        self.opt_rotation_lr = float(self.opt_rotation_lr)
-        self.opt_weight_lr = float(self.opt_weight_lr)
-        self.opt_quantizer_lr = float(self.opt_quantizer_lr)
-        self.opt_pair_ratio = float(self.opt_pair_ratio)
+        # `NaN`/`inf` compare false against every bound below, so they used to
+        # reach the optimizer and silently produce a +13.8% PPL checkpoint
+        # (#5437). Validate the normalized float instead.
+        self.opt_rotation_lr = _validate_finite_float(
+            "ParoConfig", "opt_rotation_lr", self.opt_rotation_lr, minimum=0.0
+        )
+        self.opt_weight_lr = _validate_finite_float(
+            "ParoConfig", "opt_weight_lr", self.opt_weight_lr, minimum=0.0
+        )
+        self.opt_quantizer_lr = _validate_finite_float(
+            "ParoConfig", "opt_quantizer_lr", self.opt_quantizer_lr, minimum=0.0
+        )
+        self.opt_pair_ratio = _validate_finite_float(
+            "ParoConfig", "opt_pair_ratio", self.opt_pair_ratio, minimum=0.0
+        )
         self.opt_seed = int(self.opt_seed)
         self.opt_optimizer = str(self.opt_optimizer).strip().lower()
-        self.opt_weight_decay = float(self.opt_weight_decay)
+        self.opt_weight_decay = _validate_finite_float(
+            "ParoConfig", "opt_weight_decay", self.opt_weight_decay, minimum=0.0
+        )
         if not isinstance(self.opt_betas, (list, tuple)) or len(self.opt_betas) != 2:
             raise ValueError("ParoConfig: `opt_betas` must be a 2-tuple/list of floats.")
-        self.opt_betas = (float(self.opt_betas[0]), float(self.opt_betas[1]))
-        self.opt_eps = float(self.opt_eps)
+        self.opt_betas = (
+            _validate_finite_float("ParoConfig", "opt_betas[0]", self.opt_betas[0], minimum=0.0),
+            _validate_finite_float("ParoConfig", "opt_betas[1]", self.opt_betas[1], minimum=0.0),
+        )
+        self.opt_eps = _validate_finite_float(
+            "ParoConfig", "opt_eps", self.opt_eps, minimum=0.0
+        )
         self.opt_amsgrad = bool(self.opt_amsgrad)
-        self.opt_sgd_momentum = float(self.opt_sgd_momentum)
-        self.opt_sgd_dampening = float(self.opt_sgd_dampening)
+        self.opt_sgd_momentum = _validate_finite_float(
+            "ParoConfig", "opt_sgd_momentum", self.opt_sgd_momentum, minimum=0.0
+        )
+        self.opt_sgd_dampening = _validate_finite_float(
+            "ParoConfig", "opt_sgd_dampening", self.opt_sgd_dampening, minimum=0.0
+        )
         self.opt_sgd_nesterov = bool(self.opt_sgd_nesterov)
         self.opt_fused_rotation = bool(self.opt_fused_rotation)
         self.opt_scope = str(self.opt_scope).strip().lower()
@@ -7402,8 +7595,18 @@ class ParoConfig(PreProcessorConfig):
         self.opt_stage_impl = str(self.opt_stage_impl).strip().lower()
         self.opt_pair_impl = str(self.opt_pair_impl).strip().lower()
         self.opt_quantizer_impl = str(self.opt_quantizer_impl).strip().lower()
-        self.opt_channel_scale_clamp_min = float(self.opt_channel_scale_clamp_min)
-        self.opt_channel_scale_clamp_max = float(self.opt_channel_scale_clamp_max)
+        self.opt_channel_scale_clamp_min = _validate_finite_float(
+            "ParoConfig",
+            "opt_channel_scale_clamp_min",
+            self.opt_channel_scale_clamp_min,
+            minimum=0.0,
+        )
+        self.opt_channel_scale_clamp_max = _validate_finite_float(
+            "ParoConfig",
+            "opt_channel_scale_clamp_max",
+            self.opt_channel_scale_clamp_max,
+            minimum=0.0,
+        )
         if self.opt_rotation_epochs < 0 or self.opt_finetune_epochs < 0:
             raise ValueError("ParoConfig: optimization epochs must be non-negative.")
         if self.opt_train_samples <= 0 or self.opt_validation_samples <= 0:
@@ -7729,6 +7932,16 @@ class VPTQConfig(GPTQConfig):
                 "integer of at least 2; a one-entry residual codebook has no index bits and "
                 "cannot be packed."
             )
+        # `NaN`/`inf` are false against every bound below, so they used to pass
+        # as "no outlier channels" / "one codebook" / "no seed" and the run
+        # silently used a different recipe than the caller asked for (#5437).
+        self.npercent = _validate_finite_float(
+            "VPTQConfig", "npercent", self.npercent, minimum=0.0
+        )
+        self.group_num = _validate_smooth_int("VPTQConfig", "group_num", self.group_num)
+        self.kmeans_iters = _validate_smooth_int("VPTQConfig", "kmeans_iters", self.kmeans_iters)
+        self.kmeans_seed = _validate_smooth_int("VPTQConfig", "kmeans_seed", self.kmeans_seed)
+        self.block_size = _validate_smooth_int("VPTQConfig", "block_size", self.block_size)
         if self.npercent < 0:
             raise ValueError("VPTQConfig: `npercent` must be greater than or equal to 0.")
         if self.npercent > 0 and self.vector_lens[0] <= 0:
@@ -7959,7 +8172,11 @@ class MacaqConfig(PreProcessorConfig):
         # (the inherited default) and were always block-Hadamard rotated.
         self.rotation = "hadamard" if self.rotation is None else str(self.rotation).strip().lower()
         self.n_flip_iters = int(self.n_flip_iters)
-        self.ridge = float(self.ridge)
+        # `ridge` is applied only when `ridge > 0`, so a `NaN` silently turned
+        # the flip refinement off while the run reported success (#5437).
+        self.ridge = _validate_finite_float(
+            "MacaqConfig", "ridge", self.ridge, minimum=0.0
+        )
         self.pre_alpha = float(self.pre_alpha)
         self.do_flip = bool(self.do_flip)
         self.fast_flip = bool(self.fast_flip)
@@ -7989,6 +8206,19 @@ class MacaqConfig(PreProcessorConfig):
 
         if self.lm_head:
             raise ValueError("MacaqConfig: MACaQ does not quantize the LM head.")
+        # Both fields are forced to the MXFP4 constants below, so a `NaN`/`inf`
+        # or a different value used to be replaced without a word (#5437).
+        # Reject anything that is not the MXFP4 setting first.
+        self.group_size = _validate_group_size("MacaqConfig", self.group_size)
+        # -1 is the shared "unset" sentinel; MXFP4 fixes the real value to the
+        # E8M0 block width. Anything else is a caller error.
+        if self.group_size not in (-1, self.block_size):
+            raise ValueError(
+                f"MacaqConfig: OCP MXFP4 requires `group_size={self.block_size}` "
+                f"(the E8M0 block width), got {self.group_size}."
+            )
+        if self.bits != 4:
+            raise ValueError(f"MacaqConfig: OCP MXFP4 requires `bits=4`, got {self.bits!r}.")
         self.group_size = self.block_size
         self.bits = 4
         self.desc_act = False
@@ -8557,6 +8787,10 @@ class EXL3Config(PreProcessorConfig):
         if self.format != FORMAT.EXL3:
             raise ValueError("EXL3Config: `format` must be `exl3`.")
 
+        # `group_size` is unused here and is forced to -1 below, but a
+        # `NaN`/`inf`/non-integer is still a caller error rather than
+        # something to drop silently (#5437).
+        self.group_size = _validate_group_size("EXL3Config", self.group_size)
         self.group_size = -1
         self.desc_act = False
         self.sym = True

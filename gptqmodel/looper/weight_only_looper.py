@@ -801,6 +801,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
         offload_to_disk(
             model=self.gptq_model.model,
             module=target_module,
+            module_name=module_full_name,
             disk_path=offload_path,
         )
 
@@ -1139,6 +1140,7 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
                 self.gptq_model.shell_direct_meta_materialize(
                     target_submodule=module,
                     device=CPU,
+                    module_path=module_name,
                 )
 
         if quant_config.offload_to_disk:
@@ -1272,7 +1274,12 @@ class WeightOnlyLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAss
                     inflight_home = CPU
                 self._track_inflight_layer(module, inflight_home)
 
-                module = self.gptq_model.pre_quantize(module)
+                pre_quantize_path = (
+                    self.gptq_model.lm_head if is_lm_head_module else layer_name
+                )
+                module = self.gptq_model.pre_quantize(
+                    module, module_path=pre_quantize_path or None
+                )
                 # ``pre_quantize`` moves a CPU layer to the quantize device and
                 # may return a materialized shell, so track the object that is
                 # actually staged as well as the pre-call one.

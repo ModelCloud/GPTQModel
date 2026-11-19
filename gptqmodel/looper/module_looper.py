@@ -1417,6 +1417,7 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
         fallback_device: torch.device,
         *,
         projection_modules: Optional[Dict[str, object]] = None,
+        module_path: Optional[str] = None,
     ) -> int:
         """Materialize non-projection direct state needed by a lazy layer forward.
 
@@ -1434,7 +1435,24 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
             if isinstance(candidate_module, torch.nn.Module):
                 excluded_ids.add(id(candidate_module))
 
-        module_names = {id(child): name for name, child in module.named_modules()}
+        # A descriptor such as a layer index is not a model path.  Drop it
+        # once instead of letting every child pay a failed lookup.
+        if module_path:
+            try:
+                resolved = self.gptq_model.model.get_submodule(module_path)
+            except (AttributeError, IndexError, KeyError):
+                resolved = None
+            if resolved is not module:
+                module_path = None
+
+        module_names: Dict[int, str] = {}
+        full_names: Optional[Dict[int, str]] = {} if module_path else None
+        for name, child in module.named_modules():
+            module_names.setdefault(id(child), name)
+            if full_names is not None:
+                full_names.setdefault(
+                    id(child), f"{module_path}.{name}" if name else module_path
+                )
         materialized = 0
         for child in module.modules():
             if id(child) in excluded_ids or getattr(child, "QUANT_TYPE", None):
@@ -1447,6 +1465,7 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
             self.gptq_model.shell_direct_meta_materialize(
                 target_submodule=child,
                 device=fallback_device,
+                module_path=full_names.get(id(child)) if full_names is not None else None,
             )
             remaining = [
                 tensor

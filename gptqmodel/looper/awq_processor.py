@@ -418,24 +418,40 @@ def _is_recurrent_attention_layer_type(layer_type: Optional[str]) -> bool:
     return builder is create_recurrent_attention_mask
 
 
-def _kernel_shape_supported(kernel, in_features: int, out_features: int) -> bool:
+def _kernel_shape_supported(
+    kernel, in_features: int, out_features: int, group_size: Optional[int] = None
+) -> bool:
     """Return whether ``kernel`` declares it can pack this module shape.
 
     Uses the kernel's own static shape contract
     (``SUPPORTS_{IN,OUT}_FEATURES_DIVISIBLE_BY`` through
-    ``_validate_shape_constraints``) rather than the full ``validate``: the full
-    check also probes runtime availability, and a shape decision must not depend
-    on whether a JIT extension happens to be built.
+    ``_validate_shape_constraints``) plus, when the kernel has one, its static
+    group-size/shape rule (``_validate_group_size_shape``), rather than the full
+    ``validate``: the full check also probes runtime availability, and a shape
+    decision must not depend on whether a JIT extension happens to be built.
     """
 
     check = getattr(kernel, "_validate_shape_constraints", None)
-    if not callable(check):
-        return True
-    try:
-        ok, _ = check(in_features=in_features, out_features=out_features)
-    except Exception:
-        return False
-    return bool(ok)
+    if callable(check):
+        try:
+            ok, _ = check(in_features=in_features, out_features=out_features)
+        except Exception:
+            return False
+        if not ok:
+            return False
+    group_check = getattr(kernel, "_validate_group_size_shape", None)
+    if group_size is not None and callable(group_check):
+        try:
+            ok, _ = group_check(
+                in_features=in_features,
+                out_features=out_features,
+                group_size=group_size,
+            )
+        except Exception:
+            return False
+        if not ok:
+            return False
+    return True
 
 
 def _resolve_module_sym(qcfg, module_name: Optional[str], resolved_cfg=None) -> bool:
@@ -734,14 +750,14 @@ class AWQProcessor(LoopProcessor):
         """
 
         target_format = self._module_format(module_name, resolved_cfg=resolved_cfg)
+        group_size = self._module_group_size(module_name, resolved_cfg=resolved_cfg)
         # RCO can allocate a different width per module. The CUDA GEMM/GEMV
         # kernels unpack 4-bit codes only, so a non-4-bit module must use the
         # portable torch kernel, which packs and runs 2-8 bits.
         if target_format == FORMAT.GEMM:
             if (
                 self._module_bits(module_name, resolved_cfg=resolved_cfg) != 4
-                or self._module_group_size(module_name, resolved_cfg=resolved_cfg)
-                not in AwqGEMMLinear.SUPPORTS_GROUP_SIZE
+                or group_size not in AwqGEMMLinear.SUPPORTS_GROUP_SIZE
             ):
                 return AwqTorchLinear
         if target_format == self.format:
@@ -752,9 +768,21 @@ class AWQProcessor(LoopProcessor):
                     module_name,
                     in_features=in_features,
                     out_features=out_features,
+                    group_size=group_size,
                     resolved_cfg=resolved_cfg,
                 )
-        return self._select_qlinear_kernel_for_format(target_format)
+        # The format-only selection above cannot see the module shape, and a
+        # per-channel GEMM module only packs when `out_features` is a multiple
+        # of `in_features` (#5391). Apply the same shape fallback here so a GQA
+        # `k_proj`/`v_proj`/`down_proj` does not reach `create_quant_module`.
+        return self._portable_kernel_for_shape(
+            self._select_qlinear_kernel_for_format(target_format),
+            module_name,
+            in_features=in_features,
+            out_features=out_features,
+            group_size=group_size,
+            resolved_cfg=resolved_cfg,
+        )
 
     def _portable_kernel_for_shape(
         self,
@@ -763,6 +791,7 @@ class AWQProcessor(LoopProcessor):
         *,
         in_features: Optional[int],
         out_features: Optional[int],
+        group_size: Optional[int] = None,
         resolved_cfg=None,
     ):
         """Fall back to ``AwqTorchLinear`` when ``kernel`` rejects the shape.
@@ -784,9 +813,9 @@ class AWQProcessor(LoopProcessor):
 
         if kernel is AwqTorchLinear or in_features is None or out_features is None:
             return kernel
-        if _kernel_shape_supported(kernel, in_features, out_features):
+        if _kernel_shape_supported(kernel, in_features, out_features, group_size):
             return kernel
-        if not _kernel_shape_supported(AwqTorchLinear, in_features, out_features):
+        if not _kernel_shape_supported(AwqTorchLinear, in_features, out_features, group_size):
             # Neither kernel packs the shape: keep the requested one so the
             # module-specific error still names it.
             return kernel
@@ -1332,6 +1361,12 @@ class AWQProcessor(LoopProcessor):
                 # slot index is what the replay kwargs index by.
                 source_index = len(entry.setdefault("batch_row_counts", []))
                 entry["batch_row_counts"].append(length)
+                # The reservoir priority seed is the calibration batch id, not
+                # this slot: data-parallel captures arrive in whatever order the
+                # replicas finish, and the slot would then select different
+                # rows run to run (#5432).
+                priority_key = self._reservoir_priority_key(source_index, batch_index)
+                entry.setdefault("priority_keys", []).append(priority_key)
                 entry["raw_tokens"] = entry.get("raw_tokens", 0) + length
                 entry["max_tokens"] = plan.max_tokens
                 entry.setdefault("batch_indices", []).append(batch_index)
@@ -1351,7 +1386,7 @@ class AWQProcessor(LoopProcessor):
                 if entry.get("reservoir_buffer") is not None:
                     budget_cap = self._reservoir_budget_cap(configured_max_tokens, plan, entry)
                     row_indices = torch.tensor(prov_rows, dtype=torch.int64)
-                    priorities = self._reservoir_priorities(source_index, length).index_select(
+                    priorities = self._reservoir_priorities(priority_key, length).index_select(
                         0, row_indices
                     )
                     entry["max_tokens"] = budget_cap
@@ -1405,6 +1440,11 @@ class AWQProcessor(LoopProcessor):
 
             source_idx = len(entry.setdefault("batch_row_counts", []))
             entry["batch_row_counts"].append(length)
+            # Seed by the calibration batch id so a data-parallel capture order
+            # cannot change which rows survive (#5432); the slot stays the
+            # provenance/replay key below.
+            priority_key = self._reservoir_priority_key(source_idx, batch_index)
+            entry.setdefault("priority_keys", []).append(priority_key)
             entry["raw_tokens"] = entry.get("raw_tokens", 0) + length
             # Size the reservoir from this module's own captures, the current
             # one included, so a routed expert keeps the pre-#5175 per-expert
@@ -1419,7 +1459,7 @@ class AWQProcessor(LoopProcessor):
         # capture on one lock, which dominated AWQ quantize time on MoE models
         # (#5233). ``self.lock`` is not reentrant, so only the O(1) bookkeeping
         # above runs under it.
-        new_priorities = self._reservoir_priorities(source_idx, length)
+        new_priorities = self._reservoir_priorities(priority_key, length)
         with module_lock:
             self._merge_reservoir_rows(
                 entry,
@@ -1470,19 +1510,35 @@ class AWQProcessor(LoopProcessor):
         return budget_cap if budget_cap > 0 else 906
 
     @staticmethod
-    def _reservoir_priorities(source_index: int, count: int) -> torch.Tensor:
+    def _reservoir_priority_key(source_index: int, batch_index: Optional[int]) -> int:
+        """Return the deterministic priority seed for one capture.
+
+        The calibration batch index is the only capture identifier that does
+        not depend on arrival order: data-parallel capture replays batches on
+        replicas and the hooks fire in whatever order they finish (#5432). Fall
+        back to the capture slot when no batch index is known, which is what
+        cache-less runs used before the seed was tied to the batch.
+        """
+
+        if batch_index is None:
+            return int(source_index)
+        return int(batch_index)
+
+    @staticmethod
+    def _reservoir_priorities(seed_key: int, count: int) -> torch.Tensor:
         """Return one deterministic uniform priority per captured row.
 
         A per-batch seed keeps the priorities independent and identically
         uniform across batches, which is what makes the lowest-priority
         survivors a uniform sample of the whole stream. The seed is derived from
-        the capture slot, so the same calibration run always keeps the same
-        rows.
+        the calibration batch index (see ``_reservoir_priority_key``), so the
+        same calibration batches always keep the same rows regardless of the
+        order their captures arrive in.
         """
 
         generator = torch.Generator(device="cpu")
         generator.manual_seed(
-            (0x9E3779B97F4A7C15 * (int(source_index) + 1) + 0x165667B19E3779F9)
+            (0x9E3779B97F4A7C15 * (int(seed_key) + 1) + 0x165667B19E3779F9)
             & 0x7FFFFFFFFFFFFFFF
         )
         return torch.rand(count, generator=generator, dtype=torch.float64)
@@ -1666,6 +1722,7 @@ class AWQProcessor(LoopProcessor):
             return
 
         counts = entry.get("batch_row_counts") or []
+        keys = entry.get("priority_keys") or []
         priorities = torch.empty((rows.shape[0],), dtype=torch.float64)
         per_source: Dict[int, torch.Tensor] = {}
         for index, (source, row) in enumerate(provenance):
@@ -1673,7 +1730,10 @@ class AWQProcessor(LoopProcessor):
             row = int(row)
             if source not in per_source:
                 count = int(counts[source]) if source < len(counts) else row + 1
-                per_source[source] = self._reservoir_priorities(source, max(count, row + 1))
+                # Use the seed this capture recorded at merge time; the slot is
+                # only a fallback for entries written before it was tracked.
+                seed_key = int(keys[source]) if source < len(keys) else source
+                per_source[source] = self._reservoir_priorities(seed_key, max(count, row + 1))
             priorities[index] = per_source[source][row]
 
         if rows.shape[0] > budget_cap:

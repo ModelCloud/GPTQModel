@@ -117,9 +117,12 @@ jobs:
       torch-files: ${{ steps.files.outputs.torch-files }}
       model-files: ${{ steps.files.outputs.model-files }}
       m4-files: ${{ steps.files.outputs.m4-files }}
-      cpu-matrix: ${{ steps.files.outputs.cpu-matrix }}
-      torch-matrix: ${{ steps.files.outputs.torch-matrix }}
-      model-matrix: ${{ steps.files.outputs.model-matrix }}
+      cpu-shards: ${{ steps.files.outputs.cpu-shards }}
+      torch-shards: ${{ steps.files.outputs.torch-shards }}
+      model-shards: ${{ steps.files.outputs.model-shards }}
+      cpu-shard-indexes: ${{ steps.files.outputs.cpu-shard-indexes }}
+      torch-shard-indexes: ${{ steps.files.outputs.torch-shard-indexes }}
+      model-shard-indexes: ${{ steps.files.outputs.model-shard-indexes }}
 
     steps:
       - name: Checkout Codes
@@ -141,45 +144,71 @@ jobs:
         id: files
         run: |
           uv pip install pyyaml
-          test_plan=$(python .github/scripts/ci_workflow.py list-tests \
-          --ignored-test-files "$IGNORED_TEST_FILES" \
-          --test-regex "${{ github.event.inputs.test_regex }}")
-          echo "Test plan: $test_plan"
+          plan_file="$RUNNER_TEMP/unit-test-plan.json"
+          python .github/scripts/ci_workflow.py list-tests \
+            --ignored-test-files "$IGNORED_TEST_FILES" \
+            --test-regex "${{ github.event.inputs.test_regex }}" \
+            --python-version '3.14.10t' \
+            > "$plan_file"
 
-          TEST_PLAN="$test_plan" python - <<'PY' >> "$GITHUB_OUTPUT"
+          python - "$plan_file" <<'PY' >> "$GITHUB_OUTPUT"
           import json
-          import os
+          import sys
 
-          plan = json.loads(os.environ["TEST_PLAN"])
-          print(f"cpu-files={json.dumps(plan['cpu_files'])}")
-          print(f"torch-files={json.dumps(plan['torch_files'])}")
-          print(f"model-files={json.dumps(plan['model_files'])}")
-          print(f"m4-files={json.dumps(plan['mlx_files'])}")
-          print(f"cpu-matrix={json.dumps(plan['cpu_matrix'])}")
-          print(f"torch-matrix={json.dumps(plan['torch_matrix'])}")
-          print(f"model-matrix={json.dumps(plan['model_matrix'])}")
+          with open(sys.argv[1], encoding="utf-8") as fh:
+              plan = json.load(fh)
+
+          def emit(name, value):
+              print(f"{name}={json.dumps(value)}")
+
+          emit("cpu-files", plan["cpu_files"])
+          emit("torch-files", plan["torch_files"])
+          emit("model-files", plan["model_files"])
+          emit("m4-files", plan["mlx_files"])
+          for group in ("cpu", "torch", "model"):
+              shards = plan[f"{group}_matrix_shards"]
+              emit(f"{group}-shards", shards)
+              emit(f"{group}-shard-indexes", list(range(len(shards))))
           PY
 
-          TEST_PLAN="$test_plan" python - <<'PY'
+          python - "$plan_file" <<'PY'
           import json
-          import os
+          import sys
 
-          plan = json.loads(os.environ["TEST_PLAN"])
-          print(f"CPU Test files: {json.dumps(plan['cpu_files'])}")
-          print(f"Torch Test files: {json.dumps(plan['torch_files'])}")
-          print(f"Model Compat Test files: {json.dumps(plan['model_files'])}")
-          print(f"MLX Test files: {json.dumps(plan['mlx_files'])}")
-          print(f"CPU Matrix: {json.dumps(plan['cpu_matrix'])}")
-          print(f"Torch Matrix: {json.dumps(plan['torch_matrix'])}")
-          print(f"Model Matrix: {json.dumps(plan['model_matrix'])}")
+          with open(sys.argv[1], encoding="utf-8") as fh:
+              plan = json.load(fh)
+
+          for group in ("cpu", "torch", "model"):
+              entries = plan[f"{group}_matrix"]
+              shards = plan[f"{group}_matrix_shards"]
+              print(f"{group} tests: {len(entries)} in {len(shards)} shard(s)")
+          print(f"MLX test files: {len(plan['mlx_files'])}")
+          for name, reason in sorted(plan.get("gated_tests", {}).items()):
+              print(f"gated off this lane: {name} ({reason})")
           PY
           echo "Ignored Test files: $IGNORED_TEST_FILES"
+
+      # A pinned wheel with a foreign ABI fails here, before any GPU is
+      # allocated, instead of at the install step of every affected job (#5420).
+      - name: Check resolved wheel tags
+        run: |
+          uv pip install pyyaml packaging
+          python .github/scripts/ci_deps.py check-tags \
+            --plan "$RUNNER_TEMP/unit-test-plan.json" \
+            --python-version '3.14.10t'
 
   cpu:
     needs:
       - list-test-files
       - check-vm
-    if: always() && !cancelled() && needs.list-test-files.outputs.cpu-matrix != '[]'
+    if: always() && !cancelled() && needs.list-test-files.result == 'success' && needs.list-test-files.outputs.cpu-shard-indexes != '[]'
+    strategy:
+      fail-fast: false
+      # Shards exist only to stay under the per-matrix expansion limit. Keep a
+      # single shard call active so the inner matrix concurrency is unchanged.
+      max-parallel: 1
+      matrix:
+        shard: ${{ fromJSON(needs.list-test-files.outputs.cpu-shard-indexes || '[0]') }}
     uses: ./.github/workflows/unit_tests_reusable.yml
     secrets: inherit
     with:
@@ -187,14 +216,21 @@ jobs:
       ref: ${{ github.event.inputs.ref || github.ref }}
       pr_number: ${{ fromJSON(github.event.inputs.pr_number || '0') }}
       check_vm_max_parallel: ${{ needs.check-vm.outputs['max-parallel'] }}
-      matrix_json: ${{ needs.list-test-files.outputs.cpu-matrix || '[]' }}
+      matrix_json: ${{ toJSON(fromJSON(needs.list-test-files.outputs.cpu-shards || '[[]]')[matrix.shard]) }}
       model_test_mode: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
 
   torch:
     needs:
       - list-test-files
       - check-vm
-    if: always() && !cancelled() && needs.list-test-files.outputs.torch-matrix != '[]'
+    if: always() && !cancelled() && needs.list-test-files.result == 'success' && needs.list-test-files.outputs.torch-shard-indexes != '[]'
+    strategy:
+      fail-fast: false
+      # Shards exist only to stay under the per-matrix expansion limit. Keep a
+      # single shard call active so the inner matrix concurrency is unchanged.
+      max-parallel: 1
+      matrix:
+        shard: ${{ fromJSON(needs.list-test-files.outputs.torch-shard-indexes || '[0]') }}
     uses: ./.github/workflows/unit_tests_reusable.yml
     secrets: inherit
     with:
@@ -202,14 +238,21 @@ jobs:
       ref: ${{ github.event.inputs.ref || github.ref }}
       pr_number: ${{ fromJSON(github.event.inputs.pr_number || '0') }}
       check_vm_max_parallel: ${{ needs.check-vm.outputs['max-parallel'] }}
-      matrix_json: ${{ needs.list-test-files.outputs.torch-matrix || '[]' }}
+      matrix_json: ${{ toJSON(fromJSON(needs.list-test-files.outputs.torch-shards || '[[]]')[matrix.shard]) }}
       model_test_mode: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
 
   models:
     needs:
       - list-test-files
       - check-vm
-    if: always() && !cancelled() && needs.list-test-files.outputs.model-matrix != '[]'
+    if: always() && !cancelled() && needs.list-test-files.result == 'success' && needs.list-test-files.outputs.model-shard-indexes != '[]'
+    strategy:
+      fail-fast: false
+      # Shards exist only to stay under the per-matrix expansion limit. Keep a
+      # single shard call active so the inner matrix concurrency is unchanged.
+      max-parallel: 1
+      matrix:
+        shard: ${{ fromJSON(needs.list-test-files.outputs.model-shard-indexes || '[0]') }}
     uses: ./.github/workflows/unit_tests_reusable.yml
     secrets: inherit
     with:
@@ -217,7 +260,7 @@ jobs:
       ref: ${{ github.event.inputs.ref || github.ref }}
       pr_number: ${{ fromJSON(github.event.inputs.pr_number || '0') }}
       check_vm_max_parallel: ${{ needs.check-vm.outputs['max-parallel'] }}
-      matrix_json: ${{ needs.list-test-files.outputs.model-matrix || '[]' }}
+      matrix_json: ${{ toJSON(fromJSON(needs.list-test-files.outputs.model-shards || '[[]]')[matrix.shard]) }}
       model_test_mode: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
 
   # Keep bounded tests for CPU thread pools and locks, GPU stream handoff,

@@ -504,12 +504,17 @@ class _DeviceWorker:
         cpu_core: Optional[int] = None,
         warmup_plan: Optional[Tuple[_WorkerWarmupState, ...]] = None,
         intraop_threads: Optional[int] = None,
+        on_task_cancelled: Optional[Callable[[str], None]] = None,
         *,
         key_override: Optional[str] = None,
     ):
         self.device = device
         self.rwlock = rwlock
         self._on_task_finished = on_task_finished
+        # A task cancelled while it sat in the queue never runs, so it releases
+        # its in-flight slot without advancing the completion counters. The
+        # fallback keeps direct constructions (tests, older callers) working.
+        self._on_task_cancelled = on_task_cancelled or on_task_finished
         self._on_worker_exit = on_worker_exit
         self._pending_warmups = warmup_plan or ()
         # Torch/OpenMP intra-op budget for work executed on this thread.
@@ -543,6 +548,12 @@ class _DeviceWorker:
     def submit(self, fn: Callable[..., Any], /, *args, **kwargs) -> Future:
         """
         Enqueue a callable and return a Future that resolves with its result/exception.
+
+        The future follows the `concurrent.futures` state contract: it stays
+        PENDING until this worker starts the task, so `cancel()` succeeds only
+        while the task is still queued, and the worker then skips it. Once the
+        task is running, `cancel()` returns False and the future is resolved
+        with the task's result or exception.
         """
         fut = Future()
         self._q.put((True, fn, args, kwargs, fut))
@@ -642,6 +653,25 @@ class _DeviceWorker:
                 if not is_task:
                     if DEBUG_ON: log.debug(f"{self.name}: sentinel received; queue drained, exiting")
                     break
+                # Move PENDING -> RUNNING before doing any work. A future the
+                # caller cancelled while it sat in this queue must not run:
+                # executing it burns a device slot and leaves the side effects
+                # of work the caller already abandoned. The transition also
+                # makes `cancel()` return False for the rest of the task, so a
+                # caller that tries to cancel mid-run cannot cause the result
+                # or the exception below to be dropped.
+                try:
+                    started = fut.set_running_or_notify_cancel()
+                except BaseException as exc:  # pragma: no cover - future state bug
+                    if DEBUG_ON: log.debug(f"{self.name}: future transition failed: {exc!r}")
+                    started = False
+                if not started:
+                    # The task never ran, so release its in-flight slot without
+                    # counting a completion; queue order for the tasks around
+                    # it is preserved because this item is consumed in place.
+                    self._on_task_cancelled(self.key)
+                    if DEBUG_ON: log.debug(f"{self.name}: task cancelled before start; skipped")
+                    continue
                 if DEBUG_ON: log.debug(f"{self.name}: task begin; qsize={self._q.qsize()}")
 
                 try:
@@ -654,8 +684,7 @@ class _DeviceWorker:
                     # shared warmup state caches the error, so later tasks on
                     # this worker fail with the same exception.
                     self._on_task_finished(self.key)
-                    if not fut.cancelled():
-                        fut.set_exception(exc)
+                    fut.set_exception(exc)
                     if DEBUG_ON: log.debug(f"{self.name}: warmup exception: {exc!r}")
                     continue
 
@@ -675,14 +704,12 @@ class _DeviceWorker:
                 # Counters must be updated before resolving futures to prevent
                 # tests reading stats mid-transition and seeing stale totals.
                 self._on_task_finished(self.key)
-                if not fut.cancelled():
-                    fut.set_result(result)
+                fut.set_result(result)
                 if DEBUG_ON: log.debug(f"{self.name}: task done")
             except BaseException as exc:
                 # Even on exception we must decrement inflight and update totals.
                 self._on_task_finished(self.key)
-                if not fut.cancelled():
-                    fut.set_exception(exc)
+                fut.set_exception(exc)
                 if DEBUG_ON: log.debug(f"{self.name}: task exception: {exc!r}")
             finally:
                 self._q.task_done()
@@ -710,17 +737,25 @@ class _SyncWorker:
         on_task_finished: Callable[[str], None],
         on_worker_exit: Callable[[str, "_SyncWorker"], None],
         inference_mode: bool = False,
+        on_task_cancelled: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.key = key
         self.device = device
         self.rwlock = rwlock
         self._on_task_finished = on_task_finished
+        self._on_task_cancelled = on_task_cancelled or on_task_finished
         self._on_worker_exit = on_worker_exit
         self._inference_mode = inference_mode
         self.name = f"DPWorker-{key}#sync"
 
     def submit(self, fn: Callable[..., Any], /, *args, cuda_event=None, **kwargs) -> Future:
         fut = Future()
+        # Same future-state contract as `_DeviceWorker`: a cancelled future is
+        # skipped, and a task that starts is resolved even if the caller tries
+        # to cancel it concurrently.
+        if not fut.set_running_or_notify_cancel():
+            self._on_task_cancelled(self.key)
+            return fut
         try:
             event = cuda_event
             override_inference = _pop_public_kwarg(
@@ -735,12 +770,10 @@ class _SyncWorker:
                         event.synchronize()
                     result = fn(*args, **kwargs)
             self._on_task_finished(self.key)
-            if not fut.cancelled():
-                fut.set_result(result)
+            fut.set_result(result)
         except BaseException as exc:
             self._on_task_finished(self.key)
-            if not fut.cancelled():
-                fut.set_exception(exc)
+            fut.set_exception(exc)
         return fut
 
     def stop(self) -> None:
@@ -1311,6 +1344,7 @@ class DeviceThreadPool:
             device=dev,
             rwlock=self._locks[key],
             on_task_finished=self._on_task_finished,
+            on_task_cancelled=self._on_task_cancelled,
             on_worker_exit=self._on_worker_exit,
             name=name,
             inference_mode=self._inference_mode,
@@ -1361,6 +1395,13 @@ class DeviceThreadPool:
         """
         Asynchronously schedule work on the given device; returns a Future.
         Optional (CUDA): pass `cuda_event=` to ensure work waits for the recorded event.
+
+        The returned future can be cancelled with `future.cancel()` until a
+        worker starts the task. A task cancelled while still queued is skipped
+        without calling `fn`; it keeps its position in the queue, so the tasks
+        submitted before and after it are neither reordered nor dropped. Once
+        the task is running, `cancel()` returns False and the future resolves
+        with the task's result or exception.
         """
         key = self._resolve_device_key(device)
         dev = self._devices_by_key[key]
@@ -1940,6 +1981,18 @@ class DeviceThreadPool:
             if DEBUG_ON: log.debug(f"inflight[{key}] -- -> {self._inflight[key]}")
             if self._inflight[key] == 0:
                 cv.notify_all()
+
+    def _on_task_cancelled(self, key: str) -> None:
+        """
+        Release the slot of a task that was cancelled before its worker started.
+
+        The task never ran, so it must not advance the completion counters that
+        drive the janitor's GC thresholds or ``stats()``. In-flight still has to
+        drop: ``wait()`` and the shutdown drain track accepted work, and a
+        cancelled task is resolved -- as cancelled -- without producing a
+        result, so leaving its slot marked would hang both waiters.
+        """
+        self._mark_finished(key)
 
     def _on_task_finished(self, key: str) -> None:
         """

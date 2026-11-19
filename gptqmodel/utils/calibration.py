@@ -70,6 +70,56 @@ CalibrationInputType = Union[
 ]
 
 
+#: Sentinel accepted by ``CalibrationConfig.batch_size``.
+AUTO_BATCH_SIZE = "auto"
+
+#: Auto batching never picks more rows than this in one forward. Measured on a
+#: 0.5B model: 1 -> 8 -> 16 -> 32 rows took 180s -> 46s -> 36s -> 38s, so the
+#: curve is flat past 16 while activation memory keeps growing.
+AUTO_BATCH_MAX_ROWS = 16
+
+#: Activation bytes per token per layer, measured rather than derived: a 0.5B
+#: model (24 layers, hidden 896, bf16) held ~30 MB per 260-token row, i.e.
+#: 260 * 896 * 24 * 2 bytes * ~2.7. A factor of 3 keeps some headroom.
+AUTO_BATCH_ACTIVATION_FACTOR = 3
+
+#: Only this share of the free device memory may go to calibration activations.
+AUTO_BATCH_MEMORY_SHARE = 0.25
+
+
+def auto_batch_size(
+    *,
+    rows: int,
+    tokens_per_row: int,
+    hidden_size: int,
+    num_layers: int,
+    dtype_bytes: int,
+    free_bytes: Optional[int],
+    max_rows: int = AUTO_BATCH_MAX_ROWS,
+) -> int:
+    """Largest power-of-two batch that fits, never below 1.
+
+    ``free_bytes=None`` (no CUDA) keeps the conservative single row: on a device
+    we cannot measure, guessing a batch is how a calibration run turns into an
+    OOM halfway through.
+    """
+
+    if rows <= 0:
+        return 1
+    limit = min(int(rows), max(1, int(max_rows)))
+    if free_bytes is None:
+        return 1
+
+    per_row = max(1, int(tokens_per_row)) * max(1, int(hidden_size)) * max(1, int(num_layers))
+    per_row *= max(1, int(dtype_bytes)) * AUTO_BATCH_ACTIVATION_FACTOR
+    budget = max(0, int(free_bytes)) * AUTO_BATCH_MEMORY_SHARE
+
+    batch = 1
+    while batch * 2 <= limit and batch * 2 * per_row <= budget:
+        batch *= 2
+    return batch
+
+
 def batched(iterable, batch_size: int, process_func=None):
     """Yield fixed-size batches from ``iterable`` after optional processing."""
 
@@ -1414,14 +1464,35 @@ def prepare_calibration_dataset(
             new_line_attention_mask = []
         new_line_input_ids_len = len(new_line_input_ids)
 
+        pad_id = getattr(tokenizer, "pad_token_id", None)
+        if pad_id is None:
+            # A tokenizer without a pad token still needs a value for a short
+            # window's tail. EOS is the conventional safe fallback, then 0; the
+            # zero mask keeps these slots out of the Hessian.
+            pad_id = getattr(tokenizer, "eos_token_id", None)
+        if pad_id is None:
+            pad_id = 0
+
         def flush_buffer():
             nonlocal input_ids_buff, attention_mask_buff, current_length, too_short_window_count
+            # Every emitted window is exactly `concat_size` tokens: a partial
+            # window is padded on the tokenizer's padding side with a zero
+            # attention mask. Early flushes used to emit short windows, while
+            # only the final tail was padded, so processors saw ragged rows.
             # `min_length` is measured on the packed window here, not on the
             # source rows: a full window carries `concat_size` real tokens, so
-            # only a near-empty tail window is dropped.
+            # only a near-empty partial window is dropped.
             if sum(attention_mask_buff) <= calibration_data_min_length:
                 too_short_window_count += 1
             else:
+                padding_length = calibration_dataset_concat_size - len(input_ids_buff)
+                if padding_length > 0:
+                    if padding_side == "left":
+                        input_ids_buff = ([pad_id] * padding_length) + input_ids_buff
+                        attention_mask_buff = ([0] * padding_length) + attention_mask_buff
+                    else:
+                        input_ids_buff.extend([pad_id] * padding_length)
+                        attention_mask_buff.extend([0] * padding_length)
                 concatenated_data.append(
                     {
                         "input_ids": [input_ids_buff],
@@ -1447,7 +1518,13 @@ def prepare_calibration_dataset(
             while position < row_length:
                 if input_ids_buff:
                     if new_line_input_ids_len:
-                        if current_length + new_line_input_ids_len > calibration_dataset_concat_size:
+                        # The separator belongs between two documents in the
+                        # same window, so it must leave room for at least one
+                        # token of the next document. Otherwise close the window
+                        # and start the next document in a fresh one; a
+                        # separator that exactly fills the window would be
+                        # attended trailing filler with no following document.
+                        if current_length + new_line_input_ids_len >= calibration_dataset_concat_size:
                             flush_buffer()
                             continue
                         input_ids_buff.extend(new_line_input_ids)
@@ -1473,37 +1550,11 @@ def prepare_calibration_dataset(
                 if current_length == calibration_dataset_concat_size:
                     flush_buffer()
 
-        if input_ids_buff and sum(attention_mask_buff) <= calibration_data_min_length:
-            # The tail window never reached a full block and is shorter than the
-            # minimum, so it carries no usable activation statistics.
-            too_short_window_count += 1
-            input_ids_buff = []
-            attention_mask_buff = []
-
         if input_ids_buff:
-            padding_length = calibration_dataset_concat_size - len(input_ids_buff)
-            if padding_length > 0:
-                pad_id = getattr(tokenizer, "pad_token_id", None)
-                if pad_id is None:
-                    # A tokenizer without a pad token still needs a value for
-                    # the final window's tail. EOS is the conventional safe
-                    # fallback, then 0; the zero mask keeps these slots out of
-                    # the Hessian.
-                    pad_id = getattr(tokenizer, "eos_token_id", None)
-                if pad_id is None:
-                    pad_id = 0
-                if padding_side == "left":
-                    input_ids_buff = ([pad_id] * padding_length) + input_ids_buff
-                    attention_mask_buff = ([0] * padding_length) + attention_mask_buff
-                else:
-                    input_ids_buff.extend([pad_id] * padding_length)
-                    attention_mask_buff.extend([0] * padding_length)
-            concatenated_data.append(
-                {
-                    "input_ids": [input_ids_buff],
-                    "attention_mask": [attention_mask_buff],
-                }
-            )
+            # The tail window never reached a full block; the shared flush drops
+            # it when it is too short and otherwise pads it like any other
+            # partial window.
+            flush_buffer()
 
         if too_short_window_count > 0:
             log.warn(
