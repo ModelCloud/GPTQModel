@@ -304,3 +304,20 @@ def test_normalize_checkpoint_subfolder_canonicalizes_without_touching_the_root(
     assert normalize_checkpoint_subfolder("a//b/") == "a/b"
     with pytest.raises(ValueError, match="subfolder"):
         normalize_checkpoint_subfolder("../x")
+
+
+def test_quantize_config_from_pretrained_reports_missing_config(tmp_path):
+    with pytest.raises(ValueError) as exc:
+        QuantizeConfig.from_pretrained(str(tmp_path))
+
+    message = str(exc.value)
+    assert str(tmp_path) in message
+    for filename in ("quantize_config.json", "quant_config.json", "config.json"):
+        assert filename in message
+
+
+def test_quantize_config_from_pretrained_keeps_parse_errors(tmp_path):
+    (tmp_path / "config.json").write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(json.JSONDecodeError):
+        QuantizeConfig.from_pretrained(str(tmp_path))
