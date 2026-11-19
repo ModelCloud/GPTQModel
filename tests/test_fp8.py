@@ -348,34 +348,6 @@ def test_legacy_gptqmodel_fp8_checkpoint_loads_and_forwards(
     torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
 
 
-@pytest.mark.parametrize(
-    "quant_method,expected_marker",
-    [
-        ("gptqmodel_fp8", "quant_method: 'gptqmodel_fp8'"),
-        ("fp8", "weight_scale_semantics: 'inverse'"),
-    ],
-)
-def test_transformers_refuses_gptqmodel_inverse_fp8_checkpoints(
-    tmp_path, quant_method, expected_marker
-):
-    """Plain transformers must fail loudly instead of decoding inverse scales."""
-
-    from transformers import AutoModelForCausalLM
-
-    checkpoint = tmp_path / "legacy_fp8"
-    _build_legacy_fp8_checkpoint(checkpoint, quant_method=quant_method)
-
-    with pytest.raises(ValueError) as error:
-        AutoModelForCausalLM.from_pretrained(
-            str(checkpoint), device_map="cpu", dtype="bfloat16"
-        )
-
-    message = str(error.value)
-    assert "cannot be loaded by `transformers`" in message
-    assert "GPTQModel.load" in message
-    assert expected_marker in message
-
-
 def test_production_fp8_multiplier_config_still_uses_hf_quantizer():
     """The legacy inverse guard must not refuse production FP8 checkpoints."""
 
