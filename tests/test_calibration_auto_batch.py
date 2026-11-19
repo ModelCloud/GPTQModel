@@ -183,4 +183,3 @@ def test_auto_batch_ignores_a_single_row_mapping():
 
     assert _calibration_row_count(calibration) == 1
     assert _calibration_tokens_per_row(_tokenizer_qmodel(), calibration) == 3
-

@@ -563,9 +563,13 @@ def _calibration_rows(calibration) -> List[Any]:
     if hf_rows is not None:
         return hf_rows
     try:
-        return list(dataset)
+        iterator = iter(dataset)
     except TypeError:
         return [dataset]
+    if iterator is dataset:
+        # Sizing must leave one-shot inputs for calibration's first read.
+        return []
+    return list(iterator)
 
 
 def _sequence_length(value: Any) -> int:
