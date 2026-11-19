@@ -599,6 +599,11 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
             self.moe_hooks_active = False
             self.moe_block = None
             self.moe_forward_original = None
+            # Whether `forward` lived in the block's instance dict before patching.
+            # An inherited `forward` must not be written back on exit: storing the
+            # bound method creates moe_block -> __dict__ -> bound method -> moe_block,
+            # which keeps every data-parallel replica alive until cyclic GC (#5520).
+            self._moe_forward_was_instance_attr = False
 
         def __enter__(self):
             """Set up MoE lifecycle hooks if applicable."""
@@ -615,7 +620,10 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
                 )
 
                 if self.moe_block is not None:
-                    # Save original forward method
+                    # Remember whether `forward` was already an instance attribute. The
+                    # wrapper below must be removed on exit instead of being replaced by
+                    # a bound method, which would leave a reference cycle behind.
+                    self._moe_forward_was_instance_attr = "forward" in vars(self.moe_block)
                     self.moe_forward_original = self.moe_block.forward
 
                     # Create wrapper that forwards to all experts
@@ -646,8 +654,22 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
 
         def __exit__(self, exc_type, exc_val, exc_tb):
             """Restore original MoE forward method if it was patched."""
-            if self.moe_hooks_active and self.moe_forward_original is not None and self.moe_block is not None:
-                self.moe_block.forward = self.moe_forward_original
+            if self.moe_hooks_active and self.moe_block is not None:
+                if self._moe_forward_was_instance_attr:
+                    # Restore the exact instance value that was shadowing the class method.
+                    self.moe_block.forward = self.moe_forward_original
+                else:
+                    # `forward` was inherited: remove the instance attribute so the class
+                    # method applies again. Writing the saved bound method back here would
+                    # create moe_block -> __dict__ -> bound method -> moe_block and pin the
+                    # replica (and its experts) until cyclic GC collects it (#5520).
+                    vars(self.moe_block).pop("forward", None)
+            # Drop every reference to the replica so a context kept alive by the caller
+            # cannot extend the replica's lifetime.
+            self.moe_hooks_active = False
+            self.moe_forward_original = None
+            self.moe_block = None
+            self.module = None
             return False  # Don't suppress exceptions
 
     def register_layer_callback(self, callback) -> None:
