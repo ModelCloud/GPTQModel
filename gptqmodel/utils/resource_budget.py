@@ -15,7 +15,8 @@ A sharded model is not one budget. Each device holds the weights and the KV
 cache of the layers assigned to it, so planning takes the *minimum* over devices
 of what each device's own share of the layers can hold. When the layers' device
 assignment cannot be resolved, planning returns ``None`` instead of quietly
-assuming one card.
+assuming one card. The same ``None`` covers a device that owns a growing layer
+but whose free memory was never measured: an unknown card is not an empty one.
 """
 
 from dataclasses import dataclass, replace
@@ -160,14 +161,16 @@ class ResourceBudget:
             return None
         return replace(self.kv_cache, layers=tuple(self.kv_cache.layers[i] for i in indices))
 
-    def _per_device_limits(self, *, batch_size: int,
-                           kv_budget_bytes: Optional[int]) -> Optional[Dict[int, int]]:
-        """Per-device maximum context, or None when the mapping is unknown.
+    def _growing_device_subsets(
+        self,
+    ) -> Optional[Tuple[Tuple[DeviceBudget, KVCacheEstimate], ...]]:
+        """The per-device layer slices that hold a growing KV cache.
 
-        A device whose layers hold no growing cache (linear attention, KV-shared
-        or non-attention blocks) does not constrain the context: its own
-        ``max_context_tokens`` is 0 by construction, and counting that 0 would
-        report "no usable context" for a model whose other device has plenty.
+        ``None`` when the layer-to-device map is unknown. A device whose layers
+        hold no growing cache (linear attention, KV-shared or non-attention
+        blocks) is omitted: it cannot constrain a cache it does not hold, and
+        its own limit is 0 by construction. Both planners read this one
+        enumeration, so they cannot disagree about which devices bind.
         """
 
         if self.kv_cache is None or self.layer_devices is None:
@@ -175,7 +178,7 @@ class ResourceBudget:
         if len(self.layer_devices) != len(self.kv_cache.layers):
             return None
 
-        limits: Dict[int, int] = {}
+        subsets = []
         for device in self.cuda_devices:
             owned = [i for i, index in enumerate(self.layer_devices) if index == device.index]
             if not owned:
@@ -183,6 +186,26 @@ class ResourceBudget:
             subset = self._layer_subset(owned)
             if subset is None or not subset.growing_layers:
                 continue
+            subsets.append((device, subset))
+        return tuple(subsets)
+
+    def _per_device_limits(self, *, batch_size: int,
+                           kv_budget_bytes: Optional[int]) -> Optional[Dict[int, int]]:
+        """Per-device maximum context, or None when the mapping is unknown.
+
+        A device whose layers hold no growing cache does not constrain the
+        context: counting its own 0 would report "no usable context" for a model
+        whose other device has plenty. An unmeasured device that *does* own a
+        growing layer leaves the answer unknown: planning around it would assume
+        room the snapshot never reported.
+        """
+
+        subsets = self._growing_device_subsets()
+        if subsets is None:
+            return None
+
+        limits: Dict[int, int] = {}
+        for device, subset in subsets:
             budget = device.kv_budget_bytes(self.reserve_fraction) if kv_budget_bytes is None else kv_budget_bytes
             if budget is None:
                 return None
@@ -212,7 +235,12 @@ class ResourceBudget:
 
     def max_sequences(self, context_tokens: int, *,
                       kv_budget_bytes: Optional[int] = None) -> Optional[int]:
-        """(estimated) How many sequences of ``context_tokens`` fit the KV budget."""
+        """(estimated) How many sequences of ``context_tokens`` fit the KV budget.
+
+        Like :meth:`max_context_tokens`, a sharded plan is the minimum over the
+        devices that own a growing layer, and ``None`` when any of them has no
+        free-memory measurement: an unmeasured card is unknown, not empty.
+        """
 
         if self.kv_cache is None:
             return None
@@ -223,15 +251,17 @@ class ResourceBudget:
             budget = devices[0].kv_budget_bytes(self.reserve_fraction) if devices else None
             return None if budget is None else self.kv_cache.max_sequences(budget, context_tokens)
 
-        if self.layer_devices is None or len(self.layer_devices) != len(self.kv_cache.layers):
+        subsets = self._growing_device_subsets()
+        if subsets is None:
             return None
         limits = []
-        for device in self.cuda_devices:
-            owned = [i for i, index in enumerate(self.layer_devices) if index == device.index]
-            subset = self._layer_subset(owned)
+        for device, subset in subsets:
             budget = device.kv_budget_bytes(self.reserve_fraction)
-            if subset is None or not subset.growing_layers or budget is None:
-                continue
+            if budget is None:
+                # The context planner already reports an unmeasured device that
+                # owns a growing layer as unknown; the sequence count must not
+                # quietly plan around it (#5410).
+                return None
             limits.append(subset.max_sequences(budget, context_tokens))
         return min(limits) if limits else None
 
