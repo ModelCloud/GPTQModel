@@ -281,7 +281,39 @@ def test_launcher_validates_geometry_and_requires_prepared_view():
         _fp32.linear_fp32_gate_rows(torch.zeros(6, K), weight)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def _nf12_native_ready() -> bool:
+    """Whether the native NF12 kernels can run on this host.
+
+    ``gptqmodel_nf12`` is NVIDIA-CUDA only. ROCm exposes HIP through the same
+    ``torch.cuda`` API, so a plain device check runs this test on ROCm and the
+    first ``encode`` raises "native NF12 kernels support NVIDIA CUDA, not ROCm"
+    (#5428). A host without a usable build (no cached library and no toolkit)
+    cannot run it either.
+    """
+
+    if not torch.cuda.is_available() or torch.version.hip is not None:
+        return False
+    try:
+        import gptqmodel_nf12
+
+        return bool(gptqmodel_nf12.available())
+    except Exception:  # noqa: BLE001 - an unloadable optional accelerator is a skip
+        return False
+
+
+def test_native_ready_guard_rejects_hip_and_a_missing_build(monkeypatch):
+    """The gate must not depend on ``torch.cuda.is_available()`` alone."""
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.version, "hip", "6.0")
+    assert _nf12_native_ready() is False
+
+    monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert _nf12_native_ready() is False
+
+
+@pytest.mark.skipif(not _nf12_native_ready(), reason="needs the native NVIDIA-CUDA NF12 kernels")
 @pytest.mark.parametrize("m", [1, 6, 7, 12, 13, 18, 24])
 def test_cuda_rows_kernel_matches_b1_launches_bitwise(m):
     import gptqmodel_nf12 as nf12
