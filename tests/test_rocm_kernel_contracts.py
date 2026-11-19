@@ -64,11 +64,6 @@ OTHER_KERNELS = set("""
 PLATFORM_RESTRICTED_KERNELS = set("""
     MacaqMlxQuantLinear NF12MlxQuantLinear
 """.split())
-# Kernel modules that import Triton at module scope. The registry skips a
-# kernel module whose import fails, so without Triton these are not registered.
-TRITON_IMPORT_KERNELS = set("""
-    ParoTritonLinear
-""".split())
 KERNELS = sorted(
     [*importer.iter_quant_linear_kernels(), TorchQuantEmbeddings, TTNNBlockFloat8Linear],
     key=lambda c: c.__name__,
@@ -140,8 +135,6 @@ def test_audit_covers_every_registered_kernel():
     # kernel listed here without a non-Linux platform is a stale classification.
     assert PLATFORM_RESTRICTED_KERNELS <= platform_restricted
     classified = ROCM_KERNELS | CUDA_ONLY_KERNELS | OTHER_KERNELS | platform_restricted
-    if not macaq_triton.TRITON_AVAILABLE:
-        classified -= TRITON_IMPORT_KERNELS
     assert {c.__name__ for c in KERNELS} == classified
 
 
