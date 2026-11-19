@@ -8,7 +8,14 @@ load as native ``bf4_b``/``bf8_b`` with no host-side re-quantisation.
 
 Usage::
 
-    python scripts/tt_quantize_blockfloat.py <model-id-or-path> --out DIR [--bits 4]
+    python scripts/tt_quantize_blockfloat.py <model-id-or-path> --out DIR \\
+        --calibration-dataset ./samples.parquet [--bits 4]
+
+    python scripts/tt_quantize_blockfloat.py <model-id-or-path> --out DIR \\
+        --calibration "A calibration passage." [--bits 4]
+
+One of ``--calibration`` / ``--calibration-dataset`` is required: GPTQ tunes its
+error feedback on the supplied text, so there is no implicit calibration source.
 
 The checkpoint records the source model id and whether its tokenizer has a chat
 template, because a native checkpoint scored with the wrong tokenizer (or an
@@ -23,7 +30,13 @@ import sys
 import time
 
 
-def main(argv: list) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser.
+
+    Kept separate from :func:`main` so the documented invocation can be checked
+    without loading a model (#5404).
+    """
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", help="model id or local path to quantize")
     parser.add_argument("--out", required=True, help="checkpoint output directory")
@@ -105,9 +118,9 @@ def main(argv: list) -> int:
         metavar="PATH_OR_REPO",
         help=(
             "calibration records from the same source the GPTQ test harness uses: "
-            "a .json/.json.gz/.jsonl/.parquet file or a Hub dataset repo id "
-            "(defaults to $GPTQMODEL_CALIBRATION_PARQUET, then the local "
-            "nm-calibration parquet)"
+            "a .json/.json.gz/.jsonl/.parquet file or a Hub dataset repo id. "
+            "The source is always explicit: omitting both calibration flags is a "
+            "usage error, not an environment or on-disk fallback."
         ),
     )
     parser.add_argument(
@@ -120,6 +133,11 @@ def main(argv: list) -> int:
             "aligns the two paths without changing the source file."
         ),
     )
+    return parser
+
+
+def main(argv: list) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
     if args.act_order and args.block_axis != "out":
         parser.error("--act-order splits in-axis exponent blocks; use --block-axis out")
