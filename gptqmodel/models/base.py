@@ -4831,6 +4831,19 @@ class BaseQModel(nn.Module):
     def after_model_load(self, model, load_quantized_model):
         return model
 
+    @classmethod
+    def after_make_quant(cls, model):
+        """Reattach runtime modules that the quantized shell did not replace.
+
+        A quantized load replaces only the leaves declared by ``module_tree``.
+        Definitions whose runtime model shares those leaves with another branch
+        (for example a weight-tied encoder/decoder stack) restore the aliases
+        here: the checkpoint load and its unmaterialized-parameter guard run
+        before ``after_model_load`` (#5514).
+        """
+
+        return model
+
     def release_device(self) -> bool:
         """Release Tenstorrent devices held by this model's kernels.
 
