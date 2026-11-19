@@ -80,9 +80,10 @@ from ..quantization.paro.optimization import (
     build_paro_optimizer,
     build_random_rotation_buffers,
     build_random_rotation_buffers_reference,
+    identity_paro_result,
     optimize_paro_linear,
 )
-from ..utils.fallback import normalize_fallback
+from ..utils.fallback import normalize_fallback, resolve_threshold, should_use_fallback
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import (
     create_quant_module,
@@ -361,6 +362,11 @@ class ParoProcessor(LoopProcessor):
         else:
             feature = feature.detach()
 
+        # Count the rows that actually routed here before the per-batch sampling
+        # below. ``Fallback.threshold`` asks how much of the calibration corpus
+        # reached the module, and the sampling bound must not fake low coverage.
+        raw_rows = 0 if feature.numel() == 0 else feature.reshape(-1, feature.shape[-1]).shape[0]
+
         qcfg = getattr(self, "qcfg", None)
         train_rows = getattr(qcfg, "opt_train_samples", 512) if qcfg is not None else 512
         val_rows = getattr(qcfg, "opt_validation_samples", 128) if qcfg is not None else 128
@@ -391,6 +397,7 @@ class ParoProcessor(LoopProcessor):
             batch_index = self.current_batch_index()
             entry.setdefault("input_batch_indices", []).append(batch_index)
             entry.setdefault("inputs", []).append(feature)
+            entry["raw_tokens"] = int(entry.get("raw_tokens", 0)) + raw_rows
 
     def _ensure_task_bucket(self, module_name: str, layer_index: int) -> None:
         """Reset repeated relative module names when quantization advances to a new layer."""
@@ -449,6 +456,52 @@ class ParoProcessor(LoopProcessor):
         group_size = int(resolved_cfg.get("group_size", self.qcfg.group_size))
         sym = bool(resolved_cfg.get("sym", self.qcfg.sym))
         return bits, group_size, sym
+
+    def _captured_rows(self, module_name: str) -> int:
+        """Rows of calibration data that routed to one module before sampling."""
+        entry = (getattr(self, "tasks", None) or {}).get(module_name) or {}
+        return int(entry.get("raw_tokens", 0) or 0)
+
+    def _module_fallback_requested(self, module_name: str) -> bool:
+        """Whether a module received less than ``Fallback.threshold`` of the corpus."""
+        entry = (getattr(self, "tasks", None) or {}).get(module_name) or {}
+        if "raw_tokens" not in entry:
+            # No capture accounting for this module (direct unit call or a
+            # processor built without a capture pass): we cannot claim low
+            # coverage, so keep the historical optimizer path.
+            return False
+        expected = getattr(self, "total_calibration_tokens", None)
+        return should_use_fallback(
+            getattr(self, "fallback", None), float(entry["raw_tokens"] or 0), expected
+        )
+
+    def _identity_fallback_result(self, module: NamedModule):
+        """Build the identity-rotation RTN result Paro uses for starved modules."""
+        bits, group_size, sym = self._module_quant_params(
+            module.full_name, resolved_cfg=get_resolved_module_config(module)
+        )
+        return identity_paro_result(
+            weight=self._module_weight_matrix(module),
+            bias=module.bias.data if getattr(module, "bias", None) is not None else None,
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            krot=int(self.qcfg.krot),
+            quantizer_impl=self.qcfg.opt_quantizer_impl,
+        )
+
+    def _log_fallback(self, module: NamedModule) -> None:
+        """Report one threshold-triggered fallback with the GPTQ wording."""
+        expected = getattr(self, "total_calibration_tokens", None)
+        fallback = getattr(self, "fallback", None)
+        threshold_raw, is_percent = resolve_threshold(fallback, expected)
+        threshold_text = str(getattr(fallback, "threshold", None))
+        threshold_info = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
+        log.warn(
+            f"Paro: Module `{module.full_name}` -> Using `rtn` fallback quantization "
+            f"(observed {self._captured_rows(module.name)} samples, threshold={threshold_text}"
+            f"{threshold_info}, max_total={expected})."
+        )
 
     @staticmethod
     def _module_weight_matrix(module: NamedModule) -> torch.Tensor:
@@ -538,6 +591,11 @@ class ParoProcessor(LoopProcessor):
         weight = self._module_weight_matrix(module)
         bias = module.bias.data if getattr(module, "bias", None) is not None else None
         original_weight = weight.detach().clone()
+        if self._module_fallback_requested(module.name):
+            self._log_fallback(module)
+            result = self._identity_fallback_result(module)
+            self._apply_optimization_result(module, result, original_weight)
+            return result.train_loss, result.val_loss
         if inputs.numel() == 0:
             inputs = torch.empty((0, weight.shape[1]), dtype=weight.dtype, device=weight.device)
         module_seed = self._module_seed(module.layer_index, module.full_name)
@@ -2639,13 +2697,23 @@ class ParoProcessor(LoopProcessor):
                     f"Resolved groups for layer {layer_index}: {[label for label, _modules in optimization_groups]}"
                 )
 
-            for _group_label, group_modules in optimization_groups:
-                start = time.perf_counter()
-                group_results, group_val_loss = self._optimize_group(state, group_modules)
-                duration = time.perf_counter() - start
-                duration_per_module = duration / max(1, len(group_modules))
+            starved = {name for name in state.modules if self._module_fallback_requested(name)}
+            for name in sorted(starved):
+                self._log_fallback(state.modules[name])
 
-                for named_module in group_modules:
+            for _group_label, group_modules in optimization_groups:
+                optimizable = [module for module in group_modules if module.name not in starved]
+                starved_modules = [module for module in group_modules if module.name in starved]
+
+                if optimizable:
+                    start = time.perf_counter()
+                    group_results, group_val_loss = self._optimize_group(state, optimizable)
+                    duration = time.perf_counter() - start
+                    duration_per_module = duration / max(1, len(optimizable))
+                else:
+                    group_results, group_val_loss, duration_per_module = {}, 0.0, 0.0
+
+                for named_module in optimizable:
                     original_weight = self._module_weight_matrix(named_module).detach().clone()
                     result = group_results[named_module.name]
                     self._apply_optimization_result(named_module, result, original_weight)
@@ -2656,8 +2724,20 @@ class ParoProcessor(LoopProcessor):
                         feat = torch.empty(0)
                     self._log_quant_result(named_module, feat, group_val_loss, duration_per_module)
 
+                for named_module in starved_modules:
+                    original_weight = self._module_weight_matrix(named_module).detach().clone()
+                    result = self._identity_fallback_result(named_module)
+                    self._apply_optimization_result(named_module, result, original_weight)
+                    if mode == "layer":
+                        move_to(named_module.module, device=CPU)
+                    feat = input_feat.get(named_module.name)
+                    if feat is None:
+                        feat = torch.empty(0)
+                    self._log_quant_result(named_module, feat, result.val_loss, 0.0)
+
                 if mode == "compute_block" and getattr(self.qcfg, "offload_to_disk", False):
-                    flush_device = self._module_weight_matrix(group_modules[0]).device if group_modules else None
+                    flush_group = optimizable or starved_modules
+                    flush_device = self._module_weight_matrix(flush_group[0]).device if flush_group else None
                     torch_empty_cache(device=flush_device, gc=False, sync=True)
 
         state.quantized = True

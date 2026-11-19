@@ -2285,6 +2285,35 @@ def _identity_result(
     )
 
 
+
+def identity_paro_result(
+    *,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    bits: int,
+    group_size: int,
+    sym: bool,
+    krot: int,
+    quantizer_impl: Literal["fast", "reference"] = "fast",
+) -> ParoOptimizationResult:
+    """Return the data-independent (identity rotation + RTN) Paro result.
+
+    This is the fallback used when calibration activations are missing and when
+    a module received fewer rows than ``Fallback.threshold`` allows (#5510).
+    """
+    _require_paro_sym(sym)
+    if weight.dim() != 2:
+        raise ValueError(f"Paro optimization expects rank-2 weights, got {tuple(weight.shape)}.")
+    return _identity_result(
+        weight=weight,
+        bias=bias,
+        bits=bits,
+        group_size=_normalize_group_size(group_size, weight.shape[1]),
+        quantizer_sym=_quantizer_sym_for_impl(sym, quantizer_impl),
+        krot=krot,
+    )
+
+
 def optimize_paro_linear(
     *,
     weight: torch.Tensor,
@@ -2334,13 +2363,14 @@ def optimize_paro_linear(
     normalized_optimizer_betas = (float(optimizer_betas[0]), float(optimizer_betas[1]))
     rows = _sample_activation_rows(inputs, max_rows=max(1, int(train_rows) + int(val_rows)))
     if rows.numel() == 0:
-        return _identity_result(
+        return identity_paro_result(
             weight=weight,
             bias=bias,
             bits=bits,
-            group_size=normalized_group_size,
-            quantizer_sym=quantizer_sym,
+            group_size=group_size,
+            sym=sym,
             krot=krot,
+            quantizer_impl=quantizer_impl,
         )
 
     opt_device = weight.device
