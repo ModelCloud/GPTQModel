@@ -61,7 +61,8 @@ def test_converted_experts_visit_tokens_in_routed_loop_order(family):
             if token_idx.numel() == 0:
                 assert (name, expert) not in rows
                 continue
-            assert torch.equal(rows[(name, expert)].pop(0), hidden[token_idx]), (name, expert)
+            cached = rows[(name, expert)].pop(0)
+            assert torch.equal(cached, hidden[token_idx]), (name, expert)
 
 
 _FRESH_PROCESS = textwrap.dedent(

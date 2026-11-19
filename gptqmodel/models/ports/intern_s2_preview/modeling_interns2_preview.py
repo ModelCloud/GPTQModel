@@ -496,7 +496,7 @@ class InternS2PreviewTimeSeriesModel(PreTrainedModel):
             and len(time_series_embeds.shape) == 3
             and time_series_embeds.shape[-1] == self.config.ts_adapt_in_dim
         ):
-            time_series_embeds = time_series_embeds
+            pass
         else:
             if time_series_signals.ndim == 3:
                 time_series_embeds, ts_lens = self.encoder_embed(time_series_signals, ts_lens, sr, channels)
