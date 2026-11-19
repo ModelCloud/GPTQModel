@@ -131,6 +131,18 @@ def _reject_unsupported_adapter_tensors(weights: Dict[str, torch.Tensor]) -> Non
                     f"Adapter: {feature} adapter tensors are not supported (`{key}`); "
                     "only LoRA `lora_A`/`lora_B` can be loaded"
                 )
+        if ".lora_embedding_" in key:
+            # PEFT writes `lora_embedding_A`/`lora_embedding_B` for
+            # `target_modules=["embed_tokens"]`. The runtime attaches only
+            # `lora_A`/`lora_B` to linear layers, so the embedding delta used to
+            # be dropped and the model ran as the bare checkpoint (#5508).
+            raise ValueError(
+                "Adapter: LoRA on an embedding layer is not supported "
+                f"(`{key}`); PEFT stores those tensors as `lora_embedding_A`/"
+                "`lora_embedding_B`, which this runtime cannot apply. Fold the "
+                "embedding delta into the base weights, or drop `embed_tokens` "
+                "from the adapter targets."
+            )
         if ".lora_magnitude_vector" in key:
             raise ValueError(
                 f"Adapter: DoRA is not supported (`lora_magnitude_vector` tensor found: `{key}`)"
