@@ -118,3 +118,66 @@ def test_macaq_accepts_the_mxfp4_settings():
     for group_size in (32, -1):
         config = config_module.MacaqConfig(bits=4, group_size=group_size, offload_to_disk=False)
         assert (config.bits, config.group_size) == (4, 32)
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("config_cls", _config_classes())
+def test_every_numeric_option_rejects_non_finite_values_through_dynamic(config_cls):
+    """The same numeric options must be checked inside a per-module rule (#5503).
+
+    ``dynamic`` values were merged verbatim: ``damp_percent=nan`` quantized with
+    every damp-recovery attempt failing and was then rescued by the Hessian
+    floor, ``group_size=nan`` only failed later inside ``quantize()``, and a
+    bare ``NaN`` was written into ``quantize_config.json``. A config that
+    rejects every ``dynamic`` override (VPTQ) raises for that reason and is
+    still loud.
+    """
+
+    checked = 0
+    # Match on the annotation members: the string-based helper above also
+    # catches `calibration: Union[CalibrationConfig, ...]` ("int" in the class
+    # name), which is not a numeric option.
+    for name in sorted(config_module._numeric_annotated_fields(config_cls)):
+        for bad in NON_FINITE:
+            with pytest.raises(REJECTED):
+                config_cls(offload_to_disk=False, dynamic={"+:.*": {name: bad}})
+            checked += 1
+    assert checked, f"{config_cls.__name__} has no numeric field to validate"
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize(
+    "config_cls,override",
+    [
+        (config_module.GPTQConfig, {"damp_percent": float("nan")}),
+        (config_module.GPTQConfig, {"damp_percent": 5.0}),
+        (config_module.GPTQConfig, {"damp_percent": -1.0}),
+        (config_module.GPTQConfig, {"damp_auto_increment": -0.5}),
+        (config_module.GPTQConfig, {"group_size": float("nan")}),
+        (config_module.GPTQConfig, {"group_size": -7}),
+        (config_module.ParoConfig, {"opt_pair_ratio": 0.75}),
+        (config_module.ParoConfig, {"opt_betas": [float("nan"), 0.9]}),
+        (config_module.MacaqConfig, {"ridge": -1.0}),
+        (config_module.MacaqConfig, {"pre_alpha": 2.0}),
+    ],
+)
+def test_reported_dynamic_overrides_are_rejected(config_cls, override):
+    """The concrete per-module values from the issue report."""
+
+    with pytest.raises((ValueError, TypeError)):
+        config_cls(offload_to_disk=False, dynamic={"+:.*": override})
+
+
+@pytest.mark.cpu
+def test_dynamic_numeric_overrides_keep_valid_values():
+    """An in-range rule still constructs and is not rewritten."""
+
+    override = {"damp_percent": 0.01, "group_size": 32, "damp_auto_increment": 0.0}
+    config = config_module.GPTQConfig(
+        bits=4,
+        group_size=128,
+        offload_to_disk=False,
+        dynamic={"+:.*": dict(override)},
+    )
+
+    assert config.dynamic["+:.*"] == override

@@ -4751,6 +4751,25 @@ def _require_bool_value(owner_name: str, field_label: str, value: Any) -> None:
         )
 
 
+def _numeric_annotated_fields(cls) -> set:
+    """Return the names of fields annotated ``int``/``float``, including unions.
+
+    ``bits`` is ``Union[int, str, GGUFBits]`` and ``mse`` is a union that ends
+    in ``int``/``float``, so match on the annotation members rather than the
+    top-level type.
+    """
+
+    hints = _resolved_type_hints(cls)
+    names = set()
+    for field_info in fields(cls):
+        hint = hints.get(field_info.name)
+        if hint is None:
+            continue
+        if any(member in (int, float) for member in get_args(hint) or (hint,)):
+            names.add(field_info.name)
+    return names
+
+
 def _validate_dynamic_layer_keys(owner, layer_name: str, layer_dict: Mapping) -> None:
     """Reject unknown keys and uncompilable patterns in one ``dynamic`` rule (#4668).
 
@@ -4898,6 +4917,80 @@ def _validate_dynamic_smoothers(owner, layer_name: str, layer_dict: Mapping) -> 
                 method,
                 f"dynamic['{layer_name}'].fallback.smooth",
             )
+
+
+# Numeric per-module overrides that the owning config's ``__post_init__``
+# bounds. A ``dynamic`` rule is merged verbatim, so a ``NaN``/``inf`` or an
+# out-of-range value used to quantize silently (a NaN damp was replaced by the
+# Hessian floor) and was serialized into ``quantize_config.json``, where a bare
+# ``NaN`` is not valid JSON (#5503). The bounds mirror the top-level checks;
+# values are validated, not rewritten, so the per-module merge keeps its input
+# types.
+_DYNAMIC_NUMERIC_BOUNDS: Dict[str, Tuple[float, Optional[float], bool, bool, str]] = {
+    "damp_percent": (0.0, 1.0, False, False, "between 0 and 1"),
+    "damp_auto_increment": (0.0, None, True, True, "non-negative"),
+    "opt_rotation_lr": (0.0, None, False, True, "positive"),
+    "opt_weight_lr": (0.0, None, False, True, "positive"),
+    "opt_quantizer_lr": (0.0, None, False, True, "positive"),
+    "opt_pair_ratio": (0.0, 0.5, False, True, "in the interval (0, 0.5]"),
+    "opt_weight_decay": (0.0, None, True, True, "non-negative"),
+    "opt_eps": (0.0, None, True, True, "non-negative"),
+    "opt_sgd_momentum": (0.0, None, True, True, "non-negative"),
+    "opt_sgd_dampening": (0.0, None, True, True, "non-negative"),
+    "opt_channel_scale_clamp_min": (0.0, None, True, True, "non-negative"),
+    "opt_channel_scale_clamp_max": (0.0, None, True, True, "non-negative"),
+    "ridge": (0.0, None, True, True, "non-negative"),
+    "pre_alpha": (0.0, 1.0, True, True, "between 0 and 1"),
+}
+
+
+def _validate_dynamic_numeric_overrides(owner, layer_name: str, layer_dict: Mapping) -> None:
+    """Run the top-level numeric checks on one per-module rule (#5503).
+
+    ``__post_init__`` validates the top-level ``group_size``/``damp_percent``/
+    ``damp_auto_increment`` and the Paro/MACaQ float options, but the
+    ``dynamic`` merge copied its values verbatim. ``damp_percent=nan``
+    quantized with every damp-recovery attempt failing and was then rescued by
+    the Hessian floor, and ``group_size=nan`` only failed later inside
+    ``quantize()``. Validate here so the rule fails at construction, like the
+    same value at the top level.
+    """
+
+    if not isinstance(layer_dict, Mapping):
+        return
+
+    owner_name = owner.__class__.__name__
+    numeric_fields = _numeric_annotated_fields(type(owner))
+    for key, value in layer_dict.items():
+        if value is None:
+            continue
+        canonical = QUANT_CONFIG_ARG_SYNONYMS.get(key, key)
+        label = f"dynamic['{layer_name}'].{key}"
+        if canonical == "group_size":
+            group_size = _validate_group_size(owner_name, value)
+            if group_size != -1 and group_size <= 0:
+                raise ValueError(_resolve_dynamic_group_size_error())
+            continue
+        if canonical == "opt_betas":
+            if not isinstance(value, (list, tuple)) or len(value) != 2:
+                raise ValueError(f"{owner_name}: `{label}` must be a 2-tuple/list of floats.")
+            for index, beta in enumerate(value):
+                _validate_finite_float(owner_name, f"{label}[{index}]", beta, minimum=0.0)
+            continue
+        # ``NaN``/``inf`` compares false against every bound below, so a value
+        # that reaches one of those checks is already rejected; this covers the
+        # numeric options without an explicit per-module range check.
+        if isinstance(value, float) and canonical in numeric_fields and not math.isfinite(value):
+            raise ValueError(f"{owner_name}: `{label}` must be a finite number, got {value!r}.")
+        bounds = _DYNAMIC_NUMERIC_BOUNDS.get(canonical)
+        if bounds is None:
+            continue
+        minimum, maximum, include_minimum, include_maximum, range_text = bounds
+        number = _validate_finite_float(owner_name, label, value)
+        if minimum is not None and (number < minimum or (not include_minimum and number == minimum)):
+            raise ValueError(f"{owner_name}: `{label}` must be {range_text}, got {value!r}.")
+        if maximum is not None and (number > maximum or (not include_maximum and number == maximum)):
+            raise ValueError(f"{owner_name}: `{label}` must be {range_text}, got {value!r}.")
 
 
 def _default_damp_percent(method: METHOD) -> float:
@@ -6179,6 +6272,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         checkpoint_format: FORMAT,
     ) -> None:
         _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
+        _validate_dynamic_numeric_overrides(self, layer_name, layer_dict)
         for key, value in layer_dict.items():
             if key == "bits":
                 normalized_bits = self._normalize_bits_field(
@@ -6191,8 +6285,6 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                     raise ValueError(
                         f"QuantizeConfig: Layer `{layer_name}` only support quantization of `{valid_bit_widths}` bits."
                     )
-            if key == "group_size" and value != -1 and value <= 0:
-                raise ValueError(_resolve_dynamic_group_size_error())
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return tuple(METHOD)
@@ -8293,6 +8385,7 @@ class FP8Config(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        _validate_dynamic_numeric_overrides(self, layer_name, layer_dict)
         del valid_bit_widths, checkpoint_format
         _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         if "bits" in layer_dict:
@@ -8399,6 +8492,7 @@ class NF12Config(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        _validate_dynamic_numeric_overrides(self, layer_name, layer_dict)
         del valid_bit_widths, checkpoint_format
         if not isinstance(layer_dict, dict):
             return
@@ -8587,6 +8681,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        _validate_dynamic_numeric_overrides(self, layer_name, layer_dict)
         del valid_bit_widths, checkpoint_format
         _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         if "bits" in layer_dict:
@@ -8727,6 +8822,7 @@ class EXL3Config(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        _validate_dynamic_numeric_overrides(self, layer_name, layer_dict)
         del valid_bit_widths, checkpoint_format
         for key, value in layer_dict.items():
             if key == "bits":
@@ -9028,6 +9124,7 @@ class GGUFConfig(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        _validate_dynamic_numeric_overrides(self, layer_name, layer_dict)
         _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         bits_override_present = "bits" in layer_dict
         format_override_present = FORMAT_FIELD_CODE in layer_dict
