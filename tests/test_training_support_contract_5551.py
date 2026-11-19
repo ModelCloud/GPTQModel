@@ -14,6 +14,7 @@ inheritance or a copy-paste from a sibling kernel.
 
 import importlib
 import pkgutil
+import re
 from pathlib import Path
 
 import pytest
@@ -141,3 +142,37 @@ def test_the_decision_record_names_the_inference_only_families(kernels):
     # grouping sentence still covers the families the kernels live in.
     assert "inference-only" in text
     assert "Marlin" in text and "GGUF C++" in text
+
+
+_DEVICE_LABELS = {
+    "cpu": "CPU",
+    "cuda": "CUDA",
+    "rocm": "ROCm",
+    "xpu": "XPU",
+    "npu": "NPU",
+    "mps": "MPS",
+}
+
+
+def test_the_decision_record_lists_each_kernel_s_devices(kernels):
+    """The device column must match ``SUPPORTS_DEVICES``, not an older guess."""
+
+    text = DOC.read_text(encoding="utf-8")
+    rows = {}
+    for line in text.splitlines():
+        match = re.match(r"^\| `([A-Za-z0-9_]+)`", line)
+        if match is None:
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        rows[match.group(1)] = cells[2]
+
+    wrong = {}
+    for name in sorted(TRAINABLE_KERNELS):
+        devices = {
+            _DEVICE_LABELS.get(getattr(device, "value", str(device)).lower(), str(device))
+            for device in kernels[name].SUPPORTS_DEVICES
+        }
+        documented = {label for label in _DEVICE_LABELS.values() if label in rows.get(name, "")}
+        if devices != documented:
+            wrong[name] = (sorted(devices), sorted(documented))
+    assert not wrong, f"docs/trainable-kernels.md device column is stale: {wrong}"
