@@ -215,6 +215,8 @@ def test_auto_pack_impl_prefers_accelerator(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     assert _normalize_pack_impl("auto", module, linear) == "block"
 
-    # Embeddings keep the CPU block packer even with an accelerator present.
+    # Embeddings keep the original packer even with an accelerator present: the
+    # block and GPU packers lay the packed words out along the input axis, which
+    # is not the embedding layout (#5381).
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    assert _normalize_pack_impl("auto", module, nn.Embedding(256, 256)) == "block"
+    assert _normalize_pack_impl("auto", module, nn.Embedding(256, 256)) == "original"
