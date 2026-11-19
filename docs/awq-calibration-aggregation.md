@@ -89,9 +89,12 @@ For `batch_size=1` that is one longest-sample equivalent, so 512 rows for a
 a 4096-document corpus keep the same per-module replay tensor. The extra row per
 batch guarantees every non-empty calibration batch contributes at least one row
 when the budget is at least the batch count; below that, evenly spaced batches
-contribute one row each, taken from the centre of the batch rather than its
-first (BOS) position (#5265). `_pack_token_rows` samples evenly inside each batch
-and is deterministic for a fixed capture order.
+contribute one row each. A single-row quota keeps the batch's first (BOS)
+position for one batch in eight and the batch centre for the rest: keeping every
+one at position 0 collapsed the sample onto the BOS/attention-sink activation
+(#5265), and keeping none loses the outlier channels those positions carry
+(#5310). `_pack_token_rows` samples evenly inside each batch and is
+deterministic for a fixed capture order.
 
 The position-limit clamp (#5085) is required because the packed rows are
 replayed as **one** sequence. Without it `batch_size > 1` asks for about
@@ -496,6 +499,8 @@ reproduces #4063's 24.84 / 22.77 exactly, which anchors the harness.
 | `tests/test_awq_capture_perf_5284.py::test_policy_is_resolved_once_per_module` | the aggregation policy is resolved once per `(class, module_name)`, not once per capture |
 | `tests/test_awq_capture_perf_5284.py::test_a_losing_capture_skips_the_merge` | a full reservoir does not re-rank the buffer for a capture that cannot displace a row |
 | `tests/test_awq_capture_perf_5284.py::test_merge_matches_the_previous_algorithm` | the short-circuit keeps exactly the rows the previous merge kept |
+| `tests/test_awq_token_row_position_5265.py::test_single_row_quota_keeps_a_bounded_sink_share` | one in eight single-row quotas keeps position 0, the rest keep the batch centre |
+| `tests/test_awq_token_row_position_5265.py::test_single_row_quotas_bound_the_sink_share` | the sink share of a single-row plan stays between 1% and 50% |
 
 The first three `test_awq_gpt_neo_packed_replay_5085.py` nodes fail on `main`
 before the #5085 fix; its geometry-error node asserts the fallback contract
