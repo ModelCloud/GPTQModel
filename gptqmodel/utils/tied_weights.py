@@ -131,7 +131,14 @@ def resolve_tied_weights_keys(
             continue
         if checkpoint_has_tensor is not None:
             if checkpoint_has_tensor(source) is False:
-                # Nothing to tie to: the source tensor is not in the checkpoint.
+                # A tied checkpoint may store the shared tensor under either
+                # member. Keep the declared pair when the checkpoint stores the
+                # other side, so the missing member is materialized from the
+                # stored one instead of staying on meta (#5399); drop it only
+                # when neither member is present.
+                if checkpoint_has_tensor(target) is not True:
+                    continue
+                resolved[target] = source
                 continue
             if (
                 checkpoint_tensors_equal is not None
