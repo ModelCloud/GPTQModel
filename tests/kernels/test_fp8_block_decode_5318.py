@@ -391,3 +391,43 @@ def test_block_decode_range_gate_keeps_the_in_range_fast_path() -> None:
     torch.testing.assert_close(
         output, torch.full_like(output, 0.25), rtol=0.0, atol=0.0
     )
+
+
+@_DECODE_SKIP
+def test_fused_block_gemv_keeps_the_bias_gradient() -> None:
+    """#5402: a trainable bias must not ride the opaque fused epilogue.
+
+    The fused W8A16 product adds the bias inside the Triton kernel, so its
+    output has no autograd wrapper. A bias-only training step therefore needs
+    the differentiable single-pass decode, while a frozen bias (and any
+    no-grad call) keeps the fused product.
+    """
+
+    module = _block_kernel(bias=True)
+    x = torch.randn(4, module.in_features, device="cuda", dtype=torch.float16)
+    x_flat = x.reshape(-1, module.in_features)
+    module.weight.requires_grad_(False)
+    module.weight_scale_inv.requires_grad_(False)
+    module.bias.requires_grad_(True)
+
+    # The root cause: the fused gate looked at the activation, weight and
+    # scale, but not at the bias.
+    assert not module._block_decode_eligible(x_flat, fused=True)
+    assert module._block_decode_eligible(x_flat, fused=False)
+
+    output = module(x)
+    assert output.requires_grad
+    upstream = torch.randn_like(output)
+    (output * upstream).sum().backward()
+    expected = upstream.float().sum(dim=0)
+    torch.testing.assert_close(module.bias.grad, expected)
+
+    # A frozen bias is a constant, so the fused product stays available.
+    module.bias.requires_grad_(False)
+    assert module._block_decode_eligible(x_flat, fused=True)
+
+    # And a trainable bias under no_grad is inference, not training.
+    module.bias.requires_grad_(True)
+    with torch.no_grad():
+        assert module._block_decode_eligible(x_flat, fused=True)
+        assert torch.isfinite(module(x)).all()
