@@ -22,9 +22,12 @@ quantizes, runs inference and trains **only** on the Transformers 5.23 ABI.
   Transformers symbols. Released configs with old field names are converted
   once at config-parse time.
 - **No global changes.** GPT-QModel never patches, monkeypatches or registers
-  into Transformers or the HF ecosystem (Optimum, OpenVINO, safetensors,
-  `huggingface_hub`), not even temporarily or scoped; this includes
-  `AutoConfig`/`AutoModel` and quantizer registries. GPT-QModel checkpoints load
+  into Transformers, the HF ecosystem (Optimum, OpenVINO, safetensors,
+  `huggingface_hub`) or other libraries (Accelerate, Defuser, torch, Triton),
+  not even temporarily or scoped; this includes `AutoConfig`/`AutoModel`,
+  quantizer registries and assigning onto (vendored) model classes at load
+  time. Accelerate offload uses GPT-QModel's own `GPTQModelAlignDevicesHook`,
+  and per-model fixes go on the loaded instance. GPT-QModel checkpoints load
   with `GPTQModel.load`; loading GPT-QModel-only features through plain
   Transformers is unsupported. `tests/test_transformers_unpatched.py` enforces
   it. Checkpoint `auto_map`,

@@ -98,18 +98,22 @@ def test_granitemoehybrid_monkey_patch_is_idempotent():
     assert mamba(torch.zeros(1, 2, 64)) == "eager"
 
 
-def test_real_granitemoehybrid_layer_installs_monkey_patch():
-    pytest.importorskip("transformers")
-    from transformers.models.granitemoehybrid.modeling_granitemoehybrid import (
+def test_real_granitemoehybrid_layer_is_patched_per_instance_only():
+    from gptqmodel.models.ports.native.granitemoehybrid.modeling_granitemoehybrid import (
         GraniteMoeHybridMambaLayer,
     )
 
-    original_forward = GraniteMoeHybridMambaLayer.forward
+    class_state = dict(vars(GraniteMoeHybridMambaLayer))
     layer = object.__new__(GraniteMoeHybridMambaLayer)
+    torch.nn.Module.__init__(layer)
+    other = object.__new__(GraniteMoeHybridMambaLayer)
+    torch.nn.Module.__init__(other)
     qmodel = _qmodel_with_mamba(layer)
 
-    try:
-        qmodel.monkey_patch()
-        assert GraniteMoeHybridMambaLayer.forward is not original_forward
-    finally:
-        GraniteMoeHybridMambaLayer.forward = original_forward
+    qmodel.monkey_patch()
+    qmodel.monkey_patch()
+
+    assert dict(vars(GraniteMoeHybridMambaLayer)) == class_state
+    assert vars(layer)["forward"].__func__._gptqmodel_granite_patch
+    assert vars(layer)["forward"].__self__ is layer
+    assert "forward" not in vars(other)

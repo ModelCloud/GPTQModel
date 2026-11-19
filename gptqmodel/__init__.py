@@ -38,16 +38,6 @@ from ._rocm_env import apply_default_rocm_blas_env  # noqa: E402
 
 _installed_rocm_blas_env = apply_default_rocm_blas_env()
 
-# Still before any other Torch use: HIP reports no last-level cache, so on
-# RDNA3/RDNA4 Torch exposes only L2 (8 MiB on an R9700) and never the 64 MiB
-# Infinity Cache / MALL behind it. Anything that sizes a cache-flush buffer
-# from L2 then measures a warm cache. This back-ports the Python half of
-# https://github.com/pytorch/pytorch/pull/203965 and has to run before a device
-# property is read or an Inductor benchmarker caches its size hint.
-from .rocm_llc import apply as _apply_rocm_llc  # noqa: E402
-
-_rocm_llc_status = _apply_rocm_llc()
-
 from ._banner import get_startup_banner  # noqa: E402
 from .utils.logger import setup_logger  # noqa: E402
 from .utils.rocm import warn_unsupported_rocm  # noqa: E402
@@ -110,7 +100,9 @@ _RETIRED_KERNEL_ENV_VARS = {
     "GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER": None,
     "GPTQMODEL_MARLIN_USE_FP32": "KernelConfig.marlin_fp32",
     "GPTQMODEL_MAX_PACKERS": "RuntimeConfig.max_packers",
-    "GPTQMODEL_NO_ROCM_LLC": "KernelConfig.rocm_llc",
+    # The torch last-level-cache back-port patched torch and Inductor globally;
+    # GPT-QModel never patches third-party libraries, so it has no replacement.
+    "GPTQMODEL_NO_ROCM_LLC": None,
     "GPTQMODEL_NPU_CHOLESKY_BLOCK_SIZE": "KernelConfig.npu_cholesky_block_size",
     "GPTQMODEL_PARO_AFFINE_STE_TRITON": "KernelConfig.paro_affine_ste_triton",
     "GPTQMODEL_PARO_AFFINE_STE_TRITON_BACKWARD": "KernelConfig.paro_affine_ste_triton_backward",
@@ -162,9 +154,6 @@ def warn_retired_kernel_env_vars() -> list[str]:
 
 
 warn_retired_kernel_env_vars()
-
-if any(result.startswith("applied") for result in _rocm_llc_status.values()):
-    log.debug("rocm_llc: %s", _rocm_llc_status)
 
 if _installed_alloc_conf is not None:
     log.info(
