@@ -276,3 +276,137 @@ def test_a_host_resident_buffer_does_not_make_a_model_sharded(monkeypatch):
     lines = budget.describe()
     assert any("host" in line for line in lines)
     assert not any("device -1" in line for line in lines)
+
+
+def _budget_for_config(config, devices, layer_devices, *, reserve=0.0):
+    from gptqmodel.utils.kv_cache import estimate_kv_cache
+    from gptqmodel.utils.resource_budget import DeviceBudget, ResourceBudget
+
+    estimate = estimate_kv_cache(config, dtype=torch.float16)
+    assert estimate is not None and len(estimate.layers) == len(layer_devices)
+    return ResourceBudget(
+        devices=tuple(DeviceBudget(index=index, free_bytes=free, total_bytes=24 * 1024 ** 3,
+                                   weights_bytes=weights)
+                      for index, free, weights in devices),
+        kv_cache=estimate,
+        layer_devices=tuple(layer_devices),
+        reserve_fraction=reserve,
+    )
+
+
+def test_sharded_plan_is_the_minimum_over_devices_not_the_sum_of_budgets():
+    """Regression: the printed plan spent every device's budget on every layer.
+
+    `max_context_tokens` was per device, but `describe`/the plan line formatted
+    the whole layer stack against `kv_budget_bytes`, i.e. the sum of all cards.
+    A model split one layer per card, with the second card nearly full, printed
+    the context the *aggregate* would buy - ~100x what the tight card holds.
+    """
+
+    from gptqmodel.utils.kv_cache import human_tokens
+
+    config = types.SimpleNamespace(hidden_size=64, num_hidden_layers=2,
+                                   num_attention_heads=4, num_key_value_heads=2,
+                                   max_position_embeddings=1_000_000)
+    budget = _budget_for_config(
+        config,
+        devices=[(0, 20 * 1024 ** 3, 16), (1, 1024 ** 2, 8)],
+        layer_devices=(0, 1),
+    )
+    per_layer = budget.kv_cache.layers[0].dims * budget.kv_cache.kv_element_bytes
+    tightest = (1024 ** 2) // per_layer
+
+    assert budget.max_context_tokens() == tightest
+    # describe() must agree with the plan it reports. On the unfixed code this
+    # line held the aggregate-budget answer (1000000 ctx at 1 seq).
+    text = "\n".join(budget.describe())
+    assert f"{human_tokens(tightest)} ctx at 1 seq" in text
+    assert human_tokens(1_000_000) not in text
+    # The aggregate budget would buy ~100x more; no single card can spend it.
+    assert budget.kv_cache.max_context_tokens(20 * 1024 ** 3) > tightest * 100
+    plan = budget.format_plan()
+    assert plan is not None
+    assert f"{human_tokens(tightest)} ctx at 1 seq" in plan
+    assert "limited by device 1" in plan
+
+
+def test_a_device_with_only_constant_state_layers_does_not_zero_the_plan():
+    """Regression: a mamba-only shard capped a granite-4.0-h plan at 0 tokens.
+
+    A device whose layers are all linear/recurrent holds constant state, not a
+    per-token cache; its own `max_context_tokens` is 0, but that 0 says nothing
+    about the context the model can serve.
+    """
+
+    from gptqmodel.utils.kv_cache import human_tokens
+
+    config = types.SimpleNamespace(
+        hidden_size=64, num_hidden_layers=4, num_attention_heads=4, num_key_value_heads=2,
+        max_position_embeddings=100_000,
+        layer_types=["linear_attention", "linear_attention", "full_attention", "full_attention"],
+    )
+    budget = _budget_for_config(
+        config,
+        devices=[(0, 20 * 1024 ** 3, 16), (1, 4 * 1024 ** 3, 8)],
+        layer_devices=(0, 0, 1, 1),
+    )
+
+    assert budget.kv_cache.linear_layers == 2
+    assert budget.kv_cache.growing_layers == 2
+    # Device 0 holds only recurrent layers, so only device 1 constrains context.
+    assert budget._per_device_limits(batch_size=1, kv_budget_bytes=None) == {1: 100_000}
+    assert budget.max_context_tokens() == 100_000
+    assert budget.context_batch_plan()[0] == (1, 100_000)
+    assert budget.max_sequences(1024) > 0
+    plan = budget.format_plan()
+    assert plan is not None and f"{human_tokens(100_000)} ctx" in plan
+
+
+class _AliasedInner(_FakeInner):
+    """VL-style wrapper: two paths that name the same decoder stack."""
+
+    def __init__(self, config, layer_devices, weights=None, alias=True):
+        super().__init__(config, layer_devices, weights)
+        self._alias = alias
+        self._layers = [_FakeLayer(index) for index in self._layer_devices]
+
+    def get_submodule(self, path):
+        assert path in ("model.language_model.layers", "language_model.layers")
+        if self._alias:
+            return self._layers
+        return [_FakeLayer(index) for index in self._layer_devices]
+
+
+def _alias_wrapper(inner):
+    return types.SimpleNamespace(model=inner, extract_layers_node=lambda: [
+        "model.language_model.layers", "language_model.layers"])
+
+
+def test_aliased_layer_paths_resolve_to_the_same_stack(monkeypatch):
+    """Regression: Qwen2.5-VL names its layer list twice; planning went unavailable."""
+
+    monkeypatch.setattr(base, "device_memory_bytes",
+                        lambda index=None: (8 * 1024 ** 3, 24 * 1024 ** 3))
+    config = types.SimpleNamespace(hidden_size=64, num_hidden_layers=2,
+                                   num_attention_heads=4, num_key_value_heads=2)
+    weights = [_FakeTensor(0, numel=8, size=2), _FakeTensor(1, numel=8, size=2)]
+    inner = _AliasedInner(config, layer_devices=(0, 1), weights=weights)
+    budget = BaseQModel.budget(_alias_wrapper(inner))
+
+    assert budget.layer_devices == (0, 1)
+    assert budget.max_context_tokens() is not None
+
+
+def test_distinct_layer_paths_stay_unresolved(monkeypatch):
+    """Two genuinely different stacks must not be mapped onto one config list."""
+
+    monkeypatch.setattr(base, "device_memory_bytes",
+                        lambda index=None: (8 * 1024 ** 3, 24 * 1024 ** 3))
+    config = types.SimpleNamespace(hidden_size=64, num_hidden_layers=2,
+                                   num_attention_heads=4, num_key_value_heads=2)
+    weights = [_FakeTensor(0, numel=8, size=2), _FakeTensor(1, numel=8, size=2)]
+    inner = _AliasedInner(config, layer_devices=(0, 1), weights=weights, alias=False)
+    budget = BaseQModel.budget(_alias_wrapper(inner))
+
+    assert budget.layer_devices is None
+    assert budget.max_context_tokens() is None

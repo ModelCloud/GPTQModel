@@ -94,6 +94,7 @@ class ResourceBudget:
         "max_context_tokens": ESTIMATED,
         "max_sequences": ESTIMATED,
         "context_batch_plan": ESTIMATED,
+        "format_plan": ESTIMATED,
     }
 
     @property
@@ -161,7 +162,13 @@ class ResourceBudget:
 
     def _per_device_limits(self, *, batch_size: int,
                            kv_budget_bytes: Optional[int]) -> Optional[Dict[int, int]]:
-        """Per-device maximum context, or None when the mapping is unknown."""
+        """Per-device maximum context, or None when the mapping is unknown.
+
+        A device whose layers hold no growing cache (linear attention, KV-shared
+        or non-attention blocks) does not constrain the context: its own
+        ``max_context_tokens`` is 0 by construction, and counting that 0 would
+        report "no usable context" for a model whose other device has plenty.
+        """
 
         if self.kv_cache is None or self.layer_devices is None:
             return None
@@ -174,7 +181,7 @@ class ResourceBudget:
             if not owned:
                 continue
             subset = self._layer_subset(owned)
-            if subset is None:
+            if subset is None or not subset.growing_layers:
                 continue
             budget = device.kv_budget_bytes(self.reserve_fraction) if kv_budget_bytes is None else kv_budget_bytes
             if budget is None:
@@ -223,7 +230,7 @@ class ResourceBudget:
             owned = [i for i, index in enumerate(self.layer_devices) if index == device.index]
             subset = self._layer_subset(owned)
             budget = device.kv_budget_bytes(self.reserve_fraction)
-            if subset is None or budget is None:
+            if subset is None or not subset.growing_layers or budget is None:
                 continue
             limits.append(subset.max_sequences(budget, context_tokens))
         return min(limits) if limits else None
@@ -241,23 +248,45 @@ class ResourceBudget:
                 rows.append((int(batch), int(context)))
         return tuple(rows)
 
-    def _plan_line(self, contexts: Sequence[int]) -> Optional[str]:
+    def format_plan(self, *, kv_budget_bytes: Optional[int] = None,
+                    batches: Sequence[int] = (1, 2, 4, 8, 16, 32)) -> Optional[str]:
+        """(estimated) One line: the context/batch plan this budget buys.
+
+        A sharded model plans each device's own layers against that device's own
+        budget and reports the minimum. The line is therefore labelled with the
+        binding device's budget, not the sum of every device's free memory - the
+        sum is memory no single card can spend on the whole layer stack.
+        """
+
         if self.kv_cache is None:
             return None
-        if self.is_sharded:
-            limits = self._per_device_limits(batch_size=1, kv_budget_bytes=None)
-            if not limits:
-                return None
-            binding = min(limits, key=limits.get)
+        rows = self.context_batch_plan(kv_budget_bytes=kv_budget_bytes, batches=batches)
+        if kv_budget_bytes is not None:
+            return self.kv_cache.format_plan_rows(
+                rows, kv_budget_bytes=int(kv_budget_bytes), suffix=" (estimated)")
+        if not self.is_sharded:
             budget = self.kv_budget_bytes
-            plan = self.kv_cache.format_context_batch_plan(budget) if budget else ""
-            plan = plan.replace("KV plan: ", "", 1)
-            return f"{plan} (estimated, limited by device {binding})"
-        budget = self.kv_budget_bytes
-        if not budget:
+            if not budget:
+                return None
+            return self.kv_cache.format_plan_rows(rows, kv_budget_bytes=budget, suffix=" (estimated)")
+        limits = self._per_device_limits(batch_size=1, kv_budget_bytes=None)
+        if not limits:
             return None
-        plan = self.kv_cache.format_context_batch_plan(budget).replace("KV plan: ", "", 1)
-        return f"{plan} (estimated)"
+        binding = min(limits, key=limits.get)
+        budget = next(
+            (device.kv_budget_bytes(self.reserve_fraction)
+             for device in self.cuda_devices if device.index == binding),
+            None,
+        )
+        # When the model's own context limit binds, no device is the limit; the
+        # rows formatter already says "(model limit)".
+        capped_by_model = self.context_limit is not None and limits[binding] >= self.context_limit
+        suffix = " (estimated)" if capped_by_model else f" (estimated, limited by device {binding})"
+        return self.kv_cache.format_plan_rows(
+            rows,
+            kv_budget_bytes=budget,
+            suffix=suffix,
+        )
 
     def describe(self, contexts: Sequence[int] = (8192, 32768)) -> Tuple[str, ...]:
         """Log lines with every number's kind spelled out."""
@@ -288,9 +317,14 @@ class ResourceBudget:
             cache = cache[len("KV cache:"):].strip()
         lines.append(f"Budget: KV cache {cache} (estimated)")
 
-        plan = self._plan_line(contexts)
+        plan = self.format_plan()
         if plan:
-            lines.append(f"Budget: KV plan {plan}")
+            # `format_plan` is a complete line; keep the historical log prefix.
+            body = plan[len("KV plan: "):] if plan.startswith("KV plan: ") else plan
+            lines.append(f"Budget: KV plan {body}")
         elif self.is_sharded:
-            lines.append("Budget: KV plan unavailable (a sharded model needs its layer-to-device map)")
+            lines.append(
+                "Budget: KV plan unavailable (a sharded model needs its layer-to-device map"
+                " and measured free memory)"
+            )
         return tuple(lines)

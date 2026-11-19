@@ -228,12 +228,19 @@ class KVCacheEstimate:
                 rows.append((int(batch), int(context)))
         return tuple(rows)
 
-    def format_context_batch_plan(self, kv_budget_bytes: int, batches: Sequence[int] = (1, 2, 4, 8, 16, 32)) -> str:
-        """One line: what this budget buys, collapsing equal context widths."""
+    def format_plan_rows(self, rows: Sequence[Tuple[int, int]], *,
+                         kv_budget_bytes: Optional[int] = None,
+                         suffix: str = "") -> str:
+        """One line from precomputed ``(batch_size, max_context_tokens)`` rows.
 
-        rows = self.context_batch_plan(kv_budget_bytes, batches)
+        ``kv_budget_bytes`` labels the line with the budget the rows came from.
+        It is optional because a sharded caller plans each device separately and
+        has no single whole-model number that those rows correspond to.
+        """
+
         if not rows:
-            return f"KV plan: {human_bytes(kv_budget_bytes)} fits no usable context"
+            head = f"KV plan: {human_bytes(kv_budget_bytes)} " if kv_budget_bytes is not None else "KV plan: "
+            return head + "fits no usable context" + suffix
 
         # Rows are ordered by increasing batch, so contexts never grow; equal
         # neighbours collapse into "up to N seq".
@@ -250,7 +257,16 @@ class KVCacheEstimate:
             for context, batch in groups
         ]
         capped = " (model limit)" if self.context_limit and rows[0][1] >= self.context_limit else ""
-        return f"KV plan: {human_bytes(kv_budget_bytes)} -> " + ", ".join(parts) + capped
+        prefix = f"KV plan: {human_bytes(kv_budget_bytes)} -> " if kv_budget_bytes is not None else "KV plan: "
+        return prefix + ", ".join(parts) + capped + suffix
+
+    def format_context_batch_plan(self, kv_budget_bytes: int, batches: Sequence[int] = (1, 2, 4, 8, 16, 32)) -> str:
+        """One line: what this budget buys, collapsing equal context widths."""
+
+        return self.format_plan_rows(
+            self.context_batch_plan(kv_budget_bytes, batches),
+            kv_budget_bytes=int(kv_budget_bytes),
+        )
 
     def describe(self, contexts: Sequence[int] = (8192, 32768)) -> str:
         parts_of_shape = [f"{self.growing_layers} growing layer(s)"]

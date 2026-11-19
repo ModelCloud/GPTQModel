@@ -442,21 +442,34 @@ def _layer_device_indices(wrapper: object, inner: object,
         paths = list(extract())
     except Exception:  # pragma: no cover - exotic definitions
         return None
-    if len(paths) != 1:
-        # Multi-branch definitions do not map 1:1 onto the config's layer list.
+    if not paths:
         return None
 
-    layers = None
-    for candidate in (inner, getattr(inner, "model", None)):
-        if candidate is None or not hasattr(candidate, "get_submodule"):
-            continue
-        try:
-            layers = candidate.get_submodule(paths[0])
-            break
-        except Exception:
-            continue
-    if layers is None:
+    # A definition may name the same decoder stack more than once: VL wrappers
+    # expose both ``model.language_model.layers`` and ``language_model.layers``,
+    # which resolve to one ModuleList. Accept every resolvable path only when
+    # they name the same modules; distinct stacks (HRM's L/H modules) stay
+    # unresolved instead of being guessed.
+    stacks = []
+    for path in paths:
+        for candidate in (inner, getattr(inner, "model", None)):
+            if candidate is None or not hasattr(candidate, "get_submodule"):
+                continue
+            try:
+                stacks.append(candidate.get_submodule(path))
+                break
+            except Exception:
+                continue
+    if not stacks:
         return None
+    layers = stacks[0]
+    for other in stacks[1:]:
+        try:
+            same = len(other) == len(layers) and all(a is b for a, b in zip(layers, other))
+        except TypeError:  # a path that names a module rather than a stack
+            same = False
+        if not same:
+            return None
 
     indices = []
     for layer in layers:
