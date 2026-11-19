@@ -119,7 +119,10 @@ def decode_e8m0_scale(scale: torch.Tensor) -> torch.Tensor:
     # inputs live on another GPU (#5263). ``2**exponent`` is bit-exact for the
     # whole E8M0 range, including the denormal 2**-127 that ``exp2`` rounds one
     # ulp low on CUDA.
-    decoded = torch.pow(2.0, exponent)
+    # The exponent is widened to float32 first: a Python float base with an
+    # *integer* tensor follows the process default dtype, so a concurrent fp16
+    # ``from_pretrained`` would decode most scales to 0/inf (#5297).
+    decoded = torch.pow(2.0, exponent.to(torch.float32))
     return torch.where(encoded == 255, torch.full_like(decoded, float("nan")), decoded)
 
 
