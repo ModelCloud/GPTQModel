@@ -37,6 +37,7 @@ from .fallback_smooth import (
 from .gptq import (
     _is_memory_allocation_failure,
     _move_static_groups,
+    _propagate_block_error,
     _uniform_column_group,
     get_number_of_rows_and_cols,
 )
@@ -1214,7 +1215,7 @@ class QQQ:
 
                 Losses1.div_(2)
 
-                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+                _propagate_block_error(W[:, i2:], Err1, Hinv[i1:i2, i2:])
 
                 if DEBUG:
                     self.layer.weight.data[:, :i2] = Q[:, :i2]
