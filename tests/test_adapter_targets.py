@@ -407,3 +407,77 @@ def test_partial_lora_and_dense_lm_head_load_end_to_end(tmp_path):
     with torch.inference_mode():
         dense_logits = dense_model.model(input_ids).logits
     assert not torch.allclose(dense_logits, base_logits)
+
+
+def test_legacy_lowercase_targets_attach_when_the_tensors_match(tmp_path):
+    """Legacy EoRA exports used lowercase targets and tensor keys (#5418)."""
+
+    _write_adapter(
+        tmp_path,
+        target_modules=["wqkv"],
+        module_keys=["transformer.blocks.0.antn.wqkv"],
+    )
+    adapter = Lora(rank=2, path=str(tmp_path))
+
+    assert adapter.targets_module("transformer.blocks.0.antn.Wqkv")
+    assert adapter.has_weights("transformer.blocks.0.antn.Wqkv")
+
+
+def test_legacy_lowercase_targets_need_the_matching_tensor_pair(tmp_path):
+    """The compatibility match is tensor-confirmed; a bare target is not enough."""
+
+    _write_adapter(
+        tmp_path,
+        target_modules=["wqkv"],
+        module_keys=["transformer.blocks.0.antn.other"],
+    )
+    adapter = Lora(rank=2, path=str(tmp_path))
+
+    assert not adapter.targets_module("transformer.blocks.0.antn.Wqkv")
+
+
+def test_canonical_targets_stay_case_sensitive(tmp_path):
+    _write_adapter(
+        tmp_path,
+        target_modules=["Wqkv"],
+        module_keys=["transformer.blocks.0.antn.Wqkv"],
+    )
+    adapter = Lora(rank=2, path=str(tmp_path))
+
+    assert adapter.targets_module("transformer.blocks.0.antn.Wqkv")
+    assert not adapter.targets_module("transformer.blocks.0.antn.wqkv")
+
+
+def test_legacy_lowercase_adapter_attaches_in_create_quant_module(tmp_path):
+    _write_adapter(tmp_path, target_modules=["wqkv"], module_keys=["wqkv"])
+    adapter = Lora(rank=2, path=str(tmp_path))
+    captured = {}
+
+    class DummyQuantLinear(nn.Module):
+        @classmethod
+        def validate(cls, **kwargs):
+            return True, None
+
+        def __init__(self, **kwargs):
+            super().__init__()
+            self.bias = None
+            captured[kwargs["name"]] = kwargs.get("adapter")
+
+    root = _dense_root("Wqkv")
+    create_quant_module(
+        name="Wqkv",
+        linear_cls=DummyQuantLinear,
+        bits=4,
+        desc_act=False,
+        dynamic=None,
+        group_size=32,
+        module=root,
+        submodule=root.Wqkv,
+        sym=True,
+        device="cpu",
+        lm_head_name="lm_head",
+        pack_dtype=torch.int32,
+        adapter=adapter,
+    )
+
+    assert captured["Wqkv"] is not None
