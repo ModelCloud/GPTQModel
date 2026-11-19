@@ -366,3 +366,32 @@ def test_production_fp8_multiplier_config_still_uses_hf_quantizer():
 
     quantizer = hf_auto.AutoHfQuantizer.from_config(config)
     assert isinstance(quantizer.quantization_config, FineGrainedFP8Config)
+
+
+def test_block_triton_operand_capability_table():
+    """Triton's FP8 operand availability per NVIDIA compute capability (#5400).
+
+    Triton's CUDA backend only adds ``fp8e4nv`` -- the operand behind
+    ``torch.float8_e4m3fn`` -- at SM 8.9 and later, so every Ampere target
+    (SM 8.0/8.6) must decline the block Triton paths. E5M2 lowers to
+    ``fp8e5``, which every target supports.
+    """
+
+    from gptqmodel.utils import fp8_block_triton
+
+    supported = fp8_block_triton.fp8_operand_supported
+    assert not supported("float8_e4m3fn", (8, 0))
+    assert not supported("float8_e4m3fn", (8, 6))
+    assert supported("float8_e4m3fn", (8, 9))
+    assert supported("float8_e4m3fn", (9, 0))
+    assert supported("float8_e4m3fn", (10, 0))
+    assert supported("float8_e4m3fn", (12, 0))
+
+    assert supported("float8_e5m2", (8, 0))
+    assert supported("float8_e5m2", (12, 0))
+
+    # Formats outside the table have no Triton operand at all, including the
+    # AMD-scaled ones Triton does not lower on NVIDIA.
+    assert not supported("float8_e4m3fnuz", (8, 9))
+    assert not supported("float8_e5m2fnuz", (12, 0))
+    assert not supported("float8_e8m0fnu", (12, 0))

@@ -922,7 +922,10 @@ class GPTQ:
         if batch_token_size == 0 or xtx is None:
             return
 
+        # The partial is keyed by its capture source, which can differ from
+        # the device that holds ``xtx`` when a Hessian owner is configured.
         dev = torch.device(device)
+        partial_device = xtx.device
 
         with self.lock:
             self.fwd_counter += 1
@@ -931,11 +934,19 @@ class GPTQ:
             if existing is None:
                 self._device_hessian_partials[dev] = xtx
             else:
-                self._wait_partial_ready(dev)
+                if existing.device != partial_device:
+                    # The compute device can move between batches (for example
+                    # after a CPU allocation fallback). Keep a single running
+                    # sum per capture source instead of splitting it.
+                    existing = safe_move_to(
+                        existing, partial_device, dtype=torch.float32
+                    )
+                    self._device_hessian_partials[dev] = existing
+                self._wait_partial_ready(dev, on=partial_device)
                 existing.add_(xtx)
                 del xtx
 
-            self._record_partial_ready(dev)
+            self._record_partial_ready(dev, on=partial_device)
 
             self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
             self.nsamples += batch_token_size
@@ -947,18 +958,31 @@ class GPTQ:
             return None
         return torch.cuda.Event(blocking=False, interprocess=False)
 
-    def _wait_partial_ready(self, device: torch.device) -> None:
+    def _wait_partial_ready(
+        self, device: torch.device, on: Optional[torch.device] = None
+    ) -> None:
+        """Wait for the partial keyed by ``device`` on the stream that reads it.
+
+        The key is the capture source, which can differ from the device holding
+        the partial when a Hessian owner is configured (#5518).
+        """
+
         event = self._device_hessian_partial_ready.get(torch.device(device))
         if event is not None:
-            torch.cuda.current_stream(device).wait_event(event)
+            target = torch.device(device if on is None else on)
+            torch.cuda.current_stream(target).wait_event(event)
 
-    def _record_partial_ready(self, device: torch.device) -> None:
-        device = torch.device(device)
-        event = self._cuda_event_for(device)
+    def _record_partial_ready(
+        self, device: torch.device, on: Optional[torch.device] = None
+    ) -> None:
+        """Mark the partial keyed by ``device`` ready on its compute stream."""
+
+        target = torch.device(device if on is None else on)
+        event = self._cuda_event_for(target)
         if event is not None:
-            event.record(torch.cuda.current_stream(device))
+            event.record(torch.cuda.current_stream(target))
         # A later update or reduction waits for this partial's completion.
-        self._device_hessian_partial_ready[device] = event
+        self._device_hessian_partial_ready[torch.device(device)] = event
 
     def _wait_hessian_ready(self, consumer_device: torch.device) -> None:
         event = self._hessian_ready_event
@@ -1311,7 +1335,13 @@ class GPTQ:
     def process_batch(
         self, inp: torch.Tensor, batch_index: Optional[int] = None
     ) -> Tuple[int, Optional[torch.Tensor], torch.device]:
-        """Return ``(token_count, xtx_or_counts, device)`` for one calibration batch.
+        """Return ``(token_count, xtx_or_counts, partial_key_device)`` for one batch.
+
+        ``partial_key_device`` is the *capture source* the activations came
+        from. It is not necessarily the device that holds ``xtx``: a Hessian
+        owner accumulates every replica's partial on one device but the partial
+        stays keyed by its source, so reductions keep a fixed device order
+        instead of following worker-thread arrival order (#5518).
 
         ``batch_index`` is the native-input pairing hook used by GPTAQ/FOEM;
         plain GPTQ does not use it.
@@ -1397,8 +1427,13 @@ class GPTQ:
             pad = reshaped_inp.new_zeros((reshaped_inp.shape[0], self._tp_pad_cols))
             reshaped_inp = torch.cat((reshaped_inp, pad), dim=1)
             del pad
-        canonical_device = torch.device(inp_device)
+        source_device = torch.device(inp_device)
+        canonical_device = source_device
 
+        # A Hessian owner moves the compute to one device, but the partial is
+        # still keyed by the replica it came from so the final reduction has a
+        # deterministic, thread-independent order (#5518).
+        keyed_by_source = False
         accumulator_device = self._hessian_accumulator_device
         if accumulator_device is not None and canonical_device != accumulator_device:
             reshaped_inp = reshaped_inp.to(
@@ -1406,6 +1441,7 @@ class GPTQ:
                 non_blocking=False,
             )
             canonical_device = accumulator_device
+            keyed_by_source = True
 
         batch_token_size = reshaped_inp.shape[0]
 
@@ -1440,7 +1476,8 @@ class GPTQ:
             del reshaped_inp
 
         self._snapshot_borrow_workspace_stats(context="process_batch")
-        return batch_token_size, xtx, canonical_device
+        partial_key_device = source_device if keyed_by_source else canonical_device
+        return batch_token_size, xtx, partial_key_device
 
     def _select_hessian_target_device(self, requested: Optional[torch.device]) -> torch.device:
         with self.lock:

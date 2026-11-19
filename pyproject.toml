@@ -79,13 +79,8 @@ quality = [
     "ruff==0.14.2",
     # "isort==6.0.1",
 ]
-# Engine extras carry their own torch/transformers pins; use a dedicated environment.
-vllm = [
-    "vllm>=0.32.0; python_version < \"3.15\"",
-]
-sglang = [
-    "sglang[srt]>=0.5.22",
-]
+# Publish engine extras when a release's Torch and Transformers pins
+# intersect the core requirements on a supported Python. See docs/engine-extras.md.
 bitblas = [
     "bitblas==0.1.0.post1",
     "numpy>=2.4.6; python_version < \"3.12\"",
