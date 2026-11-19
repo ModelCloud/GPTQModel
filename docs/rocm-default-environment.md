@@ -101,7 +101,7 @@ are accumulated into the Hessian. Pinning only `compute_hessian_xtx` regressed
 Qwen2.5-0.5B-Instruct to **332/795** differing tensors across processes (the
 #4075 no-pin baseline), because the captured inputs themselves differed. The
 per-call contexts in `compute_hessian_xtx` (`gptqmodel/quantization/gptq.py:1220,1257,1273`)
-and `hessian_inverse` (`gptqmodel/quantization/gptq.py:2121`) remain as
+and `hessian_inverse` (`gptqmodel/quantization/gptq.py:2202`) remain as
 defense-in-depth for direct Hessian calls; the outer method-scoped context is
 what keeps the forward reproducible.
 

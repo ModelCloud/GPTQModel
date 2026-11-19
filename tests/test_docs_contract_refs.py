@@ -92,7 +92,7 @@ CONTRACT_REFS = (
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
      "compute_hessian_xtx", 1220),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
-     "hessian_inverse", 2121),
+     "hessian_inverse", 2202),
     # `calibration.py` grew a 70-line payload normalizer above
     # `prepare_calibration_dataset` (#4934); these three citations are symbol
     # anchored so an unrelated edit cannot drift them again.

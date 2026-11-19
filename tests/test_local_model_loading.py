@@ -300,7 +300,7 @@ def test_public_dispatch_uses_local_definition_and_disables_checkpoint_model_cod
         "gptqmodel.models.ports.minimax_m2.modeling_minimax.MiniMaxText01ForCausalLM",
     )
     captured = []
-    sentinel = SimpleNamespace(log_kv_cache_estimate=lambda: None)
+    sentinel = SimpleNamespace(log_budget=lambda: None)
 
     def consume(**kwargs):
         captured.append(kwargs)

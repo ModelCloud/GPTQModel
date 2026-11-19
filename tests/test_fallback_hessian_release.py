@@ -171,6 +171,7 @@ class TestFallbackReleasesPartials:
             strategy: FallbackStrategy,
             blocksize: int,
             target_device: torch.device | None = None,
+            **_kwargs,
         ) -> tuple:
             seen["device"] = target_device
             seen["partials_at_entry"] = dict(self._device_hessian_partials)
