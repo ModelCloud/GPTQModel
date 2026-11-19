@@ -15,6 +15,7 @@ from gptqmodel.models import auto
 from gptqmodel.models.definitions.lfm3 import LFM3QModel
 from gptqmodel.models.definitions.lfm3_omni import LFM3OmniQModel
 from gptqmodel.models.definitions.lfm3_vl import LFM3VLQModel
+from gptqmodel.models.module_plan import ModulePlan
 
 
 MODEL_PATHS = {
@@ -80,6 +81,26 @@ def test_lfm3_module_tree_covers_conv_attention_and_mlp_paths(definition):
         "feed_forward.w2",
         "feed_forward.w3",
     }
+
+
+@pytest.mark.parametrize("definition", [LFM3QModel, LFM3VLQModel, LFM3OmniQModel])
+def test_lfm3_declares_live_sigmoid_gate_and_depthwise_conv(definition):
+    """The live `g_proj`/`conv.conv` leaves must be declared non-quantized.
+
+    The tree used to name the legacy `gate_proj`, so the live sigmoid gate was
+    invisible to AWQ compensation and `conv.conv` stayed undeclared.
+    """
+
+    plan = ModulePlan.from_tree(definition.module_tree)
+
+    gate = plan.find("self_attn.g_proj")
+    assert gate is not None, definition.__name__
+    assert gate.quantize is False, definition.__name__
+    assert "nosrc" in gate.flags, definition.__name__
+
+    depthwise = plan.find("conv.conv")
+    assert depthwise is not None, definition.__name__
+    assert depthwise.quantize is False, definition.__name__
 
 
 def test_lfm3_text_layers_node_and_norms():
