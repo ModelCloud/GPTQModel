@@ -149,6 +149,27 @@ def test_shared_storage_saves_distinct_views_and_deduplicates_identical_views():
     assert state["float_alias"].source.dtype == torch.float32
 
 
+def test_empty_buffers_are_not_collapsed_as_shared_storage():
+    """Empty buffers all report storage id 0; each key must still be written.
+
+    QQQ keeps an empty ``s_group`` when ``group_size == in_features`` and the
+    loader requires the key to be present. The save-time dedup used the
+    storage id alone, so every empty buffer after the first was deleted and the
+    reload failed with "Missing required quantized weights" (#5010 follow-up).
+    """
+
+    model = nn.Module()
+    model._tied_weights_keys = []
+    model.register_buffer("empty_left", torch.empty(0, dtype=torch.float16))
+    model.register_buffer("empty_right", torch.empty(0, dtype=torch.float16))
+
+    state = get_state_dict_for_save(model)
+
+    assert set(state) == {"empty_left", "empty_right"}
+    assert state["empty_left"].source.numel() == 0
+    assert state["empty_right"].source.numel() == 0
+
+
 def test_collection_scales_linearly_with_module_count():
     """Smoke/regression check: collection must remain fast for a wide module tree.
 
