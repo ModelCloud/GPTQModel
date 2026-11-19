@@ -130,11 +130,13 @@ def test_pretokenized_rows_never_reach_the_processor(cls, monkeypatch):
 
     batches = model.prepare_dataset(rows, batch_size=1)
 
+    # The leading mask-0 slot is tokenizer padding and is stripped before
+    # batching since #4889; the remaining ids/mask are passed through verbatim.
     assert [batch["input_ids"].tolist() for batch in batches] == [
         [list(range(100, 140))],
-        [list(range(200, 245))],
+        [list(range(201, 245))],
     ]
-    assert batches[1]["attention_mask"].tolist() == [[0] + [1] * 44]
+    assert batches[1]["attention_mask"].tolist() == [[1] * 44]
 
 
 @pytest.mark.parametrize(
@@ -154,7 +156,7 @@ def test_columnar_mapping_is_unpacked_not_rendered_as_key_names(cls, monkeypatch
 
     assert [batch["input_ids"].tolist() for batch in batches] == [
         [list(range(100, 140))],
-        [list(range(200, 245))],
+        [list(range(201, 245))],
     ]
 
 
