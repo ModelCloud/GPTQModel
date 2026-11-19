@@ -691,19 +691,31 @@ few hundred microseconds. Wall time therefore tracks the number of steps
 almost exactly, and the number of steps is `ceil(train_rows / opt_batch_size)`
 per epoch.
 
-The default `opt_batch_size` is 128, so the 2048-row training budget is
-replayed in 16 steps per epoch instead of 32. Every row is still visited
-exactly once per epoch: `_chunk_rows` slices the sampled rows contiguously and
-concatenating its chunks reproduces the input order. A larger step batch
-trades no calibration data for the lower launch count; it only changes how
-many rows share one optimizer step.
+The default `opt_batch_size` is 64, so the 2048-row training budget is
+replayed in 32 steps per epoch; a 128-row step batch halves that to 16. Every
+row is still visited exactly once per epoch: `_chunk_rows` slices the sampled
+rows contiguously and concatenating its chunks reproduces the input order. A
+larger step batch trades no calibration data for the lower launch count; it
+only changes how many rows share one optimizer step.
+
+Because one step covers `opt_batch_size` rows, the step batch also changes how
+far a single update moves the parameters. `_stage_learning_rates()` scales the
+three stage LRs by `max(1, opt_batch_size / 64)` so the per-epoch update stays
+constant, and every scope (`module`, `grouped`, `layer`) applies the scaled
+values. Raising the step batch is therefore a pure speed knob: without the
+scaling, `opt_batch_size=128` at the old LR cost Llama-3.2-1B about 1% PPL
+(#5306).
 
 | Step batch | Steps/epoch | Qwen2.5-0.5B quantize | wikitext-2 PPL |
 | --- | --- | --- | --- |
-| 64 | 32 | 148.9 s | 20.08 |
-| 128 (default) | 16 | 100.5 s | 19.94 |
+| 64 (default) | 32 | 148.9 s | 20.08 |
+| 128 | 16 | 100.5 s | 19.94 |
 | 160 | 13 | 87.7 s | 19.97 |
 | 256 | 8 | 61.8 s | 20.19 |
+
+The wall times come from #5175. The PPL column was measured before the LR
+scaling landed, i.e. with the raw LRs at every step batch; re-measuring it with
+the scaling is still open.
 
 | Test | Invariant |
 | --- | --- |
