@@ -327,6 +327,35 @@ def _column_entries(value: Any) -> Optional[List[Any]]:
     return None
 
 
+def _pin_hf_attention_mask_column(rows: List[Any]) -> List[Any]:
+    """Pin an HF dataset's float 0/1 ``attention_mask`` column to integers.
+
+    A ``Dataset`` is columnar, so the 0/1-versus-additive convention can be
+    decided from the whole column exactly as ``_columnar_mapping_examples``
+    does for a dict or a ``DataFrame`` (#5368). Splitting into rows first loses
+    that context and an all-padding row is read as an all-zero additive mask
+    that attends everything (#5134, #5506). Pinning the column to ``int64``
+    keeps the per-row normalizer on the 0/1 branch.
+
+    Anything that is not a uniform list of mappings with an ``attention_mask``
+    is returned unchanged, and so is a column without a 0/1 sentinel.
+    """
+
+    masks: List[Any] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or "attention_mask" not in row:
+            return rows
+        masks.append(row["attention_mask"])
+    if not _columnar_attention_mask_is_binary(masks):
+        return rows
+    pinned = []
+    for row, mask in zip(rows, masks):
+        updated = dict(row)
+        updated["attention_mask"] = None if mask is None else torch.as_tensor(mask).to(torch.int64)
+        pinned.append(updated)
+    return pinned
+
+
 def _hf_dataset_rows(dataset: Any) -> Optional[List[Any]]:
     """Return an HF dataset's rows as python mappings, or ``None`` if not HF.
 
@@ -335,13 +364,17 @@ def _hf_dataset_rows(dataset: Any) -> Optional[List[Any]]:
     ``pyarrow.Table`` objects instead of the documented python rows, and every
     row was rejected purely because of that format (issue #4882). Clearing the
     format keeps the same rows, so the rejection depends on the content only.
+
+    The rows are still columnar data, so a float 0/1 ``attention_mask`` column
+    is pinned before the split (#5506).
     """
 
     hf_dataset_types = _hf_dataset_types()
     if not hf_dataset_types or not isinstance(dataset, hf_dataset_types):
         return None
     reset_format = getattr(dataset, "with_format", None)
-    return list(reset_format(None) if callable(reset_format) else dataset)
+    rows = list(reset_format(None) if callable(reset_format) else dataset)
+    return _pin_hf_attention_mask_column(rows)
 
 
 def _frame_columns(dataset: Any) -> Optional[Mapping[str, Any]]:
