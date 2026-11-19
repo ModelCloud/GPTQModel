@@ -1369,6 +1369,7 @@ class AWQProcessor(LoopProcessor):
                 entry.setdefault("priority_keys", []).append(priority_key)
                 entry["raw_tokens"] = entry.get("raw_tokens", 0) + length
                 entry["max_tokens"] = plan.max_tokens
+                self._enable_reservoir_candidates(entry, configured_max_tokens, plan)
                 entry.setdefault("batch_indices", []).append(batch_index)
 
             if quota > 0 and local_idx is not None and len(local_idx) > 0:
@@ -1452,6 +1453,7 @@ class AWQProcessor(LoopProcessor):
             # only grows, and a growing buffer carries the rows it held.
             budget_cap = self._reservoir_budget_cap(configured_max_tokens, plan, entry)
             entry["max_tokens"] = budget_cap
+            self._enable_reservoir_candidates(entry, configured_max_tokens, plan)
             entry.setdefault("batch_indices", []).append(batch_index)
 
         # The priority draw and the slot merge are per-module work. Holding the
@@ -1482,6 +1484,71 @@ class AWQProcessor(LoopProcessor):
                 module_lock = threading.Lock()
                 reservoir_locks[module_name] = module_lock
             return module_lock
+
+    def _enable_reservoir_candidates(
+        self,
+        entry: Dict[str, Any],
+        configured_max_tokens,
+        plan,
+    ) -> None:
+        """Start retaining rows a growing budget may still admit (#5384).
+
+        A routed expert's budget grows with the captures it has seen, so a row
+        evicted under a smaller cap can belong in the final sample. Keep those
+        rows as candidates and fold them back in when the layer materializes.
+        A configured ``max_tokens`` is fixed, so that reservoir is already
+        exact and needs no candidates.
+
+        ``plan.max_tokens`` bounds the final per-expert budget: no capture is
+        larger than one layer batch and no expert sees more captures than the
+        layer has batches. Pruning the pool to that bound therefore never drops
+        a row the final sample could contain. Without a plan the budget is
+        unbounded and every candidate is kept.
+        """
+
+        if configured_max_tokens is not None or "reservoir_candidates" in entry:
+            return
+        entry["reservoir_candidates"] = []
+        candidate_cap = int(plan.max_tokens) if plan is not None else 0
+        entry["reservoir_candidate_cap"] = candidate_cap if candidate_cap > 0 else None
+
+    def _remember_reservoir_candidates(
+        self,
+        entry: Dict[str, Any],
+        rows: torch.Tensor,
+        priorities: torch.Tensor,
+        sources: torch.Tensor,
+        row_indices: torch.Tensor,
+    ) -> None:
+        """Keep rows evicted before the reservoir budget is final (#5384)."""
+
+        candidates = entry.get("reservoir_candidates")
+        if candidates is None or int(rows.shape[0]) == 0:
+            return
+        candidates.append((rows, priorities, sources, row_indices))
+        candidate_cap = entry.get("reservoir_candidate_cap")
+        if candidate_cap is None:
+            return
+        cap = int(candidate_cap)
+        if sum(int(part[0].shape[0]) for part in candidates) <= 2 * cap:
+            return
+        # Only the lowest ``cap`` candidates can ever reach the final sample:
+        # the final budget never exceeds this bound, so a candidate ranked
+        # beyond it already has ``cap`` lower-priority candidates ahead of it.
+        rows = torch.cat([part[0] for part in candidates], dim=0)
+        priorities = torch.cat([part[1] for part in candidates])
+        sources = torch.cat([part[2] for part in candidates])
+        row_indices = torch.cat([part[3] for part in candidates])
+        keep = torch.topk(priorities, cap, largest=False).indices
+        candidates.clear()
+        candidates.append(
+            (
+                rows.index_select(0, keep),
+                priorities.index_select(0, keep),
+                sources.index_select(0, keep),
+                row_indices.index_select(0, keep),
+            )
+        )
 
     def _reservoir_budget_cap(self, configured_max_tokens, plan, entry=None) -> int:
         """Resolve the routed-expert reservoir size for one capture.
@@ -1575,6 +1642,12 @@ class AWQProcessor(LoopProcessor):
         the rest for good. Raising the cap to the buffer's high-water mark
         keeps a stale merge from evicting rows a larger capture already
         merged (#5333).
+
+        A row the drop set evicts is not necessarily lost: a later capture can
+        raise the budget, and the row may belong in the final sample. Such rows
+        go to ``reservoir_candidates`` while the budget can still grow, and
+        ``_materialize_reservoir_provenance`` keeps the final budget's lowest
+        priorities over the whole stream (#5384).
         """
 
         buffer = entry.get("reservoir_buffer")
@@ -1657,6 +1730,13 @@ class AWQProcessor(LoopProcessor):
             if used >= budget_cap and count and bool(
                 (priorities > priority_buffer[:used].max()).all()
             ):
+                self._remember_reservoir_candidates(
+                    entry,
+                    rows,
+                    priorities,
+                    torch.full((count,), int(source_index), dtype=torch.int64),
+                    row_indices,
+                )
                 entry["reservoir_used"] = used
                 entry["inputs"] = [buffer[:used].unsqueeze(0)]
                 entry.pop("provenance", None)
@@ -1690,6 +1770,29 @@ class AWQProcessor(LoopProcessor):
                     torch.arange(used, budget_cap),
                 ]
             )
+            # A row evicted here can belong in the final sample once a later
+            # capture raises the budget, so keep it until materialization
+            # (#5384). Copy the kept-out rows before the survivors overwrite
+            # their slots.
+            if int(new_drop.numel()):
+                self._remember_reservoir_candidates(
+                    entry,
+                    rows.index_select(0, new_drop),
+                    priorities.index_select(0, new_drop),
+                    torch.full(
+                        (int(new_drop.numel()),), int(source_index), dtype=torch.int64
+                    ),
+                    row_indices.index_select(0, new_drop),
+                )
+            if old_probe and int(old_drop.numel()):
+                evicted = old_largest.indices.index_select(0, old_drop)
+                self._remember_reservoir_candidates(
+                    entry,
+                    buffer.index_select(0, evicted),
+                    priority_buffer.index_select(0, evicted),
+                    source_buffer.index_select(0, evicted),
+                    row_buffer.index_select(0, evicted),
+                )
             buffer[slots] = rows.index_select(0, kept_new)
             priority_buffer[slots] = priorities.index_select(0, kept_new)
             source_buffer[slots] = source_index
@@ -1738,6 +1841,22 @@ class AWQProcessor(LoopProcessor):
 
         if rows.shape[0] > budget_cap:
             keep = torch.topk(priorities, budget_cap, largest=False).indices
+            dropped = torch.ones((rows.shape[0],), dtype=torch.bool)
+            dropped[keep] = False
+            dropped = dropped.nonzero(as_tuple=False).flatten()
+            self._remember_reservoir_candidates(
+                entry,
+                rows.index_select(0, dropped),
+                priorities.index_select(0, dropped),
+                torch.tensor(
+                    [int(provenance[int(index)][0]) for index in dropped.tolist()],
+                    dtype=torch.int64,
+                ),
+                torch.tensor(
+                    [int(provenance[int(index)][1]) for index in dropped.tolist()],
+                    dtype=torch.int64,
+                ),
+            )
             rows = rows.index_select(0, keep)
             priorities = priorities[keep]
             provenance = [provenance[int(index)] for index in keep.tolist()]
@@ -1760,6 +1879,31 @@ class AWQProcessor(LoopProcessor):
         if buffer is None:
             return
         used = int(entry.get("reservoir_used", 0))
+        candidates = entry.pop("reservoir_candidates", None)
+        if candidates:
+            # The budget grew while capturing, so rows evicted under a smaller
+            # cap may belong in the final sample. The budget is final now:
+            # keep its lowest priorities over the whole capture stream (#5384).
+            budget_cap = int(buffer.shape[0])
+            rows = torch.cat([buffer[:used]] + [part[0] for part in candidates], dim=0)
+            priorities = torch.cat(
+                [entry["reservoir_priorities"][:used]] + [part[1] for part in candidates]
+            )
+            sources = torch.cat(
+                [entry["reservoir_sources"][:used]] + [part[2] for part in candidates]
+            )
+            row_indices = torch.cat(
+                [entry["reservoir_rows"][:used]] + [part[3] for part in candidates]
+            )
+            keep = torch.topk(
+                priorities, min(budget_cap, int(priorities.numel())), largest=False
+            ).indices
+            used = int(keep.numel())
+            buffer[:used] = rows.index_select(0, keep)
+            entry["reservoir_priorities"][:used] = priorities.index_select(0, keep)
+            entry["reservoir_sources"][:used] = sources.index_select(0, keep)
+            entry["reservoir_rows"][:used] = row_indices.index_select(0, keep)
+            entry["reservoir_used"] = used
         entry["inputs"] = [buffer[:used].unsqueeze(0)]
         entry["provenance"] = list(
             zip(
@@ -1774,6 +1918,7 @@ class AWQProcessor(LoopProcessor):
             "reservoir_rows",
             "reservoir_used",
             "reservoir_worst_priority",
+            "reservoir_candidate_cap",
         ):
             entry.pop(key, None)
 
