@@ -1,5 +1,54 @@
 # Embedding checkpoint shard replacement
 
+## Public save dispatch
+
+`GPTQModel.save()` and `GPTQModel.save_pretrained()` route on the same model
+state before either writer runs (`gptqmodel/models/writer.py:2034-2056`,
+`gptqmodel/models/base.py:4267-4363`). A dense wrapper delegates to the wrapped
+Transformers model. A checkpoint whose only changed payload is a module
+replacement uses `save_quantized_embeddings()`. An ordinary quantized
+checkpoint keeps the full `save_quantized()` writer.
+
+Before this change `save_pretrained()` always called `save_quantized()`:
+
+```mermaid
+flowchart TD
+    S["save_pretrained"] --> Q["save_quantized"]
+    D["dense wrapper"] --> S
+    R["module-replacement checkpoint"] --> S
+    Q --> E["ValueError: model is not quantized"]
+    Q --> W["dense model.embed_tokens.weight; packed endpoints dropped"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class E,W failure;
+```
+
+The current flow is shared by both public names:
+
+```mermaid
+flowchart TD
+    A["GPTQModel.save"] --> B{"self.quantized?"}
+    P["GPTQModel.save_pretrained"] --> B
+    B -- No --> C["self.model.save_pretrained"]
+    B -- Yes --> D{"_model_free_weight_only_replacements_only?"}
+    D -- Yes --> E["save_quantized_embeddings"]
+    D -- No --> F["save_quantized"]
+    C -.-> X["writer errors propagate"]
+    E -.-> X
+    F -.-> X
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
+
+| Model state | Before `save_pretrained()` | Current contract |
+| --- | --- | --- |
+| Dense wrapper | `save_quantized()` raised `ValueError` (`gptqmodel/models/writer.py:2033-2042` before this change) | `self.model.save_pretrained()` owns config, tied weights and sharding (`gptqmodel/models/writer.py:2044-2045`) |
+| Weight-only module replacement | `save_quantized()` rebuilt the checkpoint and wrote the dense embedding tensor, dropping the packed payload | `save_quantized_embeddings()` preserves the replaced modules (`gptqmodel/models/writer.py:2046-2052`) |
+| Ordinary quantized | `save_quantized()` | unchanged (`gptqmodel/models/writer.py:2053-2054`) |
+
+`save()` already selected the writer by state
+(`gptqmodel/models/base.py:4319-4363`); the override now follows the same
+branches, so the two public names cannot disagree.
+
 `save_quantized_embeddings()` copies missing source files, then rewrites only
 the safetensors shards that contain replaced modules. Each rewritten shard is
 read from the existing output when present, or from the source checkpoint
