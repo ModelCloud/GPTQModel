@@ -1538,8 +1538,9 @@ def convert_bitsandbytes_shard(
     quant_cfg: dict,
     ignored_layers: Iterable[str] = (),
 ) -> Dict[str, torch.Tensor]:
-    bnb = _get_bitsandbytes_dependencies()
-
+    # Resolve the optional dependency lazily, inside the packed decode
+    # branches. The ignored-tensor paths below must work in the base test
+    # environment, which does not install bitsandbytes (issue #5417).
     tensors: Dict[str, torch.Tensor] = {}
     keys = list(reader.keys())
     key_set = set(keys)
@@ -1581,6 +1582,7 @@ def convert_bitsandbytes_shard(
             if prefix + ".weight_nested_quant_map" in key_set:
                 payload["nested_quant_map"] = reader.get_tensor(prefix + ".weight_nested_quant_map")
 
+            bnb = _get_bitsandbytes_dependencies()
             quant_state = bnb.functional.QuantState.from_dict(payload, device=tensor.device)
             deq = bnb.functional.dequantize_4bit(tensor, quant_state=quant_state)
             tensors[key] = finalize_for_save(deq, target_dtype)
@@ -1589,6 +1591,7 @@ def convert_bitsandbytes_shard(
 
         if key.endswith(".weight") and (key[:-len(".weight")] + ".weight_scb") in key_set:
             prefix = key[:-len(".weight")]
+            bnb = _get_bitsandbytes_dependencies()
             deq = bnb.functional.int8_vectorwise_dequant(
                 tensor,
                 reader.get_tensor(prefix + ".weight_scb"),
