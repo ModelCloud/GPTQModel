@@ -1538,8 +1538,6 @@ def convert_bitsandbytes_shard(
     quant_cfg: dict,
     ignored_layers: Iterable[str] = (),
 ) -> Dict[str, torch.Tensor]:
-    bnb = _get_bitsandbytes_dependencies()
-
     tensors: Dict[str, torch.Tensor] = {}
     keys = list(reader.keys())
     key_set = set(keys)
@@ -1570,6 +1568,10 @@ def convert_bitsandbytes_shard(
             continue
 
         if key.endswith(".weight") and (key[:-len(".weight")] + ".weight_quant_state") in key_set:
+            # The optional dependency is imported only by an actual packed
+            # decode. Ignored-only fixtures (e.g. the ignored-layer regression)
+            # must keep running in the base test environment (#5417).
+            bnb = _get_bitsandbytes_dependencies()
             prefix = key[:-len(".weight")]
             payload = {
                 "absmax": reader.get_tensor(prefix + ".weight_absmax"),
@@ -1588,6 +1590,7 @@ def convert_bitsandbytes_shard(
             continue
 
         if key.endswith(".weight") and (key[:-len(".weight")] + ".weight_scb") in key_set:
+            bnb = _get_bitsandbytes_dependencies()
             prefix = key[:-len(".weight")]
             deq = bnb.functional.int8_vectorwise_dequant(
                 tensor,
