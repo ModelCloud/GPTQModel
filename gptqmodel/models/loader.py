@@ -17,6 +17,7 @@ import threading
 import time
 import weakref
 from functools import lru_cache, partial, wraps
+from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
 from types import MethodType
@@ -1502,21 +1503,78 @@ def _materialize_meta_expert_linears(model) -> int:
     return moved
 
 
-def _supports_flash_attn_2(config: PretrainedConfig) -> bool:
-    """Detect whether the resolved HF architecture exposes FA2 kernels."""
+def _definition_model_class(definition, config: PretrainedConfig):
+    """Return the model class ``definition`` builds for ``config``, or None.
 
-    if not getattr(config, "architectures", None):
-        return False
+    Resolved from the definition's own loader, never from a checkpoint-supplied
+    name looked up on the ``transformers`` package (``config.architectures`` is
+    checkpoint data and would import an arbitrary Transformers model module).
+    """
 
-    model_class = getattr(transformers, config.architectures[0], None)
+    from transformers.modeling_utils import PreTrainedModel
+
+    from .local import LocalModelLoader, _local_class
+
+    loader = getattr(definition, "loader", None)
+    if not isinstance(loader, LocalModelLoader):
+        # Unsupported model (BaseQModel's Transformers Auto* loader): the class
+        # that Auto* builds for this config type.
+        mapping = getattr(loader, "_model_mapping", None)
+        try:
+            return mapping[type(config)] if mapping is not None else None
+        except (KeyError, ValueError):
+            return None
+
+    target = _local_class(loader.model_class)
+    resolver = getattr(target, "_model_class", None)
+    if callable(resolver):
+        # Native* loaders: the vendored class registered for config.model_type.
+        try:
+            return resolver(config)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(target, type) and issubclass(target, PreTrainedModel):
+        return target
+    # Port factory: the package class its module names for this architecture,
+    # else the vendored class registered for config.model_type.
+    def _package_model(candidate):
+        return (
+            isinstance(candidate, type)
+            and issubclass(candidate, PreTrainedModel)
+            and candidate.__module__.startswith("gptqmodel.")
+        )
+
+    architectures = getattr(config, "architectures", None) or ()
+    name = architectures[0] if architectures and isinstance(architectures[0], str) else None
+    if name is not None and name.isidentifier():
+        found = getattr(import_module(target.__module__), name, None)
+        if _package_model(found):
+            return found
+    from .ports.native.auto import _registry, _resolve
+
+    model_type = getattr(config, "model_type", None)
+    for table in (_registry.CAUSAL_LM, _registry.IMAGE_TEXT_TO_TEXT, _registry.MULTIMODAL_LM, _registry.MODEL):
+        if model_type in table:
+            found = _resolve(table, model_type, "model")
+            if _package_model(found):
+                return found
+    return None
+
+
+def _model_class_supports_flash_attn(model_class) -> bool | None:
     if model_class is None:
-        return False
-
+        return None
     if hasattr(model_class, "_supports_flash_attn_2"):
         return bool(getattr(model_class, "_supports_flash_attn_2"))
     if hasattr(model_class, "_supports_flash_attn"):
         return bool(getattr(model_class, "_supports_flash_attn"))
-    return False
+    return None
+
+
+def _supports_flash_attn_2(definition, config: PretrainedConfig) -> bool:
+    """Detect whether the class ``definition`` builds exposes FA2 kernels."""
+
+    return bool(_model_class_supports_flash_attn(_definition_model_class(definition, config)))
 
 
 def _iter_nested_pretrained_configs(config: PretrainedConfig):
@@ -2547,7 +2605,7 @@ def ModelLoader(cls):
                 and native_gguf_qspec.tensor_qtype == _ggml_quantization_type().Q1_0
                 and atten_impl in {None, "auto"}
                 and _is_accelerated_attention_device(resolved_device)
-                and (config.model_type == "qwen3" or _supports_flash_attn_2(config))
+                and (config.model_type == "qwen3" or _supports_flash_attn_2(cls, config))
                 and is_flash_attn_2_available()
             ):
                 hf_model_init_kwargs[ATTN_IMPLEMENTATION] = "flash_attention_2"
@@ -3342,18 +3400,7 @@ def ModelLoader(cls):
                 load_quantized_model=True,
             )
 
-            if config.architectures:
-                model_class = getattr(transformers, config.architectures[0], None)
-                if model_class is not None:
-                    # backward-compatible fallback for "_supports_flash_attn" field
-                    if hasattr(model_class, "_supports_flash_attn_2"):
-                        supports_flash_attn = getattr(model_class, "_supports_flash_attn_2")
-                    elif hasattr(model_class, "_supports_flash_attn"):
-                        supports_flash_attn = getattr(model_class, "_supports_flash_attn")
-                else:
-                    supports_flash_attn = None
-            else:
-                supports_flash_attn = None
+            supports_flash_attn = _model_class_supports_flash_attn(_definition_model_class(cls, config))
 
             args = {}
             if supports_flash_attn and selector_device_family(device) in [DEVICE.CUDA, DEVICE.ROCM]:

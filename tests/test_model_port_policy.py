@@ -8,6 +8,10 @@
 3. Ports contain no pre-5.23 compatibility patterns.
 4. Nothing else in ``gptqmodel/`` imports ``transformers.models.*`` either,
    except the commented ``PACKAGE_MODEL_IMPORT_EXCEPTIONS``.
+5. Nothing in ``gptqmodel/`` resolves Transformers classes dynamically
+   (``getattr(transformers, <non-literal>)``, ``import_module("transformers.models...")``),
+   except the commented ``DYNAMIC_TRANSFORMERS_LOOKUP_EXCEPTIONS``. The runtime
+   counterpart is tests/test_no_transformers_family_imports.py.
 
 The ``PENDING_*`` sets list today's violators. They may only shrink: an entry
 that no longer violates fails the test so it gets removed. They must be empty
@@ -254,3 +258,87 @@ def test_package_never_imports_transformers_model_families():
     assert not PENDING_PACKAGE_MODEL_IMPORTS - set(found), (
         f"now framework-only; remove from pending: {sorted(PENDING_PACKAGE_MODEL_IMPORTS - set(found))}"
     )
+
+
+# Sites that may look a non-literal name up on the ``transformers`` package,
+# keyed by file relative to gptqmodel/ -> number of such sites.
+DYNAMIC_TRANSFORMERS_LOOKUP_EXCEPTIONS = {
+    # ``_by_name``: framework-class lookup that first checks the lazy export
+    # table and refuses (without importing) anything under ``transformers.models``.
+    "models/ports/native/auto/__init__.py": 1,
+}
+
+
+def _leading_text(node):
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr) and node.values and isinstance(node.values[0], ast.Constant):
+        return node.values[0].value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _leading_text(node.left)
+    return None
+
+
+def _dynamic_transformers_lookups(path):
+    """Yield ``getattr``/``hasattr`` on the transformers module with a non-literal
+    name, and ``import_module``/``__import__`` of ``transformers.models...``."""
+
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    aliases = {"transformers"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            aliases.update(alias.asname or alias.name for alias in node.names if alias.name == "transformers")
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+        if name in {"getattr", "hasattr"} and len(node.args) >= 2:
+            target, attribute = node.args[:2]
+            on_transformers = (isinstance(target, ast.Name) and target.id in aliases) or (
+                isinstance(target, ast.Call) and target.args and _leading_text(target.args[0]) == "transformers"
+            )
+            if on_transformers and not (isinstance(attribute, ast.Constant) and isinstance(attribute.value, str)):
+                yield f"{node.lineno}: {name}(transformers, <non-literal>)"
+        elif name in {"import_module", "__import__"} and node.args:
+            text = _leading_text(node.args[0])
+            package = next((_leading_text(k.value) for k in node.keywords if k.arg == "package"), None)
+            if package is None and len(node.args) > 1:
+                package = _leading_text(node.args[1])
+            if (text or "").startswith("transformers.models") or (package or "").startswith("transformers.models"):
+                yield f"{node.lineno}: {name}({text!r}, package={package!r})"
+
+
+def test_package_never_resolves_transformers_classes_dynamically():
+    found = {}
+    for path in sorted(PACKAGE.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        hits = list(_dynamic_transformers_lookups(path))
+        if hits:
+            found[path.relative_to(PACKAGE).as_posix()] = hits
+    violations = {
+        path: hits for path, hits in found.items() if len(hits) > DYNAMIC_TRANSFORMERS_LOOKUP_EXCEPTIONS.get(path, 0)
+    }
+    assert not violations, f"dynamic transformers class resolution in gptqmodel/: {violations}"
+    stale = {path for path, count in DYNAMIC_TRANSFORMERS_LOOKUP_EXCEPTIONS.items() if len(found.get(path, ())) < count}
+    assert not stale, f"exception no longer used; lower or remove it: {sorted(stale)}"
+
+
+def test_dynamic_lookup_guard_detects_violations(tmp_path):
+    sample = tmp_path / "sample.py"
+    sample.write_text(
+        "import transformers\n"
+        "import transformers as tf\n"
+        "from importlib import import_module\n"
+        "a = getattr(transformers, config.architectures[0], None)\n"
+        "b = getattr(tf, name)\n"
+        "c = import_module(f'transformers.models.{family}.modeling_{family}')\n"
+        "d = import_module('.' + name, 'transformers.models')\n"
+        "e = import_module('.' + name, package='transformers.models')\n"
+        "ok1 = getattr(transformers, 'PreTrainedModel')\n"
+        "ok2 = import_module(f'gptqmodel.models.ports.native.{family}')\n"
+        "ok3 = getattr(module, name)\n"
+    )
+    hits = list(_dynamic_transformers_lookups(sample))
+    assert [hit.split(":")[0] for hit in hits] == ["4", "5", "6", "7", "8"], hits
