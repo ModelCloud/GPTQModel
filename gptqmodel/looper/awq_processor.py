@@ -499,6 +499,13 @@ class AWQProcessor(LoopProcessor):
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
+        # AWQ masks every capture itself in `_apply_active_keep_mask_to_feature`,
+        # which also recognizes the `[B*S, H]` and MLA single-head layouts. Keep
+        # the raw activation here so a routed-expert subset stays
+        # distinguishable from a capture that was already filtered: a routed
+        # subset can coincidentally have exactly `keep_mask.sum()` rows while
+        # still carrying padding (#5360).
+        self.preserve_batch_keep_mask = True
         self.avg_losses = []
         self.nsamples = 0
         self._nsamples_total = 0
@@ -1809,13 +1816,14 @@ class AWQProcessor(LoopProcessor):
         keep_mask = getattr(tls, "value", None)
         if not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
             return feature
-        # A `[B * S, H]` capture is filtered by the mask itself, and the
-        # all-expert path already stores exactly the kept rows. Only a routed
-        # subset (pads routed to this expert, real rows elsewhere) has a row
-        # count that matches neither. A real activation can be all-zero, so
-        # the row count is the discriminator, not the zeros alone.
-        row_count = int(feature.shape[0])
-        if row_count in (int(keep_mask.numel()), int(keep_mask.sum())):
+        # A `[B * S, H]` capture is filtered by the mask itself in
+        # `_apply_active_keep_mask_to_feature`. Anything else is a routed subset
+        # (pads routed to this expert, real rows elsewhere), whose row count is
+        # unrelated to the mask: it can even equal `keep_mask.sum()` while still
+        # containing padding, so the count is only used to recognize the full
+        # grid (#5360). A real activation can be all-zero, so the zero check
+        # alone cannot decide either.
+        if int(feature.shape[0]) == int(keep_mask.numel()):
             return feature
 
         padding_present = getattr(tls, "mask_has_padding", None)

@@ -128,3 +128,56 @@ def test_moe_root_hook_is_a_no_op_without_padding():
     block(hidden)
 
     torch.testing.assert_close(seen["x"], hidden)
+
+
+def test_routed_capture_drops_pads_when_its_row_count_equals_the_kept_count():
+    """#5360: the routed row count can coincide with `keep_mask.sum()`.
+
+    A two-by-four batch with keep mask ``[[1, 1, 1, 1], [1, 1, 0, 0]]`` has six
+    attended positions. If the router sends positions ``[0, 1, 2, 3, 6, 7]`` to
+    one expert, that capture has six rows -- four real and two padding -- so a
+    row-count test against ``keep_mask.sum()`` cannot tell it apart from an
+    already-filtered grid. Only the full `[B*S, H]` grid may skip the drop.
+    """
+
+    processor = _processor()
+    mask = torch.tensor([[True, True, True, True], [True, True, False, False]])
+    _bind_mask(processor, mask)
+    assert int(mask.sum()) == 6 and int(mask.numel()) == 8
+
+    real = torch.arange(1, 9, dtype=torch.float32).reshape(4, 2)
+    # The MoE-root hook zeroes the padded positions before routing (#4035), and
+    # the router still sends them: four real rows plus two pad rows here.
+    routed = torch.cat([real, torch.zeros(2, 2)], dim=0)
+    module_name = "mlp.experts.2.gate_proj"
+    processor.tasks[module_name] = {"inputs": [], "batch_indices": []}
+
+    processor._record_input_feature(module_name, routed)
+
+    kept = processor.tasks[module_name]["inputs"][0]
+    assert tuple(kept.shape) == (1, 4, 2)
+    torch.testing.assert_close(kept[0], real)
+
+
+def test_a_full_grid_capture_is_left_to_the_mask_path():
+    """`[B*S, H]` rows are filtered by the mask, not by the zero check.
+
+    Dropping zeros here would also drop a real all-zero activation, so the full
+    grid keeps its rows and `_apply_active_keep_mask_to_feature` selects them.
+    """
+
+    processor = _processor()
+    mask = torch.tensor([[True, True, False], [True, False, False]])
+    _bind_mask(processor, mask)
+
+    grid = torch.randn(6, 4)
+    grid[3] = 0
+    module_name = "mlp.shared_expert.gate_proj"
+    processor.tasks[module_name] = {"inputs": [], "batch_indices": []}
+
+    processor._record_input_feature(module_name, grid)
+
+    kept = processor.tasks[module_name]["inputs"][0]
+    # Three attended rows, the real all-zero one included.
+    assert tuple(kept.shape) == (1, 3, 4)
+    torch.testing.assert_close(kept[0], grid[mask.reshape(-1)])
