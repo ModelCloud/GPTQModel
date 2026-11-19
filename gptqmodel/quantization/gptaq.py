@@ -155,7 +155,7 @@ class GPTAQ(GPTQ):
         batch_request_count = inp.shape[0]
 
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
-            if len(inp.shape) == 3:
+            if len(inp.shape) > 2:
                 inp = inp.reshape((-1, inp.shape[-1]))
                 if self._use_native_delta:
                     native_inp = native_inp.reshape((-1, inp.shape[-1]))
