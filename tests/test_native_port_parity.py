@@ -11,7 +11,9 @@ produce bit-identical outputs.
 """
 
 import importlib
+import inspect
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -58,23 +60,28 @@ def _flatten(output):
 # Families whose *native* Transformers forward cannot run on the tester inputs here.
 ORACLE_UNAVAILABLE = {
     "inkling": "native Inkling requires scipy",
-    "roberta": "vendored only as a dependency; the tester's inputs target encoder heads",
 }
+
+
+def _class_inputs(name, inputs):
+    """Multiple-choice heads take (batch, choices, seq) inputs; the testers' common inputs are 2-D."""
+
+    if name.endswith("ForMultipleChoice"):
+        return {k: v.unsqueeze(1).expand(-1, 2, -1).contiguous() if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+    return inputs
 
 
 @pytest.mark.parametrize("family", CASES)
 def test_vendored_family_matches_transformers(family, tmp_path):
     if family in ORACLE_UNAVAILABLE:
-        if family == "inkling":
-            pytest.importorskip("scipy", reason=ORACLE_UNAVAILABLE[family])
-        else:
-            pytest.skip(ORACLE_UNAVAILABLE[family])
+        pytest.importorskip("scipy", reason=ORACLE_UNAVAILABLE[family])
     spec = json.loads((FIXTURES / f"{family}.json").read_text())
     native_config_class, vendored_config_class = _classes(family, spec["config_module"], spec["config_class"])
     assert vendored_config_class is not native_config_class
-    inputs = _inputs(family, spec)
+    family_inputs = _inputs(family, spec)
 
     for module, name in spec["model_classes"]:
+        inputs = _class_inputs(name, family_inputs)
         native_class, vendored_class = _classes(family, module, name)
         native_config = native_config_class.from_dict(dict(spec["config"]))
         vendored_config = vendored_config_class.from_dict(dict(spec["config"]))
@@ -211,3 +218,278 @@ def test_vendored_llama4_matches_transformers(model_name, tmp_path):
     assert expected and len(actual) == len(expected)
     for index, (want, got) in enumerate(zip(expected, actual)):
         assert torch.equal(want, got), f"{model_name}: output {index} differs after loading a Transformers checkpoint"
+
+
+# ---------------------------------------------------------------------------------------------------
+# Call variants. The default forward above is not enough: the vendored families carry GPT-QModel
+# rewrites (5.23 output capturing instead of legacy return paths), so every optional output path,
+# the tuple path, the cached decode step, the loss and greedy generation must also equal native.
+# A variant is only "unsupported" when native Transformers itself raises on it; the vendored class
+# must then raise the same exception type, and the pair is listed in NATIVE_UNSUPPORTED.
+# ---------------------------------------------------------------------------------------------------
+
+from transformers.cache_utils import Cache  # noqa: E402
+from transformers.configuration_utils import PreTrainedConfig  # noqa: E402
+from transformers.utils import ModelOutput  # noqa: E402
+
+
+FORWARD_VARIANTS = {
+    "default": {},
+    "output_hidden_states": {"output_hidden_states": True},
+    "output_attentions": {"output_attentions": True},
+    "return_dict_false": {"return_dict": False},
+    "return_dict_false_all_outputs": {"return_dict": False, "output_hidden_states": True, "output_attentions": True},
+}
+# Variants native Transformers 5.23 itself raises on (the vendored class must raise the same type).
+# Absent capabilities (no `labels` argument, no cache returned, not a GenerationMixin) are not
+# listed: those variants do not exist for the class.
+NATIVE_UNSUPPORTED = {
+    "timm_wrapper": {
+        f"{name}/{variant}": "timm models do not expose attention weights (native raises ValueError)"
+        for name in ("TimmWrapperModel", "TimmWrapperForImageClassification")
+        for variant in ("output_attentions", "return_dict_false_all_outputs")
+    },
+}
+CLASSIFICATION_SUFFIXES = ("ForSequenceClassification", "ForImageClassification", "ForAudioClassification", "ForMultipleChoice")
+# Step-2 inputs keep only text inputs: like generation, media inputs are consumed by the prefill.
+STEP_KEEP = {"input_ids", "attention_mask"}
+
+
+def _assert_same(want, got, where, depth=0):
+    """Structural, bit-exact equality: types, tuple lengths, output keys, caches and tensors."""
+
+    assert depth < 12, where
+    if isinstance(want, torch.Tensor):
+        assert isinstance(got, torch.Tensor), f"{where}: {type(got).__name__} instead of a tensor"
+        assert got.dtype == want.dtype and got.shape == want.shape, f"{where}: {got.dtype}{tuple(got.shape)} != {want.dtype}{tuple(want.shape)}"
+        assert torch.equal(want, got), f"{where}: values differ"
+        return
+    if want is None or isinstance(want, (bool, int, float, str, torch.dtype, torch.device)):
+        assert type(got) is type(want) and got == want, f"{where}: {got!r} != {want!r}"
+        return
+    assert type(got).__name__ == type(want).__name__, f"{where}: {type(got).__name__} != {type(want).__name__}"
+    if isinstance(want, ModelOutput):
+        assert list(got.keys()) == list(want.keys()), f"{where}: keys {list(got.keys())} != {list(want.keys())}"
+        for key in want.keys():
+            _assert_same(want[key], got[key], f"{where}.{key}", depth + 1)
+    elif isinstance(want, (tuple, list)):
+        assert len(got) == len(want), f"{where}: length {len(got)} != {len(want)}"
+        for index, (w, g) in enumerate(zip(want, got)):
+            _assert_same(w, g, f"{where}[{index}]", depth + 1)
+    elif isinstance(want, dict):
+        assert list(got) == list(want), f"{where}: keys differ"
+        for key in want:
+            _assert_same(want[key], got[key], f"{where}[{key!r}]", depth + 1)
+    elif isinstance(want, Cache) or hasattr(want, "__dict__"):
+        # Caches (framework or family-vendored hybrid caches) and their layers: compare state.
+        want_vars = {k: v for k, v in vars(want).items() if not isinstance(v, (PreTrainedConfig, torch.nn.Module)) and not callable(v)}
+        got_vars = {k: v for k, v in vars(got).items() if not isinstance(v, (PreTrainedConfig, torch.nn.Module)) and not callable(v)}
+        assert sorted(got_vars) == sorted(want_vars), f"{where}: attributes differ"
+        for key in sorted(want_vars):
+            _assert_same(want_vars[key], got_vars[key], f"{where}.{key}", depth + 1)
+
+
+def _run(model, method, kwargs):
+    # Reseed per call: some families draw random numbers in forward/generate (diffusion masking).
+    torch.manual_seed(0)
+    try:
+        with torch.no_grad():
+            return getattr(model, method)(**kwargs), None
+    except Exception as exc:  # noqa: BLE001 - native behavior is the oracle, including failures
+        return None, exc
+
+
+def _describe(exc):
+    text = str(exc).splitlines()[0][:120] if str(exc) else ""
+    return f"{type(exc).__name__}: {text}"
+
+
+class _Checker:
+    """Collects mismatches (all of them, not just the first) and natively unsupported variants."""
+
+    def __init__(self):
+        self.failures = []
+        self.unsupported = {}
+        self.compared = []
+        self.raised = []
+
+    def compare(self, native, vendored, method, native_kwargs, label, vendored_kwargs=None):
+        expected, native_error = _run(native, method, native_kwargs)
+        actual, vendored_error = _run(vendored, method, native_kwargs if vendored_kwargs is None else vendored_kwargs)
+        if native_error is not None:
+            self.unsupported[label] = _describe(native_error)
+            self.raised.append(label)
+            if vendored_error is None or type(vendored_error) is not type(native_error):
+                self.failures.append(f"{label}: native raised {_describe(native_error)}; vendored gave {vendored_error!r}")
+            return None, None
+        if vendored_error is not None:
+            self.failures.append(f"{label}: vendored raised {_describe(vendored_error)}; native did not")
+            return None, None
+        self.compared.append(label)
+        try:
+            _assert_same(expected, actual, label)
+        except AssertionError as exc:
+            self.failures.append(str(exc).splitlines()[0])
+            return None, None
+        return expected, actual
+
+
+def _accepts(model_class, name):
+    return name in inspect.signature(model_class.forward).parameters
+
+
+def _labels(name, model_class, config, inputs):
+    if not _accepts(model_class, "labels"):
+        return None
+    if name.endswith(CLASSIFICATION_SUFFIXES):
+        batch = next(v for v in inputs.values() if isinstance(v, torch.Tensor)).shape[0]
+        return torch.zeros(batch, dtype=torch.long)
+    if getattr(config, "is_encoder_decoder", False) and "decoder_input_ids" in inputs:
+        return inputs["decoder_input_ids"].clone()
+    if "input_ids" in inputs:
+        return inputs["input_ids"].clone()
+    return None
+
+
+CACHE_KEYS = ("past_key_values", "cache_params")  # cache_params: Mamba-style families
+
+
+def _next_steps(inputs, output, config, cache_key, keep_mask=True):
+    """Inputs for one cached decode step after a use_cache=True prefill (``None`` if impossible)."""
+
+    # The greedy next token when the head has logits, else (base models) repeat the last token.
+    logits = output.get("logits")
+    encoder_decoder = getattr(config, "is_encoder_decoder", False)
+    if logits is not None and logits.dim() == 3:
+        token = logits[:, -1:].argmax(-1)
+    else:
+        token = inputs.get("decoder_input_ids" if encoder_decoder else "input_ids")
+        if token is None:
+            return None
+        token = token[:, -1:]
+    if encoder_decoder:
+        if "decoder_input_ids" not in inputs:
+            return None
+        step = {k: v for k, v in inputs.items() if not k.startswith("decoder_")}
+        step["decoder_input_ids"] = token
+    else:
+        if "input_ids" not in inputs:
+            return None
+        step = {k: v for k, v in inputs.items() if k in STEP_KEEP and (keep_mask or k != "attention_mask")}
+        step["input_ids"] = token
+        if "attention_mask" in step:
+            mask = step["attention_mask"]
+            step["attention_mask"] = torch.cat([mask, mask.new_ones(mask.shape[0], 1)], dim=-1)
+    step[cache_key] = output[cache_key]
+    step["use_cache"] = True
+    return step
+
+
+def _cache_key(output):
+    if isinstance(output, ModelOutput):
+        return next((key for key in CACHE_KEYS if output.get(key) is not None), None)
+    return None
+
+
+def _build_pair(native_class, vendored_class, native_config, vendored_config, attn_implementation=None):
+    torch.manual_seed(0)
+    native = native_class(native_config).eval()
+    torch.manual_seed(0)
+    vendored = vendored_class(vendored_config).eval()
+    vendored.load_state_dict(native.state_dict(), strict=True)
+    for key, buffer in native.named_buffers():
+        vendored.get_buffer(key).copy_(buffer)
+    if attn_implementation is not None:
+        for model in (native, vendored):
+            try:
+                model.set_attn_implementation(attn_implementation)
+            except (ValueError, ImportError, AttributeError):
+                pass
+    return native, vendored
+
+
+def assert_variants_match(native, vendored, name, inputs):
+    """Run every call variant on an identically initialized (eager) native/vendored pair.
+
+    Returns ({variant label: reason} for variants that do not apply or that Transformers itself
+    does not support, the mismatches, the compared labels, the labels native raised on).
+    """
+
+    check = _Checker()
+    config = native.config
+    for variant, kwargs in FORWARD_VARIANTS.items():
+        check.compare(native, vendored, "forward", {**inputs, **kwargs}, f"{name}/{variant}")
+
+    # Cached decode: prefill with use_cache=True, then one cached step fed the next token. The step
+    # keeps the (extended) attention mask unless native rejects that (M-RoPE families derive
+    # position ids from a full-length mask; generation slices them in prepare_inputs_for_generation),
+    # in which case the step runs without a mask. Each attempt starts from a fresh prefill so the
+    # caches are never reused after a failed step.
+    can_generate = native.can_generate()
+    if can_generate or any(_accepts(type(native), key) for key in CACHE_KEYS):
+        expected, _ = check.compare(native, vendored, "forward", {**inputs, "use_cache": True}, f"{name}/use_cache")
+        cache_key = _cache_key(expected)
+        if expected is not None and cache_key is None:
+            check.unsupported[f"{name}/cached_step"] = "native returns no cache with use_cache=True"
+        elif expected is not None:
+            def prefill(model):
+                torch.manual_seed(0)
+                with torch.no_grad():
+                    return model(**inputs, use_cache=True)
+
+            keep_mask = True
+            if "attention_mask" in inputs and not getattr(config, "is_encoder_decoder", False):
+                probe = _next_steps(inputs, prefill(native), config, cache_key)
+                keep_mask = probe is None or _run(native, "forward", probe)[1] is None
+            native_step = _next_steps(inputs, prefill(native), config, cache_key, keep_mask)
+            if native_step is None:
+                check.unsupported[f"{name}/cached_step"] = "no text input to continue"
+            else:
+                vendored_step = _next_steps(inputs, prefill(vendored), vendored.config, cache_key, keep_mask)
+                label = f"{name}/cached_step" if keep_mask else f"{name}/cached_step_without_mask"
+                check.compare(native, vendored, "forward", native_step, label, vendored_step)
+
+    labels = _labels(name, type(native), config, inputs)
+    if labels is None:
+        check.unsupported[f"{name}/loss"] = "forward takes no labels or no label-shaped input"
+    else:
+        expected, _ = check.compare(native, vendored, "forward", {**inputs, "labels": labels}, f"{name}/loss")
+        if isinstance(expected, ModelOutput) and expected.get("loss") is None:
+            check.unsupported[f"{name}/loss"] = "native returns no loss"
+
+    if can_generate:
+        check.compare(native, vendored, "generate", {**inputs, "max_new_tokens": 3, "do_sample": False}, f"{name}/generate")
+    return check.unsupported, check.failures, check.compared, check.raised
+
+
+def _record_report(family, unsupported, failures, compared):
+    report = os.environ.get("GPTQMODEL_PARITY_VARIANT_REPORT")
+    if report:
+        with open(report, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"family": family, "unsupported": unsupported, "failures": failures, "compared": compared}, sort_keys=True) + "\n")
+
+
+@pytest.mark.parametrize("family", CASES)
+def test_vendored_family_call_variants_match_transformers(family):
+    if family in ORACLE_UNAVAILABLE:
+        pytest.importorskip("scipy", reason=ORACLE_UNAVAILABLE[family])
+    spec = json.loads((FIXTURES / f"{family}.json").read_text())
+    native_config_class, vendored_config_class = _classes(family, spec["config_module"], spec["config_class"])
+    family_inputs = _inputs(family, spec)
+    unsupported, failures, compared, raised = {}, [], [], []
+    for module, name in spec["model_classes"]:
+        inputs = _class_inputs(name, family_inputs)
+        native_class, vendored_class = _classes(family, module, name)
+        native, vendored = _build_pair(
+            native_class, vendored_class,
+            native_config_class.from_dict(dict(spec["config"])), vendored_config_class.from_dict(dict(spec["config"])),
+            attn_implementation="eager",
+        )
+        class_unsupported, class_failures, class_compared, class_raised = assert_variants_match(native, vendored, name, inputs)
+        raised.extend(class_raised)
+        unsupported.update(class_unsupported)
+        failures.extend(class_failures)
+        compared.extend(class_compared)
+    _record_report(family, unsupported, failures, compared)
+    assert not failures, "\n".join(failures)
+    assert sorted(raised) == sorted(NATIVE_UNSUPPORTED.get(family, {})), {label: unsupported[label] for label in raised}

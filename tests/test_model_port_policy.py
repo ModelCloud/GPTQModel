@@ -86,6 +86,18 @@ def _model_import_ports():
     return {_port_name(path) for path in _port_files() if any(_model_family_imports(path))}
 
 
+# Exact (file -> idioms) exemptions from STALE_PATTERNS. Only for verbatim Transformers 5.23 code whose
+# observable behavior the 5.23 output-capturing conventions cannot reproduce; each needs a reason.
+STALE_PATTERN_EXCEPTIONS = {
+    # Transformers 5.23's DecisionTransformerModel returns the 3-tuple (state_preds, action_preds,
+    # return_preds) for return_dict=False while its dict output has six fields (hidden_states,
+    # attentions, last_hidden_state too). `can_return_tuple` would return every non-None field, so
+    # the verbatim `if not return_dict:` branch is the only way to keep native tuple semantics
+    # (enforced by tests/test_native_port_parity.py).
+    "native/decision_transformer/modeling_decision_transformer.py": frozenset({"if not return_dict"}),
+}
+
+
 # A released config.json may still spell a field the old way; configuration
 # modules may read it once at parse time and convert it. Nothing else may.
 PARSE_TIME_FIELDS = frozenset({"rope_scaling", "torch_dtype", "num_logits_to_keep"})
@@ -95,7 +107,7 @@ def _stale_hits(path):
     hits = set(STALE_PATTERNS.findall(path.read_text(encoding="utf-8")))
     if path.name.startswith("configuration_"):
         hits -= PARSE_TIME_FIELDS
-    return hits
+    return hits - STALE_PATTERN_EXCEPTIONS.get(path.relative_to(PORTS).as_posix(), frozenset())
 
 
 def _stale_pattern_ports():
@@ -134,6 +146,17 @@ def test_ports_contain_no_pre_5_23_compatibility_code():
     assert not PENDING_STALE_PATTERN_PORTS - actual, (
         f"now clean; remove from pending: {sorted(PENDING_STALE_PATTERN_PORTS - actual)}"
     )
+
+
+def test_stale_pattern_exceptions_are_exact_and_used():
+    for relative, idioms in STALE_PATTERN_EXCEPTIONS.items():
+        path = PORTS / relative
+        assert path.is_file(), f"exception for a missing file: {relative}"
+        found = set(STALE_PATTERNS.findall(path.read_text(encoding="utf-8")))
+        assert idioms <= found, f"exception no longer used; remove it: {relative}: {sorted(idioms - found)}"
+        # Only idioms Transformers 5.23 itself still ships in that file may be exempted.
+        upstream = Path(transformers.__file__).parent / "models" / Path(relative).relative_to("native")
+        assert idioms <= set(STALE_PATTERNS.findall(upstream.read_text(encoding="utf-8"))), relative
 
 
 def test_policy_detects_violations(tmp_path, monkeypatch):
