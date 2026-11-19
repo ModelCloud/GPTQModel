@@ -558,8 +558,8 @@ rotate_pair_grad_launcher(at::Tensor x, at::Tensor g, at::Tensor idx_ij, at::Ten
   at::Tensor out_x = at::empty(x.sizes(), options);
   at::Tensor out_g = at::empty(x.sizes(), options);
   at::Tensor partials = at::empty({KROT, granules, static_cast<int64_t>(h) / 2},
-                                  at::TensorOptions().dtype(at::kFloat).device(x.device()));
-  at::Tensor grad = at::empty({KROT, h / 2}, at::TensorOptions().dtype(at::kFloat).device(x.device()));
+                                  at::options(x).dtype(at::kFloat));
+  at::Tensor grad = at::empty({KROT, h / 2}, at::options(x).dtype(at::kFloat));
 
   const at::ScalarType dtype = x.scalar_type();
   auto theta_cast = theta.scalar_type() == dtype ? theta : at::to(theta, dtype);
@@ -1048,7 +1048,8 @@ void validate_rotation_inputs(const at::Tensor &x, const at::Tensor &idx,
               "Paro rotation indices must have one pair row per hidden column, got ",
               idx.size(1), " for hidden size ", h);
   TORCH_CHECK(theta.size(0) == idx.size(0) && theta.size(1) == h / 2,
-              "Paro rotation theta must be [krot, hidden/2], got ", theta.size(0), " x ", theta.size(1));
+              "Paro rotation theta must be [krot, hidden/2], got ",
+              theta.size(0), " x ", theta.size(1));
   TORCH_CHECK(!has_scale || scales.numel() == h,
               "Paro rotation scales must have one value per hidden column, got ",
               scales.numel());
