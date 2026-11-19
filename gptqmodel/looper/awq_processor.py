@@ -1980,14 +1980,38 @@ class AWQProcessor(LoopProcessor):
 
         return AWQProcessor._token_row_budget_for_counts(row_counts)
 
+    #: One in this many single-row quotas keeps the batch's first position.
+    #:
+    #: Both extremes are bad. Keeping every single-row quota at row 0 collapsed
+    #: the sample onto the BOS/attention-sink activation, identical for every
+    #: document (#5265: Llama-3.2-1B PPL 21.8 -> 91.7). Keeping none removes
+    #: the sink rows entirely, and the scale search then never sees the
+    #: outlier channels those positions carry (#5310: Qwen2.5-0.5B PPL 28.0,
+    #: worse than RTN's 24.8). A 1/8 share is close to the sink share of the
+    #: ``batch_size=4`` sample that #4176 accepted.
+    SINGLE_ROW_SINK_PERIOD = 8
+
+    @staticmethod
+    def _single_token_row(length: int, ordinal: int) -> torch.Tensor:
+        """Row a batch contributes when its quota is exactly one.
+
+        ``ordinal`` counts the single-row quotas in batch order, so the sink
+        rows are spread deterministically over the calibration set instead of
+        clustering in its first eighth.
+        """
+
+        if ordinal % AWQProcessor.SINGLE_ROW_SINK_PERIOD == 1:
+            return torch.zeros(1, dtype=torch.int64)
+        return AWQProcessor._stratified_token_row(1, int(length))
+
     @staticmethod
     def _stratified_token_row(quota: int, length: int) -> torch.Tensor:
         """Rows at the centre of ``quota`` equal-width bins over one batch.
 
-        A batch that contributes a single row must not pin position 0: the
-        hidden state there is the BOS/attention-sink activation, identical for
-        every document, so a run whose batches each keep one row searches every
-        module's scales on hundreds of copies of one vector (#5265).
+        Used for every quota above one, and for the non-sink single-row quotas
+        (see ``_single_token_row``): a batch that contributes one row must not
+        pin position 0 every time, because the hidden state there is the
+        BOS/attention-sink activation, identical for every document (#5265).
         """
         index = torch.arange(int(quota), dtype=torch.int64)
         return ((2 * index + 1) * int(length)) // (2 * int(quota))
@@ -2030,11 +2054,11 @@ class AWQProcessor(LoopProcessor):
                     for i in range(retained_tokens)
                 ]
             batch_ids = list(dict.fromkeys(batch_ids))
-            for active_index in batch_ids:
+            for ordinal, active_index in enumerate(batch_ids, start=1):
                 batch_index = active[active_index]
                 quotas[batch_index] = 1
-                local_indices[batch_index] = AWQProcessor._stratified_token_row(
-                    1, active_lengths[active_index]
+                local_indices[batch_index] = AWQProcessor._single_token_row(
+                    active_lengths[active_index], ordinal
                 )
             return quotas, local_indices
 
@@ -2062,6 +2086,7 @@ class AWQProcessor(LoopProcessor):
                 if not distributed:
                     break
 
+        single_row_ordinal = 0
         for active_index, batch_index in enumerate(active):
             length = active_lengths[active_index]
             quota = min(local_quotas[active_index], length)
@@ -2071,9 +2096,12 @@ class AWQProcessor(LoopProcessor):
             if quota == length:
                 local_indices[batch_index] = torch.arange(length, dtype=torch.int64)
             elif quota == 1:
-                # The bin centre, never row 0 (#5265).
-                local_indices[batch_index] = AWQProcessor._stratified_token_row(
-                    1, length
+                # Row 0 for one quota in eight, the bin centre otherwise: both
+                # an all-sink and a sink-free sample measure badly (#5265,
+                # #5310).
+                single_row_ordinal += 1
+                local_indices[batch_index] = AWQProcessor._single_token_row(
+                    length, single_row_ordinal
                 )
             else:
                 local_indices[batch_index] = (
