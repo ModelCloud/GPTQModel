@@ -26,6 +26,7 @@ from ._cpu_int4pack_layout import runtime_int4pack_dense_weight
 from ._fused_train_state import (
     bind_runtime_qzeros,
     capture_fused_train_state,
+    ensure_cpu_inference_layout,
     finalize_fused_train_state,
     fused_autograd_needs_dense,
     refinalize_fused_state_after_apply,
@@ -399,10 +400,20 @@ class TorchAtenAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
             self.linear_mode = None
         return super().train(mode=mode)
 
+    def _dense_weight_for_activation(self, x: torch.Tensor) -> torch.Tensor:
+        """Checkpoint-layout dense weight for a call that cannot use the fused op."""
+        decode_dtype = self._decode_dtype_for_activation(x.dtype)
+        return self.awq_weight_dequantize(device=x.device, dtype=decode_dtype)
+
+    def _runtime_dense_weight(self) -> torch.Tensor:
+        """Decode the live CPU int4pack layout to a dense ``[in, out]`` weight."""
+        return runtime_int4pack_dense_weight(self)
+
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
         runtime_dense = False
+        dense_weight = None
         if dynamo_is_compiling():
             # ``_cpu_transform_lock`` is an ``RLock``: dynamo cannot enter it (a
             # hard graph break), and the one-time ``transform()`` rewrites the
@@ -416,19 +427,40 @@ class TorchAtenAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
             # inside the trace. Decode the live runtime operands instead
             # (#5369).
             runtime_dense = x.device.type == "cpu" and fused_autograd_needs_dense(self, x)
+            if (
+                not runtime_dense
+                and self.linear_mode is None
+                and not self.training
+                and not x.requires_grad
+                and _has_local_int4pack_cpu_ops()
+                and x.dtype in (torch.float32, torch.bfloat16, torch.float16)
+            ):
+            # A cold trace must not bake in the dense branch: the one-time
+            # transform only runs eagerly, so install the runtime layout here
+            # and retrace into the fused path (#5515).
+                ensure_cpu_inference_layout(self, x.dtype)
             linear_mode = self.linear_mode
         else:
             with self._cpu_transform_lock:
                 force_dense = fused_autograd_needs_dense(self, x)
                 if force_dense:
-                    # The fused op has no backward. Restore the checkpoint
-                    # layout so this call can take the differentiable dequant
-                    # path; a later inference forward transforms again (#5314).
-                    if not restore_fused_train_state(self):
-                        raise RuntimeError(
-                            f"{type(self).__name__} cannot provide a gradient after the fused "
-                            "inference transform because the checkpoint layout cannot be restored."
-                        )
+                    # The fused op has no backward, so this call needs a dense
+                    # weight. Decode the live runtime layout instead of
+                    # restoring the checkpoint layout: the restore rewrites the
+                    # packed buffers a concurrent no-grad forward is reading,
+                    # so alternating grad/no-grad calls raced (#5509).
+                    runtime_dense = True
+                    dense_weight = self._runtime_dense_weight()
+                elif (
+                    self.linear_mode is None
+                    and not self.training
+                    and x.requires_grad
+                ):
+                    # A concurrent first no-grad forward may install the runtime
+                    # layout while this call decodes the checkpoint layout.
+                    # Snapshot the weight under the lock so that transform
+                    # cannot swap the buffers mid-read (#5509).
+                    dense_weight = self._dense_weight_for_activation(x)
                 if not force_dense and (
                     not self.training
                     and not x.requires_grad
@@ -457,7 +489,9 @@ class TorchAtenAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
             linear_mode = self.linear_mode
 
         if runtime_dense:
-            weight = runtime_int4pack_dense_weight(self).to(x.dtype)
+            if dense_weight is None:
+                dense_weight = runtime_int4pack_dense_weight(self)
+            weight = dense_weight.to(x.dtype)
             if self.bias is not None:
                 out = matmul_fp32_reduce(x, weight, self.bias).reshape(out_shape)
             else:
@@ -473,8 +507,9 @@ class TorchAtenAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
                 out = (out.float() + self.bias.to(out.device, torch.float32)).to(x.dtype)
             out = out.reshape(out_shape)
         else:
-            decode_dtype = self._decode_dtype_for_activation(x.dtype)
-            weight = self.awq_weight_dequantize(device=x.device, dtype=decode_dtype)
+            if dense_weight is None:
+                dense_weight = self._dense_weight_for_activation(x)
+            weight = dense_weight
             if weight.dtype == x.dtype:
                 if self.bias is not None:
                     out = matmul_fp32_reduce(x, weight, self.bias)

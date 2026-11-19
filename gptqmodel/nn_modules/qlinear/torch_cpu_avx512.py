@@ -203,6 +203,13 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
     # remaining snapshot entries are per-column metadata, not the packed weight.
     _FUSED_TRAIN_STATE_REBUILD = "avx512_gptq"
 
+    #: ``dequantize_weight`` already restores the checkpoint input order.
+    _runtime_dense_weight_is_checkpoint_order = True
+
+    def _runtime_dense_weight(self):
+        """Decode the live AVX512 layout without restoring the checkpoint layout."""
+        return self.dequantize_weight()
+
     gemm_int4_qzero_group_scaled_cpu_kernel = None
     pack_gptq_int4_kernel = None
     _fused_op_handles_bias = True
