@@ -4384,6 +4384,10 @@ class AWQProcessor(LoopProcessor):
             return
 
         original_forward = moe_block.forward
+        # Same lifecycle rule as `MoELifecycleContext` (#5520): only write an instance
+        # attribute back if the block had one. Restoring an inherited `forward` with a
+        # bound method leaves moe_block -> __dict__ -> bound method -> moe_block behind.
+        forward_was_instance_attr = "forward" in vars(moe_block)
 
         # Keep the block's real signature visible. `inspect.signature` follows
         # `__wrapped__`, so the replay machinery still sees e.g.
@@ -4435,7 +4439,10 @@ class AWQProcessor(LoopProcessor):
         try:
             yield
         finally:
-            moe_block.forward = original_forward
+            if forward_was_instance_attr:
+                moe_block.forward = original_forward
+            else:
+                vars(moe_block).pop("forward", None)
 
     @torch.inference_mode()
     def _search_best_scale(
