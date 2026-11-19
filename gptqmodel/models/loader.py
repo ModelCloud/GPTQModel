@@ -2854,12 +2854,15 @@ def ModelLoader(cls):
         # loader binds (qweight/qzeros/scales/g_idx): it stores packed mantissa
         # codes plus one exponent per block of 16 values. Route it before any
         # GPTQ parsing, otherwise every decoder layer reads as missing. The
+        # probe and the build both use the resolved checkpoint directory, so
+        # `subfolder=` selects the same artifact as passing that directory
+        # directly instead of falling through to the GPTQ config parser. The
         # guards above still apply -- this path builds the model through
         # transformers like any other, so the same version and
         # trust_remote_code rules hold.
         from .tt_blockfloat_loader import is_tt_blockfloat_checkpoint
 
-        if is_tt_blockfloat_checkpoint(model_local_path):
+        if is_tt_blockfloat_checkpoint(checkpoint_dir):
             if requested_device_map is not None or (
                 requested_device is not None
                 and str(requested_device).split(":")[0].lower() != "cpu"
@@ -2875,7 +2878,7 @@ def ModelLoader(cls):
                 )
             return _load_tt_blockfloat_model(
                 cls,
-                model_local_path=model_local_path,
+                model_local_path=checkpoint_dir,
                 dtype=dtype,
                 trust_remote_code=trust_remote_code,
             )

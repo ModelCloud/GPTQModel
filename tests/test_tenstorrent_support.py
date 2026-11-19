@@ -3075,6 +3075,74 @@ def test_gptqmodel_load_consumes_a_blockfloat_checkpoint(tmp_path):
         GPTQModel.load(out, device="xla:0")
 
 
+def test_gptqmodel_load_accepts_a_blockfloat_checkpoint_selected_by_subfolder(tmp_path):
+    """``subfolder=`` must select the same checkpoint as a direct directory path.
+
+    The block-float probe and the model build both have to use the resolved
+    checkpoint directory. Probing the repository root instead made this public
+    load fall through to the GPTQ config parser and fail with
+    ``Unknown quantization format: `tt-blockfloat``` before the model existed.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(11)
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(
+        vocab_size=64, hidden_size=32, intermediate_size=64,
+        num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
+        tie_word_embeddings=True,
+    )
+    model = LlamaForCausalLM(config)
+    with torch.no_grad():
+        for block in model.model.layers:
+            for _, module in block.named_modules():
+                if getattr(module, "weight", None) is not None and module.weight.dim() == 2:
+                    module.weight.copy_(bq.quantize_bf4(module.weight.detach().float()))
+
+    root = tmp_path / "repo"
+    packed = root / "packed"
+    bq.save_blockfloat_model(model, str(packed), bits=4, embed_bits=8)
+
+    from gptqmodel import GPTQModel
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import TTBlockfloatLinear
+
+    direct = GPTQModel.load(str(packed), device="cpu")
+    nested = GPTQModel.load(str(root), subfolder="packed", device="cpu")
+
+    assert nested.quantized is True
+    assert nested.quantize_config.method == METHOD.TT_BLOCKFLOAT
+    # The wrapped model is built from the resolved directory, so its recorded
+    # root is the checkpoint the caller selected, not the parent repository.
+    assert nested.model_local_path == str(packed)
+
+    def blockfloat_modules(loaded):
+        return {
+            name: module
+            for name, module in loaded.model.named_modules()
+            if isinstance(module, TTBlockfloatLinear)
+        }
+
+    direct_modules = blockfloat_modules(direct)
+    nested_modules = blockfloat_modules(nested)
+    assert nested_modules, "fixture produced no block-float modules"
+    assert nested_modules.keys() == direct_modules.keys()
+    for name, direct_module in direct_modules.items():
+        nested_module = nested_modules[name]
+        assert type(nested_module) is type(direct_module)
+        # Compare the packed storage itself: matching module types alone would
+        # pass if the subfolder route silently loaded different weights.
+        assert torch.equal(nested_module.codes, direct_module.codes), name
+        assert torch.equal(nested_module.exponents, direct_module.exponents), name
+
+    ids = torch.randint(0, config.vocab_size, (1, 8))
+    with torch.no_grad():
+        assert torch.equal(nested.model(ids).logits, direct.model(ids).logits)
+
+
 def _scalar_blockfloat_oracle(block, bits):
     """Independent double-precision oracle for one block, built from scratch.
 
