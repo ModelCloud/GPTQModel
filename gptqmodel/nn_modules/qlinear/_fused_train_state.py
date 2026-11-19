@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -375,6 +376,38 @@ def fused_autograd_needs_dense(module: nn.Module, x: torch.Tensor) -> bool:
     return getattr(mode, "value", mode) == "inference"
 
 
+def refresh_runtime_zero_offsets(
+    module: nn.Module, *, bits: int, dtype: torch.dtype
+) -> Optional[torch.Tensor]:
+    """Recompute CPU int4pack affine offsets after a scale-only change.
+
+    The CPU int4pack transform replaces the checkpoint's integer zero codes with
+    the affine offsets ``(2**(bits-1) - zero_code) * scale`` the fused kernel
+    consumes. Those offsets are therefore derived from ``scales``; changing the
+    scales leaves them based on the old value, and a later
+    ``clear_weight_cache()`` republished the stale pair (#5372).
+
+    The decoded zero codes are kept on the module by the transform, so the
+    offsets can be rebuilt from the current scales. ``None`` means the codes are
+    unavailable (a module whose metadata was replaced wholesale) and the caller
+    must keep the offsets it was given.
+    """
+
+    if getattr(module, "_fused_operands_shared", False):
+        # A fused source owns the storage and rebinding ``qzeros`` would break
+        # the shared allocation; the fusion path does not change scales.
+        return None
+    codes = getattr(module, "_cpu_zero_codes", None)
+    scales = getattr(module, "scales", None)
+    if not isinstance(codes, torch.Tensor) or not isinstance(scales, torch.Tensor):
+        return None
+    if tuple(codes.shape) != tuple(scales.shape):
+        return None
+    from .torch_aten_kernel import _cpu_int4pack_zero_offsets
+
+    return _cpu_int4pack_zero_offsets(codes, scales.to(dtype), bits).to(dtype)
+
+
 def reset_fused_runtime_state(module: nn.Module) -> None:
     """Forget that the live operands are in a kernel's runtime layout.
 
@@ -389,7 +422,10 @@ def reset_fused_runtime_state(module: nn.Module) -> None:
         ("scales_and_zeros", None),
         ("_cpu_transformed", False),
         ("_cpu_transform_dtype", None),
+        ("_cpu_zero_codes", None),
         ("_fused_state_key", None),
+        ("_fused_scale_key", None),
+        ("_fused_zero_key", None),
     ):
         if hasattr(module, name):
             setattr(module, name, value)
