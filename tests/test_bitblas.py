@@ -26,6 +26,31 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _bitblas_runtime_error() -> str | None:
+    """Why the BitBLAS package itself cannot be imported on this host.
+
+    Several nodes stub ``import_bitblas`` to unit-test configuration logic, but
+    they still construct a ``BitblasLinear``, which reads ``MatmulConfig`` from
+    the real package. A wheel built against a different CUDA runtime imports as
+    a module and only then fails to load its TVM shared library, so the
+    attribute-level ``BITBLAS_AVAILABLE`` gate cannot see it. Probe the import
+    once, and skip the nodes that need a usable runtime.
+    """
+
+    try:
+        import bitblas  # noqa: F401
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
+BITBLAS_RUNTIME_ERROR = _bitblas_runtime_error()
+requires_bitblas_runtime = pytest.mark.skipif(
+    BITBLAS_RUNTIME_ERROR is not None,
+    reason=f"BitBLAS runtime cannot be imported: {BITBLAS_RUNTIME_ERROR}",
+)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for BitBLAS")
 @pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
 def test_bitblas_forward_pass1():
@@ -94,6 +119,7 @@ def test_bitblas_tuning_env_override(monkeypatch):
     assert bitblas_utils._should_enable_bitblas_tuning(repack=False) is False
 
 
+@requires_bitblas_runtime
 def test_bitblas_prefers_float32_accumulation_for_fp16_inputs(monkeypatch):
     """Use fp32 accumulation to keep dequantized GPTQ inference numerically stable."""
 
@@ -137,6 +163,7 @@ def test_bitblas_prefers_float32_accumulation_for_fp16_inputs(monkeypatch):
     assert captured["config"].accum_dtype == "float32"
 
 
+@requires_bitblas_runtime
 def test_bitblas_routes_bfloat16_through_float16_compute(monkeypatch):
     """bf16 modules keep a bf16 interface but build the operator and buffers in fp16."""
 
@@ -191,6 +218,7 @@ def test_bitblas_compute_dtype_mapping():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for BitBLAS")
+@requires_bitblas_runtime
 def test_bitblas_forward_launches_in_module_device_context(monkeypatch):
     """Raw BitBLAS launches must run in the module's CUDA context, not `current_device()`.
 
@@ -302,6 +330,7 @@ def test_bitblas_forward_on_non_current_gpu_uses_module_device_context():
     assert torch.allclose(y, torch.zeros_like(y), atol=1e-4, rtol=1e-4)
 
 
+@requires_bitblas_runtime
 def test_bitblas_repack_from_symmetric_gptq_remaps_signed_codes(monkeypatch):
     class _DummyMatmul:
         lib = object()
@@ -336,6 +365,14 @@ def test_bitblas_repack_from_symmetric_gptq_remaps_signed_codes(monkeypatch):
         bias=False,
     )
     gptq_linear.pack_block(linear, scales.T, zeros.T, g_idx=g_idx.to(torch.int32))
+    # The producer this remap exists for: a v1-labelled module whose qzeros are
+    # all zero while qweight holds GPTQ's two's-complement codes. The correct
+    # symmetric zero point has to be folded back in as a biased code range.
+    qzero_format = getattr(gptq_linear, "qzero_format", None)
+    if callable(qzero_format) and qzero_format() == 2:
+        gptq_linear.qzero_format(format=1)
+    gptq_linear.qzeros.data.zero_()
+    assert bitblas_module._should_remap_symmetric_gptq_codes(gptq_linear) is True
 
     captured = {}
     layer = bitblas_module.BitblasLinear(
@@ -357,6 +394,7 @@ def test_bitblas_repack_from_symmetric_gptq_remaps_signed_codes(monkeypatch):
         captured["bias"] = bias
 
     layer._load_bitblas_quant_state = _capture_quant_state
+    layer._get_or_create_bitblas_operator = lambda config, enable_tuning: _DummyMatmul()
     layer.repack_from_gptq(gptq_linear)
 
     packed_weight = gptq_linear.qweight.detach().T.contiguous().view(layer.quant_config.torch_storage_dtype)
@@ -370,6 +408,7 @@ def test_bitblas_repack_from_symmetric_gptq_remaps_signed_codes(monkeypatch):
     assert captured["bias"] is None
 
 
+@requires_bitblas_runtime
 def test_bitblas_repack_from_gptq_v2_symmetric_codes_does_not_remap(monkeypatch):
     class _DummyMatmul:
         lib = object()
@@ -439,6 +478,7 @@ def test_bitblas_repack_from_gptq_v2_symmetric_codes_does_not_remap(monkeypatch)
     assert captured["bias"] is None
 
 
+@requires_bitblas_runtime
 def test_bitblas_validate_accepts_bf16_gptq():
     valid, err = bitblas_module.BitblasLinear.validate(
         bits=4,
@@ -455,6 +495,7 @@ def test_bitblas_validate_accepts_bf16_gptq():
     assert err is None
 
 
+@requires_bitblas_runtime
 def test_bitblas_constructor_accepts_bf16_gptq_with_fp16_compute(monkeypatch):
     """bf16 + signed GPTQ is accepted and routed to the fp16 compute path."""
 
@@ -491,6 +532,7 @@ def test_bitblas_constructor_accepts_bf16_gptq_with_fp16_compute(monkeypatch):
     assert layer.compute_dtype == torch.float16
 
 
+@requires_bitblas_runtime
 def test_bitblas_validate_rejects_desc_act_gptq():
     valid, err = bitblas_module.BitblasLinear.validate(
         bits=4,
@@ -508,6 +550,7 @@ def test_bitblas_validate_rejects_desc_act_gptq():
     assert "actual desc_act" in str(err)
 
 
+@requires_bitblas_runtime
 def test_bitblas_constructor_rejects_desc_act_gptq(monkeypatch):
     monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
     monkeypatch.setattr(
@@ -531,6 +574,7 @@ def test_bitblas_constructor_rejects_desc_act_gptq(monkeypatch):
         )
 
 
+@requires_bitblas_runtime
 def test_bitblas_validate_rejects_non_divisible_in_features():
     valid, err = bitblas_module.BitblasLinear.validate(
         bits=4,
@@ -548,6 +592,7 @@ def test_bitblas_validate_rejects_non_divisible_in_features():
     assert "must be divisible by [16]" in str(err)
 
 
+@requires_bitblas_runtime
 def test_bitblas_validate_rejects_non_divisible_out_features():
     valid, err = bitblas_module.BitblasLinear.validate(
         bits=4,
@@ -651,6 +696,7 @@ def test_create_quant_module_propagates_dtype_to_quant_linear():
     assert isinstance(module.proj, _DummyQuantLinear)
 
 
+@requires_bitblas_runtime
 def test_bitblas_rejects_unrunnable_operator(monkeypatch):
     """Surface BitBLAS build failures during construction so auto-selection can fall back."""
 
@@ -684,6 +730,7 @@ def test_bitblas_rejects_unrunnable_operator(monkeypatch):
         )
 
 
+@requires_bitblas_runtime
 def test_make_quant_falls_back_when_bitblas_operator_is_unrunnable(monkeypatch):
     """Auto kernel selection should skip BitBLAS when the runtime build is unusable."""
 
@@ -832,7 +879,10 @@ def _mock_gptq_linear(bits: int, group_size: int, in_features: int, out_features
     linear.weight.data = ref.t().contiguous()
 
     scales = scales.reshape(-1, out_features).contiguous()
-    zeros = torch.zeros_like(scales, dtype=torch.int32)
+    # A symmetric GPTQ checkpoint stores the logical zero point 2**(bits-1);
+    # `q - qzeros` then reproduces the signed codes above. An all-zero qzeros
+    # subtracts nothing and would dequantize to a different matrix than `ref`.
+    zeros = torch.full_like(scales, 1 << (bits - 1), dtype=torch.int32)
     g_idx = torch.arange(in_features, dtype=torch.int32) // (
         group_size if group_size != -1 else in_features
     )
@@ -855,6 +905,7 @@ BITBLAS_DRIFT_TOLERANCE = {torch.float16: 2e-3, torch.bfloat16: 2e-2}
     ("fp16", torch.float16),
     ("bf16", torch.bfloat16),
 ])
+@requires_bitblas_runtime
 def test_bitblas_forward_dtype_preservation_and_accuracy(_, dtype):
     """FP16 and BF16 activations must round-trip and match an independent fp32 Torch oracle.
 
