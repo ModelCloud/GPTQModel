@@ -64,7 +64,10 @@ tests. Mechanism references and diagrams live in `docs/`.
   A definition-owned `LocalModelLoader` takes precedence over both.
   Remove behaviour switches in code you touch; report others in the PR.
 - **Transformers 5.23 ABI only; every model is ported.** GPT-QModel
-  quantizes, infers and trains only on the Transformers 5.23 ABI. Every
+  quantizes, infers and trains only on the Transformers 5.23 ABI, pinned as
+  `transformers>=5.23.0,<5.24`; moving to another minor means re-vendoring the
+  native ports and passing parity (docs/transformers5-model-ports.md), never
+  just widening the pin. Every
   `MODEL_MAP` definition loads through a `LocalModelLoader` whose config and
   modeling code live in `gptqmodel/models/ports/`, including models that
   Transformers implements natively. Ports import Transformers framework

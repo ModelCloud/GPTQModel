@@ -350,7 +350,36 @@ def registry(families):
         if key in {"PROCESSOR", "IMAGE_PROCESSOR", "VIDEO_PROCESSOR"} and "glm_ocr" in vendored and "glm46v" in result:
             result["glm_ocr"] = result["glm46v"]
         tables[key] = result
+    tables.update(tokenizer_selection(families))
     return tables
+
+
+def tokenizer_selection(families):
+    """Data Transformers 5.23 ``AutoTokenizer`` selects classes with, for NativeTokenizer.
+
+    ``TOKENIZER_CLASSES``: every vendored tokenizer class name -> module (a
+    checkpoint may declare any of them, not only the ones a model_type maps to).
+    ``TOKENIZER_HUB_CLASS_OVERRIDES`` / ``TOKENIZER_BACKEND_MODEL_IDS``: the
+    model types whose hub-declared class is known wrong and the model-id
+    patterns forced onto ``TokenizersBackend``.
+    """
+
+    import ast
+    from importlib import import_module
+
+    classes = {}
+    for family in families:
+        for path in sorted((DEST / family).glob("tokenization_*.py")):
+            for node in ast.parse(path.read_text()).body:
+                if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "__all__" for t in node.targets):
+                    for name in ast.literal_eval(node.value):
+                        classes.setdefault(name, f"gptqmodel.models.ports.native.{family}.{path.stem}")
+    auto = import_module("transformers.models.auto.tokenization_auto")
+    return {
+        "TOKENIZER_CLASSES": dict(sorted(classes.items())),
+        "TOKENIZER_HUB_CLASS_OVERRIDES": sorted(auto.MODELS_WITH_INCORRECT_HUB_TOKENIZER_CLASS),
+        "TOKENIZER_BACKEND_MODEL_IDS": list(auto.MODEL_IDS_TO_TOKENIZERS_BACKEND),
+    }
 
 
 def vendored_families():

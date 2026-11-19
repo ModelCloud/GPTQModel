@@ -1110,10 +1110,9 @@ def test_model_loader_from_pretrained_native_bonsai_fast_auto_enables_fa2_on_cud
         lambda *_args, **_kwargs: ("/tmp/fake-model/bonsai.gguf", native_spec),
     )
     monkeypatch.setattr(
-        loader.transformers,
-        "FakeModelForCausalLM",
-        type("FakeModelForCausalLM", (), {"_supports_flash_attn_2": True}),
-        raising=False,
+        loader,
+        "_definition_model_class",
+        lambda *_args, **_kwargs: type("FakeModelForCausalLM", (), {"_supports_flash_attn_2": True}),
     )
 
     DummyQModel.from_pretrained(
@@ -1214,10 +1213,9 @@ def test_model_loader_from_pretrained_native_bonsai_fast_keeps_explicit_attn_imp
         lambda *_args, **_kwargs: ("/tmp/fake-model/bonsai.gguf", native_spec),
     )
     monkeypatch.setattr(
-        loader.transformers,
-        "FakeModelForCausalLM",
-        type("FakeModelForCausalLM", (), {"_supports_flash_attn_2": True}),
-        raising=False,
+        loader,
+        "_definition_model_class",
+        lambda *_args, **_kwargs: type("FakeModelForCausalLM", (), {"_supports_flash_attn_2": True}),
     )
 
     result = DummyQModel.from_pretrained(

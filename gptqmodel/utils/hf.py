@@ -771,6 +771,49 @@ def _register_vendored_tokenizer(tokenizer) -> None:
         register_transformers_equivalent(tokenizer_class)
 
 
+def _load_package_tokenizer(path, model_config, *, prefer_serialized_tokenizer=True, **kwargs):
+    """Construct a definition's tokenizer with a package-selected class.
+
+    Used for definitions whose loader names no tokenizer class. The class comes
+    from ``NativeTokenizer`` (Transformers 5.23 AutoTokenizer selection, but a
+    checkpoint-declared name resolves only to vendored/framework classes), so
+    ``tokenizer_class="BertTokenizer"`` cannot reach ``transformers.models``.
+    The load-time steps Tokenicer applies on its own path-loading branch
+    (prepared kwargs, native ERNIE-VL loading, ``fix_mistral_regex`` default,
+    serialized ``tokenizer.json`` preference) are applied here identically so
+    token ids do not change; Tokenicer then normalizes the instance.
+    """
+
+    from tokenicer import Tokenicer
+    from tokenicer.ernie_vl import load_ernie_vl
+
+    from ..models.ports.native.auto import NativeTokenizer
+
+    kwargs.pop("trust_remote_code", None)
+    kwargs.pop("code_revision", None)
+    load_kwargs = Tokenicer.prepare_load_kwargs(path, **kwargs)
+    config = model_config if isinstance(model_config, PreTrainedConfig) else None
+    native_ernie = load_ernie_vl(path, config=config, **load_kwargs)
+    if native_ernie is not None:
+        return native_ernie
+    text_config = Tokenicer._resolve_text_model_config(config)
+    text_model_type = getattr(text_config, "model_type", None)
+    if isinstance(text_model_type, str) and text_model_type:
+        regex_fix = text_model_type == "laguna" or text_model_type.startswith(
+            ("mistral", "ministral", "mixtral", "voxtral", "pixtral")
+        )
+    else:
+        regex_fix = True
+    load_kwargs.setdefault("fix_mistral_regex", regex_fix)
+    tokenizer = NativeTokenizer.from_pretrained(
+        path, model_type=getattr(config, "model_type", None), config=config, **load_kwargs
+    )
+    _register_vendored_tokenizer(tokenizer)
+    return Tokenicer._resolve_serialized_tokenizer(
+        path, tokenizer, load_kwargs, prefer_serialized_tokenizer=prefer_serialized_tokenizer
+    )
+
+
 def load_hf_tokenizer(
         tokenizer_or_path,
         *,
@@ -806,16 +849,23 @@ def load_hf_tokenizer(
             tokenicer_option_names.add(key)
     if checkpoint_path:
         tokenizer_or_path = os.fspath(tokenizer_or_path)
+        # Class selection belongs to the package for every definition, including
+        # when two checkpoints declare the same tokenizer class name. Tokenicer
+        # receives the owned instance and remains the normalization owner.
+        tokenizer_kwargs = {
+            key: value for key, value in kwargs.items()
+            if key not in {"config", "strict", "pad_tokens", "prefer_serialized_tokenizer"}
+            and key not in tokenicer_option_names
+        }
         if loader is not None and loader.tokenizer_class is not None:
-            # Class selection belongs to the definition, including when two
-            # checkpoints declare the same tokenizer class name. Tokenicer
-            # receives the owned instance and remains the normalization owner.
-            tokenizer_kwargs = {
-                key: value for key, value in kwargs.items()
-                if key not in {"config", "strict", "pad_tokens", "prefer_serialized_tokenizer"}
-                and key not in tokenicer_option_names
-            }
             tokenizer_or_path = loader.load_tokenizer(tokenizer_or_path, **tokenizer_kwargs)
+        elif loader is not None and not remote_tokenizer:
+            tokenizer_or_path = _load_package_tokenizer(
+                tokenizer_or_path,
+                model_config,
+                prefer_serialized_tokenizer=kwargs.get("prefer_serialized_tokenizer", True),
+                **tokenizer_kwargs,
+            )
     _register_vendored_tokenizer(tokenizer_or_path)
     if isinstance(model_config, PreTrainedConfig):
         # Tokenicer's model_config controls normalization; AutoTokenizer uses
