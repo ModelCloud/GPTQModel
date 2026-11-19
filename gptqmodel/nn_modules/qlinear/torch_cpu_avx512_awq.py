@@ -21,6 +21,7 @@ from ._awq_decode import AwqDecodeRangeMixin
 from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import (
     capture_fused_train_state,
+    ensure_cpu_inference_layout,
     finalize_fused_train_state,
     fused_autograd_needs_dense,
     restore_fused_train_state,
@@ -149,6 +150,28 @@ class TorchCpuAvx512AwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
 
     def _fused_input_dtype(self, x: torch.Tensor) -> bool:
         return x.dtype == torch.bfloat16
+
+    def _prepare_cpu_inference_layout(self, dtype) -> bool:
+        """Install the AVX512 AWQ runtime layout outside a traced graph (#5515).
+
+        This kernel's eager branch uses a device-only ``transform()`` and a
+        string ``linear_mode``, so it cannot share the generic sequence.
+        """
+
+        if self.linear_mode is not None or self.training:
+            return False
+        if dtype != torch.bfloat16 or not self._cpu_fused_available():
+            return False
+        qweight = getattr(self, "qweight", None)
+        if not isinstance(qweight, torch.Tensor) or qweight.device.type != "cpu":
+            return False
+        with self._cpu_transform_lock:
+            if self.linear_mode is not None:
+                return False
+            capture_fused_train_state(self)
+            self.transform("cpu")
+            self.linear_mode = "inference"
+        return True
 
     def post_init(self):
         # The decode range is read by a compiled graph as a Python constant, so
@@ -347,6 +370,18 @@ class TorchCpuAvx512AwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
             # graph must not do. The transform runs on the first eager forward
             # and in ``optimize()``'s warmup, so the graph only reads the
             # resolved ``linear_mode``.
+            if (
+                self.linear_mode is None
+                and not self.training
+                and not x_flat.requires_grad
+                and not fused_autograd_needs_dense(self, x_flat)
+                and self._cpu_fused_available()
+                and x_flat.device.type == "cpu"
+                and self._fused_input_dtype(x_flat)
+            ):
+                # A cold trace must not bake in the dense branch: install the
+                # runtime layout here and retrace into the fused path (#5515).
+                ensure_cpu_inference_layout(self, x_flat.dtype)
             linear_mode = self.linear_mode
         else:
             with self._cpu_transform_lock:

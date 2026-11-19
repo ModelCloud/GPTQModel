@@ -28,6 +28,7 @@ from ._cpu_int4pack_layout import runtime_int4pack_dense_weight
 from ._fused_train_state import (
     bind_runtime_qzeros,
     capture_fused_train_state,
+    ensure_cpu_inference_layout,
     finalize_fused_train_state,
     fused_autograd_needs_dense,
     refinalize_fused_state_after_apply,
@@ -699,6 +700,18 @@ class TorchFusedLinear(PackableQuantLinear):
             # inside the trace. Decode the live runtime operands instead
             # (#5369).
             runtime_dense = x.device.type == "cpu" and fused_autograd_needs_dense(self, x)
+            if (
+                not runtime_dense
+                and self.linear_mode is None
+                and not self.training
+                and not x.requires_grad
+                and TORCH_HAS_FUSED_OPS
+                and fused_bias_safe
+            ):
+                # A cold trace must not bake in the dense branch: the
+                # one-time transform only runs eagerly, so install the runtime
+                # layout here and retrace into the fused path (#5515).
+                ensure_cpu_inference_layout(self, x.dtype)
             linear_mode = self.linear_mode
         else:
             with self._cpu_transform_lock:

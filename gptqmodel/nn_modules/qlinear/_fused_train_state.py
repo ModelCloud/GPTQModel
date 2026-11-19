@@ -384,6 +384,53 @@ def fused_autograd_needs_dense(module: nn.Module, x: torch.Tensor) -> bool:
     return getattr(mode, "value", mode) == "inference"
 
 
+_disable_compile = getattr(getattr(torch, "compiler", None), "disable", lambda fn: fn)
+
+
+@_disable_compile
+def ensure_cpu_inference_layout(module: nn.Module, dtype: torch.dtype | None) -> bool:
+    """Install the CPU int4pack runtime layout outside a traced graph.
+
+    The one-time transform rewrites the packed ``qweight``/``qzeros`` buffers in
+    place, which a traced graph must not do, so it only ran in an eager forward.
+    A call compiled before any eager forward therefore traced the dense branch
+    and dequantized every weight on every token for the life of the process
+    (#5515). ``optimize()`` and a cold ``torch.compile`` call both go through
+    here first.
+
+    Only an eval-mode CPU module with no layout yet is transformed; everything
+    else is left to the forward. Returns whether the layout is now installed.
+    """
+
+    override = getattr(module, "_prepare_cpu_inference_layout", None)
+    if callable(override):
+        # A kernel whose eager branch differs (device-only transform, a
+        # string ``linear_mode``) installs its own layout.
+        return override(dtype)
+    if module.linear_mode is not None or module.training:
+        return False
+    qweight = getattr(module, "qweight", None)
+    if not isinstance(qweight, torch.Tensor) or qweight.device.type != "cpu":
+        return False
+    transform = getattr(module, "transform_cpu", None)
+    if not callable(transform):
+        return False
+    from ...looper.linear_mode import LinearMode
+
+    with module._cpu_transform_lock:
+        if module.linear_mode is not None:
+            return False
+        capture_fused_train_state(module)
+        transform(dtype)
+        module.linear_mode = LinearMode.INFERENCE
+        refresh = getattr(module, "_refresh_fused_op", None)
+        if not callable(refresh):
+            refresh = getattr(module, "_refresh_fused_state", None)
+        if callable(refresh):
+            refresh()
+    return True
+
+
 def refresh_runtime_zero_offsets(
     module: nn.Module, *, bits: int, dtype: torch.dtype
 ) -> Optional[torch.Tensor]:
