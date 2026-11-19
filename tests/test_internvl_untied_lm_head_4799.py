@@ -283,6 +283,13 @@ def test_resolve_tied_weights_keys_trusts_a_distinct_checkpoint_head():
         "lm_head.weight": "model.embed_tokens.weight"
     }
 
-    # The checkpoint has no source tensor: nothing to tie to.
+    # The checkpoint stores only the head: the shared tensor is present, so the
+    # pair stays tied and the embedding is materialized from the head (#5399).
     missing_source = {"lm_head.weight": True, "model.embed_tokens.weight": False}
-    assert resolve_tied_weights_keys(model, checkpoint_has_tensor=missing_source.get) == {}
+    assert resolve_tied_weights_keys(model, checkpoint_has_tensor=missing_source.get) == {
+        "lm_head.weight": "model.embed_tokens.weight"
+    }
+
+    # Neither member is stored: nothing to tie to.
+    neither = {"lm_head.weight": False, "model.embed_tokens.weight": False}
+    assert resolve_tied_weights_keys(model, checkpoint_has_tensor=neither.get) == {}

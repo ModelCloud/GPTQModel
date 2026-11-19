@@ -1196,6 +1196,23 @@ def _cleanup_all_conversions() -> None:
 atexit.register(_cleanup_all_conversions)
 
 
+def _tie_partners(tied: Optional[Dict[str, str]], name: str) -> tuple:
+    """Runtime names tied to ``name`` in either direction, as ``a.b`` pairs."""
+
+    if not isinstance(tied, dict) or "." not in name:
+        return ()
+    partners = []
+    source = tied.get(name)
+    if isinstance(source, str):
+        partners.append(source)
+    partners.extend(
+        target
+        for target, tied_source in tied.items()
+        if tied_source == name and isinstance(target, str)
+    )
+    return tuple(partner for partner in partners if "." in partner)
+
+
 class LazyTurtle:
     """Checkpoint-backed shell materializer for local dense checkpoints.
 
@@ -3775,7 +3792,25 @@ class LazyTurtle:
         # just `weight` / `bias`. Retry resolution with the full module path so leaf-only
         # materialization can still map back to fused expert checkpoint tensors.
         combined_name = self._join_tensor_name(module_path, rel_name)
-        return self._resolve_fused_checkpoint_tensor_source("", combined_name)
+        resolved = self._resolve_fused_checkpoint_tensor_source("", combined_name)
+        if resolved[0] is not None:
+            return resolved
+
+        # A tied checkpoint may store the shared tensor under only one member of
+        # the pair. Fall back to the partner of a declared tie, in either
+        # direction, so the member the checkpoint omits is materialized from the
+        # one it stores instead of staying on meta (#5399). The snapshot is
+        # still being resolved on the first pass, so `tied_weights_keys` is unset
+        # and this lookup is inert then.
+        tied = getattr(self, "tied_weights_keys", None)
+        for partner in _tie_partners(tied, combined_name):
+            partner_module, partner_rel = partner.rsplit(".", 1)
+            resolved = self._resolve_direct_checkpoint_tensor_source(
+                partner_module, partner_rel
+            )
+            if resolved[0] is not None:
+                return resolved
+        return resolved
 
     @staticmethod
     def _materialization_issue_message(

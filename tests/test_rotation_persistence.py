@@ -79,9 +79,11 @@ def test_rotation_rejects_unsupported_intermediate_size_before_mutation():
     with pytest.raises(ValueError, match=r"intermediate_size`=4864"):
         validate_rotation_dimensions(config, "random")
 
-    # Supported widths must still pass.
+    # Supported widths must still pass. ``num_attention_heads=14`` is the real
+    # Qwen2-0.5B geometry, which gives the power-of-two ``head_dim`` the
+    # per-head V/O rotation needs.
     validate_rotation_dimensions(
-        Qwen2Config(hidden_size=896, intermediate_size=896), "hadamard"
+        Qwen2Config(hidden_size=896, intermediate_size=896, num_attention_heads=14), "hadamard"
     )
     validate_rotation_dimensions(
         Qwen2Config(hidden_size=2048, intermediate_size=8192), "hadamard"

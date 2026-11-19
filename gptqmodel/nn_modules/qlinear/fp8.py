@@ -991,6 +991,12 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         # the float kind, not the exact storage width.
         decode = (
             scale.is_floating_point()
+            # The single-pass decode writes the decoded weight in the
+            # activation dtype before the FP32-reduced GEMM. A decoded weight
+            # above that dtype's finite range (for example 65536 under FP16)
+            # is stored as ``inf`` and turns a finite dot product into NaN
+            # (#5405). Those payloads keep the exact FP32 fallback.
+            and self._decode_dtype_is_range_safe(dtype)
             and fp8_block_decode_supported(
                 weight,
                 scale.to(dtype=torch.float32) if scale.dtype != torch.float32 else scale,
@@ -1001,13 +1007,32 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         fused = (
             decode
             and fp8_block_gemv_payload_supported(weight, scale, block_size=block, dtype=dtype)
-            # Same range-safety question ``_native_gemm_eligible`` answers for
-            # the row/tensor epilogue: the fused product keeps the codes in the
-            # activation dtype, so a decoded weight outside that dtype's finite
-            # range has to take the single-pass decode.
+            # The fused product keeps the codes in the activation dtype through
+            # the whole reduction, so it needs the same range safety
+            # ``_native_gemm_eligible`` asks for on the row/tensor epilogue.
+            # ``decode`` already rejects an out-of-range payload; keeping this
+            # term makes the fused gate independent of the decode gate.
             and self._native_gemm_eligible_dtype(dtype)
         )
         return (decode, fused)
+
+    def _decode_dtype_is_range_safe(self, dtype: torch.dtype) -> bool:
+        """Whether a decoded block weight can be narrowed into *dtype*.
+
+        ``_forward_block_decode`` decodes into the activation dtype before the
+        FP32-reduced GEMM, so it inherits the finite-range requirement of the
+        native GEMM. FP32 and BF16 keep the FP32 exponent range and cannot
+        overflow; only FP16 needs the decoded-weight bound that
+        ``_weights_fit_activation_dtype`` establishes. A payload above it keeps
+        the exact reference path, which decodes and multiplies in FP32 and
+        narrows only the result.
+        """
+
+        if dtype in (torch.float32, torch.bfloat16):
+            return True
+        if dtype == torch.float16:
+            return self._weights_fit_activation_dtype(dtype)
+        return False
 
     def _native_gemm_eligible_dtype(self, dtype: torch.dtype) -> bool:
         """``_native_gemm_eligible`` for a dtype instead of a live tensor.
@@ -1027,15 +1052,18 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
 
         The decode keeps the reference arithmetic (FP32 scale application, one
         rounding into the activation dtype), so it is selected on the same
-        payloads the portable block decode accepts. What it cannot do is run
-        inside a traced/exported graph: the launch is an opaque Python call, so
-        ``torch.compile``/``export`` keep the Torch decode and its exact graph
-        behaviour. CUDA-graph capture is fine; the launch is graph-safe.
+        payloads the portable block decode accepts, minus any payload whose
+        decoded weight would overflow the activation dtype on that rounding.
+        What it cannot do is run inside a traced/exported graph: the launch is
+        an opaque Python call, so ``torch.compile``/``export`` keep the Torch
+        decode and its exact graph behaviour. CUDA-graph capture is fine; the
+        launch is graph-safe.
 
         ``fused`` selects the W8A16 product that folds the decode into the
         GEMM. It needs the exact divisible 128-wide block layout, a range-safe
-        payload, and no autograd graph; everything else uses the single-pass
-        decode followed by ``matmul_fp32_reduce``.
+        payload, and no autograd graph on the activation, weight, scale or
+        bias; every other range-safe payload uses the single-pass decode
+        followed by ``matmul_fp32_reduce``.
         """
 
         if self.weight_scale_method != "block" or _is_compiling():
@@ -1067,6 +1095,11 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
                 x_flat.requires_grad
                 or self.weight.requires_grad
                 or self.weight_scale_inv.requires_grad
+                # The bias is added inside the opaque Triton epilogue, so a
+                # trainable bias needs the differentiable decode path too
+                # (#5402). A frozen bias is a constant and keeps the fused
+                # product.
+                or (self.bias is not None and self.bias.requires_grad)
             )
         )
 

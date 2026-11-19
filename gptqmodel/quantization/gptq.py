@@ -36,6 +36,7 @@ from .fallback_smooth import (
     element_saliency_weights,
     hessian_column_weights,
     mse_optimal_quant,
+    smooth_applies,
     smooth_block,
     symmetric_range,
 )
@@ -1967,14 +1968,20 @@ class GPTQ:
         ``target_device`` is the device the weight clone is quantized on; when
         None it is taken from ``self.H`` if present, else the weight.
         ``hessian_diag`` supplies the captured Hessian diagonal when the full
-        matrix has already been released (the low-sample fallback path); it is
-        used only when ``self.H`` is absent.
+        matrix has already been released (the low-sample fallback path). When
+        present it is preferred over ``self.H``: the diagonal is reduced from
+        the live capture immediately before this call, so it also includes
+        batches captured after an earlier ``finalize_hessian()``, while
+        ``self.H`` is only the last finalized snapshot.
         """
         maxq = 2 ** self.qcfg.bits - 1
         sigma = 3.0
         effective_group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
         start_time = time.time()
         smooth_method = getattr(self.fallback, "smooth", None)
+        search_mse = isinstance(smooth_method, SmoothMSE) and smooth_applies(
+            smooth_method, effective_group_size
+        )
         mse_steps = 32
         mse_maxshrink = 0.8
         if isinstance(smooth_method, SmoothMSE):
@@ -1990,13 +1997,13 @@ class GPTQ:
         # fallback without captured activations uses the weight-magnitude
         # proxy instead of the harmful uniform mean.
         col_weights = None
-        if isinstance(smooth_method, SmoothMSE):
+        if search_mse:
             col_weights = hessian_column_weights(
-                self.H, self.columns, device=target_device
+                hessian_diag, self.columns, device=target_device
             )
             if col_weights is None:
                 col_weights = hessian_column_weights(
-                    hessian_diag, self.columns, device=target_device
+                    self.H, self.columns, device=target_device
                 )
         Q = torch.empty_like(W)
         scale_chunks = []
@@ -2033,7 +2040,7 @@ class GPTQ:
             end = min(start + effective_group_size, self.columns)
             block = W[:, start:end]
 
-            if isinstance(smooth_method, SmoothMSE):
+            if search_mse:
                 weights = element_saliency_weights(block) if col_weights is None else col_weights[start:end]
                 dequant, scale, zero = mse_optimal_quant(
                     block,

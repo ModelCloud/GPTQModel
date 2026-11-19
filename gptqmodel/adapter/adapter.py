@@ -25,6 +25,32 @@ HF_ADAPTER_CONFIG_FILE_NAME = "adapter_config.json"
 HF_ADAPTER_WEIGHT_KEY_PREFIX = "base_model.model."
 
 
+def _local_adapter_generation(path) -> Optional[Tuple]:
+    """Return a cheap signature of a local adapter's files.
+
+    An unpinned local adapter is cached by path, but the files can be rewritten
+    in place (re-exporting to the same directory). Stat the two artifact files
+    so an overwrite starts a new cache entry instead of serving the previous
+    tensors (#5423).
+    """
+
+    try:
+        path = os.fspath(path)
+    except TypeError:
+        return None
+    if not isinstance(path, str) or not os.path.isdir(path):
+        return None
+    generation = []
+    for filename in (HF_ADAPTER_CONFIG_FILE_NAME, HF_ADAPTER_FILE_NAME):
+        try:
+            stat = os.stat(os.path.join(path, filename))
+        except OSError:
+            generation.append((filename, None, None, None))
+        else:
+            generation.append((filename, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size))
+    return tuple(generation)
+
+
 def _rank_pattern_matches(pattern: str, weight_key: str, *, ignore_case: bool = False) -> bool:
     """Return whether one `rank_pattern` key selects `weight_key`.
 
@@ -342,11 +368,24 @@ class Lora(Adapter):
             self.path = os.path.abspath(self.path)
         return self.path, remote_revision, remote_sha256
 
+    def _adapter_cache_key(self, path, remote_revision, remote_sha256):
+        """Build the cache key, adding a local artifact generation when unpinned.
+
+        Pinned remote sources are immutable, and a non-local path has no files to
+        stat, so those keep the historical three-part key.
+        """
+
+        if remote_revision is None and remote_sha256 is None:
+            generation = _local_adapter_generation(path)
+            if generation is not None:
+                return (path, None, None, generation)
+        return (path, remote_revision, remote_sha256)
+
     def _load_adapter(self) -> Tuple[LoraConfig, Dict[str, torch.Tensor]]:
         """Load and cache the adapter config and weights for this source."""
 
         path, remote_revision, remote_sha256 = self._resolve_source()
-        cache_key = (path, remote_revision, remote_sha256)
+        cache_key = self._adapter_cache_key(path, remote_revision, remote_sha256)
         lora_cache = AdapterCache.get(cache_key)
         if lora_cache is None:
             # get lora config
@@ -469,7 +508,7 @@ class Lora(Adapter):
             return
 
         lora_cfg, lora_weights = self._load_adapter()
-        cache_key = (
+        cache_key = self._adapter_cache_key(
             self.path,
             getattr(self, "_gptqmodel_remote_revision", None),
             getattr(self, "_gptqmodel_remote_sha256", None),

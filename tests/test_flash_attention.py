@@ -12,19 +12,20 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 
 import pytest  # noqa: E402
-import torch  # noqa: E402
-
-
-# FlashAttention-2 is an optional CUDA-only package.
-pytest.importorskip("flash_attn")
-
-from models.model_test import ModelTest  # noqa: E402
+from models.model_test import ModelTest, is_flash_attn_2_available  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="flash_attention_2 runs on CUDA")
+# FlashAttention-2 is an optional CUDA-only package. Skip the test instead of
+# failing the suite when it is not installed or no CUDA device is visible.
+pytestmark = pytest.mark.skipif(
+    not is_flash_attn_2_available(),
+    reason="FlashAttention-2 requires the optional flash_attn package and a CUDA device",
+)
+
+
 class Test(ModelTest):
 
     MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"

@@ -126,12 +126,23 @@ def bind_private_offload_root(model: nn.Module) -> Optional[str]:
     move this model's save-time bundle lookup. The directory is registered on
     the model so :func:`release_private_offload_root` can remove it after save,
     after a failed run, or when the model is garbage collected (issue #4368).
+
+    A checkpoint session records its attempt directory on the model as
+    run-owned state; this run's namespace then lives inside that attempt
+    instead of the caller's shared root (issue #5361).
     """
     config = getattr(model, "quantize_config", None)
     if config is None or not getattr(config, "offload_to_disk", False):
         return None
 
     base = getattr(model, "_private_offload_base_root", None)
+    if not base:
+        # A checkpoint attempt is run-owned state on the model rather than a
+        # rewrite of the caller's (possibly shared) QuantizeConfig. Its private
+        # namespace belongs inside that attempt directory (#5361).
+        attempt = getattr(model, "_checkpoint_offload_attempt_root", None)
+        if attempt:
+            base = os.path.abspath(os.path.expanduser(os.fspath(attempt)))
     if not base:
         configured = getattr(config, "offload_to_disk_path", None)
         if not configured:

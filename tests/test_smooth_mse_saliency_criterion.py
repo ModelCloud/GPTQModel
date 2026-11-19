@@ -36,6 +36,7 @@ from gptqmodel.quantization.rtn import RTN
 
 MAXQ = 15
 GROUP_SIZE = 128
+DEVICES = ["cpu"] + [f"cuda:{i}" for i in range(torch.cuda.device_count())]
 
 
 def _rtn_dequant(block: torch.Tensor, smooth, *, sym: bool = True) -> torch.Tensor:
@@ -223,6 +224,79 @@ def test_gptq_fallback_follows_the_hessian_not_weight_magnitude():
     ).mean() - 1e-6
 
 
+@pytest.mark.parametrize("device", DEVICES)
+def test_gptq_fallback_uses_batches_added_after_finalize_hessian(monkeypatch, device):
+    """A finalized Hessian must not hide batches captured after it (#5365).
+
+    ``finalize_hessian()`` materializes ``self.H`` from the samples seen so
+    far. Later ``add_batch()`` calls only update the partials. The fallback
+    must weight its search by the diagonal reduced from the live capture, not
+    by the older ``self.H`` snapshot.
+    """
+
+    torch.manual_seed(0)
+    block = torch.randn(8, GROUP_SIZE) * 0.2
+    block[:, 0] = 20.0
+    block[:, 1] = 1.3
+
+    first = torch.zeros(1, GROUP_SIZE, device=device)
+    first[0, 0] = 1.0
+    second = torch.zeros(1, GROUP_SIZE, device=device)
+    second[0, 1] = 100.0
+
+    def make_task():
+        source = torch.nn.Linear(GROUP_SIZE, block.shape[0], bias=False).to(device)
+        with torch.no_grad():
+            source.weight.copy_(block)
+        config = GPTQConfig(
+            bits=4,
+            group_size=GROUP_SIZE,
+            sym=True,
+            fallback=Fallback(
+                threshold=100, strategy=FallbackStrategy.RTN, smooth=SmoothMSE()
+            ),
+            offload_to_disk=False,
+        )
+        task = GPTQ(source, config)
+        task.quantizer.configure(perchannel=True)
+        task.expected_nsamples = 2
+        return task
+
+    control = make_task()
+    control.add_batch(first, None)
+    control.add_batch(second, None)
+
+    early = make_task()
+    early.add_batch(first, None)
+    early.finalize_hessian()
+    early.add_batch(second, None)
+
+    # The trigger: H holds only the first batch and the second is pending.
+    assert control.H is None
+    assert early.H is not None
+    assert early._hessian_dirty
+    assert control.nsamples == early.nsamples == 2
+
+    # Independently sum the squared activations of the two explicit rows.
+    expected = torch.zeros(GROUP_SIZE, device=device)
+    expected[0] = 1.0
+    expected[1] = 100.0**2
+
+    captured = _spy_mse_weights(monkeypatch, gptq_module)
+
+    control_quantized, *_ = control.quantize(blocksize=GROUP_SIZE)
+    assert len(captured) == 1
+    control_weights = captured.pop()
+
+    early_quantized, *_ = early.quantize(blocksize=GROUP_SIZE)
+    assert len(captured) == 1
+    early_weights = captured.pop()
+
+    _assert_weights_follow_hessian(control_weights, expected)
+    _assert_weights_follow_hessian(early_weights, expected)
+    torch.testing.assert_close(early_quantized, control_quantized, rtol=0, atol=0)
+
+
 def _captured_inputs(rows: int = 32) -> torch.Tensor:
     """Calibration rows with one channel carrying most of the energy."""
 
@@ -326,3 +400,109 @@ def test_qqq_quantize_fallback_uses_the_captured_hessian_diagonal(monkeypatch):
 
     assert captured, "the fallback never reached mse_optimal_quant"
     _assert_weights_follow_hessian(captured[0], expected)
+
+
+def _rtn_grid(block, smooth, *, group_size=GROUP_SIZE):
+    source = torch.nn.Linear(block.shape[1], block.shape[0], bias=False)
+    with torch.no_grad():
+        source.weight.copy_(block)
+    config = RTNConfig(
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        smooth=smooth,
+        offload_to_disk=False,
+    )
+    dequant, *_ = RTN(source, config).quantize()
+    return dequant
+
+
+def _gptq_fallback_grid(block, smooth, *, group_size=GROUP_SIZE):
+    source = torch.nn.Linear(block.shape[1], block.shape[0], bias=False)
+    with torch.no_grad():
+        source.weight.copy_(block)
+    config = GPTQConfig(
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        fallback=Fallback(strategy=FallbackStrategy.RTN, smooth=smooth),
+        offload_to_disk=False,
+    )
+    task = GPTQ(source, config)
+    task.quantizer.configure(perchannel=True)
+    dequant, *_ = task._fallback_quantize(FallbackStrategy.RTN, blocksize=GROUP_SIZE)
+    return dequant
+
+
+def _qqq_fallback_grid(block, smooth, *, group_size=GROUP_SIZE):
+    source = torch.nn.Linear(block.shape[1], block.shape[0], bias=False)
+    with torch.no_grad():
+        source.weight.copy_(block)
+    config = QQQConfig(
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        fallback=Fallback(strategy=FallbackStrategy.RTN, smooth=smooth),
+        offload_to_disk=False,
+    )
+    task = QQQ(source, config)
+    task.quantizer.configure(
+        bits=config.bits, perchannel=True, sym=config.sym, groupsize=config.group_size
+    )
+    dequant, *_ = task._fallback_quantize(FallbackStrategy.RTN)
+    return dequant
+
+
+GRID_BUILDERS = [
+    pytest.param(_rtn_grid, id="rtn"),
+    pytest.param(_gptq_fallback_grid, id="gptq"),
+    pytest.param(_qqq_fallback_grid, id="qqq"),
+]
+
+
+@pytest.mark.parametrize("build_grid", GRID_BUILDERS)
+def test_smooth_mse_group_size_threshold_gates_the_search(build_grid):
+    """A disabled SmoothMSE must not change the grid (#5366).
+
+    The RTN loop and the GPTQ/QQQ fallback loops entered ``mse_optimal_quant``
+    whenever the smoother was a ``SmoothMSE``, so ``group_size_threshold`` only
+    gated the non-MSE branch. An above-threshold smoother must produce exactly
+    the no-smoother grid, while the equal-threshold control must still search.
+    """
+
+    torch.manual_seed(5366)
+    block = torch.randn(16, GROUP_SIZE)
+
+    plain = build_grid(block, None)
+    disabled = build_grid(block, SmoothMSE(group_size_threshold=GROUP_SIZE * 2))
+    enabled = build_grid(block, SmoothMSE(group_size_threshold=GROUP_SIZE))
+
+    assert torch.equal(disabled, plain), (
+        "SmoothMSE ran below group_size_threshold and changed the quantized weights"
+    )
+    assert not torch.equal(enabled, plain), (
+        "the equal-threshold control never reached the MSE search"
+    )
+
+
+@pytest.mark.parametrize("build_grid", GRID_BUILDERS)
+def test_smooth_mse_threshold_uses_the_resolved_whole_row_size(build_grid):
+    """``group_size=-1`` resolves to the row width before the threshold gate."""
+
+    torch.manual_seed(5367)
+    block = torch.randn(16, GROUP_SIZE)
+
+    plain = build_grid(block, None, group_size=-1)
+    disabled = build_grid(
+        block, SmoothMSE(group_size_threshold=GROUP_SIZE + 1), group_size=-1
+    )
+    enabled = build_grid(
+        block, SmoothMSE(group_size_threshold=GROUP_SIZE), group_size=-1
+    )
+
+    assert torch.equal(disabled, plain), (
+        "a whole-row group must still honour group_size_threshold"
+    )
+    assert not torch.equal(enabled, plain), (
+        "a whole-row group at the threshold must still reach the MSE search"
+    )

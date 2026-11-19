@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import types
 
 import numpy as np
 import pytest
@@ -3073,6 +3075,74 @@ def test_gptqmodel_load_consumes_a_blockfloat_checkpoint(tmp_path):
         GPTQModel.load(out, device="xla:0")
 
 
+def test_gptqmodel_load_accepts_a_blockfloat_checkpoint_selected_by_subfolder(tmp_path):
+    """``subfolder=`` must select the same checkpoint as a direct directory path.
+
+    The block-float probe and the model build both have to use the resolved
+    checkpoint directory. Probing the repository root instead made this public
+    load fall through to the GPTQ config parser and fail with
+    ``Unknown quantization format: `tt-blockfloat``` before the model existed.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    torch.manual_seed(11)
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(
+        vocab_size=64, hidden_size=32, intermediate_size=64,
+        num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
+        tie_word_embeddings=True,
+    )
+    model = LlamaForCausalLM(config)
+    with torch.no_grad():
+        for block in model.model.layers:
+            for _, module in block.named_modules():
+                if getattr(module, "weight", None) is not None and module.weight.dim() == 2:
+                    module.weight.copy_(bq.quantize_bf4(module.weight.detach().float()))
+
+    root = tmp_path / "repo"
+    packed = root / "packed"
+    bq.save_blockfloat_model(model, str(packed), bits=4, embed_bits=8)
+
+    from gptqmodel import GPTQModel
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import TTBlockfloatLinear
+
+    direct = GPTQModel.load(str(packed), device="cpu")
+    nested = GPTQModel.load(str(root), subfolder="packed", device="cpu")
+
+    assert nested.quantized is True
+    assert nested.quantize_config.method == METHOD.TT_BLOCKFLOAT
+    # The wrapped model is built from the resolved directory, so its recorded
+    # root is the checkpoint the caller selected, not the parent repository.
+    assert nested.model_local_path == str(packed)
+
+    def blockfloat_modules(loaded):
+        return {
+            name: module
+            for name, module in loaded.model.named_modules()
+            if isinstance(module, TTBlockfloatLinear)
+        }
+
+    direct_modules = blockfloat_modules(direct)
+    nested_modules = blockfloat_modules(nested)
+    assert nested_modules, "fixture produced no block-float modules"
+    assert nested_modules.keys() == direct_modules.keys()
+    for name, direct_module in direct_modules.items():
+        nested_module = nested_modules[name]
+        assert type(nested_module) is type(direct_module)
+        # Compare the packed storage itself: matching module types alone would
+        # pass if the subfolder route silently loaded different weights.
+        assert torch.equal(nested_module.codes, direct_module.codes), name
+        assert torch.equal(nested_module.exponents, direct_module.exponents), name
+
+    ids = torch.randint(0, config.vocab_size, (1, 8))
+    with torch.no_grad():
+        assert torch.equal(nested.model(ids).logits, direct.model(ids).logits)
+
+
 def _scalar_blockfloat_oracle(block, bits):
     """Independent double-precision oracle for one block, built from scratch.
 
@@ -4791,6 +4861,138 @@ def test_gsm8k_prompt_is_five_shot_and_ends_with_the_question():
     assert prompt.endswith("Question: q7\nAnswer:")
     # Earlier shots precede the target question.
     assert prompt.index("q2") < prompt.index("q7")
+
+
+class _WordTokenizer:
+    """Word-level tokenizer stub with transformers' right-truncation semantics."""
+
+    def __init__(self):
+        self.pad_token = "<pad>"
+        self.eos_token = "<eos>"
+        self.bos_token = "<bos>"
+        self.pad_token_id = 1
+        self.bos_token_id = 0
+        self.chat_template = None
+        self._ids = {"<bos>": 0, "<pad>": 1, "<eos>": 2}
+        self._words = {0: "<bos>", 1: "<pad>", 2: "<eos>"}
+
+    def _id(self, word):
+        if word not in self._ids:
+            index = len(self._ids)
+            self._ids[word] = index
+            self._words[index] = word
+        return self._ids[word]
+
+    def __call__(self, text, return_tensors=None, truncation=False, max_length=None):
+        ids = [self.bos_token_id] + [self._id(word) for word in text.split()]
+        if truncation and max_length is not None:
+            ids = ids[:max_length]  # what a right-truncating fast tokenizer does
+        return types.SimpleNamespace(input_ids=torch.tensor([ids]))
+
+    def decode(self, ids, skip_special_tokens=True):
+        return " ".join(self._words[int(index)] for index in ids)
+
+
+class _RecordingModel:
+    """Generation stub: records the prompt ids and answers ``#### 18``."""
+
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+        self.seen = []
+
+    def eval(self):
+        return self
+
+    def generate(self, ids, **_kwargs):
+        self.seen.append(ids.clone())
+        answer = torch.tensor([[self.tokenizer._id(word) for word in "#### 18".split()]])
+        return torch.cat([ids, answer], dim=1)
+
+
+def _write_jsonl(path, rows):
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+
+
+def _stub_gsm8k_model(monkeypatch):
+    import transformers
+
+    tokenizer = _WordTokenizer()
+    model = _RecordingModel(tokenizer)
+    monkeypatch.setattr(
+        transformers, "AutoTokenizer",
+        types.SimpleNamespace(from_pretrained=lambda *args, **kwargs: tokenizer),
+    )
+    monkeypatch.setattr(
+        transformers, "AutoModelForCausalLM",
+        types.SimpleNamespace(from_pretrained=lambda *args, **kwargs: model),
+    )
+    return tokenizer, model
+
+
+def _gsm8k_paths(tmp_path):
+    rows_path = tmp_path / "rows.jsonl"
+    shots_path = tmp_path / "shots.jsonl"
+    _write_jsonl(rows_path, [{"question": "TARGET question?", "answer": "#### 18"}])
+    _write_jsonl(
+        shots_path,
+        [
+            {"question": f"demo question number {index} with extra words", "answer": f"#### {index}"}
+            for index in range(5)
+        ],
+    )
+    return rows_path, shots_path
+
+
+def test_gsm8k_truncation_keeps_the_question(monkeypatch, tmp_path, capsys):
+    """#5403: an over-budget few-shot prompt must keep the question under test."""
+
+    ev = _load_gsm8k_eval()
+    tokenizer, model = _stub_gsm8k_model(monkeypatch)
+    rows_path, shots_path = _gsm8k_paths(tmp_path)
+
+    result = ev.run_eval(
+        "stub",
+        limit=1,
+        rows_path=str(rows_path),
+        shots_path=str(shots_path),
+        max_prompt_tokens=12,
+        verbose=False,
+    )
+
+    assert len(model.seen) == 1
+    scored = tokenizer.decode(model.seen[0][0])
+    assert "TARGET" in scored, f"the question under test was truncated away: {scored!r}"
+    assert scored.rstrip().endswith("Answer:")
+    # The demonstrations are what gets dropped.
+    assert "demo question" not in scored
+    assert result["truncated_prompts"] == 1
+    assert result["max_prompt_tokens"] == 12
+    assert "WARNING" in capsys.readouterr().out
+
+
+def test_gsm8k_short_prompt_is_not_truncated(monkeypatch, tmp_path, capsys):
+    """A prompt that fits keeps every shot and reports no truncation."""
+
+    ev = _load_gsm8k_eval()
+    tokenizer, model = _stub_gsm8k_model(monkeypatch)
+    rows_path, shots_path = _gsm8k_paths(tmp_path)
+
+    result = ev.run_eval(
+        "stub",
+        limit=1,
+        rows_path=str(rows_path),
+        shots_path=str(shots_path),
+        max_prompt_tokens=4096,
+        verbose=False,
+    )
+
+    scored = tokenizer.decode(model.seen[0][0])
+    assert "TARGET" in scored
+    assert scored.count("demo question") == 5
+    assert result["truncated_prompts"] == 0
+    assert "WARNING" not in capsys.readouterr().out
 
 
 @pytest.mark.skipif(

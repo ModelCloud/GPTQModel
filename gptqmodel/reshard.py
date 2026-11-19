@@ -755,7 +755,97 @@ def _write_group(
     return filenames, tensor_to_filename, total_size
 
 
-def _copy_auxiliary_files(source_dir: str, staging_dir: str) -> None:
+_ADAPTER_CONFIG_NAMES = ("config.json", "quantize_config.json", "quant_config.json")
+
+
+def _adapter_payload(payload: object) -> Optional[dict]:
+    """The ``adapter`` manifest a checkpoint config declares, if any."""
+
+    if not isinstance(payload, dict):
+        return None
+    quant_cfg = payload.get("quantization_config")
+    for candidate in (quant_cfg, payload):
+        if not isinstance(candidate, dict):
+            continue
+        adapter = candidate.get("adapter")
+        if isinstance(adapter, dict):
+            return adapter
+    return None
+
+
+def _referenced_local_adapters(source_dir: str) -> List[str]:
+    """Adapter artifacts inside the checkpoint that its config references.
+
+    A checkpoint may ship a local LoRA payload beside its weights and point the
+    quantization config at it (``adapter.path``, relative to the checkpoint).
+    The base weight index does not list those tensors, so the reshard writer
+    has to treat the referenced directory as its own artifact; otherwise the
+    output keeps the reference and ``adapter_config.json`` but drops the
+    adapter's weights (#5416).
+
+    Only relative references that resolve inside the checkpoint are returned; a
+    remote repository id or an absolute path is not ours to copy.
+    """
+
+    adapters: List[str] = []
+    seen = set()
+    for name in _ADAPTER_CONFIG_NAMES:
+        config_path = os.path.join(source_dir, name)
+        if not os.path.isfile(config_path):
+            continue
+        try:
+            with open(config_path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        adapter = _adapter_payload(payload)
+        if not adapter:
+            continue
+        raw = adapter.get("path")
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        # Resolve lexically: an HF cache snapshot stores its files as symlinks
+        # into a sibling ``blobs`` store, so the real target legitimately sits
+        # outside the snapshot directory. `assert_auxiliary_copy_allowed`
+        # validates that allowance when the file is copied.
+        try:
+            relative = validate_relative_checkpoint_path(raw.strip(), kind="adapter path")
+        except CheckpointPathError:
+            log.debug("reshard: adapter path is not inside the checkpoint: %r", raw)
+            continue
+        resolved = os.path.normpath(os.path.join(os.path.abspath(source_dir), relative))
+        if not os.path.exists(resolved):
+            # A remote repository id also looks like a relative path; only a
+            # path that exists inside the checkpoint is ours to copy.
+            log.debug("reshard: adapter path `%s` is not a local artifact; skipping", raw)
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        adapters.append(os.path.relpath(resolved, os.path.abspath(source_dir)))
+    return adapters
+
+
+def _adapter_weight_files(source_dir: str, adapters: Sequence[str]) -> set:
+    """Absolute paths of the weight files the referenced adapters own."""
+
+    owned = set()
+    for relative in adapters:
+        adapter_path = os.path.join(source_dir, relative)
+        if os.path.isfile(adapter_path):
+            owned.add(os.path.abspath(adapter_path))
+            continue
+        for root, dirs, files in os.walk(adapter_path):
+            dirs[:] = sorted(name for name in dirs if name not in _SKIP_AUX_DIRS)
+            for filename in files:
+                owned.add(os.path.abspath(os.path.join(root, filename)))
+    return owned
+
+
+def _copy_auxiliary_files(source_dir: str, staging_dir: str, adapters: Sequence[str] = ()) -> None:
+    # Weight shards are rewritten from the index, so their source files are
+    # skipped - except the ones a referenced local adapter owns (#5416).
+    adapter_weights = _adapter_weight_files(source_dir, adapters)
     copied = 0
     for root, dirs, files in os.walk(source_dir):
         dirs[:] = sorted(name for name in dirs if name not in _SKIP_AUX_DIRS)
@@ -763,9 +853,11 @@ def _copy_auxiliary_files(source_dir: str, staging_dir: str) -> None:
         target_root = staging_dir if relative_root == "." else os.path.join(staging_dir, relative_root)
         for filename in sorted(files):
             lower = filename.lower()
-            if lower.endswith(_WEIGHT_SUFFIXES) or lower.endswith(_INDEX_SUFFIXES):
-                continue
             source_path = os.path.join(root, filename)
+            if (lower.endswith(_WEIGHT_SUFFIXES) or lower.endswith(_INDEX_SUFFIXES)) and (
+                os.path.abspath(source_path) not in adapter_weights
+            ):
+                continue
             assert_auxiliary_copy_allowed(source_dir, source_path, kind="reshard auxiliary file")
             os.makedirs(target_root, exist_ok=True)
             shutil.copy2(source_path, os.path.join(target_root, filename))
@@ -891,7 +983,7 @@ def reshard(
     buffer = bytearray(_STREAM_CHUNK_SIZE)
 
     try:
-        _copy_auxiliary_files(source_dir, staging_dir)
+        _copy_auxiliary_files(source_dir, staging_dir, _referenced_local_adapters(source_dir))
 
         total_size = 0
         tensor_to_filename: Dict[str, str] = {}

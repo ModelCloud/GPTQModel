@@ -14,6 +14,8 @@ from .config import (
     QuantizeConfig,
     SmoothLog,
     SmoothMAD,
+    SmoothMethod,
+    SmoothMSE,
     SmoothOutlier,
     SmoothPercentile,
     SmoothPercentileAsymmetric,
@@ -85,6 +87,31 @@ def _clamp_block(block: torch.Tensor, lo: torch.Tensor, hi: torch.Tensor) -> tor
     return torch.max(torch.min(block, hi), lo)
 
 
+def smooth_applies(
+    method: Optional[SmoothMethod],
+    group_size: Optional[int],
+    *,
+    width: Optional[int] = None,
+) -> bool:
+    """Return whether ``method`` is enabled for the effective group size.
+
+    ``group_size=-1`` means one group per row. ``width`` resolves that sentinel
+    so the threshold still sees the real row width; callers that already
+    resolved the effective group size can omit it. A ``None`` group size keeps
+    the legacy "no information, apply" behavior used by direct callers.
+    """
+
+    if method is None:
+        return False
+    if group_size is None:
+        return True
+    if group_size < 0:
+        if width is None:
+            return True
+        group_size = width
+    return group_size >= getattr(method, "group_size_threshold", 0)
+
+
 def smooth_block(
     block: torch.Tensor,
     fallback: Fallback,
@@ -93,11 +120,7 @@ def smooth_block(
     group_size: Optional[int] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     method = getattr(fallback, "smooth", None)
-    if method is None:
-        return block, None
-    if group_size is not None and group_size < 0:
-        group_size = block.shape[1]
-    if group_size is not None and group_size < getattr(method, "group_size_threshold", 0):
+    if not smooth_applies(method, group_size, width=block.shape[1]):
         return block, None
 
     if isinstance(method, SmoothRowCol):
@@ -158,7 +181,20 @@ def smooth_block(
         lin_threshold = (torch.exp(threshold * log_mu) - 1.0) / mu
         return torch.clamp(block_f, -lin_threshold, lin_threshold).to(block.dtype), None
 
-    return block, None
+    if isinstance(method, SmoothMSE):
+        # The MSE search needs the quantizer's code grid and saliency, so only
+        # the RTN/GPTQ/QQQ loops can apply it; they branch before calling this
+        # helper. The direct GGUF/BitsAndBytes packers call it too, and a silent
+        # no-op saved un-smoothed weights under MSE metadata (#5383).
+        raise ValueError(
+            "SmoothMSE requires the quantizer's MSE search and is not available "
+            "to the direct packers; use a clipping smoother such as SmoothMAD, "
+            "or quantize through RTN/GPTQ/QQQ."
+        )
+
+    # Fail closed: silently returning the block unchanged would advertise a
+    # preprocessor the packed weights never received.
+    raise ValueError(f"smooth_block does not implement {type(method).__name__}")
 
 
 def _eval_mse(block_f, min_val, max_val, base_zero, qcfg, maxq, shrink, eps, weights=None):

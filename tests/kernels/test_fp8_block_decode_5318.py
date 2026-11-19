@@ -34,7 +34,7 @@ import torch.nn as nn
 
 import gptqmodel.nn_modules.qlinear.fp8 as fp8_module
 from gptqmodel.utils import fp8_block_triton
-from tests.fp8_test_utils import pack_fp8_module
+from tests.fp8_test_utils import install_fp8_payload, pack_fp8_module
 
 
 pytestmark = [pytest.mark.gpu]
@@ -267,3 +267,167 @@ def test_block_decode_tiles_are_the_measured_ones() -> None:
     assert fp8_block_triton._gemv_tiles(16, 4096) == (16, 32, 4, 4)
     assert fp8_block_triton._gemv_tiles(64, 14336) == (64, 64, 4, 4)
     assert fp8_block_triton._decode_tile(128, 128) == (32, 128)
+
+
+def _range_extreme_kernel(
+    *, scale: float, semantics: str, in_features: int = 128, out_features: int = 128
+):
+    """A 128-wide block payload whose decoded weight is finite but huge.
+
+    Every stored code is 1, so the decoded weight is ``1 / scale`` for the
+    inverse convention and ``1 * scale`` for the multiplier one. A scale of
+    ``2**-16`` (or ``2**16``) decodes to 65536: finite in FP32 and BF16, but
+    above the FP16 maximum of 65504.
+    """
+
+    linear = nn.Linear(in_features, out_features, bias=False).eval()
+    kernel = fp8_module.TorchFP8Linear(
+        bits=8,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        format="float8_e5m2",
+        weight_scale_method="block",
+        weight_block_size=BLOCK,
+        register_buffers=False,
+    )
+    codes = torch.ones((out_features, in_features), dtype=torch.float8_e5m2)
+    scale_inv = torch.full(
+        (out_features // BLOCK[0], in_features // BLOCK[1]),
+        scale,
+        dtype=torch.float32,
+    )
+    install_fp8_payload(kernel, linear, codes, scale_inv)
+    kernel.weight_scale_semantics = semantics
+    return kernel.to("cuda").eval()
+
+
+@_DECODE_SKIP
+@pytest.mark.parametrize(
+    "dtype,decode_expected",
+    [
+        # FP16 cannot hold the decoded weight, so the narrowing decode must
+        # decline and the FP32 fallback must answer.
+        (torch.float16, False),
+        # BF16 and FP32 keep the FP32 exponent range and stay on the decode.
+        (torch.bfloat16, True),
+        (torch.float32, True),
+    ],
+)
+@pytest.mark.parametrize(
+    "semantics,scale",
+    [("inverse", 2.0**-16), ("multiplier", 2.0**16)],
+)
+def test_block_decode_keeps_an_out_of_fp16_range_payload_finite(
+    dtype, decode_expected, semantics, scale
+):
+    """A finite decoded weight above FP16 range must not be narrowed to inf (#5405).
+
+    The single-pass decode writes the decoded weight in the activation dtype
+    before the FP32-reduced GEMM. At 65536 an FP16 store is ``inf`` and the
+    zero codes of the weight row make the product ``0 * inf = NaN``, even
+    though ``0.25 * 65536 = 16384`` fits FP16. The range gate must send only
+    the overflowing FP16 payload to the exact FP32 fallback.
+    """
+
+    if dtype is torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        pytest.skip("BF16 arithmetic unavailable on this device")
+
+    module = _range_extreme_kernel(scale=scale, semantics=semantics)
+    x = torch.zeros(1, module.in_features, dtype=dtype, device="cuda")
+    x[0, 0] = 0.25
+    x_flat = x.reshape(-1, module.in_features)
+
+    with torch.inference_mode():
+        output = module(x)
+
+    assert torch.isfinite(output).all(), f"non-finite output for {dtype}: {output}"
+    # 0.25 * 65536 is exact in every dtype here, so the oracle is exact too.
+    reference = _oracle(module, x)
+    torch.testing.assert_close(output.to(torch.float64), reference, rtol=0.0, atol=0.0)
+    # Only the payload that would narrow to inf leaves the single-pass decode.
+    with torch.inference_mode():
+        assert module._block_decode_eligible(x_flat, fused=False) == decode_expected
+
+
+@_DECODE_SKIP
+def test_block_decode_range_gate_keeps_the_in_range_fast_path() -> None:
+    """The #5405 range gate must not move an in-range payload off the fast path."""
+
+    module = _range_extreme_kernel(scale=1.0, semantics="inverse")
+    x = torch.zeros(1, module.in_features, dtype=torch.float16, device="cuda")
+    x[0, 0] = 0.25
+    x_flat = x.reshape(-1, module.in_features)
+    calls = {"gemv": 0, "decode": 0}
+    original_gemv = fp8_module.fp8_block_gemv
+    original_decode = fp8_module.fp8_block_decode
+
+    def counted_gemv(*args, **kwargs):
+        calls["gemv"] += 1
+        return original_gemv(*args, **kwargs)
+
+    def counted_decode(*args, **kwargs):
+        calls["decode"] += 1
+        return original_decode(*args, **kwargs)
+
+    fp8_module.fp8_block_gemv = counted_gemv
+    fp8_module.fp8_block_decode = counted_decode
+    try:
+        with torch.inference_mode():
+            assert module._block_decode_eligible(x_flat, fused=False)
+            # One row of a divisible 128-wide block still takes the fused
+            # W8A16 product, which is the fastest in-range route.
+            assert module._block_decode_eligible(x_flat, fused=True)
+            output = module(x)
+    finally:
+        fp8_module.fp8_block_gemv = original_gemv
+        fp8_module.fp8_block_decode = original_decode
+
+    assert calls == {"gemv": 1, "decode": 0}, calls
+    assert torch.isfinite(output).all()
+    torch.testing.assert_close(
+        output, torch.full_like(output, 0.25), rtol=0.0, atol=0.0
+    )
+
+
+@_DECODE_SKIP
+def test_fused_block_gemv_keeps_the_bias_gradient() -> None:
+    """#5402: a trainable bias must not ride the opaque fused epilogue.
+
+    The fused W8A16 product adds the bias inside the Triton kernel, so its
+    output has no autograd wrapper. A bias-only training step therefore needs
+    the differentiable single-pass decode, while a frozen bias (and any
+    no-grad call) keeps the fused product.
+    """
+
+    module = _block_kernel(bias=True)
+    x = torch.randn(4, module.in_features, device="cuda", dtype=torch.float16)
+    x_flat = x.reshape(-1, module.in_features)
+    module.weight.requires_grad_(False)
+    module.weight_scale_inv.requires_grad_(False)
+    module.bias.requires_grad_(True)
+
+    # The root cause: the fused gate looked at the activation, weight and
+    # scale, but not at the bias.
+    assert not module._block_decode_eligible(x_flat, fused=True)
+    assert module._block_decode_eligible(x_flat, fused=False)
+
+    output = module(x)
+    assert output.requires_grad
+    upstream = torch.randn_like(output)
+    (output * upstream).sum().backward()
+    expected = upstream.float().sum(dim=0)
+    torch.testing.assert_close(module.bias.grad, expected)
+
+    # A frozen bias is a constant, so the fused product stays available.
+    module.bias.requires_grad_(False)
+    assert module._block_decode_eligible(x_flat, fused=True)
+
+    # And a trainable bias under no_grad is inference, not training.
+    module.bias.requires_grad_(True)
+    with torch.no_grad():
+        assert module._block_decode_eligible(x_flat, fused=True)
+        assert torch.isfinite(module(x)).all()

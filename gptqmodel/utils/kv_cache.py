@@ -19,6 +19,10 @@ per layer:
                  (Llama 4) uses ``attention_chunk_size`` as its window.
 ``shared``       Gemma 3n/4 tail layers reuse an earlier layer's K/V and add
                  nothing; they are reported but never counted.
+``compressed``   DeepSeek V4 CSA/HCA: a bounded sliding branch plus pooled
+                 entries every ``compress_rate`` source tokens. CSA keeps a
+                 compressor and a Lightning Indexer stream, a window buffer and
+                 the two-series overlap state; HCA keeps only the compressor.
 
 Stacks that mix those (GLM5, DeepSeek V4.1 Flash, Gemma4 and similar) declare the
 mix either through ``layer_types`` or through a heterogeneous
@@ -96,15 +100,22 @@ class LayerCache:
     """What one decoder layer contributes to the cache.
 
     ``dims`` is the sliding/full branch: ``window`` tokens at most. Compressed
-    attention (DeepSeek V4 and friends) additionally emits one pooled entry per
+    attention (DeepSeek V4 and friends) additionally emits pooled entries every
     ``compress_rate`` source tokens, which is the part that grows unbounded.
+    ``compressed_dims`` counts every pooled stream (CSA keeps a compressor and a
+    Lightning Indexer), ``buffer_dims`` the per-source-token scratch held between
+    windows, and ``overlap_dims`` the fixed state the two-series CSA window
+    carries across a forward boundary.
     """
 
     kind: str                       # "gqa" | "mla" | "linear" | "shared" | "block" | "unknown"
     dims: int = 0                   # elements cached per token (0 when not growing)
     window: Optional[int] = None    # cap for sliding layers
-    compressed_dims: int = 0        # elements per compressed entry
+    compressed_dims: int = 0        # elements per compressed entry, all streams
     compress_rate: int = 0          # source tokens per compressed entry
+    compressed_streams: int = 1     # pooled streams folded into compressed_dims
+    buffer_dims: int = 0            # elements per buffered source token, all streams
+    overlap_dims: int = 0           # fixed elements retained, all streams
 
 
 @dataclass(frozen=True)
@@ -153,6 +164,16 @@ class KVCacheEstimate:
         return sum(1 for layer in self.layers if layer.kind == "block")
 
     @property
+    def compressed_streams(self) -> int:
+        """Pooled streams across compressed layers (CSA keeps compressor + indexer)."""
+
+        return sum(
+            layer.compressed_streams
+            for layer in self.layers
+            if layer.compress_rate and layer.compressed_dims
+        )
+
+    @property
     def shared_layers(self) -> int:
         """Decoder layers that reuse an earlier layer's K/V and cache nothing."""
 
@@ -186,8 +207,18 @@ class KVCacheEstimate:
                 span = min(context_tokens, layer.window) if layer.window else context_tokens
                 elements += layer.dims * span
             if layer.compress_rate and layer.compressed_dims:
-                entries = (context_tokens + layer.compress_rate - 1) // layer.compress_rate
+                entries = context_tokens // layer.compress_rate
                 elements += layer.compressed_dims * entries
+                if entries:
+                    elements += layer.overlap_dims
+                if context_tokens and layer.compress_rate > 1:
+                    # The window buffer holds up to ``compress_rate - 1`` source
+                    # tokens. Plan for a full buffer: that is the peak a run of
+                    # this length reaches, and a constant (rather than
+                    # ``context_tokens % compress_rate``) keeps this function
+                    # monotonic for ``max_context_tokens``'s binary search.
+                    elements += layer.buffer_dims * min(
+                        context_tokens, layer.compress_rate - 1)
         return elements * self.kv_element_bytes * batch
 
     def max_context_tokens(self, kv_budget_bytes: int, *, batch_size: int = 1) -> int:
@@ -272,6 +303,8 @@ class KVCacheEstimate:
         parts_of_shape = [f"{self.growing_layers} growing layer(s)"]
         if self.sliding_layers:
             parts_of_shape.append(f"{self.sliding_layers} sliding")
+        if self.compressed_streams > 1:
+            parts_of_shape.append(f"{self.compressed_streams} compressed streams")
         shape = ", ".join(parts_of_shape) + f", {self.layer_type}"
         parts = [f"KV cache: {human_bytes(self.kv_bytes_per_token)}/token ({shape}, {_dtype_name(self.dtype)})"]
         for context in contexts:
@@ -567,12 +600,29 @@ def _estimate_for_stack(
             head_dim = _safe_get(layer_cfg, "head_dim", _safe_get(source, "head_dim"))
             window = window or _safe_get(source, "sliding_window")
             if rate and head_dim:
+                csa = layer_type == "compressed_sparse_attention"
+                # CSA runs a Lightning Indexer next to the compressor. The
+                # indexer compresses the same windows at `index_head_dim` and
+                # keeps its own entries, buffer and overlap state, so both
+                # streams are retained. HCA has only the compressor.
+                indexer_dims = 0
+                if csa:
+                    indexer_dims = _positive_int(
+                        _safe_get(layer_cfg, "index_head_dim",
+                                  _safe_get(source, "index_head_dim"))) or int(head_dim)
+                pooled = int(head_dim) + indexer_dims
                 resolved.append(LayerCache(
                     kind="compressed",
                     dims=int(head_dim),
                     window=int(window) if window else None,
-                    compressed_dims=int(head_dim),
+                    compressed_dims=pooled,
                     compress_rate=int(rate),
+                    compressed_streams=2 if csa else 1,
+                    # The CSA two-series projector writes ``2 * head_dim`` per
+                    # source token for each stream and keeps a K and a gate
+                    # buffer; HCA writes ``head_dim`` and has no overlap state.
+                    buffer_dims=(4 if csa else 2) * pooled,
+                    overlap_dims=2 * int(rate) * pooled if csa else 0,
                 ))
             else:
                 unclassified.append(layer_type)

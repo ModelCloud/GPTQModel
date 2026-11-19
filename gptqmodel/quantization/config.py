@@ -4859,9 +4859,29 @@ def _validate_dynamic_smoothers(owner, layer_name: str, layer_dict: Mapping) -> 
     # like the top-level field (#5302). Reject the keys whose only consumer is
     # the weight-only packing path.
     method = getattr(owner, "method", None)
-    if not isinstance(method, METHOD) or method not in _CALIBRATED_METHODS:
+    if not isinstance(method, METHOD):
         return
     if _is_weight_only_lifecycle(owner):
+        # The weight-only packing path reads only the top-level `smooth`, so a
+        # per-module `fallback.smooth` is recorded and ignored, and a
+        # lossless/load-only format has no smoothing step at all (#5401).
+        fallback = layer_dict.get("fallback")
+        if isinstance(fallback, Mapping) and _has_smoother(fallback.get("smooth")):
+            raise _weight_only_fallback_smoother_error(
+                owner.__class__.__name__,
+                method,
+                f"dynamic['{layer_name}'].fallback.smooth",
+            )
+        if method in _SMOOTHERLESS_WEIGHT_ONLY_METHODS:
+            for key in ("smoother", "smooth"):
+                if _has_smoother(layer_dict.get(key)):
+                    raise _smootherless_weight_only_error(
+                        owner.__class__.__name__,
+                        method,
+                        f"dynamic['{layer_name}'].{key}",
+                    )
+        return
+    if method not in _CALIBRATED_METHODS:
         return
     for key in ("smoother", "smooth"):
         if _has_smoother(layer_dict.get(key)):
@@ -5511,6 +5531,14 @@ _CALIBRATED_METHODS = frozenset(
 #: have no smoothing step anywhere, so pointing at `fallback` would be wrong.
 _FALLBACK_SMOOTHER_METHODS = frozenset({METHOD.GPTQ, METHOD.QQQ})
 
+#: Weight-only methods whose packing path never applies a top-level `smooth`.
+#: NF12 is a lossless format and refuses one at pack time; the Tenstorrent
+#: block-float and FP8 packers have no smoothing step at all. Rejecting here
+#: fails at construction instead of after a model load (#5401).
+_SMOOTHERLESS_WEIGHT_ONLY_METHODS = frozenset(
+    {METHOD.NF12, METHOD.TT_BLOCKFLOAT, METHOD.FP8}
+)
+
 #: Methods whose weight-only lifecycle reads `smooth` in its own packing path.
 #: RTN shares ``METHOD.GPTQ`` with GPTQ, so ``uses_weight_only_lifecycle()`` is
 #: the authoritative test and the method set is only a cheap negative filter.
@@ -5571,6 +5599,27 @@ def _has_smoother(value: Any) -> bool:
     return True
 
 
+def _weight_only_fallback_smoother_error(owner: Any, method: METHOD, field: str) -> ValueError:
+    """Build the rejection for a weight-only `fallback.smooth` (#5401)."""
+
+    return ValueError(
+        f"{owner}: `{field}` is not applied by the {method.value.upper()} quantizer; "
+        "its weight-only packing path reads only the top-level smoother, so the "
+        "option would only be persisted in the checkpoint. "
+        "Set it on `smoother=`/`smooth=` instead."
+    )
+
+
+def _smootherless_weight_only_error(owner: Any, method: METHOD, field: str) -> ValueError:
+    """Build the rejection for a smoother a lossless weight-only format cannot use."""
+
+    return ValueError(
+        f"{owner}: `{field}` is not supported by the {method.value.upper()} quantizer; "
+        "this format has no weight-smoothing step, so the option changes no weight "
+        "and is refused instead of failing later during packing. Remove it."
+    )
+
+
 def validate_smoother_support(qcfg: Any) -> None:
     """Reject a configured smoother on a calibrated method that ignores it (#5302).
 
@@ -5584,18 +5633,40 @@ def validate_smoother_support(qcfg: Any) -> None:
 
     Reject the request where it is made, exactly like the protocol compiler
     refuses ``weight.prepare`` for these methods, instead of shipping a no-op.
-    Weight-only methods are unaffected: they read ``smooth`` in their own path.
+    Weight-only methods keep their top-level ``smooth`` (RTN, GGUF and
+    BitsAndBytes apply it in their own packing path), but a ``fallback.smooth``
+    there is rejected too: only the GPTQ/QQQ fallback branch reads it, so a
+    weight-only config that records one claims smoothing its weights never got
+    (#5401). Lossless/load-only weight-only formats (NF12, Tenstorrent
+    block-float, FP8) apply no smoother at all, so their top-level ``smoother``
+    is refused at construction rather than at pack time.
     Checkpoint loading is handled by ``_drop_unapplied_smoothers`` so a config
     written before this fix still describes the weights it actually produced.
     """
 
     method = getattr(qcfg, "method", None)
-    if not isinstance(method, METHOD) or method not in _CALIBRATED_METHODS:
-        return
-    if _is_weight_only_lifecycle(qcfg):
+    if not isinstance(method, METHOD):
         return
 
     owner = type(qcfg).__name__
+    if _is_weight_only_lifecycle(qcfg):
+        # The weight-only packing path reads the top-level `smooth` only. The
+        # GPTQ/QQQ fallback branch is the sole consumer of `fallback.smooth`, so
+        # a weight-only config that records one persists a claim its weights do
+        # not honour (#5401, the same class as #5302).
+        fallback = getattr(qcfg, "fallback", None)
+        if _has_smoother(getattr(fallback, "smooth", None)):
+            raise _weight_only_fallback_smoother_error(owner, method, "fallback.smooth")
+        if method in _SMOOTHERLESS_WEIGHT_ONLY_METHODS and (
+            _has_smoother(getattr(qcfg, "smoother", None))
+            or _has_smoother(getattr(qcfg, "smooth", None))
+        ):
+            raise _smootherless_weight_only_error(owner, method, "smoother")
+        return
+
+    if method not in _CALIBRATED_METHODS:
+        return
+
     if _has_smoother(getattr(qcfg, "smoother", None)):
         raise _unapplied_smoother_error(owner, method, "smoother")
     fallback = getattr(qcfg, "fallback", None)
@@ -5603,6 +5674,20 @@ def validate_smoother_support(qcfg: Any) -> None:
         getattr(fallback, "smooth", None)
     ):
         raise _unapplied_smoother_error(owner, method, "fallback.smooth")
+
+
+def _warn_dropped_smoothers(target_cls: type, dropped: list) -> None:
+    """Report the smoothers removed from a loaded checkpoint config."""
+
+    if not dropped:
+        return
+    log.warn(
+        "QuantizeConfig: %s does not apply a smoother; dropping %s from the loaded "
+        "checkpoint config. The recorded option never changed a weight, so the "
+        "stored tensors are unchanged (issue #5302).",
+        target_cls.__name__,
+        ", ".join(sorted(set(dropped))),
+    )
 
 
 def _drop_unapplied_smoothers(payload: Dict[str, Any], target_cls: type) -> Dict[str, Any]:
@@ -5619,13 +5704,13 @@ def _drop_unapplied_smoothers(payload: Dict[str, Any], target_cls: type) -> Dict
         method = _normalize_quant_method(method)
     except (TypeError, ValueError):
         return payload
-    if method not in _CALIBRATED_METHODS:
-        return payload
     # A `weight_only`/GGUF/FP8/BnB/NF12 payload is a weight-only recipe, whose
-    # packing path reads `smooth` itself. The classes are resolved by name so
-    # this helper can stay above their definitions.
-    if _peek_weight_only_method(payload.get("weight_only")) is not None:
-        return payload
+    # packing path reads only the top-level `smooth`. `fallback.smooth` belongs
+    # to the GPTQ/QQQ fallback branch, so a weight-only payload that records one
+    # describes smoothing its weights never got (#5401). Lossless/load-only
+    # formats have no smoothing step at all, so their top-level smoother is
+    # dropped too. The classes are resolved by name so this helper can stay
+    # above their definitions.
     weight_only_classes = tuple(
         cls
         for cls in (
@@ -5638,7 +5723,59 @@ def _drop_unapplied_smoothers(payload: Dict[str, Any], target_cls: type) -> Dict
         )
         if isinstance(cls, type)
     )
-    if weight_only_classes and issubclass(target_cls, weight_only_classes):
+    if _peek_weight_only_method(payload.get("weight_only")) is not None or (
+        weight_only_classes and issubclass(target_cls, weight_only_classes)
+    ):
+        weight_only_dropped = []
+        fallback = payload.get("fallback")
+        if isinstance(fallback, Mapping) and _has_smoother(fallback.get("smooth")):
+            payload = dict(payload)
+            payload["fallback"] = {
+                key: value for key, value in fallback.items() if key != "smooth"
+            }
+            weight_only_dropped.append("fallback.smooth")
+        if method in _SMOOTHERLESS_WEIGHT_ONLY_METHODS:
+            for key in ("smoother", "smooth"):
+                if _has_smoother(payload.get(key)):
+                    payload = {
+                        name: value for name, value in payload.items() if name != key
+                    }
+                    weight_only_dropped.append(key)
+        dynamic = payload.get("dynamic")
+        if isinstance(dynamic, Mapping):
+            cleaned = {}
+            changed = False
+            for pattern, override in dynamic.items():
+                if isinstance(override, Mapping):
+                    blocked = set()
+                    if isinstance(override.get("fallback"), Mapping) and _has_smoother(
+                        override["fallback"].get("smooth")
+                    ):
+                        blocked.add("fallback")
+                    if method in _SMOOTHERLESS_WEIGHT_ONLY_METHODS:
+                        blocked.update(
+                            key
+                            for key in ("smoother", "smooth")
+                            if _has_smoother(override.get(key))
+                        )
+                    if blocked:
+                        override = {
+                            key: value
+                            for key, value in override.items()
+                            if key not in blocked
+                        }
+                        changed = True
+                        weight_only_dropped.extend(
+                            f"dynamic[{pattern}].{key}" for key in sorted(blocked)
+                        )
+                cleaned[pattern] = override
+            if changed:
+                payload = dict(payload)
+                payload["dynamic"] = cleaned
+        _warn_dropped_smoothers(target_cls, weight_only_dropped)
+        return payload
+
+    if method not in _CALIBRATED_METHODS:
         return payload
 
     dropped = []
@@ -5741,14 +5878,7 @@ def _drop_unapplied_smoothers(payload: Dict[str, Any], target_cls: type) -> Dict
             payload = dict(payload)
             payload["dynamic"] = cleaned
 
-    if dropped:
-        log.warn(
-            "QuantizeConfig: %s does not apply a smoother; dropping %s from the loaded "
-            "checkpoint config. The recorded option never changed a weight, so the "
-            "stored tensors are unchanged (issue #5302).",
-            target_cls.__name__,
-            ", ".join(sorted(set(dropped))),
-        )
+    _warn_dropped_smoothers(target_cls, dropped)
     return payload
 
 

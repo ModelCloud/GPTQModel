@@ -2490,6 +2490,13 @@ class PackableQuantLinear(GPTQQuantLinear):
           workers:  number of worker threads (1 -> single-thread).
         """
 
+        # Embeddings pack along their vocabulary axis, which is the transpose of
+        # this packer's layout. Reject them before touching ``.bias`` so callers
+        # take their documented ValueError fallback instead of dying on an
+        # nn.Embedding that has no bias attribute (#5381).
+        if isinstance(linear, nn.Embedding):
+            raise ValueError("pack_block does not support embedding layers")
+
         # ---------- normalize weight to [out, in] (same as your code) ----------
         W = linear.weight.detach()
         if isinstance(linear, _ConvNd):
@@ -2524,8 +2531,9 @@ class PackableQuantLinear(GPTQQuantLinear):
 
         # small buffers
         self.register_buffer("scales", _scales_for_storage(scales, name=f"{self.name}.scales"))
-        if linear.bias is not None:
-            self.register_buffer("bias", linear.bias.detach().to("cpu"))
+        bias = getattr(linear, "bias", None)
+        if bias is not None:
+            self.register_buffer("bias", bias.detach().to("cpu"))
         elif not hasattr(self, "bias"):
             self.bias = None
 
@@ -2774,8 +2782,9 @@ class PackableQuantLinear(GPTQQuantLinear):
         scale_zeros_dev = scale_zeros_g.to(device=target_device)
 
         self.register_buffer("scales", _scales_for_storage(scales_g, name=f"{self.name}.scales").to(device="cpu"))
-        if linear.bias is not None:
-            self.register_buffer("bias", linear.bias.detach().to(device="cpu"))
+        bias = getattr(linear, "bias", None)
+        if bias is not None:
+            self.register_buffer("bias", bias.detach().to(device="cpu"))
         else:
             self.bias = None
 

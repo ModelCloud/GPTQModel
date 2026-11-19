@@ -2028,8 +2028,22 @@ def ModelWriter(cls):
             save_dir: str,
             **kwargs,
     ):
+        # Both public save names dispatch on the same model state (#5359). A
+        # dense wrapper has no quantized checkpoint to write, so the wrapped
+        # Transformers model owns config, tied weights and sharding. A
+        # weight-only module replacement must use the writer that preserves
+        # its packed endpoints; `save_quantized()` would rebuild the dense
+        # tensor and drop them.
+        if not self.quantized:
+            return self.model.save_pretrained(save_dir, **kwargs)
+        if getattr(self, "_model_free_weight_only_replacements_only", False):
+            log.warn(
+                "You are using save_pretrained on a weight-only replacement checkpoint; "
+                "re-directing to the module-replacement writer."
+            )
+            return self.save_quantized_embeddings(save_dir=save_dir, **kwargs)
         log.warn("You are using save_pretrained, which will re-direct to save_quantized.")
-        self.save_quantized(save_dir=save_dir, **kwargs)
+        return self.save_quantized(save_dir=save_dir, **kwargs)
 
     cls.save_pretrained = save_pretrained
 
@@ -2185,6 +2199,16 @@ def ModelWriter(cls):
             self.tokenizer.save_pretrained(save_dir)
         if hasattr(self, "processor") and isinstance(self.processor, ProcessorMixin):
             self.processor.save_pretrained(save_dir)
+        # Generation settings are part of the save contract. The auxiliary-file
+        # copy above only reproduces what the source checkpoint already had, so
+        # edits made on the live model (``max_new_tokens`` and friends) would be
+        # dropped unless the live config is serialized here (#5387).
+        generation_config = getattr(self.model, "generation_config", None)
+        can_generate = getattr(self.model, "can_generate", None)
+        if generation_config is not None and (
+            not callable(can_generate) or can_generate()
+        ):
+            _save_generation_config(generation_config, save_dir)
 
     cls.save_quantized_embeddings = save_quantized_embeddings
 
