@@ -4,7 +4,8 @@
 
 #include <optional>
 #include <tuple>
-#include <torch/extension.h>
+
+#include "../torch_stable_compat.h"
 
 // Fused BF16 <-> FP16 activation adaptation for the FP16-only EXL3 kernels.
 // See gptqmodel_ext/exllamav3/bf16_scale.cu for the arithmetic contract.

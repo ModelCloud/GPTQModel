@@ -41,9 +41,7 @@ static __device__ __forceinline__ __nv_bfloat16 __float2bfloat16_rn(float value)
 #include <cuda_fp16.h>
 #endif
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAException.h>
+#include "../torch_stable_compat.h"
 
 #include "bf16_scale.h"
 
@@ -214,9 +212,9 @@ void launch_bf16_rescale(
     int64_t result_stride,
     cudaStream_t stream)
 {
-    const ResultT* result_ptr = reinterpret_cast<const ResultT*>(result.data_ptr());
-    const float* scale_ptr = scale.data_ptr<float>();
-    __nv_bfloat16* out_ptr = reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>());
+    const ResultT* result_ptr = reinterpret_cast<const ResultT*>(result.const_data_ptr());
+    const float* scale_ptr = scale.const_data_ptr<float>();
+    __nv_bfloat16* out_ptr = reinterpret_cast<__nv_bfloat16*>(out.mutable_data_ptr<at::BFloat16>());
     const dim3 grid(rows, (n_cols + kThreads - 1) / kThreads);
 
     if (!bias.has_value())
@@ -231,15 +229,15 @@ void launch_bf16_rescale(
     {
         case at::kHalf:
             bf16_rescale_kernel<ResultT, at::Half><<<grid, kThreads, 0, stream>>>(
-                result_ptr, scale_ptr, b.data_ptr<at::Half>(), out_ptr, n_cols, result_stride, n_cols, true);
+                result_ptr, scale_ptr, b.const_data_ptr<at::Half>(), out_ptr, n_cols, result_stride, n_cols, true);
             break;
         case at::kBFloat16:
             bf16_rescale_kernel<ResultT, at::BFloat16><<<grid, kThreads, 0, stream>>>(
-                result_ptr, scale_ptr, b.data_ptr<at::BFloat16>(), out_ptr, n_cols, result_stride, n_cols, true);
+                result_ptr, scale_ptr, b.const_data_ptr<at::BFloat16>(), out_ptr, n_cols, result_stride, n_cols, true);
             break;
         case at::kFloat:
             bf16_rescale_kernel<ResultT, float><<<grid, kThreads, 0, stream>>>(
-                result_ptr, scale_ptr, b.data_ptr<float>(), out_ptr, n_cols, result_stride, n_cols, true);
+                result_ptr, scale_ptr, b.const_data_ptr<float>(), out_ptr, n_cols, result_stride, n_cols, true);
             break;
         default:
             TORCH_CHECK(false, "bf16_rescale bias must be float16, bfloat16 or float32");
@@ -257,14 +255,16 @@ std::tuple<at::Tensor, at::Tensor> bf16_prescale(const at::Tensor& x, double bou
 
     const int64_t n_cols = x.size(-1);
     const int64_t rows = x.numel() / n_cols;
-    at::Tensor out = at::empty(x.sizes(), x.options().dtype(at::kHalf));
-    at::Tensor scale = at::empty({rows, 1}, x.options().dtype(at::kFloat));
+    at::Tensor out = at::empty(x.sizes(),
+                              at::TensorOptions().dtype(at::kHalf).device(x.device()));
+    at::Tensor scale = at::empty({rows, 1},
+                               at::TensorOptions().dtype(at::kFloat).device(x.device()));
 
     const c10::cuda::CUDAGuard guard(x.device());
     bf16_prescale_kernel<<<rows, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
-        reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
-        reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
-        scale.data_ptr<float>(),
+        reinterpret_cast<const __nv_bfloat16*>(x.const_data_ptr<at::BFloat16>()),
+        reinterpret_cast<__half*>(out.mutable_data_ptr<at::Half>()),
+        scale.mutable_data_ptr<float>(),
         n_cols,
         static_cast<float>(bound));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -292,12 +292,13 @@ at::Tensor bf16_rescale(
         const at::Tensor& b = bias.value();
         TORCH_CHECK(b.is_cuda() && b.device() == result.device(), "bf16_rescale bias is on the wrong device");
         TORCH_CHECK(b.dim() == 1 && b.is_contiguous() && b.numel() >= n_cols, "bf16_rescale bias geometry mismatch");
-        TORCH_CHECK(b.is_floating_point(), "bf16_rescale bias must be floating point");
+        TORCH_CHECK(at::is_floating_point(b), "bf16_rescale bias must be floating point");
     }
 
     std::vector<int64_t> out_shape(result.sizes().begin(), result.sizes().end() - 1);
     out_shape.push_back(n_cols);
-    at::Tensor out = at::empty(out_shape, result.options().dtype(at::kBFloat16));
+    at::Tensor out = at::empty(
+        out_shape, at::TensorOptions().dtype(at::kBFloat16).device(result.device()));
 
     const int64_t rows = result.numel() / result.size(-1);
     const int64_t result_stride = result.size(-1);
