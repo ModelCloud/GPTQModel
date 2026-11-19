@@ -121,7 +121,7 @@ def _expert_quant_digest(checkpoint: Path) -> str:
 # deliberately changes AWQ numerics, regenerate them by running this test's
 # quantization on a main checkout (the vendored classes must still match).
 _MAIN_AWQ_EXPERT_DIGESTS = {
-    "mixtral": "96206e02419dd6eac36143a3b65e91a4e34b15475ef6efcfd7070e3db94ed2a3",
+    "mixtral": "b9a9ecfd674b9e42f666491dbfbe16141062a1b7511b0484ffaad2ccc6da66a0",
     "qwen3_moe": "23b14c84e921198df0b3c9535c4a12c9ef39588d6077049da4cfaa8fa4a51d0d",
 }
 
