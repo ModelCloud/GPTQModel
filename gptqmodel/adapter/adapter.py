@@ -45,6 +45,34 @@ def _rank_pattern_matches(pattern: str, weight_key: str, *, ignore_case: bool = 
     return pcre.compile(rf"(.*\.)?({pattern})$", flags).match(weight_key) is not None
 
 
+def _pattern_override_candidates(
+    patterns: Dict[str, object], weight_key: str
+) -> List[Tuple[str, object]]:
+    """List ``(pattern, value)`` in PEFT's precedence order for ``weight_key``.
+
+    Exact, case-sensitive matches come first, in declaration order, because
+    that is the order PEFT itself applies. The legacy case-insensitive fallback
+    runs only when no pattern matched exactly: trying it per pattern let an
+    earlier lowercase rule capture a later rule's canonical mixed-case module
+    (`alpha_pattern={"proj": 8, "Proj": 2}` applied 8 to `block.Proj`, #5422).
+
+    The fallback keeps its old reach: it applies only when the pattern or the
+    module name is written in lowercase, which is what a legacy GPT-QModel
+    export produces. A canonical pattern is never case-folded onto a canonical
+    name.
+    """
+
+    exact: List[str] = []
+    folded: List[str] = []
+    for pattern in patterns:
+        if _rank_pattern_matches(pattern, weight_key):
+            exact.append(pattern)
+        elif pattern == pattern.lower() or weight_key == weight_key.lower():
+            if _rank_pattern_matches(pattern, weight_key, ignore_case=True):
+                folded.append(pattern)
+    return [(pattern, patterns[pattern]) for pattern in exact + folded]
+
+
 def _reject_unsupported_adapter_tensors(weights: Dict[str, torch.Tensor]) -> None:
     """Fail closed on adapter tensors this runtime cannot apply.
 
@@ -489,18 +517,14 @@ class Lora(Adapter):
             for k, v in lora_cfg.rank_pattern.items():
                 assert isinstance(k, str) and isinstance(v, int)
                 assert v > 0 # check for invalid rank range
-                # Match the pattern exactly as written: full name, then suffix,
-                # then regex. Lowercasing here silently missed canonical
-                # mixed-case module names and inverted regex escapes.
-                matched = _rank_pattern_matches(k, weight_key)
-                if not matched and (k != k.lower() or weight_key != weight_key.lower()):
-                    # Legacy GPT-QModel exports lowercased module names. Retry
-                    # case-insensitively without rewriting the pattern.
-                    matched = _rank_pattern_matches(k, weight_key, ignore_case=True)
-                if matched:
-                    self.rank = v
-                    log.info(f"Adapter: Base Lora `rank` = `{self.rank}` has been overridden by `{k}` due to dynamic `LoraConfig.rank_pattern` control.")
-                    return True
+            # Exact case-sensitive matches first, then the legacy fallback; see
+            # `_pattern_override_candidates` (#5422).
+            for pattern, override in _pattern_override_candidates(
+                lora_cfg.rank_pattern, weight_key
+            ):
+                self.rank = override
+                log.info(f"Adapter: Base Lora `rank` = `{self.rank}` has been overridden by `{pattern}` due to dynamic `LoraConfig.rank_pattern` control.")
+                return True
 
         return False
 
@@ -523,16 +547,17 @@ class Lora(Adapter):
                         f"Adapter: `alpha_pattern[{pattern!r}]` must be a positive real, "
                         f"actual = `{override}`."
                     )
-                matched = _rank_pattern_matches(pattern, weight_key)
-                if not matched and (pattern != pattern.lower() or weight_key != weight_key.lower()):
-                    matched = _rank_pattern_matches(pattern, weight_key, ignore_case=True)
-                if matched:
-                    alpha = float(override)
-                    log.info(
-                        f"Adapter: Base Lora `alpha` = `{base_alpha}` has been overridden by "
-                        f"`{pattern}` due to dynamic `LoraConfig.alpha_pattern` control."
-                    )
-                    break
+            # Exact case-sensitive matches first, then the legacy fallback; see
+            # `_pattern_override_candidates` (#5422).
+            for pattern, override in _pattern_override_candidates(
+                lora_cfg.alpha_pattern, weight_key
+            ):
+                alpha = float(override)
+                log.info(
+                    f"Adapter: Base Lora `alpha` = `{base_alpha}` has been overridden by "
+                    f"`{pattern}` due to dynamic `LoraConfig.alpha_pattern` control."
+                )
+                break
 
         return alpha
 
