@@ -1567,54 +1567,87 @@ class AWQProcessor(LoopProcessor):
             row_buffer[used:used + count] = row_indices
             used += count
         else:
-            # A full reservoir usually rejects the whole capture: a routed
-            # expert sees one batch per expert per layer, so most merges offer
-            # rows that all lose to the kept ones. Comparing the capture's best
-            # priority with the worst kept priority is O(cap) on host floats and
-            # skips the drop-set search below (#5284). The condition is strict
-            # so ties keep the slow path and the kept set is unchanged for
-            # every capture this short-circuits.
-            if used >= budget_cap and count and bool(
-                (priorities > priority_buffer[:used].max()).all()
-            ):
-                entry["reservoir_used"] = used
-                entry["inputs"] = [buffer[:used].unsqueeze(0)]
-                entry.pop("provenance", None)
-                return
-            # The kept set is the ``budget_cap`` lowest priorities of old + new,
-            # so ``overflow`` rows are dropped and only the ``overflow`` largest
-            # old rows can be among them (any other old row already has
-            # ``overflow`` old rows at or above it). Selecting the drop set from
-            # those plus the capture moves only the rows that survive, instead
-            # of writing every surviving row of the capture into a slot
-            # (#5284).
-            overflow = used + count - budget_cap
-            old_probe = min(overflow, used)
-            old_largest = (
-                torch.topk(priority_buffer[:used], old_probe, largest=True)
-                if old_probe
-                else None
-            )
-            union_values = (
-                torch.cat([old_largest.values, priorities]) if old_probe else priorities
-            )
-            drop = torch.topk(union_values, overflow, largest=True).indices
-            new_drop = drop[drop >= old_probe] - old_probe
-            old_drop = drop[drop < old_probe]
-            keep_new = torch.ones((count,), dtype=torch.bool)
-            keep_new[new_drop] = False
-            kept_new = keep_new.nonzero(as_tuple=False).flatten()
-            slots = torch.cat(
-                [
-                    old_largest.indices[old_drop] if old_probe else kept_new.new_empty(0),
-                    torch.arange(used, budget_cap),
-                ]
-            )
-            buffer[slots] = rows.index_select(0, kept_new)
-            priority_buffer[slots] = priorities.index_select(0, kept_new)
-            source_buffer[slots] = source_index
-            row_buffer[slots] = row_indices.index_select(0, kept_new)
-            used = budget_cap
+            # A full reservoir prefilters per row: a routed expert's capture
+            # (tens of rows) usually contributes a few winners and sometimes
+            # none, because each row survives with probability about
+            # ``cap / seen``. Testing all rows at once only skips the merge when
+            # *every* row loses, which is <1% of real captures (#5324). Every
+            # non-winning row loses to ``cap`` kept rows, so it can be left out
+            # of the merge without changing the kept set; the comparison is
+            # strict so a tie keeps the kept row. The ``winner_count`` largest
+            # kept rows plus the winners are the only rows that can leave, and
+            # copying only the surviving new rows into the freed slots keeps
+            # the merge work proportional to the winners (#5324).
+            merge_whole_capture = True
+            if used >= budget_cap:
+                kept_priorities = priority_buffer[:used]
+                winners = torch.nonzero(
+                    priorities < kept_priorities.max(), as_tuple=True
+                )[0]
+                winner_count = int(winners.numel())
+                if winner_count == 0:
+                    entry["reservoir_used"] = used
+                    entry["inputs"] = [buffer[:used].unsqueeze(0)]
+                    entry.pop("provenance", None)
+                    return
+                if winner_count < used:
+                    merge_whole_capture = False
+                    candidate_slots = torch.topk(
+                        kept_priorities, winner_count, largest=True
+                    ).indices
+                    candidates = torch.cat(
+                        [kept_priorities[candidate_slots], priorities[winners]]
+                    )
+                    dropped = torch.zeros((candidates.numel(),), dtype=torch.bool)
+                    dropped[
+                        torch.topk(candidates, winner_count, largest=True).indices
+                    ] = True
+                    slots = candidate_slots[dropped[:winner_count]]
+                    survivors = winners[~dropped[winner_count:]]
+                    buffer[slots] = rows.index_select(0, survivors)
+                    priority_buffer[slots] = priorities.index_select(0, survivors)
+                    source_buffer[slots] = source_index
+                    row_buffer[slots] = row_indices.index_select(0, survivors)
+                    used = budget_cap
+            if merge_whole_capture:
+                # The kept set is the ``budget_cap`` lowest priorities of old +
+                # new, so ``overflow`` rows are dropped and only the
+                # ``overflow`` largest old rows can be among them (any other
+                # old row already has ``overflow`` old rows at or above it).
+                # Selecting the drop set from those plus the capture moves only
+                # the rows that survive, instead of writing every surviving row
+                # of the capture into a slot (#5284).
+                overflow = used + count - budget_cap
+                old_probe = min(overflow, used)
+                old_largest = (
+                    torch.topk(priority_buffer[:used], old_probe, largest=True)
+                    if old_probe
+                    else None
+                )
+                union_values = (
+                    torch.cat([old_largest.values, priorities])
+                    if old_probe
+                    else priorities
+                )
+                drop = torch.topk(union_values, overflow, largest=True).indices
+                new_drop = drop[drop >= old_probe] - old_probe
+                old_drop = drop[drop < old_probe]
+                keep_new = torch.ones((count,), dtype=torch.bool)
+                keep_new[new_drop] = False
+                kept_new = keep_new.nonzero(as_tuple=False).flatten()
+                slots = torch.cat(
+                    [
+                        old_largest.indices[old_drop]
+                        if old_probe
+                        else kept_new.new_empty(0),
+                        torch.arange(used, budget_cap),
+                    ]
+                )
+                buffer[slots] = rows.index_select(0, kept_new)
+                priority_buffer[slots] = priorities.index_select(0, kept_new)
+                source_buffer[slots] = source_index
+                row_buffer[slots] = row_indices.index_select(0, kept_new)
+                used = budget_cap
 
         entry["reservoir_used"] = used
         # ``inputs`` stays a cheap view of the live buffer so capture-time
