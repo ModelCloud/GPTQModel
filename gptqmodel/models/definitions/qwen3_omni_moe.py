@@ -51,7 +51,6 @@ class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, OmniThinkerCheckpointLayoutMixin, T
 
     # transformers 5.22 leaves `get_input_embeddings`/`get_output_embeddings`
     # unimplemented on the Omni wrapper; both endpoints live on `thinker`.
-    HF_WRAPPER_CLASS_NAME = "Qwen3OmniMoeForConditionalGeneration"
     lm_head = "thinker.lm_head"
 
     # The thinker decoder is calibrated on activations that include the vision

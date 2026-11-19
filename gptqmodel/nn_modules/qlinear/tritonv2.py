@@ -208,8 +208,10 @@ def triton_test_add(x: torch.Tensor, y: torch.Tensor):
     import triton  # noqa: F401  # ensure Triton language bindings load
     import triton.language as tl  # noqa: F401  # ensure Triton language bindings load
 
+    from gptqmodel.utils.triton_jit import jit as triton_jit
+
     # don't put it on top-level to avoid crash if triton was not installed
-    @triton.jit
+    @triton_jit
     def add_kernel(x_ptr,  # *Pointer* to first input vector.
                    y_ptr,  # *Pointer* to second input vector.
                    output_ptr,  # *Pointer* to output vector.

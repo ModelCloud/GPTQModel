@@ -98,22 +98,22 @@ def test_qwen3_omni_resolves_the_thinker_embedding_endpoints():
     assert Qwen3OmniMoeGPTQ.lm_head == "thinker.lm_head"
 
 
-def test_qwen3_omni_patches_the_hf_getters_for_the_quantized_load_path():
+def test_qwen3_omni_loaded_instance_resolves_hf_getters_without_patching_the_class():
     model = _tiny_qwen3_omni()
-    instance = _wrapper(Qwen3OmniMoeGPTQ, model)
     wrapper_cls = Qwen3OmniMoeForConditionalGeneration
-    original = (wrapper_cls.get_input_embeddings, wrapper_cls.get_output_embeddings)
-    try:
-        instance.before_model_load("", False)
-        # The quantized loader discovers the endpoints on the HF class itself.
-        assert model.get_input_embeddings() is thinker_text_model(model).embed_tokens
-        assert model.get_output_embeddings() is model.thinker.lm_head
-        # A second load must not wrap the patch again.
-        patched = (wrapper_cls.get_input_embeddings, wrapper_cls.get_output_embeddings)
-        instance.before_model_load("", False)
-        assert (wrapper_cls.get_input_embeddings, wrapper_cls.get_output_embeddings) == patched
-    finally:
-        wrapper_cls.get_input_embeddings, wrapper_cls.get_output_embeddings = original
+    class_state = dict(vars(wrapper_cls))
+    Qwen3OmniMoeGPTQ.after_defuser_conversion(model)
+    # The quantized loader discovers the endpoints on the loaded model itself.
+    assert model.get_input_embeddings() is thinker_text_model(model).embed_tokens
+    assert model.get_output_embeddings() is model.thinker.lm_head
+    # Only this instance changed: the vendored class is untouched.
+    assert dict(vars(wrapper_cls)) == class_state
+    assert wrapper_cls.get_input_embeddings is PreTrainedModel.get_input_embeddings
+    with pytest.raises(NotImplementedError):
+        _tiny_qwen3_omni().get_input_embeddings()
+    # Idempotent.
+    Qwen3OmniMoeGPTQ.after_defuser_conversion(model)
+    assert model.get_output_embeddings() is model.thinker.lm_head
 
 
 def test_composite_wrapper_without_overrides_resolves_the_input_embedding():

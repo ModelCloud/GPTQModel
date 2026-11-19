@@ -1906,7 +1906,9 @@ def has_cpu_offload_hooks(model: nn.Module) -> bool:
 
 
 def simple_dispatch_model(model, device_map):
-    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
+    from accelerate.hooks import add_hook_to_module
+
+    from .offload_hooks import GPTQModelAlignDevicesHook
 
     device_map = dict(device_map)
     single_root = "" in device_map and len(device_map) == 1
@@ -1996,7 +1998,7 @@ def simple_dispatch_model(model, device_map):
                 for child_name, child_device in device_map.items()
             )
             # A mixed-device child means the parent hook may move inputs, but not descendants.
-            hook = AlignDevicesHook(
+            hook = GPTQModelAlignDevicesHook(
                 d,
                 io_same_device=True,
                 place_submodules=not has_other_device_child,
@@ -4357,6 +4359,7 @@ def _load_key_converted_safetensors(
                     param_device,
                     value=value,
                     dtype=new_dtype,
+                    clear_cache=False,
                 )
     if unexpected:
         log.warn(

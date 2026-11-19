@@ -39,8 +39,6 @@ class BaseQwen2_5_OmniGPTQ(OmniThinkerCheckpointLayoutMixin, ThinkerEmbeddingsMi
     ATTENTION_MASKS_REQUIRED_FOR_INPUT = True
     ATTENTION_MASKS_DTYPE = torch.long
 
-    HF_WRAPPER_CLASS_NAME = "Qwen2_5OmniForConditionalGeneration"
-
     loader = LocalModelLoader(
         config_class="gptqmodel.models.ports.native.auto.NativeConfig",
         model_class="gptqmodel.models.ports.native.auto.NativeForTextToWaveform",

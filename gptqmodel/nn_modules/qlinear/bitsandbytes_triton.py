@@ -43,6 +43,8 @@ import torch
 import triton
 import triton.language as tl
 
+from gptqmodel.utils.triton_jit import jit as triton_jit
+
 from ...utils.arch import tuning_family
 from ...utils.rocm import IS_ROCM
 
@@ -136,7 +138,7 @@ def should_use(
     return available_for(device, dtype, kernel=kernel)
 
 
-@triton.jit
+@triton_jit
 def _bnb_4bit_gemm_kernel(
     x_ptr, q_ptr, am_ptr, code_ptr, bias_ptr, out_ptr, m,
     K: tl.constexpr, N: tl.constexpr, BS: tl.constexpr,
@@ -203,7 +205,7 @@ def _bnb_4bit_gemm_kernel(
     )
 
 
-@triton.jit
+@triton_jit
 def _bnb_4bit_dequant_kernel(
     q_ptr, am_ptr, code_ptr, out_ptr,
     K: tl.constexpr, N: tl.constexpr, BS: tl.constexpr,

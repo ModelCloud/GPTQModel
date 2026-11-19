@@ -98,6 +98,8 @@ import torch
 import triton
 import triton.language as tl
 
+from gptqmodel.utils.triton_jit import jit as triton_jit
+
 from ...utils import arch as _arch
 from ...utils.arch import (
     gate_limits as _arch_gate_limits,
@@ -262,7 +264,7 @@ def split_k_for(m: int, in_features: int) -> int:
     return chosen
 
 
-@triton.jit
+@triton_jit
 def _gptq_gemm_small_m_kernel(
     x_ptr, qweight_ptr, scales_ptr, qzeros_ptr, g_idx_ptr, out_ptr,
     m,

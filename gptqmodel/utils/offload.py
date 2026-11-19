@@ -15,11 +15,7 @@ import weakref
 from collections.abc import Mapping
 from typing import Iterable, List, Optional, Set, Tuple
 
-import accelerate
 import torch
-
-# move base_module tensors to disk
-from accelerate import disk_offload
 from accelerate.hooks import remove_hook_from_module, remove_hook_from_submodules
 from accelerate.utils import align_module_device, has_offloaded_params
 from torch import nn
@@ -29,6 +25,10 @@ from .checkpoint_paths import resolve_checkpoint_path
 from .device import get_device
 from .logger import setup_logger
 from .module_locks import parent_module_lock
+
+# GPT-QModel-owned disk offload: its hooks never empty the device cache per
+# forward, without replacing Accelerate's ``clear_device_cache``.
+from .offload_hooks import disk_offload
 from .safe import safetensors_save_file
 from .tensor import tensor_buffer
 from .tied_weights import retie_tied_weights, tied_weights_keys, word_embeddings_tied
@@ -41,14 +41,6 @@ _SOURCE_COMPARE_CHUNK_BYTES = 16 * 1024 * 1024
 
 log = setup_logger()
 
-
-# Patch fix thread unsafe accelerate.utils.modeling.clear_device_cache
-def _fake_clear_device_cache(garbage_collection=False):
-    pass
-
-# keep original
-ACCELERATE_CLEAR_DEVICE_CACHE = accelerate.utils.modeling.clear_device_cache
-accelerate.utils.modeling.clear_device_cache = _fake_clear_device_cache
 
 def get_module_fullname(model: torch.nn.Module, module: torch.nn.Module) -> str:
     for name, mod in model.named_modules():
