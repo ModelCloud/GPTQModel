@@ -11,6 +11,7 @@ from pathlib import Path
 import torch
 
 from .kernel import get_kernel_config
+from .torch import dynamo_is_compiling
 
 
 _REQUIRED_AVX512_BF16_FLAGS = frozenset(
@@ -234,7 +235,7 @@ def cpu_bf16x3_matmul():
         yield
         return
 
-    if torch.compiler.is_compiling():
+    if dynamo_is_compiling():
         yield
         return
 

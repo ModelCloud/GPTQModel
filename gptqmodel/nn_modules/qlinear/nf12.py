@@ -33,6 +33,7 @@ from ...utils import nf12_codec
 from ...utils import nf12_hip as nf12_hip_runtime
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.torch import dynamo_is_compiling
 from . import WeightOnlyQuantLinear
 from ._compile_support import COMPILE_LEVEL
 from ._numerics import autocast_active, linear_fp32_reduce
@@ -296,7 +297,7 @@ class NF12Linear(WeightOnlyQuantLinear):
         return weight_to_matrix(linear)
 
     def _exp_base(self) -> int:
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # ``int(tensor.item())`` is a data-dependent host read, a hard
             # dynamo graph break. ``post_init()`` (and every eager
             # ``clear_weight_cache()`` caller) resolves the value once, so a

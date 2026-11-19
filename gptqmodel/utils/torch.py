@@ -442,7 +442,7 @@ def _dynamo_config():
 
 
 def dynamo_is_compiling() -> bool:
-    """Return True when dynamo is already tracing this thread.
+    """Return True when dynamo is already tracing this frame.
 
     ``torch.compile`` is lazy, so the wrapper ``torch_compile`` installs can be
     entered from inside another ``torch.compile`` trace: transformers compiles
@@ -452,8 +452,23 @@ def dynamo_is_compiling() -> bool:
     the outer trace, which turns a cudagraph static-cache decode into
     overwritten-output corruption (#5224). Nested calls therefore stay
     read-only; the eager body is inlined into the outer graph instead.
+
+    ``torch.compiler.is_compiling()`` is process-global on current torch: while
+    any thread holds a compile session it reports True in every other thread, so
+    eager code took its trace-only branches whenever something else compiled
+    (#5427). ``torch.compiler.is_dynamo_compiling()`` is a constant ``False`` in
+    eager code that dynamo folds to ``True`` inside the traced frame, which is
+    the question these call sites actually ask.
     """
     compiler = getattr(torch, "compiler", None)
+    is_dynamo_compiling = getattr(compiler, "is_dynamo_compiling", None)
+    if is_dynamo_compiling is not None:
+        try:
+            return bool(is_dynamo_compiling())
+        except Exception:
+            return False
+    # Older torch without the thread-correct predicate: keep the historical
+    # behavior rather than silently reporting "not tracing".
     is_compiling = getattr(compiler, "is_compiling", None)
     if is_compiling is None:
         return False

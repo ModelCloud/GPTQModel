@@ -29,6 +29,7 @@ from ..nn_modules.qlinear.torch import TorchLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..utils.marlin import marlin_pad_dim, replace_parameter
 from ..utils.model import get_layers_with_prefixes
+from ..utils.torch import dynamo_is_compiling
 from ._const import DEVICE, normalize_device
 from .fusable import require_fusable_config
 from .fusion_kernels import kernel_spec
@@ -609,7 +610,7 @@ class _FusionGroup:
         return True
 
     def execute(self, x):
-        if (not self.active or self.parent_state["training"] or x.requires_grad or torch.compiler.is_compiling()
+        if (not self.active or self.parent_state["training"] or x.requires_grad or dynamo_is_compiling()
                 or self.parent_forward is not self.native_forward
                 or torch.nn.modules.module._global_forward_pre_hooks
                 or torch.nn.modules.module._global_forward_hooks):

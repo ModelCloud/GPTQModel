@@ -26,6 +26,7 @@ from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
 from ...utils.kernel import resolve_kernel_config
 from ...utils.rocm import IS_ROCM
+from ...utils.torch import dynamo_is_compiling
 from ._compile_support import COMPILE_LEVEL
 from ._numerics import _wants_fp32_reduce, matmul_fp32_reduce
 from .paro import ParoLinear
@@ -250,7 +251,7 @@ class ParoTritonLinear(ParoLinear):
         if cached is not None:
             return cached
 
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # Benchmarking launches kernels and times them on the host, which a
             # traced graph cannot contain. A warm eager forward has already
             # measured this workload class; otherwise keep the default plan.

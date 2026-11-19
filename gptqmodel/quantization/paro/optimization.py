@@ -36,6 +36,7 @@ from ...utils.paro import (
     build_identity_rotation_buffers,
 )
 from ...utils.rocm import IS_ROCM, rocm_amp_disabled
+from ...utils.torch import dynamo_is_compiling
 from ..config import PARO_OPT_SCALE_CLAMP_MAX_DEFAULT, PARO_OPT_SCALE_CLAMP_MIN_DEFAULT
 
 
@@ -366,7 +367,7 @@ def _affine_quant_dequant_ste_fused(
     grad_enabled = torch.is_grad_enabled()
     differentiable = weight.requires_grad or scale.requires_grad or zero_point_float.requires_grad
     if not grad_enabled or not differentiable:
-        if grad_enabled or torch.compiler.is_compiling():
+        if grad_enabled or dynamo_is_compiling():
             return None
         kernels = _get_triton_affine_kernels()
         if kernels is None:
@@ -379,7 +380,7 @@ def _affine_quant_dequant_ste_fused(
             qmax=2**bits - 1,
             group_size=group_size,
         )
-    if not torch.compiler.is_compiling():
+    if not dynamo_is_compiling():
         kernels = _get_triton_affine_kernels()
         if kernels is not None:
             fused = kernels.affine_quant_dequant_ste(
@@ -436,7 +437,7 @@ def _sym_quant_dequant_ste_fused(
     grad_enabled = torch.is_grad_enabled()
     differentiable = weight.requires_grad or scale.requires_grad
     if not grad_enabled or not differentiable:
-        if grad_enabled or torch.compiler.is_compiling():
+        if grad_enabled or dynamo_is_compiling():
             return None
         kernels = _get_triton_sym_kernels()
         if kernels is None:
@@ -448,7 +449,7 @@ def _sym_quant_dequant_ste_fused(
             qmax=qmax,
             group_size=group_size,
         )
-    if not torch.compiler.is_compiling():
+    if not dynamo_is_compiling():
         kernels = _get_triton_sym_kernels()
         if kernels is not None:
             fused = kernels.sym_quant_dequant_ste(

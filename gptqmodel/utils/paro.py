@@ -27,6 +27,7 @@ from .cpp import (
     default_torch_ops_build_root,
 )
 from .kernel import get_kernel_config
+from .torch import dynamo_is_compiling
 
 
 _SUPPORTED_ROTATION_KERNEL_DTYPES = {
@@ -288,7 +289,7 @@ def apply_paro_rotation_vectorized(
             & (local_i < group_size)
             & (local_j < group_size)
         )
-        if not torch.compiler.is_compiling() and not bool(valid.any()):
+        if not dynamo_is_compiling() and not bool(valid.any()):
             # A fully padded rotation row is a no-op below: every slot keeps its
             # value, so skipping it is only an eager speedup. Reading the mask on
             # the host is a data-dependent branch dynamo cannot trace, and the
@@ -879,7 +880,7 @@ def _resolve_rotation_launch(
         requested_row_pad=requested_row_pad,
     )
     device_index = int(cache_key[0])
-    if torch.compiler.is_compiling():
+    if dynamo_is_compiling():
         # Tracing must stay free of Python locks, on-disk reads and CUDA-only
         # ops. A warm eager forward has already resolved this shape into the
         # process-local map; otherwise fall back to the native legacy default,
@@ -1025,7 +1026,7 @@ def _rotation_extension_ready_for_call() -> bool:
     ``optimize()`` loads it first, and the traced forward then uses the fused
     op.
     """
-    if torch.compiler.is_compiling() and not _ROTATION_EXTENSION_READY:
+    if dynamo_is_compiling() and not _ROTATION_EXTENSION_READY:
         return False
     return _load_rotation_extension()
 

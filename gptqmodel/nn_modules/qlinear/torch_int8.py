@@ -19,6 +19,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.torch import dynamo_is_compiling
 from ._compile_support import COMPILE_LEVEL
 from ._numerics import autocast_active
 from ._runtime_cache import tensor_cache_key
@@ -438,7 +439,7 @@ class TorchInt8Linear(GPTQQuantLinear):
     def _refresh_int8_runtime(self):
         if getattr(self, "_int8_fusion_view", False):
             return self.int8_module
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # ``_source_signature`` reads `is_inference`/`_version`/`data_ptr`
             # (hard dynamo graph breaks), and the cold rebuild takes a module
             # ``RLock`` and rewrites the derived INT8 buffers, which a graph
