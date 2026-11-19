@@ -41,8 +41,8 @@ flowchart TD
 
 | Model state | Before `save_pretrained()` | Current contract |
 | --- | --- | --- |
-| Dense wrapper | `save_quantized()` raised `ValueError` (`gptqmodel/models/writer.py:2033-2042` before this change) | `self.model.save_pretrained()` owns config, tied weights and sharding (`gptqmodel/models/writer.py:2044-2045`) |
-| Weight-only module replacement | `save_quantized()` rebuilt the checkpoint and wrote the dense embedding tensor, dropping the packed payload | `save_quantized_embeddings()` preserves the replaced modules (`gptqmodel/models/writer.py:2046-2052`) |
+| Dense wrapper | `save_quantized()` raised `ValueError` (`gptqmodel/models/writer.py:2034-2042` before this change) | `self.model.save_pretrained()` owns config, tied weights and sharding (`gptqmodel/models/writer.py:2045-2046`) |
+| Weight-only module replacement | `save_quantized()` rebuilt the checkpoint and wrote the dense embedding tensor, dropping the packed payload | `save_quantized_embeddings()` preserves the replaced modules (`gptqmodel/models/writer.py:2047-2052`) |
 | Ordinary quantized | `save_quantized()` | unchanged (`gptqmodel/models/writer.py:2053-2054`) |
 
 `save()` already selected the writer by state
