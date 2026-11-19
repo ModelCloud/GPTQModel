@@ -71,9 +71,13 @@ tests. Mechanism references and diagrams live in `docs/`.
   infrastructure only, never `transformers.models.*`, and contain no
   backward-compatibility code (no `cache_position`, tuple/legacy caches,
   `rope_scaling`, `return_dict` tuple plumbing or version checks). GPT-QModel
-  never patches, monkeypatches or registers into Transformers or the HF
-  ecosystem (optimum, OpenVINO, safetensors, huggingface_hub), not even
-  temporarily or scoped; GPT-QModel checkpoints load through `GPTQModel.load`.
+  never patches, monkeypatches or registers into Transformers, the HF
+  ecosystem (optimum, OpenVINO, safetensors, huggingface_hub) or any other
+  library (Accelerate, Defuser, torch, Triton), and never assigns onto a model
+  class at load time, not even temporarily or scoped. Behavior GPT-QModel needs
+  lives on package-owned subclasses (`GPTQModelAlignDevicesHook`,
+  `gptqmodel.utils.triton_jit.jit`) or on its own model instances; GPT-QModel
+  checkpoints load through `GPTQModel.load`.
   `tests/test_model_port_policy.py` and `tests/test_transformers_unpatched.py`
   enforce this.
 - **Naming:** use **GPT-QModel** in prose, UI, docs and release notes;

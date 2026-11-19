@@ -56,8 +56,7 @@ flowchart TD
 ```
 
 `ensure_safe_torch()` is the first statement in `gptqmodel/__init__.py`, before
-`apply_default_alloc_conf()` and `gptqmodel.rocm_llc`. Both of those import
-Torch state that cannot be undone, so a late check would already have initialized
+`apply_default_alloc_conf()`, which imports Torch state that cannot be undone, so a late check would already have initialized
 the runtime it is meant to reject. The implementation lives in the standalone
 module `gptqmodel/_torch_safety.py` because importing `gptqmodel.utils` is
 itself the side effect being guarded against; `gptqmodel.utils.security`

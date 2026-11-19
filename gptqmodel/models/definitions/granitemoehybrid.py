@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from types import MethodType
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
@@ -75,10 +76,15 @@ class GraniteMoeHybridQModel(BaseQModel):
     def monkey_patch(self):
         from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-        mamba_layer_cls = type(self.model.model.layers[0].mamba)
-        if getattr(mamba_layer_cls.forward, "_gptqmodel_granite_patch", False):
+        # Bound per mamba instance of this model: the (vendored) layer class
+        # itself is never modified.
+        mambas = [
+            mamba for layer in self.model.model.layers
+            if (mamba := getattr(layer, "mamba", None)) is not None
+        ]
+        if not mambas:
             return
-        original_forward = mamba_layer_cls.forward
+        original_forward = type(mambas[0]).forward
 
         def granitemoehybrid_mamba_forward(
             layer_self,
@@ -113,4 +119,8 @@ class GraniteMoeHybridQModel(BaseQModel):
             )
 
         granitemoehybrid_mamba_forward._gptqmodel_granite_patch = True
-        mamba_layer_cls.forward = granitemoehybrid_mamba_forward
+        for mamba in mambas:
+            bound = mamba.__dict__.get("forward")
+            if getattr(getattr(bound, "__func__", None), "_gptqmodel_granite_patch", False):
+                continue
+            mamba.forward = MethodType(granitemoehybrid_mamba_forward, mamba)

@@ -1266,6 +1266,12 @@ class BaseQModel(nn.Module):
             if dynamic_cache_prepared else dynamic_override_cache_stats(getattr(quantize_config, "dynamic", None))
         )
         self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
+        # Hooks Transformers' ``from_pretrained(device_map=...)`` attached are
+        # stock Accelerate hooks that flush the device cache on every offloaded
+        # forward. Rebind them on this model instance only.
+        from ..utils.offload_hooks import adopt_align_device_hooks
+
+        adopt_align_device_hooks(self.model)
         # transformers 5 materializes checkpoint-absent non-persistent buffers
         # with `torch.empty_like`, and only re-derives native rotary buffers in
         # the default `_init_weights`. Restore constructor-owned rotary buffers

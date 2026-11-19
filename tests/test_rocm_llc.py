@@ -1,21 +1,15 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the AMD last-level-cache back-port.
+"""Tests for the AMD last-level-cache *report*.
 
-The interesting behaviour is all defensive: the patch must never raise, must be
-idempotent, must leave ``L2_cache_size`` alone, and must decline cleanly when
-the torch internals it targets have moved.
+GPT-QModel only reads the cache geometry; it never patches torch or Inductor.
 """
 
 from __future__ import annotations
 
-import textwrap
-
-import pytest
 import torch
 
 from gptqmodel import rocm_llc
-from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 class _Props:
@@ -25,39 +19,11 @@ class _Props:
         bytes = list(b"0123456789abcdef")
 
 
-@pytest.fixture(autouse=True)
-def _clean_state(monkeypatch):
-    """Each test starts from "not applied" regardless of package import."""
-
-    rocm_llc.unapply()
-    monkeypatch.setattr(rocm_llc, "_STATE", {"applied": False, "restore": [], "status": {}})
-    configure_kernel(KernelConfig())
-    yield
-    rocm_llc.unapply()
-
-
-def test_apply_is_idempotent_and_never_raises():
-    first = rocm_llc.apply()
-    second = rocm_llc.apply()
-    assert first == second
-    expected = {"props", "benchmarker", "cudagraph"} if torch.version.hip else {"props"}
-    assert set(first) == expected
-    for value in first.values():
-        assert isinstance(value, str) and value
-
-
-def test_config_opt_out():
-    configure_kernel(KernelConfig(rocm_llc=False))
-    status = rocm_llc.apply()
-    assert status["props"].startswith("skipped")
-    assert "rocm_llc=False" in status["props"]
-    assert set(status) == {"props"}
-
-
-def test_non_rocm_reports_not_rocm(monkeypatch):
-    monkeypatch.setattr(rocm_llc.torch.version, "hip", None)
-    status = rocm_llc.apply()
-    assert status == {"props": "skipped: not ROCm"}
+def test_import_leaves_torch_device_properties_alone():
+    props = getattr(torch._C, "_CudaDeviceProperties", None)
+    if props is not None:
+        assert "last_level_cache_size" not in vars(props)
+    assert not hasattr(rocm_llc, "apply")
 
 
 def test_last_level_cache_size_falls_back_to_l2(monkeypatch):
@@ -90,55 +56,3 @@ def test_device_uuid_rejects_non_hex(monkeypatch):
     monkeypatch.setattr(rocm_llc, "_levels", {})
     monkeypatch.setattr(rocm_llc.torch.version, "hip", "7.0")
     assert rocm_llc.cache_levels(0) is None
-
-
-def test_cudagraph_rewrite_matches_upstream_shape():
-    snippet = textwrap.dedent(
-        """\
-        def do_bench_with_cudagraphs(self):
-            if indices:
-                props = device_interface.get_device_properties(device_idx)
-                cache_size = next(
-                    (
-                        getattr(props, attr)
-                        for attr in ("L2_cache_size", "last_level_cache_size")
-                        if getattr(props, attr, None)
-                    ),
-                    256 * 1024 * 1024,
-                )
-                pool_size = 4
-        """
-    )
-    patched, count = rocm_llc._CUDAGRAPH_RE.subn(rocm_llc._cudagraph_replacement, snippet)
-    assert count == 1
-    assert "max(" in patched
-    assert "256 * 1024 * 1024" in patched
-    # Still valid Python, and still keeps the surrounding block.
-    compile(patched, "<test>", "exec")
-    assert "pool_size = 4" in patched
-
-
-def test_cudagraph_rewrite_declines_unknown_source():
-    snippet = "def do_bench_with_cudagraphs(self):\n    cache_size = 42\n"
-    patched, count = rocm_llc._CUDAGRAPH_RE.subn(rocm_llc._cudagraph_replacement, snippet)
-    assert count == 0
-    assert patched == snippet
-
-
-@pytest.mark.skipif(torch.version.hip is None, reason="requires ROCm")
-def test_props_expose_last_level_cache_after_apply():
-    rocm_llc.apply()
-    props = torch.cuda.get_device_properties(0)
-    assert hasattr(props, "last_level_cache_size")
-    assert props.last_level_cache_size >= props.L2_cache_size
-    assert props.L2_cache_size == props.L2_cache_size  # untouched by the patch
-
-
-@pytest.mark.skipif(torch.version.hip is None, reason="requires ROCm")
-def test_benchmarker_uses_max_of_l2_and_llc():
-    from torch._inductor.runtime.benchmarking import InductorBenchmarker
-
-    rocm_llc.apply()
-    props = torch.cuda.get_device_properties(0)
-    expected = max(props.L2_cache_size, props.last_level_cache_size)
-    assert InductorBenchmarker().get_device_cache_size() == expected

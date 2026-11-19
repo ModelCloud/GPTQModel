@@ -53,6 +53,8 @@ try:  # pragma: no cover - exercised implicitly by the availability probe
     import triton
     import triton.language as tl
 
+    from gptqmodel.utils.triton_jit import jit as triton_jit
+
     if torch.version.hip is not None:
         from triton.language.extra.hip import libdevice as _libdevice
     else:
@@ -72,7 +74,7 @@ _AFFINE_STE_BLOCK = 1024
 # 4.24 s for the Triton one, while both beat the torch fused node on launches and
 if _AFFINE_STE_TRITON_AVAILABLE:
 
-    @triton.jit
+    @triton_jit
     def _affine_qdq_forward_kernel(
         weight_ptr,
         scale_ptr,
@@ -119,7 +121,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
         tl.store(out_ptr + offsets, centered * bounded_scale, mask=mask)
 
 
-    @triton.jit
+    @triton_jit
     def _affine_qdq_backward_kernel(
         grad_ptr,
         scale_ptr,

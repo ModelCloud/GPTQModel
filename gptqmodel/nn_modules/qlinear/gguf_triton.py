@@ -29,6 +29,8 @@ try:
     import triton.language as tl
     from packaging import version
 
+    from gptqmodel.utils.triton_jit import jit as triton_jit
+
     from ..triton_utils import custom_autotune
 
     _TRITON_AVAILABLE = True
@@ -141,7 +143,7 @@ def triton_available() -> bool:
 
 
 if _TRITON_AVAILABLE:
-    @triton.jit
+    @triton_jit
     def _gguf_cast_wide_input_kernel(
         x_ptr, half_ptr, scale_ptr, K: tl.constexpr, BLOCK_K: tl.constexpr,
     ):
@@ -163,7 +165,7 @@ if _TRITON_AVAILABLE:
         tl.store(half_ptr + row * K + columns, values / scale, columns < K)
         tl.store(scale_ptr + row, scale)
 
-    @triton.jit(do_not_specialize=["N", "ELEMENTS"])
+    @triton_jit(do_not_specialize=["N", "ELEMENTS"])
     def _gguf_restore_wide_output_kernel(
         output_ptr, scale_ptr, bias_ptr, result_ptr,
         N, ELEMENTS, HAS_BIAS: tl.constexpr,
@@ -396,7 +398,7 @@ if _TRITON_AVAILABLE:
         },
     }
 
-    @triton.jit
+    @triton_jit
     def _gguf_q1_0_g128_fused_matmul_kernel_impl(
         x_ptr,
         sign_ptr,
@@ -465,7 +467,7 @@ if _TRITON_AVAILABLE:
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
-    @triton.jit
+    @triton_jit
     def _gguf_q1_0_g128_u32_fused_matmul_kernel_impl(
         x_ptr,
         sign_ptr,
@@ -531,7 +533,7 @@ if _TRITON_AVAILABLE:
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
-    @triton.jit
+    @triton_jit
     def _gguf_q1_0_g128_k2048_fused_matmul_kernel_impl(
         x_ptr,
         sign_ptr,
@@ -599,7 +601,7 @@ if _TRITON_AVAILABLE:
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
-    @triton.jit
+    @triton_jit
     def _gguf_q1_0_g128_u32_k2048_fused_matmul_kernel_impl(
         x_ptr,
         sign_ptr,
@@ -695,7 +697,7 @@ if _TRITON_AVAILABLE:
         nearest_power_of_two=True,
     )(_gguf_q1_0_g128_u32_k2048_fused_matmul_kernel_impl)
 
-    @triton.jit
+    @triton_jit
     def _gguf_q4_k_fused_matmul_kernel_impl(
         x_ptr,
         qs_ptr,
@@ -785,7 +787,7 @@ if _TRITON_AVAILABLE:
         nearest_power_of_two=True,
     )(_gguf_q4_k_fused_matmul_kernel_impl)
 
-    @triton.jit
+    @triton_jit
     def _gguf_q5_k_fused_matmul_kernel_impl(
         x_ptr,
         qs_ptr,
@@ -887,7 +889,7 @@ if _TRITON_AVAILABLE:
         nearest_power_of_two=True,
     )(_gguf_q5_k_fused_matmul_kernel_impl)
 
-    @triton.jit
+    @triton_jit
     def _gguf_q6_k_fused_matmul_kernel_impl(
         x_ptr,
         ql_ptr,

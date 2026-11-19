@@ -113,7 +113,7 @@ flowchart LR
 | `GPTQMODEL_BITSANDBYTES_*`, `GPTQMODEL_BNB_TRITON`, `GPTQMODEL_DISABLE_BITBLAS` | `qlinear/bitsandbytes.py:49,57`, `bitsandbytes_triton.py:109`, `bitblas.py:115` | `KernelConfig.bitsandbytes_*`, `disable_bitblas` |
 | `GPTQMODEL_GSQ_DISABLE_*_RELAXATION` | `quantization/gsq_cuda_relaxation.py:400-403` | `KernelConfig.gsq_disable_*` |
 | `GPTQMODEL_EXL3_*` | `exl3_lib/quantize.py:136`, `exllamav3_processor.py:127-130`, `utils/exl3_capture_*.py` | `KernelConfig.exl3_*` |
-| `GPTQMODEL_ROCM_QUANT_BLAS`, `GPTQMODEL_NO_ROCM_LLC` | `utils/rocm.py`, `rocm_llc.py:414` | `KernelConfig.rocm_quant_blas`, `rocm_llc` |
+| `GPTQMODEL_ROCM_QUANT_BLAS`, `GPTQMODEL_NO_ROCM_LLC` | `utils/rocm.py`, `rocm_llc.py:414` | `KernelConfig.rocm_quant_blas`; `GPTQMODEL_NO_ROCM_LLC` has no replacement (the torch patch was removed) |
 | `GPTQMODEL_FLOATX_CPU_THREADS`, `GPTQMODEL_MAX_PACKERS`, `GPTQMODEL_CPU_WORKERS`, `GPTQMODEL_CUDA_WORKERS` | `dtype.py:166`, `utils/model.py:1493`, `__init__.py:394,411` | `KernelConfig.floatx_cpu_threads`, `max_packers`, `cpu_workers`, `cuda_workers` |
 | `GPTQMODEL_CPU_BF16X3`, `GPTQMODEL_EXL3_CPU_BF16X3` | `utils/cpu_features.py:17,103`, `nn_modules/exllamav3_torch.py:35,46` | `KernelConfig.cpu_bf16x3_matmul` |
 | `GPTQMODEL_FLOATX_CPU_DISABLE_AVX2`, `_AVX512` read inside `floatx_cpu.cpp` | `gptqmodel_ext/floatx_cpu.cpp:371-386` | `dequantize_fp8_cpu` / `dequantize_fp4_cpu` `simd_level` argument |
@@ -299,12 +299,11 @@ variables. Only the fields above select behaviour.
 | Field | Default | Effect |
 | --- | --- | --- |
 | `rocm_quant_blas` | `None` | `None` keeps the reproducible `rocblas` pin; `"hipblaslt"` opts into torch's default; `""`/`0`/`off`/`default` skip the pin. Any other value raises `ValueError`. |
-| `rocm_llc` | `True` | Last-level-cache back-port for torch. |
 
 `rocm_quant_blas` selects the quantization BLAS backend. `None` keeps the
 reproducible `rocblas` default; `"hipblaslt"` opts into torch's hipBLASLt
-default and is faster but not reproducible across processes. `rocm_llc` controls
-the last-level-cache back-port for torch.
+default and is faster but not reproducible across processes. The former
+`rocm_llc` torch back-port was removed: GPT-QModel never patches torch.
 
 ### Threads
 

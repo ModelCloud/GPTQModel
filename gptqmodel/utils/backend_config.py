@@ -209,7 +209,6 @@ class RuntimeConfig(_KernelSettings):
     gsq_disable_cuda_relaxation: bool = False
     gsq_disable_hip_relaxation: bool = False
     rocm_quant_blas: Optional[str] = None
-    rocm_llc: bool = True
     paro_sym_ste_triton: bool = True
     paro_affine_ste_triton: bool = True
     paro_affine_ste_triton_backward: bool = False

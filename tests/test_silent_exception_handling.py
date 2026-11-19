@@ -20,7 +20,6 @@ import threading
 import pytest
 import torch
 
-import gptqmodel
 import gptqmodel.utils.looper_helpers as looper_helpers
 import gptqmodel.utils.torch as torch_utils
 from gptqmodel.looper.module_looper import ModuleLooper
@@ -63,59 +62,6 @@ def _block_imports(monkeypatch, prefix, exc_factory):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-
-
-def test_triton_patch_failure_is_reported_by_import_guard(monkeypatch):
-    """The import-time guard must log instead of using a bare ``pass``."""
-    import ast
-    from pathlib import Path
-
-    init_py = Path(gptqmodel.__file__)
-    tree = ast.parse(init_py.read_text(encoding="utf-8"))
-
-    triton_guard = None
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Try):
-            continue
-        names = [ast.unparse(handler.type) for handler in node.handlers if handler.type is not None]
-        if "Exception" not in names:
-            continue
-        if any(
-            isinstance(call, ast.Call)
-            and isinstance(call.func, ast.Attribute)
-            and isinstance(call.func.value, ast.Name)
-            and call.func.value.id == "TritonPatch"
-            for stmt in node.body
-            for call in ast.walk(stmt)
-        ):
-            triton_guard = node
-            break
-
-    assert triton_guard is not None, "TritonPatch.apply() import guard not found"
-    handler = triton_guard.handlers[0]
-    assert not any(isinstance(stmt, ast.Pass) for stmt in handler.body), (
-        "TritonPatch.apply() failures are swallowed by a bare `pass`"
-    )
-    log_calls = [
-        call
-        for stmt in handler.body
-        for call in ast.walk(stmt)
-        if isinstance(call, ast.Call)
-        and isinstance(call.func, ast.Attribute)
-        and call.func.attr in {"warning", "warn", "error", "exception"}
-    ]
-    assert log_calls, "TritonPatch.apply() failures are not logged"
-
-    # The traceback is the only way to diagnose which triton API moved.
-    assert any(
-        any(
-            kw.arg == "exc_info"
-            and isinstance(kw.value, ast.Constant)
-            and kw.value.value is True
-            for kw in call.keywords
-        )
-        for call in log_calls
-    ), "the TritonPatch.apply() warning must pass exc_info=True"
 
 
 # ---------------------------------------------------------------------------

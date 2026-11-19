@@ -57,6 +57,7 @@ import triton
 import triton.language as tl
 
 from gptqmodel.utils.arch import tuning_family
+from gptqmodel.utils.triton_jit import jit as triton_jit
 
 
 class AwqGemvLaunch(NamedTuple):
@@ -123,7 +124,7 @@ def launch_config(device_or_arch=None) -> AwqGemvLaunch:
     return _AWQ_GEMV_LAUNCH_CONFIGS.get(tuning_family(device_or_arch), _DEFAULT_AWQ_GEMV_LAUNCH)
 
 
-@triton.jit
+@triton_jit
 def _awq_gemv_kernel(
     x_ptr,
     qweight_ptr,

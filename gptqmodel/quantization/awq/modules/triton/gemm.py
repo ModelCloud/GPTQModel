@@ -19,6 +19,7 @@ import triton
 import triton.language as tl
 
 from gptqmodel.utils.kernel import get_kernel_config
+from gptqmodel.utils.triton_jit import jit as triton_jit
 
 from .scheduler import SUPPORTED_GROUP_SIZES, validate_fused_config
 
@@ -33,7 +34,7 @@ def get_same_device_cm(t):
         return torch.cuda.device(t.device.index)
 
 
-@triton.jit
+@triton_jit
 def awq_dequantize_kernel(
     qweight_ptr,  # quantized matrix
     scales_ptr,  # scales, per group
@@ -130,7 +131,7 @@ def awq_dequantize_kernel(
     tl.store(result_ptr + result_offsets, iweights, result_masks)
 
 
-@triton.jit
+@triton_jit
 def awq_gemm_kernel(
     a_ptr,
     b_ptr,

@@ -44,6 +44,8 @@ log = setup_logger()
 try:  # pragma: no cover - import availability is environment dependent
     import triton
     import triton.language as tl
+
+    from gptqmodel.utils.triton_jit import jit as triton_jit
     TRITON_AVAILABLE = True
 except Exception:  # pragma: no cover
     triton = None
@@ -133,7 +135,7 @@ def rotate_blocks(x: torch.Tensor, bh: torch.Tensor) -> torch.Tensor:
 
 if TRITON_AVAILABLE:
 
-    @triton.jit
+    @triton_jit
     def _quant_mxfp4_kernel(x_ptr, pk_ptr, sc_ptr, K,
                             stride_xr, stride_pr, stride_sr,
                             BLOCK_G: tl.constexpr):
@@ -178,7 +180,7 @@ if TRITON_AVAILABLE:
         sc_byte = tl.where(nonfinite, 255.0, e + 127.0).to(tl.uint8)
         tl.store(sc_ptr + row * stride_sr + gid, sc_byte, mask=gid < K // 32)
 
-    @triton.jit
+    @triton_jit
     def _rot_scale_quant_kernel(x_ptr, ps_ptr, bh_ptr, pk_ptr, sc_ptr, K,
                                 stride_xr, stride_pr, stride_sr,
                                 BLOCK_G: tl.constexpr):
@@ -224,7 +226,7 @@ if TRITON_AVAILABLE:
             mask=gid < K // 32,
         )
 
-    @triton.jit
+    @triton_jit
     def _dense_w4a4_kernel(
         a_ptr, b_ptr, asc_ptr, bsc_ptr, c_ptr, bias_ptr, M, N, K,
         stride_am, stride_bn, stride_asm, stride_bsn, stride_cm,
@@ -269,7 +271,7 @@ if TRITON_AVAILABLE:
         c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :]
         tl.store(c_ptrs, acc, mask=m_mask[:, None] & n_mask[None, :])
 
-    @triton.jit
+    @triton_jit
     def _dequant_w4_to_bf16_kernel(pk_ptr, sc_ptr, out_ptr, K, BLOCK_G: tl.constexpr):
         """Packed MXFP4 row -> bf16.  ``value = magnitude * 2 ** (e8m0 - 127)``."""
 

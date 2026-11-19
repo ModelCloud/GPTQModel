@@ -57,7 +57,6 @@ _BOOL_FIELDS = (
     "gguf_native_quantized_loader",
     "gsq_disable_cuda_relaxation",
     "gsq_disable_hip_relaxation",
-    "rocm_llc",
 )
 
 _OPTIONAL_BOOL_FIELDS = ("torch_triton_dequant", "gguf_cpp_native_matmul")
@@ -253,10 +252,8 @@ class KernelConfig:
     exl3_capture_batch_checkpoint_interval: int = 1
     exl3_capture_frontier: Optional[str] = None
 
-    # ROCm quantization BLAS and LLC back-port. Replace
-    # ``GPTQMODEL_ROCM_QUANT_BLAS`` and ``GPTQMODEL_NO_ROCM_LLC``.
+    # ROCm quantization BLAS. Replaces ``GPTQMODEL_ROCM_QUANT_BLAS``.
     rocm_quant_blas: Optional[str] = None
-    rocm_llc: bool = True
 
     # Thread counts. Replace ``GPTQMODEL_CPU_WORKERS``,
     # ``GPTQMODEL_CUDA_WORKERS`` and ``GPTQMODEL_MAX_PACKERS``. ``None`` keeps
@@ -407,9 +404,6 @@ def _coerce_kernel_config(config: KernelConfig | Mapping[str, Any] | None) -> Ke
 
 _CONFIG_LOCK = threading.RLock()
 _ACTIVE_CONFIG: KernelConfig = KernelConfig()
-# True only while a ``rocm_llc=False`` policy is what removed the back-port, so
-# re-enabling restores it without re-applying a patch the import already made.
-_ROCM_LLC_SUPPRESSED = False
 
 
 def configure_kernel(config: KernelConfig | Mapping[str, Any] | None) -> KernelConfig:
@@ -424,34 +418,7 @@ def configure_kernel(config: KernelConfig | Mapping[str, Any] | None) -> KernelC
     resolved = _coerce_kernel_config(config)
     with _CONFIG_LOCK:
         _ACTIVE_CONFIG = resolved
-    _sync_rocm_llc(resolved.rocm_llc)
     return resolved
-
-
-def _sync_rocm_llc(enabled: bool) -> None:
-    """Apply or undo the ROCm LLC back-port to match the active policy.
-
-    The back-port is applied at import, so an enabled policy leaves it alone.
-    Only a policy that turns it *off* undoes it, and turning it back on restores
-    the patch that this module removed rather than re-running a patch the import
-    already made (which would reset a caller's own state).
-    """
-
-    global _ROCM_LLC_SUPPRESSED
-    try:
-        from .. import rocm_llc
-    except Exception:  # pragma: no cover - torch/import failures are non-fatal
-        return
-    try:
-        if enabled:
-            if _ROCM_LLC_SUPPRESSED:
-                rocm_llc.apply()
-                _ROCM_LLC_SUPPRESSED = False
-        else:
-            rocm_llc.unapply()
-            _ROCM_LLC_SUPPRESSED = True
-    except Exception:  # pragma: no cover - the back-port never blocks a run
-        pass
 
 
 def get_kernel_config() -> KernelConfig:

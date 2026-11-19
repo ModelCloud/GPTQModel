@@ -8,9 +8,10 @@ consistent.
 
 ## 1. Loader contract
 
-GPT-QModel never patches, monkeypatches or registers into Transformers or the
-HF ecosystem (Optimum, OpenVINO, safetensors, `huggingface_hub`), not even
-temporarily or scoped. `tests/test_transformers_unpatched.py` snapshots the
+GPT-QModel never patches, monkeypatches or registers into Transformers, the
+HF ecosystem (Optimum, OpenVINO, safetensors, `huggingface_hub`) or other
+libraries (Accelerate, Defuser, torch, Triton), not even temporarily or
+scoped. `tests/test_transformers_unpatched.py` snapshots the
 quantizer registries, the GPTQ/AWQ quantizers, Transformers' GGUF modules,
 `PreTrainedModel`, `torch.nn.init` and `safetensors.torch` (plus Optimum and
 OpenVINO when installed) before and after import, native load, port build and
@@ -242,7 +243,7 @@ GPT-QModel no longer hooks the Transformers load after dispatch, so a
 
 | Test | Invariant |
 | --- | --- |
-| `tests/test_transformers_unpatched.py` | Import, native load, port build and `GPTQModel.load` leave Transformers and the HF ecosystem unpatched |
+| `tests/test_transformers_unpatched.py` | Import, native load, port build, disk offload and `GPTQModel.load` leave Transformers, the HF ecosystem, Accelerate, Defuser, torch.nn, Triton and every loaded model class unpatched |
 | `tests/test_checkpoint_compat.py::test_hf_compat_warning_for_defused_moe_checkpoint` | Per-expert saves warn |
 | `tests/test_checkpoint_compat.py::test_hf_compat_warning_for_dynamic_awq` | `dynamic` AWQ saves warn |
 | `tests/test_checkpoint_compat.py::test_hf_compat_warning_for_every_gptqmodel_only_method` | Save-time warnings name every table entry |
