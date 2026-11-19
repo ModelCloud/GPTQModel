@@ -55,7 +55,11 @@ from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_by_name, get_op_name
 from ..quantization.awq.utils.packing_utils import source_weight_out_in
 from ..quantization.config import FORMAT, METHOD, CalibrationConfig, MSEConfig, QuantizeConfig, resolve_quant_format
-from ..utils.attn_mask import exclude_attention_sinks, normalize_seq_mask
+from ..utils.attn_mask import (
+    align_single_head_capture,
+    exclude_attention_sinks,
+    normalize_seq_mask,
+)
 from ..utils.ctx import ctx
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
@@ -1839,6 +1843,7 @@ class AWQProcessor(LoopProcessor):
         if not torch.is_tensor(feature) or not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
             return feature
 
+        feature = align_single_head_capture(feature, keep_mask)
         keep_mask = keep_mask.to(device=feature.device, dtype=torch.bool)
         if feature.dim() >= 3 and tuple(feature.shape[:2]) == tuple(keep_mask.shape):
             flattened = feature.reshape(-1, *feature.shape[2:])

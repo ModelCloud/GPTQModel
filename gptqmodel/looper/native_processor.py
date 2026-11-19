@@ -17,6 +17,7 @@ from ..looper.loop_processor import (
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..quantization.config import CalibrationConfig, QuantizeConfig
+from ..utils.attn_mask import align_single_head_capture
 from ..utils.logger import setup_logger
 from ..utils.torch import CPU, DEVICE_1
 
@@ -146,6 +147,9 @@ class NativeProcessor(LoopProcessor):
 
         if not torch.is_tensor(inp) or not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
             return [inp.to(device=target_device)]
+        # The native side of GPTAQ/FOEM must split the same rows the quantized
+        # side does; an MLA `kv_b_proj` capture is a single-head 4-D latent.
+        inp = align_single_head_capture(inp, keep_mask)
         if inp.dim() >= 3 and tuple(keep_mask.shape) == tuple(inp.shape[:2]):
             flattened = False
         elif inp.dim() == 2 and inp.shape[0] == keep_mask.numel():

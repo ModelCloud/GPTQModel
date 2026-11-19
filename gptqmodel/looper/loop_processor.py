@@ -32,7 +32,11 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..quantization.config import CalibrationConfig, QuantizeConfig
-from ..utils.attn_mask import bos_token_positions, exclude_attention_sinks
+from ..utils.attn_mask import (
+    align_single_head_capture,
+    bos_token_positions,
+    exclude_attention_sinks,
+)
 from ..utils.calibration import calibration_input_row_count
 from ..utils.colors import ANSIColor, color_text
 from ..utils.logger import setup_logger
@@ -832,6 +836,7 @@ class LoopProcessor:
         rows = keep_mask.to(dtype=torch.bool)
         if torch.is_tensor(padding_mask) and tuple(padding_mask.shape) == tuple(rows.shape):
             rows = rows | ~padding_mask.to(device=rows.device, dtype=torch.bool)
+        inp = align_single_head_capture(inp, rows)
         if inp.dim() >= 3 and tuple(inp.shape[:2]) == tuple(rows.shape):
             return inp[rows.to(device=inp.device)]
         if inp.dim() == 2 and inp.shape[0] == rows.numel():

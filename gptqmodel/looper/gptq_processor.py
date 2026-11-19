@@ -64,6 +64,7 @@ from ..quantization.config import (
     resolve_quant_format,
 )
 from ..quantization.gptq import SharedHessianFactorCache
+from ..utils.attn_mask import align_single_head_capture
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
@@ -289,6 +290,8 @@ class GPTQProcessor(LoopProcessor):
         # Activation ranges must cover every token inference will see, the
         # BOS sinks included, so only padding is removed here.
         keep_mask = active_padding_mask(self)
+        if not isinstance(module, torch.nn.Conv2d):
+            inp = align_single_head_capture(inp, keep_mask)
         if (
             torch.is_tensor(keep_mask) and inp.ndim >= 3 and keep_mask.ndim == 2
             and keep_mask.shape == inp.shape[:2]
@@ -606,6 +609,15 @@ class GPTQProcessor(LoopProcessor):
                     del inp, out
                     return
             keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
+            # MLA attention feeds `kv_b_proj` a single-head 4-D latent, whose
+            # `shape[:2]` never matches the `[B, S]` mask; drop the unit head
+            # axis so the padding/sink branches below apply to it too (#5389).
+            # A 4-D Conv2d capture keeps its layout: its channel axis is not a
+            # head axis and the unfold branch below owns it.
+            if not isinstance(getattr(g, "module", None), torch.nn.Conv2d):
+                inp_tensor = align_single_head_capture(inp_tensor, keep_mask)
+                if torch.is_tensor(out):
+                    out = align_single_head_capture(out, keep_mask)
 
             if (
                 isinstance(getattr(g, "module", None), torch.nn.Embedding)
