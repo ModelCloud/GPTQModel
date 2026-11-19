@@ -1493,7 +1493,7 @@ def hf_select_quant_linear_v2(
     else:
         device = DEVICE.CPU
 
-    if format == FORMAT.LLM_AWQ:
+    if fmt == FORMAT.LLM_AWQ:
         # llm-awq uses torch.int16 to pack qweight
         pack_dtype = torch.int16
 
