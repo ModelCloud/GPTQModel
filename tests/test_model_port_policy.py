@@ -74,11 +74,44 @@ def _model_family_imports(path):
                         yield f"transformers.{alias.name} ({module})"
 
 
+# BaseQModel subclasses under gptqmodel/ that are never instantiated as a model
+# and therefore may keep BaseQModel's Transformers Auto* loader. Keyed by
+# "module.Class"; each entry needs a comment saying why. Currently none.
+NON_MODEL_DEFINITION_CLASSES = frozenset()
+
+
+def _definition_classes():
+    """Every BaseQModel subclass a load can reach: MODEL_MAP values, classes
+    auto.py dispatches to outside MODEL_MAP (e.g. KimiLinearNativeQModel), and
+    any other subclass defined in gptqmodel/models/definitions."""
+
+    import importlib
+    import pkgutil
+
+    import gptqmodel.models.definitions as definitions
+    from gptqmodel.models.base import BaseQModel
+
+    for module in pkgutil.iter_modules(definitions.__path__):
+        importlib.import_module(f"{definitions.__name__}.{module.name}")
+
+    found = {}
+    pending = list(BaseQModel.__subclasses__())
+    while pending:
+        cls = pending.pop()
+        pending.extend(cls.__subclasses__())
+        if cls.__module__.startswith("gptqmodel."):
+            found[f"{cls.__module__}.{cls.__qualname__}"] = cls
+    for definition in MODEL_MAP.values():
+        found[f"{definition.__module__}.{definition.__qualname__}"] = definition
+    return found
+
+
 def _native_definitions():
     return {
-        model_type
-        for model_type, definition in MODEL_MAP.items()
-        if not isinstance(getattr(definition, "loader", None), LocalModelLoader)
+        name
+        for name, definition in _definition_classes().items()
+        if name not in NON_MODEL_DEFINITION_CLASSES
+        and not isinstance(getattr(definition, "loader", None), LocalModelLoader)
     }
 
 
@@ -106,6 +139,18 @@ def test_every_definition_uses_a_package_owned_loader():
     actual = _native_definitions()
     assert actual <= PENDING_NATIVE_DEFINITIONS, f"definitions without LocalModelLoader: {sorted(actual - PENDING_NATIVE_DEFINITIONS)}"
     assert not PENDING_NATIVE_DEFINITIONS - actual, f"ported; remove from pending: {sorted(PENDING_NATIVE_DEFINITIONS - actual)}"
+    classes = _definition_classes()
+    assert not NON_MODEL_DEFINITION_CLASSES - set(classes), (
+        f"allowlisted class no longer exists: {sorted(NON_MODEL_DEFINITION_CLASSES - set(classes))}"
+    )
+
+
+def test_definition_sweep_covers_classes_dispatched_outside_model_map():
+    from gptqmodel.models.definitions.kimi_linear import KimiLinearNativeQModel
+
+    classes = _definition_classes()
+    assert KimiLinearNativeQModel not in set(MODEL_MAP.values())
+    assert "gptqmodel.models.definitions.kimi_linear.KimiLinearNativeQModel" in classes
 
 
 def test_ports_never_import_transformers_model_families():
