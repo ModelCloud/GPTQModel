@@ -12,10 +12,9 @@ description: Construct regression tests for GPT-QModel bug fixes and behavior-ch
 For each bug fix or behaviour-changing refactor, add a red/green regression
 to the existing test family. Exercise the risky transition and its **next
 consumer**, not just the helper or first successful call. Select the applicable
-cases below and record the evidence in the PR. The [Nov 17 audit](references/2026-11-17-regressions.md)
-and [Nov 18 follow-ups](references/2026-11-18-regressions.md) link fixes to
-tests and distinguish proven regressions from recurring bug families;
-historical implementations are not specifications.
+cases below and record the evidence in the PR. For landed fixes and the tests
+to extend, see the audits from [Nov 17](references/2026-11-17-regressions.md),
+[Nov 18](references/2026-11-18-regressions.md) and [Nov 19](references/2026-11-19-regressions.md).
 
 ## 1. Write the invariant before the patch
 
@@ -93,6 +92,12 @@ modules, `load_state_dict(assign=False/True)`, and offload/restore where used.
   operations are supported. Cleanup may reclaim a resource only after its last
   live consumer releases it; assert both continued usability and eventual
   cleanup, including a failed save followed by retry.
+- When changing a kernel's required checkpoint tensors or their consumers,
+  pair a truncated checkpoint with a complete one from the same family.
+  Remove one required key and assert the loader names it. Load the complete
+  checkpoint through `GPTQModel.load`, check a family-specific `post_init`
+  effect, then run a forward. Include a family without `qweight` and a GPTQ
+  control. For offload changes also exercise the supported meta-backed layer.
 
 Follow [checkpoint serialization](../gptqmodel-checkpoint-serialization/SKILL.md),
 [model plans](../gptqmodel-model-plan-tests/SKILL.md), and
@@ -221,6 +226,14 @@ its token-aligned kwargs at the replay consumer against hand-listed pairs.
 Include excluded sinks when applicable and an all-kept control. Do not use the
 production row-index helper to build the expected pairs.
 
+For bounded AWQ capture, route one expert through a plan match, a routed
+mismatch, then another match with a partial quota (e.g. local rows 0 and 2).
+With spare capacity, enumerate every expected row and its replay position.
+At capacity, check which sources survive across early and late batches.
+Exercise single-row quotas over enough multi-token batches to expose both
+all-first and all-centre selection. Test explicit sink exclusion separately
+with a sparse boolean mask and check the surviving rows.
+
 Follow [tokenizer ownership](../gptqmodel-tokenizer-normalization/SKILL.md) for
 reusable normalization and [AWQ safety](../gptqmodel-awq-model-onboarding/SKILL.md)
 for native replay, routing, and source/consumer qualification. Do not duplicate
@@ -232,6 +245,14 @@ Follow the [numerical oracle skill](../gptqmodel-torch-oracle-numerics/SKILL.md)
 its tolerances, packed-code rules, and hardware requirements remain unchanged.
 Cross the **changed mechanism** with supported FP16/BF16/FP32 and dispatch paths,
 including outer autocast and inference mode when they affect it.
+
+For layers supporting activation gradients, pack or load under
+`torch.inference_mode()`, leave that context and run the same layer with
+`x.requires_grad=True`. For a linear layer compare `x.grad` after backward
+against `grad_output @ W` using the fixture's reference weight. Repeat on
+the affected device and dtype where inference selects a fused op, and verify
+the no-grad control still takes that op. If full-graph compilation is
+advertised, execute the compiled forward with `fullgraph=True` too.
 
 - Use cancellation (large product plus opposing bias), range endpoints,
   underflow, and nonfinite inputs where supported. Check wide accumulation and
