@@ -183,8 +183,8 @@ flowchart TD
     F --> G["_finalize_model_loading raises"]
     G --> H["post-weight repair never runs"]
     C --> I["patched param_needs_quantization"]
-    I --> J{"native GPT-QModel AWQ and a packed buffer of a packed module?"}
-    J -->|"yes"| E
+    I --> J{"native GPT-QModel AWQ, packed buffer,<br/>and module geometry differs from its serialized config?"}
+    J -->|"yes: the repair will rebuild this module"| E
     J -->|"no"| D
     style G fill:#f8d7da,stroke:#b02a37
     style E fill:#d9f2d9,stroke:#2e7d32
@@ -192,19 +192,37 @@ flowchart TD
 
 `_patch_transformers_awq_gptqmodel_load_bridge` wraps
 `AwqQuantizer.param_needs_quantization` with
-`hf_gptqmodel_awq_tolerated_mismatch`. The guard accepts a mismatch only when
-the live quantize config is a GPT-QModel AWQ checkpoint (an explicit
-`gptqmodel` quantizer entry, `meta.uri`, or a `dynamic` map) **and** the
-mismatched tensor is one of `qweight`/`qzeros`/`scales`/`g_idx`/`bias` on a
-`BaseQuantLinear`. Everything else keeps Transformers' behavior: dense
-parameters still raise, an explicit third-party quantizer entry wins over the
-`dynamic` heuristic, and non-AWQ methods are untouched. The accepted tensors
-are then moved into the modules rebuilt from the manifest by
+`hf_gptqmodel_awq_tolerated_mismatch` (`gptqmodel/utils/hf_load.py:301`). The
+guard accepts a mismatch only when the live quantize config is a GPT-QModel
+AWQ checkpoint (an explicit `gptqmodel` quantizer entry, `meta.uri`, or a
+`dynamic` map), the mismatched tensor is one of
+`qweight`/`qzeros`/`scales`/`g_idx`/`bias` on a `BaseQuantLinear`, **and**
+that module's built `bits`/`group_size`/`desc_act`/`sym` disagree with its
+resolved serialized per-module config. The last condition is the same one
+`_awq_modules_ignore_serialized_config` (`gptqmodel/utils/hf_load.py:909`) uses to decide whether
+`hf_gptqmodel_repair_awq_load` will rebuild the module, so a claimed tensor is
+always one the repair replaces.
+
+Everything else keeps Transformers' behavior: dense parameters still raise, an
+explicit third-party quantizer entry wins over the `dynamic` heuristic,
+non-AWQ methods are untouched, and a native checkpoint without a per-module
+geometry override keeps the mismatch. The earlier guard claimed every packed
+buffer of any native AWQ checkpoint, which disabled the last shape check for
+checkpoints the repair never rebuilds: a corrupted `qzeros`/`scales` loaded
+silently with the checkpoint shape instead of raising (#5345). The accepted
+tensors are then moved into the modules rebuilt from the manifest by
 `hf_gptqmodel_repair_awq_load`, so the load still matches `GPTQModel.load`.
 
-| Situation | Before the guard | After |
+| Decision | Before this change | After |
 | --- | --- | --- |
-| Native `dynamic` AWQ checkpoint, plain load, transformers 5.23 | RuntimeError (size mismatch); repair never runs | Packed buffers accepted, modules rebuilt from the manifest |
+| Which packed buffers bypass the 5.23 shape check | Every packed buffer on a `BaseQuantLinear` in a native AWQ checkpoint | Only buffers whose module geometry differs from the serialized per-module config |
+| What happens to a corrupted native buffer without an override | Accepted silently; no MISMATCH, no repair, no error | MISMATCH recorded; `_finalize_model_loading` raises |
+
+| Situation | Before this change | After |
+| --- | --- | --- |
+| Native `dynamic` AWQ checkpoint whose override changes geometry, plain load, transformers 5.23 | Packed buffers accepted; modules rebuilt from the manifest | Unchanged |
+| Native AWQ checkpoint without a geometry override, wrong-shape packed buffer | Loaded silently with the checkpoint shape (#5345) | RuntimeError; the mismatch is reported |
+| Native AWQ checkpoint without a geometry override, valid shapes | Loads | Unchanged |
 | Same checkpoint, transformers <= 5.22 | Loads (any active quantizer skipped the check) | Unchanged |
 | Native `dynamic` AWQ checkpoint, dense tensor shape differs | RuntimeError | RuntimeError (still reported) |
 | Third-party AWQ checkpoint | Transformers' own mismatch behavior | Unchanged |

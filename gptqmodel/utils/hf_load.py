@@ -237,6 +237,66 @@ def _hf_quantization_config_is_native_awq(model: nn.Module) -> bool:
 # genuine checkpoint error and must stay reported.
 _AWQ_PACKED_BUFFERS = ("qweight", "qzeros", "scales", "g_idx", "bias")
 
+_AWQ_QCFG_CACHE_ATTR = "_gptqmodel_awq_tolerated_qcfg"
+_AWQ_QCFG_UNSET = object()
+
+
+def _awq_load_quantize_config(model: nn.Module) -> Optional[QuantizeConfig]:
+    """Resolve the checkpoint manifest the AWQ repair will rebuild from.
+
+    Reads the same source as ``hf_gptqmodel_repair_awq_load`` so the tolerance
+    decision and the repair agree. Cached per model because Transformers calls
+    the mismatch hook once for every packed tensor whose shape differs.
+    """
+
+    cached = getattr(model, _AWQ_QCFG_CACHE_ATTR, _AWQ_QCFG_UNSET)
+    if cached is not _AWQ_QCFG_UNSET:
+        return cached
+
+    context = getattr(model, "_gptqmodel_hf_load_context", None)
+    qcfg = getattr(context, "quantize_config", None)
+    if qcfg is None:
+        checkpoint_path = find_checkpoint_dir(model)
+        if checkpoint_path is not None:
+            try:
+                qcfg = QuantizeConfig.from_pretrained(checkpoint_path)
+            except (KeyError, OSError, TypeError, ValueError):
+                qcfg = None
+    if qcfg is None:
+        raw = _hf_quantization_config_dict(model)
+        if raw:
+            try:
+                qcfg = QuantizeConfig.from_quant_config(dict(raw))
+            except (KeyError, TypeError, ValueError):
+                qcfg = None
+    try:
+        setattr(model, _AWQ_QCFG_CACHE_ATTR, qcfg)
+    except (AttributeError, TypeError):
+        pass
+    return qcfg
+
+
+def _awq_module_matches_serialized_config(
+    module: BaseQuantLinear,
+    qcfg: QuantizeConfig,
+    name: str,
+    format_code: FORMAT,
+) -> bool:
+    """Whether a built module already has its serialized per-module geometry."""
+
+    resolved = _resolved_module_config(qcfg, name, format_code)
+    if resolved is None:
+        return True
+    if int(module.bits) != int(resolved.bits):
+        return False
+    if int(module.group_size) != int(resolved.group_size):
+        return False
+    if hasattr(module, "desc_act") and bool(module.desc_act) != bool(resolved.desc_act):
+        return False
+    if hasattr(module, "sym") and bool(module.sym) != bool(resolved.sym):
+        return False
+    return True
+
 
 def hf_gptqmodel_awq_tolerated_mismatch(model: nn.Module, param_name: Optional[str] = None) -> bool:
     """Whether Transformers must not reject a native AWQ checkpoint's shape mismatch.
@@ -257,9 +317,15 @@ def hf_gptqmodel_awq_tolerated_mismatch(model: nn.Module, param_name: Optional[s
     ``replace_with_awq_linear`` imports ``gptqmodel`` mid-load, so the modules
     were built from the *global* config and the checkpoint tensors are the
     authority: accept them, then ``hf_gptqmodel_repair_awq_load`` rebuilds each
-    module from the serialized per-module config and moves them across. The
-    hook is only consulted for GPT-QModel AWQ checkpoints, so third-party AWQ
-    loads keep their existing mismatch behavior.
+    module from the serialized per-module config and moves them across.
+
+    Only a module whose built geometry genuinely disagrees with its serialized
+    per-module config may be accepted here: that is exactly the case the repair
+    rebuilds. For a native checkpoint without such an override the built module
+    already has the serialized geometry, so a differing tensor is a corrupted
+    checkpoint and Transformers must keep reporting it (#5345). The hook is only
+    consulted for GPT-QModel AWQ checkpoints, so third-party AWQ loads keep
+    their existing mismatch behavior.
     """
 
     if not _hf_quantization_config_is_native_awq(model):
@@ -274,7 +340,16 @@ def hf_gptqmodel_awq_tolerated_mismatch(model: nn.Module, param_name: Optional[s
         module = model.get_submodule(module_path)
     except AttributeError:
         return False
-    return isinstance(module, BaseQuantLinear)
+    if not isinstance(module, BaseQuantLinear):
+        return False
+
+    qcfg = _awq_load_quantize_config(model)
+    if qcfg is None:
+        # Without the serialized manifest the mismatch cannot be attributed to
+        # a per-module geometry difference, so keep Transformers' rejection.
+        return False
+    format_code = resolve_quant_format(qcfg.format, qcfg.method)
+    return not _awq_module_matches_serialized_config(module, qcfg, module_path, format_code)
 
 
 def hf_gptqmodel_reselect_context(
@@ -851,16 +926,7 @@ def _awq_modules_ignore_serialized_config(model: nn.Module, qcfg: QuantizeConfig
         module = modules.get(name)
         if not isinstance(module, BaseQuantLinear):
             continue
-        resolved = _resolved_module_config(qcfg, name, format_code)
-        if resolved is None:
-            continue
-        if int(module.bits) != int(resolved.bits):
-            return True
-        if int(module.group_size) != int(resolved.group_size):
-            return True
-        if hasattr(module, "desc_act") and bool(module.desc_act) != bool(resolved.desc_act):
-            return True
-        if hasattr(module, "sym") and bool(module.sym) != bool(resolved.sym):
+        if not _awq_module_matches_serialized_config(module, qcfg, name, format_code):
             return True
     return False
 
