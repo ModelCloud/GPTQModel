@@ -23,8 +23,8 @@ from gptqmodel.models.ports.instella import InstellaConfig
 FIXTURES = Path(__file__).parent / "fixtures" / "cleanroom" / "instella"
 VARIANTS = ["gqa_default", "mha_bias", "mqa", "rope_linear", "rope_dynamic", "tied"]
 BACKENDS = ["eager", "sdpa"]
-COMMON = dict(vocab_size=47, hidden_size=32, intermediate_size=48, num_hidden_layers=2, num_attention_heads=4,
-              num_key_value_heads=2, max_position_embeddings=8, pad_token_id=1, bos_token_id=2, eos_token_id=3)
+COMMON = {"vocab_size": 47, "hidden_size": 32, "intermediate_size": 48, "num_hidden_layers": 2, "num_attention_heads": 4,
+              "num_key_value_heads": 2, "max_position_embeddings": 8, "pad_token_id": 1, "bos_token_id": 2, "eos_token_id": 3}
 
 
 @pytest.fixture(autouse=True)
@@ -132,7 +132,7 @@ def test_cache_entries(variant, backend, cache_kind, inputs):
 def test_generation_entries(variant, backend, inputs):
     expected = _expected(variant)
     ids, mask = inputs["input_ids"], inputs["attention_mask"]
-    greedy = dict(attention_mask=mask[:, :6], max_new_tokens=8, do_sample=False, eos_token_id=None, pad_token_id=1)
+    greedy = {"attention_mask": mask[:, :6], "max_new_tokens": 8, "do_sample": False, "eos_token_id": None, "pad_token_id": 1}
     cached = _load(variant, backend).generate(ids[:, :6], use_cache=True, **greedy)
     uncached = _load(variant, backend).generate(ids[:, :6], use_cache=False, **greedy)
     assert torch.equal(cached, expected[f"{backend}.generate_greedy_cached"])
