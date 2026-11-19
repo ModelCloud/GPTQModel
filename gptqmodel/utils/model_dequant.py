@@ -370,8 +370,9 @@ def _discover_compressed_tensors_module_schemes(
     normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
     # ``from_config`` mutates process-global torch state (default dtype,
-    # init hooks); serialize it against loads/saves with the shared lock.
-    from ..models.loader import model_global_state_lock, model_load_lock
+    # init hooks); serialize it against loads/saves with the shared lock. Its
+    # own ``local_torch_dtype`` window takes the global-state writer (#5304).
+    from ..models.loader import model_load_lock
 
     loader_candidates = (
         deps["AutoModelForCausalLM"],
@@ -387,7 +388,7 @@ def _discover_compressed_tensors_module_schemes(
 
         with init_empty_weights(include_buffers=True):
             try:
-                with model_load_lock(), model_global_state_lock():
+                with model_load_lock():
                     model = loader.from_config(
                         config,
                         trust_remote_code=trust_remote_code,

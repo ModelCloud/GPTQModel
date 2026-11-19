@@ -644,6 +644,61 @@ def model_global_state_lock():
     return accessor()
 
 
+_LOCAL_TORCH_DTYPE_GUARDED = False
+_LOCAL_TORCH_DTYPE_GUARD_LOCK = threading.Lock()
+
+
+def install_model_global_state_dtype_guard() -> None:
+    """Hold the global-state writer for transformers' dtype window only.
+
+    transformers' ``from_pretrained``/``from_config`` open one process-global
+    default-dtype window per construction, ``local_torch_dtype``. Everything
+    else in those calls -- weight I/O, dtype casts, device placement, packing
+    and kernel post-init -- leaves the process state alone and must not exclude
+    compiled forwards (#5304): a warm compiled step was blocked for the whole
+    duration of a concurrent dense ``GPTQModel.load``.
+
+    Wrapping the window itself, instead of every construction call site, also
+    covers a new call site and the quantize path automatically. The patch is
+    installed once per process; the writer is re-entrant, so nested windows and
+    a load that runs compiled code while it owns the writer keep working.
+    """
+    global _LOCAL_TORCH_DTYPE_GUARDED
+
+    if _LOCAL_TORCH_DTYPE_GUARDED:
+        return
+    with _LOCAL_TORCH_DTYPE_GUARD_LOCK:
+        if _LOCAL_TORCH_DTYPE_GUARDED:
+            return
+        from transformers import modeling_utils
+
+        original = getattr(modeling_utils, "local_torch_dtype", None)
+        if original is None:
+            # transformers without the helper leaves nothing to guard; the
+            # load lock still serializes construction.
+            return
+        if getattr(original, "_gptqmodel_global_state_guarded", False):
+            _LOCAL_TORCH_DTYPE_GUARDED = True
+            return
+
+        def guarded_local_torch_dtype(dtype, model_class_name=None):
+            with model_global_state_lock():
+                with original(dtype, model_class_name=model_class_name):
+                    yield
+
+        guarded = contextmanager(guarded_local_torch_dtype)
+        guarded._gptqmodel_global_state_guarded = True
+        guarded._gptqmodel_original = original
+        modeling_utils.local_torch_dtype = guarded
+        _LOCAL_TORCH_DTYPE_GUARDED = True
+
+
+def model_global_state_dtype_guard_installed() -> bool:
+    """Whether transformers' default-dtype window takes the writer."""
+
+    return _LOCAL_TORCH_DTYPE_GUARDED
+
+
 def _install_callable_compile_fallback(original: Callable, compiled: Callable, fullgraph: bool) -> Callable:
     """Return a callable that degrades to eager after a compile failure.
 

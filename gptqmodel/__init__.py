@@ -190,6 +190,20 @@ except Exception:
     log.warning("TritonPatch.apply() failed; triton autotuner threading fix is NOT active", exc_info=True)
 
 
+def _patch_transformers_local_torch_dtype_global_state():
+    """Hold the model-global-state writer for the default-dtype window only.
+
+    transformers opens a process-global ``torch.set_default_dtype`` window for
+    each construction. Published version of the fix (#5304): only the window is
+    exclusive, so a compiled forward no longer waits for a dense load's weight
+    I/O, dtype casts and device placement.
+    """
+
+    from .utils.torch import install_model_global_state_dtype_guard
+
+    install_model_global_state_dtype_guard()
+
+
 def _patch_transformers_gptq_device_map_compat():
     """Preserve concrete single-device GPTQ maps for Optimum's later packing step."""
     try:
@@ -1160,6 +1174,7 @@ class _LazyDeviceThreadPoolProxy:
 DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
 
 _patch_transformers_gptq_device_map_compat()
+_patch_transformers_local_torch_dtype_global_state()
 _patch_transformers_gptqmodel_gguf_quantizer_compat()
 _patch_transformers_refusing_quantizers()
 _patch_transformers_save_pretrained_runtime_layout_guard()

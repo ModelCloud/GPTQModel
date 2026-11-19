@@ -56,11 +56,14 @@ The fix splits the two concerns:
   (`_install_callable_compile_fallback.call`,
   `_install_module_compile_fallback.forward`). Readers run concurrently, so
   compiled forwards from different threads and models overlap.
-- Every transformers construction site takes the **writer** side for the
-  construction call only: `from_pretrained`, `from_quantized`'s `from_config`,
-  the offload shell (`build_shell_model`), the save-side shell rebuild, the
-  compressed-tensors dequant path, the TT block-float path and the norm-tuning
-  teacher. Weight I/O, repacking and kernel post-init stay outside it.
+- The **writer** side is taken by transformers' own `local_torch_dtype`
+  window: `gptqmodel.utils.torch.install_model_global_state_dtype_guard()`
+  wraps it at package import, so every construction path (`from_pretrained`,
+  `from_quantized`'s `from_config`, the offload shell, the save-side shell
+  rebuild, the compressed-tensors dequant path, the TT block-float path, the
+  norm-tuning teacher and the DeepSeek-V4 MTP shell) is covered, including a
+  new call site, without wrapping the call. Weight I/O, repacking, dtype casts,
+  device placement and kernel post-init stay outside it (#5304).
 - `TorchLinear.optimize()` (`gptqmodel/nn_modules/qlinear/torch.py`) takes the
   writer while it installs the dynamo wrapper (dynamo config and wrapper
   construction).
@@ -73,10 +76,11 @@ compiled call is re-entrant on the reader side.
 ```mermaid
 flowchart TD
     A["thread A: GPTQModel.load"] --> B["acquire _MODEL_LOAD_LOCK (whole load)"]
-    B --> C["acquire global-state writer (construction window)"]
+    B --> I["weight I/O, dtype casts, device placement; no writer"]
+    I --> C["local_torch_dtype opens: acquire global-state writer"]
     C --> D["transformers sets default dtype bf16"]
-    D --> E["construct model; release writer"]
-    E --> F["weight I/O, packing, kernel post-init; no writer"]
+    D --> E["construct model; window closes, release writer"]
+    E --> F["packing, kernel post-init; no writer"]
     F --> G["assert_loaded_model_state; release load lock"]
 
     H["thread B: compiled call"] --> I{"outer torch.compile already tracing?"}
@@ -94,7 +98,9 @@ flowchart TD
 ```
 
 Concurrent compiled forwards take the reader together and are not serialized; a
-compiled forward waits only while a construction holds the writer. The
+compiled forward waits only while `local_torch_dtype` holds the writer -- the
+default-dtype window, milliseconds of a load -- and never for the load's weight
+I/O, dtype casts, device placement, packing or kernel post-init (#5304). The
 steady-state cost is one uncontended reader acquire (a mutex-protected counter)
 per compiled call, not the loader's re-entrant lock.
 
