@@ -9,7 +9,6 @@ import pytest
 import torch
 from torch import nn
 
-from gptqmodel.nn_modules.qlinear.fp8 import quantize_fp8_weight
 from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
 from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear
 from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear, pack_intweight
@@ -26,6 +25,7 @@ from gptqmodel.quantization.awq.utils.packing_utils import pack_awq_columns
 from gptqmodel.utils.marlin_scalar_type import scalar_types
 from gptqmodel.utils.packing import hf_pack_layer
 from gptqmodel.utils.packing_math import scaled_zero_offset
+from tests.fp8_test_utils import quantize_fp8_weight
 
 
 @pytest.fixture(params=["cpu", "cuda"])

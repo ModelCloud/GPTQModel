@@ -29,7 +29,13 @@ from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
 from gptqmodel.utils.paro import build_identity_rotation_buffers
 
 
-pytestmark = [pytest.mark.gpu]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(
+        not torch.cuda.is_available(),
+        reason="Paro Triton requires a CUDA or ROCm GPU",
+    ),
+]
 
 
 def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
