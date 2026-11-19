@@ -12,6 +12,10 @@ from __future__ import annotations
 import pytest
 import torch
 
+
+# Every case here exercises a Triton kernel module that imports Triton.
+pytest.importorskip("triton")
+
 from gptqmodel.nn_modules.qlinear import bitsandbytes_triton as bt
 from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
