@@ -3471,6 +3471,16 @@ def ModelLoader(cls):
                     cpu_offload=cpu_offload,
                 )
 
+        # The shell replaced only the modules named by `module_tree`. Let the
+        # definition reattach any runtime modules it shares with those leaves
+        # before the checkpoint is loaded: the unmaterialized-parameter guard
+        # inside `load_checkpoint_in_model_then_tie_weights` would otherwise
+        # reject the sibling branch before `after_model_load` can fix it
+        # (#5514).
+        after_make_quant = getattr(cls, "after_make_quant", None)
+        if callable(after_make_quant):
+            model = after_make_quant(model)
+
         validate_checkpoint_qweights(
             model,
             model_save_name,
