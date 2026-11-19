@@ -15,12 +15,13 @@ and the entry is released once every cached weight has been consumed.
 """
 
 import json
+import os
 
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
-from gptqmodel.adapter.adapter import AdapterCache, Lora
+from gptqmodel.adapter.adapter import AdapterCache, Lora, _local_adapter_generation
 
 
 CPU = torch.device("cpu")
@@ -51,7 +52,7 @@ def _write_adapter(directory, module_keys, *, rank=2):
 
 
 def _cache_key(directory):
-    return (str(directory), None, None)
+    return (str(directory), None, None, _local_adapter_generation(str(directory)))
 
 
 def test_second_sequential_load_sees_the_modules_the_first_load_ignored(tmp_path):
@@ -120,3 +121,26 @@ def test_fully_consumed_adapter_releases_the_cache_entry(tmp_path):
 
     Lora(rank=None, path=tmp_path).post_init("layer1", CPU)
     assert key not in AdapterCache.cache
+
+
+def test_overwriting_a_partially_consumed_local_adapter_starts_a_new_entry(tmp_path):
+    _write_adapter(tmp_path, ("layer0", "layer1"))
+    first = Lora(rank=None, path=str(tmp_path))
+    first.post_init("layer0", CPU)
+    original = first.lora_A.clone()
+
+    weights_path = tmp_path / "adapter_model.safetensors"
+    weights = load_file(str(weights_path))
+    weights["base_model.model.layer0.lora_A.weight"] = torch.full_like(
+        weights["base_model.model.layer0.lora_A.weight"], 0.75
+    )
+    save_file(weights, str(weights_path), metadata={"generation": "second"})
+    # Guarantee a distinct file generation even on a coarse-timestamp filesystem.
+    stat = os.stat(weights_path)
+    os.utime(weights_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
+
+    second = Lora(rank=None, path=str(tmp_path))
+    second.post_init("layer0", CPU)
+
+    assert not torch.equal(second.lora_A, original)
+    assert torch.all(second.lora_A == 0.75)
