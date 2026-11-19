@@ -1760,6 +1760,32 @@ def _dequantize_awq_gemv_fast(qweight, zeros, scales, bits: int, group_size: int
     return (codes.to(torch.float32).t() * scale + offset).t().contiguous()
 
 
+def _complete_module_buffers(
+    prefix: str,
+    buffers: Dict[str, torch.Tensor],
+    required: Iterable[str],
+    tensor_lookup: Optional["_ShardTensorLookup"],
+) -> Dict[str, torch.Tensor]:
+    """Fill a module's packed buffers from the checkpoint index.
+
+    GPT-QModel's writer can split one module's ``qweight``/``qzeros``/``scales``/
+    ``g_idx`` across indexed files. The converter sees one file at a time, so a
+    buffer that is missing locally is read from the shard the index names
+    instead of being reported as an incomplete module (#5398).
+    """
+
+    if tensor_lookup is None:
+        return dict(buffers)
+    complete = dict(buffers)
+    for name in required:
+        if name in complete:
+            continue
+        key = f"{prefix}.{name}"
+        if tensor_lookup.has_tensor(key):
+            complete[name] = tensor_lookup.get_tensor(key)
+    return complete
+
+
 def convert_awq_file(
     path: Path,
     target_dtype: torch.dtype,
@@ -1767,6 +1793,7 @@ def convert_awq_file(
     *,
     config: Optional[dict] = None,
     ignored_layers: Iterable[str] = (),
+    tensor_lookup: Optional["_ShardTensorLookup"] = None,
 ) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     module_buffers: Dict[str, Dict[str, torch.Tensor]] = defaultdict(dict)
@@ -1804,12 +1831,21 @@ def convert_awq_file(
     default_bits = int((config or {}).get("bits", 4))
     default_group_size = int((config or {}).get("group_size", -1))
     for prefix, buf in module_buffers.items():
+        # The shard that carries the packed payload emits the one dense weight;
+        # a shard holding only a companion buffer must not duplicate it.
+        owns_module = "qweight" in buf
+        buf = _complete_module_buffers(
+            prefix, buf, ("qweight", "qzeros", "scaled_zeros", "scales"), tensor_lookup
+        )
         zeros_key = "qzeros"
         if layout == "gemv_fast" and "scaled_zeros" in buf:
             zeros_key = "scaled_zeros"
         missing = {k for k in ("qweight", "scales", zeros_key) if k not in buf}
         if missing:
             raise KeyError(f"Incomplete AWQ buffers for module {prefix}: missing {missing}")
+        if not owns_module:
+            LOG.debug("AWQ module '%s' is emitted by the shard that owns its qweight", prefix)
+            continue
 
         qweight = buf["qweight"]
         scales = buf["scales"]
@@ -1850,6 +1886,7 @@ def convert_gptq_file(
     *,
     ignored_layers: Iterable[str] = (),
     preserved_prefixes: tuple[str, ...] = (),
+    tensor_lookup: Optional["_ShardTensorLookup"] = None,
 ) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     module_buffers: Dict[str, Dict[str, torch.Tensor]] = defaultdict(dict)
@@ -1886,9 +1923,18 @@ def convert_gptq_file(
                 tensors[key] = finalize_for_save(tensor, target_dtype)
 
     for prefix, buf in module_buffers.items():
+        # The shard that carries the packed payload emits the one dense weight;
+        # a shard holding only a companion buffer must not duplicate it.
+        owns_module = "qweight" in buf
+        buf = _complete_module_buffers(
+            prefix, buf, ("qweight", "qzeros", "scales", "g_idx"), tensor_lookup
+        )
         missing = {k for k in ("qweight", "qzeros", "scales", "g_idx") if k not in buf}
         if missing:
             raise KeyError(f"Incomplete GPTQ buffers for module {prefix}: missing {missing}")
+        if not owns_module:
+            LOG.debug("GPTQ module '%s' is emitted by the shard that owns its qweight", prefix)
+            continue
 
         qweight = buf["qweight"]
         qzeros = buf["qzeros"]
@@ -2190,7 +2236,7 @@ def dequantize_model(
             device=open_device,
             weight_map=index.get("weight_map", {}) if isinstance(index, dict) else None,
         )
-        if fmt in {"fp8", "nvfp8", "nvfp4", "mxfp4", "mxfp8", "mixed-mx"}
+        if fmt in {"fp8", "nvfp8", "nvfp4", "mxfp4", "mxfp8", "mixed-mx", "gptq", "awq"}
         else None
     )
 
@@ -2254,6 +2300,7 @@ def dequantize_model(
                     open_device,
                     config=quant_cfg,
                     ignored_layers=ignored_layers,
+                    tensor_lookup=tensor_lookup,
                 )
             elif fmt == "gptq":
                 tensors = convert_gptq_file(
@@ -2262,6 +2309,7 @@ def dequantize_model(
                     quant_cfg,
                     open_device,
                     ignored_layers=ignored_layers,
+                    tensor_lookup=tensor_lookup,
                     preserved_prefixes=("model.mtp.",) if (
                         config.get("model_type") == "mimo_v2"
                         and config.get("mimo_mtp_source_quantization_config")
