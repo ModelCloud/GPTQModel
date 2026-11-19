@@ -13,6 +13,9 @@ per layer:
 ``mla``          a compressed latent (``kv_lora_rank``) plus one decoupled RoPE
                  key (``qk_rope_head_dim``), shared across heads, with no factor
                  of two. Reading per-head shapes here overstates by ~60x.
+``indexed``      an MLA/GQA layer with a persistent sparse indexer (DeepSeek
+                 V32, GLM MoE DSA, AXK2): the branch above plus ``index_head_dim``
+                 indexer keys per token, retained at the indexer cache dtype.
 ``linear``       recurrent layers keep a constant-size state. They do not grow
                  with context and are reported separately, never in the slope.
 ``sliding``      growth capped at ``min(context, window)``; chunked attention
@@ -58,6 +61,11 @@ _FULL_ATTENTION_TYPES = frozenset({
     # A layer that mixes a recurrent branch with an attention branch still keeps
     # standard K/V for the attention half; the recurrent half is constant state.
     "hybrid",
+})
+# transformers maps these to ``DynamicIndexedLayer``, which retains a second
+# ``[batch, seq, index_head_dim]`` key cache next to the latent K/V.
+_INDEXED_ATTENTION_TYPES = frozenset({
+    "indexed_attention", "deepseek_sparse_attention", "qwen_sparse_attention",
 })
 _SLIDING_ATTENTION_TYPES = frozenset({
     "sliding_attention", "sliding_window_attention", "window_attention",
@@ -105,10 +113,12 @@ class LayerCache:
     ``compressed_dims`` counts every pooled stream (CSA keeps a compressor and a
     Lightning Indexer), ``buffer_dims`` the per-source-token scratch held between
     windows, and ``overlap_dims`` the fixed state the two-series CSA window
-    carries across a forward boundary.
+    carries across a forward boundary. An ``indexed`` layer additionally keeps
+    ``indexer_dims`` per token; ``indexer_dtype`` is the dtype that stream was
+    allocated with (``None`` means the estimate's cache dtype).
     """
 
-    kind: str                       # "gqa" | "mla" | "linear" | "shared" | "block" | "unknown"
+    kind: str                       # "gqa" | "mla" | "indexed" | "linear" | "shared" | "block" | "unknown"
     dims: int = 0                   # elements cached per token (0 when not growing)
     window: Optional[int] = None    # cap for sliding layers
     compressed_dims: int = 0        # elements per compressed entry, all streams
@@ -116,6 +126,8 @@ class LayerCache:
     compressed_streams: int = 1     # pooled streams folded into compressed_dims
     buffer_dims: int = 0            # elements per buffered source token, all streams
     overlap_dims: int = 0           # fixed elements retained, all streams
+    indexer_dims: int = 0           # indexer elements cached per token
+    indexer_dtype: Optional[torch.dtype] = None  # dtype of the indexer stream
 
 
 @dataclass(frozen=True)
@@ -133,14 +145,23 @@ class KVCacheEstimate:
     mtp_layers: int = 0
     context_limit: Optional[int] = None
     unclassified: Tuple[str, ...] = field(default_factory=tuple)
+    partial: Tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def kv_element_bytes(self) -> int:
         return _DTYPE_ITEMSIZE[self.dtype]
 
+    def _indexer_element_bytes(self, layer: LayerCache) -> int:
+        dtype = layer.indexer_dtype or self.dtype
+        return _DTYPE_ITEMSIZE.get(dtype, self.kv_element_bytes)
+
     @property
     def is_exact(self) -> bool:
-        return not self.unclassified and all(layer.kind != "unknown" for layer in self.layers)
+        return (
+            not self.unclassified
+            and not self.partial
+            and all(layer.kind != "unknown" for layer in self.layers)
+        )
 
     @property
     def growing_layers(self) -> int:
@@ -174,6 +195,12 @@ class KVCacheEstimate:
         )
 
     @property
+    def indexer_layers(self) -> int:
+        """Layers that also retain a persistent sparse-indexer key cache."""
+
+        return sum(1 for layer in self.layers if layer.indexer_dims > 0)
+
+    @property
     def shared_layers(self) -> int:
         """Decoder layers that reuse an earlier layer's K/V and cache nothing."""
 
@@ -181,7 +208,11 @@ class KVCacheEstimate:
 
     @property
     def layer_type(self) -> str:
-        kinds = {layer.kind for layer in self.layers if layer.kind in ("gqa", "mla", "compressed")}
+        kinds = {
+            layer.kind
+            for layer in self.layers
+            if layer.kind in ("gqa", "mla", "indexed", "compressed")
+        }
         if not kinds:
             return "unknown"
         return kinds.pop() if len(kinds) == 1 else "mixed"
@@ -191,21 +222,27 @@ class KVCacheEstimate:
         """Asymptotic growth: the sliding branch stops, the compressed one does not."""
 
         elements = 0.0
+        indexer_bytes = 0.0
         for layer in self.layers:
             if not layer.window:
                 elements += layer.dims
+                if layer.indexer_dims:
+                    indexer_bytes += layer.indexer_dims * self._indexer_element_bytes(layer)
             if layer.compress_rate and layer.compressed_dims:
                 elements += layer.compressed_dims / layer.compress_rate
-        return int(round(elements)) * self.kv_element_bytes
+        return int(round(elements)) * self.kv_element_bytes + int(round(indexer_bytes))
 
     def kv_bytes_for(self, context_tokens: int, *, batch_size: int = 1) -> int:
         context_tokens = max(0, int(context_tokens))
         batch = max(1, int(batch_size))
-        elements = 0
+        total = 0
         for layer in self.layers:
+            elements = 0
             if layer.dims > 0:
                 span = min(context_tokens, layer.window) if layer.window else context_tokens
                 elements += layer.dims * span
+                if layer.indexer_dims:
+                    total += layer.indexer_dims * span * self._indexer_element_bytes(layer)
             if layer.compress_rate and layer.compressed_dims:
                 entries = context_tokens // layer.compress_rate
                 elements += layer.compressed_dims * entries
@@ -219,7 +256,8 @@ class KVCacheEstimate:
                     # monotonic for ``max_context_tokens``'s binary search.
                     elements += layer.buffer_dims * min(
                         context_tokens, layer.compress_rate - 1)
-        return elements * self.kv_element_bytes * batch
+            total += elements * self.kv_element_bytes
+        return total * batch
 
     def max_context_tokens(self, kv_budget_bytes: int, *, batch_size: int = 1) -> int:
         """Largest usable context for ``budget_bytes`` at ``batch_size``.
@@ -303,6 +341,8 @@ class KVCacheEstimate:
         parts_of_shape = [f"{self.growing_layers} growing layer(s)"]
         if self.sliding_layers:
             parts_of_shape.append(f"{self.sliding_layers} sliding")
+        if self.indexer_layers:
+            parts_of_shape.append(f"{self.indexer_layers} indexed")
         if self.compressed_streams > 1:
             parts_of_shape.append(f"{self.compressed_streams} compressed streams")
         shape = ", ".join(parts_of_shape) + f", {self.layer_type}"
@@ -321,6 +361,8 @@ class KVCacheEstimate:
             parts.append(f"incl. {self.mtp_layers} MTP layer(s)")
         if self.unclassified:
             parts.append(f"unknown layer type(s): {', '.join(self.unclassified)}")
+        if self.partial:
+            parts.append(f"partial: {', '.join(self.partial)}")
         return " | ".join(parts)
 
 
@@ -503,19 +545,21 @@ def estimate_kv_cache(
 
     all_layers: list[LayerCache] = []
     unclassified_all: list[str] = []
+    partial_all: list[str] = []
     mtp_total = 0
     resolved_dtype = None
     limits = []
     for source in stacks:
-        partial = _estimate_for_stack(source, dtype=dtype)
-        if partial is None:
+        stack = _estimate_for_stack(source, dtype=dtype)
+        if stack is None:
             continue
-        all_layers.extend(partial.layers)
-        unclassified_all.extend(partial.unclassified)
-        mtp_total += partial.mtp_layers
-        resolved_dtype = resolved_dtype or partial.dtype
-        if partial.context_limit:
-            limits.append(partial.context_limit)
+        all_layers.extend(stack.layers)
+        unclassified_all.extend(stack.unclassified)
+        partial_all.extend(stack.partial)
+        mtp_total += stack.mtp_layers
+        resolved_dtype = resolved_dtype or stack.dtype
+        if stack.context_limit:
+            limits.append(stack.context_limit)
 
     if not all_layers:
         return None
@@ -525,6 +569,7 @@ def estimate_kv_cache(
         mtp_layers=mtp_total,
         context_limit=min(limits) if limits else None,
         unclassified=tuple(dict.fromkeys(unclassified_all)),
+        partial=tuple(dict.fromkeys(partial_all)),
     )
 
 
@@ -554,6 +599,7 @@ def _estimate_for_stack(
 
     resolved: list[LayerCache] = []
     unclassified: list[str] = []
+    partial: list[str] = []
     for index in range(layer_count):
         # Gemma 3n/4 reuse an earlier layer's K/V for the tail; transformers does
         # not call ``past_key_values.update`` for them, so they add no bytes.
@@ -590,6 +636,22 @@ def _estimate_for_stack(
                 unclassified.append(layer_type)
                 resolved.append(LayerCache(kind="unknown"))
             continue
+
+        # Indexed attention keeps a second key cache: one ``index_head_dim``
+        # vector per token, in the indexer's own dtype. Without the declared
+        # width the latent branch is still countable, but the total is not
+        # exact and must say so rather than look authoritative.
+        indexer_dims = 0
+        indexer_dtype = None
+        if layer_type in _INDEXED_ATTENTION_TYPES:
+            indexer_dims = _positive_int(
+                _safe_get(layer_cfg, "index_head_dim",
+                          _safe_get(source, "index_head_dim"))) or 0
+            if indexer_dims:
+                kind = "indexed"
+                indexer_dtype = resolved_dtype
+            else:
+                partial.append(f"{layer_type} indexer layout not declared")
 
         if layer_type in _COMPRESSED_ATTENTION_TYPES:
             # DeepSeek V4-style: a bounded sliding branch plus pooled entries
@@ -638,14 +700,23 @@ def _estimate_for_stack(
                 unclassified.append(layer_type)
                 resolved.append(LayerCache(kind="unknown"))
             else:
-                resolved.append(LayerCache(kind=kind, dims=dims, window=chunk))
+                resolved.append(LayerCache(
+                    kind=kind, dims=dims, window=chunk,
+                    indexer_dims=indexer_dims, indexer_dtype=indexer_dtype,
+                ))
             continue
 
         known_attention = layer_type in _FULL_ATTENTION_TYPES
         if layer_type in _SLIDING_ATTENTION_TYPES:
-            resolved.append(LayerCache(kind=kind, dims=dims, window=window or 1024))
+            resolved.append(LayerCache(
+                kind=kind, dims=dims, window=window or 1024,
+                indexer_dims=indexer_dims, indexer_dtype=indexer_dtype,
+            ))
         elif known_attention:
-            resolved.append(LayerCache(kind=kind, dims=dims))
+            resolved.append(LayerCache(
+                kind=kind, dims=dims,
+                indexer_dims=indexer_dims, indexer_dtype=indexer_dtype,
+            ))
         else:
             # An unrecognized layer type may or may not grow; counting it as a
             # full attention layer would produce a confident wrong number.
@@ -669,6 +740,7 @@ def _estimate_for_stack(
         mtp_layers=mtp,
         context_limit=limit,
         unclassified=tuple(dict.fromkeys(unclassified)),
+        partial=tuple(dict.fromkeys(partial)),
     )
 
 
