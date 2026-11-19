@@ -356,7 +356,14 @@ def assert_loaded_model_state(
     problems = []
 
     if default_dtype_before is not None:
-        default_dtype_after = torch.get_default_dtype()
+        # A construction window in another thread temporarily sets the process
+        # default dtype. Reading it here would report a change this load did not
+        # make (#5421). The writer excludes every construction window, so wait
+        # for them and compare the settled value.
+        from .torch import model_global_state_lock
+
+        with model_global_state_lock():
+            default_dtype_after = torch.get_default_dtype()
         if default_dtype_after != default_dtype_before:
             problems.append(
                 "torch.get_default_dtype() changed from "

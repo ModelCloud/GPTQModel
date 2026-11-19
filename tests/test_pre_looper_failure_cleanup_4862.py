@@ -22,11 +22,17 @@ import pytest
 from tokenizers import Tokenizer, models
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
+import gptqmodel.models.base as base_module
 from gptqmodel import BACKEND, CalibrationConfig
 from gptqmodel.adapter.adapter import Lora
-from gptqmodel.looper.eora_processor import EoraProcessor
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.models.definitions.llama import LlamaQModel
+from gptqmodel.models.quantization_run_plan import (
+    ProcessorStep,
+)
+from gptqmodel.models.quantization_run_plan import (
+    processor_class as real_processor_class,
+)
 from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.quantization.config import AutoDtypeCast
 
@@ -108,6 +114,7 @@ def _assert_no_new_smi_threads(baseline: set[int | None]) -> None:
 @pytest.mark.parametrize(
     ("dataset", "message"),
     [
+        # #4985 moved the empty check into the shared calibration preparer.
         pytest.param([], "calibration dataset is empty", id="empty"),
         pytest.param(
             [{"input_ids": [1, 2], "attention_mask": [1, 1]}],
@@ -151,18 +158,22 @@ def test_later_processor_failure_releases_the_processors_already_built(
 
     monkeypatch.setattr(LoopProcessor, "release_failed_run", recording_release)
 
-    # Calibration (including the adapter samples) is now prepared once before
-    # any processor exists (#4869/#4935), so bad data can no longer fail the
-    # EoRA constructor. Fail it at its boundary instead, after GPTQ is built.
-    def failing_eora_init(self, *args, **kwargs):
-        raise ValueError("injected EoRA construction failure")
+    # #4985 validates the calibration and adapter rows before any processor is
+    # built, so a malformed `adapter_dataset` no longer reaches the prologue
+    # release. Fail the second processor's construction instead: the GPTQ
+    # processor built first must still be released.
+    def failing_processor_class(step):
+        if step is ProcessorStep.EORA:
+            raise ValueError("EoRA processor construction failed")
+        return real_processor_class(step)
 
-    monkeypatch.setattr(EoraProcessor, "__init__", failing_eora_init)
+    monkeypatch.setattr(base_module, "processor_class", failing_processor_class)
 
-    with pytest.raises(ValueError, match="injected EoRA construction failure"):
+    with pytest.raises(ValueError, match="EoRA processor construction failed"):
         qmodel.quantize(
             CalibrationConfig(
                 dataset=CALIBRATION,
+                adapter_dataset=CALIBRATION,
                 batch_size=1,
             ),
             backend=BACKEND.GPTQ_TORCH,

@@ -168,7 +168,7 @@ from ._const import (
     normalize_device,
 )
 from .fusable import FusableConfig, require_fusable_config
-from .loader import ModelLoader, _setup_rotation_online_had
+from .loader import ModelLoader, _setup_rotation_online_had, model_load_lock
 from .local import LocalModelLoader, local_model_loader_for_config
 from .module_plan import ModulePlan
 from .quantization_run_plan import ProcessorStep, QuantizationRunPlan, processor_class
@@ -3464,16 +3464,24 @@ class BaseQModel(nn.Module):
         owns_teacher = not isinstance(teacher, nn.Module)
         if owns_teacher:
             device = get_device(self.get_input_embeddings())
+            # The teacher is a GPT-QModel-owned transformers construction, so it
+            # takes the same load lock as every other build: another thread
+            # must not be inside its own ``post_init`` while this one
+            # constructs, or the class-wide no-tie patch leaves the shell
+            # untied (#5421). The construction window still holds the
+            # global-state writer by itself (#5304), so the teacher's weight
+            # I/O stays concurrent with optimized forwards.
             teacher_trust = resolve_trust_remote_code(teacher, trust_remote_code=self.trust_remote_code)
             teacher_config = load_model_config(teacher, trust_remote_code=teacher_trust)
             teacher_loader = local_model_loader_for_config(teacher_config.to_dict()) or AutoModelForCausalLM
-            teacher = teacher_loader.from_pretrained(
-                teacher,
-                config=teacher_config,
-                dtype=self.model.dtype,
-                device_map={"": device},
-                trust_remote_code=teacher_trust,
-            )
+            with model_load_lock():
+                teacher = teacher_loader.from_pretrained(
+                    teacher,
+                    config=teacher_config,
+                    dtype=self.model.dtype,
+                    device_map={"": device},
+                    trust_remote_code=teacher_trust,
+                )
         try:
             stats = tune_norm_params(self.model, teacher, batches, names, norm)
         finally:

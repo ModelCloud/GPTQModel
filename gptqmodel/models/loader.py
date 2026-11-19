@@ -1962,6 +1962,21 @@ def model_global_state_lock():
     return _MODEL_GLOBAL_STATE_LOCK
 
 
+def _default_dtype_outside_construction() -> torch.dtype:
+    """Read torch's default dtype while no construction window can be open.
+
+    transformers' ``local_torch_dtype`` window saves, sets and restores the
+    process default dtype in the constructing thread. A bare
+    ``torch.get_default_dtype()`` at load entry or exit can therefore observe
+    another thread's temporary dtype and report a change the load did not make
+    (#5421). The writer excludes every construction window, so the value read
+    here is the process's settled default dtype.
+    """
+
+    with model_global_state_lock():
+        return torch.get_default_dtype()
+
+
 def _serialized_model_load(method):
     """Serialize a model-construction entry point across threads."""
 
@@ -2601,7 +2616,7 @@ def ModelLoader(cls):
         # quantization is unsafe with GIL=0 and torch.compile/graphs
         import torch._dynamo
         torch._dynamo.disable()
-        default_dtype_before = torch.get_default_dtype()
+        default_dtype_before = _default_dtype_outside_construction()
 
         pretrained_model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             pretrained_model_id_or_path,
@@ -3099,7 +3114,7 @@ def ModelLoader(cls):
         # to a discarded model are dropped with it: ``release_compile_trace_garbage``
         # reclaims the trace cycles that keep a dropped model alive (#5020), so a
         # load does not need a process-wide reset for them.
-        default_dtype_before = torch.get_default_dtype()
+        default_dtype_before = _default_dtype_outside_construction()
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
             kwargs,

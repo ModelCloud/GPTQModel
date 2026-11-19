@@ -711,22 +711,56 @@ def _global_state_lock_for_write():
 _LOCAL_TORCH_DTYPE_GUARDED = False
 _LOCAL_TORCH_DTYPE_GUARD_LOCK = threading.Lock()
 
+_INIT_CONTEXT_GUARDED = False
+_INIT_CONTEXT_GUARD_LOCK = threading.Lock()
+
 
 def install_model_global_state_dtype_guard() -> None:
-    """Hold the global-state writer for transformers' dtype window only.
+    """Hold the global-state writer for every transformers construction window.
 
-    transformers' ``from_pretrained``/``from_config`` open one process-global
-    default-dtype window per construction, ``local_torch_dtype``. Everything
-    else in those calls -- weight I/O, dtype casts, device placement, packing
-    and kernel post-init -- leaves the process state alone and must not exclude
-    compiled forwards (#5304): a warm compiled step was blocked for the whole
-    duration of a concurrent dense ``GPTQModel.load``.
+    transformers builds a model inside a group of process-global contexts
+    (``PreTrainedModel.get_init_context``): the ``local_torch_dtype`` window, a
+    class-wide ``PreTrainedModel.tie_weights`` no-op (``init.no_tie_weights``)
+    and the registered class swaps (``apply_patches``). Everything else in a
+    load -- weight I/O, dtype casts, device placement, packing and kernel
+    post-init -- leaves the process state alone and must not exclude compiled
+    forwards (#5304): a warm compiled step was blocked for the whole duration
+    of a concurrent dense ``GPTQModel.load``.
 
-    Wrapping the window itself, instead of every construction call site, also
-    covers a new call site and the quantize path automatically. The patch is
-    installed once per process; the writer is re-entrant, so nested windows and
-    a load that runs compiled code while it owns the writer keep working.
+    Only the dtype window was exclusive, so a foreign ``from_pretrained`` in
+    another thread could have tying disabled while a GPT-QModel shell ran
+    ``post_init``; the shell then stayed untied and the checkpoint load failed
+    on the missing ``lm_head.weight`` (#5421). The guards below close that:
+
+    * ``local_torch_dtype`` itself holds the writer, so the dtype window stays
+      exclusive even for a construction that does not use
+      ``get_init_context``.
+    * ``PreTrainedModel.get_init_context`` prepends the writer to the init
+      contexts. ``ContextManagers`` enters them in order and exits through an
+      ``ExitStack``, so the writer is acquired before every class-wide patch
+      and released after all of them: two constructions -- GPT-QModel's or a
+      caller's -- can never have one thread's patches active inside the other.
+      ``PreTrainedModel._from_config`` takes the writer for the
+      ``from_config`` construction, which opens ``apply_patches`` outside
+      ``get_init_context`` and may have no dtype window at all.
+    * ``init.no_tie_weights`` and ``apply_patches`` take the writer themselves,
+      so a direct use of either patch is exclusive too, and a tie that
+      GPT-QModel applies after a load cannot land inside another thread's
+      window.
+
+    Both patches are installed once per process. The writer is re-entrant, so
+    nested constructions and a load that runs compiled code while it owns the
+    writer keep working.
     """
+
+    _install_local_torch_dtype_guard()
+    _install_init_context_guard()
+    _install_class_wide_patch_guards()
+
+
+def _install_local_torch_dtype_guard() -> None:
+    """Make transformers' ``local_torch_dtype`` window take the writer."""
+
     global _LOCAL_TORCH_DTYPE_GUARDED
 
     if _LOCAL_TORCH_DTYPE_GUARDED:
@@ -757,10 +791,106 @@ def install_model_global_state_dtype_guard() -> None:
         _LOCAL_TORCH_DTYPE_GUARDED = True
 
 
+def _install_init_context_guard() -> None:
+    """Make every transformers model construction take the writer.
+
+    ``get_init_context`` returns the list of process-global contexts a
+    ``from_pretrained`` construction runs inside. Prepending the writer to that
+    list makes the whole group exclusive, which is what the class-wide
+    ``no_tie_weights`` / ``apply_patches`` monkeypatches need: a model built in
+    one thread must not see the other thread's temporary patches (#5421).
+
+    ``_from_config`` (the ``from_config`` construction path) opens
+    ``apply_patches`` without ``get_init_context`` and only opens a dtype
+    window when a dtype is given, so it takes the writer for its whole
+    construction. Both wrappers are pass-through and preserve the original
+    signatures.
+    """
+
+    global _INIT_CONTEXT_GUARDED
+
+    if _INIT_CONTEXT_GUARDED:
+        return
+    with _INIT_CONTEXT_GUARD_LOCK:
+        if _INIT_CONTEXT_GUARDED:
+            return
+        from transformers import modeling_utils
+
+        model_cls = modeling_utils.PreTrainedModel
+
+        original = getattr(model_cls.__dict__.get("get_init_context"), "__func__", None)
+        if original is not None and not getattr(original, "_gptqmodel_global_state_guarded", False):
+
+            @functools.wraps(original)
+            def guarded_get_init_context(cls, *args, **kwargs):
+                # First in the list, therefore entered before every context and
+                # left after all of them (``ContextManagers`` uses an
+                # ``ExitStack``).
+                return [model_global_state_lock(), *original(cls, *args, **kwargs)]
+
+            guarded_get_init_context._gptqmodel_global_state_guarded = True
+            guarded_get_init_context._gptqmodel_original = original
+            model_cls.get_init_context = classmethod(guarded_get_init_context)
+
+        original_from_config = getattr(model_cls.__dict__.get("_from_config"), "__func__", None)
+        if original_from_config is not None and not getattr(
+            original_from_config, "_gptqmodel_global_state_guarded", False
+        ):
+
+            @functools.wraps(original_from_config)
+            def guarded_from_config(cls, *args, **kwargs):
+                with model_global_state_lock():
+                    return original_from_config(cls, *args, **kwargs)
+
+            guarded_from_config._gptqmodel_global_state_guarded = True
+            guarded_from_config._gptqmodel_original = original_from_config
+            model_cls._from_config = classmethod(guarded_from_config)
+
+        _INIT_CONTEXT_GUARDED = True
+
+
 def model_global_state_dtype_guard_installed() -> bool:
     """Whether transformers' default-dtype window takes the writer."""
 
     return _LOCAL_TORCH_DTYPE_GUARDED
+
+
+def model_global_state_init_context_guard_installed() -> bool:
+    """Whether every transformers model construction takes the writer."""
+
+    return _INIT_CONTEXT_GUARDED
+
+
+def _install_class_wide_patch_guards() -> None:
+    """Hold the writer while a class-wide construction patch is installed.
+
+    ``init.no_tie_weights`` replaces ``PreTrainedModel.tie_weights`` for every
+    class and ``apply_patches`` swaps registered classes in every transformers
+    module. Both are process-global, so a tie or a construction in another
+    thread that runs inside the window sees the patch (#5421). Taking the
+    writer here makes any use of either patch -- through ``get_init_context``
+    or directly -- exclusive with a GPT-QModel construction or tie.
+    """
+
+    from transformers import initialization, modeling_utils
+
+    for module, name in (
+        (initialization, "no_tie_weights"),
+        (modeling_utils, "apply_patches"),
+    ):
+        original = getattr(module, name, None)
+        if original is None or getattr(original, "_gptqmodel_global_state_guarded", False):
+            continue
+
+        def guarded(original=original):
+            with model_global_state_lock():
+                with original():
+                    yield
+
+        wrapper = contextmanager(guarded)
+        wrapper._gptqmodel_global_state_guarded = True
+        wrapper._gptqmodel_original = original
+        setattr(module, name, wrapper)
 
 
 def _install_callable_compile_fallback(original: Callable, compiled: Callable, fullgraph: bool) -> Callable:

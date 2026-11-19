@@ -322,6 +322,10 @@ def test_forward_observes_weight_mutation_and_state_load_clears_metadata():
     module.clear_weight_cache()
     x = torch.randn(8, module.in_features, dtype=torch.float16)
 
+    # Snapshot the pre-mutation payload so `load_state_dict` can restore it.
+    original_state = {
+        name: tensor.detach().clone() for name, tensor in module.state_dict().items()
+    }
     first = module(x)
     # On CPU ``post_init`` compiles ``dequantize_weight`` (#5070), and a traced
     # graph decodes zero-points inline without publishing the cache. The eager
@@ -336,9 +340,13 @@ def test_forward_observes_weight_mutation_and_state_load_clears_metadata():
     second = module(x)
     assert not torch.equal(first, second)
 
-    module.load_state_dict(module.state_dict())
-    assert module._zeros_cache is None
-    assert module._g_idx_long_cache is None
+    # Since #5070 the dequant runs compiled and decodes its zero-points and
+    # group index inline, so the private caches stay empty. What the test is
+    # named for is still observable: the next forward must use the loaded
+    # payload, not a dequant built from the mutated one.
+    module.load_state_dict(original_state)
+    restored = module(x)
+    torch.testing.assert_close(restored, first, rtol=0, atol=0)
 
 
 def test_repeated_forward_with_inference_tensors():
@@ -413,20 +421,21 @@ def test_cached_dequant_offloads_g_idx_to_cpu_on_cuda():
     module._stream_reset_cache()
 
     assert module.g_idx.device.type == "cuda"
-    assert module._g_idx_long_cache is None
 
     with torch.inference_mode():
         weights = module.dequantize_weight(num_itr=1)
 
     assert weights.device.type == "cuda"
-    assert module._g_idx_long_cache is not None
-    assert module._g_idx_long_cache.device.type == "cuda"
+    # The compiled dequant decodes the group index inline instead of
+    # publishing `_g_idx_long_cache` (#5070), but the original buffer is
+    # still offloaded once the dequantized weight exists on the device.
     assert module.g_idx.device.type == "cpu"
 
-    # Cached path should remain usable after offloading original g_idx.
+    # The offloaded buffer must not break the next dequant.
     with torch.inference_mode():
         weights_after = module.dequantize_weight(num_itr=1)
     assert weights_after.device.type == "cuda"
+    assert torch.equal(weights_after, weights)
 
 
 def test_configure_default_lookahead_chain():

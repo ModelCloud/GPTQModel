@@ -29,6 +29,12 @@ from gptqmodel.utils.importer import clear_validation_cache, select_quant_linear
 pytestmark = [pytest.mark.cpu]
 
 
+def _clear_avx512_bf16_probe(monkeypatch):
+    """Reset the module-global capability probe (#5070 dropped ``cache_clear``)."""
+
+    monkeypatch.setattr(cpu_features, "_AVX512_BF16", None)
+
+
 def _hf_reference_unpack(packed: torch.Tensor, out_features: int, in_features: int) -> torch.Tensor:
     """Independent implementation of the upstream HF unpacking formula."""
 
@@ -236,17 +242,18 @@ def test_cpu_feature_detection_requires_vbmi(monkeypatch):
     monkeypatch.setattr(cpu_features.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(Path, "read_text", lambda self, *args, **kwargs: flags)
 
-    # The probe result is memoized in a module global; monkeypatch resets it
-    # for this test and restores the host's real answer afterwards.
-    monkeypatch.setattr(cpu_features, "_AVX512_BF16", None)
-    assert not has_avx512_bf16()
-    monkeypatch.setattr(
-        Path,
-        "read_text",
-        lambda self, *args, **kwargs: flags + " avx512vbmi",
-    )
-    monkeypatch.setattr(cpu_features, "_AVX512_BF16", None)
-    assert has_avx512_bf16()
+    _clear_avx512_bf16_probe(monkeypatch)
+    try:
+        assert not has_avx512_bf16()
+        monkeypatch.setattr(
+            Path,
+            "read_text",
+            lambda self, *args, **kwargs: flags + " avx512vbmi",
+        )
+        _clear_avx512_bf16_probe(monkeypatch)
+        assert has_avx512_bf16()
+    finally:
+        _clear_avx512_bf16_probe(monkeypatch)
 
 
 def test_cpu_feature_detection_requires_xsave(monkeypatch):
@@ -258,8 +265,11 @@ def test_cpu_feature_detection_requires_xsave(monkeypatch):
     monkeypatch.setattr(cpu_features.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(Path, "read_text", lambda self, *args, **kwargs: flags)
 
-    monkeypatch.setattr(cpu_features, "_AVX512_BF16", None)
-    assert not has_avx512_bf16()
+    _clear_avx512_bf16_probe(monkeypatch)
+    try:
+        assert not has_avx512_bf16()
+    finally:
+        _clear_avx512_bf16_probe(monkeypatch)
 
 
 @pytest.mark.parametrize(

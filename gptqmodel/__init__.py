@@ -171,13 +171,16 @@ if _installed_rocm_blas_env is not None:
 warn_unsupported_rocm()
 
 
-def _patch_transformers_local_torch_dtype_global_state():
-    """Hold the model-global-state writer for the default-dtype window only.
+def _patch_transformers_model_construction_global_state():
+    """Hold the model-global-state writer for each construction window.
 
     transformers opens a process-global ``torch.set_default_dtype`` window for
-    each construction. Published version of the fix (#5304): only the window is
-    exclusive, so a compiled forward no longer waits for a dense load's weight
-    I/O, dtype casts and device placement.
+    each construction (#5304) and, in the same init-context group, disables
+    ``PreTrainedModel.tie_weights`` class-wide and swaps registered classes
+    (#5421). Only the window was exclusive, so a foreign construction in
+    another thread could untie a GPT-QModel shell. Every construction now holds
+    the writer for the window; a compiled forward still does not wait for a
+    dense load's weight I/O, dtype casts and device placement.
     """
 
     from .utils.torch import install_model_global_state_dtype_guard
@@ -395,7 +398,12 @@ class _LazyDeviceThreadPoolProxy:
 
 DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
 
-_patch_transformers_local_torch_dtype_global_state()
+# The port installs one Transformers guard: the model-global-state writer for
+# the construction window (#5304, #5421). It now covers the dtype window, the
+# init-context group and the class-wide patches, so the port's older
+# dtype-only entry point and the model-compatibility patches main still keeps
+# for its Transformers 4 tree are not installed here.
+_patch_transformers_model_construction_global_state()
 
 
 def exllama_set_max_input_length(model, max_input_length: int):
