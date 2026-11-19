@@ -599,6 +599,10 @@ class ParoProcessor(LoopProcessor):
         if inputs.numel() == 0:
             inputs = torch.empty((0, weight.shape[1]), dtype=weight.dtype, device=weight.device)
         module_seed = self._module_seed(module.layer_index, module.full_name)
+        # The stage LRs are scaled for ``opt_batch_size`` in every scope, so the
+        # default ``opt_scope="module"`` must not pass the raw config values
+        # (#5306 regression, #5517).
+        rotation_lr, weight_lr, quantizer_lr = self._stage_learning_rates()
 
         use_mlx = (
             inputs.numel() > 0
@@ -638,9 +642,9 @@ class ParoProcessor(LoopProcessor):
                 batch_size=self.qcfg.opt_batch_size,
                 rotation_epochs=self.qcfg.opt_rotation_epochs,
                 finetune_epochs=self.qcfg.opt_finetune_epochs,
-                rotation_lr=self.qcfg.opt_rotation_lr,
-                weight_lr=self.qcfg.opt_weight_lr,
-                quantizer_lr=self.qcfg.opt_quantizer_lr,
+                rotation_lr=rotation_lr,
+                weight_lr=weight_lr,
+                quantizer_lr=quantizer_lr,
                 optimizer_name=getattr(self.qcfg, "opt_optimizer", "adamw"),
                 optimizer_weight_decay=float(getattr(self.qcfg, "opt_weight_decay", 0.01)),
                 optimizer_betas=tuple(getattr(self.qcfg, "opt_betas", (0.9, 0.95))),
@@ -671,9 +675,9 @@ class ParoProcessor(LoopProcessor):
                 batch_size=self.qcfg.opt_batch_size,
                 rotation_epochs=self.qcfg.opt_rotation_epochs,
                 finetune_epochs=self.qcfg.opt_finetune_epochs,
-                rotation_lr=self.qcfg.opt_rotation_lr,
-                weight_lr=self.qcfg.opt_weight_lr,
-                quantizer_lr=self.qcfg.opt_quantizer_lr,
+                rotation_lr=rotation_lr,
+                weight_lr=weight_lr,
+                quantizer_lr=quantizer_lr,
                 seed=module_seed,
                 optimizer_name=getattr(self.qcfg, "opt_optimizer", "adamw"),
                 optimizer_weight_decay=float(getattr(self.qcfg, "opt_weight_decay", 0.01)),
