@@ -34,7 +34,7 @@ from gptqmodel.utils import hf_load
 class _PackedAwqModule(BaseQuantLinear):
     """Minimal packed AWQ module: enough identity for the mismatch guard."""
 
-    def __init__(self, bits=4, group_size=128, desc_act=False, sym=True):
+    def __init__(self, bits=4, group_size=128, desc_act=False, sym=True, in_features=128):
         # BaseQuantLinear.__init__ builds a full kernel; this fixture only needs
         # the type identity and geometry the guard compares, plus the buffers.
         nn.Module.__init__(self)
@@ -42,18 +42,20 @@ class _PackedAwqModule(BaseQuantLinear):
         self.group_size = group_size
         self.desc_act = desc_act
         self.sym = sym
+        self.in_features = in_features
+        self.out_features = 1
         self.qweight = nn.Parameter(torch.zeros(1, 1, dtype=torch.int32), requires_grad=False)
         self.qzeros = nn.Parameter(torch.zeros(1, 1, dtype=torch.int32), requires_grad=False)
         self.scales = nn.Parameter(torch.zeros(1, 1, dtype=torch.float16), requires_grad=False)
 
 
 class _TinyModel(nn.Module):
-    def __init__(self, dynamic=None, quant_method="awq", quantizer=("gptqmodel:7.11.6",)):
+    def __init__(self, dynamic=None, quant_method="awq", quantizer=("gptqmodel:7.11.6",), group_size=128):
         super().__init__()
         self.proj = _PackedAwqModule()
         self.dense = nn.Linear(4, 4)
         meta = {"quantizer": list(quantizer)} if quantizer is not None else {}
-        quantize_config = {"quant_method": quant_method, "bits": 4, "group_size": 128}
+        quantize_config = {"quant_method": quant_method, "bits": 4, "group_size": group_size}
         if dynamic:
             quantize_config["dynamic"] = dynamic
         if meta:
@@ -87,6 +89,14 @@ def test_native_awq_without_dynamic_rejects_packed_shape_mismatch():
 
     assert hf_load.hf_gptqmodel_awq_tolerated_mismatch(model, "proj.qzeros") is False
     assert hf_load.hf_gptqmodel_awq_tolerated_mismatch(model, "proj.scales") is False
+
+
+def test_native_awq_per_channel_effective_group_size_still_matches():
+    # A per-channel kernel stores in_features as its effective group size, so
+    # the serialized -1 and the built 128 describe the same geometry.
+    model = _TinyModel(group_size=-1)
+
+    assert hf_load.hf_gptqmodel_awq_tolerated_mismatch(model, "proj.qzeros") is False
 
 
 def test_native_dynamic_override_on_another_module_does_not_tolerate():
