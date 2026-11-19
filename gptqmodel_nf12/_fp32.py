@@ -38,9 +38,14 @@ except ImportError:  # pragma: no cover - Triton builds without Gluon
     gl = None
 
 
-def _gluon_jit(fn):
-    """Apply ``gluon.jit`` when available; callers check ``gate_rows_error()``."""
-    return fn if gluon is None else gluon.jit(fn)
+def _gluon_jit(fn=None, **options):
+    """Apply ``gluon.jit`` when available; callers check ``gate_rows_error()``.
+
+    Keyword options such as ``do_not_specialize`` are forwarded to ``gluon.jit``.
+    """
+    if fn is None:
+        return lambda inner: _gluon_jit(inner, **options)
+    return fn if gluon is None else gluon.jit(fn, **options)
 
 
 def _jit(fn=None, **options):
@@ -195,10 +200,10 @@ def _linear_fp32_gate_planes(
 
 
 @_gluon_jit
-def _gate_rows_x(ptr, row, m: gl.constexpr, rows_m: gl.constexpr):
-    # When rows_m divides m every row of every tile exists: skip the mask and
-    # its zero-fill. The loaded values (and therefore the bits) are the same.
-    if m % rows_m == 0:
+def _gate_rows_x(ptr, row, m, full_tiles: gl.constexpr):
+    # When full_tiles, every row of every tile exists: skip the mask and its
+    # zero-fill. The loaded values (and therefore the bits) are the same.
+    if full_tiles:
         return gl.load(ptr)
     else:
         return gl.load(ptr, mask=row < m, other=0)
@@ -208,8 +213,8 @@ def _gate_rows_x(ptr, row, m: gl.constexpr, rows_m: gl.constexpr):
 def _gate_rows_step(
     x_row, meta_ptr, low_ptr, low_u32, escapes_ptr, gate, cols, block,
     acc0, acc1, acc2, acc3, acc4, acc5,
-    m: gl.constexpr, base_m, exp_base: gl.constexpr, rows_m: gl.constexpr,
-    block_k: gl.constexpr,
+    m, base_m, exp_base: gl.constexpr, rows_m: gl.constexpr,
+    full_tiles: gl.constexpr, block_k: gl.constexpr,
 ):
     col = block * block_k + cols
     col2 = gl.expand_dims(col, 0)
@@ -227,31 +232,32 @@ def _gate_rows_step(
     escaped = gl.load(escapes_ptr + index * 8 + slot, escape, other=0).to(gl.uint16, bitcast=True)
     bits = gl.where(escape, escaped.to(gl.uint32), (high << 8) | low)
     w = (bits << 16).to(gl.float32, bitcast=True)
-    x0 = _gate_rows_x(x_row + col, base_m, m, rows_m)
+    x0 = _gate_rows_x(x_row + col, base_m, m, full_tiles)
     acc0 = gl.fma(gl.expand_dims(x0, 0), w, acc0)
     if rows_m > 1:
-        x1 = _gate_rows_x(x_row + 5120 + col, base_m + 1, m, rows_m)
+        x1 = _gate_rows_x(x_row + 5120 + col, base_m + 1, m, full_tiles)
         acc1 = gl.fma(gl.expand_dims(x1, 0), w, acc1)
     if rows_m > 2:
-        x2 = _gate_rows_x(x_row + 10240 + col, base_m + 2, m, rows_m)
+        x2 = _gate_rows_x(x_row + 10240 + col, base_m + 2, m, full_tiles)
         acc2 = gl.fma(gl.expand_dims(x2, 0), w, acc2)
     if rows_m > 3:
-        x3 = _gate_rows_x(x_row + 15360 + col, base_m + 3, m, rows_m)
+        x3 = _gate_rows_x(x_row + 15360 + col, base_m + 3, m, full_tiles)
         acc3 = gl.fma(gl.expand_dims(x3, 0), w, acc3)
     if rows_m > 4:
-        x4 = _gate_rows_x(x_row + 20480 + col, base_m + 4, m, rows_m)
+        x4 = _gate_rows_x(x_row + 20480 + col, base_m + 4, m, full_tiles)
         acc4 = gl.fma(gl.expand_dims(x4, 0), w, acc4)
     if rows_m > 5:
-        x5 = _gate_rows_x(x_row + 25600 + col, base_m + 5, m, rows_m)
+        x5 = _gate_rows_x(x_row + 25600 + col, base_m + 5, m, full_tiles)
         acc5 = gl.fma(gl.expand_dims(x5, 0), w, acc5)
     return acc0, acc1, acc2, acc3, acc4, acc5
 
 
-@_gluon_jit
+@_gluon_jit(do_not_specialize=["m"])
 def _linear_fp32_gate_planes_rows(
     x_ptr, meta_ptr, low_ptr, escapes_ptr, bias_ptr, out_ptr,
-    m: gl.constexpr, n: gl.constexpr, exp_base: gl.constexpr, has_bias: gl.constexpr,
+    m, n: gl.constexpr, exp_base: gl.constexpr, has_bias: gl.constexpr,
     rows_n: gl.constexpr, rows_m: gl.constexpr, unroll: gl.constexpr,
+    full_tiles: gl.constexpr,
 ):
     """B1 plane-kernel arithmetic for ``rows_n`` gate rows x ``rows_m`` inputs per CTA.
 
@@ -275,6 +281,12 @@ def _linear_fp32_gate_planes_rows(
     lane axis performs the same in-thread fold, warp butterfly (16..1) and
     4-warp combine. Rows are independent; ``m`` only masks activation loads
     and output stores, so any row count reproduces the B1 bits of each row.
+
+    ``m`` is a runtime argument that Triton does not specialize (no ``== 1``
+    or divisibility variants). ``full_tiles`` is the single compile-time mask
+    decision, ``m % rows_m == 0``, so one geometry has at most two variants.
+    As a constexpr, ``m`` compiled one variant per distinct batch width and
+    grew the kernel cache without bound.
     """
     block_k: gl.constexpr = 1024
     tile: gl.constexpr = gl.BlockedLayout([1, 8], [1, 32], [1, 4], [1, 0])
@@ -296,12 +308,14 @@ def _linear_fp32_gate_planes_rows(
         for block in gl.static_range(5120 // block_k):
             acc0, acc1, acc2, acc3, acc4, acc5 = _gate_rows_step(
                 x_row, meta_ptr, low_ptr, low_u32, escapes_ptr, gate, cols, block,
-                acc0, acc1, acc2, acc3, acc4, acc5, m, base_m, exp_base, rows_m, block_k)
+                acc0, acc1, acc2, acc3, acc4, acc5, m, base_m, exp_base, rows_m,
+                full_tiles, block_k)
     else:
         for block in range(5120 // block_k):
             acc0, acc1, acc2, acc3, acc4, acc5 = _gate_rows_step(
                 x_row, meta_ptr, low_ptr, low_u32, escapes_ptr, gate, cols, block,
-                acc0, acc1, acc2, acc3, acc4, acc5, m, base_m, exp_base, rows_m, block_k)
+                acc0, acc1, acc2, acc3, acc4, acc5, m, base_m, exp_base, rows_m,
+                full_tiles, block_k)
     if has_bias:
         bias = gl.load(bias_ptr + gate)
     else:
@@ -760,6 +774,7 @@ def linear_fp32_gate_rows(x: torch.Tensor, weight: NF12Weight,
         _linear_fp32_gate_planes_rows[(n // rows_n, triton.cdiv(m, rows_m))](
             x2, meta, low, escapes, bias if bias is not None else x2, out,
             m, n, weight.exp_base, bias is not None, rows_n, rows_m, bool(unroll),
+            m % rows_m == 0,
             num_warps=4,
         )
     return out

@@ -2728,7 +2728,7 @@ def ModelWriter(cls):
         # ``from_config`` wraps construction in ``local_torch_dtype``, a
         # process-global ``torch.set_default_dtype``; without the shared lock this
         # save-side build races concurrent loads (issue #4204, regression of #4129).
-        from .loader import model_global_state_lock, model_load_lock
+        from .loader import model_load_lock
 
         ensure_qwen_drive_registered(model_id_or_path)
         config = AutoConfig.from_pretrained(
@@ -2739,13 +2739,13 @@ def ModelWriter(cls):
         model_dtype = get_hf_config_dtype(config)
 
         with model_load_lock(), suspend_hf_weight_init():
-            # Only the construction window mutates the process-global default
-            # dtype; compiled forwards are excluded from it but may overlap the
-            # rest of the shell rebuild (#5268).
-            with model_global_state_lock():
-                model = self.loader.from_config(
-                    config, dtype=model_dtype
-                )
+            # Only transformers' ``local_torch_dtype`` window mutates the
+            # process-global default dtype, and that window holds the writer
+            # itself (#5304); compiled forwards may overlap the rest of the
+            # shell rebuild (#5268).
+            model = self.loader.from_config(
+                config, dtype=model_dtype
+            )
 
             # Re-saving a loaded quantized MoE must rebuild the same per-expert
             # module tree the loader builds. ``from_config`` produces the fused

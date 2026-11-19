@@ -206,17 +206,24 @@ def test_prescale_matches_the_eager_reference_on_adversarial_rows(fused_ops):
 
 
 @requires_cuda
+@pytest.mark.parametrize("result_dtype", [torch.float16, torch.float32])
 @pytest.mark.parametrize("bias_dtype", [torch.float16, torch.bfloat16, torch.float32, None])
 @pytest.mark.parametrize("stored_padding", [0, 128])
-def test_rescale_matches_the_eager_reference_bitwise(fused_ops, bias_dtype, stored_padding):
-    """Bias subtract/scale/add stay three separate FP32 roundings, then one cast."""
+def test_rescale_matches_the_eager_reference_bitwise(
+    fused_ops, result_dtype, bias_dtype, stored_padding
+):
+    """Bias subtract/scale/add stay three separate FP32 roundings, then one cast.
+
+    The BF16 native path keeps the GEMM result in FP32 (#5331), so the fused
+    re-scale must accept both result widths.
+    """
     device = torch.device("cuda:0")
     rows, out_features = 8, 1024
     module = _bridge(out_features)
     stored = out_features + stored_padding
     torch.manual_seed(5148)
     for scale_value in (1.0, 2.0**17, 2.0**60):
-        result = (torch.randn(rows, stored, device=device) * 0.5).to(torch.float16)
+        result = (torch.randn(rows, stored, device=device) * 0.5).to(result_dtype)
         scale = torch.full((rows, 1), scale_value, device=device, dtype=torch.float32)
         bias = (
             None

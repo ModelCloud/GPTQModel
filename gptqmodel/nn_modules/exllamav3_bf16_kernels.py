@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Fused BF16 -> FP16 pre-scale and FP16 -> BF16 re-scale for EXL3.
+"""Fused BF16 -> FP16 pre-scale and FP16/FP32 -> BF16 re-scale for EXL3.
 
 The native EXL3 GEMM consumes FP16 activations.  A BF16 checkpoint therefore
 maps each activation row onto FP16 before the GEMM and undoes the per-row
@@ -17,7 +17,8 @@ each half in one launch:
   from ``frexp(amax / bound)``, divides and casts to FP16, and writes the FP32
   per-row scale.  It never reads a value back to the host (#4955).
 * ``bf16_rescale`` applies ``(out - bias) * scale + bias`` in FP32 and writes
-  BF16.
+  BF16. It accepts an FP16 result (the FP16-input path) or an FP32 result (the
+  BF16-input path, which keeps the GEMM output out of FP16's range).
 
 Every floating-point step uses explicit round-to-nearest operations, so the
 result is bit-identical to the eager torch sequence: the division by a power of
@@ -96,7 +97,7 @@ def _can_rescale(
 ) -> bool:
     if not isinstance(result, torch.Tensor):
         return False
-    if not result.is_cuda or result.dtype != torch.float16:
+    if not result.is_cuda or result.dtype not in (torch.float16, torch.float32):
         return False
     if result.dim() < 1 or not result.is_contiguous():
         return False

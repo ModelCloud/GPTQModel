@@ -190,6 +190,20 @@ except Exception:
     log.warning("TritonPatch.apply() failed; triton autotuner threading fix is NOT active", exc_info=True)
 
 
+def _patch_transformers_local_torch_dtype_global_state():
+    """Hold the model-global-state writer for the default-dtype window only.
+
+    transformers opens a process-global ``torch.set_default_dtype`` window for
+    each construction. Published version of the fix (#5304): only the window is
+    exclusive, so a compiled forward no longer waits for a dense load's weight
+    I/O, dtype casts and device placement.
+    """
+
+    from .utils.torch import install_model_global_state_dtype_guard
+
+    install_model_global_state_dtype_guard()
+
+
 def _patch_transformers_gptq_device_map_compat():
     """Preserve concrete single-device GPTQ maps for Optimum's later packing step."""
     try:
@@ -891,10 +905,28 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
                 return original_post_init(self, model, **kwargs)
             return hf_gptqmodel_post_init_for_load(model, context)
 
+        # Transformers 5.23 records a checkpoint tensor whose shape differs from
+        # the meta module as a mismatched key unless the quantizer reports that
+        # the param needs quantization. A pre-quantized AWQ checkpoint does not,
+        # so a ``dynamic`` checkpoint's per-module ``qzeros``/``scales`` were
+        # rejected in ``_finalize_model_loading`` before the post-weight repair
+        # could run (#5322).
+        original_param_needs_quantization = AwqQuantizer.param_needs_quantization
+
+        @wraps(original_param_needs_quantization)
+        def _param_needs_quantization_with_gptqmodel_bridge(self, model, param_name, **kwargs):
+            from .utils.hf_load import hf_gptqmodel_awq_tolerated_mismatch
+
+            if hf_gptqmodel_awq_tolerated_mismatch(model, param_name):
+                return True
+            return original_param_needs_quantization(self, model, param_name, **kwargs)
+
+        _param_needs_quantization_with_gptqmodel_bridge._gptqmodel_load_bridge = True
         _prepare_with_gptqmodel_bridge._gptqmodel_load_bridge = True
         _post_init_with_gptqmodel_bridge._gptqmodel_load_bridge = True
         AwqQuantizer._process_model_before_weight_loading = _prepare_with_gptqmodel_bridge
         AwqQuantizer._process_model_after_weight_loading = _post_init_with_gptqmodel_bridge
+        AwqQuantizer.param_needs_quantization = _param_needs_quantization_with_gptqmodel_bridge
         if original_validate is not None and not getattr(
             original_validate, "_gptqmodel_load_bridge", False
         ):
@@ -1160,6 +1192,7 @@ class _LazyDeviceThreadPoolProxy:
 DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
 
 _patch_transformers_gptq_device_map_compat()
+_patch_transformers_local_torch_dtype_global_state()
 _patch_transformers_gptqmodel_gguf_quantizer_compat()
 _patch_transformers_refusing_quantizers()
 _patch_transformers_save_pretrained_runtime_layout_guard()

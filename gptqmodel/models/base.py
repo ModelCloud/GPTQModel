@@ -139,7 +139,6 @@ from ..utils.torch import (
     dynamo_is_compiling,
     dynamo_traced_frames,
     model_execution_device_scope,
-    model_global_state_lock,
     release_compile_trace_garbage,
     release_pinned_host_cache,
     torch_compile,
@@ -3248,15 +3247,15 @@ class BaseQModel(nn.Module):
         owns_teacher = not isinstance(teacher, nn.Module)
         if owns_teacher:
             device = get_device(self.get_input_embeddings())
-            # The teacher is another transformers construction: exclude
-            # compiled forwards from its process-global default-dtype window.
-            with model_global_state_lock():
-                teacher = AutoModelForCausalLM.from_pretrained(
-                    teacher,
-                    dtype=self.model.dtype,
-                    device_map={"": device},
-                    trust_remote_code=self.trust_remote_code,
-                )
+            # The teacher is another transformers construction: its
+            # ``local_torch_dtype`` window takes the writer itself (#5304), so
+            # the surrounding weight I/O stays concurrent.
+            teacher = AutoModelForCausalLM.from_pretrained(
+                teacher,
+                dtype=self.model.dtype,
+                device_map={"": device},
+                trust_remote_code=self.trust_remote_code,
+            )
         try:
             stats = tune_norm_params(self.model, teacher, batches, names, norm)
         finally:

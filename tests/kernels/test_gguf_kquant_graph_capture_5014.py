@@ -26,12 +26,11 @@ attempted here.
 
 from __future__ import annotations
 
-import importlib.util
-
 import pytest
 import torch
 import torch.nn as nn
 
+from gptqmodel.nn_modules.qlinear import gguf as gguf_module
 from gptqmodel.nn_modules.qlinear._compile_support import graph_capture_safe
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 
@@ -42,23 +41,6 @@ IN_FEATURES = 512
 OUT_FEATURES = 256
 CAPTURABLE_BITS = ("q4_0", "q8_0", "q4_k", "q5_k", "q6_k")
 HOST_DEQUANT_BITS = ("q2_k", "q3_k")
-
-
-def _host_dequant_skip_reason() -> str | None:
-    """Why the Q2_K/Q3_K nodes cannot build a packed module here.
-
-    ``pack_original`` needs llama.cpp's native quantizer for Q2_K/Q3_K; the
-    in-tree fallback has no block quantizer for them. The declaration itself
-    depends only on the stored format, but these nodes build a real packed
-    instance so the assertion covers the module a checkpoint would load.
-    """
-
-    if importlib.util.find_spec("llama_cpp") is None:
-        return (
-            "Q2_K/Q3_K packing needs llama-cpp-python's native ggml quantizer; "
-            "install llama-cpp-python to run the host-dequant declaration nodes"
-        )
-    return None
 
 
 def _require_cuda() -> None:
@@ -82,6 +64,39 @@ def _build(bits: str, cls=GGUFTorchLinear) -> GGUFTorchLinear:
     )
     cls.pack_original(module, linear, scales=None, zeros=None)
     return module.cuda().eval()
+
+
+def _declare(bits: str) -> GGUFTorchLinear:
+    """The empty layer a checkpoint stored in ``bits`` loads, without packing.
+
+    A layer resolves its stored layout, and so its capture declaration, in
+    ``__init__``. Q2_K/Q3_K can then only be *packed* by llama.cpp's native
+    ggml quantizer, which may be absent or fail to load, so building a packed
+    module here tested the packer rather than the declaration (#5014).
+    """
+
+    module = GGUFTorchLinear(
+        bits=bits,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=IN_FEATURES,
+        out_features=OUT_FEATURES,
+        bias=False,
+    )
+    return module.cuda().eval()
+
+
+def _assert_declaration(bits: str, capturable: bool) -> None:
+    module = _declare(bits)
+    if capturable:
+        assert module.supports_graph_capture() is True, bits
+        assert graph_capture_safe(module) is True, bits
+    else:
+        assert module.supports_graph_capture() is False, (
+            f"{bits} dequantizes on the host, so it cannot be graph captured"
+        )
+        assert graph_capture_safe(module) is False, bits
 
 
 def _activations(rows: int, seed: int) -> torch.Tensor:
@@ -188,43 +203,35 @@ def test_shift_tables_are_reused_device_constants(bits):
 def test_graph_capture_declaration_is_per_format(bits, capturable):
     """The class declares the device formats; the helper answers per instance."""
 
-    # Q2_K/Q3_K need llama.cpp's native quantizer only to *pack* the module;
-    # the declaration assertion is skipped where that dependency is absent.
-    if not capturable:
-        reason = _host_dequant_skip_reason()
-        if reason is not None:
-            pytest.skip(reason)
-
     _require_cuda()
     assert GGUFTorchLinear.SUPPORTS_GRAPH_CAPTURE is True
     # A class is answered by its declaration: the protocol test needs a bool.
     assert graph_capture_safe(GGUFTorchLinear) is True
 
-    module = _build(bits)
-    if capturable:
-        assert module.supports_graph_capture() is True, bits
-        assert graph_capture_safe(module) is True, bits
-    else:
-        assert module.supports_graph_capture() is False, (
-            f"{bits} dequantizes on the host, so it cannot be graph captured"
-        )
-        assert graph_capture_safe(module) is False, bits
+    _assert_declaration(bits, capturable)
 
 
-def test_host_dequant_nodes_skip_without_llama_cpp(monkeypatch):
-    """The Q2_K/Q3_K nodes fail closed when llama-cpp-python is absent."""
+def test_declaration_nodes_never_require_the_native_quantizer(monkeypatch):
+    """A capture declaration must not depend on packing any weights (#5014).
 
-    real_find_spec = importlib.util.find_spec
+    ``llama_cpp`` can import while its shared library still fails to load, so a
+    dependency-presence check does not prove the Q2_K/Q3_K nodes can pack. The
+    declaration belongs to the stored layout: every node must answer with no
+    packer and no native quantizer at all.
+    """
 
-    def find_spec(name, *args, **kwargs):
-        if name == "llama_cpp":
-            return None
-        return real_find_spec(name, *args, **kwargs)
+    def fail_pack(*args, **kwargs):
+        raise AssertionError("a capture declaration must not quantize weights")
 
-    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
-    assert _host_dequant_skip_reason() is not None
-    with pytest.raises(pytest.skip.Exception):
-        test_graph_capture_declaration_is_per_format("q2_k", False)
+    monkeypatch.setattr(GGUFTorchLinear, "pack_original", fail_pack)
+    monkeypatch.setattr(gguf_module, "_quantize_gguf_tensor_numpy", fail_pack)
+    monkeypatch.setattr(gguf_module, "_ggml_native_quantize", fail_pack)
+
+    _require_cuda()
+    for bits in HOST_DEQUANT_BITS:
+        _assert_declaration(bits, False)
+    for bits in CAPTURABLE_BITS:
+        _assert_declaration(bits, True)
 
 
 def test_instance_refinement_cannot_widen_a_subclass_declaration():
