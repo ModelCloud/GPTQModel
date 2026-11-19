@@ -89,6 +89,15 @@ forward with the GGUF/bitsandbytes scope as A: chunk precisions
 `bf16, bf16, none, none` and 5/5 forwards differing from the all-BF16x3
 reference. After the change all four chunks stay `bf16` and 0/5 differ.
 
+The three switches are also part of dynamo's `GLOBAL_STATE` guard: a trace
+snapshots them when it starts and writes them back when it ends. The depth-0
+transitions therefore take the model-global-state writer
+(`model_global_state_write_guard()`), which excludes in-flight compiled calls
+and their traces, so a trace in another thread cannot restore the user's value
+mid-window (issue #5390). The writer is held for the switch only, never for the
+whole quantization. A caller that is already inside a compiled call holds the
+shared side and skips it instead of deadlocking.
+
 The guards stay scoped where they are entered. #4092 narrows
 `quant_blas_backend` to the Hessian/linalg phase; the counting works for that
 placement too, because it depends only on entry and exit, not on which phase
