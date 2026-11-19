@@ -7,6 +7,7 @@ import torch
 
 from gptqmodel.adapter.adapter import Lora
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+from tests.fp8_test_utils import pack_fp8_module
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -18,7 +19,7 @@ def test_fp8_cuda_lora_preserves_base_and_adapter_gradients():
         in_features=128, out_features=128, bias=False,
         format="float8_e4m3fn", weight_scale_method="row",
     )
-    module.pack(linear, None, None)
+    pack_fp8_module(module, linear)
     module = module.cuda().eval()
     a = torch.full((128, 1), 0.01, device="cuda", dtype=torch.float16, requires_grad=True)
     b = torch.full((1, 128), 0.5, device="cuda", dtype=torch.float16, requires_grad=True)

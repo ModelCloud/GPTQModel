@@ -91,8 +91,10 @@ CONTRACT_REFS = (
      "_log_quantize_summary", None),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
      "compute_hessian_xtx", 1220),
+    # `gptq.py` keeps growing (#5325): the line drifted 2121 -> 2202 in one
+    # merge, so cite the symbol instead.
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
-     "hessian_inverse", 2121),
+     "hessian_inverse", SYMBOL_CITATION),
     # `calibration.py` grew a 70-line payload normalizer above
     # `prepare_calibration_dataset` (#4934); these three citations are symbol
     # anchored so an unrelated edit cannot drift them again.
