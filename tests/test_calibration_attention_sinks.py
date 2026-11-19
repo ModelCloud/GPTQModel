@@ -412,6 +412,59 @@ def test_masked_hooks_accumulate_retained_rows(processor_cls, make_task, hessian
     _assert_proportional_to_oracle(hessian(task), rows)
 
 
+@pytest.mark.parametrize(
+    "processor_cls,make_task,hessian",
+    [
+        (QQQProcessor, lambda layer: QQQ(layer, QQQConfig(bits=4, group_size=4)), lambda t: t.materialize_hessian()),
+        (MacaqProcessor, lambda layer: Macaq(layer, MacaqConfig()), lambda t: t.materialize_hessian()),
+    ],
+    ids=["qqq", "macaq"],
+)
+def test_flattened_grid_accumulates_the_same_hessian_as_the_grid(processor_cls, make_task, hessian):
+    """#5385: the same batch must not build a different Hessian per layout."""
+
+    layer = _linear()
+    x = _inputs()
+    flat = x.reshape(-1, HIDDEN)
+
+    grid_task = make_task(layer)
+    grid_processor = _flagged_processor(processor_cls, tasks={"proj": grid_task})
+    _bind_masks(grid_processor, x)
+    _wrapped_hook(grid_processor, "proj")(layer, (x,), layer(x))
+
+    flat_task = make_task(layer)
+    flat_processor = _flagged_processor(processor_cls, tasks={"proj": flat_task})
+    _bind_masks(flat_processor, x)
+    _wrapped_hook(flat_processor, "proj")(layer, (flat,), layer(flat))
+
+    rows = _retained_rows(x)
+    assert grid_task.nsamples == flat_task.nsamples == rows.shape[0]
+    _assert_proportional_to_oracle(hessian(grid_task), rows)
+    _assert_proportional_to_oracle(hessian(flat_task), rows)
+    torch.testing.assert_close(hessian(grid_task), hessian(flat_task), rtol=1e-6, atol=1e-6)
+
+
+def test_exl3_capture_accumulates_the_same_rows_from_the_flattened_grid():
+    layer = _linear()
+    x = _inputs()
+    flat = x.reshape(-1, HIDDEN)
+
+    grid_capture = GPTQ(layer, qcfg=QuantizeConfig(bits=4, group_size=4))
+    grid_processor = _flagged_processor(EXL3Processor, tasks={"proj": {"capture": grid_capture}})
+    _bind_masks(grid_processor, x)
+    _wrapped_hook(grid_processor, "proj")(layer, (x,), layer(x))
+
+    flat_capture = GPTQ(layer, qcfg=QuantizeConfig(bits=4, group_size=4))
+    flat_processor = _flagged_processor(EXL3Processor, tasks={"proj": {"capture": flat_capture}})
+    _bind_masks(flat_processor, x)
+    _wrapped_hook(flat_processor, "proj")(layer, (flat,), layer(flat))
+
+    rows = _retained_rows(x)
+    assert grid_capture.nsamples == flat_capture.nsamples == rows.shape[0]
+    _assert_proportional_to_oracle(grid_capture.finalize_hessian(), rows)
+    _assert_proportional_to_oracle(flat_capture.finalize_hessian(), rows)
+
+
 def test_exl3_capture_accumulates_retained_rows():
     layer = _linear()
     capture = GPTQ(layer, qcfg=QuantizeConfig(bits=4, group_size=4))
@@ -426,23 +479,46 @@ def test_exl3_capture_accumulates_retained_rows():
 
 
 def test_calibration_rows_is_the_input_when_nothing_is_excluded():
-    """Option off, or a batch without BOS: the hook input object passes through."""
+    """Option off, or a batch without BOS: the grid input object passes through."""
 
     x = _inputs()
     processor = _flagged_processor(QQQProcessor, exclude=False)
     _bind_masks(processor, x)
     assert processor.calibration_rows(x) is x
-    flat = x.reshape(-1, HIDDEN)
-    assert processor.calibration_rows(flat) is flat
 
     processor = _flagged_processor(QQQProcessor)
     padding = _batch()[1].bool()
     ModuleLooper.__new__(ModuleLooper)._set_processor_mask(processor, padding, padding_mask=padding)
-    assert processor.calibration_rows(flat) is flat
+    assert processor.calibration_rows(x) is x
+
+
+def test_flattened_grid_loses_its_padding_even_without_sinks():
+    """#5385: the same batch must not accumulate different rows per layout."""
+
+    x = _inputs()
+    flat = x.reshape(-1, HIDDEN)
+    padding = _batch()[1].bool()
+
+    # Option off: the flattened grid still drops the padded positions.
+    processor = _flagged_processor(QQQProcessor, exclude=False)
+    _bind_masks(processor, x)
+    torch.testing.assert_close(
+        processor.calibration_rows(flat), flat[padding.reshape(-1)]
+    )
+
+    # No sink in this batch (keep mask == padding mask): same rows.
+    processor = _flagged_processor(QQQProcessor)
+    ModuleLooper.__new__(ModuleLooper)._set_processor_mask(processor, padding, padding_mask=padding)
+    torch.testing.assert_close(
+        processor.calibration_rows(flat), flat[padding.reshape(-1)]
+    )
+
+    # A `[B, S, H]` input the wrapper left whole keeps only the sink handling.
+    assert processor.calibration_rows(x) is x
 
 
 def test_unmasked_rows_lose_only_the_bos_sinks():
-    """Inputs the wrapper cannot mask keep their padding rows, as before."""
+    """A 3-D input keeps its padding (the wrapper normally removes it first)."""
 
     processor = _flagged_processor(QQQProcessor)
     x = _inputs()
@@ -451,7 +527,8 @@ def test_unmasked_rows_lose_only_the_bos_sinks():
     not_bos = ~bos_token_positions(input_ids, attention_mask, BOS)
     torch.testing.assert_close(processor.calibration_rows(x), x[not_bos])
     flat = x.reshape(-1, HIDDEN)
-    torch.testing.assert_close(processor.calibration_rows(flat), flat[not_bos.reshape(-1)])
+    keep = _expected_keep(attention_mask)
+    torch.testing.assert_close(processor.calibration_rows(flat), flat[keep.reshape(-1)])
     # Natively routed `[routed_rows, H]` inputs have no sequence position.
     routed = flat[:6]
     assert processor.calibration_rows(routed) is routed
