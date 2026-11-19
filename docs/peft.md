@@ -8,6 +8,8 @@ Loading a native GPTQ checkpoint through `AutoModelForCausalLM.from_pretrained` 
 
 AWQ is different: Transformers' `AwqQuantizer` imports `gptqmodel` from *inside* `replace_with_awq_linear`, after it has already decided how to build the layers. The AWQ bridge therefore repairs a dense checkpoint's modules after the weights are resident, but a checkpoint that stores per-expert (`experts.<n>.*.qweight`) tensors cannot be repaired after the fact: the experts were already dropped. Keep `import gptqmodel` before `from_pretrained` for AWQ, as in the example below, whenever the checkpoint may be an AWQ MoE checkpoint. GPTQ does not need the import.
 
+The repair also has to survive Transformers' own loading checks. Since 5.23 a tensor whose shape differs from the meta module is recorded as a mismatched key unless the quantizer reports `param_needs_quantization`, and a pre-quantized AWQ checkpoint does not. The bridge accepts the packed `qweight`/`qzeros`/`scales`/`g_idx`/`bias` mismatch for a native GPT-QModel AWQ checkpoint so a `dynamic` checkpoint still loads through the plain flow; see [HF interop](hf-interop.md#transformers-523-mismatch-gate).
+
 For training, select the trainable kernel for the checkpoint's quantization method: `gptq_torch` for GPTQ and `torch_awq` for AWQ. `torch_awq` is the Transformers-facing alias for GPT-QModel's `AWQ_TORCH` kernel. The default inference kernels do not propagate gradients through the quantized layers, so a backward pass will fail.
 
 ```bash

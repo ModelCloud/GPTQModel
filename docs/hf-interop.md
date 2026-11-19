@@ -151,6 +151,65 @@ flowchart TD
 | Native AWQ `dynamic` checkpoint, no `gptqmodel` import | Global group size; CPU wrong logits, CUDA qzeros error | Post hook rebuilds every module from the manifest; matches `GPTQModel.load` |
 | Second AWQ load in the same process | Same as the first | Prepare hook runs before any layer is replaced |
 
+### Transformers 5.23 mismatch gate
+
+Transformers 5.23 tightened `core_model_loading.set_param_for_module`. A
+checkpoint tensor whose shape differs from the module built on meta used to be
+accepted whenever any `hf_quantizer` was active; now it is recorded as a
+mismatched key unless the quantizer reports `param_needs_quantization`:
+
+```text
+- if ref is not None and param_value.shape != expected_shape and hf_quantizer is None:
++ if (ref is not None and param_value.shape != expected_shape
++     and (hf_quantizer is None or not hf_quantizer.param_needs_quantization(model, target_name))):
+```
+
+A pre-quantized AWQ checkpoint has nothing to quantize, so `AwqQuantizer`
+inherits the base `param_needs_quantization` (always `False`). A `dynamic`
+checkpoint's per-module `qzeros`/`scales` are wider than the modules
+Transformers built from the global `group_size`, so they were recorded as
+MISMATCH and `_finalize_model_loading` raised
+`You set ignore_mismatched_sizes to False ...` *before* `postprocess_model`
+could run the repair hook (#5322). The documented plain-`from_pretrained` flow
+(`docs/peft.md`) therefore failed for every `dynamic` AWQ checkpoint.
+
+```mermaid
+flowchart TD
+    A["plain AutoModelForCausalLM.from_pretrained"] --> B["AwqQuantizer builds modules from the global config"]
+    B --> C["core_model_loading.set_param_for_module"]
+    C --> D{"shape differs and param_needs_quantization false?"}
+    D -->|"before 5.23: quantizer active"| E["assign tensor, continue"]
+    D -->|"5.23: not quantizing"| F["mismatched_keys"]
+    F --> G["_finalize_model_loading raises"]
+    G --> H["post-weight repair never runs"]
+    C --> I["patched param_needs_quantization"]
+    I --> J{"native GPT-QModel AWQ and a packed buffer of a packed module?"}
+    J -->|"yes"| E
+    J -->|"no"| D
+    style G fill:#f8d7da,stroke:#b02a37
+    style E fill:#d9f2d9,stroke:#2e7d32
+```
+
+`_patch_transformers_awq_gptqmodel_load_bridge` wraps
+`AwqQuantizer.param_needs_quantization` with
+`hf_gptqmodel_awq_tolerated_mismatch`. The guard accepts a mismatch only when
+the live quantize config is a GPT-QModel AWQ checkpoint (an explicit
+`gptqmodel` quantizer entry, `meta.uri`, or a `dynamic` map) **and** the
+mismatched tensor is one of `qweight`/`qzeros`/`scales`/`g_idx`/`bias` on a
+`BaseQuantLinear`. Everything else keeps Transformers' behavior: dense
+parameters still raise, an explicit third-party quantizer entry wins over the
+`dynamic` heuristic, and non-AWQ methods are untouched. The accepted tensors
+are then moved into the modules rebuilt from the manifest by
+`hf_gptqmodel_repair_awq_load`, so the load still matches `GPTQModel.load`.
+
+| Situation | Before the guard | After |
+| --- | --- | --- |
+| Native `dynamic` AWQ checkpoint, plain load, transformers 5.23 | RuntimeError (size mismatch); repair never runs | Packed buffers accepted, modules rebuilt from the manifest |
+| Same checkpoint, transformers <= 5.22 | Loads (any active quantizer skipped the check) | Unchanged |
+| Native `dynamic` AWQ checkpoint, dense tensor shape differs | RuntimeError | RuntimeError (still reported) |
+| Third-party AWQ checkpoint | Transformers' own mismatch behavior | Unchanged |
+| GPTQ checkpoint | Optimum path | Unchanged |
+
 The save path reports the same hazards loudly through `hf_compat_warnings`
 (`gptqmodel/models/writer.py`). A checkpoint that stores per-expert
 `experts.<n>.*.qweight` tensors emits a warning naming the missing /
@@ -388,6 +447,7 @@ flowchart TD
 | Native save of a source with `auto_map` | Dangling `auto_map`, `OSError` on load | `auto_map` removed; config loads natively |
 | GPT-QModel-only `quant_method` in plain HF | warning + random weights | refusing quantizer raises when `gptqmodel` is imported |
 | Keyword `max_memory` budget on a mixed-capability host | `ValueError` before the budget applies | Loads when the budget names one capability group; a resolved mixed map is still refused |
+| Native `dynamic` AWQ checkpoint on transformers 5.23 | `RuntimeError` size mismatch; repair never runs | Packed buffers accepted for native AWQ only; modules rebuilt from the manifest |
 
 ## Tests
 
@@ -403,3 +463,5 @@ flowchart TD
 | `tests/test_checkpoint_compat.py::test_every_gptqmodel_only_method_registers_a_refusing_quantizer` | The package-init guard covers the whole table |
 | `tests/test_checkpoint_compat.py::test_hf_compat_warning_for_every_gptqmodel_only_method` | Save-time warnings name every table entry |
 | `tests/test_hf_bridge_mixed_capability_5084.py` | A keyword map is not validated before `max_memory`; the resolved map is |
+| `tests/test_hf_awq_dynamic_mismatch_5322.py` | The 5.23 mismatch guard accepts only native AWQ packed buffers; dense and third-party shapes still raise |
+| `tests/test_hf_awq_bridge_import_order_4795.py` | Plain-transformers `dynamic` AWQ load matches `GPTQModel.load` (5.22 and 5.23) |

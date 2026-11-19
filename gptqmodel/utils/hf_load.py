@@ -49,6 +49,7 @@ __all__ = [
     "hf_gptqmodel_repair_awq_load",
     "hf_gptqmodel_reselect_context",
     "hf_gptqmodel_reselect_offloaded_kernels",
+    "hf_gptqmodel_awq_tolerated_mismatch",
     "is_native_gptqmodel_checkpoint",
 ]
 
@@ -190,6 +191,90 @@ def _hf_quantization_config_dict(model: nn.Module) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
     return dict(payload) if isinstance(payload, dict) else None
+
+
+def _hf_quantization_config_is_native_awq(model: nn.Module) -> bool:
+    """Whether the live HF quantize config describes a native GPT-QModel AWQ checkpoint.
+
+    Reads the same provenance the load bridge uses (``quantize_config.json``
+    through Transformers' ``quantization_config``): an explicit
+    ``gptqmodel`` quantizer entry, GPT-QModel's ``meta.uri``, or non-empty
+    ``dynamic`` per-module overrides. ``dynamic`` is what makes Transformers'
+    global-config module build disagree with the checkpoint tensors.
+    """
+
+    raw = _hf_quantization_config_dict(model)
+    if not raw:
+        return False
+    # ``quantization_config`` round-trips through Transformers' typed config,
+    # whose ``quant_method`` is an enum when the live object is inspected.
+    method = raw.get("quant_method") or ""
+    method = str(getattr(method, "value", method)).strip().lower()
+    if method != "awq":
+        return False
+
+    meta = raw.get("meta")
+    quantizers = meta.get("quantizer") if isinstance(meta, dict) else None
+    if isinstance(quantizers, str):
+        quantizers = [quantizers]
+    if isinstance(quantizers, (list, tuple)):
+        normalized = [str(entry).lower().replace("-", "") for entry in quantizers if entry]
+        if any(entry.startswith("optimum") for entry in normalized):
+            return False
+        if any(entry.startswith("gptqmodel") for entry in normalized):
+            return True
+        if normalized:
+            # An explicit third-party provenance wins: do not reinterpret its
+            # `dynamic` field as GPT-QModel's per-module override syntax.
+            return False
+
+    uri = str((meta or {}).get("uri") or "").lower().replace("-", "") if isinstance(meta, dict) else ""
+    return "gptqmodel" in uri or bool(raw.get("dynamic"))
+
+
+# Buffers a packed AWQ kernel owns. Only these can legitimately disagree with a
+# module built from the global config; a dense tensor whose shape differs is a
+# genuine checkpoint error and must stay reported.
+_AWQ_PACKED_BUFFERS = ("qweight", "qzeros", "scales", "g_idx", "bias")
+
+
+def hf_gptqmodel_awq_tolerated_mismatch(model: nn.Module, param_name: Optional[str] = None) -> bool:
+    """Whether Transformers must not reject a native AWQ checkpoint's shape mismatch.
+
+    Transformers 5.23 changed ``set_param_for_module`` so a checkpoint tensor
+    whose shape differs from the meta module is recorded as a mismatched key
+    unless ``hf_quantizer.param_needs_quantization`` is true:
+
+    ``hf_quantizer is None or not hf_quantizer.param_needs_quantization(...)``
+
+    Before 5.23 any active quantizer skipped that check. ``AwqQuantizer``
+    inherits the base ``param_needs_quantization`` (always ``False``) because
+    a pre-quantized checkpoint has nothing to quantize, so on 5.23 a native
+    ``dynamic`` checkpoint's per-module ``qzeros``/``scales`` are reported as
+    MISMATCH and ``_finalize_model_loading`` raises before the post-weight
+    repair hook can rebuild the modules (#5322).
+
+    ``replace_with_awq_linear`` imports ``gptqmodel`` mid-load, so the modules
+    were built from the *global* config and the checkpoint tensors are the
+    authority: accept them, then ``hf_gptqmodel_repair_awq_load`` rebuilds each
+    module from the serialized per-module config and moves them across. The
+    hook is only consulted for GPT-QModel AWQ checkpoints, so third-party AWQ
+    loads keep their existing mismatch behavior.
+    """
+
+    if not _hf_quantization_config_is_native_awq(model):
+        return False
+    if param_name is None:
+        return True
+
+    module_path, _, buffer_name = param_name.rpartition(".")
+    if buffer_name not in _AWQ_PACKED_BUFFERS:
+        return False
+    try:
+        module = model.get_submodule(module_path)
+    except AttributeError:
+        return False
+    return isinstance(module, BaseQuantLinear)
 
 
 def hf_gptqmodel_reselect_context(
