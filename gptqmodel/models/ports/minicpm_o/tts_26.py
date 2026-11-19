@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Inherited ChatTTS/Vocos code has an unresolved licensing boundary; see NOTICE.
+# The DVAE codec, repetition penalty, gen_logits, ConditionalChatTTS.generate and
+# ConditionalChatTTS.decode_to_mel_specs are ModelCloud.ai clean-room implementations
+# (Apache-2.0) written from a behavioral specification; see NOTICE.
 
 import logging
 import math
@@ -22,7 +24,6 @@ from typing import List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import torch
-import torch.nn.utils.parametrize as P
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.parametrizations import weight_norm
@@ -108,7 +109,15 @@ class ConditionalChatTTSConfig(PretrainedConfig):
         self.repetition_penalty = repetition_penalty
 
 
+# --- Clean-room section (ModelCloud.ai, Apache-2.0) -----------------------------------------
+# ConvNeXtBlock, GFSQ, DVAEDecoder and DVAE below are an independent implementation written from
+# a behavioral specification (see NOTICE). They keep the published checkpoint's module and
+# state_dict layout under `tts.dvae.`.
+
+
 class ConvNeXtBlock(nn.Module):
+    """ConvNeXt-1D residual block: depthwise conv, LayerNorm, pointwise MLP, optional layer scale."""
+
     def __init__(
         self,
         dim: int,
@@ -117,7 +126,6 @@ class ConvNeXtBlock(nn.Module):
         dilation: int,
         layer_scale_init_value: float = 1e-6,
     ):
-        # ConvNeXt Block copied from Vocos.
         super().__init__()
         self.dwconv = nn.Conv1d(
             dim,
@@ -127,110 +135,113 @@ class ConvNeXtBlock(nn.Module):
             dilation=dilation,
             groups=dim,
         )
-
         self.norm = nn.LayerNorm(dim, eps=1e-6)
         self.pwconv1 = nn.Linear(dim, intermediate_dim)
         self.act = nn.GELU()
         self.pwconv2 = nn.Linear(intermediate_dim, dim)
-        self.coef = (
-            nn.Parameter(layer_scale_init_value * torch.ones(dim), requires_grad=True)
-            if layer_scale_init_value > 0
-            else None
-        )
+        if layer_scale_init_value > 0:
+            self.coef = nn.Parameter(torch.full((dim,), float(layer_scale_init_value)))
+        else:
+            self.coef = None
 
     def forward(self, x: torch.Tensor, cond=None) -> torch.Tensor:
-        residual = x
-
-        y = self.dwconv(x)
-        y.transpose_(1, 2)  # (B, C, T) -> (B, T, C)
-        x = self.norm(y)
-        del y
-        y = self.pwconv1(x)
-        del x
-        x = self.act(y)
-        del y
-        y = self.pwconv2(x)
-        del x
+        # `cond` is accepted for interface compatibility and ignored.
+        h = self.dwconv(x).transpose(1, 2)
+        h = self.pwconv2(self.act(self.pwconv1(self.norm(h))))
         if self.coef is not None:
-            y *= self.coef
-        y.transpose_(1, 2)  # (B, T, C) -> (B, C, T)
-
-        x = y + residual
-        del y
-
-        return x
+            h = h * self.coef
+        return x + h.transpose(1, 2)
 
 
-# Borrowed from `https://github.com/2noise/ChatTTS/blob/main/ChatTTS/model/dvae.py`
 class GFSQ(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        levels: List[int],
-        G: int,
-        R: int,
-        eps=1e-5,
-        transpose=True,
-    ):
-        super(GFSQ, self).__init__()
+    """Grouped residual FSQ wrapper over `vector_quantize_pytorch.GroupedResidualFSQ`.
+
+    Codes are laid out per frame as (g0r0, g0r1, g1r0, g1r1, ...): channel `c` is group `c // R`,
+    residual stage `c % R`.
+    """
+
+    def __init__(self, dim: int, levels, G: int, R: int, eps: float = 1e-5, transpose: bool = True):
+        super().__init__()
         try:
             from vector_quantize_pytorch import GroupedResidualFSQ
         except ModuleNotFoundError as exc:
-            if exc.name != "vector_quantize_pytorch":
-                raise
-            raise ImportError(
-                "MiniCPM-o 2.6 TTS requires vector-quantize-pytorch. "
-                "Install it with pip install 'gptqmodel[minicpm-o]'."
-            ) from exc
+            if exc.name == "vector_quantize_pytorch":
+                raise ImportError(
+                    "MiniCPM-o 2.6 TTS requires vector-quantize-pytorch. "
+                    "Install it with pip install 'gptqmodel[minicpm-o]'."
+                ) from exc
+            raise
 
-        device = torch.empty(0).device
+        target_device = torch.get_default_device()
+        # The dependency computes its constant tables eagerly; build on CPU so that this also
+        # works under a `torch.device("meta")` context, then move to the requested device.
         with torch.device("cpu"):
-            self.quantizer = GroupedResidualFSQ(
-                dim=dim,
-                levels=list(levels),
-                num_quantizers=R,
-                groups=G,
-            ).to(device)
-        for residual in self.quantizer.rvqs:
-            for layer in residual.layers:
-                layer.levels = list(levels)
-        self.n_ind = math.prod(levels)
-        self.eps = eps
-        self.transpose = transpose
+            quantizer = GroupedResidualFSQ(dim=dim, levels=list(levels), num_quantizers=R, groups=G)
+        persistent = set(quantizer.state_dict().keys())
+        # Reference copies of the derived (non-persistent) constants. They are not checkpointed,
+        # so loaders that materialize buffers uninitialized need them restored (see reset_constants).
+        self._constant_tables = {
+            name: buffer.detach().clone()
+            for name, buffer in quantizer.named_buffers()
+            if name not in persistent
+        }
+        self.quantizer = quantizer.to(target_device)
+        # On a meta shell the constants stay real CPU tensors: nothing in a checkpoint can
+        # materialize them later, and they are tiny.
+        self.reset_constants()
+
+        self.dim = dim
+        self.levels = tuple(levels)
         self.G = G
         self.R = R
+        self.eps = eps
+        self.transpose = transpose
+        self.n_ind = math.prod(levels)
 
-    def _embed(self, x: torch.Tensor):
+    @torch.no_grad()
+    def reset_constants(self) -> None:
+        """Restore the dependency's derived constant buffers (level counts, bases, scales, codebooks)."""
+        for name, value in self._constant_tables.items():
+            owner_path, _, leaf = name.rpartition(".")
+            owner = self.quantizer.get_submodule(owner_path)
+            buffer = owner._buffers[leaf]
+            if buffer.device.type == "meta":
+                owner.register_buffer(leaf, value.to(dtype=buffer.dtype).clone(), persistent=False)
+            else:
+                buffer.copy_(value.to(device=buffer.device, dtype=buffer.dtype))
+
+    def _embed(self, codes: torch.Tensor) -> torch.Tensor:
+        """Integer codes `(B, G*R, T)` (or `(B, T, G*R)` without transpose) to features."""
         if self.transpose:
-            x = x.transpose(1, 2)
-        x = x.view(x.size(0), x.size(1), self.G, self.R).permute(2, 0, 1, 3)
-        feat = self.quantizer.get_output_from_indices(x)
-        return feat.transpose_(1, 2) if self.transpose else feat
-
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        return super().__call__(x)
+            codes = codes.transpose(1, 2)
+        batch, frames, _ = codes.shape
+        indices = codes.reshape(batch, frames, self.G, self.R).permute(2, 0, 1, 3)
+        features = self.quantizer.get_output_from_indices(indices)  # (B, T, dim)
+        return features.transpose(1, 2) if self.transpose else features
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Features `(B, dim, T)` (or `(B, T, dim)` without transpose) to integer codes."""
         if self.transpose:
-            x.transpose_(1, 2)
-        _, ind = self.quantizer(x)
-        ind = ind.permute(1, 2, 0, 3).contiguous()
-        ind = ind.view(ind.size(0), ind.size(1), -1)
-        return ind.transpose_(1, 2) if self.transpose else ind
+            x = x.transpose(1, 2)
+        _, indices = self.quantizer(x)  # (G, B, T, R)
+        groups, batch, frames, stages = indices.shape
+        codes = indices.permute(1, 2, 0, 3).reshape(batch, frames, groups * stages)
+        return codes.transpose(1, 2) if self.transpose else codes
 
 
-# Borrowed from `https://github.com/2noise/ChatTTS/blob/main/ChatTTS/model/dvae.py`
 class DVAEDecoder(nn.Module):
+    """Conv1d bottleneck in, a stack of ConvNeXt-1D blocks, then a 1x1 projection out."""
+
     def __init__(
         self,
         idim: int,
         odim: int,
-        n_layer=12,
-        bn_dim=64,
-        hidden=256,
-        kernel=7,
-        dilation=2,
-        up=False,
+        n_layer: int = 12,
+        bn_dim: int = 64,
+        hidden: int = 256,
+        kernel: int = 7,
+        dilation: int = 2,
+        up: bool = False,
     ):
         super().__init__()
         self.up = up
@@ -240,107 +251,55 @@ class DVAEDecoder(nn.Module):
             nn.Conv1d(bn_dim, hidden, 3, 1, 1),
         )
         self.decoder_block = nn.ModuleList(
-            [
-                ConvNeXtBlock(
-                    hidden,
-                    hidden * 4,
-                    kernel,
-                    dilation,
-                )
-                for _ in range(n_layer)
-            ]
+            [ConvNeXtBlock(hidden, hidden * 4, kernel, dilation) for _ in range(n_layer)]
         )
         self.conv_out = nn.Conv1d(hidden, odim, kernel_size=1, bias=False)
 
     def forward(self, x: torch.Tensor, conditioning=None) -> torch.Tensor:
-        # B, C, T
-        y = self.conv_in(x)
-        del x
-        for f in self.decoder_block:
-            y = f(y, conditioning)
-
-        x = self.conv_out(y)
-        del y
-        return x
+        # `conditioning` is accepted for interface compatibility and ignored.
+        x = self.conv_in(x)
+        for block in self.decoder_block:
+            x = block(x)
+        return self.conv_out(x)
 
 
-# Borrowed from `https://github.com/2noise/ChatTTS/blob/main/ChatTTS/model/dvae.py`
 class DVAE(nn.Module):
-    def __init__(
-        self,
-    ):
+    """Mel-spectrogram codec with fixed geometry: 100 mel bins, 4 codes of 625 values per frame pair."""
+
+    def __init__(self):
         super().__init__()
-
-        coef = torch.rand(100)
-        self.coef = nn.Parameter(coef.unsqueeze(0).unsqueeze_(2))
-
+        self.coef = nn.Parameter(torch.rand(100).reshape(1, 100, 1))
         self.downsample_conv = nn.Sequential(
             nn.Conv1d(100, 512, 3, 1, 1),
             nn.GELU(),
             nn.Conv1d(512, 512, 4, 2, 1),
             nn.GELU(),
         )
-
-        self.encoder = DVAEDecoder(
-            idim=512,
-            odim=1024,
-            hidden=256,
-            n_layer=12,
-            bn_dim=128,
-        )
-
-        self.decoder = DVAEDecoder(
-            idim=512,
-            odim=512,
-            hidden=256,
-            n_layer=12,
-            bn_dim=128,
-        )
-
+        self.encoder = DVAEDecoder(idim=512, odim=1024, n_layer=12, bn_dim=128, hidden=256)
+        self.decoder = DVAEDecoder(idim=512, odim=512, n_layer=12, bn_dim=128, hidden=256)
         self.out_conv = nn.Conv1d(512, 100, 3, 1, 1, bias=False)
-
-        self.vq_layer = GFSQ(
-            dim=1024,
-            levels=(5, 5, 5, 5),
-            G=2,
-            R=2,
-        )
+        self.vq_layer = GFSQ(dim=1024, levels=(5, 5, 5, 5), G=2, R=2)
 
     @torch.inference_mode()
     def forward(self, inp: torch.Tensor, mode: Literal["encode", "decode"] = "decode") -> torch.Tensor:
-        if mode == "encode" and hasattr(self, "encoder") and self.vq_layer is not None:
-            mel = inp.clone()
-            x: torch.Tensor = self.downsample_conv(
-                torch.div(mel, self.coef.view(100, 1).expand(mel.shape), out=mel),
-            ).unsqueeze_(0)
-            del mel
-            x = self.encoder(x)
-            ind = self.vq_layer(x)
-            del x
-            return ind
+        if mode == "encode":
+            mel = inp / self.coef.reshape(-1, 1)  # (100, T); the caller's tensor is untouched
+            hidden = self.downsample_conv(mel).unsqueeze(0)
+            hidden = self.encoder(hidden)
+            return self.vq_layer(hidden)
+        if mode != "decode":
+            raise ValueError(f"unknown DVAE mode {mode!r}")
 
-        if self.vq_layer is not None:
-            vq_feats = self.vq_layer._embed(inp)
-        else:
-            vq_feats = inp
+        features = self.vq_layer._embed(inp) if self.vq_layer is not None else inp  # (B, 1024, T)
+        batch, channels, frames = features.shape
+        # Group 0 reconstructs even frames and group 1 odd frames.
+        interleaved = features.reshape(batch, 2, channels // 2, frames).permute(0, 2, 3, 1)
+        interleaved = interleaved.reshape(batch, channels // 2, frames * 2)
+        mel = self.out_conv(self.decoder(interleaved))
+        return mel * self.coef
 
-        vq_feats = (
-            vq_feats.view(
-                (vq_feats.size(0), 2, vq_feats.size(1) // 2, vq_feats.size(2)),
-            )
-            .permute(0, 2, 3, 1)
-            .flatten(2)
-        )
 
-        dec_out = self.out_conv(
-            self.decoder(
-                x=vq_feats,
-            ),
-        )
-
-        del vq_feats
-
-        return torch.mul(dec_out, self.coef, out=dec_out)
+# --- End of clean-room section ---------------------------------------------------------------
 
 
 def apply_spk_emb(
@@ -447,32 +406,33 @@ def make_streaming_chunk_mask_generation(
     return causal_mask
 
 
-# Borrowed from `https://github.com/2noise/ChatTTS/blob/main/ChatTTS/model/processors.py`
 
 
-class CustomRepetitionPenaltyLogitsProcessorRepeat:
+# Clean-room implementation (ModelCloud.ai, Apache-2.0) written from a behavioral specification; see NOTICE.
+class CustomRepetitionPenaltyLogitsProcessorRepeat(LogitsProcessor):
+    """Windowed repetition penalty over multi-codebook audio-code histories.
+
+    Each logit is divided (if non-negative) or multiplied (if negative) by `penalty ** count`, where
+    `count` is how often that id occurs in the last `past_window` ids of the row. Rows with index
+    `>= max_input_ids` are left unpenalized.
+    """
+
     def __init__(self, penalty: float, max_input_ids: int, past_window: int):
         if not isinstance(penalty, float) or not (penalty > 0):
             raise ValueError(f"`penalty` has to be a strictly positive float, but is {penalty}")
-
         self.penalty = penalty
         self.max_input_ids = max_input_ids
         self.past_window = past_window
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
         if input_ids.size(1) > self.past_window:
-            input_ids = input_ids.narrow(1, -self.past_window, self.past_window)
-        freq = F.one_hot(input_ids, scores.size(1)).sum(1)
-        if freq.size(0) > self.max_input_ids:
-            freq.narrow(0, self.max_input_ids, freq.size(0) - self.max_input_ids).zero_()
-        alpha = torch.pow(self.penalty, freq)
-        scores = scores.contiguous()
-        inp = scores.multiply(alpha)
-        oth = scores.divide(alpha)
-        con = scores < 0
-        out = torch.where(con, inp, oth)
-        del inp, oth, scores, con, alpha
-        return out
+            input_ids = input_ids[:, -self.past_window :]
+        counts = F.one_hot(input_ids, num_classes=scores.size(1)).sum(dim=1)
+        if counts.size(0) > self.max_input_ids:
+            counts[self.max_input_ids :] = 0
+        alpha = torch.pow(self.penalty, counts.to(torch.get_default_dtype()))
+        penalized = torch.where(scores < 0, scores * alpha, scores / alpha)
+        return penalized.to(scores.dtype).contiguous()
 
 
 @dataclass
@@ -814,6 +774,8 @@ class ConditionalChatTTS(PreTrainedModel):
         past_key_values = outputs.past_key_values
         return past_key_values
 
+    # Clean-room implementation (ModelCloud.ai, Apache-2.0) written from a behavioral specification;
+    # see NOTICE.
     @torch.inference_mode()
     def generate(
         self,
@@ -829,104 +791,66 @@ class ConditionalChatTTS(PreTrainedModel):
         logits_processors: List[CustomRepetitionPenaltyLogitsProcessorRepeat] = [],
         show_tqdm=False,
     ):
-        """Generate audio codes in streaming setting or non-streaming setting.
-        Specifically speaking, generate audio codes when not all text tokens are prefilled.
-
-        Always pass a valid `past_key_values` to the method. The method does not do `prefill` by itself. It relies on `prefill_text` method to provide valid `past_key_values`. Please refer to docstring of this class for more details.
-
-        In this method, we borrowed a lot of codes from `https://github.com/2noise/ChatTTS/blob/main/ChatTTS/model/gpt.py`.
+        """Sample audio codes step by step, continuing the streaming state in `past_key_values`.
 
         Args:
-            input_ids (torch.Tensor): Input token ids.
-            past_key_values (DynamicCache): Past key values for attention mechanism.
-            temperature (torch.Tensor): Temperature for sampling.
-            eos_token (Union[int, torch.Tensor]): End of sequence token.
-            streaming_tts_text_mask (Optional[torch.Tensor], optional): Mask for streaming TTS text. Defaults to None.
-            max_new_token (int, optional): Maximum number of new tokens to generate. Defaults to 50.
-            logits_warpers (List[LogitsProcessor], optional): List of logits processors. Defaults to [].
-            logits_processors (List[CustomRepetitionPenaltyLogitsProcessorRepeat], optional): List of logits processors. Defaults to [].
-            show_tqdm (bool, optional): Whether to show progress bar. Defaults to True.
+            input_ids: `(1, P, num_vq)` codes; rows `[0, C)` are the condition placeholders, rows
+                `[C, P)` are audio codes generated so far.
+            past_key_values: cache holding `P - 1` positions; extended in place.
+            temperature: per-codebook temperature `(num_vq,)` (or a single value).
+            eos_token: audio eos id.
+            streaming_tts_text_mask: validity mask over the condition positions.
+            force_no_stop: never sample eos.
+            min_new_token: number of initial steps on which eos is disallowed.
+            max_new_token: step budget of this call.
+            logits_warpers / logits_processors: applied (processors first) on each step after the
+                audio-bos step, as `f(history, logits)`.
+            show_tqdm: show a progress bar.
 
         Returns:
-            GenerationOutputs: Generation outputs.
+            ConditionalChatTTSGenerationOutput
         """
-
-        # We only support batch size `1` for now
         assert input_ids.shape[0] == 1
         assert past_key_values is not None
 
-        # fix: this should not be `input_ids.shape[1]`
-        # start_idx = input_ids.shape[1]
-        start_idx = 1 + self.num_spk_embs * self.use_speaker_embedding + self.streaming_text_reserved_len + 1
-
-        finish = torch.zeros(input_ids.shape[0], device=input_ids.device).bool()
-
-        temperature = temperature.unsqueeze(0).expand(input_ids.shape[0], -1).contiguous().view(-1, 1)
-
-        progress = input_ids.shape[1]
-
-        # Pre-allocate input_ids, shape is [batch_size=1, max_possible_seq_len, self.num_vqs]
-        input_ids_buf = torch.zeros(
-            input_ids.shape[0],  # batch_size
-            progress + max_new_token,  # max_possible_seq_len = input_ids.shape[1] + max_new_token
-            input_ids.shape[2],  # self.num_vqs
-            dtype=input_ids.dtype,
-            device=input_ids.device,
-        )
-
-        # Copy existing `input_ids` to `input_ids_buf`
-        input_ids_buf.narrow(1, 0, progress).copy_(input_ids)
-
-        del input_ids
-        input_ids = input_ids_buf.narrow(1, 0, progress)
-
-        pbar: Optional[tqdm] = None
-        if show_tqdm:
-            pbar = tqdm(
-                total=max_new_token,
-                desc="code",
-                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}(max) [{elapsed}, {rate_fmt}{postfix}]",
-            )
-
         condition_length = 1 + self.num_spk_embs * self.use_speaker_embedding + self.streaming_text_reserved_len + 1
+        batch_size, start_length, num_vq = input_ids.shape
+        device = input_ids.device
+        eos_id = int(eos_token.reshape(-1)[0]) if isinstance(eos_token, torch.Tensor) else int(eos_token)
+        temperature = temperature.to(device=device, dtype=torch.float32).reshape(1, -1, 1)
 
-        for i in range(max_new_token):
-            # Prepare generation inputs
-            audio_bos = False
+        codes = torch.zeros(
+            batch_size, start_length + max_new_token, num_vq, dtype=input_ids.dtype, device=device
+        )
+        codes[:, :start_length] = input_ids
+        cur = start_length
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
 
-            # If this is the first audio token, the case is SPECIAL
-            if progress == condition_length:
-                audio_bos = True
+        progress = tqdm(total=max_new_token, desc="code") if show_tqdm else None
+        for step in range(max_new_token):
+            past_length = past_key_values.get_seq_length()
+            if cur != past_length + 1:
+                raise AssertionError(
+                    f"generate expects a cache of {cur - 1} positions for {cur} code rows, got {past_length}"
+                )
 
-            assert progress == (
-                past_key_values.get_seq_length() + 1
-            )  # If you are using according to the guidelines, this should be passed.
-
-            if audio_bos:
-                # Generate the first token, activate the model with `self.audio_bos_token_id`, the model will predict a new audio token. This is a special case because without the `audio bos token`, it is impossible to generate the first audio token in our streaming setting.
-                narrowed_input_ids = torch.tensor([[self.audio_bos_token_id]], dtype=torch.long, device=self.device)
-                inputs_embeds = self.emb_text(narrowed_input_ids)
-                del narrowed_input_ids
+            audio_bos_step = cur == condition_length
+            if audio_bos_step:
+                bos = torch.full((batch_size, 1), self.audio_bos_token_id, dtype=torch.long, device=device)
+                inputs_embeds = self.emb_text(bos)
             else:
-                # Generate the following audio tokens, it is applicable to all other cases, including second and the following calling of `generate`.
-                narrowed_input_ids = input_ids.narrow(dim=1, start=input_ids.shape[1] - 1, length=1)
-                code_emb = [self.emb_code[i](narrowed_input_ids[:, :, i]) for i in range(self.num_vq)]
+                last = codes[:, cur - 1 : cur]
+                code_emb = [self.emb_code[k](last[:, :, k]) for k in range(num_vq)]
                 inputs_embeds = torch.stack(code_emb, 3).sum(3)
 
-            position_ids = torch.tensor(
-                [past_key_values.get_seq_length()], dtype=torch.long, device=self.device
-            ).unsqueeze(0)
-
-            # Make causal mask
+            position_ids = torch.full((batch_size, 1), past_length, dtype=torch.long, device=device)
             causal_mask = make_streaming_chunk_mask_generation(
                 inputs_embeds=inputs_embeds,
-                past_seen_tokens=past_key_values.get_seq_length(),
+                past_seen_tokens=past_length,
                 streaming_tts_text_mask=streaming_tts_text_mask,
                 streaming_reserved_length=self.streaming_text_reserved_len,
                 streaming_text_chunk_size=self.streaming_text_chunk_size,
             )
-
-            # Model forward
             outputs: BaseModelOutputWithPast = self.model(
                 attention_mask=causal_mask,
                 position_ids=position_ids,
@@ -934,163 +858,94 @@ class ConditionalChatTTS(PreTrainedModel):
                 inputs_embeds=inputs_embeds,
                 use_cache=True,
             )
+            hidden = outputs.last_hidden_state[:, -1]  # (B, H)
 
-            del position_ids
-            del inputs_embeds
-            del causal_mask
+            logits = torch.empty(batch_size, num_vq, self.num_audio_tokens, dtype=torch.float32, device=device)
+            for k in range(num_vq):
+                logits[:, k] = self.head_code[k](hidden)
+            logits = (logits / temperature).reshape(batch_size * num_vq, self.num_audio_tokens)
 
-            hidden_states = outputs.last_hidden_state
-            past_key_values = outputs.past_key_values
+            if not audio_bos_step:
+                history = codes[:, condition_length:cur].permute(0, 2, 1).reshape(batch_size * num_vq, -1)
+                for processor in logits_processors:
+                    logits = processor(history, logits)
+                for warper in logits_warpers:
+                    logits = warper(history, logits)
 
-            with P.cached():
-                logits = torch.empty(
-                    hidden_states.size(0),
-                    hidden_states.size(1),
-                    self.num_audio_tokens,
-                    self.num_vq,
-                    dtype=torch.float,
-                    device=self.device,
-                )
-                for num_vq_iter in range(self.num_vq):
-                    x: torch.Tensor = self.head_code[num_vq_iter](hidden_states)
-                    logits[..., num_vq_iter] = x
-                    del x
-
-            del hidden_states
-
-            # logits = logits[:, -1].float()
-            logits = logits.narrow(1, -1, 1).squeeze_(1).float()
-
-            # logits = rearrange(logits, "b c n -> (b n) c")
-            logits = logits.permute(0, 2, 1)
-            logits = logits.reshape(-1, logits.size(2))
-            # logits_token = rearrange(input_ids[:, start_idx:], "b c n -> (b n) c")
-            input_ids_sliced = input_ids.narrow(
-                1,
-                start_idx,
-                input_ids.size(1) - start_idx,
-            ).permute(0, 2, 1)
-            logits_token = input_ids_sliced.reshape(
-                input_ids_sliced.size(0) * input_ids_sliced.size(1),
-                -1,
-            ).to(self.device)
-            del input_ids_sliced
-
-            logits /= temperature
-
-            if not audio_bos:
-                for logitsProcessors in logits_processors:
-                    logits = logitsProcessors(logits_token, logits)
-            if not audio_bos:
-                for logitsWarpers in logits_warpers:
-                    logits = logitsWarpers(logits_token, logits)
-
-            del logits_token
-
-            if i < min_new_token:
-                logits[:, eos_token] = -torch.inf
-
+            if step < min_new_token:
+                logits[:, eos_id] = -torch.inf
             if force_no_stop:
-                logits[:, eos_token] = -torch.inf
+                logits[:, eos_id] = -torch.inf
 
-            scores = F.softmax(logits, dim=-1)
+            probs = F.softmax(logits, dim=-1)
+            next_codes = torch.multinomial(probs, 1).reshape(batch_size, num_vq)
+            finished |= (next_codes == eos_id).any(dim=1)
+            codes[:, cur] = next_codes
 
-            del logits
-            idx_next = torch.multinomial(scores, num_samples=1)  # .to(finish.device)
-
-            del scores
-
-            # idx_next = rearrange(idx_next, "(b n) 1 -> b n", n=self.num_vq)
-            idx_next = idx_next.view(-1, self.num_vq)
-            finish_or = idx_next.eq(eos_token).any(1)
-            finish.logical_or_(finish_or)
-
-            del finish_or
-            # Store new `token` into `input_ids_buf`
-            input_ids_buf.narrow(1, progress, 1).copy_(idx_next.unsqueeze_(1))
-
-            if i == 0 and finish.any():
-                # raise Exception
+            if progress is not None:
+                progress.update(1)
+            if step == 0 and finished.any():
+                # The sampled row is not kept, although the cache already holds its position.
                 break
-
-            del idx_next
-            progress += 1
-            input_ids = input_ids_buf.narrow(1, 0, progress)
-
-            if finish.all():
+            cur += 1
+            if finished.all():
                 break
-
-            if pbar is not None:
-                pbar.update(1)
-
-        if pbar is not None:
-            pbar.close()
-
-        if not finish.all():
-            if show_tqdm:
-                logger.info(f"incomplete result. hit max_new_token: {max_new_token}")
-
-        del input_ids_buf
-
-        if finish.all():
-            # the last may contains eos token
-            genrated_input_ids = input_ids[:, condition_length:-1, :]
         else:
-            # there is no eos token
-            genrated_input_ids = input_ids[:, condition_length:, :]
+            if show_tqdm:
+                logger.info("incomplete result: hit max_new_token %d", max_new_token)
+        if progress is not None:
+            progress.close()
+
+        audio_input_ids = codes[:, :cur]
+        end = cur - 1 if finished.all() else cur
+        new_ids = audio_input_ids[:, condition_length:end]
 
         return ConditionalChatTTSGenerationOutput(
-            new_ids=genrated_input_ids,
-            audio_input_ids=input_ids,  # for update purpose
-            past_key_values=past_key_values,  # for update purpose
-            finished=finish.all(),
+            new_ids=new_ids,
+            audio_input_ids=audio_input_ids,
+            past_key_values=past_key_values,
+            finished=finished.all(),
         )
 
+    # Clean-room implementation (ModelCloud.ai, Apache-2.0) written from a behavioral specification;
+    # see NOTICE.
     @torch.inference_mode()
     def decode_to_mel_specs(
         self,
         result_list: List[torch.Tensor],
     ):
-        """Decode discrete audio codes to mel spectrograms.
+        """Decode a list of `(L_i, num_vq)` code tensors to mel spectrograms `(N, 100, 2 * max L_i)`.
 
-        Borrowed from `https://github.com/2noise/ChatTTS/blob/main/ChatTTS/core.py`
-
-        Args:
-            result_list (List[torch.Tensor]): Audio codes output from `generate`.
-
-        Returns:
-            torch.Tensor: Mel spectrograms.
+        Shorter elements are right-padded with code 0 (not trimmed).
         """
-
-        decoder = self.dvae
-        max_x_len = -1
         if len(result_list) == 0:
             return np.array([], dtype=np.float32)
-        for result in result_list:
-            if result.size(0) > max_x_len:
-                max_x_len = result.size(0)
-        batch_result = torch.zeros(
-            (len(result_list), result_list[0].size(1), max_x_len),
-            dtype=result_list[0].dtype,
-            device=result_list[0].device,
-        )
-        for i in range(len(result_list)):
-            src = result_list[i]
-            batch_result[i].narrow(1, 0, src.size(0)).copy_(src.permute(1, 0))
-            del src
 
-        mel_specs = decoder(batch_result)
-        del batch_result
-        return mel_specs
+        first = result_list[0]
+        max_length = max(int(item.size(0)) for item in result_list)
+        batch = torch.zeros(len(result_list), first.size(1), max_length, dtype=first.dtype, device=first.device)
+        for index, item in enumerate(result_list):
+            batch[index, :, : item.size(0)] = item.transpose(0, 1)
+
+        return self.dvae(batch, mode="decode")
+
+    def _init_weights(self, module):
+        super()._init_weights(module)
+        # The DVAE quantizer's derived constants are non-persistent buffers: they are not in
+        # checkpoints, so loading materializes them uninitialized. Restore them here.
+        vq_layer = getattr(getattr(self, "dvae", None), "vq_layer", None)
+        if isinstance(vq_layer, GFSQ) and any(module is sub for sub in vq_layer.modules()):
+            vq_layer.reset_constants()
 
 
-# Borrowed from `https://github.com/2noise/ChatTTS/blob/main/ChatTTS/model/processors.py`
+# Clean-room implementation (ModelCloud.ai, Apache-2.0) written from a behavioral specification; see NOTICE.
 def gen_logits(
     num_code: int,
     top_P=0.7,
     top_K=20,
     repetition_penalty=1.0,
 ):
+    """Build the `(logits_warpers, logits_processors)` pair used for audio-code sampling."""
     logits_warpers = []
     if top_P is not None:
         logits_warpers.append(TopPLogitsWarper(top_P, min_tokens_to_keep=3))

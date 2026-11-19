@@ -1,0 +1,953 @@
+{
+ "seed": 500,
+ "sha256": "7ae4091cfda87f33bb7d432315d916b593602324362cb3906494ef3fb6727e3d",
+ "shapes": {
+  "dvae.coef": [
+   1,
+   100,
+   1
+  ],
+  "dvae.decoder.conv_in.0.bias": [
+   128
+  ],
+  "dvae.decoder.conv_in.0.weight": [
+   128,
+   512,
+   3
+  ],
+  "dvae.decoder.conv_in.2.bias": [
+   256
+  ],
+  "dvae.decoder.conv_in.2.weight": [
+   256,
+   128,
+   3
+  ],
+  "dvae.decoder.conv_out.weight": [
+   512,
+   256,
+   1
+  ],
+  "dvae.decoder.decoder_block.0.coef": [
+   256
+  ],
+  "dvae.decoder.decoder_block.0.dwconv.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.0.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.decoder.decoder_block.0.norm.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.0.norm.weight": [
+   256
+  ],
+  "dvae.decoder.decoder_block.0.pwconv1.bias": [
+   1024
+  ],
+  "dvae.decoder.decoder_block.0.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.decoder.decoder_block.0.pwconv2.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.0.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.decoder.decoder_block.1.coef": [
+   256
+  ],
+  "dvae.decoder.decoder_block.1.dwconv.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.1.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.decoder.decoder_block.1.norm.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.1.norm.weight": [
+   256
+  ],
+  "dvae.decoder.decoder_block.1.pwconv1.bias": [
+   1024
+  ],
+  "dvae.decoder.decoder_block.1.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.decoder.decoder_block.1.pwconv2.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.1.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.decoder.decoder_block.10.coef": [
+   256
+  ],
+  "dvae.decoder.decoder_block.10.dwconv.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.10.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.decoder.decoder_block.10.norm.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.10.norm.weight": [
+   256
+  ],
+  "dvae.decoder.decoder_block.10.pwconv1.bias": [
+   1024
+  ],
+  "dvae.decoder.decoder_block.10.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.decoder.decoder_block.10.pwconv2.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.10.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.decoder.decoder_block.11.coef": [
+   256
+  ],
+  "dvae.decoder.decoder_block.11.dwconv.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.11.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.decoder.decoder_block.11.norm.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.11.norm.weight": [
+   256
+  ],
+  "dvae.decoder.decoder_block.11.pwconv1.bias": [
+   1024
+  ],
+  "dvae.decoder.decoder_block.11.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.decoder.decoder_block.11.pwconv2.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.11.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.decoder.decoder_block.2.coef": [
+   256
+  ],
+  "dvae.decoder.decoder_block.2.dwconv.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.2.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.decoder.decoder_block.2.norm.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.2.norm.weight": [
+   256
+  ],
+  "dvae.decoder.decoder_block.2.pwconv1.bias": [
+   1024
+  ],
+  "dvae.decoder.decoder_block.2.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.decoder.decoder_block.2.pwconv2.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.2.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.decoder.decoder_block.3.coef": [
+   256
+  ],
+  "dvae.decoder.decoder_block.3.dwconv.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.3.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.decoder.decoder_block.3.norm.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.3.norm.weight": [
+   256
+  ],
+  "dvae.decoder.decoder_block.3.pwconv1.bias": [
+   1024
+  ],
+  "dvae.decoder.decoder_block.3.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.decoder.decoder_block.3.pwconv2.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.3.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.decoder.decoder_block.4.coef": [
+   256
+  ],
+  "dvae.decoder.decoder_block.4.dwconv.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.4.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.decoder.decoder_block.4.norm.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.4.norm.weight": [
+   256
+  ],
+  "dvae.decoder.decoder_block.4.pwconv1.bias": [
+   1024
+  ],
+  "dvae.decoder.decoder_block.4.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.decoder.decoder_block.4.pwconv2.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.4.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.decoder.decoder_block.5.coef": [
+   256
+  ],
+  "dvae.decoder.decoder_block.5.dwconv.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.5.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.decoder.decoder_block.5.norm.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.5.norm.weight": [
+   256
+  ],
+  "dvae.decoder.decoder_block.5.pwconv1.bias": [
+   1024
+  ],
+  "dvae.decoder.decoder_block.5.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.decoder.decoder_block.5.pwconv2.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.5.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.decoder.decoder_block.6.coef": [
+   256
+  ],
+  "dvae.decoder.decoder_block.6.dwconv.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.6.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.decoder.decoder_block.6.norm.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.6.norm.weight": [
+   256
+  ],
+  "dvae.decoder.decoder_block.6.pwconv1.bias": [
+   1024
+  ],
+  "dvae.decoder.decoder_block.6.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.decoder.decoder_block.6.pwconv2.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.6.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.decoder.decoder_block.7.coef": [
+   256
+  ],
+  "dvae.decoder.decoder_block.7.dwconv.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.7.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.decoder.decoder_block.7.norm.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.7.norm.weight": [
+   256
+  ],
+  "dvae.decoder.decoder_block.7.pwconv1.bias": [
+   1024
+  ],
+  "dvae.decoder.decoder_block.7.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.decoder.decoder_block.7.pwconv2.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.7.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.decoder.decoder_block.8.coef": [
+   256
+  ],
+  "dvae.decoder.decoder_block.8.dwconv.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.8.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.decoder.decoder_block.8.norm.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.8.norm.weight": [
+   256
+  ],
+  "dvae.decoder.decoder_block.8.pwconv1.bias": [
+   1024
+  ],
+  "dvae.decoder.decoder_block.8.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.decoder.decoder_block.8.pwconv2.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.8.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.decoder.decoder_block.9.coef": [
+   256
+  ],
+  "dvae.decoder.decoder_block.9.dwconv.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.9.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.decoder.decoder_block.9.norm.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.9.norm.weight": [
+   256
+  ],
+  "dvae.decoder.decoder_block.9.pwconv1.bias": [
+   1024
+  ],
+  "dvae.decoder.decoder_block.9.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.decoder.decoder_block.9.pwconv2.bias": [
+   256
+  ],
+  "dvae.decoder.decoder_block.9.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.downsample_conv.0.bias": [
+   512
+  ],
+  "dvae.downsample_conv.0.weight": [
+   512,
+   100,
+   3
+  ],
+  "dvae.downsample_conv.2.bias": [
+   512
+  ],
+  "dvae.downsample_conv.2.weight": [
+   512,
+   512,
+   4
+  ],
+  "dvae.encoder.conv_in.0.bias": [
+   128
+  ],
+  "dvae.encoder.conv_in.0.weight": [
+   128,
+   512,
+   3
+  ],
+  "dvae.encoder.conv_in.2.bias": [
+   256
+  ],
+  "dvae.encoder.conv_in.2.weight": [
+   256,
+   128,
+   3
+  ],
+  "dvae.encoder.conv_out.weight": [
+   1024,
+   256,
+   1
+  ],
+  "dvae.encoder.decoder_block.0.coef": [
+   256
+  ],
+  "dvae.encoder.decoder_block.0.dwconv.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.0.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.encoder.decoder_block.0.norm.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.0.norm.weight": [
+   256
+  ],
+  "dvae.encoder.decoder_block.0.pwconv1.bias": [
+   1024
+  ],
+  "dvae.encoder.decoder_block.0.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.encoder.decoder_block.0.pwconv2.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.0.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.encoder.decoder_block.1.coef": [
+   256
+  ],
+  "dvae.encoder.decoder_block.1.dwconv.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.1.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.encoder.decoder_block.1.norm.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.1.norm.weight": [
+   256
+  ],
+  "dvae.encoder.decoder_block.1.pwconv1.bias": [
+   1024
+  ],
+  "dvae.encoder.decoder_block.1.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.encoder.decoder_block.1.pwconv2.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.1.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.encoder.decoder_block.10.coef": [
+   256
+  ],
+  "dvae.encoder.decoder_block.10.dwconv.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.10.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.encoder.decoder_block.10.norm.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.10.norm.weight": [
+   256
+  ],
+  "dvae.encoder.decoder_block.10.pwconv1.bias": [
+   1024
+  ],
+  "dvae.encoder.decoder_block.10.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.encoder.decoder_block.10.pwconv2.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.10.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.encoder.decoder_block.11.coef": [
+   256
+  ],
+  "dvae.encoder.decoder_block.11.dwconv.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.11.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.encoder.decoder_block.11.norm.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.11.norm.weight": [
+   256
+  ],
+  "dvae.encoder.decoder_block.11.pwconv1.bias": [
+   1024
+  ],
+  "dvae.encoder.decoder_block.11.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.encoder.decoder_block.11.pwconv2.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.11.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.encoder.decoder_block.2.coef": [
+   256
+  ],
+  "dvae.encoder.decoder_block.2.dwconv.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.2.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.encoder.decoder_block.2.norm.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.2.norm.weight": [
+   256
+  ],
+  "dvae.encoder.decoder_block.2.pwconv1.bias": [
+   1024
+  ],
+  "dvae.encoder.decoder_block.2.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.encoder.decoder_block.2.pwconv2.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.2.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.encoder.decoder_block.3.coef": [
+   256
+  ],
+  "dvae.encoder.decoder_block.3.dwconv.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.3.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.encoder.decoder_block.3.norm.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.3.norm.weight": [
+   256
+  ],
+  "dvae.encoder.decoder_block.3.pwconv1.bias": [
+   1024
+  ],
+  "dvae.encoder.decoder_block.3.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.encoder.decoder_block.3.pwconv2.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.3.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.encoder.decoder_block.4.coef": [
+   256
+  ],
+  "dvae.encoder.decoder_block.4.dwconv.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.4.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.encoder.decoder_block.4.norm.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.4.norm.weight": [
+   256
+  ],
+  "dvae.encoder.decoder_block.4.pwconv1.bias": [
+   1024
+  ],
+  "dvae.encoder.decoder_block.4.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.encoder.decoder_block.4.pwconv2.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.4.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.encoder.decoder_block.5.coef": [
+   256
+  ],
+  "dvae.encoder.decoder_block.5.dwconv.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.5.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.encoder.decoder_block.5.norm.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.5.norm.weight": [
+   256
+  ],
+  "dvae.encoder.decoder_block.5.pwconv1.bias": [
+   1024
+  ],
+  "dvae.encoder.decoder_block.5.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.encoder.decoder_block.5.pwconv2.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.5.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.encoder.decoder_block.6.coef": [
+   256
+  ],
+  "dvae.encoder.decoder_block.6.dwconv.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.6.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.encoder.decoder_block.6.norm.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.6.norm.weight": [
+   256
+  ],
+  "dvae.encoder.decoder_block.6.pwconv1.bias": [
+   1024
+  ],
+  "dvae.encoder.decoder_block.6.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.encoder.decoder_block.6.pwconv2.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.6.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.encoder.decoder_block.7.coef": [
+   256
+  ],
+  "dvae.encoder.decoder_block.7.dwconv.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.7.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.encoder.decoder_block.7.norm.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.7.norm.weight": [
+   256
+  ],
+  "dvae.encoder.decoder_block.7.pwconv1.bias": [
+   1024
+  ],
+  "dvae.encoder.decoder_block.7.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.encoder.decoder_block.7.pwconv2.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.7.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.encoder.decoder_block.8.coef": [
+   256
+  ],
+  "dvae.encoder.decoder_block.8.dwconv.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.8.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.encoder.decoder_block.8.norm.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.8.norm.weight": [
+   256
+  ],
+  "dvae.encoder.decoder_block.8.pwconv1.bias": [
+   1024
+  ],
+  "dvae.encoder.decoder_block.8.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.encoder.decoder_block.8.pwconv2.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.8.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.encoder.decoder_block.9.coef": [
+   256
+  ],
+  "dvae.encoder.decoder_block.9.dwconv.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.9.dwconv.weight": [
+   256,
+   1,
+   7
+  ],
+  "dvae.encoder.decoder_block.9.norm.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.9.norm.weight": [
+   256
+  ],
+  "dvae.encoder.decoder_block.9.pwconv1.bias": [
+   1024
+  ],
+  "dvae.encoder.decoder_block.9.pwconv1.weight": [
+   1024,
+   256
+  ],
+  "dvae.encoder.decoder_block.9.pwconv2.bias": [
+   256
+  ],
+  "dvae.encoder.decoder_block.9.pwconv2.weight": [
+   256,
+   1024
+  ],
+  "dvae.out_conv.weight": [
+   100,
+   512,
+   3
+  ],
+  "dvae.vq_layer.quantizer.rvqs.0.project_in.bias": [
+   4
+  ],
+  "dvae.vq_layer.quantizer.rvqs.0.project_in.weight": [
+   4,
+   512
+  ],
+  "dvae.vq_layer.quantizer.rvqs.0.project_out.bias": [
+   512
+  ],
+  "dvae.vq_layer.quantizer.rvqs.0.project_out.weight": [
+   512,
+   4
+  ],
+  "dvae.vq_layer.quantizer.rvqs.1.project_in.bias": [
+   4
+  ],
+  "dvae.vq_layer.quantizer.rvqs.1.project_in.weight": [
+   4,
+   512
+  ],
+  "dvae.vq_layer.quantizer.rvqs.1.project_out.bias": [
+   512
+  ],
+  "dvae.vq_layer.quantizer.rvqs.1.project_out.weight": [
+   512,
+   4
+  ],
+  "emb_code.0.weight": [
+   16,
+   16
+  ],
+  "emb_code.1.weight": [
+   16,
+   16
+  ],
+  "emb_code.2.weight": [
+   16,
+   16
+  ],
+  "emb_code.3.weight": [
+   16,
+   16
+  ],
+  "emb_text.weight": [
+   128,
+   16
+  ],
+  "head_code.0.parametrizations.weight.original0": [
+   16,
+   1
+  ],
+  "head_code.0.parametrizations.weight.original1": [
+   16,
+   16
+  ],
+  "head_code.1.parametrizations.weight.original0": [
+   16,
+   1
+  ],
+  "head_code.1.parametrizations.weight.original1": [
+   16,
+   16
+  ],
+  "head_code.2.parametrizations.weight.original0": [
+   16,
+   1
+  ],
+  "head_code.2.parametrizations.weight.original1": [
+   16,
+   16
+  ],
+  "head_code.3.parametrizations.weight.original0": [
+   16,
+   1
+  ],
+  "head_code.3.parametrizations.weight.original1": [
+   16,
+   16
+  ],
+  "model.embed_tokens.weight": [
+   32000,
+   16
+  ],
+  "model.layers.0.input_layernorm.weight": [
+   16
+  ],
+  "model.layers.0.mlp.down_proj.weight": [
+   16,
+   32
+  ],
+  "model.layers.0.mlp.gate_proj.weight": [
+   32,
+   16
+  ],
+  "model.layers.0.mlp.up_proj.weight": [
+   32,
+   16
+  ],
+  "model.layers.0.post_attention_layernorm.weight": [
+   16
+  ],
+  "model.layers.0.self_attn.k_proj.weight": [
+   16,
+   16
+  ],
+  "model.layers.0.self_attn.o_proj.weight": [
+   16,
+   16
+  ],
+  "model.layers.0.self_attn.q_proj.weight": [
+   16,
+   16
+  ],
+  "model.layers.0.self_attn.v_proj.weight": [
+   16,
+   16
+  ],
+  "model.norm.weight": [
+   16
+  ],
+  "projector.linear1.bias": [
+   16
+  ],
+  "projector.linear1.weight": [
+   16,
+   32
+  ],
+  "projector.linear2.bias": [
+   16
+  ],
+  "projector.linear2.weight": [
+   16,
+   16
+  ]
+ }
+}
