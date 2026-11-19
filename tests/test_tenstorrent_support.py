@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import types
 
 import numpy as np
 import pytest
@@ -4834,6 +4836,138 @@ def test_gsm8k_prompt_is_five_shot_and_ends_with_the_question():
     assert prompt.endswith("Question: q7\nAnswer:")
     # Earlier shots precede the target question.
     assert prompt.index("q2") < prompt.index("q7")
+
+
+class _WordTokenizer:
+    """Word-level tokenizer stub with transformers' right-truncation semantics."""
+
+    def __init__(self):
+        self.pad_token = "<pad>"
+        self.eos_token = "<eos>"
+        self.bos_token = "<bos>"
+        self.pad_token_id = 1
+        self.bos_token_id = 0
+        self.chat_template = None
+        self._ids = {"<bos>": 0, "<pad>": 1, "<eos>": 2}
+        self._words = {0: "<bos>", 1: "<pad>", 2: "<eos>"}
+
+    def _id(self, word):
+        if word not in self._ids:
+            index = len(self._ids)
+            self._ids[word] = index
+            self._words[index] = word
+        return self._ids[word]
+
+    def __call__(self, text, return_tensors=None, truncation=False, max_length=None):
+        ids = [self.bos_token_id] + [self._id(word) for word in text.split()]
+        if truncation and max_length is not None:
+            ids = ids[:max_length]  # what a right-truncating fast tokenizer does
+        return types.SimpleNamespace(input_ids=torch.tensor([ids]))
+
+    def decode(self, ids, skip_special_tokens=True):
+        return " ".join(self._words[int(index)] for index in ids)
+
+
+class _RecordingModel:
+    """Generation stub: records the prompt ids and answers ``#### 18``."""
+
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+        self.seen = []
+
+    def eval(self):
+        return self
+
+    def generate(self, ids, **_kwargs):
+        self.seen.append(ids.clone())
+        answer = torch.tensor([[self.tokenizer._id(word) for word in "#### 18".split()]])
+        return torch.cat([ids, answer], dim=1)
+
+
+def _write_jsonl(path, rows):
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+
+
+def _stub_gsm8k_model(monkeypatch):
+    import transformers
+
+    tokenizer = _WordTokenizer()
+    model = _RecordingModel(tokenizer)
+    monkeypatch.setattr(
+        transformers, "AutoTokenizer",
+        types.SimpleNamespace(from_pretrained=lambda *args, **kwargs: tokenizer),
+    )
+    monkeypatch.setattr(
+        transformers, "AutoModelForCausalLM",
+        types.SimpleNamespace(from_pretrained=lambda *args, **kwargs: model),
+    )
+    return tokenizer, model
+
+
+def _gsm8k_paths(tmp_path):
+    rows_path = tmp_path / "rows.jsonl"
+    shots_path = tmp_path / "shots.jsonl"
+    _write_jsonl(rows_path, [{"question": "TARGET question?", "answer": "#### 18"}])
+    _write_jsonl(
+        shots_path,
+        [
+            {"question": f"demo question number {index} with extra words", "answer": f"#### {index}"}
+            for index in range(5)
+        ],
+    )
+    return rows_path, shots_path
+
+
+def test_gsm8k_truncation_keeps_the_question(monkeypatch, tmp_path, capsys):
+    """#5403: an over-budget few-shot prompt must keep the question under test."""
+
+    ev = _load_gsm8k_eval()
+    tokenizer, model = _stub_gsm8k_model(monkeypatch)
+    rows_path, shots_path = _gsm8k_paths(tmp_path)
+
+    result = ev.run_eval(
+        "stub",
+        limit=1,
+        rows_path=str(rows_path),
+        shots_path=str(shots_path),
+        max_prompt_tokens=12,
+        verbose=False,
+    )
+
+    assert len(model.seen) == 1
+    scored = tokenizer.decode(model.seen[0][0])
+    assert "TARGET" in scored, f"the question under test was truncated away: {scored!r}"
+    assert scored.rstrip().endswith("Answer:")
+    # The demonstrations are what gets dropped.
+    assert "demo question" not in scored
+    assert result["truncated_prompts"] == 1
+    assert result["max_prompt_tokens"] == 12
+    assert "WARNING" in capsys.readouterr().out
+
+
+def test_gsm8k_short_prompt_is_not_truncated(monkeypatch, tmp_path, capsys):
+    """A prompt that fits keeps every shot and reports no truncation."""
+
+    ev = _load_gsm8k_eval()
+    tokenizer, model = _stub_gsm8k_model(monkeypatch)
+    rows_path, shots_path = _gsm8k_paths(tmp_path)
+
+    result = ev.run_eval(
+        "stub",
+        limit=1,
+        rows_path=str(rows_path),
+        shots_path=str(shots_path),
+        max_prompt_tokens=4096,
+        verbose=False,
+    )
+
+    scored = tokenizer.decode(model.seen[0][0])
+    assert "TARGET" in scored
+    assert scored.count("demo question") == 5
+    assert result["truncated_prompts"] == 0
+    assert "WARNING" not in capsys.readouterr().out
 
 
 @pytest.mark.skipif(
