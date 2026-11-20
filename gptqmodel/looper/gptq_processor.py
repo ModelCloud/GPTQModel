@@ -190,6 +190,17 @@ def clone_gptq_config_for_module(
 
     return qcfg_clone
 
+def _capture_payload(value: Any) -> Any:
+    """Detach one captured tensor for a quantizer; pass ``None`` through.
+
+    The capture hook hands ``add_batch`` the module input and, only for a task
+    that asks for it, the forward output. ``None`` means "this task does not
+    read an output" and must reach ``add_batch`` unchanged (#5724).
+    """
+
+    return value.data if torch.is_tensor(value) else value
+
+
 class GPTQProcessor(LoopProcessor):
     """Captures activations and quantizes modules with GPTQ or GPTAQ/FOEM."""
 
@@ -601,6 +612,15 @@ class GPTQProcessor(LoopProcessor):
             """Records one activation batch for GPTQ Hessian/statistics accumulation."""
 
             g = self.tasks[name]  # noqa: F821
+            # GPTQ, GPTAQ and FOEM accumulate only `X^T X` from the module
+            # input; none of them reads the forward output, so slicing,
+            # gathering and copying `out` once per sample was work thrown away:
+            # a `kept_tokens x out_features` copy per sample per hooked module,
+            # plus a `nonzero` sync for every boolean index on CUDA (#5724).
+            # A task that needs the output opts in with `needs_module_output`.
+            needs_out = bool(getattr(g, "needs_module_output", False))
+            if not needs_out:
+                out = None
             batch_idx = self.current_batch_index()
             inp_tensor = inp[0]
             if capture_nvfp4:
@@ -633,7 +653,9 @@ class GPTQProcessor(LoopProcessor):
                     selected_out = out[keep_on_input].contiguous()
                 else:
                     selected_out = out
-                g.add_batch(selected_ids.data, selected_out.data, batch_index=batch_idx)  # noqa: F821
+                g.add_batch(
+                    selected_ids.data, _capture_payload(selected_out), batch_index=batch_idx
+                )  # noqa: F821
             elif (
                 torch.is_tensor(inp_tensor)
                 and torch.is_tensor(keep_mask)
@@ -664,7 +686,7 @@ class GPTQProcessor(LoopProcessor):
                         ].contiguous()
                     else:
                         sample_out = out
-                    g.add_batch(sample_inp.data, sample_out.data, batch_index=batch_idx)  # noqa: F821
+                    g.add_batch(sample_inp.data, _capture_payload(sample_out), batch_index=batch_idx)  # noqa: F821
             elif (
                 torch.is_tensor(inp_tensor)
                 and torch.is_tensor(keep_mask)
@@ -706,7 +728,7 @@ class GPTQProcessor(LoopProcessor):
                         sample_out = out
                     g.add_batch(
                         sample_inp.data,
-                        sample_out.data if torch.is_tensor(sample_out) else sample_out,
+                        _capture_payload(sample_out),
                         batch_index=batch_idx,
                     )  # noqa: F821
             elif (
@@ -741,13 +763,13 @@ class GPTQProcessor(LoopProcessor):
                         kept_out = out
                     g.add_batch(
                         kept_inp.data,
-                        kept_out.data if torch.is_tensor(kept_out) else kept_out,
+                        _capture_payload(kept_out),
                         batch_index=batch_idx,
                     )  # noqa: F821
                 else:
-                    g.add_batch(inp_tensor.data, out.data, batch_index=batch_idx)  # noqa: F821
+                    g.add_batch(inp_tensor.data, _capture_payload(out), batch_index=batch_idx)  # noqa: F821
             else:
-                g.add_batch(inp_tensor.data, out.data, batch_index=batch_idx)  # noqa: F821
+                g.add_batch(inp_tensor.data, _capture_payload(out), batch_index=batch_idx)  # noqa: F821
             del inp, out
         return tmp
 

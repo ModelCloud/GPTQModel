@@ -490,6 +490,14 @@ def _move_static_groups(groups, device: torch.device):
 
 
 class GPTQ:
+    #: Whether the capture hook must hand this task the module's forward output.
+    #: GPTQ (and its GPTAQ/FOEM subclasses) accumulate only ``X^T X`` from the
+    #: module input, so building a per-sample output slice is pure work: one
+    #: ``kept_tokens x out_features`` copy per sample per hooked module, plus a
+    #: ``nonzero`` sync for every boolean index on CUDA (#5724). A task that
+    #: reads ``out`` sets this to ``True`` and the hook gathers it again.
+    needs_module_output = False
+
     @property
     def H(self) -> Optional[torch.Tensor]:
         return self._hessian_state.hessian
@@ -894,7 +902,7 @@ class GPTQ:
 
         return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
 
-    def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
+    def add_batch(self, inp: torch.Tensor, out: Optional[torch.Tensor], batch_index: Optional[int] = None):
         if not self._hessian_capture_enabled:
             return
         if isinstance(self.module, nn.Embedding):
