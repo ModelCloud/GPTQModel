@@ -557,6 +557,101 @@ def test_v41_gptq_export_preserves_engram_and_mtp(v41_checkpoint, tmp_path):
     torch.testing.assert_close(reloaded(tokens).logits, wrapped(tokens).logits, atol=0, rtol=0)
 
 
+def test_v41_q4nx_rejects_shared_expert_projection(v41_checkpoint):
+    from gptqmodel.quantization.config import CalibrationConfig, EXL3Config
+
+    config = EXL3Config(bits=3, codebook="q4nx", offload_to_disk=False)
+    wrapped = GPTQModel.load(v41_checkpoint, device="cpu", quantize_config=config)
+    path = "layers.0.ffn.shared_experts.w1"
+    source = wrapped.model.get_submodule(path)
+    calibration = CalibrationConfig(dataset=[[4, 7, 8]], min_length=0)
+    with pytest.raises(ValueError, match=r"Q4NX supports routed expert projections"):
+        wrapped.quantize(calibration, projections=[path])
+    assert not wrapped.quantized
+    assert wrapped.model.get_submodule(path) is source
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("v41_checkpoint", [128], indirect=True)
+def test_v41_q4nx_selected_projection_quantization(v41_checkpoint, tmp_path, monkeypatch):
+    from gptqmodel.exllamav3.modules.quant.exl3_lib import quantize
+    from gptqmodel.quantization.config import CalibrationConfig, EXL3Config
+    from tests.accelerator_gates import requires_nvidia_cuda
+    from tests.test_exllamav3_torch_padding import _oracle_weight
+
+    if not requires_nvidia_cuda():
+        pytest.skip("Q4NX encoding requires NVIDIA CUDA")
+
+    paths = {f"layers.1.ffn.experts.0.w{projection}": bits for projection, bits in ((1, 2.5), (2, 3), (3, 3.5))}
+    config = EXL3Config(
+        bits=3.5, codebook="q4nx", device="cuda:0", offload_to_disk=False,
+        dynamic={path: {"bits": bits} for path, bits in paths.items()},
+    )
+    wrapped = GPTQModel.load(v41_checkpoint, device="cpu", quantize_config=config)
+    tokens = torch.tensor([[4, 11, 9]])
+    assert torch.isfinite(wrapped(tokens).logits).all()
+    untouched = wrapped.model.layers[1].ffn.experts[1].w1
+    original = {path: wrapped.model.get_submodule(path) for path in paths}
+    observed = {path: [] for path in paths}
+
+    def observe(_module, args, *, path):
+        observed[path].append(args[0].detach().cpu().double())
+
+    captured = []
+    encode = quantize.quantize_exl3
+
+    def record(weight, hessian, args, **kwargs):
+        captured.append((hessian["count"], hessian["H"].detach().cpu().double(), args["K"]))
+        assert weight.is_cuda and hessian["H"].is_cuda and args["q4nx"] is True
+        return encode(weight, hessian, args, **kwargs)
+
+    monkeypatch.setattr(quantize, "quantize_exl3", record)
+    handles = [
+        module.register_forward_pre_hook(lambda module, args, path=path: observe(module, args, path=path))
+        for path, module in original.items()
+    ]
+    rows = [[4, 7, 8, 9, 11, 12], [21, 20, 16, 15, 10, 13]]
+    try:
+        report = wrapped.quantize(CalibrationConfig(dataset=rows, min_length=0), projections=list(paths))
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    assert wrapped.quantized and len(report["exl3"]) == len(paths)
+    assert wrapped.model.layers[1].ffn.experts[1].w1 is untouched
+    assert wrapped.model.config.gptqmodel_v41_projections == {
+        path: {"bits": bits, "codebook": "q4nx"} for path, bits in paths.items()
+    }
+    assert [entry["module"] for entry in report["exl3"]] == list(paths)
+    for (path, bits), (count, hessian, rate), result in zip(paths.items(), captured, report["exl3"], strict=True):
+        raw = torch.cat(observed[path], dim=0)
+        assert rate == bits and count == result["samples"] == raw.shape[0] > 0
+        assert result["error_metrics"]["quantizer_path"] == "hessian_ldlq"
+        torch.testing.assert_close(hessian, raw.T @ raw, rtol=2e-6, atol=1e-6)
+        layer = wrapped.model.get_submodule(path)
+        assert layer is not original[path]
+        assert not list(layer.parameters())
+        packed = layer.state_dict()
+        assert set(packed) == {"trellis", "suh", "svh", "q4nx"}
+        assert packed["trellis"].shape == (8, 8, int(16 * bits))
+        x = raw[:3].bfloat16()
+        expected = (x.double() @ _oracle_weight(packed).double()).bfloat16()
+        torch.testing.assert_close(layer(x), expected, atol=2e-3, rtol=2e-3)
+
+    output = tmp_path / "exl3"
+    wrapped.save(output, max_shard_size=30000)
+    serialized = json.loads((output / "model.safetensors.index.json").read_text(encoding="utf-8"))["weight_map"]
+    reloaded = GPTQModel.load(output, device="cpu")
+    assert reloaded.quantized and reloaded.quantize_config.codebook == "q4nx"
+    for path in paths:
+        packed = wrapped.model.get_submodule(path).state_dict()
+        assert {key.removeprefix(f"{path}.") for key in serialized if key.startswith(f"{path}.")} == set(packed)
+        restored = reloaded.model.get_submodule(path).state_dict()
+        for name, tensor in packed.items():
+            assert torch.equal(restored[name], tensor)
+    torch.testing.assert_close(reloaded(tokens).logits, wrapped(tokens).logits, atol=0, rtol=0)
+
+
 def test_v41_marlin_backend_requires_cuda(v41_checkpoint):
     with pytest.raises(ValueError, match="Marlin requires NVIDIA CUDA"):
         GPTQModel.load(v41_checkpoint, device="cpu", backend="marlin")
@@ -613,3 +708,154 @@ def test_v41_hyper_connection_mixes_input_streams_into_each_output():
     residual_mix = torch.tensor([[[[0.25, 0.75], [0.5, 0.5]]]])
     expected = torch.tensor([[[[6.75, 12.5], [17.25, 33.5]]]])
     torch.testing.assert_close(expand_streams(hidden, residual, post_mix, residual_mix), expected)
+
+
+def _replace_v41_experts(checkpoint, *, bits, all_experts=False):
+    from gptqmodel.exllamav3.q4nx import Q4NX_MULTIPLIER
+    from gptqmodel.quantization.config import EXL3Config
+
+    config_path = checkpoint / "config.json"
+    index_path = checkpoint / "model.safetensors.index.json"
+    config = json.loads(config_path.read_text())
+    index = json.loads(index_path.read_text())
+    width = config["text_config"]["hidden_size"]
+    names = ["layers.0.ffn.experts.0.w1"]
+    if all_experts:
+        names = [f"layers.0.ffn.experts.{i}.w{j}" for i in range(3) for j in (1, 2, 3)]
+    config["gptqmodel_v41_source_quantization"] = config["quantization_config"]
+    config["quantization_config"] = EXL3Config(bits=bits, codebook="q4nx").to_dict()
+    config["gptqmodel_v41_projections"] = {name: {"bits": bits, "codebook": "q4nx"} for name in names}
+    generator = torch.Generator().manual_seed(97)
+    tensors = {}
+    for name in names:
+        for suffix in ("weight", "scale"):
+            index["weight_map"].pop(f"{name}.{suffix}")
+        tensors.update({
+            f"{name}.trellis": torch.randint(
+                -32768, 32768, (width // 16, width // 16, int(bits * 16)),
+                dtype=torch.int16, generator=generator,
+            ),
+            f"{name}.suh": (2 * torch.randint(2, (width,), generator=generator) - 1).half(),
+            f"{name}.svh": (torch.rand(width, generator=generator) * 0.07 + 0.01).half(),
+            f"{name}.q4nx": torch.tensor(Q4NX_MULTIPLIER - (1 << 32), dtype=torch.int32),
+        })
+    save_file(tensors, checkpoint / "experts-q4nx.safetensors")
+    index["weight_map"].update(dict.fromkeys(tensors, "experts-q4nx.safetensors"))
+    config_path.write_text(json.dumps(config))
+    index_path.write_text(json.dumps(index))
+    return tensors
+
+
+@pytest.mark.parametrize("v41_checkpoint", [128], indirect=True)
+def test_v41_q4nx_indexed_projection_load_save(v41_checkpoint, tmp_path):
+    from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
+
+    tensors = _replace_v41_experts(v41_checkpoint, bits=3.0)
+    model = GPTQModel.load(v41_checkpoint, device="cpu", backend="exl3_torch")
+    assert model.quantized and model.quantize_config.codebook == "q4nx"
+    ffn = model.model.layers[0].ffn
+    assert isinstance(ffn.experts[0].w1, ExllamaV3TorchLinear)
+    assert ffn.experts[0].w3.fp4
+    output = tmp_path / "q4nx"
+    model.save(output, max_shard_size=11000)
+    restored = GPTQModel.load(output, device="cpu", backend="exl3_torch")
+    for name, source in tensors.items():
+        module, _, leaf = name.rpartition(".")
+        torch.testing.assert_close(getattr(restored.model.get_submodule(module), leaf), source, atol=0, rtol=0)
+    tokens = torch.tensor([[4, 11, 9]])
+    torch.testing.assert_close(restored(tokens).logits, model(tokens).logits, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("v41_checkpoint", [128], indirect=True)
+def test_v41_q4nx_index_requires_marker_in_payload(v41_checkpoint):
+    tensors = _replace_v41_experts(v41_checkpoint, bits=3.0)
+    missing = "layers.0.ffn.experts.0.w1.q4nx"
+    tensors.pop(missing)
+    save_file(tensors, v41_checkpoint / "experts-q4nx.safetensors")
+    with pytest.raises(ValueError, match=missing):
+        GPTQModel.load(v41_checkpoint, device="cpu")
+
+
+@pytest.mark.parametrize("v41_checkpoint", [128], indirect=True)
+@pytest.mark.parametrize("bits", [2.5, 3.0, 3.5])
+def test_v41_q4nx_native_routing_matches_expert_order(v41_checkpoint, bits):
+    if not torch.cuda.is_available() or torch.version.hip or torch.cuda.get_device_capability() < (8, 0):
+        pytest.skip("DeepSeek V4.1 Q4NX routing requires NVIDIA SM80+")
+    from gptqmodel.exllamav3.modules.quant.exl3_lib.quantize import reconstruct_exl3_tensors
+    from gptqmodel.models.ports.deepseek_v41_flash.exl3 import routed_q4nx
+
+    tensors = _replace_v41_experts(v41_checkpoint, bits=bits, all_experts=True)
+    model = GPTQModel.load(v41_checkpoint, device="cuda", backend="exl3_exllama_v3")
+    layer = model.model.layers[0].ffn
+    generator = torch.Generator(device="cuda").manual_seed(1)
+    packed_weights = [
+        [
+            reconstruct_exl3_tensors(
+                {leaf: tensors[f"layers.0.ffn.experts.{expert}.w{index}.{leaf}"]
+                 for leaf in ("trellis", "suh", "svh", "q4nx")},
+                device="cuda", dtype=torch.float32,
+            ).double()
+            for index in (1, 3, 2)
+        ]
+        for expert in range(3)
+    ]
+
+    def reference(hidden):
+        x = hidden.flatten(0, 1)
+        sel, rw = layer.gate(x, None)
+        result = torch.zeros_like(x, dtype=torch.float32)
+        for expert, (gate, up, down) in enumerate(packed_weights):
+            rows, slots = torch.where(sel == expert)
+            values = x[rows].double()
+            limit = layer.experts[expert].limit
+            g = (values @ gate).bfloat16().float().clamp(max=limit)
+            u = (values @ up).bfloat16().float().clamp(-limit, limit)
+            activation = (torch.nn.functional.silu(g) * u * rw[rows, slots, None]).bfloat16()
+            result.index_add_(0, rows, (activation.double() @ down).bfloat16().float())
+        return (result + layer.shared_experts(x)).bfloat16().reshape_as(hidden)
+
+    with torch.inference_mode():
+        for rows in (1, 7, 129) if bits == 3.5 else (1, 7):
+            x = (0.4 * torch.randn((1, rows, 128), generator=generator, device="cuda")).bfloat16()
+            expected = reference(x)
+            actual = layer(x, None)
+            torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
+            assert layer._q4nx_tables
+        expected = reference(x.neg())
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            replay = layer(x, None)
+        x.neg_()
+        graph.replay()
+        torch.testing.assert_close(replay, expected, rtol=2e-3, atol=2e-3)
+        previous_tables = layer._q4nx_tables
+        projection = layer.experts[0].w1
+        projection.svh = projection.svh.neg()
+        assert layer._q4nx_tables is None
+        packed_weights[0][0].neg_()
+        torch.testing.assert_close(layer(x, None), reference(x), rtol=2e-3, atol=2e-3)
+        assert layer._q4nx_tables is not previous_tables
+
+        if bits == 3.5:
+            # Input scales participate in the FP16 range checks. An in-place
+            # edit to a versioned scale must rebuild the existing tables.
+            with torch.inference_mode(False):
+                projection.suh = projection.suh.clone()
+            layer(x, None)
+            previous_tables = layer._q4nx_tables
+            projection.suh.mul_(2)
+            packed_weights[0][0].mul_(2)
+            torch.testing.assert_close(layer(x, None), reference(x), rtol=2e-3, atol=2e-3)
+            assert layer._q4nx_tables.input_bound == previous_tables.input_bound / 2
+
+            layer.experts[1].limit = 0.25
+            values = x.flatten(0, 1)
+            ids, rw = layer.gate(values, None)
+            assert routed_q4nx(layer, values, ids, rw) is None
+            torch.testing.assert_close(layer(x, None), reference(x), rtol=2e-3, atol=2e-3)
+            for expert in layer.experts:
+                expert.limit = 1e-4
+            layer.gate.scale = 2**36
+            ids, rw = layer.gate(values, None)
+            assert routed_q4nx(layer, values, ids, rw) is None
+            assert torch.isfinite(layer(x, None)).all()

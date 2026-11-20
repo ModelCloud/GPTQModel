@@ -203,8 +203,12 @@ template <int bits, bool c_fp32, int cb, int MMODE, int CFG, bool SMEM_STAGE, bo
 __global__ __launch_bounds__(CFG == 0 ? 512 : 256, CFG == 0 ? (BOUND ? 2 : 1) : (HALF ? 1 : 2))
 void exl3_gemv_kernel(EXL3_GEMM_ARGS)
 {
-    static_assert(HALF ? (bits >= 1 && bits <= 3 && cb == 2) : (bits == 2 || bits == 3 || bits == 4),
-                  "exl3_gemv_kernel supports 2, 3 and 4 bpw, and 1.5, 2.5 and 3.5 bpw with mul1");
+    constexpr bool Q4NX = cb == EXL3_Q4NX_CODEBOOK;
+    constexpr int STEP_BITS = 4 * bits + 2 * HALF;
+    if constexpr (Q4NX)
+        static_assert(q4nx_supports_step_bits(STEP_BITS) && c_fp32 && !SMEM_STAGE);
+    else
+        static_assert(HALF ? (bits >= 1 && bits <= 3 && cb == 2) : (bits == 2 || bits == 3 || bits == 4));
     constexpr int WK   = CFG == 0 ? 16 : 8;     // k-split (warps per block)
     constexpr int WNT  = CFG == 0 ? 2 : 4;      // adjacent n-tiles per warp
     constexpr int PF   = CFG == 0 ? 4 : 2;      // prefetch ring depth
@@ -214,7 +218,7 @@ void exl3_gemv_kernel(EXL3_GEMM_ARGS)
     constexpr int COLS = WNT * 16;
 
     constexpr int TWORDS = HALF ? 4 * (2 * bits + 1) : 8 * bits;              // uint32 per 16x16 tile
-    constexpr bool TWO_PER_LOAD = HALF ? bits == 1 : bits == 2;               // two tiles per warp load
+    constexpr bool TWO_PER_LOAD = !Q4NX && (HALF ? bits == 1 : bits == 2);   // two tiles per warp load
     constexpr int LOADS = TWO_PER_LOAD ? WNT / 2 : WNT;                       // warp loads per k-slice
     constexpr int LSTRIDE = TWO_PER_LOAD ? 2 * TWORDS : (TWORDS < 32 ? TWORDS : 32);   // uint32 per load (lanes < LSTRIDE load)
     static_assert(!TWO_PER_LOAD || WNT % 2 == 0, "two tiles per warp load needs an even tile count per warp");
@@ -266,7 +270,7 @@ void exl3_gemv_kernel(EXL3_GEMM_ARGS)
     // Half-integer rates: word indices (< TWORDS <= 28) and funnel shifts (< 32) of both window groups, six 5-bit
     // fields in one register, extracted per use (bfe)
     [[maybe_unused]] uint32_t x_pack = 0;
-    if constexpr (HALF)
+    if constexpr (!Q4NX && HALF)
     {
         constexpr int bits2 = 2 * bits + 1;
         constexpr int gspan = 18 + 3 * bits;
@@ -284,7 +288,7 @@ void exl3_gemv_kernel(EXL3_GEMM_ARGS)
         x_src_b = i1;
         x_src_a = (i1 + 15) & 15;
     }
-    else if constexpr (bits == 3)
+    else if constexpr (!Q4NX && bits == 3)
     {
         int t_offset = lane << 3;
         int b1 = (t_offset + 257) * 3;
@@ -295,6 +299,12 @@ void exl3_gemv_kernel(EXL3_GEMM_ARGS)
         x_src_a = i0 % 24;
         x_src_b = i2 % 24;
     }
+
+    // The packed register for each lane holds the word at that lane's
+    // index. Shuffle in the two words of the lane's zero-prefixed window.
+    [[maybe_unused]] const int q4nx_start = (2 * lane + 2) * STEP_BITS - 32;
+    [[maybe_unused]] const int q4nx_first = max(q4nx_start, 0) / 32;
+    [[maybe_unused]] const int q4nx_second = (q4nx_start + 32) / 32;
 
     __shared__ float sh_red[WK][ROWS][COLS];
     [[maybe_unused]] __shared__ uint32_t sh_stage[SMEM_STAGE ? WK : 1][SMEM_STAGE ? LOADS * LSTRIDE : 1];
@@ -320,8 +330,9 @@ void exl3_gemv_kernel(EXL3_GEMM_ARGS)
                 for (int l = 0; l < LOADS; ++l)
                     pf[d][l] = ld_b(d, l);
 
-        FragC_h ch[WNT][2] = {};
-        float2 acc0[WNT][2] = {};
+        [[maybe_unused]] FragC q4nx_acc[WNT][2] = {};
+        [[maybe_unused]] FragC_h ch[WNT][2] = {};
+        [[maybe_unused]] float2 acc0[WNT][2] = {};
 
         for (int ib = 0; ib < myn; ib += PF)
         {
@@ -365,7 +376,14 @@ void exl3_gemv_kernel(EXL3_GEMM_ARGS)
             for (int t = 0; t < WNT; ++t)
             {
                 FragB f0, f1;
-                if constexpr (SMEM_STAGE)
+                if constexpr (Q4NX)
+                {
+                    const uint32_t before = __shfl_sync(0xffffffffu, bw[t], q4nx_first);
+                    const uint32_t after = __shfl_sync(0xffffffffu, bw[t], q4nx_second);
+                    const uint32_t window = __funnelshift_l(after, q4nx_start < 0 ? 0 : before, q4nx_start & 31);
+                    dq_q4nx_window<STEP_BITS>(window, f0, f1);
+                }
+                else if constexpr (SMEM_STAGE)
                 {
                     const uint32_t* tp = &sh_stage[warp][t * TWORDS];
                     if constexpr (HALF)
@@ -409,21 +427,33 @@ void exl3_gemv_kernel(EXL3_GEMM_ARGS)
                     exl3_gemv_ns::dq8_regs_3bits<cb>(awv, bwv, x_s2, f0, f1);
                 }
 
-                exl3_gemv_ns::mma_ab_h(a01, a23, f0, ch[t][0]);
-                exl3_gemv_ns::mma_ab_h(a01, a23, f1, ch[t][1]);
+                if constexpr (Q4NX)
+                {
+                    FragA a{{a01[0], a01[1], a23[0], a23[1]}};
+                    ptx_mma_m16n8k16(a, f0, q4nx_acc[t][0]);
+                    ptx_mma_m16n8k16(a, f1, q4nx_acc[t][1]);
+                }
+                else
+                {
+                    exl3_gemv_ns::mma_ab_h(a01, a23, f0, ch[t][0]);
+                    exl3_gemv_ns::mma_ab_h(a01, a23, f1, ch[t][1]);
+                }
             }
 
-            if ((d + 1) % FOLD == 0 || i + 1 == myn)
+            if constexpr (!Q4NX)
             {
-                #pragma unroll
-                for (int t = 0; t < WNT; ++t)
+                if ((d + 1) % FOLD == 0 || i + 1 == myn)
+                {
                     #pragma unroll
-                    for (int f = 0; f < 2; ++f)
-                    {
-                        acc0[t][f].x += __low2float(ch[t][f][0]);
-                        acc0[t][f].y += __high2float(ch[t][f][0]);
-                        ch[t][f][0] = hzero;
-                    }
+                    for (int t = 0; t < WNT; ++t)
+                        #pragma unroll
+                        for (int f = 0; f < 2; ++f)
+                        {
+                            acc0[t][f].x += __low2float(ch[t][f][0]);
+                            acc0[t][f].y += __high2float(ch[t][f][0]);
+                            ch[t][f][0] = hzero;
+                        }
+                }
             }
         }
         }
@@ -442,8 +472,8 @@ void exl3_gemv_kernel(EXL3_GEMM_ARGS)
                     for (int f = 0; f < 2; ++f)
                     {
                         const int col = t * 16 + f * 8 + c0;
-                        sh_red[warp][sr0][col + 0] = acc0[t][f].x;
-                        sh_red[warp][sr0][col + 1] = acc0[t][f].y;
+                        sh_red[warp][sr0][col + 0] = Q4NX ? q4nx_acc[t][f][0] : acc0[t][f].x;
+                        sh_red[warp][sr0][col + 1] = Q4NX ? q4nx_acc[t][f][1] : acc0[t][f].y;
                     }
             }
         }
@@ -483,7 +513,7 @@ void exl3_gemv_kernel(EXL3_GEMM_ARGS)
                     ((const float*) C) + this_warp * 128,
                     ((float*) C) + this_warp * 128,
                     svh + (this_warp * 128) % size_n,
-                    0.088388347648f  // 1/sqrt(128)
+                    0.088388347648f * (Q4NX ? EXL3_Q4NX_ALPHA : 1.0f)
                 );
             else
                 had_hf_r_128_inner<false, true>

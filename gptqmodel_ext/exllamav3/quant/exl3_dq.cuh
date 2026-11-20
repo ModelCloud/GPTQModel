@@ -289,17 +289,13 @@ __device__ __forceinline__ void dq8_half(const uint32_t* ptr, int t_offset, Frag
 }
 
 // Q4NX fragment decode adapted from AlexBrandes/vllm, csrc/exl3/codec_q4n.cuh
-// (ff413b2df19718342e02d9763f161d69afce7b4a). The FP32 epilogue normalizes
-// the exact integer weights after MMA.
+// (ff413b2df19718342e02d9763f161d69afce7b4a), with Qubitium's 3.5 bpw
+// extension. The shared-memory and warp-register paths decode the same
+// integer values and normalize after FP32 accumulation.
 template <int KV>
-__device__ __forceinline__ void dq_q4nx(const uint32_t* ptr, int lane, FragB& frag0, FragB& frag1)
+__device__ __forceinline__ void dq_q4nx_window(uint32_t window, FragB& frag0, FragB& frag1)
 {
     constexpr int state_bits = 32 - KV;
-    const int start = (2 * lane + 1) * KV - state_bits;
-    const int shift = start & 31;
-    const uint32_t first = start < 0 ? 0 : ptr[start / 32];
-    const uint32_t second = shift ? ptr[(start + 32) / 32] : 0;
-    const uint32_t window = __funnelshift_l(second, first, shift);
     const half offset = __ushort_as_half(0xe40f);  // -(1024 + 15)
     const half2 center = __halves2half2(offset, offset);
 
@@ -316,6 +312,16 @@ __device__ __forceinline__ void dq_q4nx(const uint32_t* ptr, int lane, FragB& fr
         frag[0] = __hadd2(low_pair, center);
         frag[1] = __hadd2(high_pair, center);
     }
+}
+
+template <int KV>
+__device__ __forceinline__ void dq_q4nx(const uint32_t* ptr, int lane, FragB& frag0, FragB& frag1)
+{
+    const int start = (2 * lane + 2) * KV - 32;
+    const int shift = start & 31;
+    const uint32_t first = start < 0 ? 0 : ptr[start / 32];
+    const uint32_t second = shift ? ptr[(start + 32) / 32] : 0;
+    dq_q4nx_window<KV>(__funnelshift_l(second, first, shift), frag0, frag1);
 }
 
 template <int bits, int cb, bool half_k = false>

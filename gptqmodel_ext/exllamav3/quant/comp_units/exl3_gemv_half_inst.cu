@@ -26,4 +26,21 @@ void* exl3_gemv_select_kernel_half(int bits, bool c_fp32, int mmode, int cfg, bo
     #undef SEL
     return nullptr;
 }
+
+// Q4NX uses AlexBrandes's zero-prefixed windows, including Qubitium's
+// 3.5 bpw extension. Every instance writes a normalized FP32 result.
+void* exl3_gemv_select_kernel_q4nx(int bits, bool half_k, int mmode, int cfg)
+{
+    #define SEL(bits_, half_, rows_, cfg_) \
+        if (bits == bits_ && half_k == half_ && mmode == rows_ && cfg == cfg_) \
+            return (void*) exl3_gemv_kernel<bits_, true, EXL3_Q4NX_CODEBOOK, rows_, cfg_, false, half_, true>;
+    #define SEL_RATE(bits_, half_) \
+        SEL(bits_, half_, 0, 0) SEL(bits_, half_, 0, 1) SEL(bits_, half_, 1, 0) SEL(bits_, half_, 1, 1)
+    SEL_RATE(2, true)
+    SEL_RATE(3, false)
+    SEL_RATE(3, true)
+    #undef SEL_RATE
+    #undef SEL
+    return nullptr;
+}
 #endif

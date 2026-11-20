@@ -212,7 +212,7 @@ def test_prescale_matches_the_eager_reference_on_adversarial_rows(fused_ops):
 def test_rescale_matches_the_eager_reference_bitwise(
     fused_ops, result_dtype, bias_dtype, stored_padding
 ):
-    """Bias subtract/scale/add stay three separate FP32 roundings, then one cast.
+    """Both rescale overloads preserve FP32 arithmetic through the BF16 cast.
 
     The BF16 native path keeps the GEMM result in FP32 (#5331), so the fused
     re-scale must accept both result widths.
@@ -234,9 +234,17 @@ def test_rescale_matches_the_eager_reference_bitwise(
         expected = module._rescale_native_output(
             result[..., :out_features], scale
         ).to(torch.bfloat16)
-        actual = fused_kernels.try_rescale(result, scale, bias, out_features)
+        actual = fused_kernels.try_rescale(
+            result, scale, bias, out_features, result_has_bias=False
+        )
         assert actual is not None
         assert _bits_equal(actual, expected), (bias_dtype, stored_padding, scale_value)
+        if bias is not None:
+            logical_bias = bias[:out_features].float()
+            logical_result = result[..., :out_features].float()
+            expected_biased = ((logical_result - logical_bias) * scale + logical_bias).bfloat16()
+            biased = fused_kernels.try_rescale(result, scale, bias, out_features)
+            assert _bits_equal(biased, expected_biased), (bias_dtype, stored_padding, scale_value)
 
 
 @requires_cuda

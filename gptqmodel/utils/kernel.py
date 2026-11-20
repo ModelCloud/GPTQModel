@@ -82,7 +82,6 @@ _MIN_INT_FIELDS = {
     "paro_triton_autotune_warmup": 0,
     "paro_triton_autotune_iters": 1,
     "paro_triton_decode_max_rows": 1,
-    "exl3_tile_batch": 1,
     "exl3_int8_gemv": 0,
     "exl3_host_rss_limit_bytes": 0,
     "exl3_cuda_allocation_limit_bytes": 0,
@@ -95,6 +94,7 @@ _OPTIONAL_MIN_INT_FIELDS = {
     "gguf_cpp_threads": 1,
     "cpu_workers": 1,
     "cuda_workers": 1,
+    "exl3_tile_batch": 1,
     "max_packers": 1,
     "pool_intraop_threads": 0,
 }
@@ -247,7 +247,7 @@ class KernelConfig:
     gsq_disable_hip_relaxation: bool = False
 
     # EXL3 scratch, telemetry and capture. Replace ``GPTQMODEL_EXL3_*``.
-    exl3_tile_batch: int = 256
+    exl3_tile_batch: Optional[int] = None
     # New CUDA variants change summation order. Existing integer checkpoints
     # use their original GEMM by default. INT8 uses 0 (off), 1 (residual),
     # or 2 (plain).

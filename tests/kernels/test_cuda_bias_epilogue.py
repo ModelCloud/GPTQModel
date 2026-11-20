@@ -115,7 +115,9 @@ def _gguf(dtype):
     linear = torch.nn.Linear(k, n, bias=True)
     linear.weight.data.fill_(38.5)
     linear.bias.data.fill_(-5000)
-    pack_fp8_module(module, linear)
+    # GGUF has its own packer; the FP8 packer writes ``weight_scale_inv`` and
+    # an ``fp8_format`` the GGUF module never reads (#5325, round 26).
+    module.pack_original(linear, scales=None, zeros=None)
     return module.eval().to(device="cuda", dtype=dtype), 38.5, 55, -5000
 
 

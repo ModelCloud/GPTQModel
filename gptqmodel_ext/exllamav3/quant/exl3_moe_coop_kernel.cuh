@@ -130,6 +130,23 @@ __device__ __forceinline__ float act_gate(int act, bool gated, float g, float u,
     return x * u;
 }
 
+__device__ __forceinline__ float round_bf16(float value)
+{
+    return __bfloat162float(__float2bfloat16_rn(value));
+}
+
+// Flash exposes each linear in BF16, clamps the gate before SiLU, and applies
+// the FP32 route weight before the BF16 input cast to the down projection.
+__device__ __forceinline__ float flash_activation(float g, float u, float scale, float weight, float limit)
+{
+    g = round_bf16(g * scale);
+    u = round_bf16(u * scale);
+    if (g > limit) g = limit;
+    if (u > limit) u = limit;
+    if (u < -limit) u = -limit;
+    return round_bf16(act_silu(g) * u * weight);
+}
+
 // 128-element Hadamard across the warp on 4 values per lane, same butterfly as had_*_r_128_inner
 __device__ __forceinline__ void had128(float& v0, float& v1, float& v2, float& v3, int lane)
 {
@@ -212,8 +229,8 @@ __device__ __forceinline__ SlotInfo slot_info(const MoeCoopParams& p, int s)
     SlotInfo si;
     si.row = s / p.topk;
     int64_t e = p.sel[s];
-    si.w = __half2float(p.rw[s]);
-    bool ok = si.w != 0.0f;
+    si.w = p.flash_rw ? p.flash_rw[s] : __half2float(p.rw[s]);
+    bool ok = p.flash_rw || si.w != 0.0f;
     if (p.min_expert >= 0)
     {
         ok = ok && e >= p.min_expert && e < p.max_expert;
@@ -808,10 +825,19 @@ void exl3_moe_coop_a_kernel(const MoeCoopParams p)
                 if (p.g_bias) add_h4(((const half*) p.g_bias[local]) + col, g0, g1, g2, g3);
             }
 
-            float a0 = act_gate(p.act, p.gated, g0, u0, p.act_limit);
-            float a1 = act_gate(p.act, p.gated, g1, u1, p.act_limit);
-            float a2 = act_gate(p.act, p.gated, g2, u2, p.act_limit);
-            float a3 = act_gate(p.act, p.gated, g3, u3, p.act_limit);
+            auto activate = [&] (float g, float u)
+            {
+                if constexpr (cb == EXL3_Q4NX_CODEBOOK)
+                {
+                    if (p.flash_rw)
+                        return flash_activation(g, u, p.flash_input_scale[s / p.topk], p.flash_rw[s], p.act_limit);
+                }
+                return act_gate(p.act, p.gated, g, u, p.act_limit);
+            };
+            float a0 = activate(g0, u0);
+            float a1 = activate(g1, u1);
+            float a2 = activate(g2, u2);
+            float a3 = activate(g3, u3);
 
             scale_h4(((const half*) p.d_suh[local]) + col, a0, a1, a2, a3);
             had128(a0, a1, a2, a3, lane);
@@ -932,10 +958,17 @@ void exl3_moe_coop_b_kernel(const MoeCoopParams p)
             had128(v0, v1, v2, v3, lane);
             scale_h4(((const half*) p.d_svh[sj.local]) + col, v0, v1, v2, v3);
             if (p.d_bias) add_h4(((const half*) p.d_bias[sj.local]) + col, v0, v1, v2, v3);
-            o0 += sj.w * v0;
-            o1 += sj.w * v1;
-            o2 += sj.w * v2;
-            o3 += sj.w * v3;
+            if constexpr (cb == EXL3_Q4NX_CODEBOOK)
+            {
+                if (p.flash_rw)
+                {
+                    o0 += round_bf16(v0); o1 += round_bf16(v1);
+                    o2 += round_bf16(v2); o3 += round_bf16(v3);
+                    continue;
+                }
+            }
+            o0 += sj.w * v0; o1 += sj.w * v1;
+            o2 += sj.w * v2; o3 += sj.w * v3;
         }
         float* part = sh_part + warp * 128 + lane * 4;
         part[0] = o0; part[1] = o1; part[2] = o2; part[3] = o3;

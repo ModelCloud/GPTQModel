@@ -138,6 +138,7 @@ std::tuple<torch::Tensor, torch::Tensor> bf16_prescale_wrapper(torch::Tensor x, 
     return bf16_prescale(x, bound);
 }
 
+template <bool result_has_bias>
 torch::Tensor bf16_rescale_wrapper(
     torch::Tensor result,
     torch::Tensor scale,
@@ -145,7 +146,7 @@ torch::Tensor bf16_rescale_wrapper(
     int64_t n_cols)
 {
     const std::optional<at::Tensor> bias = bias_opt.has_value() ? std::optional<at::Tensor>(bias_opt.value()) : std::nullopt;
-    return bf16_rescale(result, scale, bias, n_cols);
+    return bf16_rescale(result, scale, bias, n_cols, result_has_bias);
 }
 
 }  // namespace
@@ -169,6 +170,7 @@ TORCH_LIBRARY(gptqmodel_exllamav3, m)
     m.def("bc_linear_exl3_run_configured(Tensor trellis, Tensor suh, Tensor svh, float K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(a!) y, bool fp16_gemv, int int8_gemv, bool fused_gemm=False, bool q4nx=False) -> int");
     m.def("bf16_prescale(Tensor x, float bound) -> (Tensor, Tensor)");
     m.def("bf16_rescale(Tensor result, Tensor scale, Tensor? bias, int n_cols) -> Tensor");
+    m.def("bf16_rescale.raw(Tensor result, Tensor scale, Tensor? bias, int n_cols) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CPU, m)
@@ -193,5 +195,6 @@ TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CUDA, m)
     m.impl("bc_linear_exl3_run", &bc_linear_exl3_run_wrapper);
     m.impl("bc_linear_exl3_run_configured", &bc_linear_exl3_run_configured_wrapper);
     m.impl("bf16_prescale", &bf16_prescale_wrapper);
-    m.impl("bf16_rescale", &bf16_rescale_wrapper);
+    m.impl("bf16_rescale", &bf16_rescale_wrapper<true>);
+    m.impl("bf16_rescale.raw", &bf16_rescale_wrapper<false>);
 }

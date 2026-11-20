@@ -1232,26 +1232,40 @@ def decompose_blockfloat(
     offset = 2 * levels - 1
     # Recover each block's exponent. floor(log2(max)) is right only when the block
     # max sits in the lower half of its binade, so search the neighbours and keep
-    # the candidate that reproduces the weights exactly. ``-1`` is in the list
-    # because :func:`quantize_blockfloat` picks the lowest-error exponent per
-    # block, which can be one step below ``floor(log2(max))``.
+    # the candidate that reproduces the block exactly. The search is per block:
+    # :func:`quantize_blockfloat` picks each exponent independently, so one
+    # matrix can mix blocks whose exact grid sits one shift below the clamped
+    # base with blocks that sit on the base. A tensor-wide predicate rejects
+    # every such matrix even though each block is individually packable (#5648).
+    # ``-1`` is in the list because the quantizer can pick one step below
+    # ``floor(log2(max))``; ``+2`` keeps the historical fallback for a block
+    # clamped up to ``float32.tiny``.
     base = _block_exponents(w, block)
+    blocked = w.reshape(*w.shape[:-1], -1, block)
+    chosen = torch.zeros_like(base)
+    matched = torch.zeros_like(base, dtype=torch.bool)
     for shift in (0, 1, -1, 2):
         candidate = (base + shift).to(torch.float32)
-        if bool(
-            ((candidate < BLOCKFLOAT_EXPONENT_MIN) | (candidate > BLOCKFLOAT_EXPONENT_MAX)).any()
-        ):
-            # No storable scale exists at that shift for every block, so it cannot
-            # describe the whole tensor; skip before any overflowing arithmetic.
-            continue
+        usable = (candidate >= BLOCKFLOAT_EXPONENT_MIN) & (
+            candidate <= BLOCKFLOAT_EXPONENT_MAX
+        )
         scale = torch.pow(2.0, candidate).repeat_interleave(block, dim=1)
         codes = torch.round(w / scale * levels)
-        if codes.abs().max() > offset:
-            continue
-        if torch.equal(codes / levels * scale, w):
-            packed = (codes + offset).to(torch.uint8)
-            return packed, candidate.to(torch.int8)
-    raise ValueError("weight is not exactly on the block-float grid")
+        blocked_codes = codes.reshape(*blocked.shape)
+        block_scale = scale.reshape(*blocked.shape)
+        in_range = blocked_codes.abs().amax(dim=-1) <= offset
+        exact = torch.eq(blocked_codes / levels * block_scale, blocked).all(dim=-1)
+        take = usable & in_range & exact & ~matched
+        chosen = torch.where(take, candidate, chosen)
+        matched = matched | take
+        if bool(matched.all()):
+            break
+    if not bool(matched.all()):
+        raise ValueError("weight is not exactly on the block-float grid")
+    scale = torch.pow(2.0, chosen).repeat_interleave(block, dim=1)
+    codes = torch.round(w / scale * levels)
+    packed = (codes + offset).to(torch.uint8)
+    return packed, chosen.to(torch.int8)
 
 
 def recompose_blockfloat(

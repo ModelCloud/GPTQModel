@@ -335,7 +335,9 @@ def test_a_device_with_only_constant_state_layers_does_not_zero_the_plan():
 
     A device whose layers are all linear/recurrent holds constant state, not a
     per-token cache; its own `max_context_tokens` is 0, but that 0 says nothing
-    about the context the model can serve.
+    about the context the model can serve. This fixture declares no state
+    shape, so the state is unsized: the context is still known, but the batch
+    count is not (#5698).
     """
 
     from gptqmodel.utils.kv_cache import human_tokens
@@ -353,13 +355,39 @@ def test_a_device_with_only_constant_state_layers_does_not_zero_the_plan():
 
     assert budget.kv_cache.linear_layers == 2
     assert budget.kv_cache.growing_layers == 2
+    # The fixture declares no Mamba state shape: the state is not zero, it is
+    # unsized.
+    assert budget.kv_cache.unsized_state_layers == 2
     # Device 0 holds only recurrent layers, so only device 1 constrains context.
     assert budget._per_device_limits(batch_size=1, kv_budget_bytes=None) == {1: 100_000}
     assert budget.max_context_tokens() == 100_000
     assert budget.context_batch_plan()[0] == (1, 100_000)
-    assert budget.max_sequences(1024) > 0
+    # The state each sequence keeps is unknown, so a batch count would be fiction.
+    assert budget.max_sequences(1024) is None
     plan = budget.format_plan()
     assert plan is not None and f"{human_tokens(100_000)} ctx" in plan
+
+
+def test_a_device_with_only_sized_state_layers_still_reports_a_batch():
+    """Control: a declared state shape keeps the batch count computable."""
+
+    config = types.SimpleNamespace(
+        hidden_size=64, num_hidden_layers=4, num_attention_heads=4, num_key_value_heads=2,
+        max_position_embeddings=100_000,
+        layer_types=["linear_attention", "linear_attention", "full_attention", "full_attention"],
+        mamba_d_state=16, mamba_d_conv=4, mamba_expand=2,
+    )
+    budget = _budget_for_config(
+        config,
+        devices=[(0, 20 * 1024 ** 3, 16), (1, 4 * 1024 ** 3, 8)],
+        layer_devices=(0, 0, 1, 1),
+    )
+
+    assert budget.kv_cache.unsized_state_layers == 0
+    assert budget.kv_cache.state_layers == 2
+    assert budget._per_device_limits(batch_size=1, kv_budget_bytes=None) == {1: 100_000}
+    assert budget.max_context_tokens() == 100_000
+    assert budget.max_sequences(1024) > 0
 
 
 def test_an_unmeasured_shard_leaves_the_sequence_count_unknown():
@@ -420,12 +448,13 @@ def test_measured_shards_keep_the_numbers_the_unmeasured_plan_cannot_beat():
 
 
 def test_an_unmeasured_device_without_a_growing_layer_does_not_poison_the_plan():
-    """Control: only a device that owns a growing layer can make the answer unknown."""
+    """Control: an unmeasured device that holds no cache memory cannot bind."""
 
     config = types.SimpleNamespace(
         hidden_size=64, num_hidden_layers=4, num_attention_heads=4, num_key_value_heads=2,
         max_position_embeddings=100_000,
-        layer_types=["linear_attention", "linear_attention", "full_attention", "full_attention"],
+        # Non-attention blocks hold no cache at all, so device 0 is moot.
+        layer_types=["moe", "moe", "full_attention", "full_attention"],
     )
     budget = _budget_for_config(
         config,
@@ -433,7 +462,7 @@ def test_an_unmeasured_device_without_a_growing_layer_does_not_poison_the_plan()
         layer_devices=(0, 0, 1, 1),
     )
 
-    # Device 0 holds only recurrent layers, so its missing snapshot is moot.
+    # Device 0 holds no cache memory, so its missing snapshot is moot.
     assert budget.kv_cache.growing_layers == 2
     assert budget.max_context_tokens() == 100_000
     assert budget.max_sequences(1024) > 0

@@ -45,14 +45,14 @@ class DeepSeekV41FlashQModel(BaseQModel):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_id_or_path, quantize_config=None, profile=PROFILE.AUTO, **kwargs):
-        if quantize_config is not None and quantize_config.method != METHOD.GPTQ:
-            raise ValueError("DeepSeek V4.1 projection quantization uses GPTQ")
+        if quantize_config is not None and quantize_config.method not in (METHOD.GPTQ, METHOD.EXL3):
+            raise ValueError("DeepSeek V4.1 projection quantization uses GPTQ or Q4NX EXL3")
         if profile != PROFILE.AUTO:
             raise ValueError("DeepSeek V4.1 Flash supports the default load profile")
         loaded = cls.from_quantized(pretrained_model_id_or_path, **kwargs)
         if quantize_config is not None:
             if loaded.quantized:
-                raise ValueError("DeepSeek V4.1 GPTQ requires a published source checkpoint")
+                raise ValueError("DeepSeek V4.1 projection quantization requires a published source checkpoint")
             loaded.quantize_config = quantize_config
         return loaded
 
@@ -80,8 +80,10 @@ class DeepSeekV41FlashQModel(BaseQModel):
         if fuse:
             require_fusable_config(cls, "deepseek_v41")
         backend = normalize_backend(backend)
-        if module_tree is not None or backend not in (BACKEND.AUTO, BACKEND.MARLIN, BACKEND.TORCH):
-            raise ValueError("DeepSeek V4.1 Flash uses its built-in module tree and the auto, marlin, or torch backend")
+        if module_tree is not None or backend not in (
+            BACKEND.AUTO, BACKEND.MARLIN, BACKEND.TORCH, BACKEND.EXL3_EXLLAMA_V3, BACKEND.EXL3_TORCH,
+        ):
+            raise ValueError("DeepSeek V4.1 Flash uses its built-in module tree and the auto, marlin, torch, or EXL3 backend")
 
         from ..ports.deepseek_v41_flash.checkpoint import load_checkpoint
 
@@ -96,7 +98,7 @@ class DeepSeekV41FlashQModel(BaseQModel):
             raise TypeError(f"Unsupported DeepSeek V4.1 Flash load arguments: {', '.join(sorted(unsupported))}")
         model, local_path, selection = load_checkpoint(
             model_id_or_path, selection=selection, dtype=dtype, device=device, device_map=device_map, max_memory=max_memory,
-            backend=backend, loader=cls.loader,
+            backend=backend, loader=cls.loader, kernel=kernel,
         )
         tokenizer = load_hf_tokenizer(
             model_id_or_path, model_config=model.config, trust_remote_code=tokenizer_trust, **selection,
@@ -129,7 +131,7 @@ class DeepSeekV41FlashQModel(BaseQModel):
 
     def save_quantized(self, save_dir, **kwargs):
         if not self.quantized:
-            raise ValueError("Call quantize() before saving a DeepSeek V4.1 GPTQ checkpoint")
+            raise ValueError("Call quantize() before saving a DeepSeek V4.1 quantized checkpoint")
         return self.save(save_dir, **kwargs)
 
     save_pretrained = save

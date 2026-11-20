@@ -15,6 +15,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformers
 
 from ..looper.named_module import NamedModule
@@ -23,6 +24,7 @@ from ..utils.fallback import resolve_fallback_strategy, should_use_fallback
 from ..utils.logger import setup_logger
 from ..utils.p2p import safe_move_to
 from ..utils.torch import torch_sync
+from .conv_padding import conv_padding_pairs, pad_mode
 from .gar import (
     compose_final_perm,
     compute_global_perm,
@@ -238,17 +240,24 @@ class FOEM(GPTQ):
                 native_inp = native_inp.t()
 
         if isinstance(self.module, nn.Conv2d):
+            # `nn.Unfold` only accepts integer zero padding, so apply the
+            # layer's own padding (including its mode) and unfold the
+            # already-padded input. This keeps the Hessian on the operator
+            # that will actually run, matching GPTQ's capture (#3917, #5646).
+            (top, bottom), (left, right) = conv_padding_pairs(self.module)
+            pad = (left, right, top, bottom)
+            mode = pad_mode(self.module.padding_mode)
             unfold = nn.Unfold(
                 self.module.kernel_size,
                 dilation=self.module.dilation,
-                padding=self.module.padding,
+                padding=0,
                 stride=self.module.stride,
             )
-            inp = unfold(inp)
+            inp = unfold(F.pad(inp, pad, mode=mode))
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
             if self.gptaq:
-                native_inp = unfold(native_inp)
+                native_inp = unfold(F.pad(native_inp, pad, mode=mode))
                 native_inp = native_inp.permute([1, 0, 2]).flatten(1)
 
         # FOEM reports the same token-normalized loss as GPTQ/GPTAQ. ``inp`` is
@@ -696,9 +705,17 @@ class FOEM(GPTQ):
             Hinv1 = Hinv[i1:i2, i1:i2]
             if self.gptaq:
                 P1 = P[i1:i2, i1:i2]
+                # The in-block updates below mutate ``W1``. The deferred
+                # native delta product must see each column's pre-update
+                # working value, exactly like the in-block ``P1`` term does;
+                # reading ``W1`` after the loop would apply the correction to
+                # the post-update weight (#5647).
+                W1_pre = torch.empty_like(W1)
 
             for i in range(count):
                 w = W1[:, i]
+                if self.gptaq:
+                    W1_pre[:, i] = w
                 w_raw = W1_raw[:, i]
                 d = Hinv1[i, i]
 
@@ -736,7 +753,7 @@ class FOEM(GPTQ):
             Losses[:, i1:i2] = Losses1 / 2
 
             if self.gptaq:
-                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:]) - W1.matmul(P[i1:i2, i2:])
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:]) - W1_pre.matmul(P[i1:i2, i2:])
             else:
                 W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
             # The in-block correction above pulls the next column back toward

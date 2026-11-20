@@ -59,19 +59,54 @@ flowchart LR
     R -->|no| E["ValueError"]
     V --> P["pack_trellis_q4nx"]
     P --> S["Safetensors trellis, scales and q4nx marker"]
-    S --> G["Packed CUDA GEMM or explicit routed decode"]
-    S --> T["Chunked EXL3_TORCH reconstruction"]
+    S --> L{"Marker keys agree with tensor_storage?"}
+    L -->|yes| G["Native CUDA projection or routed decode"]
+    L -->|yes| T["Chunked EXL3_TORCH reconstruction"]
+    L -->|no| F["ValueError names the marker key"]
+    classDef error fill:#f9d5d5,stroke:#af3b3b,color:#222
+    class E,F error
 ```
 
-Quantization requires NVIDIA CUDA. Inference uses packed CUDA GEMM for FP16
-and BF16 on NVIDIA, or `BACKEND.EXL3_TORCH` for portable reconstruction.
-The optional FP16 and INT8 GEMV policies apply to their original codebooks.
+Quantization requires NVIDIA CUDA. Inference uses native CUDA kernels for
+FP16 and BF16 on NVIDIA, or `BACKEND.EXL3_TORCH` for portable reconstruction.
+Q4NX CUDA dispatch on Ampere selects a packed GEMV for one to eight rows when
+the column groups fit in a co-resident wave. Each warp unpacks AlexBrandes's
+zero-prefixed windows, including Qubitium's W3.5 extension, from registers.
+The kernel accumulates in FP32 and applies normalization with the output
+Hadamard transform.
+
+For large Q4NX prefill on Ampere, the native decoder writes the integer
+weights into temporary FP16 storage, then HGEMM and the output transform
+produce FP32 results. The path handles projections of 4 to 24 Mi weight
+elements and begins at 64 rows up to 12 Mi elements, or at 128 rows for
+larger projections. Weight scratch peaks at 48 MiB per call and is released
+after HGEMM. Shapes outside the tuned range and calls short of workspace use
+packed GEMM.
+
+Set `EXL3CUDAConfig(fused_gemm=True, fp16_gemv=False)` to pin Q4NX to packed
+GEMM. With `fused_gemm=True` and `fp16_gemv=True`, Q4NX can select GEMV while
+prefill uses packed GEMM. INT8 GEMV remains a `mul1` policy.
+The FP32 packed GEMM variants also tune the launch grid on Ampere for the
+5120 → 2304, 5120 → 4608, and 2304 → 5120 expert projections. The selected
+row ranges use 128-column tiles and distribute work across all available SMs.
 Q4NX weights also work with the explicit [routed decode operator](exl3-routed-decode.md).
 The saved quantization config keeps the default `codebook` and the
 `dynamic` recipe. Its `tensor_storage` entry lists each projection's
 `.q4nx` tensor and its dtype and shape. The loader selects the decoder
 from the per-projection marker, so a checkpoint can mix Q4NX and other EXL3
-codebooks.
+codebooks. Both loaders verify marker keys against the actual safetensors
+contents before constructing a decoder. A dynamic output-head rule can
+select a different codebook. The effective head rate is validated against
+that codebook.
+
+| Checkpoint state | Loader result |
+| --- | --- |
+| The storage manifest and safetensors agree on the markers | Construct the selected decoder. |
+| Either side is missing a marker present on the other | Raise a `ValueError` identifying the tensor. |
+
+Packed FP16 forward uses FP32 for split-K partials, the output Hadamard
+transform, scales and bias, then casts once. The BF16 bridge rescales the raw
+projection, adds the canonical bias in FP32, and writes BF16. [Activation dispatch](exl3-wide-activation-dispatch.md)
 
 ## Runtime policy
 
@@ -113,17 +148,23 @@ GEMV requests outside those limits use the applicable FP16 path.
 | Larger batch | Each 16-row slab rereads the packed weights | Selected 16-, 32-, 48-, or 64-row tile |
 | Output transform | Separate device pass inside the cooperative kernel | Transform from the final shared-memory output tile |
 | CUDA stream state | Per-launch Hadamard and split-K scratch | Per-launch Hadamard, split-K and INT8 scratch |
+| Q4NX small batch | Packed GEMM | Register decode and FP32 GEMV on eligible Ampere shapes |
+| Q4NX large prefill | Packed GEMM for every row tile | One native reconstruction per call and FP32 HGEMM on tuned Ampere shapes |
 
 ```mermaid
 flowchart TD
     A["BC_LinearEXL3.run"] --> B["bc_linear_exl3_run_configured"]
     B --> C["exl3_gemm validates geometry and selects the device"]
-    C --> D{"INT8 policy and eligible mul1 shape?"}
+    C --> Q{"Eligible Q4NX prefill?"}
+    Q -->|yes| W["reconstruct_q4nx, hgemm and output Hadamard"]
+    Q -->|no| D{"INT8 policy and eligible mul1 shape?"}
+    W -->|workspace unavailable| H["select_exl3_gemm_kernel_tuned"]
+    W -->|complete| J["Projection output"]
     D -->|yes| E["exl3_gemv_int8"]
     D -->|no| F{"FP16 GEMV policy and eligible shape?"}
     E -->|declined| F
     F -->|yes| G["exl3_gemv_try_launch"]
-    F -->|no| H["select_exl3_gemm_kernel_tuned"]
+    F -->|no| H
     G -->|declined| H
     H --> I["Launch original or fused EXL3 GEMM"]
     E -->|accepted| J["Projection output"]
@@ -140,7 +181,8 @@ serves the new half-bit Viterbi quantizer.
 Only immutable launch geometry and function attributes are cached across
 streams. CUDA graph allocations retain the pointer addresses of each graph's
 working buffers. Inference retains the packed trellis, scale and bias
-buffers. The kernels decode weights into temporary tiles.
+buffers. The kernels decode weights into temporary tiles or into the
+call-private matrix consumed by prefill HGEMM.
 
 For gate, up and down projections in an expert layer, the extension also
 provides the [routed decode operator](exl3-routed-decode.md).

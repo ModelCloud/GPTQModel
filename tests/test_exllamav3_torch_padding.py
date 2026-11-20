@@ -211,6 +211,114 @@ def test_q4nx_packed_cuda_decode_matches_oracle_for_decode_and_prefill(bits, mon
             torch.testing.assert_close(visible, rounded, rtol=2e-3, atol=5e-4)
 
 
+def _constant_trellis(codebook, bits, inputs, outputs):
+    multiplier = torch.tensor(0x83DCD12D, dtype=torch.uint32).view(torch.int32)
+    return {
+        "trellis": torch.zeros((inputs // 16, outputs // 16, int(16 * bits)), dtype=torch.int16, device="cuda"),
+        "suh": torch.ones(inputs, device="cuda", dtype=torch.float16),
+        "svh": torch.ones(outputs, device="cuda", dtype=torch.float16),
+        codebook: multiplier.cuda(),
+    }
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(("codebook", "bits"), [("q4nx", 2.5), ("q4nx", 3.0), ("q4nx", 3.5), ("mul1", 2.5)])
+@pytest.mark.parametrize("epilogue", ["scale", "bias"])
+@torch.inference_mode()
+def test_exl3_fp16_rounds_after_output_scale_and_bias(codebook, bits, epilogue):
+    if not requires_nvidia_cuda():
+        pytest.skip("requires NVIDIA CUDA")
+
+    packed = _constant_trellis(codebook, bits, 128, 128)
+    if codebook == "q4nx":
+        # A zero Q4NX state gives four equal (-15 / sqrt(42.5)) codewords.
+        code = -15 / math.sqrt(42.5)
+        fill = -256 if epilogue == "scale" else -224
+    else:
+        # A zero mul1 state sums four zero bytes and runs one FP16 FMA.
+        inv, offset = (struct.unpack("<e", struct.pack("<H", value))[0] for value in (0x1EEE, 0xC931))
+        code = torch.tensor(1024 * inv + offset, dtype=torch.float16).item()
+        fill = -180 if epilogue == "scale" else -160
+    scale = 1 / 16 if epilogue == "scale" else 1
+    bias = 0 if epilogue == "scale" else -65504.25
+    packed["svh"].fill_(scale)
+    if epilogue == "bias":
+        packed["bias"] = torch.zeros(128, device="cuda", dtype=torch.float32)
+        packed["bias"][0] = bias
+
+    # A constant input survives its Hadamard as the rounded DC component
+    # only. Every stored weight is equal so only output coordinate zero
+    # survives the output Hadamard. Apply its scale and bias in FP64.
+    input_dc = torch.tensor(fill * math.sqrt(128), dtype=torch.float16).item()
+    before_epilogue = input_dc * code * math.sqrt(128)
+    assert before_epilogue > 65520
+    expected = torch.zeros((1, 128), device="cuda", dtype=torch.float64)
+    expected[0, 0] = before_epilogue * scale + bias
+
+    layer = ExllamaV3Linear.from_tensors(in_features=128, out_features=128, name="projection", tensors=packed)
+    x = torch.full((1, 128), fill, dtype=torch.float16, device="cuda")
+    actual = layer(x)
+    torch.testing.assert_close(actual, expected.half(), rtol=0, atol=0)
+    if epilogue == "bias":
+        assert layer.state_dict()["bias"].dtype == torch.float32
+        assert layer.state_dict()["bias"][0].item() == bias
+
+
+@pytest.mark.cuda
+@torch.inference_mode()
+def test_q4nx_fp16_split_k_keeps_opposing_partials_in_range():
+    if not requires_nvidia_cuda():
+        pytest.skip("requires NVIDIA CUDA")
+
+    from gptqmodel.exllamav3 import ext
+
+    inputs, outputs, bits = 5120, 2304, 3.5
+    packed = _constant_trellis("q4nx", bits, inputs, outputs)
+    x = torch.zeros((24, inputs), device="cuda", dtype=torch.float16)
+    x[..., :128] = -8000 / math.sqrt(128)
+    x[..., -128:] = -x[..., :128]
+    # Only the two Hadamard DCs survive. They multiply identical integer
+    # codewords, so their opposing, individually out-of-FP16-range partials
+    # sum to exactly zero in every output channel.
+    assert abs(x[0, 0].item() * math.sqrt(128) * 15) > 65520
+    y = torch.empty((24, outputs), device="cuda", dtype=torch.float16)
+    run = ext._runtime_op("bc_linear_exl3_run_configured")
+    path = run(packed["trellis"], packed["suh"], packed["svh"], bits, None, False, False, x, y,
+               False, 0, True, q4nx=True)
+    assert 1 <= path <= 7
+    torch.testing.assert_close(y, torch.zeros_like(y), rtol=0, atol=0)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("codebook", ["q4nx", "mul1"])
+@torch.inference_mode()
+def test_exl3_bf16_adds_fp32_checkpoint_bias_after_row_rescale(codebook, monkeypatch):
+    if not requires_nvidia_cuda():
+        pytest.skip("requires NVIDIA CUDA")
+
+    import gptqmodel.nn_modules.exllamav3 as exl3_bridge
+
+    packed = _constant_trellis(codebook, 2.5, 128, 256)
+    bias = torch.full((129,), 1024.25, dtype=torch.float32, device="cuda")
+    bias[1] = 4e-8
+    packed["bias"] = bias
+    layer = ExllamaV3Linear.from_tensors(in_features=128, out_features=129, name="padded", tensors=packed)
+    x = torch.zeros((2, 2, 128), dtype=torch.bfloat16, device="cuda")
+    x[0, 1, 1] = 2**23
+    x[1, 0, 2] = -(2**20)
+    # The weight is constant in every Hadamard block. Non-DC input
+    # coordinates contribute exactly zero even when their rows are rescaled.
+    expected = bias.double().bfloat16().expand(2, 2, 129)
+    torch.testing.assert_close(layer(x), expected, rtol=0, atol=0)
+    torch.testing.assert_close(layer(x), expected, rtol=0, atol=0)
+    # The warmed prescale returns a flat row-scale vector. The eager
+    # epilogue still needs to preserve a batched input's logical geometry.
+    monkeypatch.setattr(exl3_bridge, "_try_fused_rescale", lambda *args, **kwargs: None)
+    torch.testing.assert_close(layer(x), expected, rtol=0, atol=0)
+    assert layer.state_dict()["bias"].dtype == torch.float32
+    torch.testing.assert_close(layer.state_dict()["bias"], bias, rtol=0, atol=0)
+
+
 @pytest.mark.cpu
 @pytest.mark.parametrize("outputs", [128, 576, 1056])
 @pytest.mark.parametrize("bits,codebook", [(2, "3inst"), (2, "mcg"), (6, "mcg"), (4, "mul1")])
