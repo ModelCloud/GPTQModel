@@ -234,11 +234,14 @@ class AllSparkAwqLinear(AWQuantLinear):
             )
         scales = scales.t().contiguous()
         zeros = zeros.t().contiguous()
-        scale_zeros = zeros * scales
 
         scale_dtype = self.scales.dtype if getattr(self, "scales", None) is not None else self.compute_dtype
         # Reject an unrepresentable storage cast before replacing module state.
         stored_scales = scale_to_storage_dtype(scales, scale_dtype).clone()
+        # The checkpoint decodes with the stored scale, so build the affine
+        # offset from that same grid. Mixing the wider source scale into the
+        # offset shifts the zero point whenever the storage cast rounds (#5605).
+        scale_zeros = zeros.float() * stored_scales.float()
         self.register_buffer("scales", stored_scales)
         if linear.bias is not None:
             # Keep the source width; an FP32 bias must stay FP32 through the
@@ -252,7 +255,7 @@ class AllSparkAwqLinear(AWQuantLinear):
         group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
         intweight = torch.round(
             (weight.t() + scale_zeros.index_select(0, group_index))
-            / self.scales.index_select(0, group_index)
+            / stored_scales.index_select(0, group_index).float()
         ).clamp_(0, self.maxq).to(torch.int32).contiguous()
 
         qweight, qzeros = pack_awq(intweight, zeros.to(torch.int32), self.bits)

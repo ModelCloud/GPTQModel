@@ -423,12 +423,15 @@ class AwqGEMMLinear(AWQuantLinear):
         assert scales is not None and zeros is not None
         scales = scales.t().contiguous()
         zeros = zeros.t().contiguous()
-        scale_zeros = zeros.float() * scales.float()
 
         scale_dtype = scales.dtype if scales.dtype in (torch.float16, torch.bfloat16) else torch.float16
         # Validate the storage cast before replacing any module state: a scale
         # that overflows or underflows here would silently corrupt every code.
         stored_scales = scale_to_storage_dtype(scales, scale_dtype).clone()
+        # The checkpoint decodes with the stored scale, so build the affine
+        # offset from that same grid. Mixing the wider source scale into the
+        # offset shifts the zero point whenever the storage cast rounds (#5605).
+        scale_zeros = zeros.float() * stored_scales.float()
         if linear.bias is not None:
             # The bias is not a quantization operand. Keep the source precision:
             # the forward epilogue adds it in FP32, so narrowing it to the scale
