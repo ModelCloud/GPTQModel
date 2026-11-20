@@ -47,10 +47,24 @@ def test_exl3_auto_branch_delegates_to_the_helper():
 
 
 @pytest.mark.parametrize("device", [DEVICE.ROCM, DEVICE.CUDA, "cuda:1", torch.device("cuda:1")])
-def test_native_exl3_rejects_hip_requests(device, monkeypatch):
+def test_native_exl3_accepts_rdna4_hip_requests(device, monkeypatch):
     monkeypatch.setattr("gptqmodel.models._const.IS_ROCM", True)
+    monkeypatch.setattr(
+        "gptqmodel.exllamav3.ext.exl3_native_hip_gemm_available",
+        lambda _device=None: True,
+    )
     assert ExllamaV3Linear.SUPPORTS_DEVICES == [DEVICE.CUDA]
     assert DEVICE.ALL in ExllamaV3TorchLinear.SUPPORTS_DEVICES
+    ExllamaV3Linear.validate_device(device)
+
+
+@pytest.mark.parametrize("device", [DEVICE.ROCM, DEVICE.CUDA, "cuda:1", torch.device("cuda:1")])
+def test_native_exl3_rejects_hip_without_native_gemm(device, monkeypatch):
+    monkeypatch.setattr("gptqmodel.models._const.IS_ROCM", True)
+    monkeypatch.setattr(
+        "gptqmodel.exllamav3.ext.exl3_native_hip_gemm_available",
+        lambda _device=None: False,
+    )
     with pytest.raises(NotImplementedError, match="EXL3_TORCH"):
         ExllamaV3Linear.validate_device(device)
 
@@ -66,6 +80,10 @@ def test_native_exl3_rejects_hip_before_importing_extension(monkeypatch):
     from types import SimpleNamespace
 
     monkeypatch.setattr("gptqmodel.models._const.IS_ROCM", True)
+    monkeypatch.setattr(
+        "gptqmodel.exllamav3.ext.exl3_native_hip_gemm_available",
+        lambda _device=None: False,
+    )
     module = ExllamaV3Linear(in_features=128, out_features=128, name="test", tensors={})
     module.trellis = SimpleNamespace(device=torch.device("cuda:0"))
     original_import = builtins.__import__

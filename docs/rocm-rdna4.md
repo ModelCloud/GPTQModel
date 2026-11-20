@@ -668,17 +668,20 @@ parity contract and for forced A/B runs (`KernelConfig(bitsandbytes_triton=True)
 
 ### EXL3 on RDNA4 (reconstruct + hipBLAS baseline)
 
-EXL3 exposes two forward paths on ROCm, and they are not the same code:
+EXL3 exposes three forward paths on ROCm:
 
 - `EXL3_TORCH` (`ExllamaV3TorchLinear`, what AUTO selects) decodes the packed
   trellis in portable Torch and runs a hipBLAS matmul. It is the correctness
   reference and the slow path.
-- `LinearEXL3.forward` runs `ext.reconstruct` (dense FP16 weight),
-  `ext.hgemm` (hipBLAS) and the output `ext.had_r_128`. The packed
-  tensor-core GEMM (`bc_linear_exl3_run` / `exl3_gemm`) still has no HIP
-  kernel, so the module never reaches it; the benchmark's `native` backend
-  probes that entry point and skips with
-  `ExLlamaV3 tensor-core GEMM is not available in this build (ROCm/HIP)`.
+- `LinearEXL3.forward` dispatches to the native HIP kernels when they cover
+  the shape: the native GEMV for `bsz <= 8` and the native RDNA4 WMMA GEMM for
+  up to 512 rows with K and N multiples of 128 (`EXL3_EXLLAMA_V3` must be
+  selected explicitly; AUTO still loads `EXL3_TORCH`). Everything else runs
+  `ext.reconstruct` (dense FP16 weight), `ext.hgemm` (hipBLAS) and the output
+  `ext.had_r_128`. See [RDNA4 HIP dispatch](exl3-native-decode.md#rdna4-hip-dispatch).
+- The packed tensor-core entry point (`bc_linear_exl3_run` / `exl3_gemm`)
+  reports `EXL3_HIP_DISPATCH_NATIVE` (93) or `EXL3_HIP_DISPATCH_FALLBACK` (94);
+  the benchmark's `native` backend times it directly.
 
 `tests/kernels/test_exl3_rocm_parity.py` pins both paths against the
 independent bitstream oracle in `tests/test_exllamav3_torch_padding.py`
@@ -730,6 +733,13 @@ path materializes a dense FP16 weight, so these numbers are a
 memory-bandwidth-bound lower bound for a packed native kernel, not a
 packed-kernel measurement.
 
+The native RDNA4 WMMA GEMM now beats that baseline on the GEMM rows: across 60
+2.0 bpw shapes (`m` 16-256, `k` 2048-8192, `n` 2048-16384) it is 1.14x-5.48x
+faster than reconstruct+hgemm (median 2.88x, geomean 2.66x, no regressions),
+and 1.2x-3.9x on a 3.0/4.0 bpw sample. Its maximum relative error against the
+reconstruct oracle is 2.6e-05 for an FP32 destination (4.4e-04 for FP16).
+Decode-sized batches use the native GEMV instead.
+
 Both the parity result and the table were measured with the local
 `#include <cuda_bf16.h>` workaround for the HIP JIT build break tracked in
 #5760. On the unpatched tree the extension cannot build, and the parity module
@@ -738,13 +748,13 @@ synthetic-trellis cases still run).
 
 ## Known limitations
 
-- **EXL3:** the tensor-core GEMM implementation has no ROCm kernel (all entries
-  are `nullptr` and the loader already raises a clear `TORCH_CHECK`). Loading
-  EXL3 on ROCm uses `EXL3_TORCH`; AUTO now does the same instead of selecting
-  `EXL3_EXLLAMA_V3`. The in-module forward (`LinearEXL3.forward`) is
-  reconstruct + hgemm + Hadamard on hipBLAS; `tests/kernels/test_exl3_rocm_parity.py`
-  pins its numerics and `tests/benchmark_exl3_rocm_rdna4.py` records the
-  baseline a native kernel must beat.
+- **EXL3:** the CUDA tensor-core tables are still `nullptr` on ROCm, so
+  `EXL3_EXLLAMA_V3` is opt-in there; AUTO loads `EXL3_TORCH`. On RDNA4
+  (gfx120x) the in-module forward (`LinearEXL3.forward`) reaches the native HIP
+  GEMV and WMMA GEMM, which reconstruct + hgemm internally when the shape is
+  out of range; CDNA and other ROCm targets stay on reconstruct + hgemm.
+  `tests/kernels/test_exl3_rocm_parity.py` pins the numerics and
+  `tests/benchmark_exl3_rocm_rdna4.py` records the baseline.
 - **hipBLASLt:** libraries are shipped but not tuned for RDNA4; rocBLAS
   forwarding to hipBLASLt is disabled by default (`ROCBLAS_USE_HIPBLASLT=0`)
   because it picks a different kernel per process.
