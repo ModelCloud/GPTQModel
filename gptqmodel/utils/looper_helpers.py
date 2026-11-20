@@ -724,6 +724,42 @@ def clone_module_for_devices(
     return clones
 
 
+def bind_processor_masks(processor, mask, padding_mask=None):
+    """Publish the active calibration/padding masks and their derived flags.
+
+    ``mask`` is the calibration row mask every statistic uses; ``padding_mask``
+    is the attention padding alone. The per-sample emptiness and padding-presence
+    flags are derived once here so each forward hook does not synchronize the
+    same batch mask to the host. Routed experts read padding presence from the
+    padding-only mask, because the calibration mask can additionally exclude
+    real attention-sink tokens (#5777).
+    """
+
+    mask_tls = getattr(processor, "_mask_tls", None)
+    if mask_tls is None:
+        mask_tls = threading.local()
+        setattr(processor, "_mask_tls", mask_tls)
+    mask_tls.value = mask
+    mask_tls.padding_value = padding_mask
+    # ``mask`` is [batch, seq] on the execution device. Derive the per-sample
+    # emptiness flags once per batch; every module's forward hook would
+    # otherwise synchronize once per sample.
+    mask_tls.sample_has_tokens = (
+        mask.any(dim=1).tolist()
+        if torch.is_tensor(mask) and mask.ndim == 2
+        else None
+    )
+    # Routed-expert hooks need to know whether this batch contains padding
+    # before they scan a `[routed_rows, H]` activation for all-zero rows.
+    if torch.is_tensor(padding_mask) and padding_mask.ndim == 2:
+        mask_tls.mask_has_padding = not bool(padding_mask.all())
+    elif padding_mask is None and torch.is_tensor(mask):
+        # Only sink tokens are masked; there is no padding to scan for.
+        mask_tls.mask_has_padding = False
+    else:
+        mask_tls.mask_has_padding = None
+
+
 @torch.inference_mode()
 def forward_batch_worker(
     module: torch.nn.Module,
@@ -813,10 +849,7 @@ def forward_batch_worker(
         layer_input=inputs,
     )
 
-    mask_tls = getattr(processor, "_mask_tls", None)
-    if mask_tls is not None:
-        mask_tls.value = calibration_keep_mask
-        mask_tls.padding_value = keep_mask
+    bind_processor_masks(processor, calibration_keep_mask, padding_mask=keep_mask)
 
     module_output = None
     kv_next = None
@@ -828,9 +861,7 @@ def forward_batch_worker(
     except StopForward:
         module_output = None
     finally:
-        if mask_tls is not None:
-            mask_tls.value = None
-            mask_tls.padding_value = None
+        bind_processor_masks(processor, None)
         processor._set_current_batch_index(None)
 
     if (reuse_kv or write_shared_kv_cache) and module_output is not None and isinstance(module_output, tuple) and len(module_output) > 0:
