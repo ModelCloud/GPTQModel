@@ -5,7 +5,9 @@
 The reference and vectorized CPU paths used to cast ``cos``/``sin`` and the
 activation to bf16 inside each of the ``krot`` stages, which is roughly three
 times the error of computing the whole rotation in fp32 and rounding the result
-once.  fp16 keeps the historical per-stage arithmetic.
+once.  fp16 follows the same single-rounding contract (#5634): it has the
+narrower exponent range, so per-stage narrowing could even overflow a partial
+sum whose final value is representable.
 """
 
 import torch
@@ -94,13 +96,24 @@ def test_paro_bf16_reference_and_vectorized_stay_identical():
     torch.testing.assert_close(reference, vectorized, rtol=0, atol=0)
 
 
-def test_paro_fp16_rotation_keeps_per_stage_rounding():
-    """fp16 must keep its historical arithmetic: no silent accuracy change."""
+def test_paro_fp16_rotation_rounds_once():
+    """fp16 must match the fp32 oracle within one rounding (#5634).
+
+    fp16 used to keep the historical per-stage arithmetic; that narrowing both
+    accumulated error and could overflow an intermediate value whose final
+    result is representable, so it now shares the single-rounding contract.
+    """
 
     x, pairs, theta = _rotation_fixture(dtype=torch.float16)
-    expected = _rotate_per_stage(x, pairs, theta, group_size=128)
+    oracle = apply_paro_rotation_reference(
+        x.float(), pairs, theta, group_size=128
+    ).to(torch.float16)
+    per_stage = _rotate_per_stage(x, pairs, theta, group_size=128)
+
+    per_stage_error = (per_stage.float() - oracle.float()).abs().max().item()
+    assert per_stage_error > 0
 
     for rotate in (apply_paro_rotation_reference, apply_paro_rotation_vectorized):
         rotated = rotate(x, pairs, theta, group_size=128)
         assert rotated.dtype == torch.float16
-        torch.testing.assert_close(rotated, expected, rtol=0, atol=0)
+        torch.testing.assert_close(rotated, oracle, rtol=0, atol=0)

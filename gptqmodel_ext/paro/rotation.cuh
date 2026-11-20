@@ -195,6 +195,7 @@ template <typename HalfT, typename Half2T, typename Traits> struct RotateAccessH
 };
 
 struct HalfTraits {
+  using pair_t = __half2;
   __device__ static float2 to_float2(__half2 v) { return __half22float2(v); }
   __device__ static __half2 from_floats(float a, float b) { return __floats2half2_rn(a, b); }
   __device__ static float to_float(__half v) { return __half2float(v); }
@@ -207,6 +208,7 @@ struct HalfTraits {
 template <> struct RotateAccess<__half> : RotateAccessHalf<__half, __half2, HalfTraits> {};
 
 struct BFloat16Traits {
+  using pair_t = __nv_bfloat162;
   __device__ static float2 to_float2(__nv_bfloat162 v) { return __bfloat1622float2(v); }
   __device__ static __nv_bfloat162 from_floats(float a, float b) {
     return __floats2bfloat162_rn(a, b);
@@ -226,24 +228,29 @@ struct BFloat16Traits {
   __device__ static __nv_bfloat16 hmul(__nv_bfloat16 a, __nv_bfloat16 b) { return __hmul(a, b); }
 };
 
-// BF16 inputs/outputs with an FP32 shared workspace.
+// 16-bit inputs/outputs with an FP32 shared workspace.
 //
-// The rotation must round to BF16 once, after the whole Givens sweep: a BF16
-// (or FP16) workspace narrows the running activation after every stage, and
-// the accumulated krot-stage rounding error is several times the single final
-// rounding (#4317).  Every stage accumulates in FP32 here; store_group is the
-// only place that narrows, matching apply_paro_rotation_reference.
-struct RotateAccessBFloat16FloatWorkspace {
+// The rotation must round to BF16/FP16 once, after the whole Givens sweep: a
+// 16-bit workspace narrows the running activation after every stage, and the
+// accumulated krot-stage rounding error is several times the single final
+// rounding (#4317).  FP16 additionally has a narrow exponent range, so a
+// partial sum above 65504 overflows to inf even when the final value is
+// representable (#5634).  Every stage accumulates in FP32 here; store_group is
+// the only place that narrows, matching apply_paro_rotation_reference.
+template <typename scalar_t, typename Traits>
+struct RotateAccess16BitFloatWorkspace {
+  using pair_t = typename Traits::pair_t;
+
   template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE, bool USE_SCALE>
   __device__ static void load_group(float *__restrict__ x_grp,
-                                    const __nv_bfloat16 *__restrict__ x,
-                                    const __nv_bfloat16 *__restrict__ scales, const int64_t s,
+                                    const scalar_t *__restrict__ x,
+                                    const scalar_t *__restrict__ scales, const int64_t s,
                                     const int64_t h, const int j, const int g, const int t) {
     static_assert((ROW_STRIDE % 2) == 0, "ROW_STRIDE must be even for vectorized access");
     const int offset = GROUP_SIZE * g + 2 * t;
     float2 scale_pair;
     if constexpr (USE_SCALE) {
-      scale_pair = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(scales + offset));
+      scale_pair = Traits::to_float2(*reinterpret_cast<const pair_t *>(scales + offset));
     } else {
       scale_pair = make_float2(1.0f, 1.0f);
     }
@@ -251,8 +258,8 @@ struct RotateAccessBFloat16FloatWorkspace {
     for (int i = 0; i < CTA_M; i++) {
       const int64_t row = static_cast<int64_t>(j) * CTA_M + i;
       if (row < s) {
-        float2 x_pair =
-            __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(x + row * h + offset));
+        const float2 x_pair =
+            Traits::to_float2(*reinterpret_cast<const pair_t *>(x + row * h + offset));
         x_grp[(2 * t) * ROW_STRIDE + i] = x_pair.x * scale_pair.x;
         x_grp[(2 * t + 1) * ROW_STRIDE + i] = x_pair.y * scale_pair.y;
       }
@@ -262,11 +269,11 @@ struct RotateAccessBFloat16FloatWorkspace {
   template <int KROT, int GROUP_SIZE>
   __device__ static void load_coeffs(float reg_theta[KROT], int reg_idx[KROT],
                                      const int16_t *__restrict__ idx_ij,
-                                     const __nv_bfloat16 *__restrict__ theta, const int64_t h,
+                                     const scalar_t *__restrict__ theta, const int64_t h,
                                      const int g, const int t) {
 #pragma unroll
     for (int r = 0; r < KROT; r++) {
-      reg_theta[r] = BFloat16Traits::to_float(theta[r * h / 2 + g * GROUP_SIZE / 2 + t]);
+      reg_theta[r] = Traits::to_float(theta[r * h / 2 + g * GROUP_SIZE / 2 + t]);
       reg_idx[r] = *reinterpret_cast<const int *>(idx_ij + r * h + g * GROUP_SIZE + 2 * t);
     }
   }
@@ -300,7 +307,7 @@ struct RotateAccessBFloat16FloatWorkspace {
   }
 
   template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE>
-  __device__ static void store_group(__nv_bfloat16 *__restrict__ out,
+  __device__ static void store_group(scalar_t *__restrict__ out,
                                      const float *__restrict__ x_grp, const int64_t s,
                                      const int64_t h,
                                      const int j, const int g, const int t) {
@@ -310,10 +317,14 @@ struct RotateAccessBFloat16FloatWorkspace {
     for (int i = 0; i < CTA_M; i++) {
       const int64_t row = static_cast<int64_t>(j) * CTA_M + i;
       if (row < s) {
-        *reinterpret_cast<__nv_bfloat162 *>(out + row * h + base) =
-            __floats2bfloat162_rn(x_grp[(2 * t) * ROW_STRIDE + i],
-                                  x_grp[(2 * t + 1) * ROW_STRIDE + i]);
+        *reinterpret_cast<pair_t *>(out + row * h + base) =
+            Traits::from_floats(x_grp[(2 * t) * ROW_STRIDE + i],
+                                x_grp[(2 * t + 1) * ROW_STRIDE + i]);
       }
     }
   }
 };
+
+using RotateAccessBFloat16FloatWorkspace =
+    RotateAccess16BitFloatWorkspace<__nv_bfloat16, BFloat16Traits>;
+using RotateAccessHalfFloatWorkspace = RotateAccess16BitFloatWorkspace<__half, HalfTraits>;
