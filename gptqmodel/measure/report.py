@@ -5,6 +5,7 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional
 
+from ..utils.logger import render_table
 from .config import MetricGrades
 
 
@@ -83,17 +84,45 @@ class MeasurementReport:
         if self.batches or self.positions:
             lines.append("")
             lines.append(f"measured on {self.batches} batch(es), {self.positions} position(s)")
-        verdict = {
-            None: "no thresholds configured",
-            MetricGrades.PASS: "pass",
-            MetricGrades.WARN: "warn",
-            MetricGrades.FAIL: "fail",
-        }[self.overall]
-        lines.append(f"result: {verdict}")
+        lines.append(f"result: {_verdict(self.overall)}")
+        return "\n".join(lines)
+
+    def render(self, logger: Any = None) -> str:
+        """A fixed-column table for a terminal or a TUI.
+
+        ``markdown()`` is the form to paste into a PR; this is what ``print(report)``
+        and ``str(report)`` show. ``render_table`` sizes the columns through
+        LogBar, so values line up whatever their width.
+        """
+
+        has_reference = bool(self.reference)
+        headers = ["metric", "value", "reference", "grade"] if has_reference else ["metric", "value", "grade"]
+        rows = []
+
+        for name, value in self.values.items():
+            grade = _grade(self.grades.get(name))
+            if isinstance(value, dict):
+                for width, width_value in value.items():
+                    row = [f"{name}@{width}", _format(width_value)]
+                    if has_reference:
+                        row.append("-")
+                    rows.append(row + [grade])
+                continue
+            row = [name, _format(value)]
+            if has_reference:
+                reference = self.reference.get(name)
+                row.append(_format(reference) if reference is not None else "-")
+            rows.append(row + [grade])
+
+        lines = [render_table(rows, headers=headers, tablefmt="simple", logger=logger)]
+        if self.batches or self.positions:
+            lines.append("")
+            lines.append(f"measured on {self.batches} batch(es), {self.positions} position(s)")
+        lines.append(f"result: {_verdict(self.overall)}")
         return "\n".join(lines)
 
     def __str__(self) -> str:
-        return self.markdown()
+        return self.render()
 
 
 def _format(value: Any) -> str:
@@ -104,3 +133,12 @@ def _format(value: Any) -> str:
 
 def _grade(grade: Optional[MetricGrades]) -> str:
     return "-" if grade is None else grade.value
+
+
+def _verdict(grade: Optional[MetricGrades]) -> str:
+    return {
+        None: "no thresholds configured",
+        MetricGrades.PASS: "pass",
+        MetricGrades.WARN: "warn",
+        MetricGrades.FAIL: "fail",
+    }[grade]

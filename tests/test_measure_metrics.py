@@ -12,6 +12,8 @@ then the behaviours each metric exists for:
 - grades are evaluated in order, so a value can satisfy only one.
 """
 
+import re
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -246,3 +248,49 @@ def test_report_without_grades_is_not_a_pass():
     assert report.overall is None
     assert report.passed is None
     assert "no thresholds configured" in report.markdown()
+    assert "no thresholds configured" in str(report)
+    assert "|" not in str(report)
+
+
+def test_str_renders_aligned_logbar_columns():
+    report = MeasurementReport(
+        values={"PPL": 22.85, "KLD": 0.1183, "RMSE": 0.6487, "TOP_N": {1: 0.8242, 5: 0.8352}},
+        grades={"KLD": MetricGrades.WARN, "TOP_N": MetricGrades.FAIL},
+        reference={"PPL": 22.22},
+        batches=4,
+        positions=64,
+    )
+
+    rendered = str(report)
+    assert rendered == report.render()
+    assert "|" not in rendered
+    assert "measured on 4 batch(es), 64 position(s)" in rendered
+    assert rendered.splitlines()[-1] == "result: fail"
+
+    table = rendered.split("\n\n")[0].splitlines()
+    assert table[0].split() == ["metric", "value", "reference", "grade"]
+    # Every cell starts at the same offset on every line, header through last row.
+    starts = [[match.start() for match in re.finditer(r"\S+", line)] for line in table]
+    assert all(row == starts[0] for row in starts)
+    assert [re.split(r" {2,}", line.strip()) for line in table[2:]] == [
+        ["PPL", "22.85", "22.22", "-"],
+        ["KLD", "0.1183", "-", "WARN"],
+        ["RMSE", "0.6487", "-", "-"],
+        ["TOP_N@1", "0.8242", "-", "FAIL"],
+        ["TOP_N@5", "0.8352", "-", "FAIL"],
+    ]
+
+
+def test_markdown_stays_a_github_table():
+    report = MeasurementReport(
+        values={"PPL": 22.85, "TOP_N": {1: 0.8242}},
+        grades={"TOP_N": MetricGrades.FAIL},
+        reference={"PPL": 22.22},
+    )
+
+    markdown = report.markdown().splitlines()
+    assert markdown[0] == "| metric | value | reference | grade |"
+    assert markdown[1] == "| --- | --- | --- | --- |"
+    assert markdown[2] == "| PPL | 22.85 | 22.22 | - |"
+    assert markdown[3] == "| TOP_N@1 | 0.8242 | - | FAIL |"
+    assert markdown[-1] == "result: fail"

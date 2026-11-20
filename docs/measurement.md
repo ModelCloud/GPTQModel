@@ -37,9 +37,27 @@ report = quantized.measure(MeasureConfig(
     max_batches=4,
 ))
 
-print(report.markdown())
+print(report)              # aligned columns for a terminal or TUI
+print(report.markdown())   # GitHub table for docs and PRs
 print(report.overall, report.passed)
 ```
+
+```console
+metric   value   reference  grade
+-------  ------  ---------  -----
+PPL      22.85   22.22      -
+KLD      0.1183  -          WARN
+RMSE     0.6487  -          -
+TOP_N@1  0.8242  -          FAIL
+TOP_N@5  0.8352  -          FAIL
+
+measured on 4 batch(es), 64 position(s)
+result: fail
+```
+
+`str(report)` renders through LogBar (`gptqmodel.utils.logger.render_table`), so
+the columns are sized to their content and line up in a CLI or TUI. For a
+GitHub-rendered table - docs, a PR comment - use `report.markdown()`:
 
 ```console
 | metric | value | reference | grade |
