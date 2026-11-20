@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 name: gptqmodel-agent-workflow
-description: Use when starting or delegating a GPT-QModel task, opening a draft PR, or following it through readiness, CI, and review.
+description: Use when starting or delegating GPT-QModel work, submitting fixes or features upstream, or following a PR through readiness, CI, and review.
 ---
 
 # Agent workspaces and pull requests
@@ -20,6 +20,34 @@ the task and remote URL, not a parent checkout, local branch or linked
 worktree. Reuse a parent workspace only on explicit instruction, not merely
 because work was delegated. For issue work, also follow the
 [claim workflow](../gptqmodel-issue-claims/SKILL.md#workflow).
+
+## Contribute fixes and features upstream
+
+Submit every validated bug fix as a PR to the repository that owns the faulty
+behavior. Send GPT-QModel fixes to `ModelCloud/GPTQModel` even when you find the
+bug in a fork or downstream integration. New features are welcome as upstream
+PRs too. Use these as likely owners, then trace the call and check where the
+contract is implemented. A caller that misuses a dependency API owns that
+integration bug.
+
+| Behavior | Likely upstream repository |
+| --- | --- |
+| GPT-QModel's quantization, packing, loading, kernel dispatch, or other project behavior | [ModelCloud/GPTQModel](https://github.com/ModelCloud/GPTQModel) |
+| Tokenizer loading, normalization, or template compatibility | [ModelCloud/Tokenicer](https://github.com/ModelCloud/Tokenicer). Follow the [tokenizer skill](../gptqmodel-tokenizer-normalization/SKILL.md). |
+| Defusing model structures for use by the quantization pipeline | [ModelCloud/Defuser](https://github.com/ModelCloud/Defuser) |
+| Logger or progress API behavior | [ModelCloud/LogBar](https://github.com/ModelCloud/LogBar) |
+| Device discovery, properties, or SMI queries | [ModelCloud/Device-SMI](https://github.com/ModelCloud/Device-SMI) |
+
+Use a task branch in the owning repository and follow its contribution rules.
+Add a focused regression that reproduces the bug and validates the fix there.
+Use the same ownership check for features and test the new public behavior.
+If an upstream fix already exists, link it. If you are blocked from submitting
+a fix, file or link the upstream issue with the reproduction and report the
+blocker.
+
+For any required GPT-QModel integration, link the owning PR, consume the
+upstream release when it is available, and verify the affected GPT-QModel entry
+point. Keep reusable logic in the owning library.
 
 ## Open a draft, then mark it ready
 

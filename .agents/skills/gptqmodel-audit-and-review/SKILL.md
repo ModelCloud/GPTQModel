@@ -31,6 +31,11 @@ report of the same defect and link it if one exists. Continue the audit after
 filing each issue. Add further reproduction or fix evidence to the issue as it
 becomes available.
 
+For a dependency-owned defect, also file or link the upstream issue and link the
+fix PR when available. Use the
+[upstream ownership guide](../gptqmodel-agent-workflow/SKILL.md#contribute-fixes-and-features-upstream)
+to route the fix. Keep the GPT-QModel issue focused on its downstream impact.
+
 Include the audited commit, the affected code and entry point, the trigger,
 the expected and observed behavior, and the user impact. For numerical bugs,
 include relevant backend, device architecture, format, dtype, and shape, plus
