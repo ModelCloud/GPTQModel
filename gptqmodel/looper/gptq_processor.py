@@ -402,7 +402,12 @@ class GPTQProcessor(LoopProcessor):
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
             tmp.fallback = qcfg_clone.fallback
-            tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
+
+        # Percentage fallback thresholds resolve against the calibration token
+        # count for every selector. GPTAQ and FOEM inherited the GPTQ default
+        # ``None`` here, so ``"50%"`` was resolved against a base of one and a
+        # sparsely routed expert never fell back (#5755).
+        tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
         tmp.quantizer.configure(
             perchannel=True,
