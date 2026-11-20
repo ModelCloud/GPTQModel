@@ -1083,9 +1083,23 @@ class QQQTorchLinear(QQQLinear):
             return True
 
     def materialize_checkpoint_layout_for_export(self) -> bool:
-        """Publish the dropped checkpoint buffers so an export can see them."""
+        """Publish the dropped checkpoint buffers so an export can see them.
 
-        return self._materialize_dropped_checkpoint()
+        The packed cache is released in the same critical section. The rebuilt
+        checkpoint buffers hold the exact same weight, so keeping both would
+        leave two full copies resident after a save; the refreshed cache key
+        would then make the next forward take the cache hit and never run the
+        rebuild-and-verify drop (#5804). The next native forward rebuilds the
+        packed terms and ``_maybe_drop_checkpoint_tensors()`` drops the
+        checkpoint buffers again only after proving the inverse exact.
+        """
+
+        with self._cpu_transform_lock:
+            materialized = self._materialize_dropped_checkpoint()
+            if materialized:
+                self._torch_packed_cache = None
+                self._torch_packed_cache_key = None
+            return materialized
 
     def _maybe_drop_checkpoint_tensors(self) -> bool:
         """Release the checkpoint copy once the cache proves it is rebuildable.
