@@ -125,6 +125,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Kernel input contiguity and launch contracts](kernel-input-contiguity.md)
 - [Kernel compile and graph-capture matrix](kernel-compile-matrix.md)
 - [Low-precision bias epilogues](low-precision-bias-epilogue.md)
+- [GPTQ Marlin asymmetric zero points: kU4/kU8 selection and layout](gptq-marlin-asymmetric-selection.md)
 - [Marlin bias epilogue and storage](marlin-bias-epilogue.md)
 - [Marlin hybrid work schedule](marlin-hybrid-schedule.md)
 - [Machete asymmetric zero points: one dtype, one rounding step](machete-asymmetric-zero-point.md)
