@@ -287,7 +287,8 @@ def _pack_shifts(bits: int, pack_factor: int) -> t.Tensor:
     return (t.arange(pack_factor, dtype=t.int32) * bits).view(1, pack_factor, 1)
 
 
-@t.inference_mode()
+@t.no_grad()
+@t.inference_mode(False)
 def _pack_codes_to_words(
         codes: t.Tensor,
         pack_factor: int,
@@ -313,7 +314,8 @@ def _pack_codes_to_words(
     return packed
 
 
-@t.inference_mode()
+@t.no_grad()
+@t.inference_mode(False)
 def _pack_rows_3(codes: t.Tensor) -> t.Tensor:
     """Pack every 32-input group of ``codes`` with the 10 | 1 | 10 | 1 | 10 scheme.
 
@@ -344,7 +346,8 @@ def _pack_rows_3(codes: t.Tensor) -> t.Tensor:
     return t.stack((A, B, C), dim=1).reshape(groups * 3, cols)
 
 
-@t.inference_mode()
+@t.no_grad()
+@t.inference_mode(False)
 def _pack_code_cols_2_4_8(values: t.Tensor, bits: int, pack_factor: int) -> t.Tensor:
     """Pack codes stored along the last dimension into 2/4/8-bit words.
 
@@ -358,7 +361,8 @@ def _pack_code_cols_2_4_8(values: t.Tensor, bits: int, pack_factor: int) -> t.Te
     return (viewed << shifts).sum(dim=2, dtype=t.int32)
 
 
-@t.inference_mode()
+@t.no_grad()
+@t.inference_mode(False)
 def _pack_code_cols_3(values: t.Tensor) -> t.Tensor:
     """Pack 3-bit codes stored along the last dimension (10 | 1 | 10 | 1 | 10)."""
     rows, count = values.shape
@@ -1949,6 +1953,13 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         # ``_load_from_state_dict`` convert them a second time.
         marker = self._buffers.get(QZEROS_FORMAT_BUFFER)
         if isinstance(marker, t.Tensor) and marker.numel() == 1:
+            if marker.is_inference():
+                # A module built inside ``torch.inference_mode()`` owns an
+                # inference marker. Replace it with a normal tensor so packing
+                # can keep the persistent checkpoint marker in sync (#5814).
+                with t.inference_mode(False):
+                    marker = marker.clone()
+                self.register_buffer(QZEROS_FORMAT_BUFFER, marker)
             marker.fill_(format)
         return self._qzeros_format
 
@@ -2503,7 +2514,8 @@ class PackableQuantLinear(GPTQQuantLinear):
     ):
         self.pack_block(linear, scales, zeros, g_idx, block_in, workers)
 
-    @t.inference_mode()
+    @t.no_grad()
+    @t.inference_mode(False)
     def pack_block(
             self,
             linear: nn.Module,
@@ -2768,7 +2780,8 @@ class PackableQuantLinear(GPTQQuantLinear):
         # words under the constructor's v1 label (issue #4167).
         self.qzero_format(format=2)
 
-    @t.inference_mode()
+    @t.no_grad()
+    @t.inference_mode(False)
     def pack_gpu(
         self,
         linear: nn.Module,
@@ -2970,6 +2983,8 @@ class PackableQuantLinear(GPTQQuantLinear):
 
         del weight, scales_dev, zeros_dev, scale_zeros_dev, qweight_dev, qzeros_dev
 
+    @t.no_grad()
+    @t.inference_mode(False)
     def pack_original(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
         with threadpool_limits(limits=1):
             # TODO why did we need to clone? at packing, the original weight is no longer used by other processors?
