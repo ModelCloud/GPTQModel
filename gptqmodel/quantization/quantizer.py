@@ -5,6 +5,8 @@
 
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -65,6 +67,27 @@ def _replace_zero_scale(
     undefined_zero = zero_mask & ~torch.isfinite(zero)
     safe_zero = torch.where(undefined_zero, torch.zeros_like(zero), zero)
     return safe_scale, safe_zero
+
+
+def narrowing_loses_codes(weight_dtype: torch.dtype, bits: int, sym: bool) -> bool:
+    """Whether narrowing a reconstruction to ``weight_dtype`` can move a code.
+
+    Packing does not receive the quantizer's integer codes: it recovers them
+    from ``Q = (q - zero) * scale`` with ``round(Q / scale) + zero``. Casting
+    ``Q`` to ``weight_dtype`` moves it by at most half an ULP, which is at
+    most ``max_code * 2**-mantissa_bits`` code steps for the largest code.
+    Once that exceeds half a step the recovered code can land on its
+    neighbour. BF16's 8-bit mantissa is too narrow for 8-bit asymmetric codes
+    (``max_code = 255``), while 8-bit symmetric (``128``) and every narrower
+    bit width still round-trip (#5721).
+    """
+
+    if not weight_dtype.is_floating_point or weight_dtype == torch.float32:
+        return False
+    # ``eps`` is ``2**-(mantissa_bits - 1)`` for every IEEE-like float.
+    mantissa_bits = 1 - int(round(math.log2(torch.finfo(weight_dtype).eps)))
+    max_code = (1 << bits) - 1 if not sym else (1 << (bits - 1))
+    return max_code > (1 << (mantissa_bits - 1))
 
 
 def _neutralize_dead_columns(
