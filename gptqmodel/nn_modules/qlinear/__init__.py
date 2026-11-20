@@ -2290,6 +2290,31 @@ class PackableQuantLinear(GPTQQuantLinear):
             return self.qweight.device
         raise RuntimeError(f"{self.__class__.__name__} cannot initialize wf buffers without qweight or g_idx.")
 
+    def _has_packed_operands(self) -> bool:
+        """Whether ``qweight``/``g_idx`` exist, even as meta offload placeholders."""
+
+        return getattr(self, "qweight", None) is not None or getattr(self, "g_idx", None) is not None
+
+    def _detach_wf_unsqueeze_buffers(self) -> dict:
+        """Take the shift tables out of ``_buffers`` before ``_apply`` runs.
+
+        ``_apply`` rewrites every buffer through ``fn``, so a device move, a
+        dtype cast, or ``to_empty`` would otherwise decide their storage. They
+        are derived metadata, not checkpoint state, so ``_apply`` reattaches or
+        rebuilds them from the operands' final state instead.
+        """
+
+        detached = {}
+        for name in ("wf_unsqueeze_zero", "wf_unsqueeze_neg_one"):
+            tensor = self._buffers.pop(name, None)
+            if tensor is not None:
+                detached[name] = tensor
+        return detached
+
+    def _attach_wf_unsqueeze_buffers(self, buffers: dict) -> None:
+        for name, tensor in buffers.items():
+            self.register_buffer(name, tensor, persistent=False)
+
     def _init_wf_unsqueeze_buffers(self):
         if not self.enable_wf_unsqueeze:
             return
@@ -2336,19 +2361,28 @@ class PackableQuantLinear(GPTQQuantLinear):
             self.wf_unsqueeze_neg_one = wf_neg_one
 
     def _apply(self, fn, recurse=True):
-        result = super()._apply(fn, recurse=recurse)
-        if self.enable_wf_unsqueeze:
-            # ``wf_unsqueeze_*`` are non-persistent shift tables derived from
-            # ``bits``/``pack_dtype``. ``to_empty`` materializes every buffer
-            # from uninitialized storage and a device move relocates it, so
-            # rebuild the tables for the operands ``fn`` just produced.
-            self._buffers.pop("wf_unsqueeze_zero", None)
-            self._buffers.pop("wf_unsqueeze_neg_one", None)
-            if not getattr(self, "planar", False) and (
-                getattr(self, "qweight", None) is not None
-                or getattr(self, "g_idx", None) is not None
-            ):
+        # ``wf_unsqueeze_*`` are non-persistent shift tables derived from
+        # ``bits``/``pack_dtype``. Detach them before ``fn`` runs so a device
+        # move cannot relocate them and ``to_empty`` cannot materialize them
+        # from uninitialized storage, then rebuild them for the operands
+        # ``fn`` just produced.
+        detached = self._detach_wf_unsqueeze_buffers() if self.enable_wf_unsqueeze else {}
+        try:
+            result = super()._apply(fn, recurse=recurse)
+        except Exception:
+            self._attach_wf_unsqueeze_buffers(detached)
+            raise
+        if self.enable_wf_unsqueeze and not getattr(self, "planar", False):
+            if self._has_packed_operands() and self._wf_device().type != "meta":
                 self._init_wf_unsqueeze_buffers()
+            else:
+                # A disk offload replaces the packed leaves with meta
+                # placeholders (#5788). Accelerate records the buffer names
+                # when it attaches its hook and looks them up when detaching,
+                # so keep the last live tables instead of rebuilding them from
+                # the placeholder device; the decode path rebuilds them once
+                # the operands are materialized.
+                self._attach_wf_unsqueeze_buffers(detached)
         return result
 
     def post_init(self, **kwargs):
