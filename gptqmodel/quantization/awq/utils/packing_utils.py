@@ -10,6 +10,8 @@ import threading
 import torch
 import transformers
 
+from ....utils.torch import dynamo_is_compiling
+
 
 AWQ_ORDER = [0, 2, 4, 6, 1, 3, 5, 7]
 AWQ_REVERSE_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
@@ -284,7 +286,7 @@ def _awq_shifts(device: torch.device, bits: int) -> torch.Tensor:
     cached = _AWQ_SHIFTS_CACHE.get(key)
     if cached is not None:
         return cached
-    if torch.compiler.is_compiling():
+    if dynamo_is_compiling():
         # A traced graph cannot enter the Python lock. The value is a pure
         # function of device/bits, so derive it without publishing (a state
         # write); the eager warmup caches the same tensor for later calls.

@@ -53,14 +53,16 @@ quality = [
     "ruff==0.14.2",
     # "isort==6.0.1",
 ]
-# Engine extras carry their own torch/transformers pins; use a dedicated environment.
+# An engine extra may only advertise a release range whose published
+# Torch/Transformers pins intersect requirements.txt on that interpreter,
+# because one environment has to hold both. vLLM 0.30.0 is the newest release
+# whose torch==2.13.0 / transformers>=5.10.4 pins fit the 3.10 floors; 0.31.0
+# pins transformers<5.18.0, and 0.32.0+ needs Python >=3.11 with torch
+# 2.13/2.14, outside the 3.11+ floors. SGLang 0.5.15-0.5.23 pin transformers
+# exactly (5.12.1 or 5.19.0), below every core floor, so no SGLang extra is
+# published until upstream catches up. See docs/engine-extras.md.
 vllm = [
-    "vllm>=0.31.0; python_version < \"3.11\"",
-    "vllm>=0.32.0; python_version >= \"3.11\" and python_version < \"3.15\"",
-]
-sglang = [
-    "sglang[srt]>=0.5.21; python_version < \"3.11\"",
-    "sglang[srt]>=0.5.22; python_version >= \"3.11\"",
+    "vllm>=0.30.0,<0.31; python_version < \"3.11\"",
 ]
 bitblas = [
     "bitblas==0.1.0.post1",

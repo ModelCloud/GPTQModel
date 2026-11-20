@@ -19,6 +19,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.qqq import qqq_gemm, qqq_runtime_available, qqq_runtime_error
 from ...utils.rocm import IS_ROCM
+from ...utils.torch import dynamo_is_compiling
 from ._compile_support import COMPILE_LEVEL
 from ._runtime_cache import tensor_cache_key
 
@@ -629,7 +630,7 @@ class QQQLinear(GroupedQuantLinear):
     def dynamic_quant(self, x: torch.Tensor):
         if (x.device.type == "cuda" and x.is_contiguous() and 0 < x.shape[-1] <= 32768
                 and x.dtype in QQQ_ACTIVATION_DTYPES
-                and not torch.compiler.is_compiling()):
+                and not dynamo_is_compiling()):
             quantizer = _qqq_gpu_quantizer()
             if quantizer is not None:
                 return quantizer(x)
@@ -1144,7 +1145,7 @@ class QQQTorchLinear(QQQLinear):
             or self.in_features > INT8_INT32_MAX_REDUCTION
         ):
             return None
-        if torch.compiler.is_compiling():
+        if dynamo_is_compiling():
             # ``_qqq_cpu_kernel()`` resolves the extension through
             # ``importlib`` (a dynamo-skipped call) and
             # ``_packed_weight_for_cpu()`` takes the transform lock and may drop

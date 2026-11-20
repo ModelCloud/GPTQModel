@@ -4,6 +4,7 @@
 import torch
 
 from ...utils.rocm import IS_ROCM
+from ...utils.torch import dynamo_is_compiling
 
 
 # cuBLAS accumulates float16/bfloat16 GEMMs in the operand dtype once the
@@ -91,7 +92,7 @@ class _CudaWideMatmul(torch.autograd.Function):
         flat_x = x.reshape(-1, x.shape[-1])
         if bias is None:
             output = torch.mm(flat_x, weight, out_dtype=torch.float32)
-        elif torch.compiler.is_compiling():
+        elif dynamo_is_compiling():
             # Inductor cannot lower `addmm(..., out_dtype=...)` (torch 2.15
             # raises `tuned_addmm() takes 3 positional arguments but 4 were
             # given`), which breaks a compiled static-cache decode. Keep the
@@ -191,7 +192,7 @@ def matmul_fp32_reduce(
         flat_x = x.reshape(-1, x.shape[-1])
         if bias is not None and (bias.dim() == 1 or bias.shape == shape):
             flat_bias = bias if bias.dim() == 1 else bias.reshape(-1, weight.shape[-1])
-            if torch.compiler.is_compiling():
+            if dynamo_is_compiling():
                 # Inductor (torch 2.15) cannot lower `addmm` with `out_dtype`.
                 # The eager `addmm` branch is left unchanged so its rounding
                 # stays bitwise identical to the pre-fix path; the compiled
@@ -315,7 +316,7 @@ def bias_narrows_losslessly(bias: torch.Tensor, dtype: torch.dtype) -> bool:
     # Dynamo also cannot trace its data-dependent Python boolean. Choose the
     # safe wide epilogue in either mode. The graph still reads the live bias
     # tensor on every replay, including writes made through `.data`.
-    if torch.compiler.is_compiling():
+    if dynamo_is_compiling():
         return False
     if bias.device.type == "cuda" and torch.cuda.is_current_stream_capturing():
         return False

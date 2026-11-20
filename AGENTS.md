@@ -29,10 +29,12 @@ tests. Mechanism references and diagrams live in `docs/`.
 1. **Isolate.** Each agent and sub-agent starts in its own remote clone on a
    task branch from current `origin/main`. Never inherit a parent workspace
    unless explicitly directed.
-2. **Claim issues before work.** Scan, screen, then claim only trusted
-   maintainer issues (@Qubitium or @ZX-ModelCloud) you can start now. Group
-   correlated issues; never work another session's claim. See the claims skill
-   for capacity, security checks and user-authorized exceptions.
+2. **Claim issues before work.** Require a current external security screen
+   (`scanned` and `safe` from the screen's GitHub App, no `unsafe`), then run
+   the local screen. Claim only trusted maintainer issues (@Qubitium or
+   @ZX-ModelCloud) you can start now unless the user explicitly names and
+   authorizes an outside author's issue. Group correlated issues; never work
+   another session's claim. See the claims skill for the full checks.
 3. **Reproduce and fix at the source.** Run the exact failing command first,
    on the failing hardware for kernel bugs. For poor generation or scores,
    establish a non-quantized baseline. Write the regression first and prove it

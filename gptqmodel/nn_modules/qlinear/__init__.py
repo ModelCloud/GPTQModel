@@ -33,8 +33,10 @@ from ...utils.planar_packing import (
     planar_unpack_rows,
 )
 from ...utils.safe import threadpool_limits
+from ...utils.torch import dynamo_is_compiling
 from ..compiled_state import compiled_module_getstate
 from ._compile_support import COMPILE_LEVEL
+from ._decode_dtype import decode_dtype_for_scales
 from ._fused_train_state import QZEROS_FORMAT_BUFFER, _materialize_snapshot_entry
 from ._runtime_cache import tensor_cache_key
 
@@ -2265,7 +2267,7 @@ class PackableQuantLinear(GPTQQuantLinear):
         """
         cached = getattr(self, "_ret_idx_identity", None)
         if cached is not None:
-            if t.compiler.is_compiling():
+            if dynamo_is_compiling():
                 return cached
             if getattr(self, "_ret_idx_key", None) == tensor_cache_key(self.g_idx):
                 return cached
@@ -2333,6 +2335,22 @@ class PackableQuantLinear(GPTQQuantLinear):
         else:
             self.wf_unsqueeze_neg_one = wf_neg_one
 
+    def _apply(self, fn, recurse=True):
+        result = super()._apply(fn, recurse=recurse)
+        if self.enable_wf_unsqueeze:
+            # ``wf_unsqueeze_*`` are non-persistent shift tables derived from
+            # ``bits``/``pack_dtype``. ``to_empty`` materializes every buffer
+            # from uninitialized storage and a device move relocates it, so
+            # rebuild the tables for the operands ``fn`` just produced.
+            self._buffers.pop("wf_unsqueeze_zero", None)
+            self._buffers.pop("wf_unsqueeze_neg_one", None)
+            if not getattr(self, "planar", False) and (
+                getattr(self, "qweight", None) is not None
+                or getattr(self, "g_idx", None) is not None
+            ):
+                self._init_wf_unsqueeze_buffers()
+        return result
+
     def post_init(self, **kwargs):
         self._init_wf_unsqueeze_buffers()
         super().post_init(**kwargs)
@@ -2389,11 +2407,11 @@ class PackableQuantLinear(GPTQQuantLinear):
             dim=2,
         ).reshape(self.scales.shape)
 
-    def dequantize_weight(self, num_itr: int = 1):
+    def dequantize_weight(self, num_itr: int = 1, dtype: t.dtype | None = None):
         zeros = self.unpack_zero_points()
         if self.planar:
             weight = planar_unpack_rows(self.qweight, self.bits)
-            return self._dequantize_from_codes(weight, zeros, num_itr=num_itr)
+            return self._dequantize_from_codes(weight, zeros, num_itr=num_itr, dtype=dtype)
 
         wf_neg_one = getattr(self, "wf_unsqueeze_neg_one", None)
         if wf_neg_one is None:
@@ -2425,16 +2443,33 @@ class PackableQuantLinear(GPTQQuantLinear):
             )
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
 
-        return self._dequantize_from_codes(weight, zeros, num_itr=num_itr)
+        return self._dequantize_from_codes(weight, zeros, num_itr=num_itr, dtype=dtype)
 
-    def _dequantize_from_codes(self, weight: t.Tensor, zeros: t.Tensor, num_itr: int = 1):
+    def _dequantize_from_codes(
+        self,
+        weight: t.Tensor,
+        zeros: t.Tensor,
+        num_itr: int = 1,
+        dtype: t.dtype | None = None,
+    ):
         # Packed words may contain zero-filled tail codes when an embedding
         # vocabulary is not divisible by the packing width. The runtime
         # embedding contract remains the original vocabulary size.
         if weight.shape[0] > self.in_features:
             weight = weight[:self.in_features]
+        # Decode in a dtype that holds every decoded weight: a half-precision
+        # scale can overflow before the caller widens the result (#5577). The
+        # narrow path is unchanged when the stored scales already fit.
+        if dtype is None:
+            dtype = decode_dtype_for_scales(self.scales, self.bits)
+        wide = dtype != self.scales.dtype
+        scales = self.scales.to(dtype) if wide else self.scales
+        if wide:
+            zeros = zeros.to(dtype)
         if num_itr == 1:
-            weights = self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])
+            idx = self.g_idx.long()
+            weight_i = weight.to(dtype) if wide else weight
+            weights = scales[idx] * (weight_i - zeros[idx])
         else:
             num_dim = self.g_idx.shape[0] // num_itr
             out_dim = weight.shape[1] // num_itr
@@ -2445,8 +2480,10 @@ class PackableQuantLinear(GPTQQuantLinear):
                 col_start = i * out_dim
                 col_end = (i + 1) * out_dim if i < (num_itr - 1) else weight.shape[1]
 
-                scale_i = self.scales[:, col_start:col_end]
+                scale_i = scales[:, col_start:col_end]
                 weight_i = weight[row_start:row_end, col_start:col_end]
+                if wide:
+                    weight_i = weight_i.to(dtype)
                 zeros_i = zeros[:, col_start:col_end]
                 g_idx_i = self.g_idx[row_start:row_end].long()
                 weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))

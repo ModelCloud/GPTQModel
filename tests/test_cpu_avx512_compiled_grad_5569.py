@@ -5,35 +5,26 @@
 
 #5499 gave the CPU int4pack forwards a differentiable branch for grad-requiring
 calls after the fused inference warm-up, but the two AVX512 kernels were left
-out (#5569):
+out (#5569). ``TorchCpuAvx512AwqLinear`` never consulted the autograd need in
+its compile branch, so a traced grad forward took the ``@torch.no_grad`` fused
+op and returned a detached tensor. (The GPTQ half, ``TorchCpuAvx512Linear``,
+was fixed by the ``_runtime_dense_weight_is_checkpoint_order`` contract that
+main gained afterwards; the nodes below keep it covered.)
 
-* ``TorchCpuAvx512Linear`` inherits ``TorchAtenLinear.forward``, whose compile
-  branch decoded the live ATen int4pack layout directly. The AVX512 transform
-  builds the HF int4 tile layout instead, so that decoder raised
-  ``RuntimeError: ... has no verified CPU int4pack block size`` even though the
-  inference forward had run.
-* ``TorchCpuAvx512AwqLinear`` never consulted the autograd need in its compile
-  branch, so a traced grad forward took the ``@torch.no_grad`` fused op and
-  returned a detached tensor.
-
-The compile branch now asks the module for its dense operands through
-``_runtime_dense_operands()``. The first node exercises that contract on the
-ATen int4pack kernel, which runs on any CPU host; the AVX512 nodes need an
-AVX512-BF16 host and skip otherwise.
+The AVX512-BF16 extension is only needed for ``transform_cpu`` itself, so the
+AWQ nodes build the post-warm-up state by hand and run on any CPU host. The
+end-to-end nodes skip unless the host provides the kernel.
 """
+
+import threading
 
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.torch_aten_kernel import (
-    TorchAtenLinear,
-    _has_local_int4pack_cpu_ops,
-)
 from gptqmodel.nn_modules.qlinear.torch_cpu_avx512 import TorchCpuAvx512Linear
 from gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq import TorchCpuAvx512AwqLinear
-from gptqmodel.utils.backend import BACKEND
+from gptqmodel.quantization.awq.utils.packing_utils import pack_awq
 from gptqmodel.utils.cpu_features import avx512_bf16_error, has_avx512_bf16
-from tests.test_cpu_int4_snapshot_5013 import _desc_act_gptq_module
 from tests.test_cpu_trainable_kernels_grad_after_inference_5314 import (
     IN_FEATURES,
     OUT_FEATURES,
@@ -54,14 +45,6 @@ def _skip_unless_avx512(cls):
         pytest.skip(str(err))
 
 
-def _skip_unless_aten():
-    if not _has_local_int4pack_cpu_ops():
-        pytest.skip("ATen CPU int4pack ops are unavailable")
-    ok, err = TorchAtenLinear.cached_validate_once()
-    if not ok:
-        pytest.skip(str(err))
-
-
 @pytest.fixture(autouse=True)
 def _fresh_dynamo():
     torch._dynamo.reset()
@@ -74,16 +57,35 @@ def _mode(layer):
     return getattr(mode, "value", mode)
 
 
-def _latch_inference(layer):
-    """Reproduce the state a fused eager warm-up leaves on the module.
+def _untransformed_awq_module():
+    """An AVX512 AWQ module in the state a fused inference warm-up leaves.
 
-    ``transform_cpu`` needs the AVX512-BF16 extension; the autograd dispatch
-    under test only reads the latched ``linear_mode``.
+    The kernel's ``__init__`` validates AVX512-BF16, but the dense fall-back
+    this test targets never touches the extension. Buffers are filled the same
+    way ``_awq_layer`` fills them, so ``dequantize_weight`` is the ground truth.
     """
 
-    layer.eval()
+    groups = IN_FEATURES // 128
+    codes = torch.randint(0, 16, (IN_FEATURES, OUT_FEATURES), dtype=torch.uint8)
+    zeros = torch.randint(0, 16, (groups, OUT_FEATURES), dtype=torch.uint8)
+    qweight, qzeros = pack_awq(codes, zeros, 4)
+    scales = torch.rand((groups, OUT_FEATURES), dtype=torch.float16) * 0.04 + 0.01
+
+    layer = TorchCpuAvx512AwqLinear.__new__(TorchCpuAvx512AwqLinear)
+    torch.nn.Module.__init__(layer)
+    layer.bits = 4
+    layer.group_size = 128
+    layer.in_features = IN_FEATURES
+    layer.out_features = OUT_FEATURES
+    layer.bias = None
+    layer.qweight = qweight
+    layer.qzeros = qzeros
+    layer.scales = scales
     layer.linear_mode = "inference"
-    assert _mode(layer) == "inference"
+    layer._cpu_transformed = False
+    layer._cpu_transform_lock = threading.RLock()
+    layer.adapter = None
+    layer.training = False
     return layer
 
 
@@ -112,107 +114,8 @@ def _assert_matches_dense_reference(x, grad_out, weight):
     )
 
 
-def test_compile_branch_uses_the_runtime_dense_hook(monkeypatch):
-    _skip_unless_aten()
-
-    calls = []
-
-    def checkpoint_order_operands(module):
-        # ``TorchCpuAvx512Linear`` has the same contract: its runtime layout is
-        # not the ATen int4pack permutation, so it decodes with
-        # ``dequantize_weight()`` and must not gather ``ret_idx`` again.
-        calls.append(1)
-        return module.dequantize_weight(), False
-
-    monkeypatch.setattr(
-        TorchAtenLinear, "_runtime_dense_operands", checkpoint_order_operands
-    )
-
-    layer = _latch_inference(_gptq_layer(TorchAtenLinear))
-    weight = _dequantized(layer)
-
-    x, _out, grad_out = _grad_forward(layer)
-
-    assert calls, "the compile branch bypassed _runtime_dense_operands()"
-    _assert_matches_dense_reference(x, grad_out, weight)
-
-
-def test_avx512_gptq_dense_operands_skip_the_int4pack_decoder():
-    _skip_unless_avx512(TorchCpuAvx512Linear)
-
-    layer = _gptq_layer(TorchCpuAvx512Linear)
-
-    weight, gather = layer._runtime_dense_operands()
-
-    assert gather is False, "dequantize_weight() already restores checkpoint order"
-    torch.testing.assert_close(weight, layer.dequantize_weight())
-
-
-def test_avx512_gptq_compiled_grad_forward_after_inference_latch_keeps_gradient():
-    _skip_unless_avx512(TorchCpuAvx512Linear)
-
-    layer = _latch_inference(_gptq_layer(TorchCpuAvx512Linear))
-    weight = _dequantized(layer)
-
-    x, _out, grad_out = _grad_forward(layer)
-
-    _assert_matches_dense_reference(x, grad_out, weight)
-
-
-def test_avx512_gptq_compiled_grad_forward_keeps_the_runtime_latch():
-    _skip_unless_avx512(TorchCpuAvx512Linear)
-
-    layer = _latch_inference(_gptq_layer(TorchCpuAvx512Linear))
-
-    _grad_forward(layer)
-
-    assert _mode(layer) == "inference", "the dense fallback mutated the runtime latch"
-    dense_shapes = {
-        (IN_FEATURES, OUT_FEATURES),
-        (OUT_FEATURES, IN_FEATURES),
-    }
-    for name, value in list(layer.named_parameters()) + list(layer.named_buffers()):
-        assert tuple(value.shape) not in dense_shapes, f"{name} retained a dense weight"
-
-
-def test_avx512_gptq_compiled_grad_forward_with_bias_keeps_gradient():
-    _skip_unless_avx512(TorchCpuAvx512Linear)
-
-    layer = _latch_inference(_gptq_layer(TorchCpuAvx512Linear, bias=True))
-    weight = _dequantized(layer)
-
-    x, _out, grad_out = _grad_forward(layer)
-
-    _assert_matches_dense_reference(x, grad_out, weight)
-
-
-def test_avx512_gptq_desc_act_compiled_grad_forward_keeps_checkpoint_order():
-    _skip_unless_avx512(TorchCpuAvx512Linear)
-
-    layer = _desc_act_gptq_module(
-        TorchCpuAvx512Linear,
-        BACKEND.GPTQ_TORCH_CPU_AVX512,
-        in_features=IN_FEATURES,
-        group_size=128,
-    )
-    assert not layer._ret_idx_is_identity(), "fixture must reorder the input rows"
-    weight, gather = layer._runtime_dense_operands()
-    assert gather is False, "checkpoint order must not be gathered again"
-    torch.testing.assert_close(weight, layer.dequantize_weight())
-
-    _latch_inference(layer)
-    compiled = torch.compile(layer, backend="eager", fullgraph=True)
-    x = torch.randn(4, IN_FEATURES, dtype=torch.bfloat16, requires_grad=True)
-    out = compiled(x)
-    assert out.requires_grad
-    out.sum().backward()
-    assert x.grad is not None and torch.isfinite(x.grad).all()
-
-
-def test_avx512_awq_compiled_grad_forward_after_inference_latch_keeps_gradient():
-    _skip_unless_avx512(TorchCpuAvx512AwqLinear)
-
-    layer = _latch_inference(_awq_layer(TorchCpuAvx512AwqLinear))
+def test_avx512_awq_compiled_grad_forward_keeps_gradient():
+    layer = _untransformed_awq_module()
     weight = _dequantized(layer)
 
     x, _out, grad_out = _grad_forward(layer)
@@ -221,32 +124,67 @@ def test_avx512_awq_compiled_grad_forward_after_inference_latch_keeps_gradient()
 
 
 def test_avx512_awq_compiled_grad_forward_keeps_the_runtime_latch():
-    _skip_unless_avx512(TorchCpuAvx512AwqLinear)
-
-    layer = _latch_inference(_awq_layer(TorchCpuAvx512AwqLinear))
+    layer = _untransformed_awq_module()
 
     _grad_forward(layer)
 
-    assert _mode(layer) == "inference", "the dense fallback mutated the runtime latch"
+    assert _mode(layer) == "inference", "the dense fall-back mutated the runtime latch"
+    dense_shapes = {
+        (IN_FEATURES, OUT_FEATURES),
+        (OUT_FEATURES, IN_FEATURES),
+    }
+    for name, value in list(layer.named_parameters()) + list(layer.named_buffers()):
+        assert tuple(value.shape) not in dense_shapes, f"{name} retained a dense weight"
 
 
-def test_avx512_awq_compiled_grad_forward_with_bias_keeps_gradient():
+def test_avx512_awq_compiled_inference_forward_matches_eager():
     _skip_unless_avx512(TorchCpuAvx512AwqLinear)
 
-    layer = _latch_inference(_awq_layer(TorchCpuAvx512AwqLinear, bias=True))
+    layer = _untransformed_awq_module()
+    compiled = torch.compile(layer, backend="eager", fullgraph=True)
+    x = torch.randn(4, IN_FEATURES, dtype=torch.bfloat16)
+
+    with torch.inference_mode():
+        traced = compiled(x)
+        eager = layer(x)
+
+    torch.testing.assert_close(traced.float(), eager.float(), rtol=2e-2, atol=2e-2)
+
+
+def test_avx512_gptq_runtime_dense_weight_is_checkpoint_order():
+    _skip_unless_avx512(TorchCpuAvx512Linear)
+
+    layer = _gptq_layer(TorchCpuAvx512Linear)
+
+    assert TorchCpuAvx512Linear._runtime_dense_weight_is_checkpoint_order is True
+    torch.testing.assert_close(layer._runtime_dense_weight(), layer.dequantize_weight())
+
+
+def test_avx512_gptq_compiled_grad_forward_after_fused_warm_up():
+    _skip_unless_avx512(TorchCpuAvx512Linear)
+
+    layer = _gptq_layer(TorchCpuAvx512Linear)
+    layer.eval()
+    x_eval = torch.randn(4, IN_FEATURES, dtype=torch.bfloat16)
+    with torch.inference_mode():
+        eager = layer(x_eval)
+    assert _mode(layer) == "inference"
+    assert layer._cpu_transformed
+
     weight = _dequantized(layer)
-
     x, _out, grad_out = _grad_forward(layer)
-
     _assert_matches_dense_reference(x, grad_out, weight)
 
+    compiled = torch.compile(layer, backend="eager", fullgraph=True)
+    with torch.inference_mode():
+        traced = compiled(x_eval)
+    torch.testing.assert_close(traced.float(), eager.float(), rtol=2e-2, atol=2e-2)
 
-@pytest.mark.parametrize("cls", [TorchCpuAvx512Linear, TorchCpuAvx512AwqLinear])
-def test_avx512_compiled_grad_forward_after_fused_warmup(cls):
-    _skip_unless_avx512(cls)
 
-    builder = _gptq_layer if cls is TorchCpuAvx512Linear else _awq_layer
-    layer = builder(cls)
+def test_avx512_awq_compiled_grad_forward_after_fused_warm_up():
+    _skip_unless_avx512(TorchCpuAvx512AwqLinear)
+
+    layer = _awq_layer(TorchCpuAvx512AwqLinear)
     layer.eval()
     x_eval = torch.randn(4, IN_FEATURES, dtype=torch.bfloat16)
     with torch.inference_mode():

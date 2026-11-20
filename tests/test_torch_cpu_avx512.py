@@ -29,6 +29,12 @@ from gptqmodel.utils.importer import clear_validation_cache, select_quant_linear
 pytestmark = [pytest.mark.cpu]
 
 
+def _clear_avx512_bf16_probe(monkeypatch):
+    """Reset the module-global capability probe (#5070 dropped ``cache_clear``)."""
+
+    monkeypatch.setattr(cpu_features, "_AVX512_BF16", None)
+
+
 def _hf_reference_unpack(packed: torch.Tensor, out_features: int, in_features: int) -> torch.Tensor:
     """Independent implementation of the upstream HF unpacking formula."""
 
@@ -236,7 +242,7 @@ def test_cpu_feature_detection_requires_vbmi(monkeypatch):
     monkeypatch.setattr(cpu_features.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(Path, "read_text", lambda self, *args, **kwargs: flags)
 
-    has_avx512_bf16.cache_clear()
+    _clear_avx512_bf16_probe(monkeypatch)
     try:
         assert not has_avx512_bf16()
         monkeypatch.setattr(
@@ -244,10 +250,10 @@ def test_cpu_feature_detection_requires_vbmi(monkeypatch):
             "read_text",
             lambda self, *args, **kwargs: flags + " avx512vbmi",
         )
-        has_avx512_bf16.cache_clear()
+        _clear_avx512_bf16_probe(monkeypatch)
         assert has_avx512_bf16()
     finally:
-        has_avx512_bf16.cache_clear()
+        _clear_avx512_bf16_probe(monkeypatch)
 
 
 def test_cpu_feature_detection_requires_xsave(monkeypatch):
@@ -259,11 +265,11 @@ def test_cpu_feature_detection_requires_xsave(monkeypatch):
     monkeypatch.setattr(cpu_features.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(Path, "read_text", lambda self, *args, **kwargs: flags)
 
-    has_avx512_bf16.cache_clear()
+    _clear_avx512_bf16_probe(monkeypatch)
     try:
         assert not has_avx512_bf16()
     finally:
-        has_avx512_bf16.cache_clear()
+        _clear_avx512_bf16_probe(monkeypatch)
 
 
 @pytest.mark.parametrize(
@@ -639,7 +645,9 @@ def test_layer_fp16_dense_fallback_preserves_input_dtype():
     output = layer(x)
 
     assert output.dtype == torch.float16
-    assert layer.linear_mode == "train"
+    # ``linear_mode`` is only resolved for training forwards
+    # (``torch_aten_kernel``) and this layer is in eval; the fallback is
+    # observable through the untransformed payload and the FP16 result.
     assert layer._cpu_transformed is False
     torch.testing.assert_close(output, reference, atol=0.25, rtol=0.02)
 
@@ -804,15 +812,18 @@ def test_fused_bias_validation():
         )
     with pytest.raises(RuntimeError, match="bias out_features"):
         kernel(x, packed, zeros, scales, group_size, torch.zeros(out_features + 1))
-    with pytest.raises(RuntimeError, match="Meta tensors"):
-        kernel(
-            x,
-            packed,
-            zeros,
-            scales,
-            group_size,
-            torch.empty(out_features, device="meta"),
-        )
+    # Meta construction dispatches to the registered FakeTensor impl (#5075),
+    # so it never reaches the native argument validation above.
+    meta_out = kernel(
+        x.to("meta"),
+        packed.to("meta"),
+        zeros.to("meta"),
+        scales.to("meta"),
+        group_size,
+        torch.empty(out_features, device="meta"),
+    )
+    assert meta_out.device.type == "meta"
+    assert meta_out.shape == (1, out_features)
 
 
 def test_kernel_empty_batch_and_validation():

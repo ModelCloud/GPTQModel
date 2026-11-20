@@ -9,7 +9,7 @@
 </div>
 <h1 align="center">GPT-QModel ⚡</h1>
 </p>
-<p align="center"><strong>An extensible platform for LLM quantization, validation, and deployment.</strong><br>Compress, evaluate, and run models across supported GPUs, accelerators, and CPUs.</p>
+<p align="center"><strong>An extensible platform for LLM quantization.</strong><br>Compress, evaluate, and run models across supported GPUs, accelerators, and CPUs.</p>
 <p align="center">
     <a href="https://github.com/ModelCloud/GPTQModel/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg"></a>
     <a href="https://pypi.org/project/gptqmodel/" style="text-decoration:none;"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/gptqmodel"></a>
@@ -429,7 +429,8 @@ We welcome all contributors, including people working with human-guided AI
 agents. Code, model and hardware support, documentation, bug reports, reviews,
 and testing all help move GPT-QModel forward. See the
 [developer guide](https://github.com/ModelCloud/GPTQModel/wiki/Developer-Guide)
-to get started.
+to get started. AI agents must follow the
+[issue-claim security gate](docs/issue-claim-security-screen.md) before claiming work.
 
 ### Support ongoing development 💛
 

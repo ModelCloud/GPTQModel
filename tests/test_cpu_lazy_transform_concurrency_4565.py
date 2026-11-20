@@ -235,3 +235,71 @@ def test_state_dict_waits_for_the_shared_transform_lock(module_name, class_name)
         assert not finished.wait(0.2)
     assert finished.wait(5)
     reader.join(timeout=5)
+
+
+@pytest.mark.parametrize("cls", _INT4PACK_CLASSES)
+def test_concurrent_eval_grad_and_no_grad_forwards_keep_the_runtime_layout(cls):
+    """A grad forward must not restore the layout under a no-grad forward (#5509).
+
+    The fused op has no backward, so a grad call decodes a dense weight. It used
+    to restore the checkpoint layout first, which rewrote ``qweight``/``qzeros``
+    while a concurrent no-grad forward was reading them. The grad call now
+    decodes the live runtime layout and leaves it installed.
+    """
+
+    if cls in (TorchAtenLinear, TorchAtenAwqLinear) and not _has_local_int4pack_cpu_ops():
+        pytest.skip("ATen CPU int4pack ops are unavailable")
+    if cls in (TorchFusedLinear, TorchFusedAwqLinear) and not TORCH_HAS_FUSED_OPS:
+        pytest.skip("CPU fused int4pack ops are unavailable")
+
+    layer = _make_layer(cls)
+    x = torch.randn(2, 512, dtype=torch.bfloat16)
+    with torch.inference_mode():
+        layer(x)
+    assert layer.linear_mode == "inference"
+    qweight = layer.qweight
+    qweight_ptr = qweight.data_ptr()
+
+    errors = []
+    stop = threading.Event()
+
+    def no_grad_worker():
+        while not stop.is_set():
+            try:
+                with torch.no_grad():
+                    layer(x)
+            except BaseException as exc:  # noqa: BLE001 - re-raised below
+                errors.append(exc)
+                stop.set()
+
+    def grad_worker():
+        while not stop.is_set():
+            try:
+                xx = x.clone().requires_grad_(True)
+                layer(xx).float().sum().backward()
+            except BaseException as exc:  # noqa: BLE001 - re-raised below
+                errors.append(exc)
+                stop.set()
+
+    threads = [
+        threading.Thread(target=no_grad_worker),
+        threading.Thread(target=no_grad_worker),
+        threading.Thread(target=grad_worker),
+        threading.Thread(target=grad_worker),
+    ]
+    for thread in threads:
+        thread.start()
+    time.sleep(0.5)
+    stop.set()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert not errors, [f"{type(exc).__name__}: {exc}" for exc in errors[:4]]
+    # The grad calls decoded the runtime layout instead of restoring it.
+    assert layer.linear_mode == "inference"
+    assert layer.qweight is qweight
+    assert layer.qweight.data_ptr() == qweight_ptr
+    with torch.inference_mode():
+        out = layer(x)
+    assert torch.isfinite(out).all()

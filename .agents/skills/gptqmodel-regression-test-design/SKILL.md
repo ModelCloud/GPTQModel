@@ -14,7 +14,8 @@ to the existing test family. Exercise the risky transition and its **next
 consumer**, not just the helper or first successful call. Select the applicable
 cases below and record the evidence in the PR. For landed fixes and the tests
 to extend, see the audits from [Nov 17](references/2026-11-17-regressions.md),
-[Nov 18](references/2026-11-18-regressions.md) and [Nov 19](references/2026-11-19-regressions.md).
+[Nov 18](references/2026-11-18-regressions.md), [Nov 19](references/2026-11-19-regressions.md)
+and [Nov 20](references/2026-11-20-regressions.md).
 
 ## 1. Write the invariant before the patch
 
@@ -98,6 +99,16 @@ modules, `load_state_dict(assign=False/True)`, and offload/restore where used.
   checkpoint through `GPTQModel.load`, check a family-specific `post_init`
   effect, then run a forward. Include a family without `qweight` and a GPTQ
   control. For offload changes also exercise the supported meta-backed layer.
+- For checkpoint selection, put **different valid artifacts** at the repo root
+  and in the selected subfolder. Load the child directly and via `subfolder=`;
+  compare dispatch, processor or tensor markers, and re-save/reload as applicable.
+  Move a legacy sidecar between root and child: only the selected copy may
+  affect dispatch. A missing root is a weaker decoy than a plausible wrong one.
+- For resumable exports, start with a completed export in the **same output
+  directory**. Change source or dtype with filenames unchanged; then change
+  single-file ↔ sharded layout. Compare what a normal reader loads with a
+  clean export. Assert obsolete *owned* files disappear, an unrelated file
+  survives, and an unchanged compatible export still reuses its shards.
 
 Follow [checkpoint serialization](../gptqmodel-checkpoint-serialization/SKILL.md),
 [model plans](../gptqmodel-model-plan-tests/SKILL.md), and
@@ -219,6 +230,12 @@ tokenizers, not the assumption that position zero is always a special token.
 Run consecutive batches/layers/parallel branches with distinct context and
 assert no stale mask or KV state leaks between them.
 
+When splitting a float mask into rows, put a `1.0` in one row and only zeros
+in another: the second row is padding in that 0/1 column. As a control, an
+entirely zero additive column keeps every token. Pass both fixtures through
+each affected container, including an actual HF Dataset, without converting
+it to a dict first. Assert hand-listed token IDs and masks after preparation.
+
 For packed token replay, make row **identity** observable, not just row count.
 For example, use a padded grid `[[11, 12, PAD], [21, 22, 23]]`: kept row 2
 must carry token 21, not PAD. Give each hidden row a distinct marker and assert
@@ -257,6 +274,10 @@ advertised, execute the compiled forward with `fullgraph=True` too.
 - Use cancellation (large product plus opposing bias), range endpoints,
   underflow, and nonfinite inputs where supported. Check wide accumulation and
   bias before one output cast; assigning into FP32 cannot undo earlier rounding.
+- For scale folding, cross the **storage dtype with the activation dtype**.
+  Choose a fold that fits on disk but overflows or rounds a nonzero to zero
+  on the compute cast. Compare the first forward to an independently scaled
+  product, and check an in-range fold still takes the fast path exactly once.
 - Test contiguous, row-strided, and column-strided inputs, batched prefill and
   single-token calls. Assert fixture strides before calling the public wrapper;
   `.reshape()` can preserve the bad stride, especially at batch size one.

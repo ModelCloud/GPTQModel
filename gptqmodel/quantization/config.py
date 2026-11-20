@@ -1783,9 +1783,20 @@ class SmoothMSE(SmoothMethod):
     """
     steps: int = 32
     maxshrink: float = 0.8
+    # The dict/JSON parser reads the dataclass field default, not the
+    # constructor signature, so this override must match ``__init__`` or
+    # ``smooth="mse"`` keeps the clipping smoothers' 128 default (#5572).
+    group_size_threshold: int = 0
 
-    def __init__(self, steps: int = 32, maxshrink: float = 0.8, group_size_threshold: int = 128):
-        """Configure search granularity for MSE-based shrinking."""
+    def __init__(self, steps: int = 32, maxshrink: float = 0.8, group_size_threshold: int = 0):
+        """Configure search granularity for MSE-based shrinking.
+
+        The search runs per group, so it has no reason to skip small groups.
+        The shared ``128`` default belongs to the clipping smoothers, whose
+        statistics are unreliable on short groups; inheriting it here made
+        ``SmoothMSE()`` a silent no-op at the common g32/g64 sizes (#5530).
+        An explicit threshold is still honored.
+        """
 
         super().__init__(name="mse", group_size_threshold=group_size_threshold)
         owner = type(self).__name__
@@ -1932,9 +1943,40 @@ class Fallback:
     smooth: Optional[SmoothMethod] = None
 
     def __post_init__(self) -> None:
-        """Validate a directly constructed smoother payload."""
+        """Validate the smoother and threshold at construction (#5578).
+
+        ``threshold`` used to be accepted unchecked, so ``NaN`` or a negative
+        value silently disabled the low-sample fallback (``observed < NaN`` is
+        always false) and ``NaN`` reached ``quantize_config.json`` as invalid
+        JSON. Bad strings failed only when ``quantize()`` started. Validate the
+        same parse the runtime uses, but keep the documented off forms
+        (``0``/``None``/``False``/``""``) and the ``True`` sentinel.
+        """
 
         self.smooth = _parse_smooth_method(self.smooth)
+
+        threshold = self.threshold
+        if threshold is None or threshold is False:
+            return
+        if isinstance(threshold, str) and not threshold.strip():
+            return
+        if threshold is True:
+            return
+
+        from ..utils.fallback import _parse_threshold
+
+        value, _ = _parse_threshold(threshold)
+        if value is None:
+            raise ValueError(
+                f"Fallback: `threshold` must be a number, percentage, or True/0/None, got {threshold!r}."
+            )
+        _validate_finite_float(
+            type(self).__name__,
+            "threshold",
+            value,
+            minimum=0.0,
+            range_text=">= 0 (use 0 to disable the fallback)",
+        )
 
 
 @dataclass
@@ -4751,6 +4793,25 @@ def _require_bool_value(owner_name: str, field_label: str, value: Any) -> None:
         )
 
 
+def _numeric_annotated_fields(cls) -> set:
+    """Return the names of fields annotated ``int``/``float``, including unions.
+
+    ``bits`` is ``Union[int, str, GGUFBits]`` and ``mse`` is a union that ends
+    in ``int``/``float``, so match on the annotation members rather than the
+    top-level type.
+    """
+
+    hints = _resolved_type_hints(cls)
+    names = set()
+    for field_info in fields(cls):
+        hint = hints.get(field_info.name)
+        if hint is None:
+            continue
+        if any(member in (int, float) for member in get_args(hint) or (hint,)):
+            names.add(field_info.name)
+    return names
+
+
 def _validate_dynamic_layer_keys(owner, layer_name: str, layer_dict: Mapping) -> None:
     """Reject unknown keys and uncompilable patterns in one ``dynamic`` rule (#4668).
 
@@ -4898,6 +4959,174 @@ def _validate_dynamic_smoothers(owner, layer_name: str, layer_dict: Mapping) -> 
                 method,
                 f"dynamic['{layer_name}'].fallback.smooth",
             )
+
+
+# Numeric per-module overrides that the owning config's ``__post_init__``
+# bounds. A ``dynamic`` rule is merged verbatim, so a ``NaN``/``inf`` or an
+# out-of-range value used to quantize silently (a NaN damp was replaced by the
+# Hessian floor) and was serialized into ``quantize_config.json``, where a bare
+# ``NaN`` is not valid JSON (#5503). The bounds mirror the top-level checks;
+# values are validated, not rewritten, so the per-module merge keeps its input
+# types.
+_DYNAMIC_NUMERIC_BOUNDS: Dict[str, Tuple[float, Optional[float], bool, bool, str]] = {
+    "damp_percent": (0.0, 1.0, False, False, "between 0 and 1"),
+    "damp_auto_increment": (0.0, None, True, True, "non-negative"),
+    "opt_rotation_lr": (0.0, None, False, True, "positive"),
+    "opt_weight_lr": (0.0, None, False, True, "positive"),
+    "opt_quantizer_lr": (0.0, None, False, True, "positive"),
+    "opt_pair_ratio": (0.0, 0.5, False, True, "in the interval (0, 0.5]"),
+    "opt_weight_decay": (0.0, None, True, True, "non-negative"),
+    "opt_eps": (0.0, None, False, True, "positive"),
+    "opt_sgd_momentum": (0.0, None, True, True, "non-negative"),
+    "opt_sgd_dampening": (0.0, None, True, True, "non-negative"),
+    "opt_channel_scale_clamp_min": (0.0, None, False, True, "positive"),
+    "opt_channel_scale_clamp_max": (0.0, None, False, True, "positive"),
+    "ridge": (0.0, None, True, True, "non-negative"),
+    "pre_alpha": (0.0, 1.0, True, True, "between 0 and 1"),
+}
+
+# Integer per-module options whose top-level ``__post_init__`` coerces with
+# ``int()`` and then applies bounds. A dynamic rule was merged verbatim, so
+# ``krot=0`` or ``had_block=True`` reached the processor as-is (#5574).
+_DYNAMIC_INTEGER_BOUNDS: Dict[str, Tuple[int, Optional[int], bool, bool, str]] = {
+    "krot": (1, None, True, True, "a positive integer"),
+    "opt_rotation_epochs": (0, None, True, True, "a non-negative integer"),
+    "opt_finetune_epochs": (0, None, True, True, "a non-negative integer"),
+    "opt_train_samples": (1, None, True, True, "a positive integer"),
+    "opt_validation_samples": (1, None, True, True, "a positive integer"),
+    "opt_batch_size": (1, None, True, True, "a positive integer"),
+    "n_flip_iters": (0, None, True, True, "a non-negative integer"),
+}
+
+
+def _coerce_dynamic_integer(owner_name: str, label: str, value: Any, range_text: str) -> int:
+    """Coerce one dynamic integer the way the top-level ``int()`` path does."""
+
+    if isinstance(value, bool):
+        raise ValueError(f"{owner_name}: `{label}` must be {range_text}, got {value!r}.")
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{owner_name}: `{label}` must be {range_text}, got {value!r}.") from None
+    if isinstance(value, float) and (not math.isfinite(value) or value != number):
+        raise ValueError(f"{owner_name}: `{label}` must be {range_text}, got {value!r}.")
+    return number
+
+
+def _validate_dynamic_numeric_overrides(owner, layer_name: str, layer_dict: Mapping) -> None:
+    """Run the top-level numeric checks on one per-module rule (#5503).
+
+    ``__post_init__`` validates the top-level ``group_size``/``damp_percent``/
+    ``damp_auto_increment`` and the Paro/MACaQ float options, but the
+    ``dynamic`` merge copied its values verbatim. ``damp_percent=nan``
+    quantized with every damp-recovery attempt failing and was then rescued by
+    the Hessian floor, and ``group_size=nan`` only failed later inside
+    ``quantize()``. Validate here so the rule fails at construction, like the
+    same value at the top level.
+    """
+
+    if not isinstance(layer_dict, Mapping):
+        return
+
+    owner_name = owner.__class__.__name__
+    numeric_fields = _numeric_annotated_fields(type(owner))
+    # Method payloads are normalized into their dataclasses at the top level,
+    # where their own ``__post_init__`` checks run. The dynamic merge used to
+    # copy the raw dict, so a NaN nested value reached the checkpoint JSON and
+    # failed only when the first matching module was quantized (#5574).
+    nested_normalizers = {
+        "mse": _normalize_mse,
+        "gptaq": _normalize_gptaq,
+        "foem": _normalize_foem,
+        "hessian": _normalize_hessian,
+    }
+    for key, value in layer_dict.items():
+        if value is None:
+            continue
+        canonical = QUANT_CONFIG_ARG_SYNONYMS.get(key, key)
+        label = f"dynamic['{layer_name}'].{key}"
+        normalizer = nested_normalizers.get(canonical)
+        if normalizer is not None:
+            try:
+                normalizer(value)
+            except (TypeError, ValueError) as exc:
+                raise type(exc)(f"{owner_name}: `{label}` is not a valid {canonical}: {exc}") from exc
+            continue
+        if canonical == "group_size":
+            group_size = _validate_group_size(owner_name, value)
+            if group_size != -1 and group_size <= 0:
+                raise ValueError(_resolve_dynamic_group_size_error())
+            continue
+        if canonical == "opt_betas":
+            if not isinstance(value, (list, tuple)) or len(value) != 2:
+                raise ValueError(f"{owner_name}: `{label}` must be a 2-tuple/list of floats.")
+            for index, beta in enumerate(value):
+                beta = _validate_finite_float(owner_name, f"{label}[{index}]", beta, minimum=0.0)
+                if beta >= 1.0:
+                    raise ValueError(
+                        f"{owner_name}: `{label}[{index}]` must be in the interval [0, 1), got {beta!r}."
+                    )
+            continue
+        if canonical == "had_block":
+            number = _coerce_dynamic_integer(
+                owner_name, label, value, "a positive power of two at least 32"
+            )
+            if number < 32 or number & (number - 1):
+                raise ValueError(
+                    f"{owner_name}: `{label}` must be a positive power of two at least 32, got {value!r}."
+                )
+            continue
+        if canonical == "block":
+            number = _coerce_dynamic_integer(owner_name, label, value, "16")
+            if number != 16:
+                raise ValueError(f"{owner_name}: `{label}` must be 16, got {value!r}.")
+            continue
+        if canonical == "embed_bits":
+            number = _coerce_dynamic_integer(owner_name, label, value, "4 or 8")
+            if number not in (4, 8):
+                raise ValueError(f"{owner_name}: `{label}` must be 4 or 8, got {value!r}.")
+            continue
+        integer_bounds = _DYNAMIC_INTEGER_BOUNDS.get(canonical)
+        if integer_bounds is not None:
+            minimum, maximum, include_minimum, include_maximum, range_text = integer_bounds
+            number = _coerce_dynamic_integer(owner_name, label, value, range_text)
+            if minimum is not None and (number < minimum or (not include_minimum and number == minimum)):
+                raise ValueError(f"{owner_name}: `{label}` must be {range_text}, got {value!r}.")
+            if maximum is not None and (number > maximum or (not include_maximum and number == maximum)):
+                raise ValueError(f"{owner_name}: `{label}` must be {range_text}, got {value!r}.")
+            continue
+        # ``NaN``/``inf`` compares false against every bound below, so a value
+        # that reaches one of those checks is already rejected; this covers the
+        # numeric options without an explicit per-module range check.
+        if isinstance(value, float) and canonical in numeric_fields and not math.isfinite(value):
+            raise ValueError(f"{owner_name}: `{label}` must be a finite number, got {value!r}.")
+        bounds = _DYNAMIC_NUMERIC_BOUNDS.get(canonical)
+        if bounds is None:
+            continue
+        minimum, maximum, include_minimum, include_maximum, range_text = bounds
+        number = _validate_finite_float(owner_name, label, value)
+        if minimum is not None and (number < minimum or (not include_minimum and number == minimum)):
+            raise ValueError(f"{owner_name}: `{label}` must be {range_text}, got {value!r}.")
+        if maximum is not None and (number > maximum or (not include_maximum and number == maximum)):
+            raise ValueError(f"{owner_name}: `{label}` must be {range_text}, got {value!r}.")
+
+    # Paro's scale-clamp bounds are a pair: a dynamic min above the global max
+    # (or a max below the global min) is rejected by the top-level config.
+    clamp_min = layer_dict.get("opt_channel_scale_clamp_min")
+    clamp_max = layer_dict.get("opt_channel_scale_clamp_max")
+    effective_min = getattr(owner, "opt_channel_scale_clamp_min", None) if clamp_min is None else clamp_min
+    effective_max = getattr(owner, "opt_channel_scale_clamp_max", None) if clamp_max is None else clamp_max
+    if (
+        isinstance(effective_min, (int, float))
+        and not isinstance(effective_min, bool)
+        and isinstance(effective_max, (int, float))
+        and not isinstance(effective_max, bool)
+        and effective_min >= effective_max
+    ):
+        raise ValueError(
+            f"{owner_name}: `dynamic['{layer_name}'].opt_channel_scale_clamp_min` must be "
+            "smaller than `opt_channel_scale_clamp_max`."
+        )
 
 
 def _default_damp_percent(method: METHOD) -> float:
@@ -5385,6 +5614,7 @@ class QuantizeConfigMeta(type):
             kwargs = _lift_serialized_meta_fields(kwargs)
             target_cls = _resolve_quantize_config_class(kwargs)
             kwargs = _drop_unapplied_smoothers(kwargs, target_cls)
+            kwargs = _drop_unapplied_options(kwargs, target_cls)
             target_kwargs = _prepare_target_quantize_config_kwargs(target_cls, kwargs)
             return type.__call__(target_cls, *args, **target_kwargs)
         # A concrete class rebuilt from its own `to_dict()` payload must keep
@@ -5674,6 +5904,300 @@ def validate_smoother_support(qcfg: Any) -> None:
         getattr(fallback, "smooth", None)
     ):
         raise _unapplied_smoother_error(owner, method, "fallback.smooth")
+
+
+#: MSE components each method's quantizer actually reads. GPTQ, QQQ and RTN
+#: share the ``Quantizer`` shrink grid (``norm`` + ``grid_budget``); AWQ runs
+#: its clip grid (``clip_grid_budget``) and never the shrink search. Every other
+#: method runs neither, so a non-default ``mse`` only adds a claim to the
+#: checkpoint (#5583, the #5302 class).
+_MSE_APPLIED_COMPONENTS: Dict[METHOD, frozenset] = {
+    METHOD.GPTQ: frozenset({"norm", "grid_budget"}),
+    METHOD.QQQ: frozenset({"norm", "grid_budget"}),
+    METHOD.AWQ: frozenset({"clip_grid_budget"}),
+}
+
+#: Every ``MSEConfig`` field, in the order a rejection names them.
+_MSE_COMPONENTS = ("norm", "grid_budget", "clip_grid_budget")
+
+
+def _mse_config(value: Any) -> Optional[MSEConfig]:
+    """Return ``value`` as an ``MSEConfig``, or ``None`` when it is unusable."""
+
+    try:
+        return _normalize_mse(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mse_non_default_components(mse: Any) -> Tuple[str, ...]:
+    """Return the ``MSEConfig`` fields that differ from their default."""
+
+    if not isinstance(mse, MSEConfig):
+        return ()
+    components = []
+    if mse.norm:
+        components.append("norm")
+    if mse.grid_budget is not None:
+        components.append("grid_budget")
+    if mse.clip_grid_budget is not None:
+        components.append("clip_grid_budget")
+    return tuple(components)
+
+
+def _unapplied_option_error(owner: str, method: METHOD, field: str, remedy: str) -> ValueError:
+    """Build the rejection for a shared option the method's quantizer ignores."""
+
+    return ValueError(
+        f"{owner}: `{field}` is not applied by the {method.value.upper()} quantizer; "
+        "the option would only be persisted in the checkpoint and would not change "
+        f"a weight. {remedy}"
+    )
+
+
+def _unapplied_mse_error(
+    owner: str,
+    method: METHOD,
+    components: Tuple[str, ...],
+    *,
+    field_prefix: str = "mse",
+) -> ValueError:
+    """Build the rejection for the ``mse`` fields the quantizer never reads."""
+
+    labels = [f"{field_prefix}.{component}" for component in components]
+    extra = ""
+    if len(labels) > 1:
+        extra = " Also: " + ", ".join(f"`{label}`" for label in labels[1:]) + "."
+    if method is METHOD.AWQ:
+        remedy = (
+            "AWQ's clip grid reads only `mse.clip_grid_budget`; the shrink-grid "
+            "`norm`/`grid_budget` fields belong to GPTQ/QQQ/RTN."
+        )
+    else:
+        remedy = (
+            "This packer runs no MSE search, so remove `mse`; the shrink grid "
+            "belongs to GPTQ/QQQ/RTN."
+        )
+    return ValueError(
+        f"{owner}: `{labels[0]}` is not applied by the {method.value.upper()} quantizer; "
+        "the option would only be persisted in the checkpoint and would not change "
+        f"a weight.{extra} {remedy}"
+    )
+
+
+def _ignored_mse_components(method: METHOD, mse: Any) -> Tuple[str, ...]:
+    """Return the configured ``mse`` fields ``method``'s quantizer never reads."""
+
+    applied = _MSE_APPLIED_COMPONENTS.get(method, frozenset())
+    return tuple(
+        component
+        for component in _mse_non_default_components(mse)
+        if component not in applied
+    )
+
+
+def validate_applied_options(qcfg: Any) -> None:
+    """Reject shared options the method's quantizer never reads (#5583).
+
+    #5302 made an unapplied ``smoother`` fail at construction. The other shared
+    ``PreProcessorConfig``/``GPTQConfig`` fields have the same problem: every
+    method config accepts them, the writer persists them in
+    ``quantize_config.json``, and the quantizer never looks at them. So
+    ``AWQConfig(desc_act=True)``, ``AWQConfig(mse=2.0)``, ``GGUFConfig(mse=2.0)``,
+    ``BitsAndBytesConfig(mse=2.0)``, ``QQQConfig(gptaq=...)`` and
+    ``QQQConfig(act_group_aware=True)`` all produced a checkpoint byte-identical
+    to the default while the metadata claimed the option had run.
+
+    Reject the request where it is made. Checkpoint loading is handled by
+    ``_drop_unapplied_options`` so a config written before this fix still loads
+    and describes the weights it actually produced.
+    """
+
+    method = getattr(qcfg, "method", None)
+    if not isinstance(method, METHOD):
+        return
+
+    owner = type(qcfg).__name__
+
+    if method is METHOD.AWQ and bool(getattr(qcfg, "desc_act", False)):
+        raise _unapplied_option_error(
+            owner,
+            method,
+            "desc_act",
+            "AWQ does not reorder activation columns; leave `desc_act=False` "
+            "(the default), or use a GPTQ config.",
+        )
+
+    ignored_mse = _ignored_mse_components(method, getattr(qcfg, "mse", None))
+    if ignored_mse:
+        raise _unapplied_mse_error(owner, method, ignored_mse)
+
+    if method is METHOD.QQQ:
+        if getattr(qcfg, "gptaq", None) is not None:
+            raise _unapplied_option_error(
+                owner,
+                method,
+                "gptaq",
+                "QQQ does not run the GPTAQ calibration; remove `gptaq` or use a "
+                "GPTQ config.",
+            )
+        if bool(getattr(qcfg, "act_group_aware", False)):
+            raise _unapplied_option_error(
+                owner,
+                method,
+                "act_group_aware",
+                "QQQ has no activation-group-aware calibration; leave "
+                "`act_group_aware=False` (the default).",
+            )
+
+
+def _validate_dynamic_applied_options(owner, layer_name: str, layer_dict: Mapping) -> None:
+    """Reject per-module options the method's quantizer never reads (#5583).
+
+    A ``dynamic`` rule is merged into the per-module config when the module is
+    first matched, so an option that is a no-op at the top level is a no-op
+    here too, but it is still serialized into ``quantize_config.json``.
+    """
+
+    method = getattr(owner, "method", None)
+    if not isinstance(method, METHOD):
+        return
+
+    owner_name = owner.__class__.__name__
+    label = f"dynamic['{layer_name}']"
+
+    if method is METHOD.AWQ and layer_dict.get("desc_act") is True:
+        raise _unapplied_option_error(
+            owner_name,
+            method,
+            f"{label}.desc_act",
+            "AWQ does not reorder activation columns; leave `desc_act=False` "
+            "(the default), or use a GPTQ config.",
+        )
+
+    if layer_dict.get("mse") is not None:
+        ignored_mse = _ignored_mse_components(method, _mse_config(layer_dict.get("mse")))
+        if ignored_mse:
+            raise _unapplied_mse_error(
+                owner_name,
+                method,
+                ignored_mse,
+                field_prefix=f"{label}.mse",
+            )
+
+    if method is METHOD.QQQ:
+        if layer_dict.get("gptaq") is not None:
+            raise _unapplied_option_error(
+                owner_name,
+                method,
+                f"{label}.gptaq",
+                "QQQ does not run the GPTAQ calibration; remove `gptaq` or use a "
+                "GPTQ config.",
+            )
+        if layer_dict.get("act_group_aware") is True:
+            raise _unapplied_option_error(
+                owner_name,
+                method,
+                f"{label}.act_group_aware",
+                "QQQ has no activation-group-aware calibration; leave "
+                "`act_group_aware=False` (the default).",
+            )
+
+
+def _warn_dropped_options(target_cls: type, dropped: list) -> None:
+    """Report the options removed from a loaded checkpoint config."""
+
+    if not dropped:
+        return
+    log.warn(
+        "QuantizeConfig: %s does not apply %s; dropping them from the loaded "
+        "checkpoint config. The recorded options never changed a weight, so the "
+        "stored tensors are unchanged (issue #5583).",
+        target_cls.__name__,
+        ", ".join(sorted(set(dropped))),
+    )
+
+
+def _drop_option_key(payload: Dict[str, Any], key: str) -> Dict[str, Any]:
+    """Remove ``key`` from a payload and from its ``meta`` copy."""
+
+    cleaned = {name: value for name, value in payload.items() if name != key}
+    meta_payload = cleaned.get(META_FIELD)
+    if isinstance(meta_payload, Mapping) and key in meta_payload:
+        cleaned[META_FIELD] = {
+            name: value for name, value in meta_payload.items() if name != key
+        }
+    return cleaned
+
+
+def _drop_unapplied_options(payload: Dict[str, Any], target_cls: type) -> Dict[str, Any]:
+    """Honor the weights of a checkpoint written before the #5583 rejection.
+
+    These options were never applied by the quantizer, so a checkpoint that
+    records one still contains the default weights. Dropping the claim on load
+    keeps that checkpoint usable and makes its config describe what actually
+    produced the tensors, instead of failing a load that used to work.
+    """
+
+    method = payload.get(METHOD_FIELD_CODE, payload.get(QUANT_METHOD_FIELD, METHOD.GPTQ))
+    try:
+        method = _normalize_quant_method(method)
+    except (TypeError, ValueError):
+        return payload
+
+    dropped = []
+
+    if method is METHOD.AWQ and payload.get("desc_act") is True:
+        payload = _drop_option_key(payload, "desc_act")
+        dropped.append("desc_act")
+
+    if "mse" in payload:
+        ignored_mse = _ignored_mse_components(method, _mse_config(payload.get("mse")))
+        if ignored_mse:
+            payload = _drop_option_key(payload, "mse")
+            dropped.append("mse")
+
+    if method is METHOD.QQQ:
+        if payload.get("gptaq") is not None:
+            payload = _drop_option_key(payload, "gptaq")
+            dropped.append("gptaq")
+        if payload.get("act_group_aware") is True:
+            payload = _drop_option_key(payload, "act_group_aware")
+            dropped.append("act_group_aware")
+
+    dynamic = payload.get("dynamic")
+    if isinstance(dynamic, Mapping):
+        cleaned = {}
+        changed = False
+        for pattern, override in dynamic.items():
+            if isinstance(override, Mapping):
+                blocked = []
+                if method is METHOD.AWQ and override.get("desc_act") is True:
+                    blocked.append("desc_act")
+                if override.get("mse") is not None:
+                    ignored_mse = _ignored_mse_components(
+                        method, _mse_config(override.get("mse"))
+                    )
+                    if ignored_mse:
+                        blocked.append("mse")
+                if method is METHOD.QQQ:
+                    if override.get("gptaq") is not None:
+                        blocked.append("gptaq")
+                    if override.get("act_group_aware") is True:
+                        blocked.append("act_group_aware")
+                if blocked:
+                    override = {
+                        key: value for key, value in override.items() if key not in blocked
+                    }
+                    changed = True
+                    dropped.extend(f"dynamic[{pattern}].{key}" for key in blocked)
+            cleaned[pattern] = override
+        if changed:
+            payload = dict(payload)
+            payload["dynamic"] = cleaned
+
+    _warn_dropped_options(target_cls, dropped)
+    return payload
 
 
 def _warn_dropped_smoothers(target_cls: type, dropped: list) -> None:
@@ -6179,6 +6703,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         checkpoint_format: FORMAT,
     ) -> None:
         _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
+        _validate_dynamic_numeric_overrides(self, layer_name, layer_dict)
         for key, value in layer_dict.items():
             if key == "bits":
                 normalized_bits = self._normalize_bits_field(
@@ -6191,8 +6716,6 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                     raise ValueError(
                         f"QuantizeConfig: Layer `{layer_name}` only support quantization of `{valid_bit_widths}` bits."
                     )
-            if key == "group_size" and value != -1 and value <= 0:
-                raise ValueError(_resolve_dynamic_group_size_error())
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return tuple(METHOD)
@@ -6336,6 +6859,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             for layer, layer_dict in self.dynamic.items():
                 _validate_dynamic_layer_keys(self, layer, layer_dict)
                 _validate_dynamic_smoothers(self, layer, layer_dict)
+                _validate_dynamic_applied_options(self, layer, layer_dict)
                 self._normalize_dynamic_layer_config(
                     layer,
                     layer_dict,
@@ -6389,6 +6913,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         # A smoother is persisted by every config but applied by few. Refuse the
         # request where the quantizer would silently ignore it (issue #5302).
         validate_smoother_support(self)
+        validate_applied_options(self)
 
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.
@@ -6771,6 +7296,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
         target_cls = cls if cls not in {BaseQuantizeConfig, QuantizeConfig} else _resolve_quantize_config_class(normalized)
         normalized = _drop_unapplied_smoothers(normalized, target_cls)
+        normalized = _drop_unapplied_options(normalized, target_cls)
         normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, normalized)
         if target_cls is RTNConfig:
             normalized = _normalize_rtn_kwargs(normalized)
@@ -8278,6 +8804,7 @@ class FP8Config(PreProcessorConfig):
             for layer, layer_dict in self.dynamic.items():
                 _validate_dynamic_layer_keys(self, layer, layer_dict)
                 _validate_dynamic_smoothers(self, layer, layer_dict)
+                _validate_dynamic_applied_options(self, layer, layer_dict)
                 self._normalize_dynamic_layer_config(
                     layer,
                     layer_dict,
@@ -8293,6 +8820,7 @@ class FP8Config(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        _validate_dynamic_numeric_overrides(self, layer_name, layer_dict)
         del valid_bit_widths, checkpoint_format
         _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         if "bits" in layer_dict:
@@ -8399,6 +8927,7 @@ class NF12Config(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        _validate_dynamic_numeric_overrides(self, layer_name, layer_dict)
         del valid_bit_widths, checkpoint_format
         if not isinstance(layer_dict, dict):
             return
@@ -8572,6 +9101,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
             for layer, layer_dict in self.dynamic.items():
                 _validate_dynamic_layer_keys(self, layer, layer_dict)
                 _validate_dynamic_smoothers(self, layer, layer_dict)
+                _validate_dynamic_applied_options(self, layer, layer_dict)
                 self._normalize_dynamic_layer_config(
                     layer,
                     layer_dict,
@@ -8587,6 +9117,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        _validate_dynamic_numeric_overrides(self, layer_name, layer_dict)
         del valid_bit_widths, checkpoint_format
         _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         if "bits" in layer_dict:
@@ -8727,6 +9258,7 @@ class EXL3Config(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        _validate_dynamic_numeric_overrides(self, layer_name, layer_dict)
         del valid_bit_widths, checkpoint_format
         for key, value in layer_dict.items():
             if key == "bits":
@@ -8783,6 +9315,7 @@ class EXL3Config(PreProcessorConfig):
             for layer, layer_dict in self.dynamic.items():
                 _validate_dynamic_layer_keys(self, layer, layer_dict)
                 _validate_dynamic_smoothers(self, layer, layer_dict)
+                _validate_dynamic_applied_options(self, layer, layer_dict)
                 self._normalize_dynamic_layer_config(
                     layer,
                     layer_dict,
@@ -8847,6 +9380,7 @@ class EXL3Config(PreProcessorConfig):
         # EXL3 does not delegate to `BaseQuantizeConfig.__post_init__`, so it
         # must refuse an ignored smoother explicitly (issue #5302).
         validate_smoother_support(self)
+        validate_applied_options(self)
 
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.
@@ -9028,6 +9562,7 @@ class GGUFConfig(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        _validate_dynamic_numeric_overrides(self, layer_name, layer_dict)
         _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         bits_override_present = "bits" in layer_dict
         format_override_present = FORMAT_FIELD_CODE in layer_dict

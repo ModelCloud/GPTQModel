@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import torch
 
+from ..utils.torch import dynamo_is_compiling
+
 
 MAX_EXP_BASE = 120
 NUM_EXP_BASES = MAX_EXP_BASE + 1
@@ -203,7 +205,7 @@ def decode(
     escaped = (meta == 0).all(1)
     if escapes.dim() != 2 or escapes.shape[1] != 8 or escapes.dtype != torch.int16:
         raise TypeError("escapes must be int16 [E, 8]")
-    if torch.compiler.is_compiling():
+    if dynamo_is_compiling():
         # ``bool(escaped.any())`` and ``int(index.max())`` are data-dependent
         # host reads, so a traced graph cannot branch on them. The escaped rows
         # are instead selected with a static-shape gather: every group gets a

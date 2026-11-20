@@ -46,8 +46,12 @@ flowchart TD
 ## New flow
 
 The FP8 code is exact in FP16/BF16 (E4M3 has 3 mantissa bits, E5M2 has 2;
-both dtypes hold at least 7). For a row or tensor scale, that scale is constant
-across the reduction for each output row, so it can move to the output:
+both dtypes hold at least 7). CUDA is assumed to qualify that cast; on ROCm,
+where it was previously rejected wholesale, a once-per-process probe casts all
+256 codes of the layer's format and compares them bit-for-bit with the CPU
+cast before the lean path is taken (#5429). For a row or tensor scale, that
+scale is constant across the reduction for each output row, so it can move to
+the output:
 
 `y = sum_k x_k * code_k / s = (sum_k x_k * code_k) / s`
 
@@ -71,7 +75,7 @@ flowchart TD
     B --> C{"_lean_epilogue_eligible"}
     C -- "range-safe row or tensor" --> D["_forward_lean_scaled_matmul<br/>cast codes, mm on .t(),<br/>FP32 output scale"]
     C -- "range-safe block" --> E["cast codes, in-place FP32-opmath divide,<br/>mm on .t()"]
-    C -- "ROCm, E8M0, autocast,<br/>zero scale, padded block,<br/>autograd, not range-safe" --> F["dequantize_weight<br/>reference path"]
+    C -- "native cast not bit-exact, E8M0,<br/>autocast, zero scale, padded block,<br/>autograd, not range-safe" --> F["dequantize_weight<br/>reference path"]
     D --> G["FP32 product + bias,<br/>round once to activation dtype"]
     E --> H["matmul_fp32_reduce"]
     F --> I["existing dequantize-then-matmul"]
@@ -97,7 +101,7 @@ flowchart TD
 | Zero inverse scale | reference path; the epilogue cannot reproduce `0/0` rows |
 | Block scale shape does not match the weight | reference path; padded/cropped scales keep `_expanded_scale_inv` |
 | `float8_e8m0fnu` | reference path; its CUDA cast produces NaNs |
-| ROCm | reference path; native FP8 casts are not qualified there |
+| Native FP8 cast not bit-exact, or unmeasured in a capture/trace | reference path; CUDA casts are qualified, ROCm is measured once per process (#5429) |
 | Autocast active | reference path; the GEMM operands are narrowed by autocast |
 | Autograd needs the wide-GEMM `Function` | reference path |
 | Native cast previously disabled | reference path |
@@ -123,6 +127,7 @@ forwards re-read the packed payload and observe any mutation of it.
 | `tests/kernels/test_fp8_lean_decode_5146.py::test_fp8_lean_decode_retains_only_packed_weights` | Repeated forwards leave only FP8 codes, FP32 scales and the FP32 bias; no decoded weight is materialised |
 | `tests/kernels/test_fp8_lean_decode_5146.py::test_fp8_lean_decode_does_not_regress_to_fp32_roundtrip` | A 4096x14336 M=1 layer stays within 1.8x of the cast + GEMM + epilogue emulation and 6x of dense FP16 |
 | `tests/kernels/test_fp8_kernel.py::test_fp8_default_forward_is_w8a16` | Default W8A16 output matches the FP64 oracle at `rtol=atol=2e-3` |
+| `tests/test_fp8_native_cast_probe_5429.py` | The cast probe covers all 256 codes of all four FP8 formats, caches one verdict per device/dtype pair, stays unmeasured (and uncached) during capture/tracing, and the lean gate follows the verdict |
 | `tests/test_fp8_dequant_inplace.py` | The reference `_dequantize_native` arithmetic is unchanged |
 | `scripts/benchmark_fp8_decode_5146.py --check` | Manual/CI ratio check for the Llama-3.1-8B projection shapes |
 

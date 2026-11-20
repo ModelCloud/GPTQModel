@@ -203,6 +203,13 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
     # remaining snapshot entries are per-column metadata, not the packed weight.
     _FUSED_TRAIN_STATE_REBUILD = "avx512_gptq"
 
+    #: ``dequantize_weight`` already restores the checkpoint input order.
+    _runtime_dense_weight_is_checkpoint_order = True
+
+    def _runtime_dense_weight(self):
+        """Decode the live AVX512 layout without restoring the checkpoint layout."""
+        return self.dequantize_weight()
+
     gemm_int4_qzero_group_scaled_cpu_kernel = None
     pack_gptq_int4_kernel = None
     _fused_op_handles_bias = True
@@ -307,17 +314,6 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         # inverse reproduces the bytes captured before the transform; a layout
         # this build cannot invert keeps it (#4783).
         finalize_fused_train_state(self)
-
-    def _runtime_dense_operands(self) -> tuple[torch.Tensor, bool]:
-        """Dense weight for a compiled grad forward.
-
-        ``torch_cpu_avx512`` swaps ``qweight``/``qzeros`` for the HF int4 tile
-        layout in ``transform_cpu``, not the ATen int4pack permutation, so the
-        shared int4pack decoder cannot read it (#5569). ``dequantize_weight``
-        inverts that tile layout and already restores the checkpoint channel
-        order, so the caller must not gather ``ret_idx``.
-        """
-        return self.dequantize_weight(), False
 
     def dequantize_weight(self, num_itr: int = 1):
         if not self._cpu_transformed:

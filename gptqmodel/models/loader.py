@@ -968,6 +968,34 @@ def _normalize_explicit_placement(device, device_map, max_memory):
     return requested_device_map, explicit_device_map
 
 
+def _dense_placement_device_map(device, device_map, resolved_device):
+    """Return the placement map for the dense (non-quantized) Transformers load.
+
+    Transformers' ``"auto"`` policy fills the first visible accelerator, so an
+    explicit ``device="cpu"`` on a CUDA host silently loaded a CUDA model: the
+    requested device only selected the dtype and was then replaced by ``auto``
+    (#5373). An explicit ``device_map`` still wins; otherwise the requested
+    device becomes a full-model root mapping. A device pool is a layer-wise
+    request with no single root target, so it keeps the auto policy.
+    """
+
+    if device_map:
+        return device_map
+    if device is None or isinstance(resolved_device, tuple):
+        return "auto"
+    # ``_indexed_device_request`` keeps an accelerator ordinal that the family
+    # resolution below drops (``device=1`` resolves to the CUDA family).
+    target = _indexed_device_request(device)
+    if target is None:
+        if isinstance(resolved_device, DEVICE):
+            target = str(resolved_device.to_torch_device())
+        elif isinstance(resolved_device, torch.device):
+            target = str(resolved_device)
+        else:
+            return "auto"
+    return {"": target}
+
+
 def _max_memory_device_name_is_cpu(name: str) -> bool:
     """Whether a normalized ``max_memory`` key is the CPU budget."""
 
@@ -1591,6 +1619,21 @@ def model_global_state_lock():
     """
 
     return _MODEL_GLOBAL_STATE_LOCK
+
+
+def _default_dtype_outside_construction() -> torch.dtype:
+    """Read torch's default dtype while no construction window can be open.
+
+    transformers' ``local_torch_dtype`` window saves, sets and restores the
+    process default dtype in the constructing thread. A bare
+    ``torch.get_default_dtype()`` at load entry or exit can therefore observe
+    another thread's temporary dtype and report a change the load did not make
+    (#5421). The writer excludes every construction window, so the value read
+    here is the process's settled default dtype.
+    """
+
+    with model_global_state_lock():
+        return torch.get_default_dtype()
 
 
 def _serialized_model_load(method):
@@ -2242,7 +2285,7 @@ def ModelLoader(cls):
         # quantization is unsafe with GIL=0 and torch.compile/graphs
         import torch._dynamo
         torch._dynamo.disable()
-        default_dtype_before = torch.get_default_dtype()
+        default_dtype_before = _default_dtype_outside_construction()
 
         pretrained_model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             pretrained_model_id_or_path,
@@ -2411,7 +2454,9 @@ def ModelLoader(cls):
                 # come from these arguments rather than the previous load.
                 configure_kernel(kernel)
             hf_model_init_kwargs = dict(model_init_kwargs_without_internal)
-            hf_model_init_kwargs["device_map"] = device_map if device_map else "auto"
+            hf_model_init_kwargs["device_map"] = _dense_placement_device_map(
+                device, device_map, resolved_device
+            )
             set_dtype_compat(hf_model_init_kwargs, dtype)
             hf_model_init_kwargs.update(hf_gguf_load_kwargs)
             if (
@@ -2737,7 +2782,7 @@ def ModelLoader(cls):
         # to a discarded model are dropped with it: ``release_compile_trace_garbage``
         # reclaims the trace cycles that keep a dropped model alive (#5020), so a
         # load does not need a process-wide reset for them.
-        default_dtype_before = torch.get_default_dtype()
+        default_dtype_before = _default_dtype_outside_construction()
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
             kwargs,
@@ -3440,6 +3485,16 @@ def ModelLoader(cls):
                     is_sharded=is_sharded,
                     cpu_offload=cpu_offload,
                 )
+
+        # The shell replaced only the modules named by `module_tree`. Let the
+        # definition reattach any runtime modules it shares with those leaves
+        # before the checkpoint is loaded: the unmaterialized-parameter guard
+        # inside `load_checkpoint_in_model_then_tie_weights` would otherwise
+        # reject the sibling branch before `after_model_load` can fix it
+        # (#5514).
+        after_make_quant = getattr(cls, "after_make_quant", None)
+        if callable(after_make_quant):
+            model = after_make_quant(model)
 
         validate_checkpoint_qweights(
             model,

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import torch
 
+from ..utils.torch import dynamo_is_compiling
 from .kernel import get_kernel_config
 
 
@@ -250,7 +251,7 @@ def cpu_bf16x3_matmul():
         yield
         return
 
-    if torch.compiler.is_compiling():
+    if dynamo_is_compiling():
         yield
         return
 

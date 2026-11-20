@@ -67,7 +67,11 @@ class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, OmniThinkerCheckpointLayoutMixin, T
 
     dynamic_expert_index = "num_experts"
 
-    pre_lm_head_norm_module = "thinker.model.norm"
+    # transformers 5.22 nests the thinker decoder under `language_model`.
+    pre_lm_head_norm_module = [
+        "thinker.model.language_model.norm",
+        "thinker.model.norm",
+    ]
 
     # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()

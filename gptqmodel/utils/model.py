@@ -3469,14 +3469,22 @@ def _tie_weights_after_checkpoint_load(
                 checkpoint_keys |= set(extra_keys)
             missing_keys = set(model.state_dict().keys()) - checkpoint_keys
 
-    if missing_keys is None:
-        model.tie_weights()
-        return
+    # transformers replaces ``PreTrainedModel.tie_weights`` class-wide while
+    # another thread is inside its construction window; a tie that runs then is
+    # silently skipped and the model keeps a separate, never-populated
+    # ``lm_head`` (#5421). The writer excludes every construction window, so
+    # the call below always reaches the real method.
+    from .torch import model_global_state_lock
 
-    try:
-        model.tie_weights(missing_keys=missing_keys)
-    except TypeError:
-        model.tie_weights()
+    with model_global_state_lock():
+        if missing_keys is None:
+            model.tie_weights()
+            return
+
+        try:
+            model.tie_weights(missing_keys=missing_keys)
+        except TypeError:
+            model.tie_weights()
 
 
 def _convert_safetensors_header_keys(

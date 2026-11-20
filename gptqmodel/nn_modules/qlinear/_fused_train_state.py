@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -139,6 +140,14 @@ def _materialize_snapshot_entry(module: nn.Module, entry):
     """Return the checkpoint tensor described by a snapshot entry."""
 
     if isinstance(entry, RebuiltCheckpointTensor):
+        live = getattr(module, "qweight", None)
+        if isinstance(live, torch.Tensor) and live.device.type == "meta":
+            # A move to ``meta`` discarded the runtime words, so the inverse
+            # cannot read them. The checkpoint layout is still known from the
+            # descriptor, and a meta tensor carries only shape/dtype anyway.
+            # Rebuilding here would run the inverse (and its ``aten::equal``
+            # identity check) against meta tensors.
+            return torch.empty(entry.shape, dtype=entry.dtype, device=live.device)
         tensor = module._rebuild_checkpoint_qweight()
         if not isinstance(tensor, torch.Tensor):
             raise RuntimeError(
@@ -375,6 +384,97 @@ def fused_autograd_needs_dense(module: nn.Module, x: torch.Tensor) -> bool:
     return getattr(mode, "value", mode) == "inference"
 
 
+_disable_compile = getattr(getattr(torch, "compiler", None), "disable", lambda fn: fn)
+
+
+@_disable_compile
+def ensure_cpu_inference_layout(module: nn.Module, dtype: torch.dtype | None) -> bool:
+    """Install the CPU int4pack runtime layout outside a traced graph.
+
+    The one-time transform rewrites the packed ``qweight``/``qzeros`` buffers in
+    place, which a traced graph must not do, so it only ran in an eager forward.
+    A call compiled before any eager forward therefore traced the dense branch
+    and dequantized every weight on every token for the life of the process
+    (#5515). ``optimize()`` and a cold ``torch.compile`` call both go through
+    here first.
+
+    Only an eval-mode CPU module with no layout yet is transformed; everything
+    else is left to the forward. Returns whether the layout is now installed.
+    """
+
+    override = getattr(module, "_prepare_cpu_inference_layout", None)
+    if callable(override):
+        # A kernel whose eager branch differs (device-only transform, a
+        # string ``linear_mode``) installs its own layout.
+        return override(dtype)
+    if module.linear_mode is not None or module.training:
+        return False
+    qweight = getattr(module, "qweight", None)
+    if not isinstance(qweight, torch.Tensor) or qweight.device.type != "cpu":
+        return False
+    transform = getattr(module, "transform_cpu", None)
+    if not callable(transform):
+        return False
+    from ...looper.linear_mode import LinearMode
+
+    with module._cpu_transform_lock:
+        if module.linear_mode is not None:
+            return False
+        capture_fused_train_state(module)
+        transform(dtype)
+        module.linear_mode = LinearMode.INFERENCE
+        refresh = getattr(module, "_refresh_fused_op", None)
+        if not callable(refresh):
+            refresh = getattr(module, "_refresh_fused_state", None)
+        if callable(refresh):
+            refresh()
+    return True
+
+
+def runtime_zero_offsets_from_codes(
+    module: nn.Module, *, bits: int, dtype: torch.dtype
+) -> Optional[torch.Tensor]:
+    """Return the affine offsets implied by the checkpoint zero codes.
+
+    Pure read-only variant of :func:`refresh_runtime_zero_offsets`: it does not
+    touch ``scales_and_zeros`` or ``qzeros`` and performs no cache-key or
+    ``data_ptr`` access, so a traced grad decode can call it. ``None`` means the
+    codes are unavailable or a fused source owns the storage.
+    """
+
+    if getattr(module, "_fused_operands_shared", False):
+        return None
+    codes = getattr(module, "_cpu_zero_codes", None)
+    scales = getattr(module, "scales", None)
+    if not isinstance(codes, torch.Tensor) or not isinstance(scales, torch.Tensor):
+        return None
+    if tuple(codes.shape) != tuple(scales.shape):
+        return None
+    from .torch_aten_kernel import _cpu_int4pack_zero_offsets
+
+    return _cpu_int4pack_zero_offsets(codes, scales.to(dtype), bits).to(dtype)
+
+
+def refresh_runtime_zero_offsets(
+    module: nn.Module, *, bits: int, dtype: torch.dtype
+) -> Optional[torch.Tensor]:
+    """Recompute CPU int4pack affine offsets after a scale-only change.
+
+    The CPU int4pack transform replaces the checkpoint's integer zero codes with
+    the affine offsets ``(2**(bits-1) - zero_code) * scale`` the fused kernel
+    consumes. Those offsets are therefore derived from ``scales``; changing the
+    scales leaves them based on the old value, and a later
+    ``clear_weight_cache()`` republished the stale pair (#5372).
+
+    The decoded zero codes are kept on the module by the transform, so the
+    offsets can be rebuilt from the current scales. ``None`` means the codes are
+    unavailable (a module whose metadata was replaced wholesale) and the caller
+    must keep the offsets it was given.
+    """
+
+    return runtime_zero_offsets_from_codes(module, bits=bits, dtype=dtype)
+
+
 def reset_fused_runtime_state(module: nn.Module) -> None:
     """Forget that the live operands are in a kernel's runtime layout.
 
@@ -389,7 +489,10 @@ def reset_fused_runtime_state(module: nn.Module) -> None:
         ("scales_and_zeros", None),
         ("_cpu_transformed", False),
         ("_cpu_transform_dtype", None),
+        ("_cpu_zero_codes", None),
         ("_fused_state_key", None),
+        ("_fused_scale_key", None),
+        ("_fused_zero_key", None),
     ):
         if hasattr(module, name):
             setattr(module, name, value)

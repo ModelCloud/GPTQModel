@@ -1645,9 +1645,7 @@ class ModelTest(unittest.TestCase):
 
         log.info(f"args: {args}")
         torch_fused_backend = self._torch_fused_backend()
-        model = GPTQModel.load(
-            model_id_or_path,
-            quantize_config=quantize_config,
+        load_kwargs = dict(
             trust_remote_code=trust_remote_code,
             dtype=dtype,
             device_map=(
@@ -1657,6 +1655,20 @@ class ModelTest(unittest.TestCase):
             ),
             **args,
         )
+        try:
+            model = GPTQModel.load(
+                model_id_or_path,
+                quantize_config=quantize_config,
+                **load_kwargs,
+            )
+        except ValueError as exc:
+            # A pre-quantized checkpoint carries its own quantization settings
+            # and rejects a caller config by design. Load it without the config
+            # so the prequantized eval branch in ``quantize_and_evaluate`` is
+            # reachable for every ModelTest with a quantized NATIVE_MODEL_ID.
+            if "cannot be applied to a quantized checkpoint" not in str(exc):
+                raise
+            model = GPTQModel.load(model_id_or_path, **load_kwargs)
 
         self._layer_stop_callback = None
         if DEBUG_ON and self.STOP_AFTER_LAYER is not None:

@@ -20,6 +20,7 @@ import torch
 
 import gptqmodel.quantization.gptq as gptq_module
 import gptqmodel.quantization.qqq as qqq_module
+import gptqmodel.quantization.rtn as rtn_module
 from gptqmodel.quantization.config import (
     Fallback,
     FallbackStrategy,
@@ -28,7 +29,7 @@ from gptqmodel.quantization.config import (
     RTNConfig,
     SmoothMSE,
 )
-from gptqmodel.quantization.fallback_smooth import mse_optimal_quant
+from gptqmodel.quantization.fallback_smooth import mse_optimal_quant, smooth_applies
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.quantization.qqq import QQQ
 from gptqmodel.quantization.rtn import RTN
@@ -506,3 +507,83 @@ def test_smooth_mse_threshold_uses_the_resolved_whole_row_size(build_grid):
     assert not torch.equal(enabled, plain), (
         "a whole-row group at the threshold must still reach the MSE search"
     )
+
+
+def test_default_smooth_mse_is_not_gated_by_the_clipping_threshold():
+    """``SmoothMSE()`` must not inherit the clipping smoothers' g128 default (#5530).
+
+    The search runs per group, so it has no reason to skip small groups. The
+    shared ``128`` default belongs to the clipping smoothers; inheriting it made
+    ``SmoothMSE()`` a silent no-op at the common g32/g64 sizes while
+    ``quantize_config.json`` still recorded ``smooth: mse``.
+    """
+
+    assert SmoothMSE().group_size_threshold == 0
+    assert smooth_applies(SmoothMSE(), 32)
+    assert smooth_applies(SmoothMSE(), 64)
+    # An explicit threshold keeps its documented meaning.
+    assert not smooth_applies(SmoothMSE(group_size_threshold=128), 64)
+    assert smooth_applies(SmoothMSE(group_size_threshold=128), 128)
+
+
+def test_default_smooth_mse_reaches_the_rtn_search_at_group_size_64(monkeypatch):
+    """The RTN loop must reach ``mse_optimal_quant`` at g64 without a threshold (#5530)."""
+
+    captured = _spy_mse_weights(monkeypatch, rtn_module)
+    torch.manual_seed(5530)
+    block = torch.randn(16, 64)
+
+    _rtn_grid(block, SmoothMSE(), group_size=64)
+    assert captured, "the default SmoothMSE search was skipped at group_size=64"
+
+    captured.clear()
+    _rtn_grid(block, SmoothMSE(group_size_threshold=128), group_size=64)
+    assert not captured, "an explicit above-group threshold must still skip the search"
+
+
+def test_default_smooth_mse_reaches_the_gptq_fallback_at_group_size_64(monkeypatch):
+    """The GPTQ/QQQ fallback loops must search at g64 without a threshold (#5530)."""
+
+    captured = _spy_mse_weights(monkeypatch, gptq_module)
+    torch.manual_seed(5531)
+    block = torch.randn(16, 64)
+
+    _gptq_fallback_grid(block, SmoothMSE(), group_size=64)
+    assert captured, "the default SmoothMSE search was skipped at group_size=64"
+
+
+SMOOTH_CONFIG_FORMS = [SmoothMSE(), "mse", {"type": "mse"}]
+
+
+@pytest.mark.parametrize("smooth", SMOOTH_CONFIG_FORMS, ids=["object", "string", "dict"])
+def test_default_smooth_mse_threshold_agrees_across_config_forms(smooth):
+    """Every way of asking for the MSE smoother must resolve threshold 0 (#5572).
+
+    #5541 only changed the ``SmoothMSE.__init__`` default. The dict/string
+    builder reads the dataclass field default, which stayed at the clipping
+    smoothers' 128, so saved JSON/YAML and CLI configs silently skipped the
+    search at g32/g64.
+    """
+
+    assert smooth_applies(smooth, 32)
+    assert smooth_applies(smooth, 64)
+
+    config = RTNConfig(bits=4, group_size=64, smooth=smooth)
+    assert config.smooth.group_size_threshold == 0
+    assert smooth_applies(config.smooth, 32)
+    assert smooth_applies(config.smooth, 64)
+
+    fallback = Fallback(strategy=FallbackStrategy.RTN, smooth=smooth)
+    assert fallback.smooth.group_size_threshold == 0
+
+
+@pytest.mark.parametrize("smooth", SMOOTH_CONFIG_FORMS, ids=["object", "string", "dict"])
+def test_default_smooth_mse_from_every_config_form_reaches_the_rtn_search_at_g64(monkeypatch, smooth):
+    """The parsed forms must actually run the RTN search at g64 (#5572)."""
+
+    captured = _spy_mse_weights(monkeypatch, rtn_module)
+    torch.manual_seed(5572)
+    block = torch.randn(16, 64)
+
+    _rtn_grid(block, smooth, group_size=64)
+    assert captured, "the default SmoothMSE search was skipped at group_size=64"

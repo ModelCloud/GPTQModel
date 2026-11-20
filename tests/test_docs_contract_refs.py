@@ -61,11 +61,11 @@ CONTRACT_REFS = (
      "_decoder_fp8_scale_semantics", SYMBOL_CITATION),
     ("docs/fusion-planner.md", "gptqmodel/models/fusion.py", "_share_operands", 444),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
-     "_normalize_gguf_config", 962),
+     "_normalize_gguf_config", 977),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
-     "_gguf_bits_spec_from_format_value", 892),
+     "_gguf_bits_spec_from_format_value", 907),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
-     "_gguf_bits_from_components", 933),
+     "_gguf_bits_from_components", 948),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/protocol.py",
      "_resolve_gguf_public_format", 1381),
     # `awq_processor.py` keeps growing (the #4880 replay packing added ~70
@@ -90,7 +90,7 @@ CONTRACT_REFS = (
     ("docs/quantize-run-summary.md", "gptqmodel/models/base.py",
      "_log_quantize_summary", None),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
-     "compute_hessian_xtx", 1220),
+     "compute_hessian_xtx", 1277),
     # `gptq.py` keeps growing (#5325): the line drifted 2121 -> 2202 in one
     # merge, so cite the symbol instead.
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",

@@ -39,6 +39,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Decision Transformer tensor calibration](decision-transformer-calibration.md)
 - [Embedding quantization config validation](embedding-quantization-config.md)
 - [Embedding-endpoint quantization: fresh quantize vs requantize](embed-endpoint-quantize.md)
+- [Engine extras: vLLM and SGLang pins](engine-extras.md)
 - [CPU block packing](cpu-block-packing.md)
 - [FP8 is load-only: production checkpoints only](fp8-load-only.md)
 - [FP4 effective-weight range in the decode path](fp4-effective-weight-range.md)

@@ -240,13 +240,16 @@ def test_qwen3_5_moe_prepare_dataset_routes_pretokenized_rows_to_base_path(
         (row for row in rows), batch_size=2, calibration_dataset_sort="desc"
     )
 
+    # #4889 strips the trailing mask-0 slot from the first row before sorting,
+    # so it sorts below the bare 12-token tensor and is re-padded in its batch.
+    stripped_short = list(range(1, 12))
     assert [batch["input_ids"].tolist() for batch in prepared] == [
         [long, long],
-        [short, short],
+        [short, stripped_short + [0]],
     ]
     assert [batch["attention_mask"].tolist() for batch in prepared] == [
         [[1] * 14, [1] * 14],
-        [padded, [1] * 12],
+        [[1] * 12, padded],
     ]
 
 

@@ -16,6 +16,7 @@ is what `generate()` does.
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from gptqmodel.models.base import BaseQModel
@@ -229,3 +230,102 @@ def test_columnar_additive_mask_keeps_its_negative_sentinel():
     assert prepared[0]["attention_mask"].tolist() == [[1, 1]]
     assert prepared[1]["input_ids"].tolist() == [[3]]
     assert prepared[1]["attention_mask"].tolist() == [[1]]
+
+def _mask_rows(prepared):
+    return [(row["input_ids"].tolist(), row["attention_mask"].tolist()) for row in prepared]
+
+
+_FLOAT_MASK_PAYLOAD = {
+    "input_ids": [[1, 2, 3], [4, 5, 6]],
+    "attention_mask": [[1.0, 1.0, 0.0], [0.0, 0.0, 0.0]],
+}
+
+
+@pytest.mark.parametrize("container", ["dict", "batch_encoding", "dataframe", "dataset"])
+def test_float_0_1_mask_container_parity(container):
+    """Every columnar container must drop the all-padding row the same way (#5506)."""
+
+    payload = dict(_FLOAT_MASK_PAYLOAD)
+    if container == "dict":
+        data = payload
+    elif container == "batch_encoding":
+        transformers = pytest.importorskip("transformers")
+        data = transformers.BatchEncoding(payload)
+    elif container == "dataframe":
+        pandas = pytest.importorskip("pandas")
+        data = pandas.DataFrame(payload)
+    else:
+        pytest.importorskip("datasets")
+        from datasets import Dataset
+
+        data = Dataset.from_dict(payload)
+
+    prepared = prepare_calibration_dataset(_qmodel(), data, calibration_data_min_length=0)
+
+    assert _mask_rows(prepared) == [([[1, 2]], [[True, True]])]
+
+
+def test_hf_dataset_float_0_1_mask_matches_the_dict_form():
+    """A `Dataset` is columnar, so the mask convention must survive the split (#5506)."""
+
+    pytest.importorskip("datasets")
+    from datasets import Dataset
+
+    payload = dict(_FLOAT_MASK_PAYLOAD)
+    dataset = prepare_calibration_dataset(
+        _qmodel(), Dataset.from_dict(payload), calibration_data_min_length=0
+    )
+    mapping = prepare_calibration_dataset(_qmodel(), payload, calibration_data_min_length=0)
+
+    assert _mask_rows(dataset) == _mask_rows(mapping)
+    assert _mask_rows(dataset) == [([[1, 2]], [[True, True]])]
+
+
+def test_hf_dataset_all_zero_float_mask_stays_an_additive_attend_all_mask():
+    """A `Dataset` column with no 0/1 sentinel is additive, so zero means attend (#5134)."""
+
+    pytest.importorskip("datasets")
+    from datasets import Dataset
+
+    payload = {
+        "input_ids": [[1, 2], [3, 4]],
+        "attention_mask": [[0.0, 0.0], [0.0, 0.0]],
+    }
+
+    prepared = prepare_calibration_dataset(
+        _qmodel(), Dataset.from_dict(payload), calibration_data_min_length=0
+    )
+
+    assert len(prepared) == 2
+    for row in prepared:
+        assert row["attention_mask"].tolist() == [[1, 1]]
+
+
+def test_hf_dataset_additive_mask_keeps_its_negative_sentinel():
+    pytest.importorskip("datasets")
+    from datasets import Dataset
+
+    payload = {
+        "input_ids": [[1, 2], [3, 4]],
+        "attention_mask": [[0.0, 0.0], [0.0, -10000.0]],
+    }
+
+    prepared = prepare_calibration_dataset(
+        _qmodel(), Dataset.from_dict(payload), calibration_data_min_length=0
+    )
+
+    assert len(prepared) == 2
+    assert prepared[0]["attention_mask"].tolist() == [[1, 1]]
+    assert prepared[1]["input_ids"].tolist() == [[3]]
+    assert prepared[1]["attention_mask"].tolist() == [[1]]
+
+
+def test_hf_dataset_without_an_attention_mask_column_is_unchanged():
+    pytest.importorskip("datasets")
+    from datasets import Dataset
+
+    prepared = prepare_calibration_dataset(
+        _qmodel(), Dataset.from_dict({"input_ids": [[1, 2], [3, 4]]}), calibration_data_min_length=0
+    )
+
+    assert _mask_rows(prepared) == [([[1, 2]], [[1, 1]]), ([[3, 4]], [[1, 1]])]

@@ -270,6 +270,19 @@ class DiffusionGemmaQModel(BaseQModel):
         # quantization, once encoder and decoder modules actually share storage.
         _refresh_tied_weight_metadata(model)
 
+    @classmethod
+    def after_make_quant(cls, model):
+        # A saved checkpoint stores the encoder owner only: `make_quant`
+        # replaces the encoder leaves with `QuantLinear` and leaves the tied
+        # decoder dense with `torch.empty` storage. Reattach those leaves and
+        # the remaining dense aliases here, before the loader's checkpoint
+        # guard runs; `after_model_load` is too late because the guard raises
+        # first (#5514). The untied case stays refused by
+        # `pre_quantize_generate_hook_start` and is a no-op here (#5411).
+        _sync_decoder_quantized_modules(model)
+        _sync_decoder_tied_parameters(model)
+        return model
+
     def after_model_load(self, model, load_quantized_model=False):
         model = super().after_model_load(model, load_quantized_model=load_quantized_model)
         if load_quantized_model:

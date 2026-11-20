@@ -39,15 +39,25 @@ class LFM3OmniQModel(LFM3QModel):
         {
             "operator_norm": ("operator_norm:!",),
             "post_operator_norm": ("post_operator_norm:!:postnorm",),
-            "conv": ("in_proj:0", "out_proj:1"),
+            # The depthwise convolution kernel keeps its source dtype and is
+            # declared explicitly so leaf coverage sees `conv.conv` rather than
+            # only the container.
+            "conv": {
+                "": ("in_proj:1", "out_proj:2"),
+                "conv": ("conv:0:!:nosrc",),
+            },
             "self_attn": (
                 "q_proj:0",
                 "q_norm:0:!",
                 "k_proj:0",
                 "k_norm:0:!",
                 "v_proj:0",
-                "gate_proj:!",
-                "o_proj:1",
+                # `g_proj` is a per-head sigmoid gate over the same normalized
+                # input as Q/K/V. Keep it in its source dtype; AWQ compensates
+                # it as a scale consumer. `o_proj` reads the gated attention
+                # output, not the input norm, so it is quantized plainly.
+                "g_proj:!:nosrc",
+                "o_proj:1:nosrc",
             ),
             "ffn_norm": ("ffn_norm:!",),
             "post_ffn_norm": ("post_ffn_norm:!:postnorm",),

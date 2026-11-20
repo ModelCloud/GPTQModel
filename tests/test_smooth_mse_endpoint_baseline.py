@@ -176,16 +176,22 @@ def test_smooth_mse_consumers_return_a_grid_no_worse_than_the_baseline(
         [CASES["normal"], CASES["negative_constant"], CASES["all_zero"], CASES["mixed_sign"]],
         dim=0,
     ).to(device)
-    # RTN applies `smooth` itself; the calibrated GPTQ/QQQ configs are driven
-    # by `fallback.smooth` and refuse the top-level field (#5302).
-    smooth_kwargs = {"smooth": SmoothMSE()} if consumer == "rtn" else {}
+    # RTN applies its top-level `smooth` and refuses `fallback.smooth`; the
+    # calibrated GPTQ/QQQ configs are driven by `fallback.smooth` and refuse the
+    # top-level field (#5302, #5401).
+    if consumer == "rtn":
+        config_kwargs = {"smooth": SmoothMSE()}
+        fallback_kwargs = {}
+    else:
+        config_kwargs = {}
+        fallback_kwargs = {"smooth": SmoothMSE()}
     qcfg = config_cls(
         bits=4,
         group_size=GROUP_SIZE,
         sym=sym,
-        fallback=Fallback(strategy=FallbackStrategy.RTN, smooth=SmoothMSE()),
+        fallback=Fallback(strategy=FallbackStrategy.RTN, **fallback_kwargs),
         offload_to_disk=False,
-        **smooth_kwargs,
+        **config_kwargs,
     )
     searched = _saliency_weighted_mse(block.cpu(), dequantize(block, qcfg).cpu())
     baseline = _saliency_weighted_mse(

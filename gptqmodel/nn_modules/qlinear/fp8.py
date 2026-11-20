@@ -35,7 +35,7 @@ from ...utils.fp8_block_triton import (
 )
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
-from ...utils.torch import TORCH_HAS_COMPILE, torch_compile
+from ...utils.torch import TORCH_HAS_COMPILE, dynamo_is_compiling, torch_compile
 from . import WeightOnlyQuantLinear
 from ._compile_support import COMPILE_LEVEL
 from ._numerics import autocast_active, matmul_fp32_reduce
@@ -58,6 +58,10 @@ _FUSED_DECODE_WIDE_OUT_FEATURES = 2048
 #: ``(hip?, device index, output dtype) -> bool`` answers for the row-wise
 #: ``torch._scaled_mm`` contract, measured once per process.
 _SCALED_MM_ROW_SCALE_SUPPORT: dict = {}
+
+#: ``(device index, fp8 dtype, output dtype) -> bool`` answers for the native
+#: FP8 cast contract, measured once per process on HIP devices (#5429).
+_NATIVE_FP8_CAST_SUPPORT: dict = {}
 
 #: ``GPTQMODEL_FP8_SCALED_MM``: ``auto`` (default) measures the contract,
 #: ``on``/``off`` skip the measurement and force the answer. ``off`` keeps a
@@ -94,8 +98,7 @@ _SCALED_MM_OVERRIDE: Optional[bool] = _parse_scaled_mm_override(
 def _is_compiling() -> bool:
     """Whether this call is being traced by ``torch.compile``/``torch.export``."""
 
-    compiler = getattr(torch, "compiler", None)
-    return bool(compiler is not None and compiler.is_compiling())
+    return dynamo_is_compiling()
 
 
 def _probe_must_wait() -> bool:
@@ -220,6 +223,90 @@ def _scaled_mm_row_scale_supported(device: torch.device, out_dtype: torch.dtype)
     """
 
     return _scaled_mm_row_scale_verdict(device, out_dtype) is True
+
+
+def _probe_native_fp8_cast(
+    device: torch.device, fp8_dtype: torch.dtype, out_dtype: torch.dtype
+) -> torch.Tensor:
+    """Device-side verdict for the native FP8 -> *out_dtype* cast.
+
+    Every 8-bit pattern is a code in each of the four FP8 formats, so the 256
+    patterns cover the whole domain. The CPU cast is the reference: a device
+    whose cast is bit-equal to it cannot lose weight precision when the lean
+    epilogue casts the codes to the activation dtype (#5429). Returns a 0-dim
+    bool tensor, so measuring performs no host synchronisation.
+    """
+
+    codes = torch.arange(256, dtype=torch.uint8).view(fp8_dtype)
+    expected = codes.to(out_dtype).view(torch.uint8)
+    actual = codes.to(device).to(out_dtype).to("cpu").view(torch.uint8)
+    return (actual == expected).all()
+
+
+def _native_fp8_cast_verdict(
+    device: torch.device, fp8_dtype: torch.dtype, out_dtype: torch.dtype
+) -> Optional[bool]:
+    """Whether this device casts every FP8 code to *out_dtype* bit-exactly.
+
+    CUDA casts are already qualified, so the answer is ``True`` without a
+    measurement there. HIP targets are not: gfx1201 is bit-exact for all four
+    formats and both activation dtypes, but the gate used to reject every ROCm
+    device wholesale (#5429). The cast is therefore measured once per process,
+    device and dtype pair, like the row-wise ``torch._scaled_mm`` contract
+    above. ``None`` means this context could not measure it (a CUDA-graph
+    capture or a ``torch.compile`` trace); the caller keeps the reference path
+    for this call without caching a "no".
+    """
+
+    if not IS_ROCM:
+        return True
+
+    index = device.index
+    if index is None:  # pragma: no cover - tensors always carry an index
+        index = torch.cuda.current_device() if device.type == "cuda" else -1
+    key = (index, fp8_dtype, out_dtype)
+    cached = _NATIVE_FP8_CAST_SUPPORT.get(key)
+    if cached is not None:
+        return cached
+
+    if _probe_must_wait():
+        return None
+
+    try:
+        supported = bool(_probe_native_fp8_cast(device, fp8_dtype, out_dtype))
+    except torch.cuda.OutOfMemoryError:
+        # An allocation failure says nothing about the cast contract.
+        return None
+    except Exception:
+        # A build/kernel rejection is a real answer for this combination.
+        supported = False
+
+    if _probe_must_wait():
+        # Defensive: the context turned into capture/tracing mid-measurement.
+        return supported
+
+    _NATIVE_FP8_CAST_SUPPORT[key] = supported
+    if not supported:
+        log.warn.once(
+            "FP8: the native "
+            f"`{str(fp8_dtype).replace('torch.', '')}` -> "
+            f"`{str(out_dtype).replace('torch.', '')}` cast is not bit-exact on "
+            "this device; row/tensor FP8 layers use the dequantize + matmul path."
+        )
+    return supported
+
+
+def _native_fp8_cast_supported(
+    device: torch.device, fp8_dtype: torch.dtype, out_dtype: torch.dtype
+) -> bool:
+    """``True`` only when the cast contract is known and bit-exact.
+
+    An unmeasured combination reports ``False`` for this call but stays
+    uncached, so a capture-time or traced call cannot poison the process-wide
+    answer (#5195, #5429).
+    """
+
+    return _native_fp8_cast_verdict(device, fp8_dtype, out_dtype) is True
 
 
 def _normalize_fp8_activation_quant_method(value: Optional[str]) -> str:
@@ -897,17 +984,20 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         weight is in range.
 
         Everything this gate rejects keeps the existing dequantize-then-matmul
-        path bit-for-bit: ROCm (native FP8 casts are not qualified there), the
-        E8M0 format (its CUDA cast produces NaNs), a disabled native cast, a
-        non-range-safe payload, zero inverse scales, padded block scales, and
-        an autograd graph that needs the wide-GEMM ``Function``.
+        path bit-for-bit: a device whose measured native FP8 cast is not
+        bit-exact (ROCm measures it once per process, #5429), the E8M0 format
+        (its CUDA cast produces NaNs), a disabled native cast, a non-range-safe
+        payload, zero inverse scales, padded block scales, and an autograd graph
+        that needs the wide-GEMM ``Function``.
         """
 
-        if IS_ROCM or self._native_dequant_disabled:
+        if self._native_dequant_disabled:
             return False
         if self.fp8_format == "float8_e8m0fnu":
             return False
         if not self._native_gemm_eligible(x_flat):
+            return False
+        if not _native_fp8_cast_supported(x_flat.device, self.fp8_dtype, x_flat.dtype):
             return False
         if self.weight_scale_method not in {"row", "tensor", "block"}:
             return False
@@ -1000,13 +1090,20 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             and fp8_block_decode_supported(
                 weight,
                 scale.to(dtype=torch.float32) if scale.dtype != torch.float32 else scale,
+                fp8_format=self.fp8_format,
                 block_size=block,
                 dtype=dtype,
             )
         )
         fused = (
             decode
-            and fp8_block_gemv_payload_supported(weight, scale, block_size=block, dtype=dtype)
+            and fp8_block_gemv_payload_supported(
+                weight,
+                scale,
+                fp8_format=self.fp8_format,
+                block_size=block,
+                dtype=dtype,
+            )
             # The fused product keeps the codes in the activation dtype through
             # the whole reduction, so it needs the same range safety
             # ``_native_gemm_eligible`` asks for on the row/tensor epilogue.
