@@ -443,16 +443,26 @@ class Quantizer(nn.Module):
         ).unsqueeze(1)
         xmin1 = p * xmin.unsqueeze(0)
         xmax1 = p * xmax.unsqueeze(0)
-        scale1 = xmax1 / self.maxq if groupwise else (xmax1 - xmin1) / self.maxq
-        # Evaluate the same representable scales that will be packed. Flooring
-        # only the initial/final winner would select against a different grid,
-        # and asymmetric zero points must be computed from the bounded scale.
-        if scale_min is not None:
-            scale1 = _floor_scale_for_storage(scale1, scale_min)
-        if self.qcfg.sym:
-            zero1 = self.zero.unsqueeze(0).expand(steps, rows)
+        if self._maxq_value < 0:
+            # ``configure(trits=True)`` stores the two ternary levels in
+            # ``scale``/``zero`` and uses ``maxq == -1`` as a sentinel, not an
+            # affine divisor: the ``(xmax - xmin) / maxq`` grid would be
+            # negative and meaningless. The candidate endpoints are the shrunk
+            # extrema, and the unshrunk ``(xmax, xmin)`` stay the incumbent
+            # (#5601).
+            scale1 = xmax1
+            zero1 = xmin1
         else:
-            zero1 = torch.round(-xmin1 / scale1)
+            scale1 = xmax1 / self.maxq if groupwise else (xmax1 - xmin1) / self.maxq
+            # Evaluate the same representable scales that will be packed. Flooring
+            # only the initial/final winner would select against a different grid,
+            # and asymmetric zero points must be computed from the bounded scale.
+            if scale_min is not None:
+                scale1 = _floor_scale_for_storage(scale1, scale_min)
+            if self.qcfg.sym:
+                zero1 = self.zero.unsqueeze(0).expand(steps, rows)
+            else:
+                zero1 = torch.round(-xmin1 / scale1)
 
         # Step-major order -- (i=0,z0), (i=0,z1), (i=1,z0), ... -- preserves the
         # sequential candidate order, so the first-minimum ``argmin`` below
