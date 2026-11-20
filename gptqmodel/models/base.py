@@ -3375,9 +3375,10 @@ class BaseQModel(nn.Module):
             run_started=run_started,
             vram_devices=vram_devices,
         )
-        # Quantization offloads every layer through pinned host staging. Those
-        # copies are gone once the loop returns, but PyTorch keeps the pinned
-        # blocks cached (non-swappable ``RssShmem``) for the process lifetime.
+        # Layer offload stages every device-to-host copy through a bounded
+        # pinned buffer. Those buffers are gone once the loop returns, but
+        # PyTorch keeps the pinned blocks cached (non-swappable ``RssShmem``)
+        # for the process lifetime.
         release_pinned_host_cache()
         self.log_budget()
         return result
@@ -5730,31 +5731,9 @@ class BaseQModel(nn.Module):
         #return self.offload_to_disk(module=module)
         if self.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
             # GB10 can stall in the pageable CUDA device-to-host copy used by
-            # Module.to('cpu') during post-quant layer offload. Stage each copy
-            # through a small pinned host buffer before placing it in ordinary
-            # CPU storage. Module._apply retains normal parameter handling.
-            chunk_bytes = 1024 * 1024
-
-            def to_cpu_bounded(tensor: torch.Tensor) -> torch.Tensor:
-                if tensor.device.type != "cuda":
-                    return tensor
-                if not tensor.is_contiguous():
-                    tensor = tensor.contiguous()
-                result = torch.empty(tensor.shape, dtype=tensor.dtype, device=CPU)
-                source = tensor.view(-1)
-                destination = result.view(-1)
-                chunk_elements = max(1, chunk_bytes // tensor.element_size())
-                staging = torch.empty(min(chunk_elements, tensor.numel()), dtype=tensor.dtype, device=CPU, pin_memory=True)
-                stream = torch.cuda.current_stream(tensor.device)
-                for start in range(0, tensor.numel(), chunk_elements):
-                    end = min(start + chunk_elements, tensor.numel())
-                    count = end - start
-                    staging[:count].copy_(source[start:end], non_blocking=True)
-                    stream.synchronize()
-                    destination[start:end].copy_(staging[:count])
-                return result
-
-            return module._apply(to_cpu_bounded)
+            # Module.to('cpu') during post-quant layer offload. Keep its staged
+            # copies small; the default path uses a larger pinned chunk.
+            return move_module_to_cpu_pinned(module, chunk_bytes=1024 * 1024)
         return move_module_to_cpu_pinned(module)
 
     def after_quantize(self) -> None:
