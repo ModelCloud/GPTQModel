@@ -470,6 +470,24 @@ def _propagate_block_error(
         trailing_weight[start:end].sub_(block_error[start:end].matmul(trailing_factor))
 
 
+def _static_group_of_column(static_group_perm, group_size: int):
+    """Host map from a block-pass column to its static quantizer group.
+
+    ``static_group_perm`` lives on the compute device. Resolving one column per
+    iteration through ``perm[column].item()`` is an ``aten::_local_scalar_dense``
+    call, which on CUDA drains the stream and blocks the host once per column
+    (#5720). The permutation never changes after activation ordering, so the
+    integer map is built once per module with a single device read.
+
+    ``None`` means there is no permutation to apply: columns index the natural
+    group directly.
+    """
+
+    if static_group_perm is None or group_size <= 0:
+        return None
+    return [int(source_column) // group_size for source_column in static_group_perm.tolist()]
+
+
 def _move_static_groups(groups, device: torch.device):
     """Move static-group quantizers to ``device`` and return their parameters.
 
@@ -2943,6 +2961,10 @@ class GPTQ:
             block_column_perm = final_perm
 
         static_group_perm = block_column_perm if self.qcfg.static_groups else None
+        # One host read for the whole module instead of one per column (#5720).
+        # The permutation is fixed once activation ordering is done, so the CPU
+        # retry reuses this map unchanged.
+        static_group_of_column = _static_group_of_column(static_group_perm, self.qcfg.group_size)
 
         if use_hessian:
             try:
@@ -3108,12 +3130,10 @@ class GPTQ:
                                 # A static block can cross several reordered groups.
                                 for i in range(count):
                                     column = i1 + i
-                                    idx = i1 + i
-                                    if self.qcfg.desc_act:
-                                        idx = perm[idx]
-                                    elif self.qcfg.act_group_aware and use_hessian:
-                                        idx = final_perm[idx]
-                                    self.quantizer = groups[idx // self.qcfg.group_size]
+                                    if static_group_of_column is not None:
+                                        self.quantizer = groups[static_group_of_column[column]]
+                                    else:
+                                        self.quantizer = groups[column // self.qcfg.group_size]
                                     q = self.quantizer.quantize(
                                         W[:, column : column + 1]
                                     ).flatten()
@@ -3156,12 +3176,27 @@ class GPTQ:
                             # loop does not modify until after the block. Thus every
                             # boundary inside this block can be prepared before launch.
                             block_group_size = self.qcfg.group_size
-                            uniform_group = block_group_size == -1 or (
-                                i1 // block_group_size == (i2 - 1) // block_group_size
-                                and (
-                                    not self.qcfg.static_groups
-                                    or static_group_perm is None
+                            # A permuted block can still resolve to one static
+                            # group. Detect that from the host map so the fused
+                            # kernel keeps its single-group fast path instead of
+                            # a per-column group map (#5720).
+                            block_static_group = None
+                            if block_group_size != -1 and static_group_of_column is not None:
+                                block_static_group = static_group_of_column[i1]
+                                for group_of_column in static_group_of_column[i1 + 1 : i2]:
+                                    if group_of_column != block_static_group:
+                                        block_static_group = None
+                                        break
+                            uniform_group = (
+                                block_group_size == -1
+                                or (
+                                    i1 // block_group_size == (i2 - 1) // block_group_size
+                                    and (
+                                        not self.qcfg.static_groups
+                                        or static_group_perm is None
+                                    )
                                 )
+                                or block_static_group is not None
                             )
                             if uniform_group:
                                 # Every column of this block resolves to the same
@@ -3178,7 +3213,11 @@ class GPTQ:
                                             zero.append(self.quantizer.zero)
                                             now_idx += 1
                                     else:
-                                        self.quantizer = groups[i1 // block_group_size]
+                                        self.quantizer = groups[
+                                            block_static_group
+                                            if block_static_group is not None
+                                            else i1 // block_group_size
+                                        ]
                                 block_scale, block_zero = _replace_zero_scale(
                                     self.quantizer.scale, self.quantizer.zero
                                 )
@@ -3202,14 +3241,11 @@ class GPTQ:
                                                 scale.append(self.quantizer.scale)
                                                 zero.append(self.quantizer.zero)
                                                 now_idx += 1
+                                        elif static_group_of_column is not None:
+                                            self.quantizer = groups[static_group_of_column[column]]
                                         else:
-                                            source_column = (
-                                                static_group_perm[column].item()
-                                                if static_group_perm is not None
-                                                else column
-                                            )
                                             self.quantizer = groups[
-                                                source_column // self.qcfg.group_size
+                                                column // self.qcfg.group_size
                                             ]
 
                                     key = id(self.quantizer.scale)
@@ -3248,10 +3284,10 @@ class GPTQ:
                                             now_idx += 1
                                     else:
                                         idx = i1 + i
-                                        if static_group_perm is not None:
-                                            idx = static_group_perm[idx].item()
-
-                                        self.quantizer = groups[idx // self.qcfg.group_size]
+                                        if static_group_of_column is not None:
+                                            self.quantizer = groups[static_group_of_column[idx]]
+                                        else:
+                                            self.quantizer = groups[idx // self.qcfg.group_size]
 
                                 q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
                                 Q1[:, i] = q

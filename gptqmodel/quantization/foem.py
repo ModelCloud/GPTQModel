@@ -32,7 +32,7 @@ from .gar import (
     extend_perm_with_tail,
     invert_perm,
 )
-from .gptq import GPTQ, _device_reduction_key, _move_static_groups
+from .gptq import GPTQ, _device_reduction_key, _move_static_groups, _static_group_of_column
 from .quantizer import _neutralize_dead_columns
 
 
@@ -601,6 +601,8 @@ class FOEM(GPTQ):
                 static_group_perm = perm
             elif self.qcfg.act_group_aware:
                 static_group_perm = final_perm
+        # One host read for the module instead of one per column (#5720).
+        static_group_of_column = _static_group_of_column(static_group_perm, self.qcfg.group_size)
 
         if self.qcfg.foem is None:
             raise ValueError("FOEM requires `foem` configuration.")
@@ -636,7 +638,7 @@ class FOEM(GPTQ):
 
         def _prepare_cpu(cdu_device):
             nonlocal H, W, W_raw, Q, loss_scratch, loss_total, perm, invperm, final_perm, global_perm
-            nonlocal static_group_perm, scale, zero
+            nonlocal static_group_perm, static_group_of_column, scale, zero
             H = H.to(device=cdu_device)
             W = W.to(device=cdu_device)
             # FOEM's beta correction reads the pre-pass weight, and
@@ -666,6 +668,9 @@ class FOEM(GPTQ):
                     static_group_perm = perm
                 elif self.qcfg.act_group_aware:
                     static_group_perm = final_perm
+                # Only the device changed; rebuild so the map matches it.
+                static_group_of_column = _static_group_of_column(
+                    static_group_perm, self.qcfg.group_size)
             if self.qcfg.group_size == -1 and self.qcfg.desc_act:
                 # An ungrouped ``desc_act`` module never refits the quantizer in
                 # the block loop, so rebuild the pre-reorder measurement from
@@ -768,10 +773,10 @@ class FOEM(GPTQ):
                             now_idx += 1
                     else:
                         idx = i1 + i
-                        if static_group_perm is not None:
-                            idx = static_group_perm[idx]
-
-                        self.quantizer = groups[idx // self.qcfg.group_size]
+                        if static_group_of_column is not None:
+                            self.quantizer = groups[static_group_of_column[idx]]
+                        else:
+                            self.quantizer = groups[idx // self.qcfg.group_size]
 
                 q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
                 Q1[:, i] = q
