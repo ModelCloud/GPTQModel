@@ -520,14 +520,19 @@ class FOEM(GPTQ):
             self.module_copy = None
         self._align_foem_hessian_device()
 
-        self.quantizer.find_params(W, weight=True)
-
         H = self.H
         del self.H
         if self.gptaq:
             _neutralize_dead_columns(H, W, self.dXXT)
         else:
             _neutralize_dead_columns(H, W)
+
+        # Fit the whole-row grid after dead-column masking: a channel absent
+        # from every calibration sample carries no signal, so its weight must
+        # not set the per-channel scale that every live column is quantized
+        # with. GPTQ/QQQ got this ordering in #5611; the subclasses that
+        # re-implement the block pass kept the old order (#5714).
+        self.quantizer.find_params(W, weight=True)
 
         # g_idx = []
         scale = []
