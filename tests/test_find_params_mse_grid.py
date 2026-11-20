@@ -92,14 +92,20 @@ def _legacy_find_params(self, x, weight=False):
             p = 1 - i / self.grid
             xmin1 = p * xmin
             xmax1 = p * xmax
-            scale1 = (
-                xmax1 / self.maxq
-                if self.requires_groupwise_processing()
-                else (xmax1 - xmin1) / self.maxq
-            )
-            if weight and self._maxq_value >= 0:
-                scale1 = scale1.clamp_min(2.0**-24)
-            zero1 = torch.round(-xmin1 / scale1) if not self.qcfg.sym else self.zero
+            if self._maxq_value < 0:
+                # Ternary levels are the endpoints themselves; ``maxq == -1``
+                # is a sentinel, not an affine divisor (#5601).
+                scale1 = xmax1
+                zero1 = xmin1
+            else:
+                scale1 = (
+                    xmax1 / self.maxq
+                    if self.requires_groupwise_processing()
+                    else (xmax1 - xmin1) / self.maxq
+                )
+                if weight and self._maxq_value >= 0:
+                    scale1 = scale1.clamp_min(2.0**-24)
+                zero1 = torch.round(-xmin1 / scale1) if not self.qcfg.sym else self.zero
             zero_candidates = (zero1,)
             if search_adjacent_zero_points:
                 ideal = -xmin1 / scale1
