@@ -480,7 +480,7 @@ details are available in the [citation reference](https://github.com/ModelCloud/
 | [QQQ](https://github.com/ModelCloud/GPTQModel/wiki/QQQ) | Ying Zhang et al., Meituan | [Paper](https://arxiv.org/abs/2406.09904) |
 | [VPTQ](https://github.com/ModelCloud/GPTQModel/wiki/VPTQ) | Yifei Liu et al., Microsoft | [Paper](https://arxiv.org/abs/2409.17066) · [Code](https://github.com/microsoft/VPTQ) |
 | [GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF) / llama.cpp | Georgi Gerganov and ggml-org contributors | [Project](https://github.com/ggml-org/llama.cpp) |
-| [ExLlama V3 / EXL3](https://github.com/ModelCloud/GPTQModel/wiki/EXL3) | turboderp and contributors, AlexBrandes (original Q4NX), ModelCloud (Q4NX 3.5 bpw extension) | [Project](https://github.com/turboderp-org/exllamav3) · [Native CUDA dispatch](docs/exl3-native-decode.md) · [Source credits](gptqmodel/exllamav3/CREDITS.md) |
+| [ExLlama V3 / EXL3](https://github.com/ModelCloud/GPTQModel/wiki/EXL3) | turboderp and contributors, AlexBrandes (original Q4NX), Qubitium (Q4NX 3.5 bpw extension) | [Project](https://github.com/turboderp-org/exllamav3) · [Native CUDA dispatch](docs/exl3-native-decode.md) · [Source credits](gptqmodel/exllamav3/CREDITS.md) |
 | [NF12 / NyoomFloat12](https://github.com/ModelCloud/GPTQModel/wiki/NF12) | Liberman et al., Together AI | [Research and codec](https://github.com/dphnAI/nf12) |
 | [EoRA](https://github.com/ModelCloud/GPTQModel/wiki/EoRA) | Shih-Yang Liu et al., NVIDIA | [Paper](https://arxiv.org/abs/2410.21271) |
 | [GSQ](https://github.com/ModelCloud/GPTQModel/wiki/GSQ) | Alireza Dadgarnia et al., IST-DASLab | [Paper](https://arxiv.org/abs/2604.18556) · [Code](https://github.com/IST-DASLab/GSQ) |
