@@ -405,9 +405,11 @@ class TorchAtenAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
         decode_dtype = self._decode_dtype_for_activation(x.dtype)
         return self.awq_weight_dequantize(device=x.device, dtype=decode_dtype)
 
-    def _runtime_dense_weight(self) -> torch.Tensor:
+    def _runtime_dense_weight(
+        self, activation_dtype: torch.dtype | None = None
+    ) -> torch.Tensor:
         """Decode the live CPU int4pack layout to a dense ``[in, out]`` weight."""
-        return runtime_int4pack_dense_weight(self)
+        return runtime_int4pack_dense_weight(self, activation_dtype=activation_dtype)
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
@@ -431,7 +433,7 @@ class TorchAtenAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
                 # The eager refresh below cannot run inside a trace, so decode
                 # the offsets from the checkpoint zero codes and the current
                 # scales instead of the installed stale pair (#5571).
-                dense_weight = runtime_int4pack_dense_weight(self, use_zero_codes=True)
+                dense_weight = runtime_int4pack_dense_weight(self, use_zero_codes=True, activation_dtype=x.dtype)
             if (
                 not runtime_dense
                 and self.linear_mode is None
@@ -461,7 +463,7 @@ class TorchAtenAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
                     # stale (#5571).
                     self._refresh_fused_state()
                     runtime_dense = True
-                    dense_weight = self._runtime_dense_weight()
+                    dense_weight = self._runtime_dense_weight(x.dtype)
                 elif (
                     self.linear_mode is None
                     and not self.training
@@ -501,12 +503,19 @@ class TorchAtenAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
 
         if runtime_dense:
             if dense_weight is None:
-                dense_weight = runtime_int4pack_dense_weight(self)
-            weight = dense_weight.to(x.dtype)
-            if self.bias is not None:
-                out = matmul_fp32_reduce(x, weight, self.bias).reshape(out_shape)
+                dense_weight = runtime_int4pack_dense_weight(
+                    self, activation_dtype=x.dtype
+                )
+            if dense_weight.dtype == x.dtype:
+                weight = dense_weight
+                if self.bias is not None:
+                    out = matmul_fp32_reduce(x, weight, self.bias).reshape(out_shape)
+                else:
+                    out = torch.matmul(x, weight).reshape(out_shape)
             else:
-                out = torch.matmul(x, weight).reshape(out_shape)
+                # Wide decode: promote the activation for this call, accumulate
+                # in FP32, add the stored bias there, and round once at output.
+                out = linear_wide_bias(x, dense_weight.t(), self.bias).reshape(out_shape)
         elif linear_mode == "inference":
             if not self._fused_input_dtype(x):
                 raise RuntimeError(
