@@ -20,6 +20,8 @@
  */
 #pragma once
 
+#include <optional>
+
 #include <torch/extension.h>
 
 void qqq_gemm(
@@ -34,5 +36,6 @@ void qqq_gemm(
   int thread_k = -1,
   int thread_n = -1,
   int sms = -1,
-  int max_par = 8
+  int max_par = 8,
+  const std::optional<torch::Tensor>& bias = std::nullopt
 );

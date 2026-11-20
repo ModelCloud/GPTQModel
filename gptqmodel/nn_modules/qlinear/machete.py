@@ -368,17 +368,27 @@ class MacheteLinear(GPTQQuantLinear):
         else:
             group_zeros = None
 
-        output = machete_mm(
-            a=input_2d,
-            b_q=self.qweight,
-            b_type=self.weight_type,
-            b_group_scales=group_scales,
-            b_group_zeros=group_zeros,
-            b_group_size=self.group_size,
-        )
+        mm_kwargs = {
+            "a": input_2d,
+            "b_q": self.qweight,
+            "b_type": self.weight_type,
+            "b_group_scales": group_scales,
+            "b_group_zeros": group_zeros,
+            "b_group_size": self.group_size,
+        }
 
-        if self.bias is not None:
-            output.add_(self.bias)
+        if self.bias is None:
+            output = machete_mm(**mm_kwargs)
+        else:
+            # The 16-bit images round the fp32 accumulator in the CUTLASS
+            # epilogue, so adding the bias to that tensor double-rounds every
+            # row and turns a pre-bias partial sum above 65504 into inf even
+            # when the biased result is finite (#5725). Ask for the fp32 image
+            # and round once, after the bias joins the complete reduction.
+            output = machete_mm(**mm_kwargs, out_type=torch.float32)
+            output = (
+                output + self.bias.to(device=output.device, dtype=torch.float32)
+            ).to(dtype=activation_dtype)
 
         result = output.reshape(x.shape[:-1] + (self.out_features,))
 

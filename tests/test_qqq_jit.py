@@ -289,7 +289,10 @@ def test_qqq_forward_uses_jit_kernel(monkeypatch):
 
     monkeypatch.setattr(qqq_module, "qqq_runtime_available", lambda: True)
 
-    def fake_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k, thread_n, sms, max_par):
+    def fake_gemm(
+        A, B, C, D, s1, s2, s3, workspace, thread_k, thread_n, sms, max_par,
+        bias=None,
+    ):
         calls["gemm"] = {
             "A_shape": tuple(A.shape),
             "A_dtype": A.dtype,
@@ -303,6 +306,7 @@ def test_qqq_forward_uses_jit_kernel(monkeypatch):
             "thread_n": thread_n,
             "sms": sms,
             "max_par": max_par,
+            "bias": bias,
         }
         D.copy_(torch.full_like(D, 3.0))
 
@@ -324,6 +328,7 @@ def test_qqq_forward_uses_jit_kernel(monkeypatch):
         "thread_n": -1,
         "sms": -1,
         "max_par": module.max_par,
+        "bias": None,
     }
     assert out.shape == (2, module.out_features)
     assert out.dtype == torch.float16
