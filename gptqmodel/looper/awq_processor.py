@@ -14,7 +14,7 @@ import weakref
 from collections.abc import Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union, cast
 
 import torch
 import transformers
@@ -61,6 +61,7 @@ from ..quantization.config import (
     FallbackStrategy,
     MSEConfig,
     QuantizeConfig,
+    _normalize_mse,
     resolve_quant_format,
 )
 from ..quantization.fallback_smooth import affine_range_with_zero, symmetric_range_from_bounds
@@ -4936,6 +4937,23 @@ class AWQProcessor(LoopProcessor):
             target_device = _resolve_module_exec_device(linear)
             move_to(linear, device=target_device)
 
+            # The clip grid is sized from the resolved projection's MSE
+            # snapshot, not the top-level default: a dynamic rule may lower
+            # the workspace for one large projection (or raise it for a shape
+            # where larger tiles are faster). ``_normalize_mse`` keeps the
+            # inherited top-level budget when the rule omits it and preserves
+            # an explicit zero override (#5791).
+            module_name = self._full_module_name(layer, linear)
+            resolved_cfg = (
+                self.qcfg.resolve_module_config(module_name)
+                if module_name is not None
+                else None
+            )
+            mse = _normalize_mse(
+                resolved_cfg.get("mse", None) if resolved_cfg is not None else None,
+                base=self.qcfg.mse,
+            )
+
             max_val = self._compute_best_clip(
                 linear.weight,
                 features,
@@ -4943,6 +4961,7 @@ class AWQProcessor(LoopProcessor):
                 group_size=self._group_size_for(layer, linear),
                 format=self._format_for(layer, linear),
                 sym=self._sym_for(layer, linear),
+                clip_grid_budget=mse.clip_grid_budget,
             )
             clip_list.append((name, max_val))
             move_to(linear, device=original_device)
@@ -4961,6 +4980,7 @@ class AWQProcessor(LoopProcessor):
             group_size: Optional[int] = None,
             format: Optional[FORMAT] = None,
             sym: Optional[bool] = None,
+            clip_grid_budget: Optional[Union[int, str]] = None,
     ):
         """Finds the clipping bound that minimizes reconstruction error for a weight tensor.
 
@@ -5029,10 +5049,11 @@ class AWQProcessor(LoopProcessor):
         # sequential loop enjoyed, so the CPU default stays small; on GPU the
         # larger chunk amortizes launches and feeds the wide memory bus.
         mse_cfg = getattr(self.qcfg, "mse", None)
-        budget = MSEConfig.resolve_budget_bytes(
-            mse_cfg.clip_grid_budget if isinstance(mse_cfg, MSEConfig) else None,
-            device,
-        )
+        if clip_grid_budget is None and isinstance(mse_cfg, MSEConfig):
+            # Direct callers that do not resolve a per-module snapshot keep the
+            # previous top-level behavior.
+            clip_grid_budget = mse_cfg.clip_grid_budget
+        budget = MSEConfig.resolve_budget_bytes(clip_grid_budget, device)
         # The caching allocator refuses to serve a sub-cap request from a free
         # block at or above `max_split_size`, so a workspace sized just under
         # the cap (the 256 MiB GPU default) maps one new segment per module:
