@@ -22,13 +22,14 @@ int64_t bc_linear_exl3_run_configured
     bool fp16_gemv,
     int64_t int8_gemv,
     bool fused_gemm,
-    bool q4nx
+    bool q4nx,
+    bool r4nx
 )
 {
     const auto bits = bits_from_K(K);
     TORCH_CHECK(trellis.dim() == 3 && trellis.size(-1) == 16 * bits.bits + 8 * bits.half,
                 "K does not match packed trellis width");
-    TORCH_CHECK(!bits.half || mul1 || q4nx, "EXL3 half-integer bitrates require mul1 or Q4NX");
+    TORCH_CHECK(!bits.half || mul1 || q4nx || r4nx, "EXL3 half-integer bitrates require mul1, Q4NX or R4NX");
     // The small-batch tensor-core GEMM reads the activation and writes the
     // result as densely packed rows.
     TORCH_CHECK(x.is_contiguous(), "bc_linear_exl3_run requires a contiguous input");
@@ -61,7 +62,7 @@ int64_t bc_linear_exl3_run_configured
     const bool half_output = y.scalar_type() == at::kHalf;
     at::Tensor accum = half_output ? at::empty_like(y, at::options(y).dtype(at::kFloat)) : y;
     const auto dispatch = exl3_gemm(x, trellis, accum, suh, xh, svh, mcg, mul1,
-                                   fp16_gemv, int8_gemv, fused_gemm, q4nx);
+                                   fp16_gemv, int8_gemv, fused_gemm, q4nx, r4nx);
 
     if (bias)
         at::add_out(y, accum, bias.value());
@@ -146,8 +147,8 @@ int64_t bc_linear_exl3_run_hip_gemv
         return 0;
 
     if (bias)
-        accum.add_(bias.value());
-    y.view({size_m, size_n}).copy_(accum);
+        at::add_(accum, bias.value());
+    torch::stable::copy_(at::view(y, {size_m, size_n}), accum);
     return 1;
 #else
     return 0;
@@ -158,7 +159,7 @@ void bc_linear_exl3_run(
     at::Tensor trellis, at::Tensor suh, at::Tensor svh, int64_t K,
     const c10::optional<at::Tensor>& bias, bool mcg, bool mul1, const at::Tensor& x, at::Tensor& y)
 {
-    bc_linear_exl3_run_configured(trellis, suh, svh, K, bias, mcg, mul1, x, y, false, 0, false, false);
+    bc_linear_exl3_run_configured(trellis, suh, svh, K, bias, mcg, mul1, x, y, false, 0, false, false, false);
 }
 
 void BC_LinearEXL3::run(const at::Tensor& x, at::Tensor& y)

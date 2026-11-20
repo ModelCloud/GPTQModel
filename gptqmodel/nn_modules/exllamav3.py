@@ -240,6 +240,7 @@ class ExllamaV3Linear(nn.Module):
                 getattr(self, "mcg", None) is not None,
                 getattr(self, "mul1", None) is not None,
                 q4nx=getattr(self, "q4nx", None) is not None,
+                r4nx=getattr(self, "r4nx", None) is not None,
             )
         except ValueError as exc:
             raise ValueError(f"EXL3 module `{self.name}`: {exc}") from exc
@@ -308,6 +309,7 @@ class ExllamaV3Linear(nn.Module):
             mcg=getattr(self, "mcg", None),
             mul1=getattr(self, "mul1", None),
             q4nx=getattr(self, "q4nx", None),
+            r4nx=getattr(self, "r4nx", None),
             bias=bias,
             out_dtype=self.out_dtype,
             transformers_fix=True,
@@ -592,6 +594,7 @@ class ExllamaV3Linear(nn.Module):
                 getattr(self, "mcg", None) is not None,
                 getattr(self, "mul1", None) is not None,
                 q4nx=getattr(self, "q4nx", None) is not None,
+                r4nx=getattr(self, "r4nx", None) is not None,
             )
 
         for name in EXL3_CODEBOOK_MARKERS:

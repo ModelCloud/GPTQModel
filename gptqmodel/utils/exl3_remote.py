@@ -362,7 +362,13 @@ def validate_remote_inputs(
     ):
         raise ValueError("EXL3 remote request tensor/quantizer contract is invalid")
     codebook = contract["codebook"]
-    validate_trellis_k(contract.get("bits"), codebook == "mcg", codebook == "mul1", q4nx=codebook == "q4nx")
+    validate_trellis_k(
+        contract.get("bits"),
+        codebook == "mcg",
+        codebook == "mul1",
+        q4nx=codebook == "q4nx",
+        r4nx=codebook == "r4nx",
+    )
     return weight, hessian, contract
 
 
@@ -387,7 +393,13 @@ def validate_remote_output_tensors(
         or codebook not in EXL3_CODEBOOK_MARKERS
     ):
         raise ValueError("EXL3 remote output tensor contract is invalid")
-    validate_trellis_k(bits, codebook == "mcg", codebook == "mul1", q4nx=codebook == "q4nx")
+    validate_trellis_k(
+        bits,
+        codebook == "mcg",
+        codebook == "mul1",
+        q4nx=codebook == "q4nx",
+        r4nx=codebook == "r4nx",
+    )
     expected_names = {"trellis", "suh", "svh", codebook}
     if set(tensors) != expected_names:
         raise ValueError("EXL3 remote output tensor contract is invalid")

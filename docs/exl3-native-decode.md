@@ -248,6 +248,64 @@ call-private matrix consumed by prefill HGEMM.
 For gate, up and down projections in an expert layer, the extension also
 provides the [routed decode operator](exl3-routed-decode.md).
 
+### Q4NX launch table on Ada
+
+The packed launch table stores one sample per `(cc, bits, k, n)`. Q4NX rates
+are 10, 12 or 14 bits per step, so they do not line up with the integer
+`bits = K + half_k` rows. Before this table, every Q4NX launch read the integer
+sample for the nearest bitrate: `lookup_packed_sample(table, cc_idx, K + half_k,
+k_idx, n_idx)` at `exl3_kernel_map.cu:266` in the parent commit. The retune
+adds a `[cc][rate][k][n]` grid (`exl3_packed::samples_*_q4nx`) that only the
+Q4NX codebook reads.
+
+```mermaid
+flowchart TD
+    subgraph before["Before: shared bitrate grid"]
+        A1["select_exl3_gemm_kernel_tuned<br/>cb = EXL3_Q4NX_CODEBOOK"] --> B1["lookup_packed_sample<br/>bits = K + half_k"]
+        B1 --> C1["integer-tuned shape and num_sms"]
+    end
+    subgraph after["After: measured Q4NX grid"]
+        A2["select_exl3_gemm_kernel_tuned<br/>cb = EXL3_Q4NX_CODEBOOK"] --> R2{"q4nx_rate_index(K, half_k)"}
+        R2 -->|"0, 1, 2"| B2["lookup_q4nx_sample<br/>[cc][rate][k][n]"]
+        R2 -->|"-1"| E2["TORCH_CHECK: Q4NX requires 2.5, 3.0, or 3.5 bpw"]
+        B2 --> C2["measured shape and num_sms<br/>else the declared bitrate fallback"]
+    end
+    classDef error fill:#f9d5d5,stroke:#af3b3b,color:#222
+    class E2 error
+```
+
+| Mechanism | Parent commit | This change |
+| --- | --- | --- |
+| Q4NX sample | `lookup_packed_sample(..., K + half_k, ...)`, `exl3_kernel_map.cu:266` | `lookup_q4nx_sample(..., q4nx_rate_index(K, half_k), ...)` |
+| Unknown Q4NX rate | nearest integer row | `TORCH_CHECK` fails closed |
+| Grid | integer samples only | 585 measured Ada Q4NX cells, 0 fallbacks |
+| Coverage | implicit | the generator refuses an undeclared missing cell |
+
+`tests/benchmark_exl3_q4nx_tuning_ada.py` measures each shape with five
+warmups and the median of 100 launches at m=1 and m=16, picks the shape with
+the smallest worst-case slowdown across those rows, and scores the `num_sms`
+cap across m=16 and m=2048. `scripts/generate_exl3_kernel_map_packed.py`
+requires every Ada `(rate, k, n)` cell to be measured or listed in the JSON
+`fallback` array; a declared fallback copies the integer `bits = K + half_k`
+sample, which is exactly the launch the parent commit used. The generator also
+rejects a JSON measured on another capability or device, and the generated
+header records the measured and fallback counts. The checked-in table has
+585/585 measured cells and no fallbacks.
+
+`exl3_gemm_force_tuned_config(shape_idx, num_sms)` pins one `(shape, cap)` pair
+so a sweep can measure every shape from a single build. Production dispatch
+never calls it, and a non-positive shape restores the tuned lookup.
+
+Reproduce with:
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=4 \
+    python tests/benchmark_exl3_q4nx_tuning_ada.py sweep --max-weight-gb 6 \
+    --emit-json /tmp/q4nx_ada.json --raw-json /tmp/q4nx_ada_raw.json
+cp /tmp/q4nx_ada.json scripts/exl3_kernel_map_q4nx_ada.json
+python scripts/generate_exl3_kernel_map_packed.py
+```
+
 ## A100 validation
 
 The W3 `mcg` Llama 3.2 1B checkpoint produced 20 bit-identical logit

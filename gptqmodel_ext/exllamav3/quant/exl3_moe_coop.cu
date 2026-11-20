@@ -358,7 +358,7 @@ void exl3_moe_coop_run
     if (cb == EXL3_Q4NX_CODEBOOK && !p.gu_f32 && slots)
     {
         wide_gu = at::empty({p.gated ? 2 : 1, p.slots_max, p.I}, at::options(x).dtype(at::kFloat));
-        auto* tmp = wide_gu.data_ptr<float>();
+        auto* tmp = wide_gu.mutable_data_ptr<float>();
         p.gu_u = tmp;
         if (p.gated)
             p.gu_g = tmp + static_cast<size_t>(p.slots_max) * p.I;
