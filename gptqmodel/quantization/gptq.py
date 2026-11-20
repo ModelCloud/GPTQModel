@@ -2929,8 +2929,12 @@ class GPTQ:
         # Fit the whole-row grid after dead-column masking: a channel absent
         # from every calibration sample carries no signal, so its weight must
         # not set the per-channel scale that every live column is quantized
-        # with (#5611).
-        self.quantizer.find_params(W, weight=True)
+        # with (#5611). Only the ungrouped solve reads this grid: static
+        # groups fit every group on a deep-copied quantizer and dynamic groups
+        # refit at each group boundary, so a grouped whole-projection range
+        # search would be discarded after its shrink search ran (#5830).
+        if self.qcfg.group_size == -1:
+            self.quantizer.find_params(W, weight=True)
 
         # g_idx = []
         scale = []
