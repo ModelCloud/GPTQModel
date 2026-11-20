@@ -43,7 +43,13 @@ def _activations(dtype: torch.dtype) -> torch.Tensor:
 
 
 def _two_step_xtx(matrix, *, staging_dtype, chunk_size, cap_scale=None):
-    """The pre-fix two-step staging casts, accumulated in fp32 chunk order."""
+    """The pre-fix two-step staging casts, accumulated in fp32 chunk order.
+
+    The GEMM uses the same ``addmm_`` formulation the capture now uses (#5731):
+    accumulating in the BLAS epilogue rounds differently from a separate
+    ``add_``, so the oracle has to match it for an exact comparison. The
+    staging casts above -- the contract this file guards -- are unchanged.
+    """
 
     xtx = torch.zeros((COLUMNS, COLUMNS), dtype=torch.float32)
     for start in range(0, matrix.shape[0], chunk_size):
@@ -51,7 +57,7 @@ def _two_step_xtx(matrix, *, staging_dtype, chunk_size, cap_scale=None):
         staged = chunk.to(dtype=staging_dtype).to(torch.float32)
         if cap_scale is not None:
             staged.mul_(cap_scale[start : start + chunk.size(0)].unsqueeze(1))
-        xtx.add_(torch.matmul(staged.T, staged))
+        xtx.addmm_(staged.T, staged)
     return xtx
 
 

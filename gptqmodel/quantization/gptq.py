@@ -1117,39 +1117,131 @@ class GPTQ:
                 self._hessian_dirty = True
             return
 
-        batch_token_size, xtx, device = self.process_batch(inp, batch_index=batch_index)
-        if batch_token_size == 0 or xtx is None:
-            return
+        # The partial is keyed by its capture source (see ``process_batch``).
+        # Resolving it before the capture lets an existing same-device partial
+        # absorb this batch in place (#5731).
+        dev = torch.device(get_device(inp))
 
-        # The partial is keyed by its capture source, which can differ from
-        # the device that holds ``xtx`` when a Hessian owner is configured.
-        dev = torch.device(device)
-        partial_device = xtx.device
+        with self._inplace_accumulation(dev) as target:
+            batch_token_size, xtx, device = self.process_batch(
+                inp, batch_index=batch_index, out=target,
+            )
+            if batch_token_size == 0 or xtx is None:
+                return
 
-        with self.lock:
-            self.fwd_counter += 1
+            partial_device = xtx.device
+            # ``process_batch`` detaches the product, which returns a new view
+            # of the same allocation, so identity alone cannot tell whether the
+            # batch was already accumulated into the partial.
+            accumulated_in_place = self._same_storage(xtx, target)
 
+            with self.lock:
+                self.fwd_counter += 1
+
+                if not accumulated_in_place:
+                    existing = self._device_hessian_partials.get(dev)
+                    if existing is None:
+                        self._device_hessian_partials[dev] = xtx
+                    else:
+                        if existing.device != partial_device:
+                            # The compute device can move between batches (for
+                            # example after a CPU allocation fallback). Keep a
+                            # single running sum per capture source instead of
+                            # splitting it.
+                            existing = safe_move_to(
+                                existing, partial_device, dtype=torch.float32
+                            )
+                            self._device_hessian_partials[dev] = existing
+                        self._wait_partial_ready(dev, on=partial_device)
+                        existing.add_(xtx)
+                        del xtx
+
+                self._record_partial_ready(dev, on=partial_device)
+
+                self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
+                self.nsamples += batch_token_size
+                self._hessian_dirty = True
+
+    @staticmethod
+    def _same_storage(left: object, right: object) -> bool:
+        """True when two tensor objects are views of one allocation."""
+
+        if not torch.is_tensor(left) or not torch.is_tensor(right):
+            return False
+        if left.device != right.device or tuple(left.shape) != tuple(right.shape):
+            return False
+        try:
+            return left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr()
+        except Exception:  # pragma: no cover - non-torch stand-ins
+            return False
+
+    def _can_accumulate_into(self, out: object, device: torch.device) -> bool:
+        """True when ``out`` can receive this capture's GEMM in place (#5731)."""
+
+        return (
+            torch.is_tensor(out)
+            and out.dtype == torch.float32
+            and out.device == torch.device(device)
+            and tuple(out.shape) == (self.columns, self.columns)
+        )
+
+    def _planned_partial_device(self, source: torch.device) -> torch.device:
+        """Device ``process_batch`` will compute this source's product on."""
+
+        accumulator = self._hessian_accumulator_device
+        return torch.device(accumulator) if accumulator is not None else torch.device(source)
+
+    def _prepare_inplace_partial(
+        self,
+        dev: torch.device,
+        existing: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        """Return the partial this batch may accumulate into, else ``None``.
+
+        Called with ``self.lock`` held. The returned tensor is the live
+        per-device partial, so the caller must keep the lock until its GEMM has
+        been enqueued: two concurrent ``addmm_`` writes into one accumulator
+        would interleave. The previous writer's completion event is waited on
+        before the write, mirroring the out-of-place merge.
+        """
+
+        if existing is None or existing.dtype != torch.float32:
+            return None
+        planned = self._planned_partial_device(dev)
+        if existing.device != planned:
+            # Same rule as the merge path: one running sum per capture source,
+            # moved to wherever this batch is computed.
+            existing = safe_move_to(existing, planned, dtype=torch.float32)
+            self._device_hessian_partials[dev] = existing
+        if not self._can_accumulate_into(existing, planned):
+            return None
+        self._wait_partial_ready(dev, on=existing.device)
+        return existing
+
+    @contextlib.contextmanager
+    def _inplace_accumulation(self, dev: torch.device):
+        """Yield the partial to accumulate into, holding the lock while it runs.
+
+        ``None`` means this batch must allocate its own ``X^T X``; the lock is
+        then released before the capture so a first batch keeps the previous
+        concurrency.
+        """
+
+        self.lock.acquire()
+        try:
             existing = self._device_hessian_partials.get(dev)
-            if existing is None:
-                self._device_hessian_partials[dev] = xtx
-            else:
-                if existing.device != partial_device:
-                    # The compute device can move between batches (for example
-                    # after a CPU allocation fallback). Keep a single running
-                    # sum per capture source instead of splitting it.
-                    existing = safe_move_to(
-                        existing, partial_device, dtype=torch.float32
-                    )
-                    self._device_hessian_partials[dev] = existing
-                self._wait_partial_ready(dev, on=partial_device)
-                existing.add_(xtx)
-                del xtx
-
-            self._record_partial_ready(dev, on=partial_device)
-
-            self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
-            self.nsamples += batch_token_size
-            self._hessian_dirty = True
+            target = self._prepare_inplace_partial(dev, existing)
+        except BaseException:
+            self.lock.release()
+            raise
+        if target is None:
+            self.lock.release()
+            yield None
+            return
+        try:
+            yield target
+        finally:
+            self.lock.release()
 
     @staticmethod
     def _cuda_event_for(device: torch.device) -> Optional[torch.cuda.Event]:
@@ -1509,9 +1601,28 @@ class GPTQ:
             matrix, threshold, chunk_size, feature_dim=feature_dim
         )
 
-    def compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
+    def compute_hessian_xtx(
+        self,
+        matrix: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Return this batch's ``X^T X``, accumulating into ``out`` when given.
+
+        ``out`` is an existing fp32 accumulator of the module's shape on the
+        capture device -- the per-device partial. The GEMM then writes straight
+        into it instead of materializing a second ``columns ** 2`` product that
+        the caller adds afterwards, so a capture peaks at one Hessian instead
+        of two (#5731). ``out`` is ignored when it does not match the capture,
+        and the caller keeps merging the returned product as before.
+        """
+
+        if out is not None and not self._can_accumulate_into(out, matrix.device):
+            out = None
+
         rows = matrix.shape[0]
         if rows == 0:
+            if out is not None:
+                return out
             return torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
 
         stage_dtype = self.preferred_staging_dtype(matrix.dtype, matrix.device)
@@ -1547,11 +1658,21 @@ class GPTQ:
             # context keeps a direct Hessian computation on the deterministic
             # path too, and is a reference-counted no-op when nested.
             with quant_blas_backend(matrix.device):
-                xtx = torch.matmul(mat32.T, mat32)
+                if out is not None:
+                    # ``C += A^T A`` in the BLAS epilogue: no transient product
+                    # and no second read-modify-write pass over the Hessian.
+                    out.addmm_(mat32.T, mat32)
+                    xtx = out
+                else:
+                    xtx = torch.matmul(mat32.T, mat32)
             del mat32
             return xtx
 
-        xtx_accum = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
+        xtx_accum = (
+            out
+            if out is not None
+            else torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
+        )
 
         for start in range(0, rows, chunk_size):
             rows_this = min(chunk_size, rows - start)
@@ -1563,12 +1684,17 @@ class GPTQ:
                     # in-place clamp never touches the caller's activations.
                     materialized32.mul_(cap_scale[start:start + rows_this].unsqueeze(1))
                 with quant_blas_backend(matrix.device):
-                    xtx_accum.add_(torch.matmul(materialized32.T, materialized32))
+                    # Local accumulator: accumulate the chunk in place so the
+                    # chunk's product never materializes (#5731).
+                    xtx_accum.addmm_(materialized32.T, materialized32)
 
         return xtx_accum
 
     def process_batch(
-        self, inp: torch.Tensor, batch_index: Optional[int] = None
+        self,
+        inp: torch.Tensor,
+        batch_index: Optional[int] = None,
+        out: Optional[torch.Tensor] = None,
     ) -> Tuple[int, Optional[torch.Tensor], torch.device]:
         """Return ``(token_count, xtx_or_counts, partial_key_device)`` for one batch.
 
@@ -1579,7 +1705,8 @@ class GPTQ:
         instead of following worker-thread arrival order (#5518).
 
         ``batch_index`` is the native-input pairing hook used by GPTAQ/FOEM;
-        plain GPTQ does not use it.
+        plain GPTQ does not use it. ``out`` is an existing accumulator the
+        Hessian may be written into in place (#5731).
         """
         del batch_index
         inp_device = get_device(inp)
@@ -1637,7 +1764,7 @@ class GPTQ:
             return 0, None, canonical_device
 
         try:
-            xtx = self.compute_hessian_xtx(reshaped_inp).to(dtype=torch.float32)
+            xtx = self.compute_hessian_xtx(reshaped_inp, out=out).to(dtype=torch.float32)
         except RuntimeError as exc:
             if (
                 torch.device(inp_device).type == "cuda"
@@ -1652,6 +1779,8 @@ class GPTQ:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 canonical_device = torch.device("cpu")
+                # ``out`` lives on the device that just failed; the retry has to
+                # allocate its own product and be merged like a first batch.
                 xtx = self.compute_hessian_xtx(reshaped_inp_cpu).to(dtype=torch.float32)
                 xtx = xtx.detach()
                 del reshaped_inp_cpu
