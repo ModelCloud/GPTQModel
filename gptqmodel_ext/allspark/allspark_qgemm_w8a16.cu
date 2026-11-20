@@ -1,5 +1,5 @@
 #include "allspark_utils.cuh"
-#include <torch/all.h>
+#include "../torch_stable_compat.h"
 #include <cublas_v2.h>
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
@@ -1062,7 +1062,7 @@ torch::Tensor allspark_w8a16_gemm(
     bias32 = b.scalar_type() == at::ScalarType::Float;
   }
 
-  auto c_options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
+  auto c_options = torch::TensorOptions().dtype(a.scalar_type()).device(a.device());
   torch::Tensor c = torch::empty({m, n}, c_options);
   void* c_ptr = reinterpret_cast<void*>(c.data_ptr());
 
@@ -1089,7 +1089,7 @@ torch::Tensor allspark_w8a16_gemm(
   auto workspace = torch::empty({int64_t(ws_size)}, ws_options);
   void* ws = workspace.data_ptr();
 
-  if (a.dtype() == at::ScalarType::Half) {
+  if (a.scalar_type() == at::ScalarType::Half) {
     allspark::allspark_qgemm_w8a16_perc_ampere<__half, uint8_t>(
         reinterpret_cast<const __half*>(a_ptr), b_ptr,
         reinterpret_cast<const __half*>(b_scale_ptr),
@@ -1097,7 +1097,7 @@ torch::Tensor allspark_w8a16_gemm(
         reinterpret_cast<__half*>(c_ptr), m, n_32align, n, k, ws,
         fused_gemm_params, group_size, CUBLAS_M_THRESHOLD, sm_version, stream,
         handle, bias_ptr, bias32);
-  } else if (a.dtype() == at::ScalarType::BFloat16) {
+  } else if (a.scalar_type() == at::ScalarType::BFloat16) {
     allspark::allspark_qgemm_w8a16_perc_ampere<__nv_bfloat16, uint8_t>(
         reinterpret_cast<const __nv_bfloat16*>(a_ptr), b_ptr,
         reinterpret_cast<const __nv_bfloat16*>(b_scale_ptr),

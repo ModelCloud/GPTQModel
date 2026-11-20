@@ -3,8 +3,7 @@
 #include <cuda_fp16.h>
 #include "exl3_gemv.cuh"
 
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
+#include "../../torch_stable_compat.h"
 #include <cooperative_groups.h>
 namespace cg = cooperative_groups;
 #include "../util.h"
@@ -13,7 +12,6 @@ namespace cg = cooperative_groups;
 #include "exl3_devctx.cuh"
 #include <map>
 #include <mutex>
-#include <c10/cuda/CUDAException.h>
 
 // Small-batch FP16 GEMV with the upstream shape heuristic.
 // -1: not eligible, 0: narrow config, 1: wide config. narrow_coresident = number of narrow-config
@@ -229,9 +227,7 @@ bool exl3_gemv_try_launch
 #include <cuda_fp16.h>
 #include "exl3_gemv.cuh"
 
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
+#include "../../torch_stable_compat.h"
 #include <cstdlib>
 #include <cstdint>
 #include "../util.h"

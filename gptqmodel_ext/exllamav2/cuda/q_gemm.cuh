@@ -1,3 +1,4 @@
+#include "../../torch_stable_compat.h"
 #ifndef _q_gemm_cuh
 #define _q_gemm_cuh
 
@@ -5,7 +6,6 @@
 #include <cuda_fp16.h>
 #include <cstdint>
 #include <cstdio>
-#include <ATen/cuda/CUDAContext.h>
 
 #include "q_matrix.cuh"
 

@@ -52,9 +52,7 @@ static __device__ __forceinline__ __nv_bfloat16 __float2bfloat16_rn(float value)
 #include <cuda_fp16.h>
 #endif
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAException.h>
+#include "../torch_stable_compat.h"
 
 #include "bf16_scale.h"
 
@@ -244,9 +242,9 @@ void launch_bf16_rescale_typed(
     bool result_has_bias,
     cudaStream_t stream)
 {
-    const ResultT* result_ptr = reinterpret_cast<const ResultT*>(result.data_ptr());
-    const ScaleT* scale_ptr = scale.data_ptr<ScaleT>();
-    OutputT* out_ptr = out.data_ptr<OutputT>();
+    const ResultT* result_ptr = reinterpret_cast<const ResultT*>(result.const_data_ptr());
+    const ScaleT* scale_ptr = scale.const_data_ptr<ScaleT>();
+    OutputT* out_ptr = out.mutable_data_ptr<OutputT>();
     const dim3 grid(rows, (n_cols + kThreads - 1) / kThreads);
 
     if (!bias.has_value())
@@ -261,15 +259,15 @@ void launch_bf16_rescale_typed(
     {
         case at::kHalf:
             bf16_rescale_kernel<ResultT, at::Half, OutputT, ScaleT><<<grid, kThreads, 0, stream>>>(
-                result_ptr, scale_ptr, b.data_ptr<at::Half>(), out_ptr, n_cols, result_stride, n_cols, result_has_bias);
+                result_ptr, scale_ptr, b.const_data_ptr<at::Half>(), out_ptr, n_cols, result_stride, n_cols, result_has_bias);
             break;
         case at::kBFloat16:
             bf16_rescale_kernel<ResultT, at::BFloat16, OutputT, ScaleT><<<grid, kThreads, 0, stream>>>(
-                result_ptr, scale_ptr, b.data_ptr<at::BFloat16>(), out_ptr, n_cols, result_stride, n_cols, result_has_bias);
+                result_ptr, scale_ptr, b.const_data_ptr<at::BFloat16>(), out_ptr, n_cols, result_stride, n_cols, result_has_bias);
             break;
         case at::kFloat:
             bf16_rescale_kernel<ResultT, float, OutputT, ScaleT><<<grid, kThreads, 0, stream>>>(
-                result_ptr, scale_ptr, b.data_ptr<float>(), out_ptr, n_cols, result_stride, n_cols, result_has_bias);
+                result_ptr, scale_ptr, b.const_data_ptr<float>(), out_ptr, n_cols, result_stride, n_cols, result_has_bias);
             break;
         default:
             TORCH_CHECK(false, "bf16_rescale bias must be float16, bfloat16 or float32");
@@ -310,30 +308,42 @@ std::tuple<at::Tensor, at::Tensor> bf16_prescale(
         TORCH_CHECK(suh->dim() == 1 && suh->numel() >= n_cols, "bf16_prescale suh width mismatch");
     }
     const int64_t rows = x.numel() / n_cols;
-    at::Tensor out = at::empty(x.sizes(), x.options().dtype(at::kHalf));
+    at::Tensor out = at::empty(x.sizes(),
+                              at::TensorOptions().dtype(at::kHalf).device(x.device()));
     const bool wide_scale = x.scalar_type() == at::kBFloat16 && suh.has_value();
-    at::Tensor scale = at::empty({rows, 1}, x.options().dtype(wide_scale ? at::kDouble : at::kFloat));
+    at::Tensor scale = at::empty({rows, 1},
+                               at::TensorOptions()
+                                   .dtype(wide_scale ? at::kDouble : at::kFloat)
+                                   .device(x.device()));
 
     const c10::cuda::CUDAGuard guard(x.device());
     const __half* suh_ptr = suh.has_value()
-        ? reinterpret_cast<const __half*>(suh->data_ptr<at::Half>()) : nullptr;
-    AT_DISPATCH_SWITCH(x.scalar_type(), "bf16_prescale",
-        AT_DISPATCH_CASE(at::kHalf, [&] {
-            bf16_prescale_kernel<at::Half, float><<<rows, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
-                x.data_ptr<at::Half>(), suh_ptr, reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
-                scale.data_ptr<float>(), n_cols, static_cast<float>(bound));
-        })
-        AT_DISPATCH_CASE(at::kBFloat16, [&] {
-            if (wide_scale)
-                bf16_prescale_kernel<at::BFloat16, double><<<rows, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
-                    x.data_ptr<at::BFloat16>(), suh_ptr, reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
-                    scale.data_ptr<double>(), n_cols, bound);
-            else
-                bf16_prescale_kernel<at::BFloat16, float><<<rows, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
-                    x.data_ptr<at::BFloat16>(), suh_ptr, reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
-                    scale.data_ptr<float>(), n_cols, static_cast<float>(bound));
-        })
-    );
+        ? reinterpret_cast<const __half*>(suh->const_data_ptr<at::Half>()) : nullptr;
+    // The stable-ABI surface does not ship ATen/Dispatch.h, so the two
+    // supported input dtypes are dispatched with a plain switch.
+    switch (x.scalar_type())
+    {
+    case at::kHalf:
+        bf16_prescale_kernel<at::Half, float><<<rows, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+            x.const_data_ptr<at::Half>(), suh_ptr,
+            reinterpret_cast<__half*>(out.mutable_data_ptr<at::Half>()),
+            scale.mutable_data_ptr<float>(), n_cols, static_cast<float>(bound));
+        break;
+    case at::kBFloat16:
+        if (wide_scale)
+            bf16_prescale_kernel<at::BFloat16, double><<<rows, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+                x.const_data_ptr<at::BFloat16>(), suh_ptr,
+                reinterpret_cast<__half*>(out.mutable_data_ptr<at::Half>()),
+                scale.mutable_data_ptr<double>(), n_cols, bound);
+        else
+            bf16_prescale_kernel<at::BFloat16, float><<<rows, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+                x.const_data_ptr<at::BFloat16>(), suh_ptr,
+                reinterpret_cast<__half*>(out.mutable_data_ptr<at::Half>()),
+                scale.mutable_data_ptr<float>(), n_cols, static_cast<float>(bound));
+        break;
+    default:
+        TORCH_CHECK(false, "bf16_prescale requires float16 or bfloat16");
+    }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return {out, scale};
 }
@@ -362,34 +372,39 @@ at::Tensor bf16_rescale(
         const at::Tensor& b = bias.value();
         TORCH_CHECK(b.is_cuda() && b.device() == result.device(), "bf16_rescale bias is on the wrong device");
         TORCH_CHECK(b.dim() == 1 && b.is_contiguous() && b.numel() >= n_cols, "bf16_rescale bias geometry mismatch");
-        TORCH_CHECK(b.is_floating_point(), "bf16_rescale bias must be floating point");
+        TORCH_CHECK(at::is_floating_point(b), "bf16_rescale bias must be floating point");
     }
 
     std::vector<int64_t> out_shape(result.sizes().begin(), result.sizes().end() - 1);
     out_shape.push_back(n_cols);
     TORCH_CHECK(output_dtype == at::kHalf || output_dtype == at::kBFloat16,
                 "bf16_rescale requires float16 or bfloat16 output");
-    at::Tensor out = at::empty(out_shape, result.options().dtype(output_dtype));
+    at::Tensor out = at::empty(
+        out_shape, at::TensorOptions().dtype(output_dtype).device(result.device()));
 
     const int64_t rows = result.numel() / result.size(-1);
     const int64_t result_stride = result.size(-1);
 
     const c10::cuda::CUDAGuard guard(result.device());
     const auto stream = at::cuda::getCurrentCUDAStream();
-    AT_DISPATCH_SWITCH(output_dtype, "bf16_rescale_output",
-        AT_DISPATCH_CASE(at::kHalf, [&] {
-            if (result.scalar_type() == at::kHalf)
-                launch_bf16_rescale<at::Half, at::Half>(result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
-            else
-                launch_bf16_rescale<float, at::Half>(result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
-        })
-        AT_DISPATCH_CASE(at::kBFloat16, [&] {
-            if (result.scalar_type() == at::kHalf)
-                launch_bf16_rescale<at::Half, at::BFloat16>(result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
-            else
-                launch_bf16_rescale<float, at::BFloat16>(result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
-        })
-    );
+    // Plain switch: the stable-ABI surface does not provide AT_DISPATCH_CASE.
+    switch (output_dtype)
+    {
+    case at::kHalf:
+        if (result.scalar_type() == at::kHalf)
+            launch_bf16_rescale<at::Half, at::Half>(result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
+        else
+            launch_bf16_rescale<float, at::Half>(result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
+        break;
+    case at::kBFloat16:
+        if (result.scalar_type() == at::kHalf)
+            launch_bf16_rescale<at::Half, at::BFloat16>(result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
+        else
+            launch_bf16_rescale<float, at::BFloat16>(result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
+        break;
+    default:
+        TORCH_CHECK(false, "bf16_rescale requires float16 or bfloat16 output");
+    }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;
 }

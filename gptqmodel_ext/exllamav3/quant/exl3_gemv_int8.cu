@@ -4,9 +4,7 @@
 #include "exl3_gemv.cuh"
 #include "exl3_gemv_int8_kernel.cuh"
 #include "comp_units/exl3_gemv_int8_instances.cuh"
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <ATen/ops/empty.h>
+#include "../../torch_stable_compat.h"
 #include "../util.h"
 #include "../util.cuh"
 #include "../ptx.cuh"
@@ -15,7 +13,6 @@
 #include "hadamard_inner.cuh"
 #include <cooperative_groups.h>
 #include <mutex>
-#include <c10/cuda/CUDAException.h>
 #include <set>
 #include <map>
 
@@ -145,8 +142,12 @@ static bool exl3_gemv_int8_sq
     int pstride = size_n * (residual ? 2 : 1);
     const size_t ws_ints = SQ_WS_RESERVED + (size_t) ksplit * M * pstride;
     if (ws_ints > GEMV_INT8_WS_INTS) return false;
-    auto ws = at::empty({(int64_t) ws_ints}, options.dtype(at::kInt));
-    int* ws_ptr = ws.data_ptr<int>();
+    // The compat TensorOptions builder is non-const, so derive the int
+    // workspace options from a local copy of the caller's options.
+    at::TensorOptions ws_options = options;
+    ws_options.dtype(at::kInt);
+    auto ws = at::empty({(int64_t) ws_ints}, ws_options);
+    int* ws_ptr = ws.mutable_data_ptr<int>();
     // The first region is the completion counters. Partial sums and scales
     // have exclusive or idempotent producers before the CTA that consumes them.
     C10_CUDA_CHECK(cudaMemsetAsync(ws_ptr, 0, sizeof(int) * (size_n / 256), stream));
@@ -216,7 +217,7 @@ bool exl3_gemv_int8
     if (at::cuda::getDeviceProperties(device)->sharedMemPerBlockOptin < 80 * 1024) return false;
 
     int num_sms = DevCtx::instance().get_num_sms(device);
-    bool c_fp32 = C.dtype() == at::kFloat;
+    bool c_fp32 = C.scalar_type() == at::kFloat;
     bool residual = mode == 1;
 
     // Per-slice-scale kernel: m == 1, plus m == 2 in plain int8 mode (rows share the decoded
@@ -227,7 +228,7 @@ bool exl3_gemv_int8
         (const half*) A.data_ptr(), (const uint16_t*) B.data_ptr(), C.data_ptr(),
         size_m, size_k, size_n, K, half_k, c_fp32, residual,
         (const half*) suh.data_ptr(), (half*) A_had.data_ptr(), (const half*) svh.data_ptr(),
-        A.options(), device, num_sms, stream))
+        at::options(A), device, num_sms, stream))
         return true;
     if (size_m > 1) return false;
 
@@ -276,8 +277,8 @@ bool exl3_gemv_int8
     // The cooperative kernel initializes the accumulators before its first grid barrier.
     const size_t ws_ints = (size_t) 2 * size_n + 4 * size_m + 1024;
     if (ws_ints > GEMV_INT8_WS_INTS) return false;
-    auto ws = at::empty({(int64_t) ws_ints}, A.options().dtype(at::kInt));
-    int* ws_ptr = ws.data_ptr<int>();
+    auto ws = at::empty({(int64_t) ws_ints}, at::options(A).dtype(at::kInt));
+    int* ws_ptr = ws.mutable_data_ptr<int>();
 
     const half* A_ptr = (const half*) A.data_ptr();
     const uint16_t* B_ptr = (const uint16_t*) B.data_ptr();
@@ -314,11 +315,9 @@ bool exl3_gemv_int8
 #else  // __HIP_PLATFORM_AMD__ || USE_ROCM
 
 #include <cuda_fp16.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
-#include <ATen/ops/empty.h>
 #include <cstdint>
+
+#include "../../torch_stable_compat.h"
 
 #include "exl3_gemv.cuh"
 #include "exl3_gemv_int8_kernel.cuh"
@@ -357,7 +356,7 @@ bool exl3_gemv_int8
     // Same gate as the CUDA path: residual mode is m == 1, plain int8 mode m <= 2
     if (size_m < 1 || size_m > (residual ? 1 : 2)) return false;
     if (size_k % 128 || size_n % 128) return false;
-    if (C.dtype() != at::kFloat) return false;
+    if (C.scalar_type() != at::kFloat) return false;
 
     const int device = A.get_device();
     if (!exl3_gemv_int8_hip_host::arch_ok(device)) return false;
@@ -365,25 +364,25 @@ bool exl3_gemv_int8
     // memory instead, so the caller's buffer is left untouched.
     (void) A_had;
 
-    const auto quant_options = A.options().dtype(at::kChar);
+    const auto quant_options = at::options(A).dtype(at::kChar);
     at::Tensor qa = at::empty({(int64_t) size_m * size_k}, quant_options);
     at::Tensor qb = at::empty({(int64_t) size_m * size_k}, quant_options);
-    at::Tensor qscale = at::empty({size_m}, A.options().dtype(at::kFloat));
-    at::Tensor qsum = at::empty({size_m}, A.options().dtype(at::kInt));
-    at::Tensor qsum2 = at::empty({size_m}, A.options().dtype(at::kInt));
+    at::Tensor qscale = at::empty({size_m}, at::options(A).dtype(at::kFloat));
+    at::Tensor qsum = at::empty({size_m}, at::options(A).dtype(at::kInt));
+    at::Tensor qsum2 = at::empty({size_m}, at::options(A).dtype(at::kInt));
 
     const int status = exl3_gemv_int8_hip_launch
     (
         reinterpret_cast<const half*>(A.const_data_ptr()),
         reinterpret_cast<const uint16_t*>(B.const_data_ptr()),
-        C.data_ptr(),
+        C.mutable_data_ptr(),
         reinterpret_cast<const half*>(suh.const_data_ptr()),
         reinterpret_cast<const half*>(svh.const_data_ptr()),
-        reinterpret_cast<int8_t*>(qa.data_ptr()),
-        reinterpret_cast<int8_t*>(qb.data_ptr()),
-        reinterpret_cast<float*>(qscale.data_ptr()),
-        reinterpret_cast<int*>(qsum.data_ptr()),
-        reinterpret_cast<int*>(qsum2.data_ptr()),
+        reinterpret_cast<int8_t*>(qa.mutable_data_ptr()),
+        reinterpret_cast<int8_t*>(qb.mutable_data_ptr()),
+        reinterpret_cast<float*>(qscale.mutable_data_ptr()),
+        reinterpret_cast<int*>(qsum.mutable_data_ptr()),
+        reinterpret_cast<int*>(qsum2.mutable_data_ptr()),
         size_m, size_k, size_n, bits, residual, device, stream
     );
     if (status < 0) C10_CUDA_KERNEL_LAUNCH_CHECK();

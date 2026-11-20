@@ -26,7 +26,7 @@
 
 #include <cuda_fp16.h>
 #include <stdio.h>
-#include <torch/extension.h>
+#include "torch_stable_compat.h"
 #include "gemv_cuda.h"
 #include "../dequantize.cuh"
 #define PACK_FACTOR 8
@@ -315,10 +315,10 @@ torch::Tensor gemv_forward_cuda_decode(
     std::vector<int64_t> output_shape = _in_feats.sizes().vec();
     output_shape.back() = n;
 
-    auto in_feats = reinterpret_cast<half*>(_in_feats.data_ptr<at::Half>());
+    auto in_feats = reinterpret_cast<half*>(_in_feats.mutable_data_ptr<at::Half>());
     auto kernel = reinterpret_cast<uint32_t*>(_kernel.data_ptr());
-    auto zeros = reinterpret_cast<half*>(_zeros.data_ptr<at::Half>());
-    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
+    auto zeros = reinterpret_cast<half*>(_zeros.mutable_data_ptr<at::Half>());
+    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.mutable_data_ptr<at::Half>());
 
     if (group_size != 128)
     {
@@ -346,7 +346,7 @@ torch::Tensor gemv_forward_cuda_decode(
     {
       launch_gemv_forward_decode<float>(
         m, n, k, num_blocks, num_threads, smem_size,
-        in_feats, kernel, scaling_factors, zeros, _out_feats.data_ptr<float>()
+        in_feats, kernel, scaling_factors, zeros, _out_feats.mutable_data_ptr<float>()
       );
     }
     else
@@ -354,7 +354,7 @@ torch::Tensor gemv_forward_cuda_decode(
       launch_gemv_forward_decode<half>(
         m, n, k, num_blocks, num_threads, smem_size,
         in_feats, kernel, scaling_factors, zeros,
-        reinterpret_cast<half*>(_out_feats.data_ptr<at::Half>())
+        reinterpret_cast<half*>(_out_feats.mutable_data_ptr<at::Half>())
       );
     }
     return _out_feats;

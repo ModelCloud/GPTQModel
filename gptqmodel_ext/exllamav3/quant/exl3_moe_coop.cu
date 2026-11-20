@@ -2,10 +2,7 @@
 // exl3_moe_coop_kernel.cuh, instantiated per (K, codebook) in comp_units/exl3_moe_coop_inst_k*.cu
 
 #include <cuda_fp16.h>
-#include <ATen/ATen.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAGuard.h>
+#include "../../torch_stable_compat.h"
 #include <map>
 #include <cmath>
 #include <mutex>
@@ -215,7 +212,7 @@ MoeCoopParams exl3_moe_coop_prepare
     TORCH_CHECK(u_trellis.dim() == 1 && u_trellis.numel() <= 32767,
                 "exl3_moe_coop: pointer tables must hold at most 32767 experts");
     auto check_table = [&](const at::Tensor& t) {
-        TORCH_CHECK(t.scalar_type() == at::kLong && t.is_contiguous() && t.sizes() == u_trellis.sizes(),
+        TORCH_CHECK(t.scalar_type() == at::kLong && t.is_contiguous() && t.sizes().equals(u_trellis.sizes()),
                     "exl3_moe_coop: pointer tables must be contiguous int64 arrays of equal length");
     };
     for (const at::Tensor* t : { &g_trellis, &g_suh, &g_svh, &u_trellis, &u_suh, &u_svh, &d_trellis, &d_suh, &d_svh })
@@ -360,8 +357,8 @@ void exl3_moe_coop_run
     at::Tensor wide_gu;
     if (cb == EXL3_Q4NX_CODEBOOK && !p.gu_f32 && slots)
     {
-        wide_gu = at::empty({p.gated ? 2 : 1, p.slots_max, p.I}, x.options().dtype(at::kFloat));
-        auto* tmp = wide_gu.data_ptr<float>();
+        wide_gu = at::empty({p.gated ? 2 : 1, p.slots_max, p.I}, at::options(x).dtype(at::kFloat));
+        auto* tmp = wide_gu.mutable_data_ptr<float>();
         p.gu_u = tmp;
         if (p.gated)
             p.gu_g = tmp + static_cast<size_t>(p.slots_max) * p.I;
@@ -431,7 +428,7 @@ void exl3_moe_coop
     for (const auto* t : { &g_bias, &u_bias, &d_bias, &sh_out, &sh_gate_w })
         TORCH_CHECK(!*t || t->value().device() == x.device(), "exl3_moe_coop: optional tensors must be on the input device");
     TORCH_CHECK(sel.is_contiguous() && rw.is_contiguous(), "exl3_moe_coop: sel/rw must be contiguous");
-    TORCH_CHECK(sel.sizes() == rw.sizes() && sel.dim() == 2 && sel.size(0) == x.size(0), "exl3_moe_coop: sel/rw must be (bsz, topk)");
+    TORCH_CHECK(sel.sizes().equals(rw.sizes()) && sel.dim() == 2 && sel.size(0) == x.size(0), "exl3_moe_coop: sel/rw must be (bsz, topk)");
     if (sh_out)
     {
         TORCH_CHECK_DTYPE(sh_out.value(), kFloat);

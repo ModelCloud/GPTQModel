@@ -1,6 +1,6 @@
 // Adapted from ExLlamaV3 v1.6.7 (8c593e4), copyright TurboDerp and contributors, MIT.
 #pragma once
-#include <c10/util/Exception.h>
+#include "../../torch_stable_compat.h"
 #include <cmath>
 
 // Split the EXL3 bitrate into the integral part and half-bit flag used

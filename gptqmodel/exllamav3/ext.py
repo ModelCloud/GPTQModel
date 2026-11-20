@@ -17,6 +17,7 @@ from typing import Optional
 import torch
 
 from ..utils.cpp import (
+    _TORCH_STABLE_ABI_TARGET,
     TorchOpsJitExtension,
     _jit_cxx_standard,
     cuda_include_paths_with_fallback,
@@ -219,6 +220,7 @@ _EXLLAMAV3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     build_env_scope=scoped_arch_list_env,
     python_abi_dependent=False,
     stage_hip_sources=True,
+    torch_stable_abi_target=_TORCH_STABLE_ABI_TARGET,
 )
 
 

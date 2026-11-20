@@ -1,7 +1,6 @@
+#include "../../torch_stable_compat.h"
 #include <cuda_fp16.h>
 #include "quantize.cuh"
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
 #include "../util.h"
 #include "../util.cuh"
 #include "codebook.cuh"
@@ -499,7 +498,7 @@ void decode
     dim3 blockDim(64);
     dim3 gridDim(cols / 64, rows);
 
-    if (output_tiles.dtype() == at::kFloat)
+    if (output_tiles.scalar_type() == at::kFloat)
         decode_kernel<<<gridDim, blockDim, 0, stream>>>
         (
             (const uint16_t*) input_indices.data_ptr(),
@@ -508,7 +507,7 @@ void decode
             mcg,
             mul1
         );
-    else if (output_tiles.dtype() == at::kHalf)
+    else if (output_tiles.scalar_type() == at::kHalf)
         decode_kernel<<<gridDim, blockDim, 0, stream>>>
         (
             (const uint16_t*) input_indices.data_ptr(),

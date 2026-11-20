@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include <torch/all.h>
+#include "../torch_stable_compat.h"
 #include <vector>
 
 

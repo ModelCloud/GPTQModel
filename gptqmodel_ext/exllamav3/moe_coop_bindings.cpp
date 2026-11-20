@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <limits>
-#include <torch/library.h>
+#include "../torch_stable_compat.h"
 
 #include "quant/exl3_moe_coop.cuh"
 
@@ -52,7 +52,7 @@ void run_exl3_moe_coop(
 
 }  // namespace
 
-TORCH_LIBRARY_FRAGMENT(gptqmodel_exllamav3, m) {
+STABLE_TORCH_LIBRARY_FRAGMENT(gptqmodel_exllamav3, m) {
     m.def(
         "exl3_moe_coop(Tensor x, Tensor selected_experts, Tensor routing_weights, "
         "int min_expert, int max_expert, int input_features, "
@@ -67,6 +67,6 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_exllamav3, m) {
     );
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CUDA, m) {
-    m.impl("exl3_moe_coop", run_exl3_moe_coop);
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CUDA, m) {
+    m.impl("exl3_moe_coop", TORCH_BOX(&run_exl3_moe_coop));
 }

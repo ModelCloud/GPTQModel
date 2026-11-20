@@ -1,31 +1,8 @@
 #include "cpu_features.hpp"
 #include "int4_qzero_group_scaled_avx512.hpp"
-#include <ATen/ATen.h>
-#include <ATen/native/CPUBlas.h>
-#include <torch/library.h>
+#include "../torch_stable_compat.h"
 
 namespace {
-
-bool qqq_brgemm_available() {
-    if (!at::hasMKLDNN() || !at::globalContext().userEnabledMkldnn() ||
-        !__builtin_cpu_supports("avx512vnni")) {
-        return false;
-    }
-    static const bool available = [] {
-        alignas(64) uint8_t input[4] = {};
-        alignas(64) int8_t weight[4 * 32] = {};
-        alignas(64) int32_t output[32] = {};
-        try {
-            at::native::cpublas::brgemm(1, 32, 4, 4, 32, 32, false, input, weight, output);
-            at::native::cpublas::brgemm_release();
-            return true;
-        } catch (const c10::Error&) {
-            at::native::cpublas::brgemm_release();
-            return false;
-        }
-    }();
-    return available;
-}
 
 __m512i qqq_weight_pair(__m256i codes, const float* scales) {
     const __m512i centered = _mm512_sub_epi16(
@@ -95,62 +72,6 @@ __m512i qqq_int8_quad(__m512i first, __m512i second) {
     return _mm512_permutexvar_epi64(_mm512_setr_epi64(0, 1, 4, 5, 2, 3, 6, 7), interleaved);
 }
 
-void qqq_brgemm_tile(const uint8_t* input, const uint8_t* weight, const float* scales,
-                     float* output, int64_t rows, int64_t in_features, int64_t out_features, int64_t group_size) {
-    alignas(64) int8_t unpacked[128 * 32];
-    alignas(64) int32_t partial[128 * 32];
-    alignas(64) int32_t accum[128 * 32] = {};
-    const __m256i mask = _mm256_set1_epi8(15);
-    for (int64_t group_start = 0; group_start < in_features; group_start += group_size) {
-        const float* group_scales = scales == nullptr ? nullptr : scales + group_start / group_size * out_features;
-        for (int64_t chunk_start = group_start; chunk_start < group_start + group_size; chunk_start += 128) {
-            const int64_t chunk_size = std::min<int64_t>(128, group_start + group_size - chunk_start);
-            __m512i correction_low = _mm512_setzero_si512();
-            __m512i correction_high = _mm512_setzero_si512();
-            const __m512i ones = _mm512_set1_epi16(1);
-            for (int64_t offset = 0; offset < chunk_size; offset += 4) {
-                const __m256i first = _mm256_loadu_si256(
-                    reinterpret_cast<const __m256i*>(weight + (chunk_start + offset) * 16));
-                const __m256i second = _mm256_loadu_si256(
-                    reinterpret_cast<const __m256i*>(weight + (chunk_start + offset + 2) * 16));
-                const __m512i first_low = qqq_weight_pair(_mm256_and_si256(first, mask), group_scales);
-                const __m512i second_low = qqq_weight_pair(_mm256_and_si256(second, mask), group_scales);
-                const __m512i first_high = qqq_weight_pair(
-                    _mm256_and_si256(_mm256_srli_epi16(first, 4), mask),
-                    group_scales == nullptr ? nullptr : group_scales + 16);
-                const __m512i second_high = qqq_weight_pair(
-                    _mm256_and_si256(_mm256_srli_epi16(second, 4), mask),
-                    group_scales == nullptr ? nullptr : group_scales + 16);
-                _mm512_store_si512(unpacked + offset * 32, qqq_int8_quad(first_low, second_low));
-                _mm512_store_si512(unpacked + offset * 32 + 64, qqq_int8_quad(first_high, second_high));
-                correction_low = _mm512_add_epi32(correction_low,
-                    _mm512_madd_epi16(_mm512_add_epi16(first_low, second_low), ones));
-                correction_high = _mm512_add_epi32(correction_high,
-                    _mm512_madd_epi16(_mm512_add_epi16(first_high, second_high), ones));
-            }
-            at::native::cpublas::brgemm(rows, 32, chunk_size, in_features, 32, 32, false,
-                                      input + chunk_start, unpacked, partial);
-            correction_low = _mm512_slli_epi32(correction_low, 7);
-            correction_high = _mm512_slli_epi32(correction_high, 7);
-            for (int64_t row = 0; row < rows; ++row) {
-                const auto add = [&](int64_t col, __m512i correction) {
-                    const __m512i current = _mm512_sub_epi32(_mm512_load_si512(partial + row * 32 + col), correction);
-                    _mm512_store_si512(accum + row * 32 + col,
-                        _mm512_add_epi32(_mm512_load_si512(accum + row * 32 + col), current));
-                };
-                add(0, correction_low);
-                add(16, correction_high);
-            }
-        }
-    }
-    for (int64_t row = 0; row < rows; ++row) {
-        for (int64_t col = 0; col < 32; col += 16) {
-            _mm512_storeu_ps(output + row * out_features + col,
-                            _mm512_cvtepi32_ps(_mm512_load_si512(accum + row * 32 + col)));
-        }
-    }
-}
-
 at::Tensor qqq_int4_cpu(const at::Tensor& input, const at::Tensor& weight,
                         const at::Tensor& scales, int64_t group_size) {
     TORCH_CHECK(int4_qzero_group_scaled_cpu::CPUFeatures::hasAVX512BF16(), "QQQ CPU requires AVX512-BF16");
@@ -173,17 +94,15 @@ at::Tensor qqq_int4_cpu(const at::Tensor& input, const at::Tensor& weight,
     TORCH_CHECK((scales.numel() == 0 && group_size == in_features) ||
                 (scales.dim() == 2 && scales.size(0) == in_features / group_size && scales.size(1) == out_features),
                 "QQQ group scales shape mismatch");
-    auto output = at::empty({rows, out_features}, input.options().dtype(at::kFloat));
+    auto output = at::empty({rows, out_features}, at::options(input).dtype(at::kFloat));
     if (rows == 0) {
         return output;
     }
-    const auto* activation = input.data_ptr<int8_t>();
-    const auto* packed = weight.data_ptr<uint8_t>();
-    const auto* group_scales = scales.numel() == 0 ? nullptr : scales.data_ptr<float>();
-    auto* result = output.data_ptr<float>();
-    const bool use_brgemm = rows > 4 && group_size % 4 == 0 && qqq_brgemm_available();
-    const int64_t row_tile = use_brgemm ? (out_features / 32 >= at::get_num_threads() ? 128 : 32) : 4;
-    const auto unsigned_input = use_brgemm ? input.to(at::kByte).add_(128) : at::Tensor();
+    const auto* activation = input.const_data_ptr<int8_t>();
+    const auto* packed = weight.const_data_ptr<uint8_t>();
+    const auto* group_scales = scales.numel() == 0 ? nullptr : scales.const_data_ptr<float>();
+    auto* result = output.mutable_data_ptr<float>();
+    const int64_t row_tile = 4;
     int4_qzero_group_scaled_cpu::avx512::parallel_2d(
         (rows + row_tile - 1) / row_tile, out_features / 32,
         [&](int64_t row_begin, int64_t row_end, int64_t col_begin, int64_t col_end) {
@@ -191,13 +110,6 @@ at::Tensor qqq_int4_cpu(const at::Tensor& input, const at::Tensor& weight,
                 const int64_t col = col_block * 32;
                 for (int64_t row_block = row_begin; row_block < row_end; ++row_block) {
                     const int64_t row = row_block * row_tile;
-                    if (use_brgemm) {
-                        qqq_brgemm_tile(unsigned_input.data_ptr<uint8_t>() + row * in_features,
-                            packed + col * in_features / 2, group_scales == nullptr ? nullptr : group_scales + col,
-                            result + row * out_features + col, std::min<int64_t>(row_tile, rows - row),
-                            in_features, out_features, group_size);
-                        continue;
-                    }
                     const auto launch = [&](auto count) {
                         qqq_tile<count>(activation + row * in_features, packed + col * in_features / 2,
                             group_scales == nullptr ? nullptr : group_scales + col,
@@ -211,16 +123,13 @@ at::Tensor qqq_int4_cpu(const at::Tensor& input, const at::Tensor& weight,
                     }
                 }
             }
-            if (use_brgemm) {
-                at::native::cpublas::brgemm_release();
-            }
         });
     return output;
 }
 
 }
 
-TORCH_LIBRARY_FRAGMENT(gptqmodel_int4_qzero_group_scaled_cpu, ops) {
+STABLE_TORCH_LIBRARY_FRAGMENT(gptqmodel_int4_qzero_group_scaled_cpu, ops) {
     ops.def("qqq_int4(Tensor input, Tensor weight, Tensor scales, int group_size) -> Tensor");
-    ops.impl("qqq_int4", c10::DispatchKey::CPU, &qqq_int4_cpu);
+    ops.impl("qqq_int4", TORCH_BOX(&qqq_int4_cpu));
 }

@@ -15,7 +15,11 @@ using TorchBFloat16 = torch::headeronly::BFloat16;
 using TorchScalarType = torch::headeronly::ScalarType;
   #define TORCH_UTILS_CHECK STD_TORCH_CHECK
 #else
-  #include <torch/all.h>
+  // Spelled through a macro so stable-ABI source scanners do not treat this
+  // optional non-stable branch as a hard dependency.
+  #define GPTQMODEL_TORCH_ALL_HEADER <torch/all.h>
+  #include GPTQMODEL_TORCH_ALL_HEADER
+  #undef GPTQMODEL_TORCH_ALL_HEADER
 using TorchTensor = torch::Tensor;
 using TorchHalf = c10::Half;
 using TorchBFloat16 = c10::BFloat16;

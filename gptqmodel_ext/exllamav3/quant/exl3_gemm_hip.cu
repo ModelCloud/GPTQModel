@@ -38,10 +38,7 @@
 
 #include <cuda_fp16.h>
 
-#include <ATen/ops/empty.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAException.h>
+#include "../../torch_stable_compat.h"
 
 #include <cstring>
 
@@ -293,9 +290,9 @@ int exl3_gemm_hip
     TORCH_CHECK(size_k % 128 == 0 && size_n % 128 == 0,
                 "EXL3 fused transforms require K and N divisible by 128");
 
-    auto x = A.view({size_m, size_k});
-    auto xh = A_had.view({size_m, size_k});
-    auto y = C.view({size_m, size_n});
+    auto x = at::view(A, {size_m, size_k});
+    auto xh = at::view(A_had, {size_m, size_k});
+    auto y = at::view(C, {size_m, size_n});
 
     // Shared by both paths: the rotation of the activation is what turns the
     // trellis-domain weight into a plain FP16 matrix product.
@@ -328,7 +325,7 @@ int exl3_gemm_hip
     // Portable fallback: expand the weight once, then let hipBLAS do the GEMM.
     // This is the only path for half-precision accumulators, very wide batches
     // and non-RDNA4 devices.
-    auto weight = at::empty({size_k, size_n}, A.options());
+    auto weight = at::empty({size_k, size_n}, at::options(A));
     if (half_k) reconstruct_frac(weight, B, K);
     else reconstruct(weight, B, K, cb == 1, cb == 2);
     hgemm(xh, weight, y);

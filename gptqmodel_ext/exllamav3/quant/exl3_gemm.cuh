@@ -1,6 +1,6 @@
 #pragma once
+#include "../../torch_stable_compat.h"
 
-#include <ATen/Tensor.h>
 
 int exl3_gemm(
     const at::Tensor& A, const at::Tensor& B, at::Tensor& C,

@@ -3,7 +3,7 @@
 // Original author: jiqing-feng <jiqing.feng@intel.com> (Intel).
 // Modified for GPT-QModel by ModelCloud.ai.
 
-#include <torch/all.h>
+#include "../torch_stable_compat.h"
 #include "int4_qzero_group_scaled.hpp"
 #include "int4_qzero_group_scaled_pack.hpp"
 #include <limits>
@@ -32,7 +32,7 @@ torch::Tensor gemm_int4_qzero_group_scaled_cpu_forward(
     TORCH_CHECK(input.size(1) == weight.size(1) * 2, "input/weight feature dimensions differ");
     TORCH_CHECK(input.size(1) % blocksize == 0, "in_features must be divisible by blocksize");
     TORCH_CHECK(
-        zeros.sizes() == absmax.sizes(),
+        zeros.sizes().equals(absmax.sizes()),
         "zeros and absmax must have the same shape");
     TORCH_CHECK(
         zeros.size(0) == input.size(1) / blocksize,
@@ -51,7 +51,7 @@ torch::Tensor gemm_int4_qzero_group_scaled_cpu_forward(
             "bias out_features does not match weight");
     }
 
-    auto output = at::empty({input.size(0), weight.size(0)}, input.options());
+    auto output = at::empty({input.size(0), weight.size(0)}, at::options(input));
     if (input.size(0) == 0) {
         return output;
     }

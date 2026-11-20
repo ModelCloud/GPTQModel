@@ -1,3 +1,4 @@
+#include "../../torch_stable_compat.h"
 #include <cuda_fp16.h>
 #include "exl3_gemm.cuh"
 #include "exl3_gemm_hip.cuh"
@@ -5,16 +6,10 @@
 #include <cstdint>
 #include <tuple>
 
-#include <torch/library.h>
-
 #include <algorithm>
 #include <limits>
 #include <set>
 #include <shared_mutex>
-#include <ATen/ops/empty.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAGuard.h>
 #include "../hgemm.cuh"
 #include "../util.h"
 #include "exl3_kernel_map.cuh"
@@ -41,7 +36,7 @@ int exl3_gemm(
     TORCH_CHECK_SHAPES(C, -1, B, 1, 16);
     TORCH_CHECK_DTYPE(A, kHalf);
     TORCH_CHECK_DTYPE(B, kShort);
-    const bool c_fp32 = C.dtype() == at::kFloat;
+    const bool c_fp32 = C.scalar_type() == at::kFloat;
     if (!c_fp32) TORCH_CHECK_DTYPE(C, kHalf);
     TORCH_CHECK(int(mcg) + int(mul1) + int(q4nx) + int(r4nx) <= 1, "conflicting EXL3 codebooks");
     TORCH_CHECK(int8_gemv >= 0 && int8_gemv <= 2, "EXL3 INT8 mode must be 0, 1 or 2");
@@ -110,19 +105,21 @@ int exl3_gemm(
     {
         try
         {
-            auto weight = at::empty({size_k, size_n}, A.options());
+            auto weight = at::empty({size_k, size_n}, at::options(A));
             reconstruct_q4nx(weight, B, K, half_k);
-            auto x = A.view({size_m, size_k});
-            auto xh = A_had.view({size_m, size_k});
-            auto y = C.view({size_m, size_n});
+            auto x = at::view(A, {size_m, size_k});
+            auto xh = at::view(A_had, {size_m, size_k});
+            auto y = at::view(C, {size_m, size_n});
             had_r_128(x, xh, suh, c10::nullopt, 1.0f);
             hgemm(xh, weight, y);
             had_r_128(y, y, c10::nullopt, svh, EXL3_Q4NX_ALPHA);
             return 92;
         }
-        catch (const c10::OutOfMemoryError&)
+        catch (const std::exception&)
         {
             // The expanded weight and HGEMM workspace are optional scratch.
+            // The stable ABI reports a failed allocation as a runtime error, so
+            // the fallback catches the base exception type.
         }
     }
 
@@ -154,9 +151,13 @@ int exl3_gemm(
     // The split-K counters belong to this launch (#4619). The caching
     // allocator preserves captured addresses and keeps streams isolated.
     const int lock_rows = use_fused ? 1 : CEIL_DIVIDE(size_m, EXL3_GEMM_TILESIZE_M);
-    auto locks_tensor = at::empty({(int64_t) lock_rows * (size_n / 16)}, A.options().dtype(at::kInt));
-    locks = locks_tensor.data_ptr<int>();
-    C10_CUDA_CHECK(cudaMemsetAsync(locks, 0, locks_tensor.nbytes(), stream));
+    auto locks_tensor = at::empty({(int64_t) lock_rows * (size_n / 16)},
+                                  at::options(A).dtype(at::kInt));
+    locks = locks_tensor.mutable_data_ptr<int>();
+    C10_CUDA_CHECK(cudaMemsetAsync(
+        locks, 0,
+        static_cast<size_t>(locks_tensor.numel()) * locks_tensor.element_size(),
+        stream));
 
     bool attr_ready;
     {
@@ -226,11 +227,11 @@ std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t> exl3_gemm_kernel_probe(
 
 // No tensor argument, so the op is registered as a composite kernel rather than
 // under a dispatch key; the selection itself needs no tensor.
-TORCH_LIBRARY_FRAGMENT(gptqmodel_exllamav3, m)
+STABLE_TORCH_LIBRARY_FRAGMENT(gptqmodel_exllamav3, m)
 {
     m.def("exl3_gemm_kernel_probe(int cc, int size_k, int size_n, int K, bool c_fp32, int cb, "
           "bool half_k, bool fused_gemm, int size_m) -> (int kernel, int shape_idx, int num_sms, "
           "int block_dim, int q4nx_shape)");
-    m.impl("exl3_gemm_kernel_probe", &exl3_gemm_kernel_probe);
+    m.impl("exl3_gemm_kernel_probe", TORCH_BOX(&exl3_gemm_kernel_probe));
 }
 #endif

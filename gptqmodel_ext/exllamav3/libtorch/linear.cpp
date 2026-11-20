@@ -1,7 +1,5 @@
+#include "../../torch_stable_compat.h"
 #include "linear.h"
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <torch/extension.h>
 #include "../util.h"
 #include "../quant/bits_k.cuh"
 #include "../quant/exl3_gemm.cuh"
@@ -62,14 +60,14 @@ int64_t bc_linear_exl3_run_configured
     // Q4NX normalizes those sums in the output Hadamard. Keep the destination
     // wide through split-K, the Hadamard and the output scale.
     const bool half_output = y.scalar_type() == at::kHalf;
-    at::Tensor accum = half_output ? at::empty_like(y, y.options().dtype(at::kFloat)) : y;
+    at::Tensor accum = half_output ? at::empty_like(y, at::options(y).dtype(at::kFloat)) : y;
     const auto dispatch = exl3_gemm(x, trellis, accum, suh, xh, svh, mcg, mul1,
                                    fp16_gemv, int8_gemv, fused_gemm, q4nx, r4nx);
 
     if (bias)
         at::add_out(y, accum, bias.value());
     else if (half_output)
-        y.copy_(accum);
+        torch::stable::copy_(y, accum);
     return dispatch;
 }
 
@@ -132,7 +130,7 @@ int64_t bc_linear_exl3_run_hip_gemv
 
     // The packed kernel writes FP32 partial sums and applies svh and the output
     // Hadamard itself; keep the result wide and cast once, like the CUDA path.
-    at::Tensor accum = at::empty({size_m, size_n}, x.options().dtype(at::kFloat));
+    at::Tensor accum = at::empty({size_m, size_n}, at::options(x).dtype(at::kFloat));
     at::Tensor xh = at::empty_like(x);
 
     const half* A_ptr = reinterpret_cast<const half*>(x.const_data_ptr());
@@ -165,8 +163,8 @@ int64_t bc_linear_exl3_run_hip_gemv
         return 0;
 
     if (bias)
-        accum.add_(bias.value());
-    y.view({size_m, size_n}).copy_(accum);
+        at::add_(accum, bias.value());
+    torch::stable::copy_(at::view(y, {size_m, size_n}), accum);
     return 1;
 #else
     return 0;

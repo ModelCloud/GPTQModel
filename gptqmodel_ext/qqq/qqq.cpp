@@ -1,7 +1,5 @@
 // Adapted from https://github.com/HandH1998/QQQ
 
-#include <c10/cuda/CUDAGuard.h>
-#include <torch/library.h>
 
 #include "qqq_gemm.h"
 
@@ -23,12 +21,12 @@ void qqq_gemm_dispatch(const torch::Tensor& A, const torch::Tensor& B, torch::Te
 
 }  // namespace
 
-TORCH_LIBRARY(gptqmodel_qqq, m) {
+STABLE_TORCH_LIBRARY(gptqmodel_qqq, m) {
   m.def(
       "qqq_gemm(Tensor A, Tensor B, Tensor(a!) C, Tensor(a!) D, Tensor s1, Tensor s2, Tensor s3, "
       "Tensor(a!) workspace, int thread_k=-1, int thread_n=-1, int sms=-1, int max_par=8) -> ()");
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_qqq, CUDA, m) {
-  m.impl("qqq_gemm", &qqq_gemm_dispatch);
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_qqq, CUDA, m) {
+  m.impl("qqq_gemm", TORCH_BOX(&qqq_gemm_dispatch));
 }

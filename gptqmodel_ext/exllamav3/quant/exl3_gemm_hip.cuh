@@ -1,6 +1,6 @@
 #pragma once
 
-#include <ATen/Tensor.h>
+#include "../../torch_stable_compat.h"
 
 // Native EXL3 tensor-core GEMM for RDNA4 (gfx120x) on ROCm/HIP.
 //

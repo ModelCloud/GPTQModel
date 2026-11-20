@@ -1,7 +1,6 @@
+#include "../../torch_stable_compat.h"
 #include <cuda_fp16.h>
 #include "quantize.cuh"
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
 #include "../util.h"
 #include "../util.cuh"
 #include "hadamard_inner.cuh"
@@ -117,11 +116,11 @@ void had_r_128
         // A zero-row batch would launch a zero-sized grid, which the CUDA/HIP
         // runtime rejects. Keep dtype validation identical for empty operands
         // and return the caller's empty output before the launch.
-        if (input.dtype() == at::kHalf)
+        if (input.scalar_type() == at::kHalf)
         {
             TORCH_CHECK_DTYPE(output, kHalf);
         }
-        else if (input.dtype() == at::kFloat)
+        else if (input.scalar_type() == at::kFloat)
         {
             TORCH_CHECK_DTYPE(output, kFloat);
         }
@@ -138,7 +137,7 @@ void had_r_128
     dim3 blockDim(32);
     dim3 gridDim(rows, blocks);
 
-    if (input.dtype() == at::kHalf)
+    if (input.scalar_type() == at::kHalf)
     {
         TORCH_CHECK_DTYPE(output, kHalf);
         had_hf_r_128_kernel<<<gridDim, blockDim, 0, stream>>>
@@ -152,7 +151,7 @@ void had_r_128
         cuda_check(cudaPeekAtLastError());
     }
 
-    else if (input.dtype() == at::kFloat)
+    else if (input.scalar_type() == at::kFloat)
     {
         TORCH_CHECK_DTYPE(output, kFloat);
         had_ff_r_128_kernel<<<gridDim, blockDim, 0, stream>>>
@@ -202,12 +201,12 @@ void had_r_128_dual
         // A zero-row batch would launch a zero-sized grid, which the CUDA/HIP
         // runtime rejects. Keep dtype validation identical for empty operands
         // and return the caller's empty outputs before the launch.
-        if (input1.dtype() == at::kHalf)
+        if (input1.scalar_type() == at::kHalf)
         {
             TORCH_CHECK_DTYPE(output1, kHalf);
             TORCH_CHECK_DTYPE(output2, kHalf);
         }
-        else if (input1.dtype() == at::kFloat)
+        else if (input1.scalar_type() == at::kFloat)
         {
             TORCH_CHECK_DTYPE(output1, kFloat);
             TORCH_CHECK_DTYPE(output2, kFloat);
@@ -225,7 +224,7 @@ void had_r_128_dual
     dim3 blockDim(32);
     dim3 gridDim(rows, blocks);
 
-    if (input1.dtype() == at::kHalf)
+    if (input1.scalar_type() == at::kHalf)
     {
         TORCH_CHECK_DTYPE(output1, kHalf);
         had_hf_r_128_dual_kernel<<<gridDim, blockDim, 0, stream>>>
@@ -243,7 +242,7 @@ void had_r_128_dual
         cuda_check(cudaPeekAtLastError());
     }
 
-    else if (input1.dtype() == at::kFloat)
+    else if (input1.scalar_type() == at::kFloat)
     {
         TORCH_CHECK_DTYPE(output1, kFloat);
         had_ff_r_128_dual_kernel<<<gridDim, blockDim, 0, stream>>>

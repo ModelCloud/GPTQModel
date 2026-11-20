@@ -12,10 +12,7 @@
 
 #include <cuda_fp16.h>
 #include <stdio.h>
-#include <torch/extension.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAGuard.h>
+#include "torch_stable_compat.h"
 #include "gemv_cuda.h"
 #define VECTORIZE_FACTOR 8
 #define Q_VECTORIZE_FACTOR 8
@@ -309,11 +306,11 @@ torch::Tensor gemv_forward_cuda(
     // device (which may differ in multi-GPU inference).
     const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
     // int kernel_volume = _out_in_map.size(1);
-    auto in_feats = reinterpret_cast<float4*>(_in_feats.data_ptr<at::Half>());
-    auto kernel = reinterpret_cast<uint32_t*>(_kernel.data_ptr<int>());
-    auto zeros = reinterpret_cast<uint32_t*>(_zeros.data_ptr<int>());
-    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
-    // auto out_in_map = _out_in_map.data_ptr<int>();
+    auto in_feats = reinterpret_cast<float4*>(_in_feats.mutable_data_ptr<at::Half>());
+    auto kernel = reinterpret_cast<uint32_t*>(_kernel.mutable_data_ptr<int>());
+    auto zeros = reinterpret_cast<uint32_t*>(_zeros.mutable_data_ptr<int>());
+    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.mutable_data_ptr<at::Half>());
+    // auto out_in_map = _out_in_map.mutable_data_ptr<int>();
     // A caller with a bias to add asks for FP32 output so the bias joins the
     // complete FP32 reduction and the result is rounded exactly once.
     auto options = torch::TensorOptions()
@@ -331,7 +328,7 @@ torch::Tensor gemv_forward_cuda(
     {
       launch_gemv_forward<float>(
         group_size, num_blocks, num_threads, stream,
-        in_feats, kernel, zeros, scaling_factors, _out_feats.data_ptr<float>(),
+        in_feats, kernel, zeros, scaling_factors, _out_feats.mutable_data_ptr<float>(),
         num_in_channels, num_out_channels);
     }
     else
@@ -339,7 +336,7 @@ torch::Tensor gemv_forward_cuda(
       launch_gemv_forward<half>(
         group_size, num_blocks, num_threads, stream,
         in_feats, kernel, zeros, scaling_factors,
-        reinterpret_cast<half*>(_out_feats.data_ptr<at::Half>()),
+        reinterpret_cast<half*>(_out_feats.mutable_data_ptr<at::Half>()),
         num_in_channels, num_out_channels);
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();

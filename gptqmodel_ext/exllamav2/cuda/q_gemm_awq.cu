@@ -1,4 +1,4 @@
-#include <ATen/ATen.h>
+#include "../../torch_stable_compat.h"
 #include "q_gemm.cuh"
 #include "util.cuh"
 #include "matrix_view.cuh"
@@ -262,7 +262,7 @@ void gemm_half_q_half_cuda
             ? at::empty({split_count * split_element_stride}, float_options)
             : at::zeros({split_element_stride}, float_options);
     }
-    float* c_float = b->is_gptq ? accum.data_ptr<float>() : nullptr;
+    float* c_float = b->is_gptq ? accum.mutable_data_ptr<float>() : nullptr;
     const bool wide_output = c_out_float != nullptr;
     if (wide_output && !b->is_gptq) {
         // The non-GPTQ kernel atomically accumulates FP32 K blocks directly

@@ -9,15 +9,12 @@
 
  */
 
-#include <torch/extension.h>
-#include <ATen/cuda/CUDAContext.h>
+#include "torch_stable_compat.h"
 #include "gemm_cuda.h"
 #include "dequantize.cuh"
 #include <algorithm>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAGuard.h>
 #include <cublas_v2.h>
 #include <cstdlib>
 #include <type_traits>
@@ -189,19 +186,19 @@ torch::Tensor fused_reduce_splitk_fp32_to_output(torch::Tensor out_feats_tensor,
   const int blocks = static_cast<int>(std::max<int64_t>(1, std::min<int64_t>(wanted_blocks, 4096)));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  auto partials = reinterpret_cast<const float*>(out_feats_tensor.data_ptr<float>());
+  auto partials = reinterpret_cast<const float*>(out_feats_tensor.mutable_data_ptr<float>());
   output_t* out = nullptr;
   if constexpr (std::is_same_v<output_t, half>)
   {
-    out = reinterpret_cast<half*>(result.data_ptr<at::Half>());
+    out = reinterpret_cast<half*>(result.mutable_data_ptr<at::Half>());
   }
   else if constexpr (std::is_same_v<output_t, nv_bfloat16>)
   {
-    out = reinterpret_cast<nv_bfloat16*>(result.data_ptr<at::BFloat16>());
+    out = reinterpret_cast<nv_bfloat16*>(result.mutable_data_ptr<at::BFloat16>());
   }
   else
   {
-    out = reinterpret_cast<float*>(result.data_ptr<float>());
+    out = reinterpret_cast<float*>(result.mutable_data_ptr<float>());
   }
 
   reduce_splitk_fp32_to_output_kernel<output_t><<<blocks, threads, 0, stream>>>(
@@ -218,7 +215,7 @@ torch::Tensor maybe_fused_reduce_splitk_fp32_to_output(
   // passes it from KernelConfig so the same shape always takes the same path.
   if (!fused_splitk_reduce)
   {
-    return out_feats_tensor.sum(0).to(output_dtype);
+    return at::to(at::sum(out_feats_tensor, 0), output_dtype);
   }
 
   switch (output_dtype)
@@ -230,7 +227,7 @@ torch::Tensor maybe_fused_reduce_splitk_fp32_to_output(
   case at::kFloat:
     return fused_reduce_splitk_fp32_to_output<float>(out_feats_tensor, output_dtype);
   default:
-    return out_feats_tensor.sum(0).to(output_dtype);
+    return at::to(at::sum(out_feats_tensor, 0), output_dtype);
   }
 }
 
@@ -1117,11 +1114,11 @@ torch::Tensor grouped_gemm_forward(
     at::Tensor _out_feats = torch::empty({split_k_iters, num_in_feats, _topk_weights.size(1), _kernel.size(2) * 8}, options);
     int num_out_channels = _out_feats.size(-1);
 
-    auto in_feats = reinterpret_cast<half*>(_in_feats.data_ptr<at::Half>());
-    auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
-    auto out_feats = _out_feats.data_ptr<float>();
-    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
-    auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
+    auto in_feats = reinterpret_cast<half*>(_in_feats.mutable_data_ptr<at::Half>());
+    auto kernel = reinterpret_cast<int*>(_kernel.mutable_data_ptr<int>());
+    auto out_feats = _out_feats.mutable_data_ptr<float>();
+    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.mutable_data_ptr<at::Half>());
+    auto zeros = reinterpret_cast<int*>(_zeros.mutable_data_ptr<int>());
     auto topk_weights = mul_weights ? reinterpret_cast<float*>(_topk_weights.data_ptr()) : nullptr;
     auto sorted_token_ids_ptr = reinterpret_cast<int*>(_sorted_token_ids_ptr.data_ptr());
     auto expert_ids_ptr = reinterpret_cast<int*>(_expert_ids_ptr.data_ptr());
@@ -1155,7 +1152,7 @@ torch::Tensor grouped_gemm_forward(
             _topk_weights.numel(), top_k, num_experts, pad_num_in_feats,
             num_in_feats, num_in_channels, num_out_channels, out_feats);
     }
-    return _out_feats.sum(0).to(_in_feats.scalar_type());
+    return at::to(at::sum(_out_feats, 0), _in_feats.scalar_type());
 }
 
 // Dequantization to fp16
@@ -1207,7 +1204,7 @@ torch::Tensor dequantize_weights_cuda(
 
     const at::cuda::OptionalCUDAGuard device_guard(device_of(_scaling_factors));
 
-	    auto options = torch::TensorOptions().dtype(_scaling_factors.dtype()).device(_scaling_factors.device());
+	    auto options = torch::TensorOptions().dtype(_scaling_factors.scalar_type()).device(_scaling_factors.device());
 	    at::Tensor _de_kernel;
     if (num_experts == 1) {
       _de_kernel = torch::empty({in_c, out_c}, options);
@@ -1215,22 +1212,22 @@ torch::Tensor dequantize_weights_cuda(
       _de_kernel = torch::empty({num_experts, in_c, out_c}, options);
     }
 
-	    auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
-	    auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
+	    auto kernel = reinterpret_cast<int*>(_kernel.mutable_data_ptr<int>());
+	    auto zeros = reinterpret_cast<int*>(_zeros.mutable_data_ptr<int>());
 
 	    dim3 num_blocks(x_blocks, y_blocks, num_experts);
 	    dim3 threads_per_block(x_thread, y_thread);  //  col, row 64x4096
         if (_scaling_factors.scalar_type() == at::kBFloat16)
         {
           validate_bf16_device(_scaling_factors.device());
-          auto de_kernel = reinterpret_cast<nv_bfloat16*>(_de_kernel.data_ptr<at::BFloat16>());
-          auto scaling_factors = reinterpret_cast<nv_bfloat16*>(_scaling_factors.data_ptr<at::BFloat16>());
+          auto de_kernel = reinterpret_cast<nv_bfloat16*>(_de_kernel.mutable_data_ptr<at::BFloat16>());
+          auto scaling_factors = reinterpret_cast<nv_bfloat16*>(_scaling_factors.mutable_data_ptr<at::BFloat16>());
           dequantize_weights<nv_bfloat16><<<num_blocks, threads_per_block>>>(kernel, scaling_factors, zeros, de_kernel, G, in_c, out_c);
         }
         else
         {
-          auto de_kernel = reinterpret_cast<half*>(_de_kernel.data_ptr<at::Half>());
-          auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
+          auto de_kernel = reinterpret_cast<half*>(_de_kernel.mutable_data_ptr<at::Half>());
+          auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.mutable_data_ptr<at::Half>());
           dequantize_weights<half><<<num_blocks, threads_per_block>>>(kernel, scaling_factors, zeros, de_kernel, G, in_c, out_c);
         }
 
@@ -1310,11 +1307,11 @@ torch::Tensor gemmv2_forward_cuda(
     int num_out_feats = _out_feats.size(-2);
     num_out_channels = _out_feats.size(-1);
 
-    auto in_feats = reinterpret_cast<half*>(_in_feats.data_ptr<at::Half>());
-    auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
-    auto out_feats = _out_feats.data_ptr<float>();
-    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
-    auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
+    auto in_feats = reinterpret_cast<half*>(_in_feats.mutable_data_ptr<at::Half>());
+    auto kernel = reinterpret_cast<int*>(_kernel.mutable_data_ptr<int>());
+    auto out_feats = _out_feats.mutable_data_ptr<float>();
+    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.mutable_data_ptr<at::Half>());
+    auto zeros = reinterpret_cast<int*>(_zeros.mutable_data_ptr<int>());
 
     // blockIdx_x: i_factors[0] * j_factors[0]
     // blockIdx_y: i_factors[1] * j_factors[1]
@@ -1361,13 +1358,13 @@ scalar_t* tensor_ptr(torch::Tensor& tensor);
 template <>
 half* tensor_ptr<half>(torch::Tensor& tensor)
 {
-    return reinterpret_cast<half*>(tensor.data_ptr<at::Half>());
+    return reinterpret_cast<half*>(tensor.mutable_data_ptr<at::Half>());
 }
 
 template <>
 nv_bfloat16* tensor_ptr<nv_bfloat16>(torch::Tensor& tensor)
 {
-    return reinterpret_cast<nv_bfloat16*>(tensor.data_ptr<at::BFloat16>());
+    return reinterpret_cast<nv_bfloat16*>(tensor.mutable_data_ptr<at::BFloat16>());
 }
 
 static void validate_awq_gemm_args(
@@ -1438,10 +1435,10 @@ torch::Tensor launch_gemm_forward_cuda(
     }
 
     auto in_feats = tensor_ptr<scalar_t>(in_feats_tensor);
-    auto kernel = reinterpret_cast<int*>(kernel_tensor.data_ptr<int>());
+    auto kernel = reinterpret_cast<int*>(kernel_tensor.mutable_data_ptr<int>());
     auto out_feats = tensor_ptr<scalar_t>(out_feats_tensor);
     auto scaling_factors = tensor_ptr<scalar_t>(scaling_factors_tensor);
-    auto zeros = reinterpret_cast<int*>(zeros_tensor.data_ptr<int>());
+    auto zeros = reinterpret_cast<int*>(zeros_tensor.mutable_data_ptr<int>());
 
     if (num_out_channels % 128 == 0)
     {
@@ -1460,8 +1457,8 @@ torch::Tensor launch_gemm_forward_cuda(
             group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
     }
 
-    auto result = out_feats_tensor.sum(0);
-    return result.scalar_type() == output_dtype ? result : result.to(output_dtype);
+    auto result = at::sum(out_feats_tensor, 0);
+    return result.scalar_type() == output_dtype ? result : at::to(result, output_dtype);
 }
 
 template <typename scalar_t>
@@ -1490,10 +1487,10 @@ torch::Tensor launch_gemm_forward_cuda_fp32_reduce(
     }
 
     auto in_feats = tensor_ptr<scalar_t>(in_feats_tensor);
-    auto kernel = reinterpret_cast<int*>(kernel_tensor.data_ptr<int>());
-    auto out_feats = reinterpret_cast<float*>(out_feats_tensor.data_ptr<float>());
+    auto kernel = reinterpret_cast<int*>(kernel_tensor.mutable_data_ptr<int>());
+    auto out_feats = reinterpret_cast<float*>(out_feats_tensor.mutable_data_ptr<float>());
     auto scaling_factors = tensor_ptr<scalar_t>(scaling_factors_tensor);
-    auto zeros = reinterpret_cast<int*>(zeros_tensor.data_ptr<int>());
+    auto zeros = reinterpret_cast<int*>(zeros_tensor.mutable_data_ptr<int>());
 
     if (num_out_channels % 128 == 0)
     {

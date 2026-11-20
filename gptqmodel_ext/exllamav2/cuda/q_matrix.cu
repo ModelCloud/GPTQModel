@@ -1,4 +1,4 @@
-#include <ATen/cuda/CUDAContext.h>
+#include "../../torch_stable_compat.h"
 #include "q_matrix.cuh"
 #include "matrix_view.cuh"
 #include "util.cuh"
