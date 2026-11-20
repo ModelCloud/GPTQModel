@@ -667,8 +667,18 @@ class QQQ:
                     previous[1].add_(cross)
                     self._gsq_moments[inp.device] = (previous[0], previous[1], previous[2] + count)
 
-        dev = torch.device(get_device(inp))
         batch_token_size = inp.shape[1]
+        if self.qcfg.mock_quantization and not self._gsq_enabled:
+            # Mock quantization never consumes the Hessian, so skip the
+            # ``columns**2`` accumulation buffer and its matmul. Only the sample
+            # count survives, because it is reported with the quantized block
+            # (#5839).
+            with self.lock:
+                self.fwd_counter += 1
+                self.nsamples += batch_token_size
+            return
+
+        dev = torch.device(get_device(inp))
         inp = inp.float()
         if self._tp_pad_cols:
             pad = inp.new_zeros((self._tp_pad_cols, inp.shape[1]))
@@ -846,6 +856,18 @@ class QQQ:
             resolve_threshold,
             should_use_fallback,
         )
+
+        # ``mock_quantization`` exists to skip the heavy calibration math, so it
+        # must not invert a Hessian or propagate errors. Select the
+        # data-independent RTN grid before materializing anything and keep the
+        # configured QQQ layout (#5839). The NaN-loss retry sets the same flag
+        # and re-enters here, so it lands on this path too.
+        if self.qcfg.mock_quantization:
+            self.H = None
+            self._materialized_samples = 0
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+            return self._fallback_quantize(FallbackStrategy.RTN)
 
         resolved_strategy = resolve_fallback_strategy(self.fallback)
 
