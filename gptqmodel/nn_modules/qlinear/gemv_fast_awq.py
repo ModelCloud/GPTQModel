@@ -22,6 +22,7 @@ from ...utils.gemv import calculate_zeros_width
 from ...utils.model_dequant import _dequantize_awq_gemv_fast
 from ...utils.packing_math import scale_to_storage_dtype, scaled_zero_offset
 from ._compile_support import COMPILE_LEVEL
+from ._numerics import fp32_epilogue_context
 
 
 def pack_intweight(unpacked_qweight, interleave, kstride):
@@ -456,11 +457,15 @@ class AwqGEMVFastTorchLinear(AwqGEMVFastLinear):
             weight = weight.to(device=inputs.device)
 
         # FP32 accumulation with a single rounding at the end, matching the
-        # accelerator GEMV_FAST kernels' accumulator width.
-        output = torch.matmul(inputs.to(torch.float32), weight.t())
-        if self.bias is not None:
-            output = output + self.bias.to(device=output.device, dtype=torch.float32)
-        output = output.to(dtype=input_dtype)
+        # accelerator GEMV_FAST kernels' accumulator width. An ambient autocast
+        # would narrow this explicit FP32 matmul and round the product before
+        # the bias cancels it (#5613), so the epilogue runs outside it and the
+        # caller's context is restored afterwards.
+        with fp32_epilogue_context(inputs.device.type):
+            output = torch.matmul(inputs.to(torch.float32), weight.t())
+            if self.bias is not None:
+                output = output + self.bias.to(device=output.device, dtype=torch.float32)
+            output = output.to(dtype=input_dtype)
 
         if self.adapter:
             output = self.adapter.apply(x=inputs, out=output)
