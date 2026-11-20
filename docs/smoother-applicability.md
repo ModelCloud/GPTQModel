@@ -125,4 +125,41 @@ refuses `weight.prepare` on the GPTQ/AWQ targets instead of dropping it.
 - `tests/test_fallback.py` — fallback thresholds and `fallback.smooth`.
 - `tests/qcfg/test_config_validation_4668.py` — payload key validation.
 
+
+## Other options accepted but never applied (#5583)
+
+The same audit covers the other shared fields. `desc_act`, `mse`, `gptaq` and
+`act_group_aware` live on `PreProcessorConfig`/`GPTQConfig`, so every method
+config accepted them and the writer copied them into `quantize_config.json`.
+`mse` is a three-field dataclass, and its fields belong to different consumers:
+
+| Field | Consumer |
+| --- | --- |
+| `mse.norm`, `mse.grid_budget` | the GPTQ/QUU/RTN shrink grid (`Quantizer`, `qqq.py`) |
+| `mse.clip_grid_budget` | the AWQ clip grid (`awq_processor.py`) |
+| `desc_act` | GPTQ/QUU/RTN activation reordering; AWQ has none |
+| `gptaq` | GPTQ only (`GPTQProcessor`) |
+| `act_group_aware` | GPTQ/FOEM/GPTAQ calibration; QQU has none |
+
+A non-default value for a field its method does not read is refused at
+construction with the same "is not applied by the X quantizer" wording, for
+both the top-level config and `dynamic` rules. The loader drops the claim from a
+checkpoint written before the fix (top level, the `meta` copy and `dynamic`
+rules), so those artifacts still load and re-save a config that matches the
+tensors that were actually produced.
+
+| Request | Result |
+| --- | --- |
+| `AWQConfig(desc_act=True)` | `ValueError`; AWQ has no activation reordering |
+| `AWQConfig(mse=2.0)` | `ValueError`; only `clip_grid_budget` is read |
+| `GGUFConfig(mse=2.0)`, `BitsAndBytesConfig(mse=2.0)` | `ValueError`; no MSE search |
+| `QUUConfig(gptaq=...)` | `ValueError`; QQU does not run GPTAQ |
+| `QUUConfig(act_group_aware=True)` | `ValueError`; QQU has no activation-group-aware calibration |
+| `GPTQConfig(mse=2.0)`, `RTNConfig(mse=2.0)`, `QUUConfig(mse=2.0)` | applied |
+| pre-fix checkpoint with one of these | loads; the claim is dropped with a warning |
+
+- `tests/test_config_unapplied_options_5583.py` - construction rejection,
+  per-module rules, load-path correction, and the RTN control that proves the
+  MSE grid still changes packed weights where it is accepted.
+
 Introduced for [#5302](https://github.com/ModelCloud/GPTQModel/issues/5302).
