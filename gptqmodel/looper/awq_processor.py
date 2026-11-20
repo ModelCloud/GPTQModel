@@ -58,6 +58,7 @@ from ..quantization.config import (
     FORMAT,
     METHOD,
     CalibrationConfig,
+    Fallback,
     FallbackStrategy,
     MSEConfig,
     QuantizeConfig,
@@ -1020,24 +1021,53 @@ class AWQProcessor(LoopProcessor):
         """
         return _resolve_module_sym(self.qcfg, module_name, resolved_cfg)
 
-    def _fallback_strategy_for_module(self, resolved_cfg=None) -> FallbackStrategy:
-        """Resolve the fallback strategy that applies to one fallback module.
+    def _fallback_for_module(self, resolved_cfg=None, module_name: Optional[str] = None) -> Optional[Fallback]:
+        """Resolve the fallback policy that applies to one module.
 
         A ``dynamic`` fallback override outranks the processor-level fallback,
-        matching GPTQ's module-config resolution. The strategy is honoured on
-        every plain-quantization path, including AWQ's own failure fallbacks;
-        an unset strategy still resolves to RTN.
+        matching GPTQ's module-config resolution. Selection must read this
+        merged policy too: resolving it only when ``apply_quant`` already knows
+        the module falls back made a per-module threshold unreachable, because
+        the coverage and replay-error gates only saw the run-wide object
+        (#5820).
         """
 
-        fallback = self.fallback
-        override = (
-            resolved_cfg.get("fallback", None)
-            if resolved_cfg is not None
-            else None
-        )
+        fallback = self.fallback or self.qcfg.fallback
+        override = resolved_cfg.get("fallback", None) if resolved_cfg is not None else None
+        if override is None and resolved_cfg is None and module_name:
+            override = self.qcfg.dynamic_get(module_name, "fallback", None)
         if override is not None:
-            fallback = normalize_fallback(override, fallback or self.qcfg.fallback)
-        return resolve_fallback_strategy(fallback)
+            fallback = normalize_fallback(override, fallback)
+        return fallback
+
+    def _fallback_for_member(
+        self, name: str, named_childs: Optional[Dict[str, NamedModule]] = None
+    ) -> Optional[Fallback]:
+        """Resolve one scaling-group member's fallback from its bound config."""
+
+        named = (named_childs or {}).get(name)
+        if named is None:
+            return self._fallback_for_module()
+        return self._fallback_for_module(
+            get_resolved_module_config(named),
+            getattr(named, "full_name", None) or name,
+        )
+
+    def _group_has_fallback(
+        self, layer_names: List[str], named_childs: Optional[Dict[str, NamedModule]] = None
+    ) -> bool:
+        """Whether any member of a scaling group may fall back."""
+
+        return any(self._fallback_for_member(name, named_childs) is not None for name in layer_names)
+
+    def _fallback_strategy_for_module(self, resolved_cfg=None, module_name: Optional[str] = None) -> FallbackStrategy:
+        """Resolve the fallback strategy that applies to one fallback module.
+
+        The strategy is honoured on every plain-quantization path, including
+        AWQ's own failure fallbacks; an unset strategy still resolves to RTN.
+        """
+
+        return resolve_fallback_strategy(self._fallback_for_module(resolved_cfg, module_name))
 
     def _full_module_name(self, layer_module: Optional[nn.Module], module: nn.Module) -> Optional[str]:
         """Build a model-level module name from a layer and one of its children."""
@@ -3976,6 +4006,7 @@ class AWQProcessor(LoopProcessor):
         self,
         layer_names: List[str],
         input_feat: Dict[str, torch.Tensor],
+        named_childs: Optional[Dict[str, NamedModule]] = None,
     ) -> List[str]:
         """Returns the scaling-group members that lack enough activations.
 
@@ -3993,6 +4024,10 @@ class AWQProcessor(LoopProcessor):
         be multiplied by ``s``. Callers fold the scale into these members and
         quantize them with the fallback strategy while the well-covered
         members keep AWQ (#4675).
+
+        Each member's merged fallback policy (a ``dynamic`` override outranks
+        the processor-level one) decides its own coverage, so a per-module
+        threshold can select the fallback grid (#5820).
         """
 
         from ..utils.fallback import should_use_fallback
@@ -4005,7 +4040,8 @@ class AWQProcessor(LoopProcessor):
             if feat is None or feat.numel() == 0:
                 starved.append(name)
                 continue
-            if should_use_fallback(self.fallback, float(self._captured_tokens(name, feat)), expected):
+            fallback = self._fallback_for_member(name, named_childs)
+            if should_use_fallback(fallback, float(self._captured_tokens(name, feat)), expected):
                 starved.append(name)
 
         return starved
@@ -4032,6 +4068,7 @@ class AWQProcessor(LoopProcessor):
         self,
         layer_names: List[str],
         input_feat: Dict[str, torch.Tensor],
+        named_childs: Optional[Dict[str, NamedModule]] = None,
     ) -> bool:
         """Whether the group as a whole has enough routed rows to search with.
 
@@ -4053,12 +4090,17 @@ class AWQProcessor(LoopProcessor):
             total += float(self._captured_tokens(name, feat))
         if total <= 0:
             return False
-        return not should_use_fallback(self.fallback, total, expected)
+        # Every member's merged policy must accept the group total: a dynamic
+        # override that raises one member's threshold also raises this bar.
+        return not any(
+            should_use_fallback(self._fallback_for_member(name, named_childs), total, expected) for name in layer_names
+        )
 
     def _should_fallback_group(
         self,
         layer_names: List[str],
         input_feat: Dict[str, torch.Tensor],
+        named_childs: Optional[Dict[str, NamedModule]] = None,
     ) -> bool:
         """Returns whether any layer in a scaling group lacks enough activations.
 
@@ -4067,7 +4109,7 @@ class AWQProcessor(LoopProcessor):
         AWQ for its siblings use ``_starved_group_members`` instead (#4675).
         """
 
-        return bool(self._starved_group_members(layer_names, input_feat))
+        return bool(self._starved_group_members(layer_names, input_feat, named_childs))
 
     def _quantize_layer(self, layer_index: int, state: _AWQLayerState) -> None:
         """Runs the AWQ scaling, clipping, and quantization flow for one layer."""
@@ -4098,12 +4140,6 @@ class AWQProcessor(LoopProcessor):
 
         input_feat = self._layer_input_features(state)
         self._scale_feature_by_module = {}
-        missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]
-        if missing and not self.fallback:
-            raise RuntimeError(
-                f"AWQProcessor error: missing activation features for modules {missing} "
-                f"with fallback disabled."
-            )
 
         # Filtering MLP modules like Qwen3MoeSparseMoeBlock
         def unwrap(m):
@@ -4116,6 +4152,18 @@ class AWQProcessor(LoopProcessor):
             for name, module in state.modules.items()
             if isinstance(unwrap(module), tuple(SUPPORTS_MODULE_TYPES))
         }
+
+        missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]
+        if missing:
+            # A dynamic override may enable the fallback for exactly the module
+            # whose rows are missing; only a module with no fallback policy at
+            # all has to abort the layer (#5820).
+            unfallbackable = [name for name in missing if self._fallback_for_member(name, named_childs) is None]
+            if unfallbackable:
+                raise RuntimeError(
+                    f"AWQProcessor error: missing activation features for modules {unfallbackable} "
+                    f"with fallback disabled."
+                )
 
         module_kwargs_global = dict(self._module_forward_kwargs)
         module_kwargs_global["_awq_feature_kwargs"] = dict(
@@ -4171,8 +4219,10 @@ class AWQProcessor(LoopProcessor):
             shared_search_input = cfg.get("_input_feature_name") not in layer_names
             if shared_search_input:
                 cfg["_awq_allow_partial_replay"] = True
-            if self.fallback and self._should_fallback_group(layer_names, input_feat):
-                starved_names = self._starved_group_members(layer_names, input_feat)
+            if self._group_has_fallback(layer_names, named_childs) and self._should_fallback_group(
+                layer_names, input_feat, named_childs
+            ):
+                starved_names = self._starved_group_members(layer_names, input_feat, named_childs)
                 covered_names = [name for name in layer_names if name not in starved_names]
                 if not shared_search_input or not starved_names:
                     # A caller-level veto or a dense group: the whole group
@@ -4196,7 +4246,7 @@ class AWQProcessor(LoopProcessor):
                         len(starved_names),
                         starved_names[:6],
                     )
-                elif self._group_coverage_is_sufficient(layer_names, input_feat):
+                elif self._group_coverage_is_sufficient(layer_names, input_feat, named_childs):
                     # Every member is individually below the threshold, but the
                     # group as a whole has routed data: search the members that
                     # the replay executes and fold the rest.
@@ -4345,9 +4395,9 @@ class AWQProcessor(LoopProcessor):
                     **call_kwargs,
                 ))
             except _AWQScaleGroupError as exc:
-                if not self.fallback:
-                    raise
                 layer_names = [get_op_name(layer_module_ref, target) for target in layer["layers"]]
+                if not self._group_has_fallback(layer_names, named_childs):
+                    raise
                 fallback_names.update(layer_names)
                 log.warning(
                     "AWQProcessor: layer %s using configured plain-quantization fallback for %s: %s",
@@ -6444,7 +6494,7 @@ class AWQProcessor(LoopProcessor):
 
             module_sym = self._module_sym(named_module.full_name, resolved_cfg=resolved_cfg)
             fallback_strategy = (
-                self._fallback_strategy_for_module(resolved_cfg)
+                self._fallback_strategy_for_module(resolved_cfg, named_module.full_name)
                 if not scales_list
                 else None
             )
