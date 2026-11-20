@@ -18,6 +18,7 @@ import torch
 from safetensors.torch import save_file
 from torch import nn
 
+from gptqmodel.nn_modules.qlinear import qqq as qqq_module
 from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
 from gptqmodel.quantization import FORMAT
 from gptqmodel.utils.model import (
@@ -93,6 +94,137 @@ def test_export_materializes_the_dropped_buffers():
         buffer = getattr(module, name)
         assert isinstance(buffer, torch.Tensor), f"{name} was not published for export"
     assert module._torch_dropped_checkpoint is None
+
+
+class _FakePackedKernel:
+    """Deterministic ``qqq_int4`` stand-in that reads every operand."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, activation, packed, scales, group_size):
+        self.calls += 1
+        weight = packed.to(torch.float32).sum(dim=1)
+        scale = scales.to(torch.float32).sum() if scales.numel() else 1.0
+        return (
+            activation.to(torch.float32).sum(dim=1, keepdim=True)
+            + weight.unsqueeze(0) * scale
+        )
+
+
+@pytest.fixture
+def packed_kernel(monkeypatch):
+    kernel = _FakePackedKernel()
+    monkeypatch.setattr(qqq_module, "_qqq_cpu_kernel", lambda: kernel)
+    return kernel
+
+
+def _unique_tensor_bytes(module) -> int:
+    """Resident bytes owned by the module, counting each storage once."""
+
+    seen = set()
+    total = 0
+
+    def add(value):
+        nonlocal total
+        if not isinstance(value, torch.Tensor):
+            return
+        storage = value.untyped_storage()
+        if storage.data_ptr() in seen:
+            return
+        seen.add(storage.data_ptr())
+        total += storage.nbytes()
+
+    for value in (*module._parameters.values(), *module._buffers.values()):
+        add(value)
+    for value in getattr(module, "_torch_packed_cache", None) or ():
+        add(value)
+    return total
+
+
+# ---------------------------------------------------------------------------
+# #5804: the export must not leave the checkpoint layout and the packed cache
+# resident together. The save collector publishes the checkpoint buffers, and
+# the old code then kept the cache key current so the next forward took the
+# cache hit and never dropped the duplicate.
+# ---------------------------------------------------------------------------
+
+def test_export_releases_the_duplicate_packed_cache():
+    module = _dropped_module()
+    model = nn.Module()
+    model.layer = module
+
+    assert _restore_checkpoint_layout_for_export(model) == 1
+
+    assert module._torch_packed_cache is None
+    assert module._torch_packed_cache_key is None
+    assert module._torch_dropped_checkpoint is None
+    for name in ("B", "s_group", "s_channel"):
+        assert isinstance(getattr(module, name), torch.Tensor), name
+
+
+def test_next_forward_after_export_restores_the_single_layout(packed_kernel):
+    module = _dropped_module()
+    model = nn.Module()
+    model.layer = module
+    activations = torch.randn(2, IN_FEATURES, dtype=DTYPE)
+    with torch.inference_mode():
+        before = module(activations).clone()
+    one_layout_bytes = _unique_tensor_bytes(module)
+    assert module.B is None
+
+    _restore_checkpoint_layout_for_export(model)
+    # The cache is gone: only the published checkpoint layout is resident.
+    assert module._torch_packed_cache is None
+    assert _unique_tensor_bytes(module) <= one_layout_bytes * 1.1
+
+    with torch.inference_mode():
+        after = module(activations)
+
+    assert torch.equal(before, after)
+    assert packed_kernel.calls == 2
+    # The rebuilt cache replaced the checkpoint layout again: one layout
+    # resident, not two.
+    assert module.B is None and module.s_channel is None
+    assert module._torch_dropped_checkpoint is not None
+    assert module._torch_packed_cache is not None
+    assert _unique_tensor_bytes(module) <= one_layout_bytes * 1.1
+
+
+def test_export_retry_after_a_failure_keeps_the_checkpoint_tensors(monkeypatch):
+    from gptqmodel.utils import model as model_utils
+
+    module = _dropped_module()
+    model = nn.Module()
+    model.layer = module
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("simulated export failure")
+
+    # Fail inside the collection, after the export has materialized the
+    # checkpoint layout. A retry must still see every tensor.
+    monkeypatch.setattr(model_utils, "_checkpoint_layout_buffer", fail)
+    with pytest.raises(RuntimeError, match="simulated export failure"):
+        get_state_dict_for_save(model)
+    monkeypatch.undo()
+
+    state = get_state_dict_for_save(model)
+    for name in ("B", "s_group", "s_channel"):
+        assert f"layer.{name}" in state, sorted(state)
+        assert isinstance(getattr(module, name), torch.Tensor), name
+
+
+def test_never_warmed_export_keeps_the_checkpoint_layout():
+    module = _build_module()
+    model = nn.Module()
+    model.layer = module
+    checkpoint_bytes = _unique_tensor_bytes(module)
+
+    assert _restore_checkpoint_layout_for_export(model) == 0
+
+    assert module._torch_packed_cache is None
+    assert module.B is not None
+    assert _unique_tensor_bytes(module) == checkpoint_bytes
 
 
 def test_save_manifest_contains_every_quantized_tensor():
