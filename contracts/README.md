@@ -15,7 +15,7 @@ the text, or close the issue or PR.
 
 | Area | Contract | Rule in one line |
 | --- | --- | --- |
-| Kernel / module | [Forward dtype](kernel/forward-dtype.md) | The first forward sets the activation dtype. Every later forward uses the same dtype, and the output dtype matches the input dtype. A different dtype is a caller bug and must raise. |
+| Kernel / module | [Forward dtype](kernel/forward-dtype.md) | The first forward sets the activation dtype. Every later forward uses the same dtype, and the output dtype matches the input dtype. After the first forward, weight and buffer dtypes are frozen. A different input dtype, or a later weight dtype change, is a caller bug and must raise. |
 
 ## Rules for agents and contributors
 
