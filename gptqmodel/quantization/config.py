@@ -4525,6 +4525,33 @@ def apply_scalar_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: Re
     config._resolve_activation_ordering(desc_act, act_group_aware)
 
 
+def _merge_dynamic_kernel_policy(
+    config: "BaseQuantizeConfig",
+    value: Union[KernelConfig, Mapping],
+) -> KernelConfig:
+    """Merge one per-module ``kernel`` rule onto the run-level policy.
+
+    A rule is a partial override: unset fields keep the policy the API boundary
+    resolved for the run. A ``KernelConfig`` instance is already complete and is
+    used verbatim.
+    """
+
+    if isinstance(value, KernelConfig):
+        return value
+    if not isinstance(value, Mapping):
+        raise ValueError("QuantizeConfig: `kernel` must be a KernelConfig, dict, or None.")
+    base = resolve_kernel_config(config)
+    known = {kernel_field.name for kernel_field in fields(KernelConfig)}
+    unknown = sorted(str(key) for key in value if key not in known)
+    if unknown:
+        raise TypeError(
+            "QuantizeConfig: unknown per-module `kernel` option(s): "
+            + ", ".join(f"`{key}`" for key in unknown)
+            + "."
+        )
+    return replace(base, **dict(value))
+
+
 def apply_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: ResolvedModuleConfig) -> None:
     """Apply *every* field of one resolved ``dynamic`` rule to a config clone.
 
@@ -4550,13 +4577,17 @@ def apply_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: ResolvedM
         "preprocessors": _normalize_preprocessors,
     }
     for key, value in resolved_cfg.overrides.items():
+        canonical = QUANT_CONFIG_ARG_SYNONYMS.get(key, key)
         if value is None:
             # `None` means "no override": the rule inherits the run-level value,
             # the same way the numeric validators already read it. Applying it
             # overwrote the clone with `None` and the next `__post_init__` died
             # with a bare TypeError (#5659).
+            if canonical == "gsq":
+                # The one real `None` value: it disables GSQ for this module.
+                # An absent key is what inherits the run-level GSQ (#5689).
+                config.gsq = None
             continue
-        canonical = QUANT_CONFIG_ARG_SYNONYMS.get(key, key)
         if canonical in ("smoother", "smooth"):
             config.smoother = _normalize_smoother_config(value)
             continue
@@ -4564,6 +4595,14 @@ def apply_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: ResolvedM
             # Merge partial dict rules onto the run-level value so a rule that
             # only sets `grid_budget` keeps the configured `norm`.
             config.mse = _normalize_mse(value, base=getattr(config, "mse", None))
+            continue
+        if canonical == "kernel":
+            # A per-module `kernel` rule is a partial override of the run-level
+            # policy. Publish the merged policy as the clone's resolved kernel
+            # too, because `resolve_kernel_config()` prefers that attribute
+            # over `kernel` (#5689).
+            config.kernel = _merge_dynamic_kernel_policy(config, value)
+            config._resolved_kernel = config.kernel
             continue
         normalizer = normalizers.get(canonical)
         if normalizer is not None:
@@ -6910,10 +6949,23 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         # `None` means "inherit the run-level value", not an override, so
         # drop it before validation. A rule such as `{"krot": None}` used
         # to reach `int(None)` in the per-module clone (#5659).
+        #
+        # Validate the key names first: dropping the value must not hide a
+        # typo, so `{"not_a_real_option": None}` still fails (#5689).
+        # `gsq` is the exception -- its `None` is the per-module disable that
+        # every method documented, so it survives and `apply_module_overrides`
+        # applies it (#5689).
         if self.dynamic is not None:
+            for layer, layer_dict in self.dynamic.items():
+                if isinstance(layer_dict, Mapping):
+                    _validate_dynamic_layer_keys(self, layer, layer_dict)
             self.dynamic = {
                 layer: (
-                    {key: value for key, value in layer_dict.items() if value is not None}
+                    {
+                        key: value
+                        for key, value in layer_dict.items()
+                        if value is not None or QUANT_CONFIG_ARG_SYNONYMS.get(key, key) == "gsq"
+                    }
                     if isinstance(layer_dict, dict)
                     else layer_dict
                 )
