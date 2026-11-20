@@ -99,6 +99,21 @@ void reconstruct_q4nx_wrapper(torch::Tensor& unpacked, torch::Tensor packed, int
 }
 #endif
 
+void reconstruct_r4nx_wrapper(torch::Tensor& unpacked, torch::Tensor packed, double rate)
+{
+    reconstruct_r4nx(unpacked, packed, rate);
+}
+
+void pack_trellis_r4nx_wrapper(torch::Tensor& packed, torch::Tensor states, int64_t kv)
+{
+    pack_trellis_r4nx(packed, states, static_cast<int>(kv));
+}
+
+void unpack_trellis_r4nx_wrapper(torch::Tensor& states, torch::Tensor packed, int64_t kv)
+{
+    unpack_trellis_r4nx(states, packed, static_cast<int>(kv));
+}
+
 void had_r_128_wrapper(
     torch::Tensor input,
     torch::Tensor& output,
@@ -136,9 +151,9 @@ void bc_linear_exl3_run_wrapper(
 int64_t bc_linear_exl3_run_configured_wrapper(
     torch::Tensor trellis, torch::Tensor suh, torch::Tensor svh, double K,
     std::optional<torch::Tensor> bias, bool mcg, bool mul1, torch::Tensor x, torch::Tensor& y,
-    bool fp16_gemv, int64_t int8_gemv, bool fused_gemm, bool q4nx)
+    bool fp16_gemv, int64_t int8_gemv, bool fused_gemm, bool q4nx, bool r4nx)
 {
-    return bc_linear_exl3_run_configured(trellis, suh, svh, K, bias, mcg, mul1, x, y, fp16_gemv, int8_gemv, fused_gemm, q4nx);
+    return bc_linear_exl3_run_configured(trellis, suh, svh, K, bias, mcg, mul1, x, y, fp16_gemv, int8_gemv, fused_gemm, q4nx, r4nx);
 }
 
 int64_t bc_linear_exl3_run_hip_gemv_wrapper(
@@ -181,13 +196,16 @@ TORCH_LIBRARY(gptqmodel_exllamav3, m)
 #if !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)
     m.def("reconstruct_q4nx(Tensor(a!) unpacked, Tensor packed, int K, bool half_k) -> ()");
 #endif
+    m.def("reconstruct_r4nx(Tensor(a!) unpacked, Tensor packed, float K) -> ()");
+    m.def("pack_trellis_r4nx(Tensor(a!) packed, Tensor states, int kv) -> ()");
+    m.def("unpack_trellis_r4nx(Tensor(a!) states, Tensor packed, int kv) -> ()");
     m.def("quantize_tiles_frac(Tensor input_tiles, Tensor(a!) output_tiles, Tensor(b!) output_indices, Tensor(c!) temp_costs, Tensor(d!) temp_edges, int K, int mask) -> ()");
     m.def("pack_trellis_frac(Tensor(a!) packed, Tensor unpacked, int K, int mask) -> ()");
     m.def("unpack_trellis_frac(Tensor(a!) unpacked, Tensor packed, int K, int mask) -> ()");
     m.def("had_r_128(Tensor input, Tensor(a!) output, Tensor? pre_scale, Tensor? post_scale, float scale) -> ()");
     m.def("hgemm(Tensor a, Tensor b, Tensor(a!) c) -> ()");
     m.def("bc_linear_exl3_run(Tensor trellis, Tensor suh, Tensor svh, int K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(b!) y) -> ()");
-    m.def("bc_linear_exl3_run_configured(Tensor trellis, Tensor suh, Tensor svh, float K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(a!) y, bool fp16_gemv, int int8_gemv, bool fused_gemm=False, bool q4nx=False) -> int");
+    m.def("bc_linear_exl3_run_configured(Tensor trellis, Tensor suh, Tensor svh, float K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(a!) y, bool fp16_gemv, int int8_gemv, bool fused_gemm=False, bool q4nx=False, bool r4nx=False) -> int");
     m.def("bc_linear_exl3_run_hip_gemv(Tensor trellis, Tensor suh, Tensor svh, float K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(b!) y, bool q4nx=False) -> int");
     m.def("bf16_prescale(Tensor x, float bound) -> (Tensor, Tensor)");
     m.def("bf16_rescale(Tensor result, Tensor scale, Tensor? bias, int n_cols) -> Tensor");
@@ -211,6 +229,9 @@ TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CUDA, m)
 #if !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)
     m.impl("reconstruct_q4nx", &reconstruct_q4nx_wrapper);
 #endif
+    m.impl("reconstruct_r4nx", &reconstruct_r4nx_wrapper);
+    m.impl("pack_trellis_r4nx", &pack_trellis_r4nx_wrapper);
+    m.impl("unpack_trellis_r4nx", &unpack_trellis_r4nx_wrapper);
     m.impl("quantize_tiles_frac", &quantize_tiles_frac_wrapper);
     m.impl("pack_trellis_frac", &pack_trellis_frac_wrapper);
     m.impl("unpack_trellis_frac", &unpack_trellis_frac_wrapper);
