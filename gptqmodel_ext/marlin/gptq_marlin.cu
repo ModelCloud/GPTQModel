@@ -1442,7 +1442,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   // replaces the caller's buffer.
   torch::Tensor bias_f32;
   if (has_bias && b_bias.scalar_type() != at::ScalarType::Float) {
-    bias_f32 = b_bias.to(at::ScalarType::Float);
+    bias_f32 = at::to(b_bias, at::ScalarType::Float);
   } else {
     bias_f32 = b_bias;
   }

@@ -1269,7 +1269,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rotate_pair_grad_meta(
   const int64_t krot = theta.size(0);
   const int64_t half_hidden = x.size(-1) / 2;
   at::Tensor grad = at::empty({krot, half_hidden}, at::TensorOptions().dtype(at::kFloat).device(x.device()));
-  return {at::empty(x.sizes(), at::TensorOptions().dtype(x.scalar_type()).device(x.device())), at::empty(g.sizes(), g.options()), grad};
+  return {at::empty(x.sizes(), at::TensorOptions().dtype(x.scalar_type()).device(x.device())), at::empty(g.sizes(), at::options(g)), grad};
 }
 
 at::Tensor grad_theta_meta(at::Tensor rot, at::Tensor grad, at::Tensor idx_i, at::Tensor idx_j) {

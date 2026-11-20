@@ -213,7 +213,7 @@ torch::Tensor sub_fp32_dispatch(const torch::Tensor& packed, const torch::Tensor
   TORCH_CHECK(wq.is_contiguous(), op, ": wq must be contiguous");
 
   auto guard = device_guard(packed);
-  auto out = torch::empty({n, k}, packed.options().dtype(at::kFloat));
+  auto out = torch::empty({n, k}, at::options(packed).dtype(at::kFloat));
   const hipError_t status = nf12_sub_fp32(
       packed.const_data_ptr<uint8_t>(),
       reinterpret_cast<const uint4*>(escapes.const_data_ptr<int16_t>()),
@@ -238,21 +238,20 @@ torch::Tensor embedding_dispatch(const torch::Tensor& ids_in,
   TORCH_CHECK(ids_in.scalar_type() == at::kInt || ids_in.scalar_type() == at::kLong,
               "nf12_hip.embedding: ids must be int32 or int64");
   auto guard = device_guard(packed);
-  const torch::Tensor ids = ids_in.is_contiguous() ? ids_in : ids_in.contiguous();
-  c10::SmallVector<int64_t, 5> out_sizes(ids.sizes().begin(), ids.sizes().end());
+  const torch::Tensor ids = ids_in.is_contiguous() ? ids_in : at::contiguous(ids_in);
+  std::vector<int64_t> out_sizes(ids.sizes().begin(), ids.sizes().end());
   out_sizes.push_back(k);
-  auto out = at::native::empty_cuda(
-      out_sizes, at::kBFloat16, std::nullopt, packed.device(), false, std::nullopt);
+  auto out = at::empty(out_sizes, at::options(packed).dtype(at::kBFloat16));
   const int64_t num_ids = ids.numel();
   if (num_ids == 0) return out;
 
   const hipError_t status = nf12_embedding(
-      packed.data_ptr<uint8_t>(),
-      escapes.numel() ? reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>()) : nullptr,
+      packed.const_data_ptr<uint8_t>(),
+      escapes.numel() ? reinterpret_cast<const uint4*>(escapes.const_data_ptr<int16_t>()) : nullptr,
       static_cast<uint32_t>(escapes.size(0)), static_cast<uint32_t>(exp_base),
       n, k,
-      ids.scalar_type() == at::kInt ? ids.data_ptr<int32_t>() : nullptr,
-      ids.scalar_type() == at::kLong ? ids.data_ptr<int64_t>() : nullptr,
+      ids.scalar_type() == at::kInt ? ids.const_data_ptr<int32_t>() : nullptr,
+      ids.scalar_type() == at::kLong ? ids.const_data_ptr<int64_t>() : nullptr,
       num_ids, static_cast<void*>(out.data_ptr()), current_stream());
   TORCH_CHECK(status == hipSuccess, "nf12_hip.embedding failed: ", hipGetErrorString(status));
   return out;
@@ -274,15 +273,16 @@ rowmajor_pack_dispatch(const torch::Tensor& packed,
   const int64_t tiles = (n / 16) * (k / 64);
   TORCH_CHECK(tiles > 0 && tiles <= std::numeric_limits<int32_t>::max(),
               "nf12_hip.rowmajor_pack: tile count exceeds int32 capacity");
-  auto counts = torch::empty({tiles}, packed.options().dtype(at::kInt));
-  counts.zero_();
+  auto counts = torch::empty({tiles}, at::options(packed).dtype(at::kInt));
+  torch::stable::zero_(counts);
   hipError_t status = nf12_rowmajor_count(
-      packed.data_ptr<uint8_t>(), n, k, counts.data_ptr<int32_t>(), stream);
+      packed.const_data_ptr<uint8_t>(), n, k, counts.mutable_data_ptr<int32_t>(), stream);
   TORCH_CHECK(status == hipSuccess,
               "nf12_hip.rowmajor_pack count failed: ", hipGetErrorString(status));
 
-  const torch::Tensor prefix = counts.cumsum(0, at::kLong);
-  const int64_t collisions = prefix.select(0, tiles - 1).item<int64_t>();
+  const torch::Tensor prefix = at::cumsum(counts, 0, at::kLong);
+  const int64_t collisions =
+      at::item<int64_t>(at::narrow(prefix, 0, tiles - 1, 1));
   const int64_t original = escapes.size(0);
   TORCH_CHECK(collisions >= 0 &&
                   original <= (std::numeric_limits<int64_t>::max() - collisions) / 2,
@@ -292,24 +292,24 @@ rowmajor_pack_dispatch(const torch::Tensor& packed,
               "nf12_hip.rowmajor_pack: escape index exceeds uint32 capacity");
 
   auto row_packed =
-      torch::empty({n, k * 3 / 2}, packed.options().dtype(at::kByte));
+      torch::empty({n, k * 3 / 2}, at::options(packed).dtype(at::kByte));
   auto row_escapes =
-      torch::empty({total_escapes, 4}, packed.options().dtype(at::kShort));
-  auto invalid = torch::zeros({1}, packed.options().dtype(at::kInt));
+      torch::empty({total_escapes, 4}, at::options(packed).dtype(at::kShort));
+  auto invalid = torch::zeros({1}, at::options(packed).dtype(at::kInt));
   status = nf12_rowmajor_pack(
-      packed.data_ptr<uint8_t>(),
+      packed.const_data_ptr<uint8_t>(),
       original != 0
-          ? reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>())
+          ? reinterpret_cast<const uint4*>(escapes.const_data_ptr<int16_t>())
           : nullptr,
       original, n, k, static_cast<uint32_t>(exp_base),
-      prefix.data_ptr<int64_t>(), row_packed.data_ptr<uint8_t>(),
+      prefix.const_data_ptr<int64_t>(), row_packed.mutable_data_ptr<uint8_t>(),
       total_escapes != 0
-          ? reinterpret_cast<uint64_t*>(row_escapes.data_ptr<int16_t>())
+          ? reinterpret_cast<uint64_t*>(row_escapes.mutable_data_ptr<int16_t>())
           : nullptr,
-      invalid.data_ptr<int32_t>(), stream);
+      invalid.mutable_data_ptr<int32_t>(), stream);
   TORCH_CHECK(status == hipSuccess,
               "nf12_hip.rowmajor_pack failed: ", hipGetErrorString(status));
-  TORCH_CHECK(invalid.item<int32_t>() == 0,
+  TORCH_CHECK(at::item<int32_t>(invalid) == 0,
               "nf12_hip.rowmajor_pack: canonical escape index out of range");
   return {row_packed, row_escapes, original, collisions};
 }
@@ -328,19 +328,18 @@ torch::Tensor rowmajor_embedding_dispatch(const torch::Tensor& ids_in,
   TORCH_CHECK(ids_in.scalar_type() == at::kInt || ids_in.scalar_type() == at::kLong,
               "nf12_hip.rowmajor_embedding: ids must be int32 or int64");
   auto guard = device_guard(packed);
-  const torch::Tensor ids = ids_in.is_contiguous() ? ids_in : ids_in.contiguous();
-  c10::SmallVector<int64_t, 5> out_sizes(ids.sizes().begin(), ids.sizes().end());
+  const torch::Tensor ids = ids_in.is_contiguous() ? ids_in : at::contiguous(ids_in);
+  std::vector<int64_t> out_sizes(ids.sizes().begin(), ids.sizes().end());
   out_sizes.push_back(k);
-  auto out = at::native::empty_cuda(
-      out_sizes, at::kBFloat16, std::nullopt, packed.device(), false, std::nullopt);
+  auto out = at::empty(out_sizes, at::options(packed).dtype(at::kBFloat16));
   const int64_t num_ids = ids.numel();
   if (num_ids == 0) return out;
 
   const hipError_t status = nf12_rowmajor_lookup(
       ids.data_ptr(),
-      packed.data_ptr<uint8_t>(),
+      packed.const_data_ptr<uint8_t>(),
       escapes.numel()
-          ? reinterpret_cast<const uint64_t*>(escapes.data_ptr<int16_t>())
+          ? reinterpret_cast<const uint64_t*>(escapes.const_data_ptr<int16_t>())
           : nullptr,
       static_cast<uint32_t>(escapes.size(0)), static_cast<uint32_t>(exp_base),
       n, k, num_ids, static_cast<void*>(out.data_ptr()),

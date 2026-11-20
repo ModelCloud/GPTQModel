@@ -315,3 +315,44 @@ def test_stable_abi_sources_avoid_array_ref_equality():
             if "sizes() ==" in line or "sizes() !=" in line:
                 offenders.append(f"{path.relative_to(root)}:{lineno}")
     assert not offenders, "use .equals() instead of operator==: " + ", ".join(offenders)
+
+
+def test_stable_abi_sources_avoid_unstable_tensor_methods():
+    """Compat-layer sources must call only the stable ``Tensor`` surface.
+
+    The 2.10 stable ``Tensor`` exposes metadata, typed data pointers and
+    ``is_contiguous``, but not ``options()``/``nbytes()``/``item()``/
+    ``cumsum()``/``contiguous()``/``zero_()`` and not the ``at::native::``
+    namespace.  Those spellings compile against newer libtorch only, so a
+    CUDA/HIP kernel that keeps one fails on the floor this PR promises, and it
+    fails late: only when the extension is built on a device host.  The compat
+    header ships ``at::options``/``at::item``/``at::cumsum``/``at::min``/
+    ``at::max``/``at::contiguous`` and typed accessors instead.
+    """
+
+    root = Path(__file__).resolve().parents[1] / "gptqmodel_ext"
+    patterns = {
+        "at::native::": re.compile(r"\bat::native::"),
+        ".options()": re.compile(r"\.options\(\)"),
+        ".nbytes()": re.compile(r"\.nbytes\(\)"),
+        ".data_ptr<T>()": re.compile(r"(?<![A-Za-z0-9_])\.data_ptr<"),
+        ".item<T>()": re.compile(r"(?<![A-Za-z0-9_])\.item<"),
+        ".cumsum(": re.compile(r"\.cumsum\("),
+        ".contiguous()": re.compile(r"\.contiguous\(\)"),
+        ".zero_()": re.compile(r"\.zero_\(\)"),
+    }
+    offenders = []
+    for path in sorted(root.rglob("*")):
+        if path.suffix not in {".h", ".hpp", ".cpp", ".cu", ".cuh"}:
+            continue
+        if path.name == "torch_stable_compat.h":
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if "torch_stable_compat.h" not in text:
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            code = line.split("//")[0]
+            for label, pattern in patterns.items():
+                if pattern.search(code):
+                    offenders.append(f"{path.relative_to(root)}:{lineno} ({label})")
+    assert not offenders, "unstable torch APIs in stable-ABI sources: " + ", ".join(offenders)

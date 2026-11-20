@@ -93,9 +93,13 @@ int exl3_gemm(
     // The split-K counters belong to this launch (#4619). The caching
     // allocator preserves captured addresses and keeps streams isolated.
     const int lock_rows = use_fused ? 1 : CEIL_DIVIDE(size_m, EXL3_GEMM_TILESIZE_M);
-    auto locks_tensor = at::empty({(int64_t) lock_rows * (size_n / 16)}, A.options().dtype(at::kInt));
-    locks = locks_tensor.data_ptr<int>();
-    C10_CUDA_CHECK(cudaMemsetAsync(locks, 0, locks_tensor.nbytes(), stream));
+    auto locks_tensor = at::empty({(int64_t) lock_rows * (size_n / 16)},
+                                  at::options(A).dtype(at::kInt));
+    locks = locks_tensor.mutable_data_ptr<int>();
+    C10_CUDA_CHECK(cudaMemsetAsync(
+        locks, 0,
+        static_cast<size_t>(locks_tensor.numel()) * locks_tensor.element_size(),
+        stream));
 
     bool attr_ready;
     {

@@ -144,7 +144,7 @@ void gemm_half_q_half(
         (const half*) a.data_ptr(),
         qm,
         wide_output ? nullptr : (half*) c.data_ptr(),
-        wide_output ? c.data_ptr<float>() : nullptr,
+        wide_output ? c.mutable_data_ptr<float>() : nullptr,
         c.size(0),
         c.size(1),
         a.size(1),

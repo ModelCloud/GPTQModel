@@ -270,6 +270,43 @@ inline Tensor sum(const Tensor& self, int64_t dim) {
       std::nullopt);
 }
 
+/// aten::cumsum(Tensor self, int dim, ScalarType? dtype=None) -> Tensor
+///
+/// `Tensor::cumsum` is not part of the stable surface. The row-major packer
+/// needs an exclusive prefix sum over small per-tile counters, so route the
+/// call through the boxed dispatcher like `repeat`/`view` above.
+inline Tensor cumsum(
+    const Tensor& self,
+    int64_t dim,
+    std::optional<ScalarType> dtype = std::nullopt) {
+  std::array<StableIValue, 3> stack{
+      torch::stable::detail::from(self),
+      torch::stable::detail::from(dim),
+      torch::stable::detail::from(dtype)};
+  STABLE_TORCH_ERROR_CODE_CHECK(
+      torch_call_dispatcher("aten::cumsum", "", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<Tensor>(stack[0]);
+}
+
+/// aten::min(Tensor self) / aten::max(Tensor self): scalar reductions.
+///
+/// The no-dimension overloads return a 0-D tensor; `Tensor::min`/`max` are
+/// not part of the stable surface. Checkpoint validation reads one bound from
+/// a small CPU index tensor, so the boxed dispatcher cost is irrelevant.
+inline Tensor min(const Tensor& self) {
+  std::array<StableIValue, 1> stack{torch::stable::detail::from(self)};
+  STABLE_TORCH_ERROR_CODE_CHECK(
+      torch_call_dispatcher("aten::min", "", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<Tensor>(stack[0]);
+}
+
+inline Tensor max(const Tensor& self) {
+  std::array<StableIValue, 1> stack{torch::stable::detail::from(self)};
+  STABLE_TORCH_ERROR_CODE_CHECK(
+      torch_call_dispatcher("aten::max", "", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<Tensor>(stack[0]);
+}
+
 inline Tensor repeat(const Tensor& self, IntHeaderOnlyArrayRef repeats) {
   std::array<StableIValue, 2> stack{
       torch::stable::detail::from(self),
@@ -438,9 +475,18 @@ inline Tensor cpu(const Tensor& self) {
 
 /// `Tensor::item<T>()` is not part of the stable surface. The kernels only read
 /// a single-element flag/result tensor, so copy it to the host and read it.
+///
+/// ATen's `item<T>()` converts the scalar to `T`; the raw stable pointer read
+/// does not, and a dtype mismatch aborts in `const_data_ptr<T>()`. Checkpoint
+/// bounds are int32 tensors read as int64, so convert to the requested dtype
+/// first instead of silently requiring the caller to spell the stored one.
 template <class T>
 inline T item(const Tensor& self) {
-  const Tensor host = cpu(self);
+  constexpr ScalarType target =
+      torch::headeronly::CppTypeToScalarType<T>::value;
+  const Tensor host = self.scalar_type() == target
+      ? cpu(self)
+      : to(self, Device(DeviceType::CPU), target);
   return host.const_data_ptr<T>()[0];
 }
 

@@ -105,7 +105,7 @@ void blockfloat_linear_out(const torch::Tensor& x, const torch::Tensor& codes,
     // first turns a cancelling result into inf.
     const torch::Tensor& b = *bias;
     TORCH_CHECK(b.dim() == 1 && b.size(0) == n, "bias must be [n]");
-    bias_f32 = b.to(at::kFloat).contiguous();
+    bias_f32 = at::contiguous(at::to(b, at::kFloat));
     check_like(bias_f32, xc, "bias");
     bias_ptr = bias_f32.data_ptr();
   }

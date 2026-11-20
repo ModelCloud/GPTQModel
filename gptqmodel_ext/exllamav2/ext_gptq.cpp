@@ -90,8 +90,8 @@ int64_t make_q_matrix(
         TORCH_CHECK(gptq_g_idx.numel() == height,
                     "gptq_g_idx has ", gptq_g_idx.numel(), " entries but the weight has ", height, " rows");
         TORCH_CHECK(groups > 0, "act-order weights need at least one scale group");
-        const int64_t g_min = gptq_g_idx.min().item<int64_t>();
-        const int64_t g_max = gptq_g_idx.max().item<int64_t>();
+        const int64_t g_min = at::item<int64_t>(at::min(gptq_g_idx));
+        const int64_t g_max = at::item<int64_t>(at::max(gptq_g_idx));
         TORCH_CHECK(g_min >= 0 && g_max < groups,
                     "gptq_g_idx must be in [0, ", groups - 1, "], got min=", g_min, " max=", g_max);
     }
@@ -166,7 +166,7 @@ void gemm_half_q_half(
         (const half*) a.data_ptr(),
         qm,
         wide_output ? nullptr : (half*) c.data_ptr(),
-        wide_output ? c.data_ptr<float>() : nullptr,
+        wide_output ? c.mutable_data_ptr<float>() : nullptr,
         c.size(0),
         c.size(1),
         a.size(1),

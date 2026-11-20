@@ -433,8 +433,8 @@ static void check_outlier_indices(const c10::optional<at::Tensor>& outlier_indic
               "VPTQ CUDA outlier indices need an outlier codebook");
   const int64_t count = outlier_centroids->numel() / outlier_vector_len;
   TORCH_CHECK(count > 0, "VPTQ CUDA outlier codebook is empty");
-  const int64_t low = outlier_indices->min().item<int64_t>();
-  const int64_t high = outlier_indices->max().item<int64_t>();
+  const int64_t low = at::item<int64_t>(at::min(*outlier_indices));
+  const int64_t high = at::item<int64_t>(at::max(*outlier_indices));
   TORCH_CHECK(low >= 0 && high < count,
               "VPTQ CUDA outlier index is outside [0, ", count, "): got min=", low,
               " max=", high);
