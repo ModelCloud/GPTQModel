@@ -2534,6 +2534,16 @@ class PackableQuantLinear(GPTQQuantLinear):
         if isinstance(linear, nn.Embedding):
             raise ValueError("pack_block does not support embedding layers")
 
+        # Block packing writes 32-bit storage words only. Reject narrow words
+        # before mutating module state so callers take their documented
+        # ValueError fallback to ``pack_original`` (#5806).
+        word_bits = int(self.pack_dtype_bits)
+        if word_bits != 32:
+            raise ValueError(
+                "pack_block requires 32-bit packing words; "
+                f"got {word_bits}-bit words. Use pack_original for narrower words."
+            )
+
         # ---------- normalize weight to [out, in] (same as your code) ----------
         W = linear.weight.detach()
         if isinstance(linear, _ConvNd):
@@ -2576,8 +2586,6 @@ class PackableQuantLinear(GPTQQuantLinear):
 
         # ---------- constants ----------
         bits = int(self.bits)  # 2,3,4,8
-        word_bits = int(self.pack_dtype_bits)  # expect 32
-        assert word_bits == 32, "Only 32-bit packing words supported."
         if (in_features % word_bits) != 0:
             raise ValueError("in_features must be divisible by 32")
         if (out_features % word_bits) != 0:
@@ -2785,6 +2793,11 @@ class PackableQuantLinear(GPTQQuantLinear):
         if target_device.type != "cuda":
             raise ValueError(f"pack_gpu expected a CUDA device, got `{target_device}`.")
 
+        # Validate the word width before staging the dense weight on the device.
+        word_bits = int(self.pack_dtype_bits)
+        if word_bits != 32:
+            raise ValueError("pack_gpu currently supports 32-bit packing words only.")
+
         MASK32 = (1 << 32) - 1
         mask_tensor = t.tensor(MASK32, dtype=t.int64, device=target_device)
 
@@ -2826,9 +2839,6 @@ class PackableQuantLinear(GPTQQuantLinear):
             self.bias = None
 
         bits = int(self.bits)
-        word_bits = int(self.pack_dtype_bits)
-        if word_bits != 32:
-            raise ValueError("pack_gpu currently supports 32-bit packing words only.")
         if in_features % word_bits != 0:
             raise ValueError("in_features must be divisible by 32 for pack_gpu")
 
