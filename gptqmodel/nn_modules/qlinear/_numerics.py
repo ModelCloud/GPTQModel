@@ -339,18 +339,44 @@ def bias_narrows_losslessly(bias: torch.Tensor, dtype: torch.dtype) -> bool:
     return torch.equal(bias.to(dtype=dtype).to(torch.float64), bias.to(torch.float64))
 
 
-def linear_needs_wide_bias(x: torch.Tensor, bias: torch.Tensor | None) -> bool:
-    """Whether the stored bias must stay wide through the reduction epilogue."""
+def needs_wide_bias_epilogue(bias: torch.Tensor | None, activation_dtype: torch.dtype) -> bool:
+    """Whether a stored bias must be added after a wide reduction.
+
+    A narrower bias can be widened losslessly inside the GEMM; only a wider
+    (or incomparable) one must stay out of the low-precision operands.
+    """
 
     return (
         bias is not None
-        and x.dtype in (torch.float16, torch.bfloat16)
-        and bias.dtype != x.dtype
-        # A narrower bias can be widened losslessly inside the GEMM; only a
-        # wider (or incomparable) one must stay out of the low-precision
-        # operands.
-        and _FLOAT_WIDTH.get(bias.dtype, 3) >= _FLOAT_WIDTH.get(x.dtype, 3)
+        and activation_dtype in (torch.float16, torch.bfloat16)
+        and bias.dtype != activation_dtype
+        and _FLOAT_WIDTH.get(bias.dtype, 3) >= _FLOAT_WIDTH.get(activation_dtype, 3)
     )
+
+
+def linear_needs_wide_bias(x: torch.Tensor, bias: torch.Tensor | None) -> bool:
+    """Whether the stored bias must stay wide through the reduction epilogue."""
+
+    return needs_wide_bias_epilogue(bias, x.dtype)
+
+
+def scales_narrowed_by(
+    stored_dtype: torch.dtype | None, activation_dtype: torch.dtype
+) -> bool:
+    """Whether decoding at ``activation_dtype`` narrows the stored scales.
+
+    Decoders that build a temporary weight in the activation dtype round each
+    stored scale first. Only a strictly wider stored dtype is a narrowing risk
+    here: FP16 and BF16 are incomparable widths, and a range difference between
+    them is already covered by the callers' range gate.
+
+    The answer is dtype-only, so a compiled graph or a CUDA-graph capture can
+    read it as a Python constant.
+    """
+
+    if stored_dtype is None:
+        return False
+    return _FLOAT_WIDTH.get(stored_dtype, 3) > _FLOAT_WIDTH.get(activation_dtype, 3)
 
 
 def promote_bias(x: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor | None:

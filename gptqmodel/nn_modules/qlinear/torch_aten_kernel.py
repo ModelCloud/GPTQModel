@@ -34,7 +34,11 @@ from ._fused_train_state import (
     refresh_runtime_zero_offsets,
     restore_fused_train_state,
 )
-from ._numerics import linear_wide_bias, matmul_fp32_reduce
+from ._numerics import (
+    linear_wide_bias,
+    matmul_fp32_reduce,
+    needs_wide_bias_epilogue,
+)
 from ._runtime_cache import build_group_ret_idx, tensor_cache_key
 from .torch_fused import (
     _cpu_int4pack_mm,
@@ -67,7 +71,7 @@ def _cpu_int4pack_zero_offsets(
     return (zero_center - zero_codes.float()) * scales.float()
 
 
-def _cpu_int4pack_scale_dtype(scales, zero_codes, bits, target_dtype):
+def _cpu_int4pack_scale_dtype(scales, zero_codes, bits, target_dtype, *, wide_bias=False):
     # The fused op stores affine offsets instead of integer zero points. Check
     # their range before replacing checkpoint buffers with the packed layout.
     offsets = _cpu_int4pack_zero_offsets(zero_codes, scales.to(target_dtype), bits)
@@ -82,10 +86,15 @@ def _cpu_int4pack_scale_dtype(scales, zero_codes, bits, target_dtype):
     # The fused CPU op always widens BF16 activations to FP32, so metadata may
     # stay wider than the activation dtype. Prefer the checkpoint scale
     # precision there instead of permanently rounding FP16 scales to BF16 (one
-    # BF16 ulp is above the inference tolerance). FP16 activations keep the
-    # historical compute dtype: they multiply in FP16 when no FP32 product is
-    # requested, so widening their metadata would change that contract.
-    if target_dtype == torch.bfloat16 and not torch.equal(
+    # BF16 ulp is above the inference tolerance).
+    #
+    # An FP32 bias is added to the int4pack product in FP32 before the single
+    # output cast, so the epilogue cannot recover bits that the half metadata
+    # already dropped. Keep the checkpoint scale precision there too (#5764).
+    # Other FP16 activations keep the historical compute dtype: they multiply
+    # in FP16 when no FP32 product is requested, so widening their metadata
+    # would change that contract.
+    if (wide_bias or target_dtype == torch.bfloat16) and not torch.equal(
         scales.to(target_dtype).to(scales.dtype), scales
     ):
         return torch.float32
@@ -468,7 +477,13 @@ class TorchAtenLinear(PackableQuantLinear):
             self.wf_unsqueeze_zero,
         ).to(torch.uint8)
         zero_codes = torch.bitwise_and(zero_codes, self.maxq).reshape(self.scales.shape)
-        compute_dtype = _cpu_int4pack_scale_dtype(self.scales, zero_codes, self.bits, target_dtype)
+        compute_dtype = _cpu_int4pack_scale_dtype(
+            self.scales,
+            zero_codes,
+            self.bits,
+            target_dtype,
+            wide_bias=needs_wide_bias_epilogue(self.bias, target_dtype),
+        )
         # Convert for the packed runtime layout only: ``self.scales`` keeps the
         # checkpoint dtype so a later forward or save cannot persist a narrowed
         # scale (the same defect class as issue #4178).

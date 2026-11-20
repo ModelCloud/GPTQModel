@@ -32,7 +32,11 @@ from ._fused_train_state import (
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
-from ._numerics import linear_wide_bias, matmul_fp32_reduce
+from ._numerics import (
+    linear_wide_bias,
+    matmul_fp32_reduce,
+    needs_wide_bias_epilogue,
+)
 from ._runtime_cache import tensor_cache_key
 from .torch_aten_kernel import (
     TorchAtenLinear,
@@ -252,7 +256,13 @@ class TorchAtenAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
         target_dtype = dtype if dtype in (torch.float16, torch.bfloat16) else self.scales.dtype
         if target_dtype not in (torch.float16, torch.bfloat16, torch.float32):
             target_dtype = torch.bfloat16
-        compute_dtype = _cpu_int4pack_scale_dtype(self.scales, izeros, self.bits, target_dtype)
+        compute_dtype = _cpu_int4pack_scale_dtype(
+            self.scales,
+            izeros,
+            self.bits,
+            target_dtype,
+            wide_bias=needs_wide_bias_epilogue(self.bias, target_dtype),
+        )
         # Packed runtime metadata only: ``self.scales`` keeps the checkpoint
         # dtype so a later forward or save cannot persist a narrowed scale
         # (issue #4178).

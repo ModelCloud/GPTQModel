@@ -34,7 +34,11 @@ from ._fused_train_state import (
     refresh_runtime_zero_offsets,
     restore_fused_train_state,
 )
-from ._numerics import linear_wide_bias, matmul_fp32_reduce
+from ._numerics import (
+    linear_wide_bias,
+    matmul_fp32_reduce,
+    needs_wide_bias_epilogue,
+)
 from ._runtime_cache import tensor_cache_key
 from .torch_fused import (
     Int4PackedOp,
@@ -290,7 +294,13 @@ class TorchFusedAwqLinear(AwqDecodeRangeMixin, AWQuantLinear):
 
         from .torch_aten_kernel import _cpu_int4pack_scale_dtype
 
-        compute_dtype = _cpu_int4pack_scale_dtype(self.scales, izeros.reshape_as(self.scales), self.bits, dtype)
+        compute_dtype = _cpu_int4pack_scale_dtype(
+            self.scales,
+            izeros.reshape_as(self.scales),
+            self.bits,
+            dtype,
+            wide_bias=needs_wide_bias_epilogue(self.bias, dtype),
+        )
 
         # AWQ has no g_idx — weights are already in natural order, just transpose
         # iweight: (in_features, out_features) -> (out_features, in_features) for int4pack
