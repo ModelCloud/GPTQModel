@@ -257,6 +257,7 @@ class TTNNLinear(GPTQQuantLinear):
         return open_mesh(
             device_count=self._requested_device_count(),
             fabric=self._fabric_config(),
+            device_id=self._requested_device_id(),
         )
 
     def _requested_device_count(self) -> int:
@@ -264,6 +265,12 @@ class TTNNLinear(GPTQQuantLinear):
         if requested is None:
             return 1
         return int(requested)
+
+    def _requested_device_id(self) -> int:
+        # The loader resolves an explicit `xla:N` request to this ordinal; a
+        # bare `xla` or an unplaced load keeps the historical chip 0.
+        requested = getattr(self, "ttnn_device_id", None)
+        return 0 if requested is None else int(requested)
 
     def _fabric_config(self) -> str:
         # Collectives are only used when more than one chip participates.
@@ -283,6 +290,7 @@ class TTNNLinear(GPTQQuantLinear):
             tuple(tensor_cache_key(t) for t in tensors),
             self.qzero_format(),
             self._requested_device_count(),
+            self._requested_device_id(),
         )
 
     def _build_layer(self) -> TTNNPackedLayer:

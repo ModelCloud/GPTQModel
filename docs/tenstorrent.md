@@ -620,6 +620,16 @@ loader therefore pins `device_map = {"": "cpu"}`.
 This is also why `{"": "xla"}` is **not** a substitute: `simple_dispatch_model`
 would call `.to("xla")` and initialize PJRT anyway.
 
+An indexed request is therefore read as the **chip**, not as checkpoint
+placement. `device="xla:1"` stages the checkpoint on CPU and passes ordinal 1
+to every native kernel, which forwards it to
+`open_mesh(device_count=1, device_id=1, ...)`. A request that names more than
+one chip — a layer-wise `xla:N` map or a `device=(...)` pool — is rejected,
+because the kernel owns one mesh per process and the mesh size is chosen per
+layer, not by the checkpoint map. `xla:0` pins chip 0; a bare `xla` names no
+chip, so the kernel keeps its default of chip 0 and the loader sets no
+`ttnn_device_id` at all.
+
 ### 3. Context ownership is one owner per chip, per process
 
 TT-Metal enforces a single runtime per chip. Consequences worth knowing:
