@@ -225,6 +225,27 @@ def _scaled_mm_row_scale_supported(device: torch.device, out_dtype: torch.dtype)
     return _scaled_mm_row_scale_verdict(device, out_dtype) is True
 
 
+def _compare_fp8_casts(expected: torch.Tensor, actual: torch.Tensor) -> torch.Tensor:
+    """Whether *actual* matches *expected* for every code, NaN payloads aside.
+
+    A NaN cannot contribute a finite value to a matmul and the IEEE conversion
+    contract does not pin its sign or payload, so two casts agree when they
+    agree on which codes are NaN and are bit-equal on the rest. ROCm preserves
+    the source NaN payload while the CPU reference canonicalises it; comparing
+    raw bits rejected every otherwise bit-exact ROCm cast (#5570). NaN-ness
+    itself is still compared, so a cast that turns a NaN into a number (or the
+    reverse) is rejected.
+    """
+
+    expected_nan = torch.isnan(expected)
+    nan_matches = torch.equal(expected_nan, torch.isnan(actual))
+    finite = ~expected_nan
+    bits_match = (
+        actual[finite].view(torch.uint8) == expected[finite].view(torch.uint8)
+    ).all()
+    return torch.tensor(nan_matches, dtype=torch.bool) & bits_match
+
+
 def _probe_native_fp8_cast(
     device: torch.device, fp8_dtype: torch.dtype, out_dtype: torch.dtype
 ) -> torch.Tensor:
@@ -232,15 +253,16 @@ def _probe_native_fp8_cast(
 
     Every 8-bit pattern is a code in each of the four FP8 formats, so the 256
     patterns cover the whole domain. The CPU cast is the reference: a device
-    whose cast is bit-equal to it cannot lose weight precision when the lean
-    epilogue casts the codes to the activation dtype (#5429). Returns a 0-dim
-    bool tensor, so measuring performs no host synchronisation.
+    whose cast matches it for every non-NaN code cannot lose weight precision
+    when the lean epilogue casts the codes to the activation dtype (#5429).
+    NaN payloads are allowed to differ (#5570); see ``_compare_fp8_casts``.
+    Returns a 0-dim bool tensor.
     """
 
     codes = torch.arange(256, dtype=torch.uint8).view(fp8_dtype)
-    expected = codes.to(out_dtype).view(torch.uint8)
-    actual = codes.to(device).to(out_dtype).to("cpu").view(torch.uint8)
-    return (actual == expected).all()
+    expected = codes.to(out_dtype)
+    actual = codes.to(device).to(out_dtype).to("cpu")
+    return _compare_fp8_casts(expected, actual)
 
 
 def _native_fp8_cast_verdict(
