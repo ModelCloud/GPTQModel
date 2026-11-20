@@ -3,9 +3,8 @@
 #include <c10/util/Exception.h>
 #include <cmath>
 
-// Bitrate K of an EXL3 tensor: an integer 1..8, or a half-integer 1.5 / 2.5 / 3.5 (mul1 codebook only). Python
-// passes LinearEXL3.K (int or float); the C++ boundary takes it as float and decomposes it once here into the
-// integer part and the half flag the kernel tables are indexed by
+// Split the EXL3 bitrate into the integral part and half-bit flag used
+// by the kernel tables. Callers validate compatibility with their codebook.
 struct BitsK
 {
     int bits;

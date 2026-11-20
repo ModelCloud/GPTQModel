@@ -19,13 +19,14 @@ int64_t bc_linear_exl3_run_configured
     at::Tensor& y,
     bool fp16_gemv,
     int64_t int8_gemv,
-    bool fused_gemm
+    bool fused_gemm,
+    bool q4nx
 )
 {
     const auto bits = bits_from_K(K);
     TORCH_CHECK(trellis.dim() == 3 && trellis.size(-1) == 16 * bits.bits + 8 * bits.half,
                 "K does not match packed trellis width");
-    TORCH_CHECK(!bits.half || mul1, "EXL3 half-integer bitrates require mul1");
+    TORCH_CHECK(!bits.half || mul1 || q4nx, "EXL3 half-integer bitrates require mul1 or Q4NX");
     // The small-batch tensor-core GEMM reads the activation and writes the
     // result as densely packed rows.
     TORCH_CHECK(x.is_contiguous(), "bc_linear_exl3_run requires a contiguous input");
@@ -52,7 +53,7 @@ int64_t bc_linear_exl3_run_configured
     // rotated input (#4619).  Allocate it per call for every batch size; the
     // caching allocator reuses the block for ordered work on the same stream.
     at::Tensor xh = at::empty_like(x);
-    const auto dispatch = exl3_gemm(x, trellis, y, suh, xh, svh, mcg, mul1, fp16_gemv, int8_gemv, fused_gemm);
+    const auto dispatch = exl3_gemm(x, trellis, y, suh, xh, svh, mcg, mul1, fp16_gemv, int8_gemv, fused_gemm, q4nx);
 
     if (bias)
         y.add_(bias.value());
@@ -63,7 +64,7 @@ void bc_linear_exl3_run(
     at::Tensor trellis, at::Tensor suh, at::Tensor svh, int64_t K,
     const c10::optional<at::Tensor>& bias, bool mcg, bool mul1, const at::Tensor& x, at::Tensor& y)
 {
-    bc_linear_exl3_run_configured(trellis, suh, svh, K, bias, mcg, mul1, x, y, false, 0, false);
+    bc_linear_exl3_run_configured(trellis, suh, svh, K, bias, mcg, mul1, x, y, false, 0, false, false);
 }
 
 void BC_LinearEXL3::run(const at::Tensor& x, at::Tensor& y)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "arch.cuh"
+#include "q4nx.cuh"
 
 #define EXL3_GEMM_T_ARGS \
     const int bits, \
@@ -143,6 +144,20 @@ inline int exl3_gemm_shape_smem(int shape, int bits, bool half_k)
 EXL3_FRACTIONAL_KERNEL_EXTERNS(1)
 EXL3_FRACTIONAL_KERNEL_EXTERNS(2)
 EXL3_FRACTIONAL_KERNEL_EXTERNS(3)
+
+#define EXL3_Q4NX_KERNEL_EXTERNS(RATE) \
+    extern fp_exl3_gemm_kernel tfp_exl3_gemm_kernel_fp32_q4nx_##RATE[]; \
+    extern fp_exl3_gemm_kernel tfp_exl3_gemm_kernel_fp16_q4nx_##RATE[];
+
+#define EXL3_Q4NX_KERNEL_INSTANCES(RATE, K, HALF) \
+    fp_exl3_gemm_kernel tfp_exl3_gemm_kernel_fp32_q4nx_##RATE[] = { \
+        EXL3_GEMM_KERNEL_INSTANCES(K, HALF, true, EXL3_Q4NX_CODEBOOK) }; \
+    fp_exl3_gemm_kernel tfp_exl3_gemm_kernel_fp16_q4nx_##RATE[] = { \
+        EXL3_GEMM_KERNEL_INSTANCES(K, HALF, false, EXL3_Q4NX_CODEBOOK) };
+
+EXL3_Q4NX_KERNEL_EXTERNS(w25)
+EXL3_Q4NX_KERNEL_EXTERNS(w30)
+EXL3_Q4NX_KERNEL_EXTERNS(w35)
 
 struct TResult
 {

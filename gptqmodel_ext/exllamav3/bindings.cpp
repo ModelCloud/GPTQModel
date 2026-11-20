@@ -128,9 +128,9 @@ void bc_linear_exl3_run_wrapper(
 int64_t bc_linear_exl3_run_configured_wrapper(
     torch::Tensor trellis, torch::Tensor suh, torch::Tensor svh, double K,
     std::optional<torch::Tensor> bias, bool mcg, bool mul1, torch::Tensor x, torch::Tensor& y,
-    bool fp16_gemv, int64_t int8_gemv, bool fused_gemm)
+    bool fp16_gemv, int64_t int8_gemv, bool fused_gemm, bool q4nx)
 {
-    return bc_linear_exl3_run_configured(trellis, suh, svh, K, bias, mcg, mul1, x, y, fp16_gemv, int8_gemv, fused_gemm);
+    return bc_linear_exl3_run_configured(trellis, suh, svh, K, bias, mcg, mul1, x, y, fp16_gemv, int8_gemv, fused_gemm, q4nx);
 }
 
 std::tuple<torch::Tensor, torch::Tensor> bf16_prescale_wrapper(torch::Tensor x, double bound)
@@ -166,7 +166,7 @@ TORCH_LIBRARY(gptqmodel_exllamav3, m)
     m.def("had_r_128(Tensor input, Tensor(a!) output, Tensor? pre_scale, Tensor? post_scale, float scale) -> ()");
     m.def("hgemm(Tensor a, Tensor b, Tensor(a!) c) -> ()");
     m.def("bc_linear_exl3_run(Tensor trellis, Tensor suh, Tensor svh, int K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(b!) y) -> ()");
-    m.def("bc_linear_exl3_run_configured(Tensor trellis, Tensor suh, Tensor svh, float K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(a!) y, bool fp16_gemv, int int8_gemv, bool fused_gemm=False) -> int");
+    m.def("bc_linear_exl3_run_configured(Tensor trellis, Tensor suh, Tensor svh, float K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(a!) y, bool fp16_gemv, int int8_gemv, bool fused_gemm=False, bool q4nx=False) -> int");
     m.def("bf16_prescale(Tensor x, float bound) -> (Tensor, Tensor)");
     m.def("bf16_rescale(Tensor result, Tensor scale, Tensor? bias, int n_cols) -> Tensor");
 }

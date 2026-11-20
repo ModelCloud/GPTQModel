@@ -22,7 +22,7 @@ std::shared_mutex kernel_attr_mutex;
 int exl3_gemm(
     const at::Tensor& A, const at::Tensor& B, at::Tensor& C,
     const at::Tensor& suh, const at::Tensor& A_had, const at::Tensor& svh,
-    bool mcg, bool mul1, bool fp16_gemv, int64_t int8_gemv, bool fused_gemm)
+    bool mcg, bool mul1, bool fp16_gemv, int64_t int8_gemv, bool fused_gemm, bool q4nx)
 {
 #if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
     TORCH_CHECK(false,
@@ -40,15 +40,23 @@ int exl3_gemm(
     TORCH_CHECK_DTYPE(B, kShort);
     const bool c_fp32 = C.dtype() == at::kFloat;
     if (!c_fp32) TORCH_CHECK_DTYPE(C, kHalf);
-    TORCH_CHECK(!(mcg && mul1), "specified both mcg and mul1");
+    TORCH_CHECK(int(mcg) + int(mul1) + int(q4nx) <= 1, "conflicting EXL3 codebooks");
     TORCH_CHECK(int8_gemv >= 0 && int8_gemv <= 2, "EXL3 INT8 mode must be 0, 1 or 2");
 
     const int64_t words_per_tile = B.size(2);
     TORCH_CHECK(words_per_tile >= 16 && words_per_tile <= 128, "invalid EXL3 trellis width");
     const int K = words_per_tile / 16;
     const bool half_k = words_per_tile % 16 == 8;
-    TORCH_CHECK(words_per_tile % 16 == 0 || (half_k && K <= 3 && mul1),
-                "EXL3 half-integer bitrates require mul1 at 1.5, 2.5 or 3.5 bpw");
+    if (q4nx)
+    {
+        TORCH_CHECK(words_per_tile % 4 == 0 && q4nx_supports_step_bits(words_per_tile / 4),
+                    "Q4NX requires 2.5, 3.0, or 3.5 bpw");
+    }
+    else
+    {
+        TORCH_CHECK(words_per_tile % 16 == 0 || (half_k && K <= 3 && mul1),
+                    "EXL3 half-integer bitrates require mul1 at 1.5, 2.5 or 3.5 bpw");
+    }
 
     if (C.numel() == 0) return 0;
     TORCH_CHECK(A.size(-1) > 0 && A.size(-1) % 128 == 0 && C.size(-1) % 128 == 0,
@@ -60,7 +68,7 @@ int exl3_gemm(
     const int size_m = rows;
     const int size_k = A.size(-1);
     const int size_n = C.size(-1);
-    const int cb = mcg ? 1 : mul1 ? 2 : 0;
+    const int cb = q4nx ? EXL3_Q4NX_CODEBOOK : mcg ? 1 : mul1 ? 2 : 0;
     const int num_sms = DevCtx::instance().get_num_sms(device);
     const int cc = DevCtx::instance().get_cc(device);
 
@@ -79,10 +87,10 @@ int exl3_gemm(
         (void*)&A_ptr, (void*)&B_ptr, (void*)&C_ptr, (void*)&size_m, (void*)&size_k,
         (void*)&size_n, (void*)&locks, (void*)&su, (void*)&xh, (void*)&sv
     };
-    if (fp16_gemv && exl3_gemv_try_launch(args, size_m, size_k, size_n, K, half_k, cb, c_fp32, device, stream))
+    if (fp16_gemv && !q4nx && exl3_gemv_try_launch(args, size_m, size_k, size_n, K, half_k, cb, c_fp32, device, stream))
         return 90;
 
-    const bool use_fused = fused_gemm || half_k;
+    const bool use_fused = fused_gemm || half_k || q4nx;
     const int smem_max = std::min<int>(SMEM_MAX, at::cuda::getDeviceProperties(device)->sharedMemPerBlockOptin);
     const TResult* config = select_exl3_gemm_kernel_tuned(
         cc, size_k, size_n, K, c_fp32, -1, 0, cb, half_k, use_fused, size_m, smem_max);

@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from gptqmodel.exllamav3 import ext
+from tests.test_exllamav3_torch_padding import _oracle_inner
 
 
 pytestmark = pytest.mark.skipif(
@@ -14,7 +15,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _fixture(op, bits):
+def _fixture(op, bits, *, q4nx=False):
     device = torch.device("cuda", torch.cuda.current_device())
     gen = torch.Generator(device=device).manual_seed(117)
     rows, width, experts, topk = 2, 128, 3, 2
@@ -39,8 +40,11 @@ def _fixture(op, bits):
             trellises.append(packed)
             su.append(sign)
             sv.append(scale)
-            w = torch.empty((width, width), device=device, dtype=torch.float16)
-            ext.exllamav3_ext.reconstruct(w, packed, bits, False, True)
+            if q4nx:
+                w = _oracle_inner({"trellis": packed, "q4nx": True}).to(device)
+            else:
+                w = torch.empty((width, width), device=device, dtype=torch.float16)
+                ext.exllamav3_ext.reconstruct(w, packed, bits, False, True)
             dense.append((sign.double()[:, None] * hadamard) @ w.double() @ (hadamard * scale.double()))
         projection_weights.append(dense)
         tables.append(tuple(torch.tensor([item.data_ptr() for item in column], device=device)
@@ -59,8 +63,8 @@ def _fixture(op, bits):
         assert packed_owners
         op(x, ids, routing, -1, -1, width,
            *tables[0], *tables[1], *tables[2], None, None, None,
-           bits, bits, bits, False, True, 0, 0.0, True,
-           had_g, had_u, gu_g, gu_u, activation, down, counters, out, None, None)
+           bits, bits, bits, False, not q4nx, 0, 0.0, True,
+           had_g, had_u, gu_g, gu_u, activation, down, counters, out, None, None, q4nx=q4nx)
         return out
 
     def reference(inputs):
@@ -77,11 +81,12 @@ def _fixture(op, bits):
     return x, run, reference
 
 
-@pytest.mark.parametrize("bits", (3, 2.5))
+@pytest.mark.parametrize("bits", (3, 2.5, 3.5))
+@pytest.mark.parametrize("q4nx", (False, True))
 @torch.inference_mode()
-def test_routed_exl3_matches_torch_and_replays_changed_input(bits):
+def test_routed_exl3_matches_torch_and_replays_changed_input(bits, q4nx):
     op = ext._runtime_op("exl3_moe_coop")
-    x, run, reference = _fixture(op, bits)
+    x, run, reference = _fixture(op, bits, q4nx=q4nx)
     initial = x.clone()
     changed = -x
     eager = run().clone()

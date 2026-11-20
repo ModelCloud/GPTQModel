@@ -406,20 +406,26 @@ def test_output_geometry_is_bound_to_request() -> None:
         validate_remote_output_tensors(request, tensors)
 
 
-def test_half_rate_remote_request_binds_the_mul1_trellis_width():
+@pytest.mark.parametrize("codebook", ["mul1", "q4nx"])
+def test_half_rate_remote_request_binds_the_codebook_and_trellis_width(codebook):
     endpoint = _endpoint("spark-a")
     weight, hessian = _inputs()
     inputs = {"input_weight": weight, "hessian": hessian}
-    request = _request(weight, hessian, endpoint, bits=2.5, codebook="mul1")
+    request = _request(weight, hessian, endpoint, bits=2.5, codebook=codebook)
     assert validate_remote_inputs(request, inputs)[2]["bits"] == 2.5
 
     packed = {
         "trellis": torch.zeros((8, 8, 40), dtype=torch.int16),
         "suh": torch.ones(128, dtype=torch.float16),
         "svh": torch.ones(128, dtype=torch.float16),
-        "mul1": torch.tensor(0x83DCD12D - 2**32, dtype=torch.int32),
+        codebook: torch.tensor(0x83DCD12D - 2**32, dtype=torch.int32),
     }
     validate_remote_output_tensors(request, packed)
+    wrong_marker = "mul1" if codebook == "q4nx" else "q4nx"
+    wrong = {**packed, wrong_marker: packed[codebook]}
+    del wrong[codebook]
+    with pytest.raises(ValueError, match="tensor contract"):
+        validate_remote_output_tensors(request, wrong)
     packed["trellis"] = torch.zeros((8, 8, 32), dtype=torch.int16)
     with pytest.raises(ValueError, match="geometry"):
         validate_remote_output_tensors(request, packed)
@@ -659,7 +665,11 @@ def test_request_surfaces_authenticated_worker_error(monkeypatch) -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="EXL3 requires CUDA")
-def test_worker_quantization_resumes_from_its_packed_checkpoint(tmp_path) -> None:
+@pytest.mark.parametrize(("bits", "codebook"), [(2, "mcg"), (2.5, "q4nx")])
+def test_worker_quantization_resumes_from_its_packed_checkpoint(tmp_path, bits, codebook) -> None:
+    if codebook == "q4nx" and torch.version.hip is not None:
+        pytest.skip("Q4NX encoding requires NVIDIA CUDA")
+
     endpoint = _endpoint("spark-a")
     identity = {
         "contract": REMOTE_CONTRACT,
@@ -668,7 +678,7 @@ def test_worker_quantization_resumes_from_its_packed_checkpoint(tmp_path) -> Non
         "image_digest": endpoint.image_digest,
     }
     weight, hessian = _inputs()
-    request = _request(weight, hessian, endpoint)
+    request = _request(weight, hessian, endpoint, bits=bits, codebook=codebook)
     store = EXL3ProjectionCheckpointStore(tmp_path / "worker-checkpoints")
 
     first_tensors, first_result, first_hit = execute_remote_projection(
@@ -688,7 +698,7 @@ def test_worker_quantization_resumes_from_its_packed_checkpoint(tmp_path) -> Non
     assert first_hit is False
     assert second_hit is True
     assert first_result == second_result
-    assert set(first_tensors) == {"trellis", "suh", "svh", "mcg"}
+    assert set(first_tensors) == {"trellis", "suh", "svh", codebook}
     assert all(
         torch.equal(first_tensors[name], second_tensors[name])
         for name in first_tensors

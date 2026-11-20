@@ -359,7 +359,8 @@ __device__ __forceinline__ void gemv_tile
     uint32_t* __restrict__ sh_stage     // [WK][STAGE_WORDS], staged widths only
 )
 {
-    constexpr bool REG = HALF ? false : tile_reg<bits>();
+    constexpr bool Q4NX = cb == EXL3_Q4NX_CODEBOOK;
+    constexpr bool REG = !Q4NX && !HALF && tile_reg<bits>();
     constexpr int TWORDS = HALF ? 4 * (2 * bits + 1) : 8 * bits;              // uint32 per 16x16 tile
     constexpr int GWORDS = WNT * TWORDS;                                        // uint32 per warp per k-slice
     constexpr int LOADS = REG ? (bits == 2 ? WNT / 2 : WNT) : CEIL_DIVIDE(GWORDS, 32);
@@ -426,6 +427,7 @@ __device__ __forceinline__ void gemv_tile
                 pf[d][l] = ld_b(d, l);
 
     FragC_h ch[WNT][2] = {};
+    FragC q4nx_acc[WNT][2] = {};
     float2 acc0[WNT][2] = {};
 
     for (int ib = 0; ib < myn; ib += PF)
@@ -494,11 +496,22 @@ __device__ __forceinline__ void gemv_tile
                     exl3_gemv_ns::dq8_regs_3bits<cb>(awv, bwv, x_s2, f0, f1);
                 }
 
-                exl3_gemv_ns::mma_ab_h(a01, a23, f0, ch[t][0]);
-                exl3_gemv_ns::mma_ab_h(a01, a23, f1, ch[t][1]);
+                if constexpr (Q4NX)
+                {
+                    // Accumulate the exact nibble sums in FP32 and normalize
+                    // after the warp reduction, before the optional FP16 cast.
+                    FragA a{{a01[0], a01[1], a23[0], a23[1]}};
+                    ptx_mma_m16n8k16(a, f0, q4nx_acc[t][0]);
+                    ptx_mma_m16n8k16(a, f1, q4nx_acc[t][1]);
+                }
+                else
+                {
+                    exl3_gemv_ns::mma_ab_h(a01, a23, f0, ch[t][0]);
+                    exl3_gemv_ns::mma_ab_h(a01, a23, f1, ch[t][1]);
+                }
             }
 
-            if ((d + 1) % FOLD == 0 || i + 1 == myn)
+            if (!Q4NX && ((d + 1) % FOLD == 0 || i + 1 == myn))
             {
                 #pragma unroll
                 for (int t = 0; t < WNT; ++t)
@@ -525,8 +538,8 @@ __device__ __forceinline__ void gemv_tile
             for (int f = 0; f < 2; ++f)
             {
                 const int col = t * 16 + f * 8 + c0;
-                red[col + 0] = acc0[t][f].x;
-                red[col + 1] = acc0[t][f].y;
+                red[col + 0] = Q4NX ? q4nx_acc[t][f][0] : acc0[t][f].x;
+                red[col + 1] = Q4NX ? q4nx_acc[t][f][1] : acc0[t][f].y;
             }
     }
     __syncthreads();
@@ -539,6 +552,8 @@ __device__ __forceinline__ void gemv_tile
         #pragma unroll
         for (int j = 0; j < WKK; ++j)
             sum += sh_red[(j * ROWS + r) * TCOLS + c];
+        if constexpr (Q4NX)
+            sum *= EXL3_Q4NX_ALPHA;
         const size_t idx = (size_t) rows[r] * c_stride + group * TCOLS + c;
         if (c_f32) ((float*) C)[idx] = sum;
         else       ((half*) C)[idx] = __float2half_rn(sum);

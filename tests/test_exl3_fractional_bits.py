@@ -54,6 +54,42 @@ def test_dynamic_half_rate_can_select_its_own_codebook():
     assert (cfg.runtime_bits, cfg.codebook) == (2, "mcg")
 
 
+@pytest.mark.parametrize("bits", [2.5, 3, 3.5])
+def test_q4nx_recipe_reaches_projection_quantizer_after_config_round_trip(bits):
+    defaults = QuantizeConfig.from_quant_config(EXL3Config(bits=bits, codebook="q4nx").to_dict())
+    assert defaults.runtime_bits == bits and defaults.codebook == "q4nx"
+
+    projection = "model.layers.0.mlp.experts.0.down_proj"
+    cfg = EXL3Config(
+        bits=4,
+        head_bits=6,
+        dynamic={
+            projection: {"bits": bits, "codebook": " Q4NX "},
+            "model.layers.0.self_attn.q_proj": {"bits": 4},
+        },
+        offload_to_disk=False,
+    )
+    restored = QuantizeConfig.from_quant_config(cfg.to_dict())
+    resolved = clone_exllamav3_config_for_module(restored, projection)
+    processor = object.__new__(EXL3Processor)
+    processor.lm_head_name = "lm_head"
+    args = processor._build_quant_args(
+        SimpleNamespace(name=projection, full_name=projection), resolved, torch.device("cuda:0"),
+    )
+    assert args["K"] == bits
+    assert args["q4nx"] is True
+    assert not {"mcg", "mul1"} & args.keys()
+    assert restored.codebook == "mcg"
+
+
+@pytest.mark.parametrize("bits", [1.5, 2, 4, 7])
+def test_q4nx_rejects_other_rates_in_global_and_dynamic_config(bits):
+    with pytest.raises(ValueError, match="q4nx.*2.5.*3.0"):
+        EXL3Config(bits=bits, codebook="q4nx")
+    with pytest.raises(ValueError, match="q4nx.*2.5.*3.0"):
+        EXL3Config(bits=4, dynamic={"down_proj": {"codebook": "q4nx", "bits": bits}})
+
+
 @pytest.mark.parametrize("bits,codebook", [(2.5, "3inst"), (2.25, "mul1"), (4.5, "mul1")])
 def test_unsupported_rate_and_codebook_pairs_are_rejected(bits, codebook):
     with pytest.raises(ValueError, match="Native half-bit rates"):

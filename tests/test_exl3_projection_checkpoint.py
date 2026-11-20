@@ -372,7 +372,11 @@ def test_projection_checkpoint_collision_rejects_a_different_tensor_set(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="EXL3 requires CUDA")
-def test_packed_replay_matches_exllamav3_runtime_reconstruction() -> None:
+@pytest.mark.parametrize(("bits", "codebook"), [(2, "mcg"), (2.5, "q4nx"), (3, "q4nx")])
+def test_packed_replay_matches_exllamav3_runtime_reconstruction(bits, codebook) -> None:
+    if codebook == "q4nx" and torch.version.hip is not None:
+        pytest.skip("Q4NX encoding requires NVIDIA CUDA")
+
     from gptqmodel.exllamav3.modules.quant.exl3 import LinearEXL3
     from gptqmodel.exllamav3.modules.quant.exl3_lib.quantize import (
         quantize_exl3,
@@ -385,12 +389,12 @@ def test_packed_replay_matches_exllamav3_runtime_reconstruction() -> None:
     activations = torch.randn((1024, 128), dtype=torch.float32, device=device)
     hessian = (2.0 / activations.shape[0]) * activations.T @ activations
     quant_args = {
-        "K": 2,
+        "K": bits,
         "devices": [device],
         "apply_out_scales": None,
         "sigma_reg": 0.025,
         "seed": 787,
-        "mcg": True,
+        codebook: True,
     }
     _, _, tensors = quantize_exl3(
         weight,
@@ -406,8 +410,8 @@ def test_packed_replay_matches_exllamav3_runtime_reconstruction() -> None:
         suh=tensors["suh"],
         svh=tensors["svh"],
         trellis=tensors["trellis"],
-        mcg=tensors["mcg"],
         out_dtype=torch.float16,
+        **{codebook: tensors[codebook]},
     )
     try:
         reference = runtime.get_weight_tensor()

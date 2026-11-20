@@ -11,6 +11,7 @@ from safetensors.torch import load_file, save_file
 
 from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
 from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
+from tests.accelerator_gates import requires_nvidia_cuda
 
 
 def _packed(outputs=576, *, bits=6, codebook="mcg", bias=True):
@@ -28,7 +29,7 @@ def _packed(outputs=576, *, bits=6, codebook="mcg", bias=True):
         "svh": (torch.randn(stored_outputs, generator=gen) * .1).half(),
     }
     if codebook != "3inst":
-        multiplier = {"mcg": 0xCBAC1FED, "mul1": 0x83DCD12D}[codebook]
+        multiplier = {"mcg": 0xCBAC1FED, "mul1": 0x83DCD12D, "q4nx": 0x83DCD12D}[codebook]
         packed[codebook] = torch.tensor(multiplier, dtype=torch.uint32).view(torch.int32)
     if bias:
         packed["bias"] = (torch.randn(outputs, generator=gen) * .01).half()
@@ -43,6 +44,27 @@ def _oracle_inner(packed):
     words = words.reshape(*words.shape[:2], -1, 2).flip(-1).reshape_as(words)
     positions = torch.arange(15, -1, -1)
     stream = ((words[..., None] >> positions) & 1).flatten(-2)
+    if "q4nx" in packed:
+        # Construct each state from individual bits and a zero prefix. Decode
+        # the four nibbles pairs directly into their matrix coordinates.
+        step_bits = int(4 * bits)
+        state_bits = 32 - step_bits
+        state_positions = torch.arange(state_bits)
+        stream = torch.nn.functional.pad(stream, (state_bits, 0))
+        windows = torch.arange(1, 65)[:, None] * step_bits + state_positions
+        states = (stream[..., windows] * (1 << state_positions.flip(0))).sum(-1)
+        products = (states * 0x83DCD12D) & 0xFFFFFFFF
+        tiles = torch.empty((*trellis.shape[:2], 16, 16))
+        for step, product in enumerate(products.unbind(-1)):
+            lane, half = divmod(step, 2)
+            col_base, row_base = divmod(lane, 4)
+            for c in range(4):
+                row = row_base * 2 + c % 2 + (c // 2) * 8
+                col = col_base + half * 8
+                lo = (product >> (8 * c)) & 15
+                hi = (product >> (8 * c + 4)) & 15
+                tiles[..., row, col] = ((lo + hi - 15).double() / math.sqrt(42.5)).float()
+        return tiles.permute(0, 2, 1, 3).reshape(trellis.shape[0] * 16, trellis.shape[1] * 16)
     widths = torch.full((256,), int(bits), dtype=torch.long)
     if bits != int(bits):
         widths[1::2] += 1
@@ -123,6 +145,70 @@ def test_mul1_half_rate_safetensors_round_trip_matches_ring_oracle(bits, tmp_pat
     packed.pop("mul1")
     with pytest.raises(ValueError, match="half-bit rate .* and mul1"):
         _module(packed, outputs)(x)
+
+
+@pytest.mark.parametrize("bits", [2.5, 3.0, 3.5])
+def test_q4nx_safetensors_round_trip_matches_zero_prefix_oracle(bits, tmp_path):
+    outputs = 129
+    packed = _packed(outputs, bits=bits, codebook="q4nx")
+    module = _module(packed, outputs)
+    x = torch.randn((3, 128), generator=torch.Generator().manual_seed(45)) * 0.125
+    expected = x @ _oracle_weight(packed)[:, :outputs] + packed["bias"].float()
+    torch.testing.assert_close(module.get_inner_weight_tensor(torch.float32), _oracle_inner(packed), rtol=1e-7, atol=2e-7)
+    torch.testing.assert_close(module(x), expected, atol=2e-6, rtol=2e-6)
+
+    storage = module.tensor_storage_entry()
+    assert storage["bits_per_weight"] == bits
+    assert storage["q4nx_multiplier"] == 0x83DCD12D
+    path = tmp_path / "model.safetensors"
+    save_file(module.state_dict(), path, metadata={"format": "exl3", "bits": str(bits)})
+    for module_cls in (ExllamaV3TorchLinear, ExllamaV3Linear):
+        restored = module_cls(
+            name="kv_a", in_features=128, out_features=outputs, tensor_storage=storage,
+        )
+        restored.load_state_dict(load_file(path), assign=True)
+        assert restored.state_dict().keys() == packed.keys()
+        for name, tensor in restored.state_dict().items():
+            assert torch.equal(tensor, packed[name])
+        torch.testing.assert_close(restored(x), expected, atol=2e-6, rtol=2e-6)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("bits", [2.5, 3.0, 3.5])
+@torch.inference_mode()
+def test_q4nx_packed_cuda_decode_matches_oracle_for_decode_and_prefill(bits, monkeypatch):
+    if not requires_nvidia_cuda():
+        pytest.skip("requires NVIDIA CUDA")
+
+    outputs = 129
+    packed_cpu = _packed(outputs, bits=bits, codebook="q4nx")
+    dense = _oracle_weight(packed_cpu)[:, :outputs].cuda().double()
+    packed = {name: tensor.cuda() for name, tensor in packed_cpu.items()}
+    layer = ExllamaV3Linear.from_tensors(in_features=128, out_features=outputs, name="kv_a", tensors=packed)
+    inner = layer._ensure_inner()
+
+    def forbidden_fallback(*unused, **kwargs):
+        pytest.fail("Q4NX forward should decode inside the packed CUDA GEMM")
+
+    monkeypatch.setattr(inner, "get_inner_weight_tensor", forbidden_fallback)
+    monkeypatch.setattr(layer, "_ensure_torch_inner", forbidden_fallback)
+    for rows, dtype in ((1, torch.float16), (17, torch.bfloat16), (65, torch.float16)):
+        x = torch.linspace(-0.5, 0.5, rows * 128, device="cuda").reshape(rows, 128).to(dtype)
+        expected = (x.double() @ dense + packed["bias"].double()).float()
+        raw = inner.forward(x.half(), {}, out_dtype=torch.float32)[..., :outputs]
+        torch.testing.assert_close(raw, expected, rtol=2e-3, atol=2e-4)
+        visible = layer(x)
+        assert visible.dtype == dtype
+        rounded = expected.to(dtype)
+        if dtype == torch.bfloat16:
+            assert torch.equal(visible, raw.bfloat16())
+            # The FP32 check above bounds arithmetic error. A value that
+            # crosses a BF16 rounding boundary may differ by one BF16 step.
+            outside = ~torch.isclose(visible, rounded, rtol=2e-3, atol=5e-4)
+            nearest = torch.nextafter(rounded[outside], visible[outside])
+            torch.testing.assert_close(visible[outside], nearest, rtol=0, atol=0)
+        else:
+            torch.testing.assert_close(visible, rounded, rtol=2e-3, atol=5e-4)
 
 
 @pytest.mark.cpu
