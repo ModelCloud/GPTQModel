@@ -160,6 +160,58 @@ Measured with an independent FP64 oracle (`out_features=64`,
 | natural order (GPT-QModel) | 4.12e-07 |
 | vLLM `[0, 2, 1, 3]` order | 8.42 |
 
+## 6. Legacy weight-file resolution
+
+`save_quantized` always writes the canonical `model` base name
+(`gptqmodel/models/writer.py`), but older exports used
+`gptq_model-<bits>bit-<group>g.safetensors`. `from_quantized` probed the
+legacy name first, so a directory that held both files silently reloaded the
+stale export while `config.json` / `quantize_config.json` described the new
+one.
+
+Before, `possible_model_basenames` in `gptqmodel/models/loader.py` listed the
+legacy name first:
+
+```mermaid
+flowchart TD
+    A["from_quantized"] --> B["possible_model_basenames<br/>legacy first, then model"]
+    B --> C{"legacy file exists?"}
+    C -- "yes" --> D["load stale gptq_model weights"]
+    C -- "no" --> E["load model.safetensors"]
+    classDef error fill:#f9d5d5,stroke:#af3b3b,color:#222
+    class D error
+```
+
+After, `_quantized_checkpoint_basenames` puts the canonical name first and the
+writer removes the stale legacy name that belongs to the saved layout:
+
+```mermaid
+flowchart TD
+    A["from_quantized"] --> B["_quantized_checkpoint_basenames<br/>model first, legacy fallback"]
+    B --> C{"model checkpoint exists?"}
+    C -- "yes" --> D["load canonical model checkpoint"]
+    C -- "no" --> E["fallback to legacy gptq_model name"]
+    F["save_quantized"] --> G["_cleanup_stale_legacy_weight_files<br/>bits and group from quantize_config"]
+    G --> H{"legacy name matches this save?"}
+    H -- "yes" --> I["remove stale legacy file"]
+    H -- "no" --> J["keep other exports"]
+    classDef good fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+    classDef warn fill:#fff3cd,stroke:#8a6d3b,color:#222
+    class D good
+    class I good
+    class E warn
+```
+
+- `_quantized_checkpoint_basenames(qcfg)` returns `["model",
+  "gptq_model-<bits>bit-<group>g"]`; the legacy entry only resolves when no
+  canonical file exists.
+- `_cleanup_stale_legacy_weight_files` removes the legacy single file, its
+  `.index.json`, and `gptq_model-<bits>bit-<group>g-NNNNN-of-NNNNN.safetensors`
+  shards for the saved bits/group. A legacy export for a different layout is
+  left alone.
+- The canonical file wins even when the stale legacy file has different
+  weights; the writer no longer leaves that ambiguity behind a fresh save.
+
 ## Contracts
 
 - A checkpoint written by GPTQModel 5.4.x parses on 5.x; `meta.gptaq: false`
@@ -174,6 +226,8 @@ Measured with an independent FP64 oracle (`out_features=64`,
   reason instead of leaving the caller with random weights.
 - 8-bit AWQ stays in natural lane order and is documented as not loadable by
   vLLM `awq_marlin`.
+- The loader probes `model` before `gptq_model-<bits>bit-<group>g`; a save
+  removes the legacy name that matches its own bits/group.
 
 ## Validation
 
@@ -189,6 +243,9 @@ Measured with an independent FP64 oracle (`out_features=64`,
 | `tests/test_checkpoint_compat.py::test_awq_8bit_vllm_order_would_swap_lanes_one_and_two` | the vLLM undo is not this layout |
 | `tests/test_checkpoint_compat.py::test_untied_lm_head_quantizes_and_reloads` | untied head quantizes, saves, reloads, forwards |
 | `tests/test_checkpoint_compat.py::test_tied_lm_head_is_rejected_with_the_explicit_error` | tied head raises `NotImplementedError` |
+| `tests/test_checkpoint_legacy_shadow_5723.py::test_loader_basename_order_prefers_the_canonical_name` | the loader probes `model` first |
+| `tests/test_checkpoint_legacy_shadow_5723.py::test_loader_prefers_the_fresh_canonical_checkpoint` | a stale legacy file does not shadow the fresh save |
+| `tests/test_checkpoint_legacy_shadow_5723.py::test_save_removes_a_stale_legacy_export` | the writer drops only its own legacy name |
 
 Introduced in [PR #4034](https://github.com/ModelCloud/GPTQModel/pull/4034) for
 [issue #4013](https://github.com/ModelCloud/GPTQModel/issues/4013).
