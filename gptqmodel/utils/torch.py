@@ -1870,6 +1870,16 @@ def tf32_high_precision_guard():
     take the model-global-state writer, which excludes in-flight compiled
     calls and their traces, so no trace can straddle a switch (#5390). Only
     the switches take the writer, not the whole quantization.
+
+    A *raw* ``torch.compile`` call is the residual case. Only the package's
+    ``torch_compile()`` wrapper holds the shared side, so a trace started by
+    a caller's own ``torch.compile`` runs outside it. A raw trace that started
+    before this guard writes the pre-guard precision back when it ends, while
+    the guard is still active: the writer cannot exclude a trace that never
+    takes the lock, and dynamo exposes no in-flight-trace signal to wait on.
+    Callers that quantize while another thread runs a raw compile must
+    coordinate: let that trace finish before ``quantize()``, or compile
+    through ``torch_compile()`` so the call holds the reader (#5612).
     """
 
     global _TF32_GUARD_DEPTH, _TF32_GUARD_PREVIOUS
