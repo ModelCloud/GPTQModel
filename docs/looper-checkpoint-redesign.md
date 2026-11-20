@@ -66,7 +66,7 @@ from each attempt's private offload directory, so rerunning with the same
 | QuantizationCheckpointAdapter | Compose packed modules, dense weights, processor continuations, scheduler and RNG |
 | Processor continuation protocol | Own caches, counters, results, statistics and method-specific state |
 | Packed-module schemas | Explicit constructors for standard, QQQ, Paro, EXL3 and BNB modules |
-| ContinuationCodec | Versioned tagged values and tensors; no pickle |
+| ContinuationCodec | Versioned tagged values and tensors; no pickle; streamed single-read file codec |
 | CheckpointStore | Writer lease, immutable objects, publication and integrity |
 
 Both the calibration looper and weight-only looper expose the same extension
@@ -206,6 +206,80 @@ workspace per thread. These guarantees apply to
 uninterrupted execution too; a checkpoint cannot repair nondeterministic inputs
 or shared random-state races in the underlying algorithm.
 
+## Continuation capture and restore I/O
+
+Continuation capture streams the encoded payload into the store instead of
+building it in memory twice. `ContinuationCodec.dump_file()` writes the
+safetensors object straight to the private path from `CheckpointStore.stage()`;
+`CheckpointStore.put_file()` hashes, fsyncs and renames that file into
+`objects/<sha256>` without loading it. `ContinuationCodec.dumps()` remains the
+in-memory form for tests and callers that need bytes, and
+`ContinuationCodec.sha256()` hashes exactly those bytes from a temporary file
+under the offload root for the calibration identity.
+
+Encoding writes one payload entry per distinct tensor object. Repeated
+references to the same tensor share that entry, so aliases restore to the same
+object. Already-CPU tensors are written from the live state without a clone;
+non-CPU tensors are moved to CPU. A tensor view whose storage overlaps another
+entry is the only case that is copied, because safetensors rejects entries with
+shared storage.
+
+Resume hashes the continuation once. `CheckpointStore._manifest()` verifies
+every referenced object with `object_path()`, which streams the file through
+SHA-256, and records the continuation's verified path in
+`_verified_continuations`. `CheckpointExtension.prepare()` asks
+`continuation_path()` for that recorded path and decodes it with
+`ContinuationCodec.load_file()` (`safetensors.safe_open`), materializing each
+payload tensor once for all of its aliases. Bitwise verification compares the
+decoded tensor against its own live bytes and `_version`, so an in-place
+transfer that mutates its source is detected; inference tensors, which do not
+track a version counter, keep a cloned reference for the comparison.
+
+```mermaid
+flowchart TD
+    A["CheckpointExtension.on_boundary"] --> B["adapter.capture"]
+    B --> C["ContinuationCodec.dump_file"]
+    C --> D["ContinuationCodec._encode"]
+    D --> E{"device is CPU?"}
+    E -- "yes" --> F["Write live tensor; clone only overlapping views"]
+    E -- "no" --> G["tensor.to(device=cpu)"]
+    F --> H["save_file into CheckpointStore.stage path"]
+    G --> H
+    H --> I["CheckpointStore.put_file: hash, fsync, rename to objects/sha256"]
+    I --> J["CheckpointStore.commit: object_path checks"]
+    J --> K["Manifest published; CURRENT replaced"]
+    L["CheckpointExtension.prepare"] --> M["CheckpointStore.load: _manifest calls object_path"]
+    M --> N["_verified_continuations records the hashed path"]
+    N --> O["continuation_path returns the recorded path"]
+    O --> P["ContinuationCodec.load_file: safe_open"]
+    P --> Q["_decode materializes each tensor once"]
+    Q --> R{"version and raw bytes match?"}
+    R -- "no" --> X["ValueError; checkpoint_restore_failed"]
+    R -- "yes" --> S["adapter.restore; committed cursor"]
+    M -- "checksum mismatch" --> Y["CheckpointCorrupt; try the older generation"]
+    I -. "exception" .-> Z["stage deletes its temp file"]
+    classDef failure fill:#fce8e6,stroke:#a33,color:#111
+    class X,Y,Z failure
+```
+
+| Mechanism | Before | Now |
+| --- | --- | --- |
+| Capture buffer | `gptqmodel/looper/continuation.py:34` cloned every tensor (`.to(device="cpu").contiguous().clone()`), then `gptqmodel/looper/checkpoint.py:151` built a second full `bytes` buffer with `dumps()`, which `put()` copied again. | `dump_file()` streams the payload into `CheckpointStore.stage()`; `put_file()` hashes and renames it without a second buffer. CPU tensors are written as-is. |
+| Repeated references | Each reference to the same tensor produced its own payload entry and clone. | `_encode()` registers one entry per distinct tensor object (`id`); aliases restore to the same object. |
+| Calibration identity | `gptqmodel/looper/gptq_checkpoint.py:393` serialized the whole continuation to `bytes` to hash it. | `ContinuationCodec.sha256()` hashes the same bytes from a temporary file in the offload root. |
+| Manifest verification | `gptqmodel/looper/checkpoint_store.py:267` called `get()`, reading and hashing the whole payload into memory only to discard it. | `_manifest()` calls `object_path()`, which streams and hashes the file, and records the verified path. |
+| Resume decode | `gptqmodel/looper/checkpoint.py:110` called `loads(store.get(...))`: one full `bytes` read, a header parse, then `safetensors.load()` copied the payload again. | `load_file()` decodes with `safe_open`; each payload tensor is materialized once and shared by aliases. |
+| Bitwise verification | Compared every stored tensor against a cloned copy. | Compares the live decoded tensor and its `_version`; inference tensors keep a cloned reference. |
+
+Failure paths stay fail-closed. A checksum mismatch during manifest
+verification raises `CheckpointCorrupt` and recovery tries the preceding
+generation. A staged file is deleted on success and on exception, and
+`CheckpointStore.collect()` removes stray `.<32 hex>.tmp` staging files. The
+continuation is hashed when the manifest is verified and then decoded from that
+same path, so a file changed between verification and decode is not re-hashed;
+that is the existing no-external-edit contract, now with one streaming hash
+instead of a full read plus a second hash at prepare time.
+
 ## Disk-backed layer-output staging and reads
 
 `DiskBackedLayerOutputWriter` collects indexed replay batches. With
@@ -307,7 +381,8 @@ corruption detection at dispatch, and empty-slot skipping for list-backed replay
 - Initial calibration capture is still reconstructed for identity validation
   on restart; completed transformer layers are not replayed.
 - Source hashing and integrity checks favor correctness over startup speed.
-  Continuation serialization copies activation tensors to CPU.
+  Continuation serialization writes CPU-owned copies; already-CPU tensors are
+  streamed without an extra copy, and only overlapping storage views are cloned.
 - Each attempt gets a private offload directory, retained because live model
   save references may depend on it. After saving and discarding live
   quantization objects, users may remove the checkpoint directory.
@@ -318,6 +393,11 @@ corruption detection at dispatch, and empty-slot skipping for list-backed replay
   The lease excludes competing checkpoint runs, not arbitrary external tools.
 
 ## Validation
+
+`tests/test_checkpoint_continuation_stream_5749.py` pins byte-identical staged
+files and digests, alias deduplication, clone-free CPU encoding, bounded commit
+peak RSS with no full-payload store reads, bitwise resume restore and corrupted
+continuation rejection.
 
 Storage tests cover publication errors, corruption/fallback, missing artifacts,
 unpublished orphans, retention, leases, thread ownership and SIGTERM/SIGKILL

@@ -390,11 +390,10 @@ class QuantizationCheckpointAdapter:
             ),
             "source": _source_identity(self.model),
             "quantization": config,
-            "calibration": hashlib.sha256(
-                ContinuationCodec.dumps(
-                    [processor.inputs_cache.unwrap() for processor in self.processors]
-                )
-            ).hexdigest(),
+            "calibration": ContinuationCodec.sha256(
+                [processor.inputs_cache.unwrap() for processor in self.processors],
+                self.offload,
+            ),
             "processors": [type(processor).__name__ for processor in self.processors],
             "packed_kernel": str(self.model.qlinear_kernel),
             "runtime": {
@@ -483,7 +482,7 @@ class QuantizationCheckpointAdapter:
                 "numpy_rng": numpy_rng,
             }
             # The caller serializes immediately while the boundary is quiescent;
-            # preserve source device tags until the codec makes CPU-owned copies.
+            # preserve source device tags until the codec writes CPU-owned copies.
         emit_device_telemetry(
             "checkpoint_execution_captured",
             execution=state["execution"],
