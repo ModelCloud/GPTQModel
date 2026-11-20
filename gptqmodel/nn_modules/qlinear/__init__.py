@@ -374,6 +374,22 @@ def _pack_code_cols_3(values: t.Tensor) -> t.Tensor:
     return _pack_rows_3(transposed).T.contiguous()
 
 
+def checkpoint_qzeros_layout(format_code) -> int | None:
+    """Checkpoint qzero word layout for a GPTQ-family checkpoint format.
+
+    ``gptq`` (and its ``gemm`` alias) store the v1 ``zero_point - 1``
+    convention. ``gptq_v2`` and the planar ``gptq_p`` layout store logical
+    zero points on disk. Other formats have no GPTQ qzero layout, so callers
+    keep their runtime or unknown-layout behavior.
+    """
+
+    if format_code in (FORMAT.GPTQ, "gptq", FORMAT.GEMM, "gemm"):
+        return 1
+    if format_code in (FORMAT.GPTQ_V2, "gptq_v2", FORMAT.GPTQ_P, "gptq_p"):
+        return 2
+    return None
+
+
 class BaseQuantLinear(nn.Module):
     # CPU int4pack kernels rewrite checkpoint buffers into their runtime layout
     # on the first forward. Serialize that cold check-and-transform so a
@@ -1925,15 +1941,22 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         loading, or an explicit conversion). A ``REQUIRES_FORMAT_V2`` kernel
         decodes v2 even while that placeholder still says v1, so a copied v1
         marker must be converted instead of being treated as an exact match
-        (issue #4377). An established v1 layout is left alone: the public
-        ``convert_gptq_v2_to_v1_format`` path deliberately holds v1 words.
+        (issue #4377). The planar ``gptq_p`` layout also stores logical words
+        for every kernel that supports it. An established v1 layout is left
+        alone: the public ``convert_gptq_v2_to_v1_format`` path deliberately
+        holds v1 words.
         """
 
         runtime_format = self._runtime_qzeros_format()
         if (
             runtime_format == 1
-            and getattr(self, "REQUIRES_FORMAT_V2", False)
             and not getattr(self, "_qzeros_format_established", False)
+            and (
+                getattr(self, "REQUIRES_FORMAT_V2", False)
+                # The planar ``gptq_p`` words are logical for every kernel that
+                # supports the format, independent of REQUIRES_FORMAT_V2.
+                or getattr(self, "format", None) == FORMAT.GPTQ_P
+            )
         ):
             return 2
         return runtime_format
@@ -1973,10 +1996,9 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         """
 
         checkpoint_format = self._checkpoint_qzeros_format()
-        if checkpoint_format in (FORMAT.GPTQ, "gptq", "gemm"):
-            return 1
-        if checkpoint_format in (FORMAT.GPTQ_V2, "gptq_v2"):
-            return 2
+        layout = checkpoint_qzeros_layout(checkpoint_format)
+        if layout is not None:
+            return layout
         return int(self._runtime_qzeros_format())
 
     def _checkpoint_qzeros_format(self):
@@ -2057,14 +2079,15 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         if checkpoint_format is None:
             return None
         runtime_format = self._runtime_qzeros_format()
+        checkpoint_layout = checkpoint_qzeros_layout(checkpoint_format)
         planar = bool(getattr(self, "planar", False))
-        if runtime_format == 2 and checkpoint_format in (FORMAT.GPTQ, "gptq", "gemm"):
+        if runtime_format == 2 and checkpoint_layout == 1:
             from ...utils.model_dequant import _revert_gptq_v1_qzeros_correction
 
             return _revert_gptq_v1_qzeros_correction(
                 qzeros, self.bits, planar=planar,
             )
-        if runtime_format == 1 and checkpoint_format in (FORMAT.GPTQ_V2, "gptq_v2"):
+        if runtime_format == 1 and checkpoint_layout == 2:
             from ...utils.model_dequant import _correct_gptq_v1_qzeros
 
             return _correct_gptq_v1_qzeros(
@@ -2120,18 +2143,15 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             if isinstance(recorded, int) and recorded in (1, 2):
                 return int(recorded)
 
-        on_disk_format = getattr(self, "_checkpoint_format_on_disk", None)
-        if on_disk_format in (FORMAT.GPTQ, "gptq", "gemm"):
-            return 1
-        if on_disk_format in (FORMAT.GPTQ_V2, "gptq_v2"):
-            return 2
-        if self.format in (FORMAT.GPTQ, "gptq", "gemm"):
+        layout = checkpoint_qzeros_layout(getattr(self, "_checkpoint_format_on_disk", None))
+        if layout is not None:
+            return layout
+        layout = checkpoint_qzeros_layout(getattr(self, "format", None))
+        if layout is not None:
             # An export shell being filled by accelerate, or a directly
             # constructed module. Keep the historical restore from the format
             # the module was built for; the caller owns any word conversion.
-            return 1
-        if self.format in (FORMAT.GPTQ_V2, "gptq_v2"):
-            return 2
+            return layout
         return None
 
     def _incoming_qzeros_is_live(self, state_dict, prefix: str) -> bool:
@@ -2176,14 +2196,16 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
     def _restore_qzeros_format(self, incoming_format: int) -> None:
         """Convert the copied qzeros words to this kernel's runtime layout."""
 
-        requires_v2 = getattr(self, "REQUIRES_FORMAT_V2", False)
+        logical_layout = getattr(self, "REQUIRES_FORMAT_V2", False) or (
+            getattr(self, "format", None) == FORMAT.GPTQ_P
+        )
         self._qzeros_format_established = True
         if incoming_format == 1:
-            if requires_v2:
+            if logical_layout:
                 # The checkpoint v1 convention stores `zero_point - 1`, but
-                # this kernel always decodes v2. Convert the loaded words in
-                # place so a `load_state_dict(state_dict())` round trip keeps
-                # the same zero points.
+                # this kernel decodes logical (v2) words. Convert the loaded
+                # words in place so a `load_state_dict(state_dict())` round
+                # trip keeps the same zero points.
                 from ...utils.model import convert_gptq_v1_to_v2_format_module
 
                 convert_gptq_v1_to_v2_format_module(
@@ -2194,7 +2216,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             return
 
         if incoming_format == 2:
-            if requires_v2:
+            if logical_layout:
                 self._qzeros_format = 2
                 return
             # A v2 source copied into a kernel that decodes v1 words. Marlin

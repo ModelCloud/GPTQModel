@@ -52,6 +52,7 @@ from ..nn_modules.qlinear import (
     QZEROS_FORMAT_BUFFER,
     BaseQuantLinear,
     GPTQQuantLinear,
+    checkpoint_qzeros_layout,
 )
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
@@ -1004,7 +1005,7 @@ def hf_convert_gptq_v1_to_v2_format(
     except (TypeError, ValueError):
         source_format = None
     converted = False
-    if source_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+    if source_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.GPTQ_P):
         # Optimum calls this before `save_pretrained()` can run. Record the
         # on-disk layout here so the state-dict hook emits the checkpoint
         # convention instead of the kernel's runtime one.
@@ -1012,13 +1013,14 @@ def hf_convert_gptq_v1_to_v2_format(
             if not isinstance(module, GPTQQuantLinear):
                 continue
             module._checkpoint_format_on_disk = source_format
-            if source_format == FORMAT.GPTQ_V2:
-                # A v2 file already stores logical zero points and the kernel
-                # decodes v2, so no word conversion runs. Mark the runtime
-                # layout anyway: without it the module keeps the constructor's
-                # v1 placeholder, `checkpoint_layout_qzeros` mistakes the live
-                # v2 words for v1, and the next save adds one to every zero
-                # point (issue #4952). The call also initializes the persistent
+            if checkpoint_qzeros_layout(source_format) == 2:
+                # A v2 or planar gptq_p file already stores logical zero points
+                # and the kernel decodes logical words, so no word conversion
+                # runs. Mark the runtime layout anyway: without it the module
+                # keeps the constructor's v1 placeholder,
+                # `checkpoint_layout_qzeros` mistakes the live logical words
+                # for v1, and the next save adds one to every zero point
+                # (issue #4952). The call also initializes the persistent
                 # `qzeros_format` marker, which an HF-loaded module otherwise
                 # leaves as uninitialized memory.
                 module.qzero_format(format=2)

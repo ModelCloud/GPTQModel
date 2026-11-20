@@ -51,7 +51,7 @@ from ..adapter.adapter import Adapter, normalize_adapter
 from ..adapter.remote import configure_explicit_remote_adapter, resolve_checkpoint_adapter_path
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
-from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
+from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear, checkpoint_qzeros_layout
 from ..nn_modules.qlinear.allspark import AllSparkLinear
 from ..nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
@@ -3921,11 +3921,12 @@ def ModelLoader(cls):
                 **load_extra_kwargs,
             )
 
-            if format_code == FORMAT.GPTQ_V2:
-                # Native v2 checkpoints store logical zero points; the v1->v2
-                # conversion above only runs for v1 checkpoints. Mark the
-                # loaded modules so decoders and repack bookkeeping read the
-                # words as v2 instead of misreading every zero point one high.
+            if checkpoint_qzeros_layout(format_code) == 2:
+                # Native v2 and planar gptq_p checkpoints store logical zero
+                # points; the v1->v2 conversion above only runs for v1
+                # checkpoints. Mark the loaded modules so decoders and repack
+                # bookkeeping read the words as v2 instead of misreading every
+                # zero point one high.
                 for m in model.modules():
                     if isinstance(m, GPTQQuantLinear):
                         m.qzero_format(format=2)
