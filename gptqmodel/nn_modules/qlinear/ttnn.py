@@ -360,21 +360,30 @@ class TTNNLinear(GPTQQuantLinear):
             zero_words, out_features=self.out_features, device_count=device_count
         )
 
-        def _upload(tensor, dtype, mesh_mapper=None):
+        def _upload(tensor, dtype, mesh_mapper=None, layout=ttnn.TILE_LAYOUT):
             host = ttnn.from_torch(
                 tensor,
                 dtype=dtype,
-                layout=ttnn.TILE_LAYOUT,
+                layout=layout,
                 mesh_mapper=mesh_mapper,
             )
             return ttnn.to_device(host, dev)
+
+        # ``g_idx`` is a lookup table consumed by ``ttnn.embedding``. Tiled
+        # storage pads its single logical row to 32 physical rows: 96 KiB for
+        # a 768-input projection instead of 24 KiB row-major (#5854). The
+        # embedding operator accepts a row-major index tensor, so keep it
+        # unpadded on the device.
+        indices_layout = ttnn.ROW_MAJOR_LAYOUT
 
         if device_count == 1:
             weight = _upload(weight_words, ttnn.uint32)
             zeros = _upload(zero_words, ttnn.uint32)
             scales = _upload(self.scales.detach().to("cpu", torch.bfloat16).contiguous(), ttnn.bfloat16)
             indices = _upload(
-                g_idx.to(torch.uint32).reshape(1, 1, 1, -1).contiguous(), ttnn.uint32
+                g_idx.to(torch.uint32).reshape(1, 1, 1, -1).contiguous(),
+                ttnn.uint32,
+                layout=indices_layout,
             )
             bias = None
             if self.bias is not None:
@@ -393,7 +402,10 @@ class TTNNLinear(GPTQQuantLinear):
                 ttnn.bfloat16, shard_cols,
             )
             indices = _upload(
-                g_idx.to(torch.uint32).reshape(1, 1, 1, -1).contiguous(), ttnn.uint32, replicate
+                g_idx.to(torch.uint32).reshape(1, 1, 1, -1).contiguous(),
+                ttnn.uint32,
+                replicate,
+                layout=indices_layout,
             )
             bias = None
             if self.bias is not None:

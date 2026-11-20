@@ -2893,6 +2893,81 @@ def test_ttnn_budget_counts_the_packed_device_tensors(chips):
     os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
     reason="explicit TTNN hardware gate",
 )
+@pytest.mark.parametrize("chips", [1, 4])
+def test_ttnn_group_indices_are_stored_row_major(chips):
+    """``g_idx`` is a lookup table, not a tile (#5854).
+
+    Tiled storage pads the single logical row of indices to 32 physical rows:
+    96 KiB for a 768-input projection instead of 24 KiB row-major. The
+    ``ttnn.embedding`` consumer accepts the row-major tensor directly, so the
+    forward must stay bit-identical while the device allocation drops by the
+    72 KiB the issue measured.
+    """
+
+    import dataclasses
+
+    from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
+    from gptqmodel.utils.ttnn_runtime import close_mesh, dram_allocated_bytes, import_ttnn
+
+    ttnn = import_ttnn()
+    layer = TTNNLinear(
+        bits=4, group_size=128, sym=True, desc_act=False,
+        in_features=768, out_features=768, bias=True,
+        format=FORMAT.GPTQ_V2,
+    ).eval()
+    layer.ttnn_device_count = chips
+    layer.qweight.fill_(0x99999999 - 2**32)
+    layer.qzeros.fill_(0x88888888 - 2**32)
+    layer.scales.fill_(0.0625)
+    layer.g_idx.copy_(torch.arange(768, dtype=torch.int32) // 128)
+    layer.bias.zero_()
+    layer.qzero_format(2)
+    try:
+        layer.post_init()
+        mesh = layer._mesh()
+        indices = layer._ttnn_layer.g_idx
+        assert indices.layout == ttnn.ROW_MAJOR_LAYOUT
+        activation = torch.randn(2, 768, dtype=torch.bfloat16)
+        with torch.inference_mode():
+            row_major = layer(activation)
+
+        # Upload the same indices tiled: the reference forward and the cost the
+        # row-major layout avoids.
+        payload = layer.g_idx.detach().to("cpu", dtype=torch.uint32).reshape(1, 1, 1, -1).contiguous()
+        before = dram_allocated_bytes(mesh.device)
+        tiled = ttnn.to_device(
+            ttnn.from_torch(payload, dtype=ttnn.uint32, layout=ttnn.TILE_LAYOUT),
+            mesh.device,
+        )
+        tiled_bytes = dram_allocated_bytes(mesh.device) - before
+        before = dram_allocated_bytes(mesh.device)
+        row = ttnn.to_device(
+            ttnn.from_torch(payload, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT),
+            mesh.device,
+        )
+        row_bytes = dram_allocated_bytes(mesh.device) - before
+        ttnn.deallocate(row)
+        assert tiled_bytes == 96 * 1024
+        assert row_bytes == 24 * 1024
+        assert tiled_bytes - row_bytes == 72 * 1024
+
+        original = layer._ttnn_layer.g_idx
+        layer._ttnn_layer = dataclasses.replace(layer._ttnn_layer, g_idx=tiled)
+        try:
+            with torch.inference_mode():
+                tiled_out = layer(activation)
+        finally:
+            ttnn.deallocate(original)
+        torch.testing.assert_close(row_major, tiled_out, rtol=0, atol=0)
+    finally:
+        layer.clear_weight_cache()
+        close_mesh()
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
 def test_block_float_budget_counts_the_device_weight():
     """The ``bf8_b`` kernel's device weight is budgeted too (#5810)."""
 
