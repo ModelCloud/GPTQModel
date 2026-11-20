@@ -734,6 +734,131 @@ def test_native_ttnn_layerwise_resolution_never_initializes_pjrt(monkeypatch, ba
     ]
 
 
+@pytest.mark.parametrize(
+    "device, device_map, ordinal",
+    [
+        ("xla:1", None, 1),
+        (torch.device("xla", 2), None, 2),
+        (None, {"": "xla:3"}, 3),
+        (None, {"": "xla:0"}, 0),
+    ],
+)
+def test_native_ttnn_chip_ordinal_is_not_checkpoint_placement(device, device_map, ordinal):
+    """An indexed `xla:N` selects the chip, not the checkpoint's storage.
+
+    Treating it as a full-model placement map sent the checkpoint through PJRT
+    and failed while reading safetensors, before the native upload could run
+    (#5853).
+    """
+
+    from gptqmodel.models.loader import _resolve_native_ttnn_placement
+
+    requested, explicit, resolved = _resolve_native_ttnn_placement(device, device_map, None)
+    assert requested is None
+    assert explicit == {"": "cpu"}
+    assert resolved == ordinal
+
+
+def test_native_ttnn_placement_without_a_named_chip_is_unchanged():
+    from gptqmodel.models.loader import _resolve_native_ttnn_placement
+
+    assert _resolve_native_ttnn_placement(None, None, None) == (None, None, None)
+    # A bare family names no chip, so the kernel keeps its default chip 0.
+    assert _resolve_native_ttnn_placement("xla", None, None) == (None, None, None)
+    assert _resolve_native_ttnn_placement(DEVICE.XLA, None, None) == (None, None, None)
+    # A budget is a layer-wise request and names no single chip.
+    assert _resolve_native_ttnn_placement("xla:1", None, {"xla": "8GiB"}) == (None, None, None)
+
+
+@pytest.mark.parametrize(
+    "device, device_map",
+    [
+        (None, {"": "xla:0", "model.decoder.layers.0": "xla:1"}),
+        (("xla:0", "xla:1"), None),
+        (["xla:2", "xla:3"], None),
+    ],
+)
+def test_native_ttnn_rejects_a_multi_chip_placement(device, device_map):
+    """A per-layer `xla:N` map cannot coexist with the native mesh.
+
+    The native kernel opens one mesh per process; a layer-wise XLA map would
+    initialize PJRT and claim the same chips, so it is rejected rather than
+    silently ignored.
+    """
+
+    from gptqmodel.models.loader import _resolve_native_ttnn_placement
+
+    with pytest.raises(ValueError, match="one chip per process"):
+        _resolve_native_ttnn_placement(device, device_map, None)
+
+
+def test_native_ttnn_ordinal_is_applied_to_every_native_kernel():
+    from gptqmodel.models.loader import _apply_native_ttnn_ordinal
+
+    class _Kernel(torch.nn.Module):
+        def _requested_device_id(self):
+            return int(getattr(self, "ttnn_device_id", 0))
+
+    model = torch.nn.Module()
+    model.kernel = _Kernel()
+    model.dense = torch.nn.Linear(2, 2)
+
+    _apply_native_ttnn_ordinal(model, 1)
+    assert model.kernel._requested_device_id() == 1
+    assert not hasattr(model.dense, "ttnn_device_id")
+
+
+def test_ttnn_kernels_open_the_requested_chip(monkeypatch):
+    """Both native kernels forward their ordinal to `open_mesh`."""
+
+    from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
+    from gptqmodel.nn_modules.qlinear.ttnn_blockfloat import TTNNBlockFloat8Linear
+
+    opened = []
+    runtime = _patch_ttnn_runtime(monkeypatch, _fake_ttnn_module(opened))
+    common = {
+        "bits": 4, "group_size": 128, "sym": True, "desc_act": False,
+        "in_features": 256, "out_features": 128, "bias": False,
+        "pack_dtype": torch.int32,
+    }
+    for kernel in (TTNNLinear, TTNNBlockFloat8Linear):
+        # Construction validates against the live chip count, which the fake
+        # runtime cannot enumerate; the placement under test is the ordinal.
+        monkeypatch.setattr(kernel, "validate_once", classmethod(lambda cls: (True, None)))
+    try:
+        for kernel in (TTNNLinear, TTNNBlockFloat8Linear):
+            layer = kernel(**common)
+            assert layer._requested_device_id() == 0
+            layer._mesh()
+            assert opened[-1][0] == "device"
+            assert opened[-1][1]["device_id"] == 0
+            runtime.close_mesh()
+
+            layer.ttnn_device_id = 1
+            layer._mesh()
+            assert opened[-1][1]["device_id"] == 1
+            runtime.close_mesh()
+    finally:
+        runtime.close_mesh()
+
+
+def test_ttnn_rejects_an_ordinal_with_a_multi_chip_mesh(monkeypatch):
+    from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
+
+    opened = []
+    _patch_ttnn_runtime(monkeypatch, _fake_ttnn_module(opened))
+    monkeypatch.setattr(TTNNLinear, "validate_once", classmethod(lambda cls: (True, None)))
+    layer = TTNNLinear(
+        bits=4, group_size=128, sym=True, desc_act=False,
+        in_features=256, out_features=128, bias=False, pack_dtype=torch.int32,
+    )
+    layer.ttnn_device_count = 4
+    layer.ttnn_device_id = 1
+    with pytest.raises(ValueError, match="device_id selects a single chip"):
+        layer._mesh()
+    assert opened == []
+
+
 def test_ttnn_rejects_non_8_aligned_widths():
     from gptqmodel.nn_modules.qlinear.ttnn import TTNNLinear
 
@@ -2685,6 +2810,82 @@ def test_ttnn_zero_words_crossing_shard_boundaries(chips):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     finally:
         layer.clear_weight_cache()
+        close_mesh()
+
+
+def _cached_opt_gptq_checkpoint():
+    """Return the cached OPT-125M GPTQ snapshot directory, or None.
+
+    ``try_to_load_from_cache`` needs ``refs/main``, which a snapshot copied
+    without it does not have; walking the snapshot directory finds the same
+    files without a network round trip.
+    """
+
+    from huggingface_hub.constants import HF_HUB_CACHE
+
+    repo_dir = os.path.join(
+        HF_HUB_CACHE, "models--ModelCloud--Opt-125-GPTQ-4bit-10-25-2024", "snapshots"
+    )
+    if not os.path.isdir(repo_dir):
+        return None
+    for name in sorted(os.listdir(repo_dir)):
+        snapshot = os.path.join(repo_dir, name)
+        if os.path.isfile(os.path.join(snapshot, "config.json")):
+            return snapshot
+    return None
+
+
+@pytest.mark.skipif(
+    os.environ.get("GPTQMODEL_TEST_TTNN") != "1",
+    reason="explicit TTNN hardware gate",
+)
+@pytest.mark.parametrize("device, ordinal", [("xla:0", 0), ("xla:1", 1), (None, 0)])
+def test_ttnn_load_places_the_model_on_the_requested_chip(device, ordinal):
+    """`device="xla:N"` selects the native chip, not a checkpoint map (#5853).
+
+    The native backend stages the checkpoint on the host and uploads packed
+    weights through TT-Metal. Treating the indexed device as an Accelerate
+    placement map sent the read through PJRT and failed in
+    ``aten::empty.memory_format`` before any upload. The load must instead open
+    the requested chip and produce finite logits from CPU-staged tensors.
+    """
+
+    from gptqmodel import GPTQModel
+    from gptqmodel.utils.ttnn_runtime import close_mesh, current_mesh, ttnn_device_count
+
+    checkpoint = _cached_opt_gptq_checkpoint()
+    if checkpoint is None:
+        pytest.skip("the local OPT-125M GPTQ checkpoint is not cached")
+    try:
+        if ttnn_device_count() < 2:
+            pytest.skip("needs at least two visible Tenstorrent chips")
+    except Exception as exc:  # pragma: no cover - hardware availability only
+        pytest.skip(f"TTNN is not usable here: {exc}")
+
+    model = None
+    try:
+        model = GPTQModel.load(
+            checkpoint,
+            backend=BACKEND.GPTQ_TTNN,
+            device=device,
+            dtype=torch.bfloat16,
+            local_files_only=True,
+        )
+        mesh = current_mesh()
+        assert mesh is not None and mesh.device_id == ordinal
+        kernels = [m for m in model.model.modules() if hasattr(m, "_requested_device_id")]
+        assert kernels, "no native TTNN kernel was installed"
+        assert {m._requested_device_id() for m in kernels} == {ordinal}
+
+        with torch.inference_mode():
+            logits = model.model(
+                input_ids=torch.tensor([[3, 5, 6, 7]]), use_cache=False
+            ).logits
+        assert tuple(logits.shape) == (1, 4, 50272)
+        assert torch.isfinite(logits).all()
+    finally:
+        if model is not None:
+            model.release_device()
         close_mesh()
 
 

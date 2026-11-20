@@ -95,11 +95,18 @@ class _TTNNBlockFloatMixin:
         return open_mesh(
             device_count=self._requested_device_count(),
             fabric=self._fabric_config(),
+            device_id=self._requested_device_id(),
         )
 
     def _requested_device_count(self) -> int:
         requested = getattr(self, "ttnn_device_count", None)
         return 1 if requested is None else int(requested)
+
+    def _requested_device_id(self) -> int:
+        # Resolved by the loader from an explicit `xla:N` request; `open_mesh`
+        # still rejects an ordinal combined with a multi-chip mesh.
+        requested = getattr(self, "ttnn_device_id", None)
+        return 0 if requested is None else int(requested)
 
     def _fabric_config(self) -> str:
         return "DISABLED" if self._requested_device_count() == 1 else "FABRIC_1D"
