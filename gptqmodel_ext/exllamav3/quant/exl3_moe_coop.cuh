@@ -78,7 +78,7 @@ struct MoeCoopParams
 
 // Launch with plain device pointers (called from BC_BlockSparseMLP). K: gate/up and down bit
 // widths (gate and up always share one, the converter allocates them as one group); cb: 0 default,
-// 1 mcg, 2 mul1 codebook, uniform across the three projections
+// 1 mcg, 2 mul1, 3 Q4NX, uniform across the three projections
 void exl3_moe_coop_launch(const MoeCoopParams& p, float K_gu, float K_d, int cb, int device, cudaStream_t stream);
 
 // Static part of the parameter block, validated once from the module's tensors (BC construction);
@@ -94,7 +94,7 @@ MoeCoopParams exl3_moe_coop_prepare
     const c10::optional<at::Tensor>& u_bias,
     const c10::optional<at::Tensor>& d_bias,
     float Kg, float Ku, float Kd,
-    bool mcg, bool mul1,
+    bool mcg, bool mul1, bool q4nx,
     int act,
     float act_limit,
     bool gated,
@@ -147,7 +147,8 @@ void exl3_moe_coop
     at::Tensor& ctr,
     at::Tensor& out,
     const c10::optional<at::Tensor>& sh_out,
-    const c10::optional<at::Tensor>& sh_gate_w
+    const c10::optional<at::Tensor>& sh_gate_w,
+    bool q4nx
 );
 
 // Length of the int32 scratch for a module: completion counters + run table (slots_max =

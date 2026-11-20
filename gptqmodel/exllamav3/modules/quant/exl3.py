@@ -13,12 +13,14 @@ import torch
 from ....utils.kernel import KernelConfig
 from ...ext import exllamav3_ext as ext
 from ...trellis import trellis_rate
-from .exl3_lib.quantize import had_k, had_n, preapply_had_l, preapply_had_r
+from .exl3_lib.quantize import had_k, had_n, preapply_had_l, preapply_had_r, reconstruct_q4nx_inner
 
 
 class LinearEXL3:
 
     quant_type: str = "exl3"
+    q4nx: bool = False
+    q4nx_tensor: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -38,6 +40,8 @@ class LinearEXL3:
         transformers_fix: bool = False,
         key: str | None = None,
         kernel: KernelConfig | None = None,
+        *,
+        q4nx: torch.Tensor | None = None,
     ):
         assert scale is None, "scale is no longer used"
         assert su is not None or suh is not None, "either su (packed) or suh (unpacked) is required"
@@ -69,10 +73,12 @@ class LinearEXL3:
 
         self.mcg_tensor = mcg
         self.mul1_tensor = mul1
+        self.q4nx_tensor = q4nx
         self.mcg = self.mcg_tensor is not None
         self.mul1 = self.mul1_tensor is not None
+        self.q4nx = self.q4nx_tensor is not None
 
-        self.K = trellis_rate(trellis.shape[-1], self.mcg, self.mul1)
+        self.K = trellis_rate(trellis.shape[-1], self.mcg, self.mul1, q4nx=self.q4nx)
 
         self.bc = ext.BC_LinearEXL3(
             self.trellis,
@@ -83,6 +89,7 @@ class LinearEXL3:
             self.mcg,
             self.mul1,
             **({"kernel": kernel} if kernel is not None else {}),
+            **({"q4nx": True} if self.q4nx else {}),
         )
 
 
@@ -104,6 +111,7 @@ class LinearEXL3:
                 ("bias", self.bias),
                 ("mcg", self.mcg_tensor),
                 ("mul1", self.mul1_tensor),
+                ("q4nx", self.q4nx_tensor),
             ] if tensor is not None
         }
 
@@ -127,7 +135,7 @@ class LinearEXL3:
         if torch.version.hip is not None:
             torch_mode = True
         else:
-            torch_mode = params.get("reconstruct", bsz > 32)
+            torch_mode = params.get("reconstruct", bsz > 32 and not self.q4nx)
 
         out_shape = x.shape[:-1] + (self.out_features,)
         if bsz == 0:
@@ -178,16 +186,18 @@ class LinearEXL3:
         # suh = self.unpack_bf(self.su).unsqueeze(1)
         suh = self.unpack_bf(self.su).unsqueeze(1) if self.su else self.suh.unsqueeze(1)
         svh = self.unpack_bf(self.sv).unsqueeze(0) if self.sv else self.svh.unsqueeze(0)
-        w = self.get_inner_weight_tensor()
+        w = reconstruct_q4nx_inner(self.trellis) if self.q4nx else self.get_inner_weight_tensor()
         w = preapply_had_l(w, had_k)
         w *= suh
         w = preapply_had_r(w, had_n)
         w *= svh
         # w *= self.scale
-        return w
+        return w.half() if self.q4nx else w
 
 
     def get_inner_weight_tensor(self):
+        if self.q4nx:
+            return reconstruct_q4nx_inner(self.trellis).half()
         w = torch.empty((self.in_features, self.out_features), dtype = torch.half, device = self.trellis.device)
         ext.reconstruct(w, self.trellis, self.K, self.mcg, self.mul1)
         return w
@@ -233,6 +243,7 @@ class LinearEXL3:
             "bias": producer.send(self.bias),
             "mcg": producer.send(self.mcg_tensor),
             "mul1": producer.send(self.mul1_tensor),
+            "q4nx": producer.send(self.q4nx_tensor),
             "out_dtype": self.out_dtype,
         }
 
@@ -246,6 +257,7 @@ class LinearEXL3:
         id_bias = exported["bias"]
         mcg = consumer.recv(exported["mcg"], cuda = True)
         mul1 = consumer.recv(exported["mul1"], cuda = True)
+        q4nx = consumer.recv(exported["q4nx"], cuda = True) if "q4nx" in exported else None
 
         if split is not None:
             split_out, first, last = split
@@ -279,6 +291,7 @@ class LinearEXL3:
             trellis = trellis,
             mcg = mcg,
             mul1 = mul1,
+            q4nx = q4nx,
             bias = bias,
             out_dtype = exported["out_dtype"],
         )

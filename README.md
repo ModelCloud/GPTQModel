@@ -99,7 +99,7 @@ compatible deployment engine.
 
 Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kernel scratch, one quantization stream and one tile-scratch pair per device, per-device plan lifetimes and the single GGUF CUDA weight copy are documented in [kernel scratch lifecycle](docs/kernel-scratch-lifecycle.md). CPU layer packing quantizes and packs each bounded input block in one shift/reduce pass; see [CPU block packing](docs/cpu-block-packing.md). Compiled CPU int4pack forwards decode the live runtime layout for grad-requiring calls; see [compiled CPU int4pack gradient fallback](docs/cpu-int4pack-compiled-grad.md).
 
-EXL3 supports packed 1.5, 2.5 and 3.5 bits per weight with the `mul1` codebook. [Native half-bit EXL3 rates](docs/exl3-runtime-weights.md#native-mul1-half-bit-rates)
+EXL3 supports 1.5, 2.5, and 3.5 bits per weight with `mul1` and 2.5, 3.0, and 3.5 with `q4nx`. [Native half-bit EXL3 rates](docs/exl3-runtime-weights.md#native-mul1-half-bit-rates) · [Q4NX layout and CUDA dispatch](docs/exl3-native-decode.md#q4nx)
 
 ### Control, scale, and quality ⚙️
 
@@ -480,7 +480,7 @@ details are available in the [citation reference](https://github.com/ModelCloud/
 | [QQQ](https://github.com/ModelCloud/GPTQModel/wiki/QQQ) | Ying Zhang et al., Meituan | [Paper](https://arxiv.org/abs/2406.09904) |
 | [VPTQ](https://github.com/ModelCloud/GPTQModel/wiki/VPTQ) | Yifei Liu et al., Microsoft | [Paper](https://arxiv.org/abs/2409.17066) · [Code](https://github.com/microsoft/VPTQ) |
 | [GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF) / llama.cpp | Georgi Gerganov and ggml-org contributors | [Project](https://github.com/ggml-org/llama.cpp) |
-| [ExLlama V3 / EXL3](https://github.com/ModelCloud/GPTQModel/wiki/EXL3) | turboderp and contributors | [Project](https://github.com/turboderp-org/exllamav3) · [Native CUDA dispatch](docs/exl3-native-decode.md) |
+| [ExLlama V3 / EXL3](https://github.com/ModelCloud/GPTQModel/wiki/EXL3) | turboderp and contributors, AlexBrandes (original Q4NX), Qubitium (Q4NX 3.5 bpw extension) | [Project](https://github.com/turboderp-org/exllamav3) · [Native CUDA dispatch](docs/exl3-native-decode.md) · [Source credits](gptqmodel/exllamav3/CREDITS.md) |
 | [NF12 / NyoomFloat12](https://github.com/ModelCloud/GPTQModel/wiki/NF12) | Liberman et al., Together AI | [Research and codec](https://github.com/dphnAI/nf12) |
 | [EoRA](https://github.com/ModelCloud/GPTQModel/wiki/EoRA) | Shih-Yang Liu et al., NVIDIA | [Paper](https://arxiv.org/abs/2410.21271) |
 | [GSQ](https://github.com/ModelCloud/GPTQModel/wiki/GSQ) | Alireza Dadgarnia et al., IST-DASLab | [Paper](https://arxiv.org/abs/2604.18556) · [Code](https://github.com/IST-DASLab/GSQ) |

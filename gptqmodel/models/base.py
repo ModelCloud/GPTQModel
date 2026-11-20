@@ -3017,6 +3017,12 @@ class BaseQModel(nn.Module):
             if not torch.cuda.is_available():
                 raise ValueError("EXL3 quantization requires CUDA/HIP.")
 
+            if IS_ROCM and (
+                self.quantize_config.codebook == "q4nx"
+                or any(rule.get("codebook") == "q4nx" for rule in (self.quantize_config.dynamic or {}).values())
+            ):
+                raise ValueError("EXL3 q4nx quantization requires NVIDIA CUDA.")
+
             quant_device = self.quantize_config.device
             if isinstance(quant_device, DEVICE):
                 quant_device_type = quant_device.type

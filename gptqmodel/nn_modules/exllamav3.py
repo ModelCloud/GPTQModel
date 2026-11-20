@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 import torch
 import torch.nn as nn
 
-from ..exllamav3.trellis import trellis_rate
+from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, trellis_rate
 from ..models._const import DEVICE, normalize_device
 from ..utils.kernel import KernelConfig, snapshot_kernel_config
 from . import exllamav3_bf16_kernels as _bf16_kernels
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from ..exllamav3.modules.quant.exl3 import LinearEXL3
 
 
-_EXL3_BUFFER_NAMES = ("trellis", "suh", "svh", "su", "sv", "bias", "mcg", "mul1")
+_EXL3_BUFFER_NAMES = ("trellis", "suh", "svh", "su", "sv", "bias", *EXL3_CODEBOOK_MARKERS)
 
 # The native EXL3 kernels accept FP16 only. A BF16 activation inside FP16's
 # finite range converts exactly, so the default BF16 checkpoint can use them.
@@ -57,17 +57,15 @@ class ExllamaV3Linear(nn.Module):
     QUANT_TYPE = "exl3"
     # The trellis codes and sign vectors are the EXL3 payload. The sign
     # vectors are stored either unpacked (`suh`/`svh`) or packed (`su`/`sv`),
-    # and the codebook is `mcg` on one recipe and `mul1` on another. A module
-    # built for a recipe owns only one side of each pair, and the validator
-    # skips the absent suffix.
+    # and a per-projection marker selects the decoder. The validator skips
+    # buffers that are absent for the module's recipe.
     CHECKPOINT_REQUIRED_BUFFERS = (
         "trellis",
         "suh",
         "svh",
         "su",
         "sv",
-        "mcg",
-        "mul1",
+        *EXL3_CODEBOOK_MARKERS,
     )
     # Every floating EXL3 buffer (the fp16 `suh`/`svh` sign vectors and the
     # bias) loads at its checkpoint dtype; the Hadamard kernels require fp16.
@@ -184,7 +182,7 @@ class ExllamaV3Linear(nn.Module):
         the packed trellis remains aliased by the native handle and is never
         duplicated here.
         """
-        for name in ("suh", "svh", "su", "sv", "mcg", "mul1"):
+        for name in ("suh", "svh", "su", "sv", *EXL3_CODEBOOK_MARKERS):
             tensor = getattr(self, name, None)
             if tensor is not None and tensor.device.type != "meta" and tensor.is_inference():
                 with torch.inference_mode(False), torch.no_grad():
@@ -247,6 +245,7 @@ class ExllamaV3Linear(nn.Module):
                 trellis.shape[-1],
                 getattr(self, "mcg", None) is not None,
                 getattr(self, "mul1", None) is not None,
+                q4nx=getattr(self, "q4nx", None) is not None,
             )
         except ValueError as exc:
             raise ValueError(f"EXL3 module `{self.name}`: {exc}") from exc
@@ -314,6 +313,7 @@ class ExllamaV3Linear(nn.Module):
             trellis=trellis,
             mcg=getattr(self, "mcg", None),
             mul1=getattr(self, "mul1", None),
+            q4nx=getattr(self, "q4nx", None),
             bias=bias,
             out_dtype=self.out_dtype,
             transformers_fix=True,
@@ -594,15 +594,15 @@ class ExllamaV3Linear(nn.Module):
         trellis = getattr(self, "trellis", None)
         if trellis is not None:
             entry["bits_per_weight"] = trellis_rate(
-                trellis.shape[-1], getattr(self, "mcg", None) is not None, getattr(self, "mul1", None) is not None
+                trellis.shape[-1],
+                getattr(self, "mcg", None) is not None,
+                getattr(self, "mul1", None) is not None,
+                q4nx=getattr(self, "q4nx", None) is not None,
             )
 
-        mcg_multiplier = self._multiplier_value("mcg")
-        if mcg_multiplier is not None:
-            entry["mcg_multiplier"] = mcg_multiplier
-
-        mul1_multiplier = self._multiplier_value("mul1")
-        if mul1_multiplier is not None:
-            entry["mul1_multiplier"] = mul1_multiplier
+        for name in EXL3_CODEBOOK_MARKERS:
+            multiplier = self._multiplier_value(name)
+            if multiplier is not None:
+                entry[f"{name}_multiplier"] = multiplier
 
         return entry

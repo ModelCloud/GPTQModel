@@ -595,6 +595,8 @@ void exl3_gemm_kernel_inner
     // Copy output tile to global with hadamard transform and out scale
     auto output_had_sh_gl = [&]()
     {
+        constexpr float had_scale = 0.088388347648f *
+            (cb == EXL3_Q4NX_CODEBOOK ? EXL3_Q4NX_ALPHA : 1.0f);
         int sh_warp = warp_id;
         constexpr int active_warps = EXL3_GEMM_BASE_THREADS / 32;
         for (;; sh_warp += active_warps)
@@ -609,12 +611,12 @@ void exl3_gemm_kernel_inner
             if constexpr (c_fp32)
             {
                 float* had_out = gl_c_ptr_32 + row * size_n_stride + col * 128;
-                had_ff_r_128_inner<false, true>(had_in, had_out, post_scale_c, 0.088388347648f);
+                had_ff_r_128_inner<false, true>(had_in, had_out, post_scale_c, had_scale);
             }
             else
             {
                 half* had_out = gl_c_ptr_16 + row * size_n_stride + col * 128;
-                had_fh_r_128_inner<false, true>(had_in, had_out, post_scale_c, 0.088388347648f);
+                had_fh_r_128_inner<false, true>(had_in, had_out, post_scale_c, had_scale);
             }
         }
     };

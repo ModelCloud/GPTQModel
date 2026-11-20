@@ -33,7 +33,7 @@ from ..exllamav3.modules.quant.exl3_lib.quantize import (
     EXL3_HESSIAN_SYMMETRY_CONTRACT,
     quantize_exl3,
 )
-from ..exllamav3.trellis import validate_trellis_k
+from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, validate_trellis_k
 from .exl3_projection_checkpoint import (
     CHECKPOINT_SCHEMA,
     CHECKPOINT_SCHEMA_VERSION,
@@ -346,7 +346,7 @@ def validate_remote_inputs(
         or weight.shape[0] % 128
         or weight.shape[1] % 128
         or not isinstance(contract, dict)
-        or contract.get("codebook") not in ("mcg", "mul1")
+        or contract.get("codebook") not in EXL3_CODEBOOK_MARKERS
         or contract.get("hessian_capture") != EXL3_HESSIAN_CAPTURE_CONTRACT
         or contract.get("hessian_numerical") != EXL3_HESSIAN_NUMERICAL_CONTRACT
         or contract.get("hessian_symmetry") != EXL3_HESSIAN_SYMMETRY_CONTRACT
@@ -361,7 +361,8 @@ def validate_remote_inputs(
         or (not uncalibrated and request["sample_count"] == 0)
     ):
         raise ValueError("EXL3 remote request tensor/quantizer contract is invalid")
-    validate_trellis_k(contract.get("bits"), contract["codebook"] == "mcg", contract["codebook"] == "mul1")
+    codebook = contract["codebook"]
+    validate_trellis_k(contract.get("bits"), codebook == "mcg", codebook == "mul1", q4nx=codebook == "q4nx")
     return weight, hessian, contract
 
 
@@ -383,10 +384,10 @@ def validate_remote_output_tensors(
         not isinstance(shape, list)
         or len(shape) != 2
         or any(isinstance(value, bool) or not isinstance(value, int) for value in shape)
-        or codebook not in ("mcg", "mul1")
+        or codebook not in EXL3_CODEBOOK_MARKERS
     ):
         raise ValueError("EXL3 remote output tensor contract is invalid")
-    validate_trellis_k(bits, codebook == "mcg", codebook == "mul1")
+    validate_trellis_k(bits, codebook == "mcg", codebook == "mul1", q4nx=codebook == "q4nx")
     expected_names = {"trellis", "suh", "svh", codebook}
     if set(tensors) != expected_names:
         raise ValueError("EXL3 remote output tensor contract is invalid")

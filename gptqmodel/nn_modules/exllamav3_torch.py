@@ -14,7 +14,8 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 
-from ..exllamav3.trellis import trellis_rate
+from ..exllamav3.q4nx import decode_q4nx_states, unpack_q4nx_states
+from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, trellis_rate
 from ..models._const import DEVICE
 from ..utils.cpu_features import cpu_bf16x3_scope, has_avx512_bf16, has_cpu_bf16x3_precision
 from ..utils.logger import setup_logger
@@ -364,10 +365,9 @@ class ExllamaV3TorchLinear(nn.Module):
         """EXL3 has no runtime cache to initialize."""
 
     def _codebook_name(self) -> str:
-        if getattr(self, "mcg", None) is not None:
-            return "mcg"
-        if getattr(self, "mul1", None) is not None:
-            return "mul1"
+        for name in EXL3_CODEBOOK_MARKERS:
+            if getattr(self, name, None) is not None:
+                return name
         return "3inst"
 
     def _bits_per_weight(self) -> int | float:
@@ -379,6 +379,7 @@ class ExllamaV3TorchLinear(nn.Module):
                 trellis.shape[-1],
                 getattr(self, "mcg", None) is not None,
                 getattr(self, "mul1", None) is not None,
+                q4nx=getattr(self, "q4nx", None) is not None,
                 max_integer_rate=16,
             )
         except ValueError as exc:
@@ -431,8 +432,12 @@ class ExllamaV3TorchLinear(nn.Module):
                 f"for {trellis.shape[1]} tiles."
             )
 
+        packed = trellis[:, tile_n_start:tile_n_end]
+        if getattr(self, "q4nx", None) is not None:
+            return unpack_q4nx_states(packed)
+
         bits = self._bits_per_weight()
-        words = (trellis[:, tile_n_start:tile_n_end].to(torch.int32) & 0xFFFF).contiguous()
+        words = (packed.to(torch.int32) & 0xFFFF).contiguous()
         words = words.view(*words.shape[:-1], -1, 2).flip(-1).reshape(*words.shape)
         if bits != int(bits):
             # Each alternating pair consumes 2*floor(bits)+1 bits. Gather
@@ -507,8 +512,12 @@ class ExllamaV3TorchLinear(nn.Module):
             raise RuntimeError(f"EXL3 module `{self.name}` has not been materialized from checkpoint tensors yet.")
 
         encoded = self._unpack_indices(tile_n_start, tile_n_end)
-        lut = _codebook_lut(self._codebook_name(), trellis.device.type, trellis.device.index)
-        decoded = lut[encoded]
+        codebook = self._codebook_name()
+        if codebook == "q4nx":
+            decoded = decode_q4nx_states(encoded)
+        else:
+            lut = _codebook_lut(codebook, trellis.device.type, trellis.device.index)
+            decoded = lut[encoded]
 
         perm_i = _tensor_core_perm_i(trellis.device.type, trellis.device.index)
         decoded = decoded[..., perm_i]
@@ -678,13 +687,10 @@ class ExllamaV3TorchLinear(nn.Module):
             "bits_per_weight": self._bits_per_weight(),
         }
 
-        mcg_multiplier = self._multiplier_value("mcg")
-        if mcg_multiplier is not None:
-            entry["mcg_multiplier"] = mcg_multiplier
-
-        mul1_multiplier = self._multiplier_value("mul1")
-        if mul1_multiplier is not None:
-            entry["mul1_multiplier"] = mul1_multiplier
+        for name in EXL3_CODEBOOK_MARKERS:
+            multiplier = self._multiplier_value(name)
+            if multiplier is not None:
+                entry[f"{name}_multiplier"] = multiplier
 
         return entry
 

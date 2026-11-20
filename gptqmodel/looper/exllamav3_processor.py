@@ -28,7 +28,7 @@ from ..exllamav3.modules.quant.exl3_lib.quantize import (
     reconstruct_exl3_tensors,
     validate_exl3_quantization_geometry,
 )
-from ..exllamav3.trellis import validate_trellis_k
+from ..exllamav3.trellis import EXL3_CODEBOOK_MARKERS, validate_trellis_k
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
@@ -849,6 +849,8 @@ class _EXL3NaturalRouteCapture:
 def clone_exllamav3_config_for_module(
     qcfg: EXL3Config,
     module_full_name: str,
+    *,
+    lm_head_name: str = "lm_head",
 ) -> Optional[EXL3Config]:
     """Clones and applies per-module EXL3 dynamic overrides, or skips the module."""
 
@@ -870,13 +872,21 @@ def clone_exllamav3_config_for_module(
             qcfg_clone.out_scales = out_scales_override
 
         codebook_override = resolved_cfg.get("codebook", None)
-        if codebook_override is not None:
+        if codebook_override is not None and codebook_override != qcfg.codebook:
             qcfg_clone.codebook = codebook_override
+            is_head = lm_head_name in (module_full_name, module_full_name.rsplit(".", 1)[-1])
+            if not is_head:
+                qcfg_clone.head_bits = None
+            elif qcfg_clone.head_bits is not None:
+                qcfg_clone.bits = qcfg_clone.head_bits
 
         calibration_override = resolved_cfg.get("calibration", None)
         if calibration_override is not None:
             qcfg_clone.calibration = calibration_override
 
+    # The rules were normalized against the model defaults. This clone already
+    # resolved its module, so its codebook must not reinterpret another rule.
+    qcfg_clone.dynamic = None
     qcfg_clone.__post_init__()
     return qcfg_clone
 
@@ -2319,7 +2329,9 @@ class EXL3Processor(SharedInputCaptureProcessor):
 
         del kwargs
 
-        module_qcfg = clone_exllamav3_config_for_module(self.qcfg, module.full_name)
+        module_qcfg = clone_exllamav3_config_for_module(
+            self.qcfg, module.full_name, lm_head_name=getattr(self, "lm_head_name", "lm_head"),
+        )
         if module_qcfg is None:
             return
         # The fallback is honoured for starved modules at quantization time
@@ -2541,9 +2553,8 @@ class EXL3Processor(SharedInputCaptureProcessor):
         """Builds the argument bundle passed into the EXL3 quantizer."""
 
         bits = self._target_bits(module, module_qcfg) if bits_override is None else bits_override
-        mcg = module_qcfg.codebook == "mcg"
-        mul1 = module_qcfg.codebook == "mul1"
-        validate_trellis_k(bits, mcg, mul1)
+        codebook = module_qcfg.codebook
+        validate_trellis_k(bits, codebook == "mcg", codebook == "mul1", q4nx=codebook == "q4nx")
         quant_args: Dict[str, object] = {
             "K": bits,
             "devices": [device],
@@ -2552,10 +2563,8 @@ class EXL3Processor(SharedInputCaptureProcessor):
             "seed": 787,
         }
 
-        if mcg:
-            quant_args["mcg"] = True
-        elif mul1:
-            quant_args["mul1"] = True
+        if codebook in EXL3_CODEBOOK_MARKERS:
+            quant_args[codebook] = True
 
         return quant_args
 
@@ -2690,7 +2699,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
             )
 
         module.stream_sync()
-        packed_names = ("trellis", "suh", "svh", "su", "sv", "mcg", "mul1")
+        packed_names = ("trellis", "suh", "svh", "su", "sv", *EXL3_CODEBOOK_MARKERS)
         packed = {
             name: module.state[name]
             for name in packed_names
@@ -3662,8 +3671,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
                 "su",
                 "sv",
                 "bias",
-                "mcg",
-                "mul1",
+                *EXL3_CODEBOOK_MARKERS,
             ):
                 tensor = module.state.pop(tensor_name, None)
                 if tensor is not None:
