@@ -375,14 +375,14 @@ void pack_trellis(at::Tensor& packed, const at::Tensor& suffixes, int64_t kv)
 
 }  // namespace
 
-TORCH_LIBRARY_FRAGMENT(gptqmodel_exllamav3, m)
+STABLE_TORCH_LIBRARY_FRAGMENT(gptqmodel_exllamav3, m)
 {
     m.def("quantize_tiles_q4nx(Tensor input, Tensor(a!) output, Tensor(b!) suffixes, int kv, bool scale_search) -> ()");
     m.def("pack_trellis_q4nx(Tensor(a!) packed, Tensor suffixes, int kv) -> ()");
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CUDA, m)
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CUDA, m)
 {
-    m.impl("quantize_tiles_q4nx", &quantize_tiles);
-    m.impl("pack_trellis_q4nx", &pack_trellis);
+    m.impl("quantize_tiles_q4nx", TORCH_BOX(&quantize_tiles));
+    m.impl("pack_trellis_q4nx", TORCH_BOX(&pack_trellis));
 }

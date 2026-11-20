@@ -127,7 +127,7 @@ int64_t bc_linear_exl3_run_hip_gemv
 
     // The packed kernel writes FP32 partial sums and applies svh and the output
     // Hadamard itself; keep the result wide and cast once, like the CUDA path.
-    at::Tensor accum = at::empty({size_m, size_n}, x.options().dtype(at::kFloat));
+    at::Tensor accum = at::empty({size_m, size_n}, at::options(x).dtype(at::kFloat));
     at::Tensor xh = at::empty_like(x);
 
     const half* A_ptr = reinterpret_cast<const half*>(x.const_data_ptr());

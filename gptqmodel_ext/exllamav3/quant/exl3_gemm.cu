@@ -5,8 +5,6 @@
 #include <cstdint>
 #include <tuple>
 
-#include <torch/library.h>
-
 #include <algorithm>
 #include <limits>
 #include <set>
@@ -208,11 +206,11 @@ std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t> exl3_gemm_kernel_probe(
 
 // No tensor argument, so the op is registered as a composite kernel rather than
 // under a dispatch key; the selection itself needs no tensor.
-TORCH_LIBRARY_FRAGMENT(gptqmodel_exllamav3, m)
+STABLE_TORCH_LIBRARY_FRAGMENT(gptqmodel_exllamav3, m)
 {
     m.def("exl3_gemm_kernel_probe(int cc, int size_k, int size_n, int K, bool c_fp32, int cb, "
           "bool half_k, bool fused_gemm, int size_m) -> (int kernel, int shape_idx, int num_sms, "
           "int block_dim, int q4nx_shape)");
-    m.impl("exl3_gemm_kernel_probe", &exl3_gemm_kernel_probe);
+    m.impl("exl3_gemm_kernel_probe", TORCH_BOX(&exl3_gemm_kernel_probe));
 }
 #endif

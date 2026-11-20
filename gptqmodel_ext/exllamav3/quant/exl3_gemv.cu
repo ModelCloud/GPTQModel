@@ -204,9 +204,7 @@ bool exl3_gemv_try_launch
 #include <cuda_fp16.h>
 #include "exl3_gemv.cuh"
 
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
+#include "../../torch_stable_compat.h"
 #include <cstdlib>
 #include <cstdint>
 #include "../util.h"
