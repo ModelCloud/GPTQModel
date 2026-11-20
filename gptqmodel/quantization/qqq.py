@@ -933,15 +933,19 @@ class QQQ:
 
         tick = time.time()
 
-        if not self.quantizer.ready():
-            self.quantizer.find_params(W, weight=True)
-
         H = self.H
         del self.H
         # The quantizer consumes and mutates this Hessian; it is no longer the
         # materialized calibration state, so later batches start a fresh merge.
         self._materialized_samples = 0
         _neutralize_dead_columns(H, W)
+
+        # Fit the whole-row grid after dead-column masking: a channel absent
+        # from every calibration sample carries no signal, so its weight must
+        # not set the per-channel scale that every live column is quantized
+        # with (#5611).
+        if not self.quantizer.ready():
+            self.quantizer.find_params(W, weight=True)
 
         g_idx = []
         scale = []
