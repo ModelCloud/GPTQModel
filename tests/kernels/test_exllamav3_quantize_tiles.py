@@ -15,6 +15,12 @@ import pytest
 import torch
 
 
+def _q4nx_pack_oracle(suffixes, kv):
+    stream = "".join(f"{suffix:0{kv}b}" for suffix in suffixes)
+    words = [int(stream[i:i + 16], 2) for i in range(0, len(stream), 16)]
+    return torch.tensor(words).reshape(-1, 2).flip(-1).flatten().to(torch.int16)
+
+
 @pytest.mark.cuda
 @pytest.mark.parametrize("bits", [2.5, 3.0, 3.5])
 def test_q4nx_beam_reproduces_a_legal_tile_and_packs_its_bytes(bits):
@@ -29,8 +35,7 @@ def test_q4nx_beam_reproduces_a_legal_tile_and_packs_its_bytes(bits):
     rng = Random(671)
     suffixes = [rng.randrange(1 << kv) for _ in range(64)]
     stream = "".join(f"{suffix:0{kv}b}" for suffix in suffixes)
-    words_in_stream_order = [int(stream[i:i + 16], 2) for i in range(0, len(stream), 16)]
-    packed_oracle = torch.tensor(words_in_stream_order).reshape(-1, 2).flip(-1).flatten().to(torch.int16)
+    packed_oracle = _q4nx_pack_oracle(suffixes, kv)
 
     state_bits = 32 - kv
     prefix_stream = "0" * state_bits + stream
@@ -88,6 +93,90 @@ def test_q4nx_w35_matches_exhaustive_viterbi():
     recovered, codes = quantize_tiles(source, {"K": 3.5, "q4nx": True})
     assert codes[0, :64].tolist() == suffixes[::-1]
     torch.testing.assert_close((recovered.double() - source).square().sum(), prior.min(), atol=1e-6, rtol=1e-6)
+
+
+def _q4nx_decode_in_half_steps(states):
+    shifts = torch.arange(0, 32, 8, device=states.device)
+    bytes_ = (states[..., None] * 0x83DCD12D) >> shifts
+    return 2 * (((bytes_ >> 4) & 15) + (bytes_ & 15) - 15)
+
+
+def _q4nx_integer_path(target, kv, beam):
+    """Compare exact dyadic costs and break ties by the smallest state."""
+    state_bits = 32 - kv
+    state_mask = (1 << state_bits) - 1
+    class_count = 1 << (state_bits - kv)
+    device = target.device
+    suffixes = torch.arange(1 << kv, device=device)
+    prefixes = torch.zeros(1, dtype=torch.int64, device=device)
+    prior = torch.zeros_like(prefixes)
+    history = []
+    tied = torch.zeros((), dtype=torch.bool, device=device)
+    for point in target.reshape(64, 4):
+        states = (prefixes[:, None] << kv) | suffixes
+        costs = (_q4nx_decode_in_half_steps(states) - point).square().sum(-1) + prior[:, None]
+        # Sort by (path cost, state) as an integer and reduce independently for
+        # each overlap class. A state determines its own predecessor class.
+        edges = (costs << state_bits) | states
+        classes = states % class_count
+        winners = torch.full((class_count,), torch.iinfo(edges.dtype).max, dtype=edges.dtype, device=device)
+        winners.scatter_reduce_(0, classes.flatten(), edges.flatten(), reduce="amin")
+        best = winners.topk(beam, largest=False, sorted=True).values
+        prior = best >> state_bits
+        prefixes = best % class_count
+        history.append(winners & state_mask)
+        tied |= (prior[1:] == prior[:-1]).any()
+
+    state = int(best[0]) & state_mask
+    path = []
+    for winners in torch.stack(history).cpu().flip(0):
+        state = int(winners[state % class_count])
+        path.append(state)
+        state >>= kv
+    assert tied.item(), "the fixture must exercise equal path costs"
+    return torch.tensor(path[::-1], device=device)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("bits", [2.5, 3.0, 3.5])
+def test_q4nx_exact_codes_for_ties_and_partial_launch_chunks(bits):
+    from tests.accelerator_gates import requires_nvidia_cuda
+
+    if not requires_nvidia_cuda():
+        pytest.skip("requires NVIDIA CUDA")
+
+    from gptqmodel.exllamav3.modules.quant.exl3_lib.quantize import pack_trellis, quantize_tiles
+    from gptqmodel.utils.kernel import KernelConfig, configure_kernel, get_kernel_config
+
+    # Half-code steps with exactly representable normalized targets. The
+    # squared errors and sums are multiples of 1/4 and fit exactly in FP32,
+    # even at the two targets beyond the range of the codebook.
+    device = torch.device("cuda", torch.cuda.current_device())
+    targets = torch.tensor([[0] * 8, [-32, -4, -1, 0, 1, 2, 4, 32]], device=device).repeat(1, 32)
+    order = [1, 0, 1, 1, 0]
+    source = targets[order].float() * (0.5 / sqrt(42.5))
+    kv = int(bits * 4)
+    previous = get_kernel_config()
+    try:
+        for scale_search in (False, True):
+            beam = 16 if scale_search or bits == 3.5 else 128
+            paths = torch.stack([_q4nx_integer_path(target, kv, beam) for target in targets])
+            expected = _q4nx_decode_in_half_steps(paths[order]).flatten(1).float() * (0.5 / sqrt(42.5))
+            suffixes = (paths & ((1 << kv) - 1)).to(torch.int16)
+            expected_codes = torch.zeros_like(source, dtype=torch.int16)
+            expected_codes[:, :64] = suffixes[order]
+            expected_words = torch.stack([_q4nx_pack_oracle(row, kv) for row in suffixes.tolist()])[order]
+
+            args = {"K": bits, "q4nx": True, "q4nx_scale_search": scale_search}
+            for policy in (KernelConfig(), KernelConfig(exl3_tile_batch=2)):
+                configure_kernel(policy)
+                recovered, codes = quantize_tiles(source, args)
+                packed = pack_trellis(codes.unsqueeze(0), args).squeeze(0)
+                assert torch.equal(recovered.view(torch.int32), expected.view(torch.int32))
+                assert torch.equal(codes, expected_codes)
+                assert torch.equal(packed.cpu(), expected_words)
+    finally:
+        configure_kernel(previous)
 
 
 @pytest.mark.cuda

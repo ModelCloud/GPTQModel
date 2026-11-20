@@ -25,6 +25,8 @@ struct MoeCoopParams
     int x_stride;
     const int64_t* sel;         // (bsz, topk) global expert indices
     const half* rw;             // (bsz, topk) routing weights
+    const float* flash_rw;      // Flash uses FP32 routing weights before down projection
+    const float* flash_input_scale;  // Flash BF16 input prescale, one factor per token
     int bsz;
     int topk;
     int H;                      // x width (the experts' input width before padding)
@@ -148,7 +150,8 @@ void exl3_moe_coop
     at::Tensor& out,
     const c10::optional<at::Tensor>& sh_out,
     const c10::optional<at::Tensor>& sh_gate_w,
-    bool q4nx
+    bool q4nx,
+    const c10::optional<at::Tensor>& flash_input_scale
 );
 
 // Length of the int32 scratch for a module: completion counters + run table (slots_max =

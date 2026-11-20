@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Projection-level GPTQ for the DeepSeek V4.1 source checkpoint."""
+"""Calibrated projection-level quantization for the DeepSeek V4.1 source checkpoint."""
 
 import math
+import time
 from collections import defaultdict
 
 import torch
@@ -13,12 +14,13 @@ from torch import nn
 from ...looper.gptq_processor import clone_gptq_config_for_module
 from ...looper.loop_processor import prepare_calibration_dataset_once
 from ...nn_modules.qlinear.torch import TorchLinear
-from ...quantization.config import FORMAT, METHOD, CalibrationConfig
+from ...quantization.config import FORMAT, METHOD, CalibrationConfig, GPTQConfig
 from ...quantization.dtype import dequantize_fp8, is_fp4_packed_dtype
 from ...quantization.gptq import GPTQ
 from ...utils.model_dequant import dequantize_deepseek_v4_fp4_expert
 from ...utils.packing import hf_pack_layer
 from ...utils.torch import as_torch_device
+from .._const import DEVICE, normalize_device
 from .layers import V41MarlinLinear, V41NativeMXLinear, V41PackedLinear, fp8_roundtrip
 
 
@@ -84,10 +86,14 @@ def _source_weight(model, path, device):
     return dequantize_fp8(weight, scale=scale)
 
 
-def _quantize_projection(model, path, module, inputs, config):
+def _projection_devices(module, config):
     resident = module.qweight if isinstance(module, V41MarlinLinear) else module.weight
     destination = resident.device
-    device = destination if config.device is None else as_torch_device(config.device)
+    return destination, destination if config.device is None else as_torch_device(config.device)
+
+
+def _quantize_projection(model, path, module, inputs, config):
+    destination, device = _projection_devices(module, config)
     source = _source_weight(model, path, device)
     groups = getattr(module, "groups", 1)
     rounded_input = not isinstance(module, nn.Linear)
@@ -128,15 +134,74 @@ def _quantize_projection(model, path, module, inputs, config):
     return replacement, spec, reports
 
 
+def _quantize_q4nx_projection(model, path, module, inputs, config):
+    from ...exllamav3.modules.quant.exl3_lib import quantize as exl3_quantizer
+    from ...looper.exllamav3_processor import build_exl3_quant_args, prepare_exl3_hessian
+    from ...utils.exl3_remote import validate_exl3_hessian_metrics
+    from .exl3 import V41Q4NXLinear
+
+    started = time.perf_counter()
+    destination, device = _projection_devices(module, config)
+    source = _source_weight(model, path, device)
+    n, k = source.shape
+    stored_n = exl3_quantizer.validate_exl3_quantization_geometry(k, n, label=path)
+    weight = torch.zeros((k, stored_n), dtype=torch.float32, device=device)
+    weight[:, :n].copy_(source.T)
+    del source
+
+    # Only the linear geometry is needed to reuse GPTQ's chunked FP32 capture.
+    # Q4NX consumes the observed BF16 rows at the native Flash route boundary.
+    capture_config = GPTQConfig(
+        bits=max(2, int(config.runtime_bits)), group_size=-1, desc_act=False,
+        act_group_aware=False, offload_to_disk=False, device=device,
+    )
+    capture = GPTQ(nn.Linear(k, n, bias=False, device="meta"), qcfg=capture_config)
+    try:
+        for value in inputs:
+            capture.add_batch(value.to(device), None)
+        samples = capture.nsamples
+        if not samples:
+            raise ValueError(f"Calibrate DeepSeek V4.1 projection {path} with inputs that exercise it")
+        hessian = {
+            "H": prepare_exl3_hessian(capture, target_device=device, module_full_name=path),
+            "count": samples, "finalized": False, "single_use": True,
+        }
+    finally:
+        capture.free()
+
+    bits = config.runtime_bits
+    quant_args = build_exl3_quant_args(config, bits=bits, device=device)
+    _, loss, tensors = exl3_quantizer.quantize_exl3(
+        weight, hessian, quant_args, return_weight_q=False,
+    )
+    metrics = quant_args["error_metrics"]
+    validate_exl3_hessian_metrics(metrics, sample_count=samples, sigma_reg=quant_args["sigma_reg"])
+    if not math.isfinite(loss) or loss < 0:
+        raise ValueError(f"Invalid Q4NX quantization result for DeepSeek V4.1 projection {path}")
+
+    replacement = V41Q4NXLinear.from_tensors(
+        in_features=k, out_features=n, name=path,
+        tensors={name: tensor.to(destination) for name, tensor in tensors.items()},
+    )
+    replacement.post_init()
+    spec = {"bits": bits, "codebook": config.codebook}
+    return replacement, spec, [{
+        "module": path, "samples": samples, "loss": loss,
+        "duration": time.perf_counter() - started, "error_metrics": metrics,
+    }]
+
+
 @torch.no_grad()
 def quantize_projections(wrapper, calibration, projections):
     config = wrapper.quantize_config
-    if config is None or config.method != METHOD.GPTQ or config.format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
-        raise ValueError("DeepSeek V4.1 projection quantization requires a GPTQ QuantizeConfig")
+    use_exl3 = config is not None and config.method == METHOD.EXL3 and config.format == FORMAT.EXL3
+    use_gptq = config is not None and config.method == METHOD.GPTQ and config.format in (FORMAT.GPTQ, FORMAT.GPTQ_V2)
+    if not (use_exl3 or use_gptq):
+        raise ValueError("DeepSeek V4.1 projection quantization requires a GPTQ or Q4NX EXL3 config")
     if wrapper.quantized:
-        raise ValueError("DeepSeek V4.1 GPTQ requires a published source checkpoint")
+        raise ValueError("DeepSeek V4.1 quantization requires a published source checkpoint")
     if not isinstance(calibration, CalibrationConfig) or calibration.dataset is None:
-        raise TypeError("DeepSeek V4.1 GPTQ requires CalibrationConfig with a dataset")
+        raise TypeError("DeepSeek V4.1 quantization requires CalibrationConfig with a dataset")
     if calibration.exclude_attention_sinks or calibration.adapter_dataset is not None:
         raise ValueError("DeepSeek V4.1 projection calibration supports the supplied token rows directly")
     if (
@@ -146,22 +211,46 @@ def quantize_projections(wrapper, calibration, projections):
     ):
         raise ValueError("Specify unique DeepSeek V4.1 backbone or vision projection paths")
 
+    if use_exl3:
+        from ...exllamav3.modules.quant.exl3_lib.quantize import validate_exl3_quantization_geometry
+        from ...looper.exllamav3_processor import clone_exllamav3_config_for_module
+        from .exl3 import bind_q4nx_routing, is_routed_projection
+
     model = wrapper.model
     selected = {}
     for path in projections:
+        if use_exl3 and not is_routed_projection(path):
+            raise ValueError(f"DeepSeek V4.1 Q4NX supports routed expert projections, got {path}")
         if not _quantizable_path(path):
             raise ValueError(f"DeepSeek V4.1 preserves the published weights for {path}")
         module = model.get_submodule(path)
         if not isinstance(module, _SOURCE_LINEAR_TYPES) or path + ".weight" not in model.source_weight_map:
-            raise ValueError(f"DeepSeek V4.1 projection GPTQ does not support {path}")
-        resolved = clone_gptq_config_for_module(config, path)
-        if resolved is None:
-            continue
-        if resolved.gptaq is not None or resolved.foem is not None or resolved.adapter:
-            raise ValueError("DeepSeek V4.1 projection quantization uses GPTQ")
-        selected[path] = (module, resolved)
+            raise ValueError(f"DeepSeek V4.1 projection quantization does not support {path}")
+        if use_exl3:
+            resolved = clone_exllamav3_config_for_module(config, path, lm_head_name=wrapper.lm_head)
+            if resolved is None:
+                continue
+            if resolved.codebook != "q4nx":
+                raise ValueError(f"DeepSeek V4.1 EXL3 requires the q4nx codebook for {path}")
+            if path + ".scale" not in model.source_weight_map:
+                raise ValueError(f"Missing source FP4 scales for DeepSeek V4.1 projection {path}")
+            _, device = _projection_devices(module, resolved)
+            if normalize_device(device) != DEVICE.CUDA or not torch.cuda.is_available():
+                raise ValueError(f"DeepSeek V4.1 Q4NX requires an NVIDIA CUDA quantization device for {path}")
+            text = model.config.text_config
+            k, n = text.hidden_size, text.moe_intermediate_size
+            if path.endswith(".w2"):
+                k, n = n, k
+            validate_exl3_quantization_geometry(k, n, label=path)
+        else:
+            resolved = clone_gptq_config_for_module(config, path)
+            if resolved is None:
+                continue
+            if resolved.gptaq is not None or resolved.foem is not None or resolved.adapter:
+                raise ValueError("DeepSeek V4.1 projection quantization uses GPTQ")
+        selected[path] = module, resolved
     if not selected:
-        raise ValueError("No DeepSeek V4.1 projections matched the GPTQ configuration")
+        raise ValueError("No DeepSeek V4.1 projections matched the quantization configuration")
 
     batches = prepare_calibration_dataset_once(
         calibration.bind(wrapper.prepare_dataset, batch_size=wrapper._calibration_batch_size(calibration))
@@ -184,16 +273,19 @@ def quantize_projections(wrapper, calibration, projections):
             handle.remove()
 
     replacements, specs, reports = {}, {}, []
+    quantize_projection = _quantize_q4nx_projection if use_exl3 else _quantize_projection
     for path, (module, resolved) in selected.items():
         inputs = activations.pop(path, None)
         if not inputs:
             raise ValueError(f"Calibrate DeepSeek V4.1 projection {path} with inputs that exercise it")
-        replacement, spec, report = _quantize_projection(model, path, module, inputs, resolved)
+        replacement, spec, report = quantize_projection(model, path, module, inputs, resolved)
         replacements[path] = replacement
         specs[path] = spec
         reports.extend(report)
     for path, replacement in replacements.items():
         model.set_submodule(path, replacement)
+    if use_exl3:
+        bind_q4nx_routing(model, specs)
     model.config.gptqmodel_v41_projections = specs
     wrapper.quantized = True
-    return {"gptq": reports}
+    return {config.method.value: reports}

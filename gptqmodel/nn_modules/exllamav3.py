@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 
 _EXL3_BUFFER_NAMES = ("trellis", "suh", "svh", "su", "sv", "bias", *EXL3_CODEBOOK_MARKERS)
+_EXL3_REQUIRED_BUFFERS = ("trellis", "suh", "svh", "su", "sv", *EXL3_CODEBOOK_MARKERS)
 
 # The native EXL3 kernels accept FP16 only. A BF16 activation inside FP16's
 # finite range converts exactly, so the default BF16 checkpoint can use them.
@@ -59,14 +60,7 @@ class ExllamaV3Linear(nn.Module):
     # vectors are stored either unpacked (`suh`/`svh`) or packed (`su`/`sv`),
     # and a per-projection marker selects the decoder. The validator skips
     # buffers that are absent for the module's recipe.
-    CHECKPOINT_REQUIRED_BUFFERS = (
-        "trellis",
-        "suh",
-        "svh",
-        "su",
-        "sv",
-        *EXL3_CODEBOOK_MARKERS,
-    )
+    CHECKPOINT_REQUIRED_BUFFERS = _EXL3_REQUIRED_BUFFERS
     # Every floating EXL3 buffer (the fp16 `suh`/`svh` sign vectors and the
     # bias) loads at its checkpoint dtype; the Hadamard kernels require fp16.
     MODEL_DTYPE_BUFFERS = ()
@@ -421,10 +415,9 @@ class ExllamaV3Linear(nn.Module):
         Rows already inside the safe range keep a scale of 1 and stay bit-exact.
 
         Returns ``(fp16_input, output_scale)``, where ``output_scale`` is
-        ``None`` only for an empty batch. Otherwise the kernel result must have
-        the bias removed, be multiplied by ``output_scale``, and have the bias
-        restored. Rows that need no scaling carry a scale of exactly 1, so the
-        rescale is the identity for them. Returns ``None`` for non-finite
+        ``None`` only for an empty batch. Multiply the unbiased kernel result
+        by ``output_scale`` before adding the checkpoint bias. Rows that need
+        no scaling carry a scale of exactly 1. Returns ``None`` for non-finite
         activations so they keep the FP32 Torch reconstruction path.
 
         The whole decision is computed on the device: there is no
@@ -502,11 +495,11 @@ class ExllamaV3Linear(nn.Module):
         The fused path writes BF16 directly; this returns FP32.
         """
         bias = getattr(self, "bias", None)
-        output = result.to(torch.float32)
+        output = result.float() * output_scale.reshape(*result.shape[:-1], 1)
         if bias is None:
-            return output * output_scale
+            return output
         bias = bias[:self.out_features].to(torch.float32)
-        return (output - bias) * output_scale + bias
+        return output + bias
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
@@ -543,7 +536,7 @@ class ExllamaV3Linear(nn.Module):
                 # (#5331). Keep the result in FP32 until the BF16 re-scale.
                 native_result = inner.forward(
                     native_input,
-                    {},
+                    {"include_bias": False},
                     out_dtype=torch.float32,
                 )
                 if output_scale is not None:
@@ -552,6 +545,7 @@ class ExllamaV3Linear(nn.Module):
                         output_scale,
                         getattr(self, "bias", None),
                         self.out_features,
+                        result_has_bias=False,
                     )
                     if fused is not None:
                         # Already BF16: the trailing ``.to`` is a no-op.

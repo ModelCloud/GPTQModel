@@ -521,6 +521,14 @@ inline Tensor& add_(Tensor& self, const Tensor& other) {
   return self;
 }
 
+/// Out-of-place accumulate into an existing destination: `self = a + b`. The
+/// stable surface has no `aten::add.out`, so materialize the sum and copy it
+/// into `self`; both steps are stable ops.
+inline Tensor& add_out(Tensor& self, const Tensor& a, const Tensor& b) {
+  torch::stable::copy_(self, add(a, b));
+  return self;
+}
+
 /// `aten::addmm` carries Scalar beta/alpha, which the stable IValue bridge
 /// cannot marshal. The AOTI per-device `_out` shims take plain doubles.
 inline Tensor addmm(const Tensor& self, const Tensor& mat1, const Tensor& mat2) {

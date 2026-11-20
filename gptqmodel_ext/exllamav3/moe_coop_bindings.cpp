@@ -30,7 +30,8 @@ void run_exl3_moe_coop(
     at::Tensor& counters, at::Tensor& out,
     const std::optional<at::Tensor>& shared_out,
     const std::optional<at::Tensor>& shared_gate,
-    bool q4nx
+    bool q4nx,
+    const std::optional<at::Tensor>& flash_input_scale
 ) {
     constexpr int64_t int_max = std::numeric_limits<int>::max();
     TORCH_CHECK(min_expert >= -1 && min_expert <= int_max && max_expert >= -1 && max_expert <= int_max,
@@ -44,7 +45,8 @@ void run_exl3_moe_coop(
         gate_bias, up_bias, down_bias,
         static_cast<float>(gate_bits), static_cast<float>(up_bits), static_cast<float>(down_bits), mcg, mul1,
         static_cast<int>(activation), static_cast<float>(activation_limit), gated,
-        had_gate, had_up, gate_out, up_out, activated, down_out, counters, out, shared_out, shared_gate, q4nx
+        had_gate, had_up, gate_out, up_out, activated, down_out, counters, out, shared_out, shared_gate, q4nx,
+        flash_input_scale
     );
 }
 
@@ -61,7 +63,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(gptqmodel_exllamav3, m) {
         "int activation, float activation_limit, bool gated, "
         "Tensor(a!) had_gate, Tensor(b!) had_up, Tensor(c!) gate_out, Tensor(d!) up_out, "
         "Tensor(e!) activated, Tensor(f!) down_out, Tensor(g!) counters, Tensor(h!) out, "
-        "Tensor? shared_out=None, Tensor? shared_gate=None, bool q4nx=False) -> ()"
+        "Tensor? shared_out=None, Tensor? shared_gate=None, bool q4nx=False, Tensor? flash_input_scale=None) -> ()"
     );
 }
 

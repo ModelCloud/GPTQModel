@@ -2,10 +2,17 @@
 #include <cuda_fp16.h>
 #include "exl3_gemm.cuh"
 
+#include <algorithm>
+#include <limits>
+#include <set>
+#include <shared_mutex>
+#include "../hgemm.cuh"
 #include "../util.h"
 #include "exl3_kernel_map.cuh"
 #include "exl3_devctx.cuh"
 #include "exl3_gemv.cuh"
+#include "hadamard.cuh"
+#include "reconstruct.cuh"
 
 namespace {
 std::set<void*> kernel_attr_set[MAX_DEVICES];
@@ -65,6 +72,33 @@ int exl3_gemm(
     const int num_sms = DevCtx::instance().get_num_sms(device);
     const int cc = DevCtx::instance().get_cc(device);
 
+    // On the measured Ampere prefill shapes, decoding once and reusing the
+    // weights across rows is faster than decoding for each packed row tile.
+    // Cap the per-call expanded matrix at 48 MiB and require more rows for
+    // the wider projections. Keep the HGEMM result wide through normalization.
+    const int64_t weight_elements = (int64_t) size_k * size_n;
+    if (q4nx && c_fp32 && cc == CC_AMPERE && !fused_gemm &&
+        weight_elements >= 4 * 1024 * 1024 && weight_elements <= 24 * 1024 * 1024 &&
+        size_m >= (weight_elements <= 12 * 1024 * 1024 ? 64 : 128))
+    {
+        try
+        {
+            auto weight = at::empty({size_k, size_n}, at::options(A));
+            reconstruct_q4nx(weight, B, K, half_k);
+            auto x = A.view({size_m, size_k});
+            auto xh = A_had.view({size_m, size_k});
+            auto y = C.view({size_m, size_n});
+            had_r_128(x, xh, suh, c10::nullopt, 1.0f);
+            hgemm(xh, weight, y);
+            had_r_128(y, y, c10::nullopt, svh, EXL3_Q4NX_ALPHA);
+            return 92;
+        }
+        catch (const c10::OutOfMemoryError&)
+        {
+            // The expanded weight and HGEMM workspace are optional scratch.
+        }
+    }
+
     if (int8_gemv && mul1 && size_m <= (int8_gemv == 1 ? 1 : 2)
         && exl3_gemv_int8(A, B, C, suh, A_had, svh, int8_gemv, stream))
         return 91;
@@ -80,7 +114,7 @@ int exl3_gemm(
         (void*)&A_ptr, (void*)&B_ptr, (void*)&C_ptr, (void*)&size_m, (void*)&size_k,
         (void*)&size_n, (void*)&locks, (void*)&su, (void*)&xh, (void*)&sv
     };
-    if (fp16_gemv && !q4nx && exl3_gemv_try_launch(args, size_m, size_k, size_n, K, half_k, cb, c_fp32, device, stream))
+    if (fp16_gemv && exl3_gemv_try_launch(args, size_m, size_k, size_n, K, half_k, cb, c_fp32, device, stream))
         return 90;
 
     const bool use_fused = fused_gemm || half_k || q4nx;

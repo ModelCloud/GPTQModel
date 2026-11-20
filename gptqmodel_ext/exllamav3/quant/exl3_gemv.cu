@@ -41,6 +41,7 @@ static int exl3_gemv_cfg(int cc, int size_m, int size_k, int size_n, int K, int 
 }
 
 void* exl3_gemv_select_kernel_half(int bits, bool c_fp32, int mmode, int cfg, bool smem);
+void* exl3_gemv_select_kernel_q4nx(int bits, bool half_k, int mmode, int cfg);
 
 // bound: the narrow config's two-blocks-per-SM instance (the wide config has one form)
 static void* exl3_gemv_select_kernel(int bits, int cb, bool c_fp32, int mmode, int cfg, bool smem, bool bound)
@@ -76,9 +77,12 @@ bool exl3_gemv_try_launch
     cudaStream_t stream
 )
 {
-    // Free integer checks first; the env read (~64 ns) and device queries only run for calls
-    // that could actually take this path
-    if (half_k)
+    const bool q4nx = cb == EXL3_Q4NX_CODEBOOK;
+    if (q4nx)
+    {
+        if (!c_fp32 || !q4nx_supports_step_bits(4 * K + 2 * half_k)) return false;
+    }
+    else if (half_k)
     {
         if (K < 1 || K > 3 || cb != 2) return false;
     }
@@ -91,7 +95,7 @@ bool exl3_gemv_try_launch
     if (size_k % 128 || size_n % 128) return false;
 
     int cc = DevCtx::instance().get_cc(device);
-    // if (cc != CC_AMPERE) return false;
+    if (q4nx && cc != CC_AMPERE) return false;
     int mmode = size_m == 1 ? 0 : 1;
     int num_sms = DevCtx::instance().get_num_sms(device);
 
@@ -111,11 +115,12 @@ bool exl3_gemv_try_launch
         return blocks_per_sm;
     };
 
-    // Extraction style: shuffle by default, smem staging selectable per call for evaluation
+    // Each warp loads packed words into registers and shuffles the words it needs.
     constexpr bool smem = false;
 
     auto select = [&] (int cfg_, bool bound) -> void*
     {
+        if (q4nx) return exl3_gemv_select_kernel_q4nx(K, half_k, mmode, cfg_);
         return half_k ? exl3_gemv_select_kernel_half(K, c_fp32, mmode, cfg_, smem)
                       : exl3_gemv_select_kernel(K, cb, c_fp32, mmode, cfg_, smem, bound);
     };
@@ -125,14 +130,15 @@ bool exl3_gemv_try_launch
 
     // Shape heuristic: a half-integer rate K + 0.5 is handled like the integer rate above it (its tile is
     // between the two in bytes; unmeasured, so it inherits the K + 1 envelope)
-    int cfg = exl3_gemv_cfg(cc, size_m, size_k, size_n, half_k ? K + 1 : K, cb, narrow_coresident);
+    int cfg = q4nx ? (size_n / 32 <= narrow_coresident ? 0 : 1)
+                   : exl3_gemv_cfg(cc, size_m, size_k, size_n, half_k ? K + 1 : K, cb, narrow_coresident);
     if (cfg < 0) return false;
 
     void* kernel = cfg == 0 ? narrow_kernel : select(cfg, false);
     if (!kernel) return false;
 
     // A narrow grid that fits in one wave without the bound runs the unbounded integer instance
-    if (cfg == 0 && !half_k)
+    if (cfg == 0 && !half_k && !q4nx)
     {
         void* unbounded = select(0, false);
         if (unbounded && size_n / 32 <= occupancy(unbounded, 512) * num_sms) kernel = unbounded;
@@ -142,6 +148,7 @@ bool exl3_gemv_try_launch
     int cols = cfg == 0 ? 32 : 64;
 
     int max_blocks = occupancy(kernel, block_dim) * num_sms;
+    if (q4nx && size_n / cols > max_blocks) return false;
     int grid = MIN(size_n / cols, max_blocks);
     if (grid < 1) return false;
 

@@ -24,13 +24,12 @@ flowchart TD
     R --> G
     G --> C
     C --> I["LinearEXL3.forward"]
-    I --> J{"rows greater than 32?"}
-    J -->|no| K["bc.run: FP16 native GEMM"]
-    J -->|yes| L["ext.hgemm: FP16 native GEMM"]
-    K --> Q{"fused op present?"}
-    L --> Q
-    Q -->|yes| T["bf16_rescale: (out - bias) * scale + bias<br/>in FP32, one BF16 cast, one launch"]
-    Q -->|no| U["eager re-scale: FP32, multiply, BF16 cast"]
+    I --> K["Native projection with FP32 reduction and scaling"]
+    K --> W{"BF16 output?"}
+    W -->|no| Y["Add bias in FP32 and cast to FP16"]
+    W -->|yes| Q{"Fused BF16 epilogue present?"}
+    Q -->|yes| T["bf16_rescale.raw<br/>out * scale + bias in FP32, then BF16 cast"]
+    Q -->|no| U["Eager FP32 multiply and bias add, then BF16 cast"]
     B -->|float32| H
     H --> M["ExllamaV3TorchLinear._forward_eager"]
     M --> N2["reshape rows; convert to FP32"]
@@ -72,8 +71,8 @@ the kernel output row is multiplied back:
   practice exact, because BF16 divides exactly by a power of two.
 - The Hadamard bound also covers the GEMM accumulation for EXL3's packed weight
   scales, so the output row stays finite before it is rescaled.
-- The native kernels add the bias to the scaled accumulator. The bridge removes
-  the bias, rescales, and restores it in FP32, so the bias is never scaled.
+- The BF16 bridge requests the raw projection. It rescales the FP32 output and
+  adds the original checkpoint bias once before the BF16 cast.
 - The decision stays on the device (#4955). A per-row `inf`-norm reduction,
   `frexp`, and a `where` give every row its own scale, and a row that needs no
   scale gets exactly 1.0, which is the identity. Nothing is read back to the
@@ -124,15 +123,15 @@ flowchart LR
     B4 --> B5["to BF16"]
 ```
 
-After, the same math in two launches
+The current mapping uses two launches
 (`gptqmodel_ext/exllamav3/bf16_scale.cu`, reached through
 `gptqmodel/nn_modules/exllamav3_bf16_kernels.py`):
 
 ```mermaid
 flowchart LR
     X["BF16 x"] --> P["bf16_prescale<br/>one launch: row amax,<br/>power-of-two scale, FP16 cast"]
-    P --> G["EXL3 GEMM<br/>FP16 in, FP16 out"]
-    G --> R["bf16_rescale<br/>one launch: FP32 bias math,<br/>BF16 cast"]
+    P --> G["EXL3 GEMM<br/>FP16 in, unbiased FP32 out"]
+    G --> R["bf16_rescale.raw<br/>one launch: multiply, add bias,<br/>cast to BF16"]
     R --> Y["BF16 y"]
 ```
 
@@ -140,9 +139,9 @@ The pre-scale is one program per row: the row `amax` has to be complete before
 that row is cast, and a launch has no grid-wide barrier, so the row stays in one
 block. `frexp(amax / bound)` becomes the exponent field of the `amax / bound`
 quotient (the quotient is always above 1 on the rows that use it), and the
-divide is a multiply by the exact power-of-two reciprocal. The re-scale keeps
-`(out - bias) * scale + bias` as three separate FP32 roundings (`__fsub_rn`,
-`__fmul_rn`, `__fadd_rn`, never an FMA) and casts once to BF16.
+divide is a multiply by the exact power-of-two reciprocal. The re-scale
+computes `out * scale + bias` with a rounded FP32 multiply and a separate FP32
+add before casting once to BF16.
 
 **Failure contract.** The fused path declines instead of approximating:
 

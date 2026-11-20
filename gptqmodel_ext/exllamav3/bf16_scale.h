@@ -15,4 +15,5 @@ at::Tensor bf16_rescale(
     const at::Tensor& result,
     const at::Tensor& scale,
     const std::optional<at::Tensor>& bias,
-    int64_t n_cols);
+    int64_t n_cols,
+    bool result_has_bias);

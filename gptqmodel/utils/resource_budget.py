@@ -167,13 +167,14 @@ class ResourceBudget:
         """The per-device layer slices that hold KV-cache memory.
 
         ``None`` when the layer-to-device map is unknown. A device is kept when
-        its layers hold a growing cache *or* a recurrent state: the state is
-        constant per sequence, so a shard made only of Mamba/linear-attention
-        layers still runs out of memory as the batch grows (#5658). A device
-        whose layers cache nothing (KV-shared or non-attention blocks) is
-        omitted: it cannot constrain a cache it does not hold. Both planners
-        read this one enumeration, so they cannot disagree about which devices
-        bind.
+        its layers hold a growing cache, a sized recurrent state, or an unsized
+        one: the state is constant per sequence, so a shard made only of
+        Mamba/linear-attention layers still runs out of memory as the batch
+        grows (#5658), and an unsized state is unknown memory rather than none
+        (#5698). A device whose layers cache nothing (KV-shared or non-attention
+        blocks) is omitted: it cannot constrain a cache it does not hold. Both
+        planners read this one enumeration, so they cannot disagree about which
+        devices bind.
         """
 
         if self.kv_cache is None or self.layer_devices is None:
@@ -187,7 +188,8 @@ class ResourceBudget:
             if not owned:
                 continue
             subset = self._layer_subset(owned)
-            if subset is None or not (subset.growing_layers or subset.state_layers):
+            if subset is None or not (
+                    subset.growing_layers or subset.state_layers or subset.unsized_state_layers):
                 continue
             subsets.append((device, subset))
         return tuple(subsets)
@@ -200,9 +202,14 @@ class ResourceBudget:
         counting its own 0 would report "no usable context" for a model whose
         other device has plenty. A device that owns only recurrent layers
         constrains the batch (its state is constant per sequence) but not the
-        context length. An unmeasured device that owns cache memory leaves the
-        answer unknown: planning around it would assume room the snapshot never
-        reported.
+        context length, so a shard whose state fits the budget is skipped here;
+        one whose state does not fit still reports 0 and binds (#5658). An
+        unknown context (``max_context_tokens`` returned ``None``) or an
+        unmeasured budget leaves the answer unknown: planning around either
+        would assume room the snapshot never reported.
+
+        An empty mapping means no device bounds the context at all (a stack of
+        recurrent layers whose state fits), so only the model's own limit does.
         """
 
         subsets = self._cache_device_subsets()
@@ -214,8 +221,15 @@ class ResourceBudget:
             budget = device.kv_budget_bytes(self.reserve_fraction) if kv_budget_bytes is None else kv_budget_bytes
             if budget is None:
                 return None
-            limits[device.index] = subset.max_context_tokens(budget, batch_size=batch_size)
-        return limits or None
+            context = subset.max_context_tokens(budget, batch_size=batch_size)
+            if context is None:
+                return None
+            if subset.growing_layers == 0 and context > 0:
+                # Recurrent state is a per-sequence cost, not a per-token one:
+                # it binds the batch count, not the context length (#5658).
+                continue
+            limits[device.index] = context
+        return limits
 
     def max_context_tokens(self, *, batch_size: int = 1,
                            kv_budget_bytes: Optional[int] = None) -> Optional[int]:
@@ -236,7 +250,13 @@ class ResourceBudget:
             return None if budget is None else self.kv_cache.max_context_tokens(budget, batch_size=batch_size)
 
         limits = self._per_device_limits(batch_size=batch_size, kv_budget_bytes=None)
-        return min(limits.values()) if limits else None
+        if limits is None:
+            return None
+        if not limits:
+            # Nothing grows per token and every recurrent shard's state fits, so
+            # only the model's own limit can bound the context.
+            return self.context_limit
+        return min(limits.values())
 
     def max_sequences(self, context_tokens: int, *,
                       kv_budget_bytes: Optional[int] = None) -> Optional[int]:
@@ -245,9 +265,16 @@ class ResourceBudget:
         Like :meth:`max_context_tokens`, a sharded plan is the minimum over the
         devices that own a growing layer, and ``None`` when any of them has no
         free-memory measurement: an unmeasured card is unknown, not empty.
+        ``None`` too when a shard's recurrent state is unsized: the state each
+        sequence keeps is unknown, so a batch count computed without it would
+        be fiction (#5698).
         """
 
         if self.kv_cache is None:
+            return None
+        if self.kv_cache.unsized_state_layers:
+            # A state the config does not size is unknown memory: every count
+            # below would divide by a total that omits it (#5698).
             return None
         if kv_budget_bytes is not None:
             return self.kv_cache.max_sequences(int(kv_budget_bytes), context_tokens)
@@ -258,6 +285,9 @@ class ResourceBudget:
 
         subsets = self._cache_device_subsets()
         if subsets is None:
+            return None
+        if any(subset.unsized_state_layers for _, subset in subsets):
+            # The state a sequence keeps is unknown, so the batch count is too.
             return None
         limits = []
         for device, subset in subsets:
@@ -271,16 +301,32 @@ class ResourceBudget:
         return min(limits) if limits else None
 
     def context_batch_plan(self, *, kv_budget_bytes: Optional[int] = None,
-                           batches: Sequence[int] = (1, 2, 4, 8, 16, 32)) -> Tuple[Tuple[int, int], ...]:
-        """(estimated) ``(batch_size, max_context_tokens)`` rows for the KV budget."""
+                           batches: Sequence[int] = (1, 2, 4, 8, 16, 32)
+                           ) -> Optional[Tuple[Tuple[int, int], ...]]:
+        """(estimated) ``(batch_size, max_context_tokens)`` rows for the KV budget.
+
+        ``None`` when the context is unknown for every batch size, so a caller
+        cannot mistake "unmeasured" for "fits nothing".
+        """
 
         if self.kv_cache is None:
             return ()
+        if kv_budget_bytes is None and self.kv_budget_bytes is None:
+            # No measured budget to plan against: there is nothing to enumerate.
+            return ()
         rows = []
+        unknown = False
         for batch in batches:
             context = self.max_context_tokens(batch_size=batch, kv_budget_bytes=kv_budget_bytes)
+            if context is None:
+                # Unknown is not "fits nothing": an empty tuple would format as
+                # "fits no usable context", which is a different claim.
+                unknown = True
+                continue
             if context:
                 rows.append((int(batch), int(context)))
+        if unknown and not rows:
+            return None
         return tuple(rows)
 
     def format_plan(self, *, kv_budget_bytes: Optional[int] = None,
@@ -290,12 +336,17 @@ class ResourceBudget:
         A sharded model plans each device's own layers against that device's own
         budget and reports the minimum. The line is therefore labelled with the
         binding device's budget, not the sum of every device's free memory - the
-        sum is memory no single card can spend on the whole layer stack.
+        sum is memory no single card can spend on the whole layer stack. When
+        the model's own context limit binds instead, no single device budget
+        produced the rows, so the label is omitted. ``None`` when the plan is
+        unknown.
         """
 
         if self.kv_cache is None:
             return None
         rows = self.context_batch_plan(kv_budget_bytes=kv_budget_bytes, batches=batches)
+        if rows is None:
+            return None
         if kv_budget_bytes is not None:
             return self.kv_cache.format_plan_rows(
                 rows, kv_budget_bytes=int(kv_budget_bytes), suffix=" (estimated)")
@@ -305,21 +356,29 @@ class ResourceBudget:
                 return None
             return self.kv_cache.format_plan_rows(rows, kv_budget_bytes=budget, suffix=" (estimated)")
         limits = self._per_device_limits(batch_size=1, kv_budget_bytes=None)
-        if not limits:
+        if limits is None:
             return None
-        binding = min(limits, key=limits.get)
-        budget = next(
-            (device.kv_budget_bytes(self.reserve_fraction)
-             for device in self.cuda_devices if device.index == binding),
-            None,
-        )
-        # When the model's own context limit binds, no device is the limit; the
-        # rows formatter already says "(model limit)".
-        capped_by_model = self.context_limit is not None and limits[binding] >= self.context_limit
+        if limits:
+            binding = min(limits, key=limits.get)
+            budget = next(
+                (device.kv_budget_bytes(self.reserve_fraction)
+                 for device in self.cuda_devices if device.index == binding),
+                None,
+            )
+            # When the model's own context limit binds, no device is the limit;
+            # the rows formatter already says "(model limit)".
+            capped_by_model = self.context_limit is not None and limits[binding] >= self.context_limit
+        else:
+            # No shard bounds the context: only the model's own limit can.
+            binding = None
+            budget = None
+            capped_by_model = True
         suffix = " (estimated)" if capped_by_model else f" (estimated, limited by device {binding})"
         return self.kv_cache.format_plan_rows(
             rows,
-            kv_budget_bytes=budget,
+            # Model-capped rows were not bought by one device's budget; the
+            # suffix already says "(estimated)".
+            kv_budget_bytes=None if capped_by_model else budget,
             suffix=suffix,
         )
 

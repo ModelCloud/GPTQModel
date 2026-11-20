@@ -90,6 +90,44 @@ their projections and gates, and all MTP tensors in the exported checkpoint.
 The exported index also works when a mapped table and its scale land in
 different shards. Load the export with `GPTQModel.load()`.
 
+## Selected-projection Q4NX EXL3
+
+Use `EXL3Config` for routed `layers.N.ffn.experts.E.w1`, `w3`, and `w2`
+projections. The encoder uses the original FP4 weights and the BF16 inputs
+observed at each projection during calibration. Supply rows that exercise each
+selected projection. Both the encoder and the inference kernels use EXL3
+activation handling for the replaced projections.
+
+```python
+from gptqmodel import GPTQModel
+from gptqmodel.quantization import EXL3Config
+from gptqmodel.quantization.config import CalibrationConfig
+
+model = GPTQModel.load(
+    "deepseek-ai/DeepSeek-V4.1-Flash",
+    device_map="auto",
+    quantize_config=EXL3Config(bits=3.5, codebook="q4nx"),
+)
+model.quantize(
+    CalibrationConfig(dataset=calibration_rows),
+    projections=[f"layers.14.ffn.experts.0.w{i}" for i in (1, 3, 2)],
+)
+model.save("deepseek-v41-flash-q4nx")
+```
+
+The indexed export specifies each replaced projection's rate and codebook in
+`gptqmodel_v41_projections`. It stores the packed trellis, `suh`, `svh`, and
+`q4nx` marker in safetensors. The loader checks the marker against the
+projection declaration and reports missing or unexpected tensors before
+serving. The source format configuration still describes the other weights.
+
+`backend="exl3_exllama_v3"` explicitly selects NVIDIA SM80+ for Q4NX
+projections. AUTO can use native EXL3 on a compatible device.
+`backend="exl3_torch"` selects portable EXL3 and source projections.
+A routed layer with all eligible Q4NX experts uses the grouped CUDA path.
+Layers with partial replacements or heterogeneous expert layouts use
+the standard expert loop. [Grouped routing and limits](exl3-routed-decode.md#deepseek-v41-flash-q4nx)
+
 ## Pinned evidence
 
 The following artifacts come from `deepseek-ai/DeepSeek-V4.1-Flash`, revision

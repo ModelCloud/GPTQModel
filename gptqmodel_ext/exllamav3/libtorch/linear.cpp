@@ -51,10 +51,18 @@ int64_t bc_linear_exl3_run_configured
     // rotated input (#4619).  Allocate it per call for every batch size; the
     // caching allocator reuses the block for ordered work on the same stream.
     at::Tensor xh = at::empty_like(x);
-    const auto dispatch = exl3_gemm(x, trellis, y, suh, xh, svh, mcg, mul1, fp16_gemv, int8_gemv, fused_gemm, q4nx);
+    // Packed GEMM uses its destination for cross-block partial sums, and
+    // Q4NX normalizes those sums in the output Hadamard. Keep the destination
+    // wide through split-K, the Hadamard and the output scale.
+    const bool half_output = y.scalar_type() == at::kHalf;
+    at::Tensor accum = half_output ? at::empty_like(y, at::options(y).dtype(at::kFloat)) : y;
+    const auto dispatch = exl3_gemm(x, trellis, accum, suh, xh, svh, mcg, mul1,
+                                   fp16_gemv, int8_gemv, fused_gemm, q4nx);
 
     if (bias)
-        at::add_(y, bias.value());
+        at::add_out(y, accum, bias.value());
+    else if (half_output)
+        torch::stable::copy_(y, accum);
     return dispatch;
 }
 

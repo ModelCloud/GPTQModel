@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from ...quantization.config import FORMAT
+from ...quantization.config import FORMAT, METHOD
 from ...utils.model import OffloadTensorRef, TensorSource, streaming_state_dict_to_shards
 from ...utils.offload import _read_safetensors_header
 from ..writer import _parse_max_shard_size, _torch_dtype_from_safetensors_name
@@ -57,10 +57,12 @@ def save_checkpoint(wrapper, save_dir, *, safetensors_metadata, max_shard_size, 
             config.get("gptqmodel_v41_source_quantization") or config["quantization_config"]
         )
         quantization = wrapper.quantize_config.to_dict()
-        quantization["format"] = FORMAT.GPTQ_V2.value
-        quantization["checkpoint_format"] = FORMAT.GPTQ_V2.value
+        method = wrapper.quantize_config.method
+        checkpoint_format = FORMAT.EXL3 if method == METHOD.EXL3 else FORMAT.GPTQ_V2
+        quantization["format"] = checkpoint_format.value
+        quantization["checkpoint_format"] = checkpoint_format.value
         config["quantization_config"] = quantization
-        metadata.update(quant_method="gptq", checkpoint_format=FORMAT.GPTQ_V2.value)
+        metadata.update(quant_method=method.value, checkpoint_format=checkpoint_format.value)
     if meta_quantizer is not None:
         metadata["quantizer"] = str(meta_quantizer)
     with TemporaryDirectory(prefix=f".{destination.name}-", dir=destination.parent) as staging:

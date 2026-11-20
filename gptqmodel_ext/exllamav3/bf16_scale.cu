@@ -12,8 +12,9 @@
 //   prescale:  amax over the row, scale = 2**frexp_exponent(amax / bound) when
 //              amax > bound (1.0 otherwise), x * 2**-exponent in FP32, then a
 //              single RTNE cast to FP16.
-//   rescale:   ((FP16 or FP32 result -> FP32) - bias) * scale + bias with
-//              three separate RN FP32 roundings, then one RTNE cast to BF16.
+//   rescale:   unbiased result * scale + bias in FP32, then one RTNE cast
+//              to BF16. The original overload also subtracts the bias from
+//              inputs that include it before scaling.
 //
 // The division by a power of two is exact, so the fused results are
 // bit-identical to the eager reference.  Everything stays on the device; no
@@ -173,7 +174,7 @@ void bf16_rescale_kernel
     int64_t n_cols,
     int64_t result_stride,
     int64_t out_stride,
-    bool has_bias
+    bool result_has_bias
 )
 {
     const int64_t row = blockIdx.x;
@@ -184,10 +185,12 @@ void bf16_rescale_kernel
     }
     const float row_scale = scale[row];
     float value = result_to_float<ResultT>(result[row * result_stride + col]);
-    if (has_bias)
+    if (bias)
     {
         const float bias_value = bias_to_float<BiasT>(bias[col]);
-        value = __fadd_rn(__fmul_rn(__fsub_rn(value, bias_value), row_scale), bias_value);
+        if (result_has_bias)
+            value = __fsub_rn(value, bias_value);
+        value = __fadd_rn(__fmul_rn(value, row_scale), bias_value);
     }
     else
     {
@@ -210,6 +213,7 @@ void launch_bf16_rescale(
     int64_t n_cols,
     int64_t rows,
     int64_t result_stride,
+    bool result_has_bias,
     cudaStream_t stream)
 {
     const ResultT* result_ptr = reinterpret_cast<const ResultT*>(result.const_data_ptr());
@@ -229,15 +233,15 @@ void launch_bf16_rescale(
     {
         case at::kHalf:
             bf16_rescale_kernel<ResultT, at::Half><<<grid, kThreads, 0, stream>>>(
-                result_ptr, scale_ptr, b.const_data_ptr<at::Half>(), out_ptr, n_cols, result_stride, n_cols, true);
+                result_ptr, scale_ptr, b.const_data_ptr<at::Half>(), out_ptr, n_cols, result_stride, n_cols, result_has_bias);
             break;
         case at::kBFloat16:
             bf16_rescale_kernel<ResultT, at::BFloat16><<<grid, kThreads, 0, stream>>>(
-                result_ptr, scale_ptr, b.const_data_ptr<at::BFloat16>(), out_ptr, n_cols, result_stride, n_cols, true);
+                result_ptr, scale_ptr, b.const_data_ptr<at::BFloat16>(), out_ptr, n_cols, result_stride, n_cols, result_has_bias);
             break;
         case at::kFloat:
             bf16_rescale_kernel<ResultT, float><<<grid, kThreads, 0, stream>>>(
-                result_ptr, scale_ptr, b.const_data_ptr<float>(), out_ptr, n_cols, result_stride, n_cols, true);
+                result_ptr, scale_ptr, b.const_data_ptr<float>(), out_ptr, n_cols, result_stride, n_cols, result_has_bias);
             break;
         default:
             TORCH_CHECK(false, "bf16_rescale bias must be float16, bfloat16 or float32");
@@ -275,7 +279,8 @@ at::Tensor bf16_rescale(
     const at::Tensor& result,
     const at::Tensor& scale,
     const std::optional<at::Tensor>& bias,
-    int64_t n_cols)
+    int64_t n_cols,
+    bool result_has_bias)
 {
     TORCH_CHECK(result.is_cuda(), "bf16_rescale requires a CUDA tensor");
     TORCH_CHECK(
@@ -308,12 +313,12 @@ at::Tensor bf16_rescale(
     if (result.scalar_type() == at::kHalf)
     {
         launch_bf16_rescale<at::Half>(
-            result, scale, bias, out, n_cols, rows, result_stride, stream);
+            result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
     }
     else
     {
         launch_bf16_rescale<float>(
-            result, scale, bias, out, n_cols, rows, result_stride, stream);
+            result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;

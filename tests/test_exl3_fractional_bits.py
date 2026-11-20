@@ -82,6 +82,54 @@ def test_q4nx_recipe_reaches_projection_quantizer_after_config_round_trip(bits):
     assert restored.codebook == "mcg"
 
 
+@pytest.mark.parametrize("lm_head_name", ["lm_head", "transformer.output_layer"])
+@pytest.mark.parametrize(("head_override", "expected_bits"), [({}, 6), ({"head_bits": 5}, 5)])
+def test_head_rate_uses_its_dynamic_codebook_after_config_round_trip(lm_head_name, head_override, expected_bits):
+    cfg = EXL3Config(
+        bits=3.5,
+        codebook="q4nx",
+        lm_head=True,
+        head_bits="6",
+        dynamic={lm_head_name: {"bits": 4, "codebook": " MCG ", **head_override}},
+        offload_to_disk=False,
+    )
+    restored = QuantizeConfig.from_quant_config(cfg.to_dict())
+    assert restored.head_bits == 6
+    processor = object.__new__(EXL3Processor)
+    processor.lm_head_name = lm_head_name
+    device = torch.device("cuda:0")
+
+    head = clone_exllamav3_config_for_module(restored, lm_head_name, lm_head_name=lm_head_name)
+    head_args = processor._build_quant_args(
+        SimpleNamespace(name=lm_head_name.rsplit(".", 1)[-1], full_name=lm_head_name), head, device,
+    )
+    assert head_args["K"] == expected_bits
+    assert head_args["mcg"] is True
+    assert "q4nx" not in head_args
+
+    projection_name = "model.layers.0.mlp.down_proj"
+    projection = clone_exllamav3_config_for_module(restored, projection_name, lm_head_name=lm_head_name)
+    projection_args = processor._build_quant_args(
+        SimpleNamespace(name="down_proj", full_name=projection_name), projection, device,
+    )
+    assert projection_args["K"] == 3.5
+    assert projection_args["q4nx"] is True
+    assert "mcg" not in projection_args
+
+
+def test_head_rate_is_checked_when_dynamic_codebook_does_not_match_head():
+    cfg = EXL3Config(
+        bits=3.5,
+        codebook="q4nx",
+        lm_head=True,
+        head_bits=6,
+        dynamic={"not_the_head": {"bits": 4, "codebook": "mcg"}},
+        offload_to_disk=False,
+    )
+    with pytest.raises(ValueError, match=r"q4nx supports.*head_bits=6"):
+        clone_exllamav3_config_for_module(cfg, "lm_head")
+
+
 @pytest.mark.parametrize("bits", [1.5, 2, 4, 7])
 def test_q4nx_rejects_other_rates_in_global_and_dynamic_config(bits):
     with pytest.raises(ValueError, match="q4nx.*2.5.*3.0"):

@@ -54,8 +54,6 @@ class LinearEXL3:
         assert trellis.dtype == torch.int16, "trellis is wrong datatype"
         assert len(trellis.shape) == 3, "trellis must have dim = 3"
 
-        if bias is not None and bias.dtype == torch.float: bias = bias.to(torch.half)
-
         self.transformers_fix = transformers_fix
         self.key = key
 
@@ -138,31 +136,35 @@ class LinearEXL3:
             torch_mode = params.get("reconstruct", bsz > 32 and not self.q4nx)
 
         out_shape = x.shape[:-1] + (self.out_features,)
+        result_dtype = out_dtype or self.out_dtype or torch.half
         if bsz == 0:
             # A zero-row batch has no Hadamard/HGEMM work. The native
             # had_r_128 would otherwise launch a zero-row grid, which the
             # CUDA/HIP runtime rejects.
-            return torch.empty(out_shape, dtype = out_dtype or self.out_dtype or torch.half, device = x.device)
+            return torch.empty(out_shape, dtype=result_dtype, device=x.device)
         # The native hadamard/hgemm/bc kernels treat the operand as densely
         # packed rows and take `data_ptr()` directly. `view` succeeds on some
         # strided inputs (column slices, `hidden_states[:, -1:, :]`), which
         # then produced silently wrong rows, so pack before the kernels.
         x = x.reshape(-1, self.in_features).contiguous()
-        y = torch.empty(out_shape, dtype = out_dtype or self.out_dtype or torch.half, device = x.device)
+        include_bias = params.get("include_bias", True)
 
         if torch_mode:
-            y_ = y.view(x.shape[0], self.out_features)
+            y = torch.empty((x.shape[0], self.out_features), dtype=torch.float32, device=x.device)
             xh = torch.empty_like(x)
             ext.had_r_128(x, xh, self.suh, None, 1.0)
             w = self.get_inner_weight_tensor()
-            ext.hgemm(xh, w, y_)
-            ext.had_r_128(y_, y_, None, self.svh, 1.0)
-            if self.bias is not None:
-                y += self.bias
-            y = y.view(out_shape)
+            ext.hgemm(xh, w, y)
+            ext.had_r_128(y, y, None, self.svh, 1.0)
+            if include_bias and self.bias is not None:
+                y.add_(self.bias)
+            return y.view(out_shape).to(result_dtype)
 
-        else:
+        y = torch.empty(out_shape, dtype=result_dtype, device=x.device)
+        if include_bias:
             self.bc.run(x, y)
+        else:
+            self.bc.run(x, y, include_bias=False)
 
         return y
 
