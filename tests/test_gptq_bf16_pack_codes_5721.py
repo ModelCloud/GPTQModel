@@ -171,6 +171,8 @@ def _pack_and_compare(dtype: torch.dtype, exact: torch.Tensor):
     zeros = named.state["q_zeros"].clone()
     g_idx = named.state["q_g_idx"].clone()
     _pack(named, processor, model)
+    # The FP32 reconstruction is consumed by the pack call, not retained.
+    assert "pack_wq" not in named.state
 
     layer = model.linear
     assert isinstance(layer, TorchLinear)
