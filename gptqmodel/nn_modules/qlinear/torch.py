@@ -70,15 +70,25 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 
+_UNSET = object()
+
+
 class _CompiledDequantizeWeight:
-    """Run a compiled *unbound* ``dequantize_weight`` without pinning the module.
+    """Run the compiled 2/4/8-bit decoder without pinning the module's operands.
 
     ``torch.compile(self.dequantize_weight)`` stores the bound method inside the
     compiled wrapper, so the module ends up referencing itself through the
     instance attribute.  A GPU model then keeps its VRAM allocated after the last
     user reference is dropped, until a full cyclic ``gc.collect()`` (#4847).
-    Compiling the class function and resolving the instance through a weak
-    reference keeps the compiled fast path cycle-free.
+    The wrapper resolves the instance through a weak reference and keeps the
+    compiled fast path cycle-free.
+
+    The compiled entry is :func:`_decode_248_weight`, which takes the packed
+    operands as arguments.  Tracing ``dequantize_weight`` itself lifted
+    ``module.qweight``/``qzeros``/``scales`` into the compiled graph, so a
+    fusion pass that replaced those buffers with views of the fused allocation
+    left the originals reachable from the cached graph until a full dynamo
+    reset (#5797).
     """
 
     __slots__ = ("_compiled", "_module_ref")
@@ -91,12 +101,56 @@ class _CompiledDequantizeWeight:
         module = self._module_ref()
         if module is None:
             raise RuntimeError("compiled `dequantize_weight` called after its module was released")
+        if len(args) > 2:
+            raise TypeError(
+                "dequantize_weight() takes from 0 to 2 positional arguments "
+                f"but {len(args)} were given"
+            )
+        num_itr = kwargs.pop("num_itr", _UNSET)
+        dtype = kwargs.pop("dtype", _UNSET)
+        if args:
+            if num_itr is not _UNSET:
+                raise TypeError("dequantize_weight() got multiple values for argument 'num_itr'")
+            num_itr = args[0]
+        if len(args) > 1:
+            if dtype is not _UNSET:
+                raise TypeError("dequantize_weight() got multiple values for argument 'dtype'")
+            dtype = args[1]
+        if kwargs:
+            name = next(iter(kwargs))
+            raise TypeError(f"dequantize_weight() got an unexpected keyword argument '{name}'")
+        if num_itr is _UNSET:
+            num_itr = 1
+        if dtype is _UNSET:
+            dtype = None
         # The compiled kernel is reachable outside the model-forward proxy
         # (e.g. a direct kernel call). Enter the module's device so inductor's
         # device-less lazy patterns cannot resolve to the current, excluded
         # GPU (#5101); the caller's device is restored on exit.
-        with model_execution_device_scope(module, args, kwargs):
-            return self._compiled(module, *args, **kwargs)
+        with model_execution_device_scope(module, module.qweight):
+            if module.training or module.bits not in (2, 4, 8):
+                # The compiled entry covers the eval 2/4/8-bit decode only.
+                return type(module).dequantize_weight(module, num_itr=num_itr, dtype=dtype)
+            if (
+                num_itr == 1
+                and module._triton_dequant_enabled
+                and module._can_use_triton_dequant()
+            ):
+                return type(module).dequantize_weight(module, num_itr=num_itr, dtype=dtype)
+            qweight, zeros, g_idx_long, scales, decode_dtype = module._prepare_248_decode(dtype)
+            return self._compiled(
+                qweight,
+                zeros,
+                g_idx_long,
+                scales,
+                pack_factor=module.pack_factor,
+                wf_unsqueeze_neg_one=module.wf_unsqueeze_neg_one,
+                dequant_dtype=module.dequant_dtype,
+                maxq=module.maxq,
+                in_features=module.in_features,
+                decode_dtype=decode_dtype,
+                num_itr=num_itr,
+            )
 
     def __repr__(self):
         return f"<compiled dequantize_weight {self._compiled!r}>"
@@ -181,6 +235,76 @@ def _right_shift_unpack(values: torch.Tensor, shifts: torch.Tensor, dtype: torch
     shifts_i64 = shifts.to(device=values.device, dtype=torch.int64)
     divisors = torch.pow(torch.full_like(shifts_i64, 2), shifts_i64)
     return torch.floor_divide(values_i64, divisors).to(dtype)
+
+
+def _decode_248_weight(
+    qweight: torch.Tensor,
+    zeros: torch.Tensor,
+    g_idx_long: torch.Tensor,
+    scales: torch.Tensor,
+    *,
+    pack_factor: int,
+    wf_unsqueeze_neg_one: torch.Tensor,
+    dequant_dtype: torch.dtype,
+    maxq: int,
+    in_features: int,
+    decode_dtype: torch.dtype,
+    num_itr: int,
+) -> torch.Tensor:
+    """Reconstruct a packed 2/4/8-bit weight from explicit operands.
+
+    Every packed operand and every layout constant is a parameter, so a
+    compiled decode guards on the tensors it is handed instead of reading
+    module attributes. A graph that read ``module.qweight`` kept the pre-fusion
+    tensor alive after ``_FusionGroup._share_operands`` replaced the buffers
+    with views of the fused allocation (#5797).
+
+    Decode in a dtype that holds every stored weight. A half-precision scale
+    overflows on the multiply here, before the caller widens the result, so the
+    eval fast path used to return ``inf``/``NaN`` (#5606). The scale dtype is
+    kept whenever it is safe, so a finite fast path is bitwise unchanged.
+    """
+
+    wide = decode_dtype != scales.dtype
+    if wide:
+        zeros = zeros.to(decode_dtype)
+
+    weight = torch.bitwise_and(
+        _right_shift_unpack(
+            qweight.unsqueeze(1).expand(-1, pack_factor, -1),
+            wf_unsqueeze_neg_one,
+            dequant_dtype,
+        ),
+        maxq,
+    )
+    weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
+
+    if num_itr == 1:
+        if wide:
+            return scales.to(decode_dtype)[g_idx_long] * (
+                weight[:in_features].to(decode_dtype) - zeros[g_idx_long]
+            )
+        return scales[g_idx_long] * (weight[:in_features] - zeros[g_idx_long])
+
+    num_dim = g_idx_long.shape[0] // num_itr
+    out_dim = weight.shape[1] // num_itr
+    wide_scales = scales.to(decode_dtype) if wide else scales
+    weights = []
+    for i in range(num_itr):
+        row_start = i * num_dim
+        row_end = (i + 1) * num_dim
+        col_start = i * out_dim
+        col_end = (i + 1) * out_dim if i < (num_itr - 1) else weight.shape[1]
+
+        scale_i = wide_scales[:, col_start:col_end]
+        weight_i = weight[row_start:row_end, col_start:col_end]
+        zeros_i = zeros[:, col_start:col_end]
+        g_idx_i = g_idx_long[row_start:row_end]
+        if wide:
+            weight_i = weight_i.to(decode_dtype)
+        weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
+
+    return torch.cat(weights, dim=1)
 
 
 class _LinearWeightMetadata:
@@ -504,12 +628,15 @@ class TorchLinear(PackableQuantLinear):
             # MPS doesn't support inductor.
             backend = "inductor" if device_type != "mps" else "aot_eager"
 
-        # Compile the unbound function: compiling the bound method would store a
-        # strong reference to this module inside the compiled wrapper (#4847).
-        # Construction imports dynamo and changes its process-global config, so
-        # take the global-state writer while installing (#5127, #5268).
+        # Compile the operand-taking decoder, not the bound method: the bound
+        # method would store a strong reference to this module inside the
+        # compiled wrapper (#4847), and tracing ``dequantize_weight`` itself
+        # would lift the packed buffers into the graph and pin the pre-fusion
+        # tensors (#5797). Construction imports dynamo and changes its
+        # process-global config, so take the global-state writer while
+        # installing (#5127, #5268).
         with model_global_state_lock():
-            compiled = torch_compile(type(self).dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
+            compiled = torch_compile(_decode_248_weight, backend=backend, mode=mode, fullgraph=fullgraph)
             self.dequantize_weight = _CompiledDequantizeWeight(compiled, self)
 
             if self.adapter:
@@ -1319,60 +1446,38 @@ class TorchLinear(PackableQuantLinear):
                 return resolved
         return scales_fit_dtype(self.scales, self.bits, activation_dtype)
 
-    def _dequantize_weight_cached_248(
-        self, num_itr: int = 1, dtype: torch.dtype | None = None
-    ) -> torch.Tensor:
+    def _prepare_248_decode(self, dtype: torch.dtype | None = None):
+        """Eagerly stage the operands one 2/4/8-bit decode reads.
+
+        The staging is deliberately outside the compiled graph: it resolves the
+        cached zero-point/g_idx tables and the range-safe decode dtype, and it
+        returns the packed operands themselves so the compiled decode can take
+        them as arguments (#5797).
+        """
+
         self._init_wf_unsqueeze_buffers()
         zeros = self._stream_decode_qzeros()
         g_idx_long = self._stream_g_idx_long(target_device=self.qweight.device)
         self._maybe_offload_g_idx_to_cpu()
+        return self.qweight, zeros, g_idx_long, self.scales, self._resolve_decode_dtype(dtype)
 
-        # Decode in a dtype that holds every stored weight. A half-precision
-        # scale overflows on the multiply here, before the caller widens the
-        # result, so the eval fast path used to return `inf`/`NaN` (#5606).
-        # The scale dtype is kept whenever it is safe, so a finite fast path is
-        # bitwise unchanged.
-        decode_dtype = self._resolve_decode_dtype(dtype)
-        wide = decode_dtype != self.scales.dtype
-        if wide:
-            zeros = zeros.to(decode_dtype)
-
-        weight = torch.bitwise_and(
-            _right_shift_unpack(
-                self.qweight.unsqueeze(1).expand(-1, self.pack_factor, -1),
-                self.wf_unsqueeze_neg_one,
-                self.dequant_dtype,
-            ),
-            self.maxq,
+    def _dequantize_weight_cached_248(
+        self, num_itr: int = 1, dtype: torch.dtype | None = None
+    ) -> torch.Tensor:
+        qweight, zeros, g_idx_long, scales, decode_dtype = self._prepare_248_decode(dtype)
+        return _decode_248_weight(
+            qweight,
+            zeros,
+            g_idx_long,
+            scales,
+            pack_factor=self.pack_factor,
+            wf_unsqueeze_neg_one=self.wf_unsqueeze_neg_one,
+            dequant_dtype=self.dequant_dtype,
+            maxq=self.maxq,
+            in_features=self.in_features,
+            decode_dtype=decode_dtype,
+            num_itr=num_itr,
         )
-        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
-
-        if num_itr == 1:
-            if wide:
-                return self.scales.to(decode_dtype)[g_idx_long] * (
-                    weight[:self.in_features].to(decode_dtype) - zeros[g_idx_long]
-                )
-            return self.scales[g_idx_long] * (weight[:self.in_features] - zeros[g_idx_long])
-
-        num_dim = self.g_idx.shape[0] // num_itr
-        out_dim = weight.shape[1] // num_itr
-        scales = self.scales.to(decode_dtype) if wide else self.scales
-        weights = []
-        for i in range(num_itr):
-            row_start = i * num_dim
-            row_end = (i + 1) * num_dim
-            col_start = i * out_dim
-            col_end = (i + 1) * out_dim if i < (num_itr - 1) else weight.shape[1]
-
-            scale_i = scales[:, col_start:col_end]
-            weight_i = weight[row_start:row_end, col_start:col_end]
-            zeros_i = zeros[:, col_start:col_end]
-            g_idx_i = g_idx_long[row_start:row_end]
-            if wide:
-                weight_i = weight_i.to(decode_dtype)
-            weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
-
-        return torch.cat(weights, dim=1)
 
 def dequantize_model(model: PreTrainedModel, dtype: Optional[torch.dtype] = None):
     # Use the model's compute dtype, not the checkpoint storage dtype: GPTQ
