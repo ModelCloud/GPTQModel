@@ -1939,9 +1939,40 @@ class Fallback:
     smooth: Optional[SmoothMethod] = None
 
     def __post_init__(self) -> None:
-        """Validate a directly constructed smoother payload."""
+        """Validate the smoother and threshold at construction (#5578).
+
+        ``threshold`` used to be accepted unchecked, so ``NaN`` or a negative
+        value silently disabled the low-sample fallback (``observed < NaN`` is
+        always false) and ``NaN`` reached ``quantize_config.json`` as invalid
+        JSON. Bad strings failed only when ``quantize()`` started. Validate the
+        same parse the runtime uses, but keep the documented off forms
+        (``0``/``None``/``False``/``""``) and the ``True`` sentinel.
+        """
 
         self.smooth = _parse_smooth_method(self.smooth)
+
+        threshold = self.threshold
+        if threshold is None or threshold is False:
+            return
+        if isinstance(threshold, str) and not threshold.strip():
+            return
+        if threshold is True:
+            return
+
+        from ..utils.fallback import _parse_threshold
+
+        value, _ = _parse_threshold(threshold)
+        if value is None:
+            raise ValueError(
+                f"Fallback: `threshold` must be a number, percentage, or True/0/None, got {threshold!r}."
+            )
+        _validate_finite_float(
+            type(self).__name__,
+            "threshold",
+            value,
+            minimum=0.0,
+            range_text=">= 0 (use 0 to disable the fallback)",
+        )
 
 
 @dataclass
