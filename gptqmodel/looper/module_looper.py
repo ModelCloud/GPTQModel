@@ -2239,6 +2239,9 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
                 # Private copy: per-layer kwargs and hidden frontiers diverge
                 # between the native and quantized streams (#5831).
                 processor.receive_input_cache(copy.deepcopy(reusable_capture))
+                # The processor owns the copy; do not keep the source capture
+                # alive through the run if its owner later replaces it.
+                del reusable_capture
                 continue
 
             input_cache = self.cache_inputs(layers=layers,
