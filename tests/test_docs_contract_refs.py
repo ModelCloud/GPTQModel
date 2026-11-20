@@ -59,7 +59,7 @@ CONTRACT_REFS = (
      "_build_layer_type_position_embeddings", SYMBOL_CITATION),
     ("docs/fp8-scale-semantics.md", "gptqmodel/models/base.py",
      "_decoder_fp8_scale_semantics", SYMBOL_CITATION),
-    ("docs/fusion-planner.md", "gptqmodel/models/fusion.py", "_share_operands", 444),
+    ("docs/fusion-planner.md", "gptqmodel/models/fusion.py", "_share_operands", 525),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
      "_normalize_gguf_config", 977),
     ("docs/gguf-config-resolution.md", "gptqmodel/quantization/config.py",
@@ -90,7 +90,7 @@ CONTRACT_REFS = (
     ("docs/quantize-run-summary.md", "gptqmodel/models/base.py",
      "_log_quantize_summary", None),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
-     "compute_hessian_xtx", 1277),
+     "compute_hessian_xtx", SYMBOL_CITATION),
     # `gptq.py` keeps growing (#5325): the line drifted 2121 -> 2202 in one
     # merge, so cite the symbol instead.
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
@@ -115,7 +115,7 @@ CONTRACT_REFS = (
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/utils/model.py",
      "simple_dispatch_model", SYMBOL_CITATION),
     ("docs/generate-cpu-offload-autograd.md", "gptqmodel/nn_modules/qlinear/torch.py",
-     "_gptq_gemm_uniform_group_for_current_g_idx", 1031),
+     "_gptq_gemm_uniform_group_for_current_g_idx", 1114),
 )
 
 PYTHON_BLOCK = re.compile(r"```python\n(.*?)```", re.S)
