@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -16,13 +17,14 @@ from gptqmodel.models.definitions.deepseek_v41_flash import DeepSeekV41FlashQMod
 
 
 @pytest.fixture
-def v41_checkpoint(tmp_path):
+def v41_checkpoint(tmp_path, request):
+    width = getattr(request, "param", 32)
     # Layers 0, 1, 2, 3, 4, 5 have the roles of published layers 1, 14, 15, 20, 21, 24.
     text = {
-        "model_type": "deepseek_v41_text", "vocab_size": 32, "hidden_size": 32,
-        "moe_intermediate_size": 32, "num_hidden_layers": 6,
-        "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 32, "qk_rope_head_dim": 8,
-        "q_lora_rank": 32, "o_lora_rank": 32, "o_groups": 2, "rms_norm_eps": 1e-20,
+        "model_type": "deepseek_v41_text", "vocab_size": 32, "hidden_size": width,
+        "moe_intermediate_size": width, "num_hidden_layers": 6,
+        "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": width, "qk_rope_head_dim": 8,
+        "q_lora_rank": width, "o_lora_rank": width, "o_groups": 2, "rms_norm_eps": 1e-20,
         "n_routed_experts": 3, "n_shared_experts": 1, "num_experts_per_tok": 2,
         "scoring_func": "sqrtsoftplus", "norm_topk_prob": True, "routed_scaling_factor": 1.5,
         "swiglu_limit": 10.0, "sliding_window": 4, "compress_ratios": [0, 2, 2, 1, 1, 1, 0, 0],
@@ -64,45 +66,45 @@ def v41_checkpoint(tmp_path):
         tensors[name + ".weight"] = weight
         tensors[name + ".scale"] = scales.exp2().to(torch.float8_e8m0fnu)
 
-    dense("embed.weight", (32, 32))
-    dense("head.weight", (32, 32))
-    dense("norm.weight", (32,), offset=1)
+    dense("embed.weight", (32, width))
+    dense("head.weight", (32, width))
+    dense("norm.weight", (width,), offset=1)
     for layer in range(6):
         prefix = f"layers.{layer}."
         for name in ("attn_norm", "ffn_norm", "attn.q_norm", "attn.kv_norm"):
-            dense(prefix + name + ".weight", (32,), offset=1)
+            dense(prefix + name + ".weight", (width,), offset=1)
         for branch in ("attn", "ffn"):
-            dense(prefix + f"hc_{branch}_fn", (8, 64), dtype=torch.float32)
+            dense(prefix + f"hc_{branch}_fn", (8, 2 * width), dtype=torch.float32)
             dense(prefix + f"hc_{branch}_base", (8,), dtype=torch.float32)
             dense(prefix + f"hc_{branch}_scale", (3,), dtype=torch.float32, offset=1)
         dense(prefix + "attn.attn_sink", (2,), dtype=torch.float32)
-        for name, rows, cols in (("wq_a", 32, 32), ("wq_b", 64, 32), ("wkv", 32, 32),
-                                 ("wo_a", 64, 32), ("wo_b", 32, 64)):
+        for name, rows, cols in (("wq_a", width, width), ("wq_b", 2 * width, width), ("wkv", width, width),
+                                 ("wo_a", 2 * width, width), ("wo_b", width, 2 * width)):
             packed(prefix + "attn." + name, rows, cols)
         if layer in (1, 3, 5):
-            packed(prefix + "attn.indexer.wq_b", 64, 32)
-            dense(prefix + "attn.indexer.weights_proj.weight", (2, 32))
+            packed(prefix + "attn.indexer.wq_b", 64, width)
+            dense(prefix + "attn.indexer.weights_proj.weight", (2, width))
         if layer in (1, 3):
-            for name in ("compressor.norm", "indexer.k_norm"):
-                dense(prefix + f"attn.{name}.weight", (32,), offset=1)
-            for name in ("compressor.wkv", "indexer.wk"):
-                dense(prefix + f"attn.{name}.weight", (32, 32))
+            dense(prefix + "attn.compressor.norm.weight", (width,), offset=1)
+            dense(prefix + "attn.indexer.k_norm.weight", (32,), offset=1)
+            dense(prefix + "attn.compressor.wkv.weight", (width, width))
+            dense(prefix + "attn.indexer.wk.weight", (32, width))
         if layer == 1:
-            dense(prefix + "attn.compressor.wgate.weight", (32, 32))
+            dense(prefix + "attn.compressor.wgate.weight", (width, width))
 
-        dense(prefix + "ffn.gate.weight", (3, 32))
+        dense(prefix + "ffn.gate.weight", (3, width))
         tensors[prefix + "ffn.gate.bias"] = torch.tensor([1.0, 0.0, -1.0])
         tensors[prefix + "ffn.gate.bias_vl"] = torch.tensor([-1.0, 0.0, 1.0])
         for projection in ("w1", "w2", "w3"):
-            packed(prefix + "ffn.shared_experts." + projection, 32, 32)
+            packed(prefix + "ffn.shared_experts." + projection, width, width)
             for expert in range(3):
-                packed(prefix + f"ffn.experts.{expert}.{projection}", 32, 32, fp4=True)
+                packed(prefix + f"ffn.experts.{expert}.{projection}", width, width, fp4=True)
 
     for name in ("image_start", "image_end", "image_newline"):
-        dense(name, (32,))
+        dense(name, (width,))
     for name, rows, cols in (
         ("vision.patch_embed.proj", 8, 12), ("vision.blocks.0.attn.wqkv", 24, 8),
-        ("vision.blocks.0.attn.wo", 8, 8), ("aligner.w1", 32, 32), ("aligner.w2", 32, 32),
+        ("vision.blocks.0.attn.wo", 8, 8), ("aligner.w1", width, 32), ("aligner.w2", width, width),
     ):
         dense(name + ".weight", (rows, cols))
         dense(name + ".bias", (rows,))
@@ -121,6 +123,12 @@ def v41_checkpoint(tmp_path):
         "layers.1.engram.q_weight": shard,
     })
     tensors["layers.1.engram.q_weight"] = torch.full((1,), float("nan"))
+    # Exercise repacking when only one operand is available from the first shard.
+    if width != 32:
+        separate = "additional.safetensors"
+        projections = ("layers.1.attn.wq_a.scale", "layers.1.ffn.experts.0.w1.weight")
+        save_file({name: tensors.pop(name) for name in projections}, tmp_path / separate)
+        weight_map.update(dict.fromkeys(projections, separate))
     save_file(tensors, tmp_path / shard)
     (tmp_path / "model.safetensors.index.json").write_text(
         json.dumps({"weight_map": weight_map}), encoding="utf-8",
@@ -297,6 +305,71 @@ def test_v41_packed_projection_matches_independent_weights_and_retains_packed_st
             assert tuple(dict(projection.named_buffers())) == ("scale", "weight")
 
 
+@pytest.mark.cuda
+@pytest.mark.parametrize("v41_checkpoint", [128], indirect=True)
+def test_v41_cuda_load_runs_packed_projections(v41_checkpoint, monkeypatch):
+    from gptqmodel.models._const import DEVICE, normalize_device
+    from gptqmodel.models.deepseek_v41 import layers
+    from gptqmodel.utils.marlin import marlin_runtime_available, marlin_runtime_error
+
+    device = torch.device("cuda", torch.cuda.device_count() - 1) if torch.cuda.is_available() else torch.device("cpu")
+    if normalize_device(device) != DEVICE.CUDA or torch.cuda.get_device_capability(device) < (8, 0):
+        pytest.skip("NVIDIA CUDA compute capability 8.0 or later is required")
+    if not marlin_runtime_available(torch.bfloat16):
+        pytest.skip(marlin_runtime_error(torch.bfloat16))
+
+    source = GPTQModel.load(v41_checkpoint, device="cpu").model
+    loaded = GPTQModel.load(v41_checkpoint, device_map="auto", max_memory={device.index: "1GiB"}).model
+    reference = GPTQModel.load(v41_checkpoint, device=device, backend="torch").model
+    assert isinstance(reference.layers[1].attn.wq_a, layers.V41PackedLinear)
+    assert torch.equal(
+        reference.layers[1].attn.wq_a.weight.cpu().view(torch.uint8),
+        source.layers[1].attn.wq_a.weight.view(torch.uint8),
+    )
+
+    def dense_decode(*args, **kwargs):
+        pytest.fail("A CUDA projection decoded the entire packed weight")
+
+    monkeypatch.setattr(layers, "dequantize_fp8", dense_decode)
+    monkeypatch.setattr(layers, "dequantize_deepseek_v4_fp4_expert", dense_decode)
+    names = ("attn.wq_a", "attn.wo_a", "attn.indexer.wq_b", "ffn.experts.0.w1")
+    generator = torch.Generator().manual_seed(13)
+    fp4_levels = torch.tensor([0, .5, 1, 1.5, 2, 3, 4, 6, 0, -.5, -1, -1.5, -2, -3, -4, -6]).double()
+    for name in names:
+        raw = source.layers[1].get_submodule(name)
+        projection = loaded.layers[1].get_submodule(name)
+        exponents = raw.scale.view(torch.uint8).double() - 127
+        scales = exponents.exp2().repeat_interleave(32, dim=1)
+        if raw.fp4:
+            unsigned = raw.weight.view(torch.uint8).long()
+            codes = torch.stack((unsigned & 15, unsigned >> 4), dim=-1).flatten(1)
+            weight = fp4_levels[codes] * scales
+        else:
+            weight = raw.weight.double() * scales.repeat_interleave(32, dim=0)
+
+        buffers = tuple(projection.buffers())
+        assert not list(projection.parameters())
+        assert projection.qweight.nbytes == raw.weight.nbytes
+        assert projection.scales.nbytes == raw.scale.nbytes * (1 if raw.fp4 else 32)
+        projection.to(dtype=torch.bfloat16)
+        assert projection.scales.dtype == torch.uint8
+        for tokens in (1, 17):
+            shape = (2, tokens, raw.groups, weight.size(1)) if raw.groups > 1 else (tokens, weight.size(1))
+            x = torch.randn(shape, generator=generator).bfloat16()
+            blocks = x.double().unflatten(-1, (-1, 32))
+            scale = torch.exp2(torch.ceil(torch.log2(blocks.abs().amax(-1, keepdim=True).clamp_min(1e-4) / 448)))
+            quantized = ((blocks / scale).to(torch.float8_e4m3fn).double() * scale).flatten(-2)
+            if raw.groups > 1:
+                expected = torch.einsum("bsgd,grd->bsgr", quantized, weight.unflatten(0, (raw.groups, -1)))
+            else:
+                expected = quantized @ weight.T
+            actual = projection(x.to(device)).cpu()
+            torch.testing.assert_close(actual, expected.bfloat16(), atol=2e-3, rtol=2e-3)
+            assert all(a is b for a, b in zip(projection.buffers(), buffers, strict=True))
+            assert tuple(t.dtype for t in buffers) == (torch.int32, torch.uint8)
+            assert all(t.device == device for t in buffers)
+
+
 def test_v41_candidate_order_does_not_depend_on_masked_tail():
     from gptqmodel.models.deepseek_v41.attention import _candidate_blocks, _rank_entries
 
@@ -312,6 +385,29 @@ def test_v41_candidate_order_does_not_depend_on_masked_tail():
 def test_v41_public_load_rejects_quantization(v41_checkpoint):
     with pytest.raises(NotImplementedError, match="inference-only"):
         GPTQModel.load(v41_checkpoint, device="cpu", quantize_config={"bits": 4, "group_size": 32})
+
+
+def test_v41_marlin_backend_requires_cuda(v41_checkpoint):
+    with pytest.raises(ValueError, match="Marlin requires NVIDIA CUDA"):
+        GPTQModel.load(v41_checkpoint, device="cpu", backend="marlin")
+
+
+def test_v41_hyper_connection_normalizes_before_rounding():
+    from gptqmodel.models.deepseek_v41.layers import V41HyperConnection
+
+    config = SimpleNamespace(hc_mult=2, hc_eps=1e-6, rms_norm_eps=1e-20, hc_sinkhorn_iters=4, hidden_size=32)
+    generator = torch.Generator().manual_seed(609)
+    connection = V41HyperConnection(config)
+    with torch.no_grad():
+        connection.fn.copy_(torch.randn(connection.fn.shape, generator=generator) / 8)
+        connection.base.zero_()
+        connection.scale.fill_(1)
+    residual = torch.randn((2, 13, 2, config.hidden_size), generator=generator).bfloat16()
+    rows = residual.double().flatten(-2)
+    dot = (rows.unsqueeze(-2) * connection.fn[:config.hc_mult].double()).sum(-1)
+    rms = (rows.square().mean(-1, keepdim=True) + config.rms_norm_eps).sqrt()
+    expected = (dot / rms).float().sigmoid() + config.hc_eps
+    torch.testing.assert_close(connection(residual)[0], expected, atol=0, rtol=0)
 
 
 def test_v41_hyper_connection_mixes_input_streams_into_each_output():

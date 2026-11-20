@@ -79,8 +79,9 @@ class DeepSeekV41FlashQModel(BaseQModel):
             raise ValueError("DeepSeek V4.1 Flash does not support adapters")
         if fuse:
             require_fusable_config(cls, "deepseek_v41")
-        if module_tree is not None or normalize_backend(backend) not in (BACKEND.AUTO, BACKEND.TORCH):
-            raise ValueError("DeepSeek V4.1 Flash uses its built-in architecture and Torch backend")
+        backend = normalize_backend(backend)
+        if module_tree is not None or backend not in (BACKEND.AUTO, BACKEND.MARLIN, BACKEND.TORCH):
+            raise ValueError("DeepSeek V4.1 Flash uses its built-in module tree and the auto, marlin, or torch backend")
 
         from ..deepseek_v41.checkpoint import load_checkpoint
 
@@ -94,6 +95,7 @@ class DeepSeekV41FlashQModel(BaseQModel):
             raise TypeError(f"Unsupported DeepSeek V4.1 Flash load arguments: {', '.join(sorted(unsupported))}")
         model, local_path, selection = load_checkpoint(
             model_id_or_path, selection=selection, dtype=dtype, device=device, device_map=device_map, max_memory=max_memory,
+            backend=backend,
         )
         tokenizer = load_hf_tokenizer(
             model_id_or_path, model_config=model.config, trust_remote_code=tokenizer_trust, **selection,

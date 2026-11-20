@@ -13,8 +13,12 @@ from safetensors import safe_open
 from transformers.utils.hub import cached_file, cached_files, extract_commit_hash
 
 from ...quantization.dtype import is_fp4_packed_dtype
+from ...utils.backend import BACKEND
+from ...utils.marlin import marlin_runtime_available, marlin_runtime_error
 from ...utils.torch import as_torch_device
+from .._const import DEVICE, normalize_device
 from .configuration import DeepSeekV41FlashConfig
+from .layers import V41MarlinLinear, V41PackedLinear
 from .modeling import DeepSeekV41FlashForCausalLM
 
 
@@ -51,15 +55,35 @@ def _checkpoint_tensors(index, expected):
     return shards
 
 
-def _get_placements(model, expected, device, device_map, max_memory):
+def _supports_marlin_device(device):
+    return normalize_device(device) == DEVICE.CUDA and torch.cuda.get_device_capability(device) >= (8, 0)
+
+
+def _infer_placements(model, max_memory, backend):
+    source_scales = []
+    try:
+        # Budget for the per-row Marlin scales wherever an inferred layer could
+        # land on a compatible GPU. This only changes the meta size estimate.
+        if backend != BACKEND.TORCH and any(_supports_marlin_device(i) for i in range(torch.cuda.device_count())):
+            for module in model.modules():
+                if isinstance(module, V41PackedLinear) and not module.fp4 and module.marlin_aligned:
+                    source_scales.append((module, module.scale))
+                    module.scale = module.scale.new_empty((module.out_features, module.scale.size(1)))
+        return infer_auto_device_map(
+            model, max_memory=max_memory, no_split_module_classes=model._no_split_modules,
+        )
+    finally:
+        for module, scale in source_scales:
+            module.scale = scale
+
+
+def _get_placements(model, expected, device, device_map, max_memory, backend):
     if device_map is None:
         device_map = {"": device} if device is not None else "auto"
     if max_memory is not None and device_map != "auto":
         raise ValueError('DeepSeek V4.1 max_memory requires device_map="auto"')
     if device_map == "auto":
-        device_map = infer_auto_device_map(
-            model, max_memory=max_memory, no_split_module_classes=model._no_split_modules,
-        )
+        device_map = _infer_placements(model, max_memory, backend)
     if not isinstance(device_map, dict):
         raise ValueError('DeepSeek V4.1 device_map must be a mapping or "auto"')
 
@@ -99,7 +123,31 @@ def _read_tensor(shard, source, template, device):
     return value.to(device=device, dtype=target_dtype)
 
 
-def load_checkpoint(checkpoint, *, selection, dtype, device, device_map, max_memory):
+def _select_marlin_projections(model, placements, backend):
+    selected = set()
+    if backend == BACKEND.TORCH:
+        return selected
+    eligible_devices = {}
+    for name, module in model.named_modules():
+        if not isinstance(module, V41PackedLinear):
+            continue
+        target = placements[f"{name}.weight"]
+        if target not in eligible_devices:
+            eligible_devices[target] = _supports_marlin_device(target)
+        if eligible_devices[target] and module.marlin_aligned:
+            selected.add(name)
+        elif backend == BACKEND.MARLIN:
+            group_width = module.out_features // module.groups
+            raise ValueError(
+                f"DeepSeek V4.1 Marlin requires NVIDIA CUDA SM 8.0+ and tile-aligned dimensions. "
+                f"Projection {name} has N={group_width}, K={module.in_features} on {target}."
+            )
+    if selected and not marlin_runtime_available(torch.bfloat16):
+        raise RuntimeError(f"DeepSeek V4.1 requires Marlin on this CUDA device. {marlin_runtime_error(torch.bfloat16)}")
+    return selected
+
+
+def load_checkpoint(checkpoint, *, selection, dtype, device, device_map, max_memory, backend):
     index_name = "model.safetensors.index.json"
     index_path = Path(cached_file(checkpoint, index_name, **selection))
     revision = extract_commit_hash(str(index_path), None)
@@ -130,7 +178,8 @@ def load_checkpoint(checkpoint, *, selection, dtype, device, device_map, max_mem
         model = DeepSeekV41FlashForCausalLM(config, dtype=dtype)
     expected = model.state_dict(keep_vars=True)
     shards = _checkpoint_tensors(json.loads(index_path.read_text(encoding="utf-8")), expected)
-    device_map, placements = _get_placements(model, expected, device, device_map, max_memory)
+    device_map, placements = _get_placements(model, expected, device, device_map, max_memory, backend)
+    marlin_projections = _select_marlin_projections(model, placements, backend)
     filenames = cached_files(checkpoint, list(shards), **selection)
     for filename in filenames:
         with safe_open(filename, framework="pt", device="cpu") as shard:
@@ -141,5 +190,7 @@ def load_checkpoint(checkpoint, *, selection, dtype, device, device_map, max_mem
                 if isinstance(expected[target], torch.nn.Parameter):
                     value = torch.nn.Parameter(value, requires_grad=False)
                 setattr(module, leaf, value)
+                if parent in marlin_projections and not (module.weight.is_meta or module.scale.is_meta):
+                    model.set_submodule(parent, V41MarlinLinear(module))
     model.hf_device_map = device_map
     return model.eval(), str(index_path.parent), selection

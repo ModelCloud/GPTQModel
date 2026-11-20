@@ -9,6 +9,14 @@ from torch.nn import functional as F
 
 from ...quantization.activation_floatx import _e2m1_nearest_values
 from ...quantization.dtype import dequantize_fp8
+from ...utils.marlin import (
+    gptq_marlin_gemm,
+    marlin_is_tile_aligned,
+    marlin_make_workspace_new,
+    mxfp4_marlin_prepare,
+    mxfp8_marlin_prepare,
+)
+from ...utils.marlin_scalar_type import scalar_types
 from ...utils.model_dequant import dequantize_deepseek_v4_fp4_expert
 
 
@@ -36,6 +44,8 @@ class V41PackedLinear(nn.Module):
 
     def __init__(self, in_features, out_features, *, fp4=False, groups=1):
         super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
         self.groups = groups
         self.fp4 = fp4
         if in_features % 32 or out_features % 32 or out_features % groups:
@@ -45,6 +55,10 @@ class V41PackedLinear(nn.Module):
         columns = in_features // 2 if fp4 else in_features
         dtype = torch.int8 if fp4 else torch.float8_e4m3fn
         self.register_buffer("weight", torch.empty(out_features, columns, dtype=dtype))
+
+    @property
+    def marlin_aligned(self):
+        return marlin_is_tile_aligned(self.out_features // self.groups, self.in_features)
 
     def forward(self, x):
         x = fp8_roundtrip(x)
@@ -56,6 +70,59 @@ class V41PackedLinear(nn.Module):
             return F.linear(x, weight)
         weight = weight.unflatten(0, (self.groups, -1))
         return torch.einsum("bsgd,grd->bsgr", x, weight)
+
+
+class V41MarlinLinear(nn.Module):
+    """Execute the released MX weight codes in Marlin's packed layout."""
+
+    def __init__(self, source):
+        super().__init__()
+        self.groups = source.groups
+        self.in_features = source.in_features
+        self.group_width = source.out_features // source.groups
+        self.weight_type = scalar_types.float4_e2m1f if source.fp4 else scalar_types.float8_e4m3fn
+        if source.fp4:
+            prepare = mxfp4_marlin_prepare
+            scales = source.scale
+        else:
+            prepare = mxfp8_marlin_prepare
+            # DeepSeek shares each 32x32 exponent across 32 output rows.
+            # Marlin reads one exponent byte per output row and K group.
+            scales = source.scale.view(torch.uint8).repeat_interleave(32, dim=0).view(source.scale.dtype)
+        if self.groups == 1:
+            qweight, scales = prepare(source.weight, scales)
+        else:
+            weights = source.weight.split(self.group_width)
+            packed = [prepare(weight, scale) for weight, scale in zip(weights, scales.split(self.group_width), strict=True)]
+            qweights, group_scales = zip(*packed, strict=True)
+            qweight, scales = torch.stack(qweights), torch.stack(group_scales)
+        self.register_buffer("qweight", qweight)
+        # Keep the exponent bytes opaque to dtype-changing module moves.
+        self.register_buffer("scales", scales.view(torch.uint8))
+
+    def _project(self, x, qweight, scales, workspace):
+        flat = x.reshape(-1, self.in_features).contiguous()
+        output = gptq_marlin_gemm(
+            a=flat, c=None, b_q_weight=qweight, b_bias=None, b_scales=scales,
+            global_scale=None, b_zeros=None, g_idx=None, perm=None, workspace=workspace,
+            b_q_type=self.weight_type, size_m=flat.size(0), size_n=self.group_width,
+            size_k=self.in_features, use_fp32_reduce=True,
+        )
+        return output.reshape(*x.shape[:-1], self.group_width)
+
+    def forward(self, x):
+        if not x.is_cuda or x.dtype != torch.bfloat16:
+            raise ValueError("DeepSeek V4.1 Marlin projections require CUDA bfloat16 activations")
+        x = fp8_roundtrip(x)
+        # Each forward owns its locks so concurrent streams do not share them.
+        workspace = marlin_make_workspace_new(x.device)
+        scales = self.scales.view(torch.float8_e8m0fnu)
+        if self.groups == 1:
+            return self._project(x, self.qweight, scales, workspace)
+        return torch.stack([
+            self._project(group, qweight, group_scales, workspace)
+            for group, qweight, group_scales in zip(x.unbind(-2), self.qweight, scales, strict=True)
+        ], dim=-2)
 
 
 class V41RMSNorm(nn.Module):
@@ -89,9 +156,9 @@ class V41HyperConnection(nn.Module):
         weights = self.fn.double()
         mix_chunks = []
         for chunk in flat.split(max(1, 2**20 // flat.size(-1))):
-            values = chunk.float()
+            values = chunk.double()
             inv_rms = torch.rsqrt(values.square().mean(-1, keepdim=True) + self.norm_eps)
-            mix_chunks.append(F.linear(values.double(), weights).float() * inv_rms)
+            mix_chunks.append((F.linear(values, weights) * inv_rms).float())
         mixes = torch.cat(mix_chunks).unflatten(0, residual.shape[:2])
         pre, post, residual_mix = mixes.split((self.streams, self.streams, self.streams**2), dim=-1)
         pre_base, post_base, mix_base = self.base.split((self.streams, self.streams, self.streams**2))

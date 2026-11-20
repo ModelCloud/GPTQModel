@@ -18,8 +18,20 @@ model = GPTQModel.load(
 Use a local checkpoint directory or a Hugging Face repository ID.
 `device_map="auto"` places whole decoder layers, and an explicit device map can
 pin those layers. The devices must have room for the packed weights and
-execution workspace. The Torch runtime decodes one projection at a time and
-stores cache entries in BF16.
+execution workspace. On NVIDIA GPUs with compute capability 8.0 or later,
+the default backend uses GPT-QModel's Marlin MXFP4 and MXFP8 kernels for
+tile-aligned projections. `backend="marlin"` requires that path for every
+packed projection. `backend="torch"` selects the reference path, which decodes
+one projection at a time. Both paths store cache entries in BF16.
+
+Marlin repacks the published E2M1 and E4M3 codes during loading, one projection
+at a time. The FP8 source scales cover 32 output rows and 32 input columns.
+Marlin repeats each FP8 exponent byte across those 32 rows. FP4 source scales
+already have one byte per row and input group. Automatic placement budgets for
+the repeated scales. Marlin keeps the same number of weight bytes as the
+checkpoint and decodes weight tiles during matrix multiplication. Activations
+are dynamically rounded to block-32 FP8 and passed to Marlin as BF16. The
+grouped `wo_a` projection keeps its head groups separate.
 
 Text inputs use unpadded sequences. For images, pass flattened RGB patches as
 `pixel_values`, one `[1, patch_rows, patch_columns]` entry per image as
@@ -155,6 +167,7 @@ and Engram even if all its attention and expert projections resolve.
 | Dispatch | `deepseek_v41` failed config detection on Transformers releases without V4.1. | GPT-QModel recognizes the config and selects `DeepSeekV41FlashQModel`. |
 | Load | `V41Source` provided an explicit calibration API. | `load_checkpoint` validates the inference keys and opens only the shards needed by the backbone and vision tower. |
 | Forward | The public loader had no V4.1 inference runtime. | `V41DecoderLayer` carries the hyper-connection mix forward, and `V41AttentionState` shares compressed KV and selections between blocks. |
+| Packed projections | The initial V4.1 runtime decoded each FP4 or FP8 projection into a temporary BF16 matrix. | `V41MarlinLinear` uses packed CUDA GEMM. `V41PackedLinear` provides the Torch path. |
 
 ```mermaid
 flowchart TD
@@ -162,13 +175,18 @@ flowchart TD
     DEF --> IDX["load_checkpoint reads the index"]
     IDX --> FILTER["Skip dSpark and Engram entries"]
     FILTER --> MATCH{"Checkpoint matches the model?"}
-    MATCH -->|"Yes"| PACK["Load packed weights and dense parameters"]
+    MATCH -->|"Yes"| SELECT["_select_marlin_projections checks devices and geometry"]
     MATCH -->|"No"| ERROR["Raise with the missing or unexpected tensor"]
+    SELECT -->|"Marlin"| PACK["Repack each loaded projection into V41MarlinLinear"]
+    SELECT -->|"Torch"| TORCH["Keep the source layout in V41PackedLinear"]
+    SELECT -->|"Marlin requested and unavailable"| KERNEL_ERROR["Raise the device or kernel error"]
     PACK --> STATE["DeepSeekV41FlashCache owns per-request history"]
+    TORCH --> STATE
     STATE --> LAYER["V41DecoderLayer runs attention and MoE"]
     LAYER --> KV["Pass source banks and index selections to later layers"]
     KV --> OUT["Commit cache and return logits"]
     style ERROR fill:#fee,stroke:#b22
+    style KERNEL_ERROR fill:#fee,stroke:#b22
 ```
 
 Source names map directly to runtime paths except for the six `hc_*`
