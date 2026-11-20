@@ -384,12 +384,27 @@ void exl3_moe_coop
     at::Tensor& out,
     const c10::optional<at::Tensor>& sh_out,
     const c10::optional<at::Tensor>& sh_gate_w,
-    bool q4nx
+    bool q4nx,
+    const c10::optional<at::Tensor>& flash_input_scale
 )
 {
     TORCH_CHECK_DTYPE(x, kHalf);
     TORCH_CHECK_DTYPE(sel, kLong);
-    TORCH_CHECK_DTYPE(rw, kHalf);
+    if (flash_input_scale)
+    {
+        TORCH_CHECK_DTYPE(rw, kFloat);
+        TORCH_CHECK_DTYPE(*flash_input_scale, kFloat);
+        TORCH_CHECK(q4nx && gated && act == MOE_COOP_ACT_SILU && act_limit > 0 &&
+                    !g_bias && !u_bias && !d_bias && !sh_gate_w,
+                    "exl3_moe_coop: Flash requires bias-free gated Q4NX SiLU projections with a positive clamp");
+        TORCH_CHECK(flash_input_scale->device() == x.device() && flash_input_scale->is_contiguous() &&
+                    flash_input_scale->numel() == x.size(0),
+                    "exl3_moe_coop: Flash input scale must contain one FP32 factor per row");
+    }
+    else
+    {
+        TORCH_CHECK_DTYPE(rw, kHalf);
+    }
     TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous(),
                 "exl3_moe_coop: x must be a contiguous CUDA matrix");
     TORCH_CHECK(at::cuda::getDeviceProperties(x.get_device())->major >= 8, "exl3_moe_coop requires NVIDIA SM80 or newer");
@@ -414,5 +429,10 @@ void exl3_moe_coop
                                             had_g, had_u, gu_g, gu_u, act_out, d_out, ctr, out, sh_gate_w, K_gu, K_d, cb);
     p.min_expert = min_expert;
     p.max_expert = max_expert;
+    if (flash_input_scale)
+    {
+        p.flash_rw = rw.const_data_ptr<float>();
+        p.flash_input_scale = flash_input_scale->const_data_ptr<float>();
+    }
     exl3_moe_coop_run(p, K_gu, K_d, cb, x, sel, rw, sh_out);
 }

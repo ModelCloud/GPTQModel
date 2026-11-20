@@ -15,7 +15,9 @@ from accelerate import infer_auto_device_map
 from safetensors import safe_open
 from transformers.utils.hub import cached_file, cached_files, extract_commit_hash
 
+from ...exllamav3.q4nx import Q4NX_MULTIPLIER
 from ...quantization.dtype import is_fp4_packed_dtype
+from ...quantization.config import METHOD
 from ...utils.backend import BACKEND
 from ...utils.macaq_triton import TRITON_AVAILABLE
 from ...utils.marlin import marlin_runtime_available, marlin_runtime_error
@@ -125,6 +127,8 @@ def _read_tensor(shard, source, template, device):
         target_dtype in (torch.bfloat16, torch.float32) and value.dtype in (torch.bfloat16, torch.float32)
     ):
         raise ValueError(f"DeepSeek V4.1 tensor {source} has dtype {value.dtype}, expected {target_dtype}")
+    if source.endswith(".q4nx") and value.item() != Q4NX_MULTIPLIER - (1 << 32):
+        raise ValueError(f"DeepSeek V4.1 tensor {source} has an invalid Q4NX marker")
     return value.to(device=device, dtype=target_dtype)
 
 
@@ -180,7 +184,7 @@ def _configure_projection_backends(model, placements, backend):
     return selected
 
 
-def load_checkpoint(checkpoint, *, selection, dtype, device, device_map, max_memory, backend):
+def load_checkpoint(checkpoint, *, selection, dtype, device, device_map, max_memory, backend, kernel=None):
     index_name = "model.safetensors.index.json"
     index_path = Path(cached_file(checkpoint, index_name, **selection))
     revision = extract_commit_hash(str(index_path), None)
@@ -189,8 +193,15 @@ def load_checkpoint(checkpoint, *, selection, dtype, device, device_map, max_mem
     config = DeepSeekV41FlashConfig.from_pretrained(checkpoint, **selection)
     specs = config.gptqmodel_v41_projections or {}
     quantization = getattr(config, "quantization_config", {})
-    if specs and quantization.get("quant_method") != "gptq":
-        raise ValueError("DeepSeek V4.1 GPTQ projections require the GPTQ checkpoint configuration")
+    method = quantization.get("quant_method")
+    if specs and method not in (METHOD.GPTQ, METHOD.EXL3):
+        raise ValueError("DeepSeek V4.1 packed projections require a GPTQ or EXL3 checkpoint configuration")
+    packed_exl3 = bool(specs) and method == METHOD.EXL3
+    if backend in (BACKEND.EXL3_EXLLAMA_V3, BACKEND.EXL3_TORCH) and not packed_exl3:
+        raise ValueError("The DeepSeek V4.1 EXL3 backend requires packed Q4NX projections")
+    if backend == BACKEND.MARLIN and packed_exl3:
+        raise ValueError("DeepSeek V4.1 packed Q4NX projections require AUTO, TORCH, or an EXL3 backend")
+    source_backend = BACKEND.TORCH if backend == BACKEND.EXL3_TORCH else backend
     format_config = config.gptqmodel_v41_source_quantization if specs else quantization
     format_config = format_config or {}
     if (
@@ -214,12 +225,18 @@ def load_checkpoint(checkpoint, *, selection, dtype, device, device_map, max_mem
             from .gptq import _SOURCE_LINEAR_TYPES, _quantizable_path, make_gptq_projection
 
             for path, spec in specs.items():
-                if not _quantizable_path(path):
+                if not packed_exl3 and not _quantizable_path(path):
                     raise ValueError(f"DeepSeek V4.1 GPTQ checkpoint cannot replace {path}")
                 source = model.get_submodule(path)
                 if not isinstance(source, _SOURCE_LINEAR_TYPES):
-                    raise ValueError(f"DeepSeek V4.1 cannot load GPTQ projection {path}")
-                model.set_submodule(path, make_gptq_projection(source, spec))
+                    raise ValueError(f"DeepSeek V4.1 cannot load packed projection {path}")
+                if packed_exl3:
+                    from .exl3 import make_q4nx_projection
+
+                    projection = make_q4nx_projection(source, path, spec, backend, kernel)
+                else:
+                    projection = make_gptq_projection(source, spec)
+                model.set_submodule(path, projection)
     expected = model.state_dict(keep_vars=True)
     mapped_tables = {
         f"layers.{index}.engram.embed": model.layers[index].engram.embed
@@ -228,9 +245,24 @@ def load_checkpoint(checkpoint, *, selection, dtype, device, device_map, max_mem
     mapped_keys = {f"{prefix}.{leaf}" for prefix in mapped_tables for leaf in ("weight", "scale")}
     index = json.loads(index_path.read_text(encoding="utf-8"))
     shards = _checkpoint_tensors(index, expected.keys() | mapped_keys)
-    device_map, placements = _get_placements(model, expected, device, device_map, max_memory, backend)
-    projection_classes = _configure_projection_backends(model, placements, backend)
+    device_map, placements = _get_placements(model, expected, device, device_map, max_memory, source_backend)
+    if backend == BACKEND.EXL3_EXLLAMA_V3:
+        for path in specs:
+            target = placements[f"{path}.trellis"]
+            if normalize_device(target) != DEVICE.CUDA or torch.cuda.get_device_capability(target) < (8, 0):
+                raise ValueError(f"DeepSeek V4.1 Q4NX projection {path} requires NVIDIA CUDA SM80+")
+    projection_classes = _configure_projection_backends(model, placements, source_backend)
     files = {Path(path).name: path for path in cached_files(checkpoint, list(shards), **selection)}
+    if packed_exl3:
+        expected_markers = {path + ".q4nx" for path in specs}
+        actual_markers = {
+            name for filename in files.values() for name in _read_safetensors_header(filename)[1]
+            if name.endswith(".q4nx")
+        }
+        if missing := expected_markers - actual_markers:
+            raise ValueError(f"Missing DeepSeek V4.1 checkpoint tensor {min(missing)}")
+        if extra := actual_markers - expected_markers:
+            raise ValueError(f"Unexpected DeepSeek V4.1 checkpoint tensor {min(extra)}")
     weight_map = index["weight_map"]
     table_shards = {weight_map[name] for name in mapped_keys}
     for prefix, table in mapped_tables.items():
@@ -259,4 +291,8 @@ def load_checkpoint(checkpoint, *, selection, dtype, device, device_map, max_mem
     model.source_shards = files
     for path in specs:
         model.get_submodule(path).post_init()
+    if packed_exl3:
+        from .exl3 import bind_q4nx_routing
+
+        bind_q4nx_routing(model, specs)
     return model.eval(), str(index_path.parent), selection
