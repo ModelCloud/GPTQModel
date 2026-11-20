@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
+
 import torch
 
 from ...utils.rocm import IS_ROCM
@@ -39,6 +41,20 @@ def autocast_active(device_type: str) -> bool:
         return torch.is_autocast_enabled(device_type)
     except TypeError:  # torch < 2.4 takes no device argument (CUDA only)
         return torch.is_autocast_enabled()
+
+
+def fp32_epilogue_context(device_type: str):
+    """Keep an explicit FP32 epilogue out of an ambient autocast context.
+
+    A module that promises one wide reduction and a single output rounding
+    performs its matmul on explicit FP32 operands. Autocast still narrows an
+    eligible ``matmul``, so the product is rounded *before* a stored bias
+    cancels it (an exact 1 can become 0). Entering this context disables
+    autocast only for the epilogue; leaving it restores the caller's state.
+    """
+    if not autocast_active(device_type):
+        return contextlib.nullcontext()
+    return torch.autocast(device_type=device_type, enabled=False)
 
 
 def _can_fuse_hip_bias(
@@ -411,3 +427,34 @@ def linear_fp32_reduce(x, weight, bias=None):
         # addition; keep both in a single epilogue.
         return _fused_addmm(x, weight, bias)
     return torch.nn.functional.linear(x, weight, bias)
+
+
+def codebook_rounding_dtype(
+    activation_dtype: torch.dtype, codebook_dtype: torch.dtype
+) -> torch.dtype:
+    """Dtype a wide codebook reconstruction should be rounded to for a matmul.
+
+    A decoder sums its codebooks in FP32 and rounds once. The historical target
+    was the codebook storage dtype, and that stays bitwise identical whenever
+    the activation dtype can hold every value the codebook dtype can (a
+    matching dtype, or an FP32/FP64 activation over an FP16 checkpoint).
+
+    When the activation dtype has a wider range but a coarser mantissa -- BF16
+    activations over an FP16 checkpoint -- rounding to the codebook dtype can
+    turn a finite sum into ``inf`` even though the activation dtype represents
+    it exactly. Round once to the activation dtype there instead (#5609).
+    """
+
+    if (
+        not activation_dtype.is_floating_point
+        or not codebook_dtype.is_floating_point
+        or activation_dtype == codebook_dtype
+    ):
+        return codebook_dtype
+    activation = torch.finfo(activation_dtype)
+    codebook = torch.finfo(codebook_dtype)
+    if activation.max >= codebook.max and activation.eps <= codebook.eps:
+        return codebook_dtype
+    if activation.max > codebook.max:
+        return activation_dtype
+    return codebook_dtype
