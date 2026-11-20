@@ -49,7 +49,8 @@ void bc_linear_exl3_run
 int64_t bc_linear_exl3_run_configured(
     at::Tensor trellis, at::Tensor suh, at::Tensor svh, double K,
     const c10::optional<at::Tensor>& bias, bool mcg, bool mul1,
-    const at::Tensor& x, at::Tensor& y, bool fp16_gemv, int64_t int8_gemv, bool fused_gemm, bool q4nx);
+    const at::Tensor& x, at::Tensor& y, bool fp16_gemv, int64_t int8_gemv, bool fused_gemm, bool q4nx,
+    bool r4nx = false);
 
 // ROCm-only fast path: run the packed small-batch GEMV (native HIP kernels) and
 // return 1, or 0 when the shape/device/codebook is not eligible so the caller

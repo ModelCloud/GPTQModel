@@ -13,7 +13,14 @@ import torch
 from ....utils.kernel import KernelConfig
 from ...ext import exllamav3_ext as ext
 from ...trellis import trellis_rate
-from .exl3_lib.quantize import had_k, had_n, preapply_had_l, preapply_had_r, reconstruct_q4nx_inner
+from .exl3_lib.quantize import (
+    had_k,
+    had_n,
+    preapply_had_l,
+    preapply_had_r,
+    reconstruct_q4nx_inner,
+    reconstruct_r4nx_inner,
+)
 
 
 class LinearEXL3:
@@ -21,6 +28,8 @@ class LinearEXL3:
     quant_type: str = "exl3"
     q4nx: bool = False
     q4nx_tensor: torch.Tensor | None = None
+    r4nx: bool = False
+    r4nx_tensor: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -42,6 +51,7 @@ class LinearEXL3:
         kernel: KernelConfig | None = None,
         *,
         q4nx: torch.Tensor | None = None,
+        r4nx: torch.Tensor | None = None,
     ):
         assert scale is None, "scale is no longer used"
         assert su is not None or suh is not None, "either su (packed) or suh (unpacked) is required"
@@ -72,11 +82,15 @@ class LinearEXL3:
         self.mcg_tensor = mcg
         self.mul1_tensor = mul1
         self.q4nx_tensor = q4nx
+        self.r4nx_tensor = r4nx
         self.mcg = self.mcg_tensor is not None
         self.mul1 = self.mul1_tensor is not None
         self.q4nx = self.q4nx_tensor is not None
+        self.r4nx = self.r4nx_tensor is not None
 
-        self.K = trellis_rate(trellis.shape[-1], self.mcg, self.mul1, q4nx=self.q4nx)
+        self.K = trellis_rate(
+            trellis.shape[-1], self.mcg, self.mul1, q4nx=self.q4nx, r4nx=self.r4nx
+        )
 
         self.bc = ext.BC_LinearEXL3(
             self.trellis,
@@ -88,6 +102,7 @@ class LinearEXL3:
             self.mul1,
             **({"kernel": kernel} if kernel is not None else {}),
             **({"q4nx": True} if self.q4nx else {}),
+            **({"r4nx": True} if self.r4nx else {}),
         )
 
 
@@ -110,6 +125,7 @@ class LinearEXL3:
                 ("mcg", self.mcg_tensor),
                 ("mul1", self.mul1_tensor),
                 ("q4nx", self.q4nx_tensor),
+                ("r4nx", self.r4nx_tensor),
             ] if tensor is not None
         }
 
@@ -134,7 +150,9 @@ class LinearEXL3:
         if torch.version.hip is not None:
             torch_mode = params.get("reconstruct", bsz > 8)
         else:
-            torch_mode = params.get("reconstruct", bsz > 32 and not self.q4nx)
+            # R4NX has no tensor-core GEMM kernel on any backend, so it always
+            # decodes through reconstruct + HGEMM.
+            torch_mode = self.r4nx or params.get("reconstruct", bsz > 32 and not self.q4nx)
 
         out_shape = x.shape[:-1] + (self.out_features,)
         result_dtype = out_dtype or self.out_dtype or torch.half
@@ -207,16 +225,23 @@ class LinearEXL3:
         # suh = self.unpack_bf(self.su).unsqueeze(1)
         suh = self.unpack_bf(self.su).unsqueeze(1) if self.su else self.suh.unsqueeze(1)
         svh = self.unpack_bf(self.sv).unsqueeze(0) if self.sv else self.svh.unsqueeze(0)
-        w = reconstruct_q4nx_inner(self.trellis) if self.q4nx else self.get_inner_weight_tensor()
+        if self.r4nx:
+            w = reconstruct_r4nx_inner(self.trellis)
+        elif self.q4nx:
+            w = reconstruct_q4nx_inner(self.trellis)
+        else:
+            w = self.get_inner_weight_tensor()
         w = preapply_had_l(w, had_k)
         w *= suh
         w = preapply_had_r(w, had_n)
         w *= svh
         # w *= self.scale
-        return w.half() if self.q4nx else w
+        return w.half() if (self.q4nx or self.r4nx) else w
 
 
     def get_inner_weight_tensor(self):
+        if self.r4nx:
+            return reconstruct_r4nx_inner(self.trellis).half()
         if self.q4nx:
             return reconstruct_q4nx_inner(self.trellis).half()
         w = torch.empty((self.in_features, self.out_features), dtype = torch.half, device = self.trellis.device)
@@ -265,6 +290,7 @@ class LinearEXL3:
             "mcg": producer.send(self.mcg_tensor),
             "mul1": producer.send(self.mul1_tensor),
             "q4nx": producer.send(self.q4nx_tensor),
+            "r4nx": producer.send(self.r4nx_tensor),
             "out_dtype": self.out_dtype,
         }
 
@@ -279,6 +305,7 @@ class LinearEXL3:
         mcg = consumer.recv(exported["mcg"], cuda = True)
         mul1 = consumer.recv(exported["mul1"], cuda = True)
         q4nx = consumer.recv(exported["q4nx"], cuda = True) if "q4nx" in exported else None
+        r4nx = consumer.recv(exported["r4nx"], cuda = True) if "r4nx" in exported else None
 
         if split is not None:
             split_out, first, last = split
@@ -313,6 +340,7 @@ class LinearEXL3:
             mcg = mcg,
             mul1 = mul1,
             q4nx = q4nx,
+            r4nx = r4nx,
             bias = bias,
             out_dtype = exported["out_dtype"],
         )
