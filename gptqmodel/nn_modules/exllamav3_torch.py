@@ -23,6 +23,7 @@ from ..utils.logger import setup_logger
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
 from .compiled_state import compiled_module_getstate
 from .exllamav3 import _EXL3_BUFFER_NAMES, _EXL3_REQUIRED_BUFFERS, _torch_dtype
+from .qlinear._numerics import fp32_epilogue_context
 
 
 log = setup_logger()
@@ -590,24 +591,29 @@ class ExllamaV3TorchLinear(nn.Module):
     def _forward_eager(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
         compute_dtype = torch.float32
-        x_2d = x.reshape(-1, self.in_features).to(compute_dtype)
-        if (
-            x.device.type == "cpu"
-            and _cpu_bf16x3_support()
-            and _cpu_bf16x3_should_use(
-                x_2d.shape[0],
-                self.in_features,
-                self.out_features,
-            )
-        ):
-            with cpu_bf16x3_scope():
+        # Both Hadamards and every tiled projection must run in the explicit
+        # FP32 contract; an ambient autocast context would otherwise round the
+        # Hadamard output before the packed-code projection and overflow it
+        # (#5837). The context restores the caller's autocast state on exit.
+        with fp32_epilogue_context(x.device.type):
+            x_2d = x.reshape(-1, self.in_features).to(compute_dtype)
+            if (
+                x.device.type == "cpu"
+                and _cpu_bf16x3_support()
+                and _cpu_bf16x3_should_use(
+                    x_2d.shape[0],
+                    self.in_features,
+                    self.out_features,
+                )
+            ):
+                with cpu_bf16x3_scope():
+                    y = self._forward_chunked(x_2d, compute_dtype)
+            else:
                 y = self._forward_chunked(x_2d, compute_dtype)
-        else:
-            y = self._forward_chunked(x_2d, compute_dtype)
-        bias = getattr(self, "bias", None)
-        if bias is not None:
-            y = y + bias.to(dtype=compute_dtype)
-        y = y.view(*x.shape[:-1], self.out_features)
+            bias = getattr(self, "bias", None)
+            if bias is not None:
+                y = y + bias.to(dtype=compute_dtype)
+            y = y.view(*x.shape[:-1], self.out_features)
         return y.to(input_dtype)
 
     def optimize(
