@@ -25,7 +25,10 @@ from ...utils.machete import (
 )
 from ...utils.marlin import replace_parameter, replace_tensor, unpack_cols
 from ...utils.marlin_scalar_type import scalar_types
-from ...utils.packing_math import scaled_zero_offset
+from ...utils.packing_math import (
+    validate_narrow_affine_products,
+    zero_points_in_scale_dtype,
+)
 from ...utils.rocm import IS_ROCM
 from ._compile_support import COMPILE_LEVEL
 
@@ -183,8 +186,11 @@ class AwqMacheteLinear(AWQuantLinear):
         num_groups = self.in_features // effective_group_size
         qzeros_unpacked = unpack_cols(self.qzeros, self.bits, num_groups, self.out_features).to(device=device)
         qzeros_unpacked = _undo_awq_interleave(qzeros_unpacked, self.bits)
-        # Validate before overwriting the checkpoint's weight layout.
-        qzeros_fp = scaled_zero_offset(self.scales, qzeros_unpacked)
+        # Keep the logical zero point: the native mainloop subtracts it from the
+        # upcast integer code before scaling, so the dequantized weight rounds
+        # once from `(code - zero) * scale`. Validate before overwriting the
+        # checkpoint's weight layout.
+        qzeros_runtime = zero_points_in_scale_dtype(self.scales, qzeros_unpacked)
 
         # Reconstruct integer weights from packed AWQ representation
         qweight_int = unpack_cols(
@@ -194,6 +200,12 @@ class AwqMacheteLinear(AWQuantLinear):
             self.out_features,
         ).to(device=device)
         qweight_int = _undo_awq_interleave(qweight_int, self.bits)
+
+        # Reject an out-of-range affine product before any registered tensor is
+        # rewritten, so a failed load leaves the checkpoint layout intact.
+        validate_narrow_affine_products(
+            qweight_int, qzeros_unpacked, self.scales, effective_group_size
+        )
 
         packed = pack_quantized_values_into_int32(
             qweight_int,
@@ -212,7 +224,7 @@ class AwqMacheteLinear(AWQuantLinear):
         # Ensure scales are contiguous and resident on the correct device.
         _replace_registered_tensor(self, "scales", self.scales.contiguous())
 
-        _replace_registered_tensor(self, "qzeros", qzeros_fp)
+        _replace_registered_tensor(self, "qzeros", qzeros_runtime)
 
         if self.bias is not None:
             self.bias = self.bias.to(device=device)
@@ -224,8 +236,12 @@ class AwqMacheteLinear(AWQuantLinear):
             return self.empty_linear_output(x)
 
         input_2d = x.reshape(-1, x.shape[-1]).contiguous()
-        group_scales = self.scales.to(dtype=input_2d.dtype)
-        group_zeros = self.qzeros.to(dtype=input_2d.dtype)
+        # The generated asymmetric kernels require the activation, group scale
+        # and group zero-point operands to share one dtype; the native
+        # dispatcher rejects any other signature.
+        activation_dtype = input_2d.dtype
+        group_scales = self.scales.to(dtype=activation_dtype)
+        group_zeros = self.qzeros.to(dtype=activation_dtype)
 
         output = machete_mm(
             a=input_2d,

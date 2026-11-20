@@ -109,16 +109,38 @@ def test_qqq_solver_allocation_failure_retries_on_cpu(monkeypatch):
 
 
 def test_qqq_numerical_failure_does_not_retry_on_cpu(monkeypatch):
+    """An indefinite Hessian exhausts damp recovery without leaving CUDA.
+
+    Recovery intentionally retries the additive damp grid and the diagonal
+    floor (issue #5858), so the failure must be a matrix that stays
+    non-positive-definite for every candidate: ``cholesky_ex`` reports
+    ``info != 0`` on CUDA for the whole run.
+    """
+
     task = _qqq_task("cuda")
-    error = torch._C._LinAlgError(
-        "The leading minor of order 1 is not positive definite"
+    real_cholesky_ex = torch.linalg.cholesky_ex
+    calls = {"cuda": 0}
+
+    def always_indefinite(hessian, *args, **kwargs):
+        if hessian.device.type == "cuda":
+            calls["cuda"] += 1
+            return torch.empty_like(hessian), torch.tensor(1, device=hessian.device)
+        return real_cholesky_ex(hessian, *args, **kwargs)
+
+    monkeypatch.setattr(torch.linalg, "cholesky_ex", always_indefinite)
+    messages = []
+    monkeypatch.setattr(
+        "gptqmodel.quantization.qqq.log.warn",
+        lambda message, *args, **kwargs: messages.append(
+            message % args if args else message
+        ),
     )
-    state = _fail_first_cuda_cholesky(monkeypatch, error)
 
     with pytest.raises(torch._C._LinAlgError):
         task.quantize(blocksize=16)
 
-    assert state["failed"] is True
+    assert calls["cuda"] > 1
+    assert "falling back to CPU" not in "\n".join(messages)
 
 
 def test_exl3_block_ldl_solver_allocation_failure_retries_on_cpu(monkeypatch):

@@ -53,18 +53,24 @@ from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.resource_budget import DeviceAllocation, RuntimeAllocationUnavailable
 from ...utils.tt_packing import dequantize_tt_packed_4bit, repack_gptq_for_tt
 from ...utils.ttnn_runtime import (
     TTNNMesh,
     TTNNUnavailable,
     close_mesh,
     current_mesh,
+    dram_allocated_bytes,
+    hold_mesh_lease,
     import_ttnn,
+    mesh_device_ids,
     open_mesh,
+    release_mesh_lease,
     to_host_replica,
 )
 from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
+from .ttnn import _ttnn_arch
 
 
 log = setup_logger()
@@ -92,11 +98,18 @@ class _TTNNBlockFloatMixin:
         return open_mesh(
             device_count=self._requested_device_count(),
             fabric=self._fabric_config(),
+            device_id=self._requested_device_id(),
         )
 
     def _requested_device_count(self) -> int:
         requested = getattr(self, "ttnn_device_count", None)
         return 1 if requested is None else int(requested)
+
+    def _requested_device_id(self) -> int:
+        # Resolved by the loader from an explicit `xla:N` request; `open_mesh`
+        # still rejects an ordinal combined with a multi-chip mesh.
+        requested = getattr(self, "ttnn_device_id", None)
+        return 0 if requested is None else int(requested)
 
     def _fabric_config(self) -> str:
         return "DISABLED" if self._requested_device_count() == 1 else "FABRIC_1D"
@@ -141,6 +154,9 @@ class _TTNNBlockFloatMixin:
         weights = self._host_weights().to(torch.bfloat16).contiguous()
 
         mesh = self._mesh()
+        # Lease the shared handle for this layer; the model wrapper releases
+        # only devices its own kernels hold.
+        hold_mesh_lease(self)
         dev = mesh.device
         count = mesh.num_devices
         if self.out_features % count:
@@ -148,6 +164,14 @@ class _TTNNBlockFloatMixin:
                 f"out_features={self.out_features} must be divisible by the "
                 f"{count} TTNN devices in the mesh"
             )
+
+        # Measure the allocator before the upload so the budget can report the
+        # exact per-chip storage this weight adds, including tile padding and
+        # page rounding. An unreadable view is reported as unknown, not zero.
+        try:
+            allocated_before = dram_allocated_bytes(dev)
+        except Exception:
+            allocated_before = None
 
         host = ttnn.from_torch(
             weights,
@@ -173,15 +197,91 @@ class _TTNNBlockFloatMixin:
                 dev,
             )
 
+        device_bytes = None
+        if allocated_before is not None:
+            try:
+                allocated_after = dram_allocated_bytes(dev)
+            except Exception:
+                allocated_after = None
+            if allocated_after is not None and allocated_after > allocated_before:
+                device_bytes = allocated_after - allocated_before
+        try:
+            device_ids = mesh_device_ids(mesh)
+        except Exception:
+            device_ids = ()
+
+        old_weight = getattr(self, "_ttnn_weight", None)
+        old_bias = getattr(self, "_ttnn_bias", None)
         self._ttnn_weight = weight
         self._ttnn_bias = bias
         self._ttnn_devices = count
+        self._ttnn_device_ids = device_ids
+        self._ttnn_device_bytes = device_bytes
+        self._ttnn_key = self._weight_key(mesh)
+        # Publish first, then release the replaced tensors: a rebuild that fails
+        # above must leave the previous, still-valid weight in place.
+        for tensor in (old_weight, old_bias):
+            if tensor is None:
+                continue
+            try:
+                ttnn.deallocate(tensor)
+            except Exception as exc:  # pragma: no cover - best-effort release
+                log.debug(f"TTNN: block-float weight deallocate failed: {exc}")
         return weight
 
+    def _compute_config(self, ttnn):
+        """Return the HiFi4 / FP32-destination compute config for this layer.
+
+        TT-Metal defaults to ``LoFi`` with ``math_approx_mode``. On real OPT
+        ``q_proj`` data that measured 0.0456 maximum absolute error, while the
+        same GEMM with HiFi4 and FP32 accumulation measured 0.0093 -- the floor
+        the dense FP32 Torch oracle itself shows. ``TTNNLinear`` already uses
+        this configuration; the block-float path must match it or it drops
+        finite cancellation residuals that the exact result keeps.
+        """
+
+        config = getattr(self, "_ttnn_compute_config", None)
+        if config is None:
+            config = ttnn.init_device_compute_kernel_config(
+                _ttnn_arch(ttnn),
+                math_fidelity=ttnn.MathFidelity.HiFi4,
+                math_approx_mode=False,
+                fp32_dest_acc_en=True,
+            )
+            self._ttnn_compute_config = config
+        return config
+    def _weight_key(self, mesh):
+        """Identity of every input that the packed BF8 weight is built from.
+
+        ``tensor_cache_key`` catches tensor replacement and in-place mutation;
+        ``generation`` catches a closed and reopened mesh. Inference tensors do
+        not expose a version counter, so for those the key falls back to storage
+        identity and the explicit ``clear_weight_cache()`` contract still
+        applies.
+        """
+
+        from ._runtime_cache import tensor_cache_key
+
+        tensors = (self.qweight, self.qzeros, self.scales, self.g_idx, self.bias)
+        return (
+            tuple(tensor_cache_key(tensor) for tensor in tensors),
+            self.qzero_format(),
+            self.WEIGHT_FORMAT,
+            mesh.generation,
+            mesh.num_devices,
+            mesh.device_id,
+        )
+
     def _device_weight(self):
-        if getattr(self, "_ttnn_weight", None) is None:
-            return self._build_device_weight()
-        return self._ttnn_weight
+        weight = getattr(self, "_ttnn_weight", None)
+        mesh = current_mesh()
+        if (
+            weight is not None
+            and mesh is not None
+            and getattr(self, "_ttnn_key", None) == self._weight_key(mesh)
+        ):
+            return weight
+        return self._build_device_weight()
 
     # -- lifecycle --------------------------------------------------------
 
@@ -191,6 +291,10 @@ class _TTNNBlockFloatMixin:
     def clear_weight_cache(self) -> None:
         weight, self._ttnn_weight = getattr(self, "_ttnn_weight", None), None
         bias, self._ttnn_bias = getattr(self, "_ttnn_bias", None), None
+        self._ttnn_compute_config = None
+        self._ttnn_key = None
+        self._ttnn_device_ids = ()
+        self._ttnn_device_bytes = None
         if weight is None and bias is None:
             return
         ttnn = import_ttnn()
@@ -205,11 +309,35 @@ class _TTNNBlockFloatMixin:
                     # follows will reclaim it. Record it instead of hiding it.
                     log.debug(f"TTNN: block-float weight deallocate failed: {exc}")
 
-    def release_device(self) -> None:
+    def iter_runtime_device_allocations(self):
+        """Report the block-float device tensors this layer owns (#5810).
+
+        The bytes are the per-chip DRAM delta measured when the weight was
+        uploaded, so tile padding, allocator page rounding and replicated
+        operands are included exactly as the device holds them. A layer that
+        was never built owns no device storage; a built layer whose allocator
+        could not be read reports its backend as unmeasured instead of zero.
+        """
+
+        if getattr(self, "_ttnn_weight", None) is None:
+            return
+        if self._ttnn_device_bytes is None or not self._ttnn_device_ids:
+            raise RuntimeAllocationUnavailable("ttnn")
+        for index in self._ttnn_device_ids:
+            yield DeviceAllocation(
+                backend="ttnn", index=index, weights_bytes=self._ttnn_device_bytes
+            )
+
+    def release_device(self) -> bool:
+        """Drop this layer's mesh lease, closing the mesh only when last."""
+
         self.clear_weight_cache()
+        if not release_mesh_lease(self):
+            return False
         mesh = current_mesh()
         if mesh is not None:
             close_mesh(owner=mesh.owner)
+        return True
 
     def pack(self, linear, scales, zeros, g_idx, **kwargs):
         self.clear_weight_cache()
@@ -221,7 +349,12 @@ class _TTNNBlockFloatMixin:
     def _compute(self, ttnn, mesh, activation):
         weight = self._device_weight()
         bias = getattr(self, "_ttnn_bias", None)
-        output = ttnn.linear(activation, weight, bias=bias)
+        output = ttnn.linear(
+            activation,
+            weight,
+            bias=bias,
+            compute_kernel_config=self._compute_config(ttnn),
+        )
         if self._ttnn_devices > 1:
             gathered = ttnn.all_gather(output, 1)
             ttnn.deallocate(output)
@@ -374,6 +507,10 @@ class TTNNBlockFloat8Linear(_TTNNBlockFloatMixin, GPTQQuantLinear):
         self._ttnn_weight = None
         self._ttnn_bias = None
         self._ttnn_devices = 1
+        # Per-chip storage measured when the block-float weight was uploaded,
+        # and the chip ordinals those bytes live on (#5810).
+        self._ttnn_device_ids = ()
+        self._ttnn_device_bytes: Optional[int] = None
 
     @classmethod
     def validate_device(cls, device):

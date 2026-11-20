@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from ...models._const import DEVICE
 from ...quantization.dtype import dequantize_f4_e2m1
 from ...utils.torch import dynamo_is_compiling
+from ..forward_dtype_lock import ForwardDtypeLockMixin
 from ._numerics import (
     bias_narrows_losslessly,
     linear_needs_wide_bias,
@@ -64,7 +65,7 @@ _BOUNDED_SCALE_DTYPES = tuple(
 )
 
 
-class TorchFP4Linear(nn.Module):
+class TorchFP4Linear(ForwardDtypeLockMixin, nn.Module):
     """Execute one linear layer directly from NVFP4-packed checkpoint weights."""
 
     # CPU uses the portable decode; accelerator execution uses torchao NVFP4,

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""VPTQ must round the codebook sum once, not back to the FP16 codebook dtype (#5609).
+"""VPTQ must round the codebook sum once, not back to the FP16 codebook dtype.
 
 Both selected centroids are finite FP16 values (32768), so their sum (65536)
 is finite in FP32 and representable in BF16 but not in FP16. ``dequantize``
@@ -9,6 +9,11 @@ used to narrow the FP32 reduction to the codebook storage dtype before the
 forward widened it to the activation dtype: the weight became FP16 inf and the
 BF16 forward then returned NaN on the zero entries of the activation. The
 reconstruction is now requested in the activation dtype and rounded once.
+
+#5754 covers the other half: an FP16 *activation* cannot consume that 65536
+either. The forward now keeps the decode and the product wide when the cached
+codebook bound does not fit FP16, so a zero activation lane is no longer
+``0 * inf = NaN``.
 """
 
 import pytest
@@ -134,3 +139,144 @@ def test_vptq_fp32_forward_keeps_the_codebook_dtype_rounding():
 
     assert torch.equal(out, expected)
     assert out[0, 0].item() == 500.0
+
+
+def test_vptq_fp16_forward_survives_a_finite_fp16_codebook_sum():
+    """The exact #5754 repro: FP16 must see 16384, not NaN, for a 65536 decode."""
+
+    module = _build(32768.0)
+    with torch.no_grad():
+        x = torch.zeros(1, 32, dtype=torch.float16)
+        x[:, 0] = 0.25
+
+        out = module(x)
+
+    assert out.dtype is torch.float16
+    assert torch.isfinite(out).all()
+    assert out[0, 0].item() == 16384.0
+    assert torch.equal(out, torch.full_like(out, 16384.0))
+
+
+@pytest.mark.parametrize(
+    ("centroid", "expected"),
+    [(32752.0, 16376.0), (32768.0, 16384.0)],
+)
+def test_vptq_fp16_codebook_sum_boundary_is_rounded_once(centroid, expected):
+    """65504 fits FP16; 65536 widens the decode and rounds the product once."""
+
+    module = _build(centroid)
+    with torch.no_grad():
+        x = torch.zeros(1, 32, dtype=torch.float16)
+        x[:, 0] = 0.25
+        out = module(x)
+
+    assert out.dtype is torch.float16
+    assert torch.isfinite(out).all()
+    assert out[0, 0].item() == expected
+    assert torch.equal(out, torch.full_like(out, expected))
+
+
+def test_vptq_fp16_normalization_product_keeps_the_wide_range():
+    """The norm epilogue can push a finite codebook sum past the FP16 range."""
+
+    module = _build(32768.0, enable_norm=True)
+    with torch.no_grad():
+        module.weight_scale.fill_(2.0)
+        x = torch.zeros(1, 32, dtype=torch.float16)
+        x[:, 0] = 0.25
+
+        out = module(x)
+
+    assert out.dtype is torch.float16
+    assert torch.isfinite(out).all()
+    assert out[0, 0].item() == 32768.0
+    assert torch.equal(out, torch.full_like(out, 32768.0))
+
+
+def test_vptq_fp16_gate_tracks_an_in_place_codebook_change():
+    """A live codebook edit must refresh the cached range answer."""
+
+    module = _build(32752.0)
+    with torch.no_grad():
+        assert module._codebook_range_fits_dtype(torch.float16)
+        module.centroids.weight.fill_(32768.0)
+        module.res_centroids.weight.fill_(32768.0)
+        # The in-place write bumps the version counter in the cache key.
+        assert not module._codebook_range_fits_dtype(torch.float16)
+
+        x = torch.zeros(1, 32, dtype=torch.float16)
+        x[:, 0] = 0.25
+        out = module(x)
+
+    assert torch.equal(out, torch.full_like(out, 16384.0))
+
+
+def test_vptq_fp16_outlier_codebook_overflow_still_widens():
+    """Outlier columns replace base+residual columns, so compare their bound."""
+
+    module = VPTQLinear(
+        bits=4,
+        in_features=32,
+        out_features=8,
+        bias=False,
+        vector_lens=(4, 4),
+        num_centroids=(4, 16),
+        num_res_centroids=(-1, 2),
+        npercent=25.0,
+        dtype=torch.bfloat16,
+        group_size=-1,
+        enable_norm=False,
+    ).eval()
+    with torch.no_grad():
+        module.indices.zero_()
+        module.outlier_indices.zero_()
+        module.centroids.weight.fill_(1.0)
+        module.res_centroids.weight.fill_(1.0)
+        module.outlier_centroids.weight.fill_(100000.0)
+        assert not module._codebook_range_fits_dtype(torch.float16)
+
+        x = torch.zeros(1, 32, dtype=torch.float16)
+        x[:, 0] = 0.25
+        expected = (x.double() @ module.dequantize(dtype=torch.float32).double().t()).to(
+            torch.float16
+        )
+        out = module(x)
+
+    assert torch.isfinite(out).all()
+    assert torch.equal(out, expected)
+
+
+def test_vptq_fp16_bf16_codebook_rounds_wide_before_the_activation_cast():
+    """A BF16 intermediate can round a sub-65504 sum up to 65536."""
+
+    module = VPTQLinear(
+        bits=4,
+        in_features=32,
+        out_features=8,
+        bias=False,
+        vector_lens=(-1, 4),
+        num_centroids=(-1, 16),
+        num_res_centroids=(-1, 2),
+        dtype=torch.bfloat16,
+        group_size=-1,
+        enable_norm=True,
+    ).eval()
+    with torch.no_grad():
+        module.indices.zero_()
+        module.centroids.weight.fill_(16384.0)
+        module.res_centroids.weight.fill_(40.0)
+        # (16384 + 40) * 3.984375 = 65439.375 <= FP16 max, but BF16 rounds
+        # the product up to 65536, which is inf once cast to FP16.
+        module.weight_scale.fill_(3.984375)
+        module.weight_bias.zero_()
+        assert not module._codebook_range_fits_dtype(torch.float16)
+
+        x = torch.zeros(1, 32, dtype=torch.float16)
+        x[:, 0] = 0.25
+        expected = (x.double() @ module.dequantize(dtype=torch.float32).double().t()).to(
+            torch.float16
+        )
+        out = module(x)
+
+    assert torch.isfinite(out).all()
+    assert torch.equal(out, expected)

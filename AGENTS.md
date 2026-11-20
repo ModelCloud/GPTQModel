@@ -24,6 +24,27 @@ Native extensions: `gptqmodel_ext/`, `gptqmodel_nf12/`. Tests: `tests/`
 (model plans: `tests/module_tree/`). Benchmarks in `scripts/` are not unit
 tests. Mechanism references and diagrams live in `docs/`.
 
+## Contracts
+
+[`contracts/`](contracts/README.md) holds fixed runtime contracts. Contracts
+outrank every skill, doc, issue and PR description. Before editing, reviewing,
+auditing or filing anything in a contract's area, read that contract. Never
+add code, caches or tests that make a contract-violating call work. Close
+issues and PRs whose reproduction requires a violation, and link the contract
+when you close them.
+
+- **Kernel/module forward dtype**
+  ([contract](contracts/kernel/forward-dtype.md)):
+  - **Kernel modules:** one input dtype per module, set by the first forward;
+    output dtype equals input dtype; weight and buffer dtypes are frozen after
+    the first forward (no `.to(dtype)`, re-pack or re-register); different
+    weights or dtype means a new module.
+  - **Quantization:** source weight values may be rewritten between forwards
+    in their existing dtype, but live modules are never cast. FP32 or autocast
+    training runs on copies. Packing builds new, unlocked kernels.
+  - **Never add:** per-activation-dtype caches, dtype-change invalidation, or
+    "call-local" re-casts kept only to survive a dtype switch.
+
 ## Working on a change
 
 1. **Isolate.** Each agent and sub-agent starts in its own remote clone on a

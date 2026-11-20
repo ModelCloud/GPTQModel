@@ -198,6 +198,12 @@ class GPTAQ(GPTQ):
         device = inp.device
         use_native = self._use_native_delta
 
+        # ``process_batch`` hands over ``[features, tokens]``; pad the feature
+        # axis so the outer product matches the expanded TP Hessian (#5823).
+        inp = self.pad_tp_features(inp)
+        if use_native:
+            native_inp = self.pad_tp_features(native_inp)
+
         if self._gptaq_active_device is not None and device != self._gptaq_active_device:
             # A second device appeared: demote the live single-device buffers
             # into the partial map and continue accumulating per device.
@@ -626,6 +632,9 @@ class GPTAQ(GPTQ):
             self.H = None
             self.dXXT = None
             return self._rtn_fallback_after_hessian_failure(blocksize)
+        # The block pass reads only Hinv/P. Rebinding the cell releases the
+        # full fp32 Hessian captured by the inverse closures (#5717).
+        H = None
         if self._use_native_delta:
             del self.dXXT
 
@@ -736,13 +745,7 @@ class GPTAQ(GPTQ):
             Q = Q[:, :valid_cols]
             g_idx = g_idx[:valid_cols]
 
-        if isinstance(self.module, transformers.Conv1D):
-            Q = Q.t()
-
-        if Q.shape != self.module.weight.shape:
-            Q = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
-        else:
-            Q = Q.type_as(self.module.weight.data)
+        Q = self._narrow_reconstruction(Q)
 
         # Q = Q.to(device=DEVICE_1)
 

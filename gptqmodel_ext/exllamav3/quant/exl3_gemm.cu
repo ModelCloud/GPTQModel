@@ -1,6 +1,7 @@
 #include "../../torch_stable_compat.h"
 #include <cuda_fp16.h>
 #include "exl3_gemm.cuh"
+#include "exl3_gemm_hip.cuh"
 
 #include <cstdint>
 #include <tuple>
@@ -28,14 +29,7 @@ int exl3_gemm(
     const at::Tensor& suh, const at::Tensor& A_had, const at::Tensor& svh,
     bool mcg, bool mul1, bool fp16_gemv, int64_t int8_gemv, bool fused_gemm, bool q4nx, bool r4nx)
 {
-#if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
-    TORCH_CHECK(false,
-        "ExLlamaV3 tensor-core GEMM is not available in this build (ROCm/HIP); "
-        "use the reconstruct + hgemm path (torch_mode) instead.");
-#else
     const at::cuda::OptionalCUDAGuard device_guard(A.device());
-    const auto stream = at::cuda::getCurrentCUDAStream().stream();
-    const int device = A.get_device();
 
     TORCH_CHECK_DIM(B, 3);
     TORCH_CHECK_SHAPES(A, -1, B, 0, 16);
@@ -86,6 +80,17 @@ int exl3_gemm(
     const int size_k = A.size(-1);
     const int size_n = C.size(-1);
     const int cb = q4nx ? EXL3_Q4NX_CODEBOOK : mcg ? 1 : mul1 ? 2 : 0;
+
+#if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
+    // HIP has no `mma.sync` and the tuned kernel table above is empty, so the
+    // native path is a separate RDNA4 kernel: it decodes the trellis straight
+    // into the WMMA operands and only falls back to `reconstruct` + `hgemm` for
+    // the shapes it does not cover. It never raises for a supported geometry.
+    return exl3_gemm_hip(A, B, C, suh, A_had, svh,
+                         size_m, size_k, size_n, K, half_k, cb, c_fp32);
+#else
+    const auto stream = at::cuda::getCurrentCUDAStream().stream();
+    const int device = A.get_device();
     const int num_sms = DevCtx::instance().get_num_sms(device);
     const int cc = DevCtx::instance().get_cc(device);
 
@@ -172,7 +177,7 @@ int exl3_gemm(
     C10_CUDA_CHECK(cudaLaunchCooperativeKernel(
         kernel, MIN(num_sms, config->num_sms), config->block_dim, args, smem_max, stream));
     return config->shape_idx;
-#endif
+#endif  // __HIP_PLATFORM_AMD__ || USE_ROCM
 }
 
 #if !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)

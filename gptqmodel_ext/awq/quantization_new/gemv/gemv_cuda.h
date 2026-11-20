@@ -9,4 +9,5 @@ torch::Tensor gemv_forward_cuda_decode(
     int m,
     int n,
     int k,
-    int group_size);
+    int group_size,
+    bool fp32_output);

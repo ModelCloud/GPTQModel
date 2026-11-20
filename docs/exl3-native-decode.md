@@ -115,30 +115,28 @@ projection, adds the canonical bias in FP32, and writes BF16. [Activation dispat
 ### Blackwell (sm_120)
 
 Blackwell was unmeasured when the Ada band landed, so `exl3_gemv_try_launch`
-declined Q4NX there. The same sweep on an RTX 5090 (170 SMs, 96 MiB L2) shows
-the packed GEMV is not numerically correct on sm_120: in all 180 cells it
-disagrees with the reconstructed FP32 weight by 0.16 to 0.82 relative, while
-the block-pipelined kernel stays within 3.3e-4. The defect is not specific to
-Q4NX — `mul1` W3 and `mcg` W2/W4 miss by 0.26 to 0.43 on the same device — so
-it belongs to the GEMV kernel on sm_120, not to the Q4NX decoder. Enabling it
-would be a poor trade even if the kernel were correct: the geometric mean is
-1.06x cold and 1.18x warm, and 61 of the 180 cells regress (0.77x warm at the
-worst). Blackwell keeps the block-pipelined kernel, and
-`tests/kernels/test_exllamav3_q4nx_gemv_blackwell.py` pins the decline so the
-gate is not opened without a working kernel and a new sweep.
+declines Q4NX there. The pre-#5873 sweep on an RTX 5090 (170 SMs, 96 MiB L2)
+measured the Q4NX GEMV with the broken output epilogue: in all 180 cells it
+disagreed with the reconstructed FP32 weight by 0.16 to 0.82 relative, while
+the block-pipelined kernel stayed within 3.3e-4. #5873 fixes that epilogue for
+the non-Q4NX FP16 GEMV (below). Q4NX still keeps the packed kernel because the
+same sweep measured only a 1.06x cold and 1.18x warm geometric-mean speedup,
+with 61 of the 180 cells regressing (0.77x warm at the worst).
+`tests/kernels/test_exllamav3_q4nx_gemv_blackwell.py` pins the decline until a
+fresh sweep justifies enabling Q4NX.
 
-| bpw | Cells | GEMV vs FP32 reference | Packed vs reference | Cold geomean | Warm geomean | Regressions |
+| bpw | Cells | GEMV vs FP32 reference (broken epilogue) | Packed vs reference | Cold geomean | Warm geomean | Regressions |
 | --- | ---: | --- | --- | ---: | ---: | ---: |
 | 2.5 | 60 | 0.16–0.74, median 0.37 | ≤ 3.2e-4 | 1.04x | 1.18x | 24/60 |
 | 3.0 | 60 | 0.17–0.82, median 0.37 | ≤ 3.1e-4 | 1.05x | 1.17x | 20/60 |
 | 3.5 | 60 | 0.16–0.68, median 0.36 | ≤ 3.2e-4 | 1.07x | 1.18x | 17/60 |
 
-The GEMV rows need the gate opened for the duration of the measurement; the
-committed tree declines every cell, so the table below is the kernel Blackwell
-actually runs. Times are medians in microseconds per projection: `cold`
-flushes 160 MiB of L2 before each of 20 launches, `warm` is a 100-launch batch
-after five warmups. `GB/s` is the packed trellis, `k * n * bits / 8` bytes over
-the measured time.
+The timing rows are the pre-#5873 Q4NX measurement, taken with the gate opened
+for the duration of the sweep; the committed tree declines every Q4NX cell, so
+the table below is the Q4NX kernel Blackwell actually runs. Times are medians
+in microseconds per projection: `cold` flushes 160 MiB of L2 before each of 20
+launches, `warm` is a 100-launch batch after five warmups. `GB/s` is the packed
+trellis, `k * n * bits / 8` bytes over the measured time.
 
 | bpw | k | n | m | Cold | GB/s | Warm | GB/s |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -168,6 +166,48 @@ Run the sweep with:
 PYTHONPATH=. CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=2 \
     /root/venv/bin/python tests/benchmark_exl3_q4nx_gemv_blackwell.py --check
 ```
+
+### FP16 GEMV epilogue on Blackwell
+
+The non-Q4NX FP16 GEMV (`exl3_gemv_kernel`) writes one C tile per group. A
+128-column output tile spans groups written by different blocks, so the output
+Hadamard transform could not run safely inside the cooperative kernel after
+`grid.sync()` on Blackwell: the post-barrier reads returned whole raw tiles.
+#5873 moves the transform to `exl3_gemv_epilogue_kernel`, launched next in the
+same stream after the cooperative kernel completes. Stream ordering makes the
+C stores visible without a device-scope barrier, and the kernel applies the
+same `had_ff_r_128_inner` / `had_hf_r_128_inner` scaling per 128-column tile.
+The FP16 GEMV dispatch (90) now serves eligible non-Q4NX shapes on sm_120 and
+sm_121.
+
+Before:
+
+```mermaid
+flowchart TD
+    A["exl3_gemv_try_launch"] --> B["exl3_gemv_kernel"]
+    B --> C["grid.sync()"]
+    C --> D["in-kernel had_ff_r_128_inner reads C"]
+    D --> E["Blackwell: stale 128-column tiles"]
+    classDef error fill:#f9d5d5,stroke:#af3b3b,color:#222
+    class E error
+```
+
+After:
+
+```mermaid
+flowchart TD
+    A["exl3_gemv_try_launch"] --> B["cudaLaunchCooperativeKernel exl3_gemv_kernel"]
+    B --> C["stream order: cooperative kernel completes"]
+    C --> D["exl3_gemv_epilogue_kernel"]
+    D --> E["had_ff_r_128_inner per 128-column tile"]
+    E --> F["Projection output"]
+```
+
+On the 48-SM GB10 test host, the fixed GEMV matched the FP64 oracle within
+6.7e-4 across 80 eligible cells (m 1/2/4/8, k and n 2048/4096/8192). The
+separate launch measured 1.05x cold and 1.00x warm geometric-mean speedup over
+the packed kernel; the 170-SM RTX 5090 warm result in #5873 was not
+re-measured on this host.
 
 ## Runtime policy
 
@@ -236,8 +276,10 @@ flowchart TD
 The original integer Torch operator and default Python call remain available.
 The configured operator accepts a float bitrate and returns the selected path
 for diagnostics. NVIDIA CUDA serves the native tensor-core paths. The EXL3
-Torch backend provides the CPU and ROCm inference paths. NVIDIA CUDA also
-serves the new half-bit Viterbi quantizer.
+Torch backend provides the CPU inference path; on ROCm, RDNA4 (gfx120x) also
+has native HIP GEMV and WMMA GEMM paths (see [RDNA4 HIP dispatch](#rdna4-hip-dispatch)),
+while CDNA keeps reconstruct + hipBLAS. NVIDIA CUDA also serves the new
+half-bit Viterbi quantizer.
 
 Only immutable launch geometry and function attributes are cached across
 streams. CUDA graph allocations retain the pointer addresses of each graph's
@@ -305,6 +347,93 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=4 \
 cp /tmp/q4nx_ada.json scripts/exl3_kernel_map_q4nx_ada.json
 python scripts/generate_exl3_kernel_map_packed.py
 ```
+
+## RDNA4 HIP dispatch
+
+ROCm builds compile `quant/exl3_gemm_hip.cu` instead of the CUDA tensor-core
+tables. The HIP entry point owns the whole decision: it runs the fused
+trellis -> WMMA kernel when the device and geometry are covered, and otherwise
+reconstructs the weight and calls hipBLAS, so `bc_linear_exl3_run_configured`
+never raises for a supported geometry. `EXL3_HIP_DISPATCH_NATIVE` (93) and
+`EXL3_HIP_DISPATCH_FALLBACK` (94) report which path ran.
+
+```mermaid
+flowchart TD
+    A["LinearEXL3.forward (ROCm)"] --> B{"reconstruct flag, R4NX, or (Q4NX and bsz > 8)?"}
+    B -->|yes| T["EXL3_TORCH reconstruct + hgemm"]
+    B -->|no| C{"bsz <= 8?"}
+    C -->|yes| D["bc_linear_exl3_run_hip_gemv"]
+    D -->|accepted| J["Projection output"]
+    D -->|declined| Q{"Q4NX?"}
+    C -->|no| Q
+    Q -->|yes| T
+    Q -->|no| E["bc.run -> bc_linear_exl3_run_configured -> exl3_gemm"]
+    E --> F["exl3_gemm_hip: had_r_128, then validate K and N % 128"]
+    F --> G{"c_fp32 and 0 < m <= 512 and gfx120x?"}
+    G -->|yes| H["exl3_hip_gemm_kernel WMMA decode, FP32 accumulate, output Hadamard"]
+    G -->|no| I["reconstruct, hgemm, output Hadamard"]
+    H --> J
+    I --> J
+    T --> J
+```
+
+The native GEMM covers integer rates 1-8 bpw for the `3inst`, `mcg` and
+`mul1` codebooks and the 1.5/2.5/3.5 bpw `mul1` half rates, with K and N
+multiples of 128 and at most 512 rows. Q4NX has no fused ROCm decoder, so it
+keeps the Torch path above the GEMV's batch size. R4NX always reconstructs
+(there is no R4NX GEMM kernel on any backend). CDNA and every non-gfx120x ROCm
+target fall back to reconstruct + hipBLAS.
+
+### AUTO selection on RDNA4
+
+Before #5836, `ExllamaV3Linear.SUPPORTS_DEVICES` was `[DEVICE.CUDA]`, so
+`_resolve_exl3_auto_backend` (`gptqmodel/models/loader.py:2184`) always fell
+through to `EXL3_TORCH` on ROCm even though `validate_device` already accepted
+gfx120x. The native HIP GEMV and WMMA GEMM were reachable only by passing
+`BACKEND.EXL3_EXLLAMA_V3` explicitly.
+
+```mermaid
+flowchart TD
+    subgraph before["Before #5836"]
+        B1["backend=AUTO<br/>_resolve_exl3_auto_backend"] --> B2{"family in<br/>ExllamaV3Linear.SUPPORTS_DEVICES?"}
+        B2 -->|"CUDA"| B3["EXL3_EXLLAMA_V3"]
+        B2 -->|"ROCm: list is [DEVICE.CUDA]"| B4["EXL3_TORCH<br/>packed HIP GEMV unreachable"]
+    end
+    subgraph after["After #5836"]
+        A1["backend=AUTO<br/>_resolve_exl3_auto_backend"] --> A2{"cuda_available?"}
+        A2 -->|no| A6["EXL3_TORCH"]
+        A2 -->|yes| A3{"selector_device_family"}
+        A3 -->|CUDA| A5["EXL3_EXLLAMA_V3"]
+        A3 -->|ROCm| A4{"all selected ordinals<br/>supports_device()?"}
+        A4 -->|"gfx120x and extension usable"| A5
+        A4 -->|"CDNA, other gfx, no HIP ops"| A6
+    end
+```
+
+`ExllamaV3Linear.SUPPORTS_DEVICES` is now the static family list
+`[DEVICE.CUDA, DEVICE.ROCM]` (`gptqmodel/nn_modules/exllamav3.py:71`).
+`supports_device` (`exllamav3.py:82`) keeps the per-architecture gate: NVIDIA
+CUDA is always eligible, and ROCm is eligible only when
+`exl3_native_hip_gemm_usable` (`gptqmodel/exllamav3/ext.py:287`) returns true.
+That probe extends the `gfx120*` metadata check with loadability: already
+registered ops, a cached or configured prebuilt library, or a HIP JIT
+toolchain (`ninja` plus `hipcc` through `ROCM_HOME` or `PATH`). A ROCm runtime
+wheel without the development toolkit therefore stays on `EXL3_TORCH` instead
+of selecting a kernel that cannot load; the probe never compiles.
+
+The explicit path now calls `ExllamaV3Linear.validate_device(device)`
+(`loader.py:3079`) with the real selector, so every selected ordinal is probed
+instead of the abstract `DEVICE.ROCM` family (which converted to `cuda:0` and
+validated GPU 0 only). `validate_device` keeps the cheap architecture metadata
+probe because the load itself will build the extension.
+
+`tests/test_rocm_exl3_auto.py` covers the AUTO matrix (CUDA native yes/no,
+ROCm native yes/no, no CUDA, CPU) and the all-ordinals requirement.
+`tests/kernels/test_exl3_public_load_hip_5836.py` is the gfx1201 end-to-end
+regression: it quantizes a 256->512 EXL3 3.0 bpw `mul1` projection, reloads it
+through `GPTQModel.load` with AUTO, asserts `ExllamaV3Linear`, spies on
+`bc_linear_exl3_run_hip_gemv` for M=1/8 (and its absence at M=9), and matches
+an independent FP64 decode at `rtol=atol=2e-3`.
 
 ## A100 validation
 

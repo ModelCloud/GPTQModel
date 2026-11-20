@@ -101,7 +101,9 @@ def test_awq_gemm_forward_does_not_rewrite_checkpoint_scale_or_bias():
     assert _relerr(first, expected) < 1e-3
     _assert_checkpoint_buffers(module, scales, bias)
 
-    module(x.to(torch.bfloat16))
+    # contracts/kernel/forward-dtype.md: a later dtype switch is a caller bug.
+    with pytest.raises(RuntimeError, match="forward-dtype.md"):
+        module(x.to(torch.bfloat16))
     _assert_checkpoint_buffers(module, scales, bias)
 
     after = module(x)
@@ -135,7 +137,9 @@ def test_awq_torch_forward_does_not_rewrite_checkpoint_scale_or_bias():
     assert _relerr(first, expected) < 1e-3
     _assert_checkpoint_buffers(module, scales, bias)
 
-    module(x.to(torch.bfloat16))
+    # contracts/kernel/forward-dtype.md: a later dtype switch is a caller bug.
+    with pytest.raises(RuntimeError, match="forward-dtype.md"):
+        module(x.to(torch.bfloat16))
     _assert_checkpoint_buffers(module, scales, bias)
 
     after = module(x)

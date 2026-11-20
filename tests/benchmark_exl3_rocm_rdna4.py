@@ -21,14 +21,13 @@ Backends are feature-detected, never hard-coded:
     beat this path.  It is forced through the ext ops so it stays available
     after a native kernel is wired into ``LinearEXL3.forward``.
 ``module``
-    ``LinearEXL3.forward`` exactly as the product dispatches it.  On today's
-    ROCm build that is reconstruct+hgemm; once a native kernel is integrated
-    this row automatically becomes the native path.
+    ``LinearEXL3.forward`` exactly as the product dispatches it: the native
+    GEMV for decode-sized batches, the native RDNA4 WMMA GEMM for the shapes
+    it covers, and reconstruct+hgemm otherwise.
 ``native``
-    ``module.bc.run``: the packed tensor-core/GEMV entry point.  The probe
-    calls it once; today it raises on HIP (``exl3_gemm`` is CUDA-only), so the
-    row is skipped with the reason.  When the RDNA4 kernels land it starts
-    being timed without a harness change.
+    ``module.bc.run``: the packed tensor-core entry point.  On RDNA4 it runs
+    the fused WMMA kernel (dispatch 93) or reconstruct+hgemm (dispatch 94);
+    on other ROCm targets it raises and the row is skipped with the reason.
 
 Tensors are synthetic packed trellises with the same geometry as a quantized
 projection; the benchmark measures inference, not quantization.  Every timed

@@ -71,7 +71,14 @@ from ..quantization.config import (
     resolve_quant_format,
 )
 from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4, quark_floatx_formats
-from ..utils.backend import BACKEND, PROFILE, backend_for_activation, normalize_backend, normalize_profile
+from ..utils.backend import (
+    BACKEND,
+    NATIVE_TTNN_BACKENDS,
+    PROFILE,
+    backend_for_activation,
+    normalize_backend,
+    normalize_profile,
+)
 from ..utils.backend_config import Backend, RuntimeConfig, resolve_backend_config, resolve_quantize_backend
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
@@ -295,6 +302,16 @@ def _ggml_quantization_type():
     from ..utils.internal_gguf import GGMLQuantizationType
 
     return GGMLQuantizationType
+
+
+def _quantized_checkpoint_basenames(qcfg) -> List[str]:
+    """Checkpoint base names to probe, in resolution order.
+
+    ``save_quantized`` always writes the canonical ``model`` base name. The
+    legacy AutoGPTQ name is only a fallback: probing it first silently loaded a
+    stale export when a directory held both files (issue #5723).
+    """
+    return ["model", f"gptq_model-{qcfg.bits}bit-{qcfg.group_size}g"]
 
 
 ATTN_IMPLEMENTATION = "attn_implementation"
@@ -684,7 +701,20 @@ def _layerwise_device_strings(
 
 def _native_ttnn_backend(backend: BACKEND) -> bool:
     """Return whether ``backend`` owns its chips without the Torch/XLA runtime."""
-    return backend in (BACKEND.GPTQ_TTNN,)
+    return backend in NATIVE_TTNN_BACKENDS
+
+
+def _apply_native_ttnn_ordinal(model, ordinal: int) -> None:
+    """Pin every native TTNN kernel in ``model`` to the requested chip.
+
+    The kernels open the process-wide mesh from ``post_init``, so the ordinal
+    has to be set before that runs. Only modules that expose the native
+    placement hook are touched; other backends never reach this helper.
+    """
+
+    for module in model.modules():
+        if hasattr(module, "_requested_device_id"):
+            module.ttnn_device_id = ordinal
 
 
 def _module_tensor_bytes(module: torch.nn.Module) -> int:
@@ -942,6 +972,92 @@ def _indexed_device_request(device) -> Optional[str]:
     if isinstance(device, torch.device) and device.index is not None:
         return str(device)
     return None
+
+
+def _xla_chip_ordinals(value) -> Optional[List[int]]:
+    """Return the concrete ``xla:N`` ordinals a placement value names.
+
+    ``None`` when the value names no XLA chip: CPU, an abstract family such as
+    a bare ``xla``, or an Accelerate policy string. Only an explicit index
+    names a chip, so ``xla`` keeps the default chip 0 without pinning it.
+    Sequences are flattened so a device pool reports every chip it names.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, (tuple, list, set)):
+        collected: List[int] = []
+        for item in value:
+            ordinals = _xla_chip_ordinals(item)
+            if ordinals:
+                collected.extend(ordinals)
+        return collected or None
+    if isinstance(value, DEVICE):
+        return None
+    if isinstance(value, str) and value.strip().lower() in {
+        "auto", "balanced", "balanced_low_0", "sequential", "cpu",
+    }:
+        return None
+    try:
+        target = value if isinstance(value, torch.device) else torch.device(value)
+    except (RuntimeError, ValueError, TypeError):
+        return None
+    if target.type != "xla" or target.index is None:
+        return None
+    return [int(target.index)]
+
+
+def _native_ttnn_chip_ordinal(device, device_map, max_memory) -> Optional[int]:
+    """Resolve the chip a native TTNN load asked for, if it named one.
+
+    The native kernel stages packed weights on the host and uploads them
+    through TT-Metal, so an indexed ``xla:N`` request selects the chip that
+    ``open_mesh`` opens; it must not become Accelerate checkpoint placement
+    (#5853). A request that names several chips is rejected: the native kernel
+    owns one mesh per process and a per-layer ``xla:N`` map would initialize the
+    PJRT runtime, which cannot coexist with that mesh. A memory budget is a
+    layer-wise request and names no single chip.
+    """
+
+    if max_memory is not None:
+        return None
+
+    ordinals: List[int] = list(_xla_chip_ordinals(device) or [])
+    if isinstance(device_map, dict):
+        for value in device_map.values():
+            ordinals.extend(_xla_chip_ordinals(value) or [])
+    named = sorted(set(ordinals))
+    if not named:
+        return None
+    if len(named) > 1:
+        raise ValueError(
+            f"the native TTNN backend opens one chip per process, but this load "
+            f"requests chips {named} (`device={device!r}`, `device_map={device_map!r}`). "
+            "Pass a single `xla:N` device (or `xla` for chip 0); the mesh size is "
+            "chosen by the kernel, not by checkpoint placement."
+        )
+    return named[0]
+
+
+def _resolve_native_ttnn_placement(device, device_map, max_memory):
+    """Resolve placement for a backend that owns its chips without PJRT.
+
+    Returns ``(requested_device_map, explicit_device_map, ordinal)``. A named
+    chip keeps the execution device indexed for kernel selection while the
+    checkpoint itself is pinned to CPU staging. Without an ordinal the previous
+    contract stands: ``explicit_device_map`` is what the caller passed.
+    """
+
+    requested_device_map, explicit_device_map = _normalize_explicit_placement(
+        device, device_map, max_memory
+    )
+    ordinal = _native_ttnn_chip_ordinal(device, device_map, max_memory)
+    if ordinal is not None:
+        # The indexed device selects the chip, not checkpoint storage. Keeping
+        # `requested_device_map` None lets `device` stay `xla:N` for kernel
+        # selection instead of collapsing to the CPU placement map.
+        requested_device_map, explicit_device_map = None, {"": "cpu"}
+    return requested_device_map, explicit_device_map, ordinal
 
 
 def _normalize_explicit_placement(device, device_map, max_memory):
@@ -2184,19 +2300,27 @@ def _load_quantized_gguf_checkpoint_into_model(
 def _resolve_exl3_auto_backend(device, *, cuda_available: Optional[bool] = None) -> "BACKEND":
     """Pick the EXL3 kernel for ``backend=AUTO``.
 
-    Only the CUDA family gets ``EXL3_EXLLAMA_V3``: its tensor-core GEMM dispatch
-    table is populated exclusively for CUDA.  On ROCm every entry of that table
-    is ``nullptr`` (``exl3_gemm.cu`` already rejects HIP with an explicit
-    ``TORCH_CHECK``), so the AUTO branch used to load a backend that cannot run.
-    ROCm -- CDNA and RDNA4 alike -- therefore resolves to ``EXL3_TORCH``, the
-    portable kernel that is the supported ROCm path.
+    The CUDA family keeps the native tensor-core kernel. On ROCm
+    ``exl3_gemm.cu`` forwards to ``exl3_gemm_hip.cu``, which runs a native
+    wave32 WMMA GEMM and the packed HIP GEMV on RDNA4 (gfx120x) and reconstruct
+    + hgemm everywhere else. AUTO selects that native wrapper only when every
+    selected device is a supported RDNA4 target and the EXL3 extension is
+    usable; CDNA, other ROCm targets and hosts whose build has no HIP ops keep
+    the portable ``EXL3_TORCH`` kernel instead of selecting a path that cannot
+    load.
     """
 
     if cuda_available is None:
         cuda_available = torch.cuda.is_available()
+    if not cuda_available:
+        return BACKEND.EXL3_TORCH
     device_family = selector_device_family(device)
-    if cuda_available and device_family in ExllamaV3Linear.SUPPORTS_DEVICES:
+    if device_family == DEVICE.CUDA:
         return BACKEND.EXL3_EXLLAMA_V3
+    if device_family == DEVICE.ROCM:
+        targets = _selector_devices(device) or ()
+        if targets and all(ExllamaV3Linear.supports_device(target) for target in targets):
+            return BACKEND.EXL3_EXLLAMA_V3
     return BACKEND.EXL3_TORCH
 
 
@@ -2760,7 +2884,7 @@ def ModelLoader(cls):
         # this one before any device is claimed. The native TTNN backend also
         # gates its own mesh open; the two gates share one rate limit, so a load
         # never pays the cooldown twice.
-        if normalize_backend(backend) in (BACKEND.GPTQ_TTNN, BACKEND.GPTQ_TT_XLA):
+        if normalize_backend(backend) in NATIVE_TTNN_BACKENDS | {BACKEND.GPTQ_TT_XLA}:
             from ..utils.tt_thermal import before_device_open
 
             before_device_open(owner=f"{cls.__name__}.from_quantized[{normalize_backend(backend).value}]")
@@ -2800,9 +2924,18 @@ def ModelLoader(cls):
         kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
         max_memory = kwargs_without_internal.pop("max_memory", None)
         tokenizer_trust_remote_code = kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
-        requested_device_map, explicit_device_map = _normalize_explicit_placement(
-            device, device_map, max_memory
-        )
+        # Resolve the backend first: whether an indexed `device` is checkpoint
+        # placement depends on the runtime that will own the chip (#5853).
+        backend = normalize_backend(backend)
+        native_ttnn_ordinal = None
+        if _native_ttnn_backend(backend):
+            requested_device_map, explicit_device_map, native_ttnn_ordinal = (
+                _resolve_native_ttnn_placement(device, device_map, max_memory)
+            )
+        else:
+            requested_device_map, explicit_device_map = _normalize_explicit_placement(
+                device, device_map, max_memory
+            )
         # Kept for the block-float route, which builds on CPU and must not
         # silently ignore a placement request the caller made.
         requested_device = device
@@ -2818,7 +2951,10 @@ def ModelLoader(cls):
 
         # A CPU-resident layer runs `post_init` on CPU. AUTO must therefore not
         # select a CUDA-only kernel for a map that offloads some layers.
-        cpu_offload = _device_map_uses_cpu(explicit_device_map)
+        # The native TTNN backend stages every layer on the host by design, so
+        # its `{"": "cpu"}` staging map is not the Accelerate offload path; the
+        # kernel's `post_init` runs there and uploads on purpose (#5853).
+        cpu_offload = False if _native_ttnn_backend(backend) else _device_map_uses_cpu(explicit_device_map)
         if max_memory is not None and any(
             str(key).strip().lower() == "cpu" for key in max_memory
         ):
@@ -3067,8 +3203,8 @@ def ModelLoader(cls):
                 backend = _resolve_exl3_auto_backend(device)
             if backend == BACKEND.EXL3_EXLLAMA_V3:
                 if not torch.cuda.is_available():
-                    raise ValueError("EXL3_EXLLAMA_V3 loading requires NVIDIA CUDA; use EXL3_TORCH instead.")
-                ExllamaV3Linear.validate_device(selector_device_family(device))
+                    raise ValueError("EXL3_EXLLAMA_V3 loading requires CUDA or ROCm; use EXL3_TORCH instead.")
+                ExllamaV3Linear.validate_device(device)
         elif format_code == FORMAT.BITSANDBYTES:
             if backend not in (BACKEND.AUTO, BACKEND.BITSANDBYTES, BACKEND.MLX):
                 raise TypeError("FORMAT.BITSANDBYTES requires AUTO, BITSANDBYTES, or MLX backend.")
@@ -3218,10 +3354,7 @@ def ModelLoader(cls):
             if format_code == FORMAT.EXL3:
                 possible_model_basenames = ["model"]
             else:
-                possible_model_basenames = [
-                    f"gptq_model-{qcfg.bits}bit-{qcfg.group_size}g",
-                    "model",
-                ]
+                possible_model_basenames = _quantized_checkpoint_basenames(qcfg)
 
             extensions = [".safetensors"]
 
@@ -3970,6 +4103,11 @@ def ModelLoader(cls):
         else:
             log.warn("can't get model's sequence length from model config, will set to 4096.")
             model.seqlen = 4096
+
+        if native_ttnn_ordinal is not None:
+            # `post_init` opens the mesh, so the ordinal must be on every kernel
+            # before that call rather than after the model is built.
+            _apply_native_ttnn_ordinal(model, native_ttnn_ordinal)
 
         if format_code != FORMAT.EXL3:
             # Any post-initialization that require device information, for example buffers initialization on device.

@@ -122,6 +122,12 @@ class BACKEND(str, Enum):
     PARO = "paro"
 
 
+#: Backends that own Tenstorrent chips through TT-Metal instead of the PJRT
+#: runtime. They stage checkpoint tensors on CPU and upload packed weights on
+#: demand, so device selection and host staging must treat them alike.
+NATIVE_TTNN_BACKENDS = frozenset({BACKEND.GPTQ_TTNN, BACKEND.GPTQ_TT_BF8})
+
+
 class PROFILE(str, Enum):
     # Inference profile selects between alternative runtime/load strategies.
     AUTO = "auto"

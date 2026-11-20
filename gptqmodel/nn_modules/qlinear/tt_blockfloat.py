@@ -584,6 +584,60 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
         )
         return out.reshape(*shape, self.in_features)
 
+    def _embedding_row_stride(self) -> Optional[int]:
+        """Bytes per stored row, or ``None`` when a row is not byte-aligned.
+
+        The compact gather slices the packed stream at row boundaries, which is
+        only exact when one row occupies a whole number of bytes. Every width
+        here (2, 4, 8 bits) divides a byte, so the requirement reduces to the
+        row's bit length; the default 16-value block satisfies it for every
+        realistic geometry, and the whole-table path covers the rest.
+        """
+
+        if getattr(self, "block_axis", "in") != "in":
+            # ``block_axis="out"`` stores W^T, so a token id selects a column of
+            # the packed stream instead of a contiguous row slice.
+            return None
+        if (self.in_features * self.bits) % 8:
+            return None
+        return packed_code_bytes(self.in_features, self.bits)
+
+    def _gather_embedding_rows(self, input_ids: torch.Tensor) -> Optional[torch.Tensor]:
+        """Decode only the requested rows of the packed table, or ``None``.
+
+        A lookup table is read, not multiplied, so the dense table is never
+        built here: the compact code and exponent rows are gathered first and
+        decoded afterwards. One token then costs one row of scratch instead of
+        the whole vocabulary, and prefill costs its own rows. Past a query
+        wider than the table the whole-table decode reads each row once
+        instead of repeatedly, so that crossover keeps the dense path.
+        """
+
+        from ...utils.tt_blockfloat_quant import _unpack_codes, recompose_blockfloat
+
+        # ``F.embedding`` rejects non-integer ids; without this the cast below
+        # would truncate a float query instead of raising.
+        if input_ids.dtype not in (torch.int32, torch.int64):
+            return None
+        stride = self._embedding_row_stride()
+        if stride is None:
+            return None
+        flat = input_ids.reshape(-1)
+        if flat.numel() > self.out_features:
+            return None
+        # An out-of-range id must keep ``F.embedding``'s IndexError. Declining
+        # here hands the query to the whole-table path, which raises it, rather
+        # than letting ``index_select`` wrap a negative id or depend on its own
+        # bounds check matching across Torch versions.
+        if int(flat.min()) < 0 or int(flat.max()) >= self.out_features:
+            return None
+        index = flat.to(torch.int64)
+        packed = self.codes.reshape(self.out_features, stride).index_select(0, index)
+        codes = _unpack_codes(packed, self.bits, (index.numel(), self.in_features))
+        exponents = self.exponents.index_select(0, index)
+        rows = recompose_blockfloat(codes, exponents, bits=self.bits, block=self.block)
+        return rows.reshape(*input_ids.shape, self.in_features).to(self.output_dtype)
+
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         if input_ids.numel() == 0:
             # An empty gather still has a shape and a dtype to preserve; the
@@ -597,6 +651,9 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
         kernel = self._kernel_embedding(input_ids)
         if kernel is not None:
             return kernel
+        gathered = self._gather_embedding_rows(input_ids)
+        if gathered is not None:
+            return gathered
         weight = self.dequantize(dtype=self.output_dtype)
         return F.embedding(input_ids, weight)
 
@@ -644,7 +701,15 @@ class TTBlockfloatTiedHead(nn.Module):
             else out_dtype
         )
         weight = embedding.dequantize(dtype=compute_dtype)
-        out = F.linear(hidden_states.to(compute_dtype), weight)
+        # Ambient autocast would narrow these explicitly wide operands back to
+        # the activation dtype before the reduction, turning a cancelling
+        # float32 dot into NaN in float16 (#5796). The sibling linear fallback
+        # disables autocast for the same reason.
+        if autocast_active(hidden_states.device.type):
+            with torch.autocast(device_type=hidden_states.device.type, enabled=False):
+                out = F.linear(hidden_states.to(compute_dtype), weight)
+        else:
+            out = F.linear(hidden_states.to(compute_dtype), weight)
         del weight
         return out.to(out_dtype)
 

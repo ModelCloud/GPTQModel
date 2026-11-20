@@ -302,6 +302,7 @@ def test_hf_load_post_init_restores_gptqmodel_config_fields(monkeypatch):
         group_size=128,
         dynamic={r"+:^model\.layers\.0\.self_attn\.q_proj$": {"group_size": 32}},
         lm_head=True,
+        rotation="hadamard",
     )
     context = HFGPTQModelLoadContext(quantize_config=qcfg, quant_linear=TorchLinear)
     model = torch.nn.Module()
@@ -317,6 +318,43 @@ def test_hf_load_post_init_restores_gptqmodel_config_fields(monkeypatch):
     assert model.config.quantization_config.lm_head is True
     assert model.config.quantization_config.method == qcfg.method
     assert model.config.quantization_config.pack_dtype == "int32"
+    assert model.config.quantization_config.rotation == "hadamard"
+
+
+def test_hf_save_pretrained_config_keeps_rotation_for_reload(tmp_path, monkeypatch):
+    """`save_pretrained()` must publish `rotation`, or the reload drops it (#5827).
+
+    The bridge synchronizes a few GPTQModel-only fields into Transformers'
+    typed ``GPTQConfig``. That typed config is what ``save_pretrained()``
+    writes to ``config.json``; ``QuantizeConfig.from_pretrained`` then falls
+    back to that file when the directory has no ``quantize_config.json``. A
+    missing ``rotation`` therefore reloads a rotated checkpoint as an
+    unrotated one and silently changes the logits.
+    """
+
+    import gptqmodel.utils.model as model_utils  # noqa: PLC0415
+
+    qcfg = QuantizeConfig(bits=4, group_size=128, rotation="hadamard")
+    context = HFGPTQModelLoadContext(quantize_config=qcfg, quant_linear=TorchLinear)
+    model = torch.nn.Module()
+    model.config = SimpleNamespace(quantization_config=GPTQConfig(bits=4))
+
+    monkeypatch.setattr(
+        model_utils, "hf_convert_gptq_v1_to_v2_format", lambda model, **kwargs: (model, False)
+    )
+    monkeypatch.setattr(model_utils, "gptqmodel_post_init", lambda model, **kwargs: model)
+
+    hf_gptqmodel_post_init_for_load(model, context)
+
+    # What Transformers writes into `config.json` on `save_pretrained()`.
+    saved = model.config.quantization_config.to_dict()
+    assert saved["rotation"] == "hadamard"
+
+    (tmp_path / "config.json").write_text(
+        json.dumps({"quantization_config": saved}), encoding="utf-8"
+    )
+    reloaded = QuantizeConfig.from_pretrained(str(tmp_path))
+    assert reloaded.model_rotation == "hadamard"
 
 
 class _RotationModel(torch.nn.Module):

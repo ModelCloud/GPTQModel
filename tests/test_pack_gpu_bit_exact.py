@@ -14,10 +14,17 @@ import torch.nn as nn
 from gptqmodel.nn_modules import qlinear as qlinear_module
 from gptqmodel.nn_modules.qlinear import _pack_gpu_block_in
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.quantization import FORMAT
 from gptqmodel.utils.packing import _normalize_pack_impl
 
 
-def _make_module(out_features: int, in_features: int, bits: int, group_size: int) -> TorchLinear:
+def _make_module(
+    out_features: int,
+    in_features: int,
+    bits: int,
+    group_size: int,
+    fmt: FORMAT | None = None,
+) -> TorchLinear:
     module = TorchLinear(
         bits=bits,
         group_size=group_size,
@@ -27,6 +34,7 @@ def _make_module(out_features: int, in_features: int, bits: int, group_size: int
         out_features=out_features,
         bias=False,
         register_buffers=True,
+        format=fmt,
     )
     module.qzero_format(format=2)
     return module
@@ -47,9 +55,24 @@ def _inputs(out_features: int, in_features: int, bits: int, group_size: int):
     return linear, scales, zeros, g_idx
 
 
-@pytest.mark.parametrize("bits", [2, 4, 8])
+# 3-bit continuous and every planar width used to pack through a per-32-group
+# Python loop in ``pack_gpu``; these layouts must stay bit-exact against the CPU
+# block packer after the vectorized rewrite (#5733).
+LAYOUTS = [
+    (2, None),
+    (4, None),
+    (8, None),
+    (3, FORMAT.GPTQ_V2),
+    (3, FORMAT.GPTQ_P),
+    (5, FORMAT.GPTQ_P),
+    (6, FORMAT.GPTQ_P),
+    (7, FORMAT.GPTQ_P),
+]
+
+
+@pytest.mark.parametrize(("bits", "fmt"), LAYOUTS)
 @pytest.mark.parametrize("shape", [(256, 256), (512, 128), (128, 512)])
-def test_pack_gpu_matches_cpu_block_packer(bits: int, shape):
+def test_pack_gpu_matches_cpu_block_packer(bits: int, fmt: FORMAT | None, shape):
     if not torch.cuda.is_available():
         pytest.skip("CUDA/ROCm device required for GPU packing test")
 
@@ -58,7 +81,7 @@ def test_pack_gpu_matches_cpu_block_packer(bits: int, shape):
     group_size = 128
     linear, scales, zeros, g_idx = _inputs(out_features, in_features, bits, group_size)
 
-    cpu_module = _make_module(out_features, in_features, bits, group_size)
+    cpu_module = _make_module(out_features, in_features, bits, group_size, fmt=fmt)
     cpu_module.pack_block(
         linear=linear,
         scales=scales.clone(),
@@ -68,7 +91,7 @@ def test_pack_gpu_matches_cpu_block_packer(bits: int, shape):
         workers=1,
     )
 
-    gpu_module = _make_module(out_features, in_features, bits, group_size)
+    gpu_module = _make_module(out_features, in_features, bits, group_size, fmt=fmt)
     gpu_module.pack_gpu(
         linear=linear.to("cuda"),
         scales=scales.to("cuda").clone(),
@@ -85,8 +108,8 @@ def test_pack_gpu_matches_cpu_block_packer(bits: int, shape):
     assert torch.equal(gpu_module.g_idx, cpu_module.g_idx)
 
 
-@pytest.mark.parametrize("bits", [2, 4, 8])
-def test_pack_gpu_batched_multi_block_matches_cpu_block_packer(bits: int):
+@pytest.mark.parametrize(("bits", "fmt"), LAYOUTS)
+def test_pack_gpu_batched_multi_block_matches_cpu_block_packer(bits: int, fmt: FORMAT | None):
     """The vectorized ``pack_gpu`` qweight path must stay bit-exact when the
     input features span several ``block_in`` chunks.
 
@@ -103,7 +126,7 @@ def test_pack_gpu_batched_multi_block_matches_cpu_block_packer(bits: int):
     group_size = 128
     linear, scales, zeros, g_idx = _inputs(out_features, in_features, bits, group_size)
 
-    cpu_module = _make_module(out_features, in_features, bits, group_size)
+    cpu_module = _make_module(out_features, in_features, bits, group_size, fmt=fmt)
     cpu_module.pack_block(
         linear=linear,
         scales=scales.clone(),
@@ -113,7 +136,7 @@ def test_pack_gpu_batched_multi_block_matches_cpu_block_packer(bits: int):
         workers=1,
     )
 
-    gpu_module = _make_module(out_features, in_features, bits, group_size)
+    gpu_module = _make_module(out_features, in_features, bits, group_size, fmt=fmt)
     gpu_module.pack_gpu(
         linear=linear.to("cuda"),
         scales=scales.to("cuda").clone(),

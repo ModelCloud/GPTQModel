@@ -46,15 +46,25 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.tt_packing import TT_GPTQ_PACK_FACTOR, _repack_zero_words, _require_4bit_gptq
+from ...utils.resource_budget import DeviceAllocation, RuntimeAllocationUnavailable
+from ...utils.tt_packing import (
+    TT_GPTQ_PACK_BITS,
+    TT_GPTQ_PACK_FACTOR,
+    _repack_zero_words,
+    _require_4bit_gptq,
+)
 from ...utils.ttnn_runtime import (
     TTNNMesh,
     TTNNUnavailable,
     close_mesh,
     current_mesh,
+    dram_allocated_bytes,
+    hold_mesh_lease,
     import_ttnn,
     is_ttnn_available,
+    mesh_device_ids,
     open_mesh,
+    release_mesh_lease,
     ttnn_device_count,
 )
 from ._compile_support import COMPILE_LEVEL
@@ -83,6 +93,38 @@ class TTNNPackedLayer:
 
 def _ceil_div(value: int, divisor: int) -> int:
     return (value + divisor - 1) // divisor
+
+
+def _shard_zero_words(
+    zero_words: torch.Tensor, *, out_features: int, device_count: int
+) -> torch.Tensor:
+    """Repack the global zero table into one padded word row per mesh shard.
+
+    A checkpoint packs zero points along the full output width, so a word can
+    straddle a shard boundary: with ``out_features=40`` and four chips each
+    shard owns ten columns but needs two whole words, while the global table has
+    only five. Sharding those words by column gives a shard neither the whole
+    word nor the right bit lane. Decode the logical nibbles, split by output
+    column, and pack each shard separately so the column mapper receives
+    ``device_count * ceil(shard_out / 8)`` words.
+    """
+
+    if device_count == 1:
+        return zero_words
+    groups = zero_words.shape[0]
+    lane_shifts = torch.arange(0, 32, TT_GPTQ_PACK_BITS, dtype=torch.int64).view(1, 1, -1)
+    nibbles = (zero_words.to(torch.int64).unsqueeze(-1) >> lane_shifts) & 0xF
+    logical = nibbles.reshape(groups, -1)[:, :out_features]
+    shard_out = out_features // device_count
+    shifts = torch.arange(0, 32, TT_GPTQ_PACK_BITS, dtype=torch.int64)
+    packed = []
+    for shard in logical.split(shard_out, dim=1):
+        pad = (-shard_out) % TT_GPTQ_PACK_FACTOR
+        if pad:
+            shard = torch.nn.functional.pad(shard, (0, pad))
+        words = (shard.reshape(groups, -1, TT_GPTQ_PACK_FACTOR) << shifts).sum(-1)
+        packed.append(words.to(torch.uint32))
+    return torch.cat(packed, dim=1).contiguous()
 
 
 def _ttnn_arch(ttnn):
@@ -166,6 +208,10 @@ class TTNNLinear(GPTQQuantLinear):
         )
         self._ttnn_layer: Optional[TTNNPackedLayer] = None
         self._ttnn_key = None
+        # Per-chip storage measured when this layer uploaded its tensors, and
+        # the chip ordinals those bytes live on (#5810).
+        self._ttnn_device_ids = ()
+        self._ttnn_device_bytes: Optional[int] = None
 
     # -- capability -------------------------------------------------------
 
@@ -218,6 +264,7 @@ class TTNNLinear(GPTQQuantLinear):
         return open_mesh(
             device_count=self._requested_device_count(),
             fabric=self._fabric_config(),
+            device_id=self._requested_device_id(),
         )
 
     def _requested_device_count(self) -> int:
@@ -225,6 +272,12 @@ class TTNNLinear(GPTQQuantLinear):
         if requested is None:
             return 1
         return int(requested)
+
+    def _requested_device_id(self) -> int:
+        # The loader resolves an explicit `xla:N` request to this ordinal; a
+        # bare `xla` or an unplaced load keeps the historical chip 0.
+        requested = getattr(self, "ttnn_device_id", None)
+        return 0 if requested is None else int(requested)
 
     def _fabric_config(self) -> str:
         # Collectives are only used when more than one chip participates.
@@ -244,6 +297,7 @@ class TTNNLinear(GPTQQuantLinear):
             tuple(tensor_cache_key(t) for t in tensors),
             self.qzero_format(),
             self._requested_device_count(),
+            self._requested_device_id(),
         )
 
     def _build_layer(self) -> TTNNPackedLayer:
@@ -277,8 +331,19 @@ class TTNNLinear(GPTQQuantLinear):
         )
 
         mesh = self._mesh()
+        # Own a lease for as long as this layer keeps device tensors, so a
+        # model's release_device closes the shared mesh only after its last
+        # kernel lets go of it.
+        hold_mesh_lease(self)
         dev = mesh.device
         device_count = mesh.num_devices
+        # Measure the allocator before the upload so the budget can report the
+        # exact per-chip storage these tensors add, including tile padding and
+        # page rounding. An unreadable view is reported as unknown, not zero.
+        try:
+            allocated_before = dram_allocated_bytes(dev)
+        except Exception:
+            allocated_before = None
 
         # Tensor parallel: every chip owns a contiguous slice of out_features.
         if self.out_features % device_count:
@@ -289,22 +354,36 @@ class TTNNLinear(GPTQQuantLinear):
         shard_out = self.out_features // device_count
         out_words_per_device = _ceil_div(shard_out, TT_GPTQ_PACK_FACTOR)
         zero_words_per_group = _ceil_div(self.out_features, TT_GPTQ_PACK_FACTOR)
+        # Repack per shard before the column mapper: a globally packed word may
+        # straddle two shards and cannot be sliced at a column boundary.
+        zero_words = _shard_zero_words(
+            zero_words, out_features=self.out_features, device_count=device_count
+        )
 
-        def _upload(tensor, dtype, mesh_mapper=None):
+        def _upload(tensor, dtype, mesh_mapper=None, layout=ttnn.TILE_LAYOUT):
             host = ttnn.from_torch(
                 tensor,
                 dtype=dtype,
-                layout=ttnn.TILE_LAYOUT,
+                layout=layout,
                 mesh_mapper=mesh_mapper,
             )
             return ttnn.to_device(host, dev)
+
+        # ``g_idx`` is a lookup table consumed by ``ttnn.embedding``. Tiled
+        # storage pads its single logical row to 32 physical rows: 96 KiB for
+        # a 768-input projection instead of 24 KiB row-major (#5854). The
+        # embedding operator accepts a row-major index tensor, so keep it
+        # unpadded on the device.
+        indices_layout = ttnn.ROW_MAJOR_LAYOUT
 
         if device_count == 1:
             weight = _upload(weight_words, ttnn.uint32)
             zeros = _upload(zero_words, ttnn.uint32)
             scales = _upload(self.scales.detach().to("cpu", torch.bfloat16).contiguous(), ttnn.bfloat16)
             indices = _upload(
-                g_idx.to(torch.uint32).reshape(1, 1, 1, -1).contiguous(), ttnn.uint32
+                g_idx.to(torch.uint32).reshape(1, 1, 1, -1).contiguous(),
+                ttnn.uint32,
+                layout=indices_layout,
             )
             bias = None
             if self.bias is not None:
@@ -323,7 +402,10 @@ class TTNNLinear(GPTQQuantLinear):
                 ttnn.bfloat16, shard_cols,
             )
             indices = _upload(
-                g_idx.to(torch.uint32).reshape(1, 1, 1, -1).contiguous(), ttnn.uint32, replicate
+                g_idx.to(torch.uint32).reshape(1, 1, 1, -1).contiguous(),
+                ttnn.uint32,
+                replicate,
+                layout=indices_layout,
             )
             bias = None
             if self.bias is not None:
@@ -331,6 +413,19 @@ class TTNNLinear(GPTQQuantLinear):
                     self.bias.detach().to("cpu", torch.bfloat16).reshape(1, -1).contiguous(),
                     ttnn.bfloat16, shard_cols,
                 )
+
+        device_bytes = None
+        if allocated_before is not None:
+            try:
+                allocated_after = dram_allocated_bytes(dev)
+            except Exception:
+                allocated_after = None
+            if allocated_after is not None and allocated_after > allocated_before:
+                device_bytes = allocated_after - allocated_before
+        try:
+            device_ids = mesh_device_ids(mesh)
+        except Exception:
+            device_ids = ()
 
         # Validate the sharded packed shapes once, here, so a checkpoint whose
         # layout cannot serve this mesh fails at load rather than mid-forward.
@@ -371,6 +466,8 @@ class TTNNLinear(GPTQQuantLinear):
             compute_config=compute_config,
         )
         self._ttnn_key = key
+        self._ttnn_device_ids = device_ids
+        self._ttnn_device_bytes = device_bytes
         return self._ttnn_layer
 
     # -- lifecycle --------------------------------------------------------
@@ -381,6 +478,8 @@ class TTNNLinear(GPTQQuantLinear):
     def clear_weight_cache(self) -> None:
         layer, self._ttnn_layer = self._ttnn_layer, None
         self._ttnn_key = None
+        self._ttnn_device_ids = ()
+        self._ttnn_device_bytes = None
         if layer is None:
             return
         ttnn = import_ttnn()
@@ -394,13 +493,40 @@ class TTNNLinear(GPTQQuantLinear):
                 except Exception:  # pragma: no cover - best-effort release
                     pass
 
-    def release_device(self) -> None:
-        """Close the mesh this layer opened, if it still owns it."""
+    def iter_runtime_device_allocations(self):
+        """Report the packed device tensors this layer owns (#5810).
+
+        The bytes are the per-chip DRAM delta measured when the tensors were
+        uploaded, so tile padding, allocator page rounding and replicated
+        operands are included exactly as the device holds them. A layer that
+        was never built owns no device storage; a built layer whose allocator
+        could not be read reports its backend as unmeasured instead of zero.
+        """
+
+        if self._ttnn_layer is None:
+            return
+        if self._ttnn_device_bytes is None or not self._ttnn_device_ids:
+            raise RuntimeAllocationUnavailable("ttnn")
+        for index in self._ttnn_device_ids:
+            yield DeviceAllocation(
+                backend="ttnn", index=index, weights_bytes=self._ttnn_device_bytes
+            )
+
+    def release_device(self) -> bool:
+        """Drop this layer's mesh lease and close the mesh when it is last.
+
+        Returns ``True`` only when this call closed the shared mesh.  Another
+        model's kernels can hold the same process-wide handle, so clearing this
+        layer's tensors is not on its own a reason to tear the device down.
+        """
 
         self.clear_weight_cache()
+        if not release_mesh_lease(self):
+            return False
         mesh = current_mesh()
         if mesh is not None:
             close_mesh(owner=mesh.owner)
+        return True
 
     def pack(self, linear, scales, zeros, g_idx, **kwargs):
         self.clear_weight_cache()

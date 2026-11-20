@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import get_ident
@@ -100,6 +101,7 @@ class CheckpointStore:
         self._owner = None
         self._identity = None
         self._cursor = -1
+        self._verified_continuations = {}
 
     def __enter__(self):
         if self._lease is not None:
@@ -122,6 +124,7 @@ class CheckpointStore:
         self._lease, self._owner = lease, get_ident()
         self._identity = None
         self._cursor = -1
+        self._verified_continuations = {}
         try:
             (self.root / "objects").mkdir(exist_ok=True)
             _sync_directory(self.root)
@@ -153,6 +156,16 @@ class CheckpointStore:
             _sync_directory(destination.parent)
         finally:
             temporary.unlink(missing_ok=True)
+
+    @contextmanager
+    def stage(self):
+        """Yield a private path for streaming an object into the store."""
+        self._check_owner()
+        path = self.root / f".{uuid4().hex}.tmp"
+        try:
+            yield path
+        finally:
+            path.unlink(missing_ok=True)
 
     def put(self, data: bytes) -> str:
         """Persist an immutable object; publishing its reference is separate."""
@@ -196,6 +209,18 @@ class CheckpointStore:
         if actual != digest:
             raise CheckpointCorrupt(f"checksum mismatch for checkpoint object {digest}")
         return path
+
+    def continuation_path(self, digest: str) -> Path:
+        """Return a continuation verified by the latest manifest load.
+
+        Manifest verification already streamed this object; reusing that path
+        avoids hashing the payload twice before the single decode on resume.
+        """
+        self._check_owner()
+        path = self._verified_continuations.pop(digest, None)
+        if path is not None:
+            return path
+        return self.object_path(digest)
 
     def put_file(self, source: Path) -> str:
         """Stream a quiesced artifact into the store using bounded host memory."""
@@ -264,7 +289,9 @@ class CheckpointStore:
                 or not isinstance(manifest["identity"], dict)
             ):
                 raise ValueError("invalid manifest")
-            self.get(manifest["continuation"])
+            self._verified_continuations[manifest["continuation"]] = (
+                self.object_path(manifest["continuation"])
+            )
             for digest in manifest["artifacts"].values():
                 self.object_path(digest)
             return manifest
@@ -337,7 +364,7 @@ class CheckpointStore:
             "continuation": continuation,
             "artifacts": artifacts,
         }
-        self.get(continuation)
+        self.object_path(continuation)
         for digest in artifacts.values():
             self.object_path(digest)
         ref = self.put(_json(manifest))
@@ -383,6 +410,8 @@ class CheckpointStore:
                 path.unlink()
         _sync_directory(self.root / "objects")
         for path in self.root.iterdir():
-            if re.fullmatch(r"\.CURRENT\.[0-9a-f]{32}\.tmp", path.name):
+            if re.fullmatch(r"\.[0-9a-f]{32}\.tmp", path.name) or re.fullmatch(
+                r"\.CURRENT\.[0-9a-f]{32}\.tmp", path.name
+            ):
                 path.unlink()
         _sync_directory(self.root)

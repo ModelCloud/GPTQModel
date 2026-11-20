@@ -458,7 +458,11 @@ class GPTQProcessor(LoopProcessor):
             hessian.chunk_size,
             hessian.chunk_bytes,
             # The sink-row cap rescales rows before `X^T X` (issue #4742).
-            getattr(hessian, "sink_row_cap_median_multiple", None),
+            # Compare the *effective* cap, not the configured one: `desc_act`
+            # and `act_group_aware` decide whether the cap applies at all, so
+            # equal configured caps can still accumulate different Hessians
+            # (#5855).
+            task.sink_row_cap_median_multiple(),
         )
 
     def _hessian_capture_signature(self, task: Any) -> Optional[Tuple[Any, ...]]:
@@ -467,15 +471,16 @@ class GPTQProcessor(LoopProcessor):
         GPTQ, GPTAQ and FOEM each accumulate ``H`` differently, so a group may
         only share within one quantizer kind.  GPTAQ/FOEM additionally require
         the same native-delta mode because ``dXXT`` must be adopted together
-        with ``H``.
+        with ``H``.  Every kind keys the effective sink-row cap because it
+        rescales the activations before both ``H`` and ``dXXT`` (#5855).
         """
 
         if type(task) is GPTQ:
             return ("gptq", task.columns, *self._hessian_accumulation_settings(task))
         if type(task) is GPTAQ:
-            return ("gptaq", task.columns, bool(task._use_native_delta))
+            return ("gptaq", task.columns, bool(task._use_native_delta), task.sink_row_cap_median_multiple())
         if type(task) is FOEM:
-            return ("foem", task.columns, bool(task.gptaq))
+            return ("foem", task.columns, bool(task.gptaq), task.sink_row_cap_median_multiple())
         return None
 
     def begin_shared_input_capture(

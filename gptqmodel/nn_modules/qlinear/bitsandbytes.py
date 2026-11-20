@@ -318,9 +318,14 @@ def _dequantize_int8_weight(
     weight: torch.Tensor,
     weight_scb: torch.Tensor,
 ) -> torch.Tensor:
-    """Dequantize BnB INT8 weights with the same row-scale math as the native op."""
+    """Dequantize BnB INT8 weights with the same row-scale math as the native op.
 
-    return weight.to(torch.float32) * (weight_scb.to(torch.float32) / 127.0).unsqueeze(1)
+    Divide the code by 127 before applying the row scale. Evaluating
+    ``weight_scb / 127`` first underflows to zero for a subnormal row absmax
+    (for example ``2**-145``) and erases every finite value in that row.
+    """
+
+    return (weight.to(torch.float32) / 127.0) * weight_scb.to(torch.float32).unsqueeze(1)
 
 
 def _int8_imma_misaligned(in_features: int, out_features: int) -> bool:
@@ -389,9 +394,13 @@ def _int8_vectorwise_quant_fp32(
 
     x_fp32 = x.to(torch.float32).reshape(-1, x.shape[-1])
     row_absmax = x_fp32.abs().amax(dim=1)
-    scale = row_absmax / 127.0
-    scale = torch.where(scale == 0, torch.ones_like(scale), scale)
-    codes = (x_fp32 / scale[:, None]).round().clamp(-127, 127).to(torch.int8)
+    # Normalize by the row absmax before applying the code range. Computing
+    # ``row_absmax / 127`` first underflows to zero for a subnormal row and
+    # then selects the unit denominator meant for a genuinely zero row, which
+    # erases every finite code. A zero row keeps the unit denominator so its
+    # codes stay zero.
+    safe_absmax = torch.where(row_absmax == 0, torch.ones_like(row_absmax), row_absmax)
+    codes = (x_fp32 / safe_absmax[:, None] * 127.0).round().clamp(-127, 127).to(torch.int8)
     return codes, row_absmax, None
 
 

@@ -1,6 +1,7 @@
 // Adapted from ExLlamaV3 v1.6.7 (8c593e4), copyright TurboDerp and contributors, MIT.
-#if !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)
 #pragma once
+
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)
 
 // Device side of the fused int8-activation GEMV (see comment below). Kernels are instantiated in
 // comp_units/exl3_gemv_int8_inst_*.cu; the host code in exl3_gemv_int8.cu includes this header only
@@ -1270,4 +1271,618 @@ void exl3_gemv_int8_coop_kernel
         if (row + 1 < size_m) grid.sync();
     }
 }
+#else  // __HIP_PLATFORM_AMD__ || USE_ROCM
+
+// ROCm INT8-activation GEMV for mul1 (cb 2) trellises on RDNA4.
+//
+// Same arithmetic as the CUDA int8 path above: the cb 2 codebook is affine in the byte sum of
+// state * 0x83DCD12D, so
+//
+//   value * a = k_inv * byte_sum(state * 0x83DCD12D) * a + k_bias * a
+//
+// and a dp4a against a splat of an int8-quantized activation evaluates the byte sum times that
+// activation in one instruction, without ever decoding the trellis. The quantized activation's
+// per-row scale and exact int sums are the CUDA cooperative kernel's global scale
+// (q = max|A_had| / 127, v = clamp(rint(a / q), -127, 127), residual mode re-quantizes the
+// rounding error with q2 = q / 254).
+//
+// RDNA has no cooperative launch, so the HIP entry point runs the CUDA kernel's phases as
+// separate launches on the caller's stream, exactly like the fp16 HIP GEMV:
+//
+//   1. input Hadamard A -> shared, int8 + row max + sums (exl3_gemv_int8_hip_quant_kernel)
+//   2. GEMV + affine epilogue                             (exl3_gemv_int8_hip_kernel)
+//   3. output Hadamard + svh                              (exl3_gemv_hip_had_out_kernel)
+//
+// RDNA4's v_dot4_i32_i8 is signed x signed where the CUDA dp4a is u32 x s32, so the kernel flips
+// the sign bit of every byte of the trellis product before the dot. That turns the unsigned byte
+// sum into sum_i (b_i - 128) * v = byte_sum * v - 512 * v, and the -512 * sum(v) it introduces
+// is folded into the affine correction (1536 * k_inv + k_bias instead of 1024 * k_inv + k_bias).
+
+#include <cuda_fp16.h>
+#include <cstdint>
+#include <cstdlib>
+#include "exl3_gemv.cuh"
+#include "exl3_gemv_kernel.cuh"
+#include "exl3_devctx.cuh"
+
+namespace exl3_gemv_int8_hip_ns {
+
+// Signed byte dot product. Full rate on the RDNA3/RDNA4 targets that implement it; the
+// portable form keeps every other target assembling (the host declines them at run time).
+__device__ __forceinline__ int dp4a(uint32_t a, uint32_t b, int c)
+{
+#if defined(__GFX11__) || defined(__GFX12__) || defined(__gfx1100__) || defined(__gfx1101__) || \
+    defined(__gfx1102__) || defined(__gfx1103__) || defined(__gfx1150__) || defined(__gfx1151__) || \
+    defined(__gfx1200__) || defined(__gfx1201__) || defined(__gfx1202__)
+    int d;
+    asm("v_dot4_i32_i8 %0, %1, %2, %3" : "=v"(d) : "v"(a), "v"(b), "v"(c));
+    return d;
+#else
+    int d = c;
+    #pragma unroll
+    for (int i = 0; i < 4; ++i)
+        d += (int) (int8_t) ((a >> (8 * i)) & 0xff) * (int) (int8_t) ((b >> (8 * i)) & 0xff);
+    return d;
+#endif
+}
+
+// Byte J of x replicated into all four bytes (one v_perm_b32 on RDNA).
+template <int J>
+__device__ __forceinline__ uint32_t splat(uint32_t x)
+{
+    return __builtin_amdgcn_perm(x, x, 0x01010101u * J);
+}
+
+// The quantize kernel writes the four int8 activations a lane needs (k = 2q, 2q + 1, 2q + 8,
+// 2q + 9 of every 16-k row, q = lane & 3) as the four bytes of one word, so a lane loads them
+// with a single broadcast load. Grouping k by 16 makes that a byte permutation of one 16-byte
+// vector: source words 0..3 hold k 0..7 and source words 4..7 hold k 8..15, so output word w
+// takes the low half of source word w and the low half of source word w + 4.
+__device__ __forceinline__ float lo_half(uint32_t u)
+{
+    return __half2float(__ushort_as_half((unsigned short) (u & 0xffffu)));
+}
+
+__device__ __forceinline__ float hi_half(uint32_t u)
+{
+    return __half2float(__ushort_as_half((unsigned short) (u >> 16)));
+}
+
+// v = clamp(rint(a / q), -127, 127), the CUDA kernel's per-element quantization.
+__device__ __forceinline__ int q8(float a, float rq)
+{
+    return max(-127, min(127, __float2int_rn(a * rq)));
+}
+
+// Pack four int8 lanes into one word (byte 0 = lowest k).
+__device__ __forceinline__ uint32_t pack4(int v0, int v1, int v2, int v3)
+{
+    return (uint32_t) (v0 & 0xff) | ((uint32_t) (v1 & 0xff) << 8)
+         | ((uint32_t) (v2 & 0xff) << 16) | ((uint32_t) (v3 & 0xff) << 24);
+}
+
+}  // namespace exl3_gemv_int8_hip_ns
+
+// Quantize one activation row: input Hadamard into shared memory, per-row max, int8
+// splat-ready layout, exact int sums. One block per row; the row is at most a few tens of KiB,
+// so keeping it in shared memory costs less than a separate Hadamard launch plus its global
+// round trip, and the single-block max stays deterministic.
+template <bool RESIDUAL>
+__global__ __launch_bounds__(512)
+void exl3_gemv_int8_hip_quant_kernel
+(
+    const half* __restrict__ A,
+    const half* __restrict__ suh,
+    int8_t* __restrict__ qa,
+    int8_t* __restrict__ qb,
+    float* __restrict__ qscale,
+    int* __restrict__ qsum,
+    int* __restrict__ qsum2,
+    int size_k
+)
+{
+    using namespace exl3_gemv_int8_hip_ns;
+    constexpr int THREADS = 512;
+    constexpr int WARPS = THREADS / 32;
+    const int row = blockIdx.x;
+    const int t = threadIdx.x;
+
+    // Stage the row's input Hadamard in shared memory: the quantization needs the transformed
+    // row, so doing it here saves a launch and the global round trip through A_had that the
+    // CUDA phase split implies. One warp per 128 k, exactly as the standalone had_in kernel.
+    extern __shared__ uint4 sh_vec[];
+    half* sh_ah = reinterpret_cast<half*>(sh_vec);
+    const half* Ar = A + (size_t) row * size_k;
+    for (int off = (t >> 5) * 128; off < size_k; off += WARPS * 128)
+        had_hf_r_128_inner<true, false>(Ar + off, sh_ah + off, suh + off, 0.088388347648f);
+    __syncthreads();
+
+    const uint4* Ar4 = reinterpret_cast<const uint4*>(sh_ah);       // 8 halves (16 B) per vector
+    const int ngroups = size_k >> 4;                                // 16 k per int8 group
+    uint4* qa4 = reinterpret_cast<uint4*>(qa + (size_t) row * size_k);
+    uint4* qb4 = reinterpret_cast<uint4*>(qb + (size_t) row * size_k);
+
+    __shared__ float sh_max[THREADS / 32];
+    __shared__ float sh_q;
+    __shared__ int sh_s1[THREADS / 32];
+    __shared__ int sh_s2[THREADS / 32];
+
+    // Row max. One thread per 16-k group: two 16-byte vector loads instead of 32 scalar ones,
+    // which is what keeps this pass off the critical path on a single block.
+    float mx = 0.0f;
+    for (int g = t; g < ngroups; g += THREADS)
+    {
+        const uint4 a0 = Ar4[2 * g], a1 = Ar4[2 * g + 1];
+        mx = fmaxf(mx, fmaxf(fmaxf(fabsf(lo_half(a0.x)), fabsf(hi_half(a0.x))),
+                             fmaxf(fabsf(lo_half(a0.y)), fabsf(hi_half(a0.y)))));
+        mx = fmaxf(mx, fmaxf(fmaxf(fabsf(lo_half(a0.z)), fabsf(hi_half(a0.z))),
+                             fmaxf(fabsf(lo_half(a0.w)), fabsf(hi_half(a0.w)))));
+        mx = fmaxf(mx, fmaxf(fmaxf(fabsf(lo_half(a1.x)), fabsf(hi_half(a1.x))),
+                             fmaxf(fabsf(lo_half(a1.y)), fabsf(hi_half(a1.y)))));
+        mx = fmaxf(mx, fmaxf(fmaxf(fabsf(lo_half(a1.z)), fabsf(hi_half(a1.z))),
+                             fmaxf(fabsf(lo_half(a1.w)), fabsf(hi_half(a1.w)))));
+    }
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffull, mx, o));
+    if ((t & 31) == 0) sh_max[t >> 5] = mx;
+    __syncthreads();
+    if (t == 0)
+    {
+        float v = sh_max[0];
+        #pragma unroll
+        for (int i = 1; i < THREADS / 32; ++i) v = fmaxf(v, sh_max[i]);
+        // Same floor and scale as the CUDA kernel's per-row phase
+        sh_q = fmaxf(v, 1e-8f) / 127.0f;
+        qscale[row] = sh_q;
+    }
+    __syncthreads();
+
+    const float q = sh_q;
+    const float rq = 1.0f / q;
+    const float rq2 = rq * 254.0f;
+    int l1 = 0, l2 = 0;
+    for (int g = t; g < ngroups; g += THREADS)
+    {
+        const uint4 a0 = Ar4[2 * g], a1 = Ar4[2 * g + 1];
+        const uint32_t src[8] = {a0.x, a0.y, a0.z, a0.w, a1.x, a1.y, a1.z, a1.w};
+        uint32_t s[4], r[4];
+        #pragma unroll
+        for (int w = 0; w < 4; ++w)
+        {
+            const float x0 = lo_half(src[w]), x1 = hi_half(src[w]);
+            const float x2 = lo_half(src[w + 4]), x3 = hi_half(src[w + 4]);
+            const int v0 = q8(x0, rq), v1 = q8(x1, rq), v2 = q8(x2, rq), v3 = q8(x3, rq);
+            s[w] = pack4(v0, v1, v2, v3);
+            if constexpr (RESIDUAL)
+            {
+                const int u0 = q8(x0 - q * (float) v0, rq2);
+                const int u1 = q8(x1 - q * (float) v1, rq2);
+                const int u2 = q8(x2 - q * (float) v2, rq2);
+                const int u3 = q8(x3 - q * (float) v3, rq2);
+                r[w] = pack4(u0, u1, u2, u3);
+            }
+        }
+        qa4[g] = make_uint4(s[0], s[1], s[2], s[3]);
+        if constexpr (RESIDUAL) qb4[g] = make_uint4(r[0], r[1], r[2], r[3]);
+        // Exact int sums of the quantized bytes, one v_dot4_i32_i8 per word
+        const uint32_t ones = 0x01010101u;
+        l1 = dp4a(s[3], ones, dp4a(s[2], ones, dp4a(s[1], ones, dp4a(s[0], ones, l1))));
+        if constexpr (RESIDUAL)
+            l2 = dp4a(r[3], ones, dp4a(r[2], ones, dp4a(r[1], ones, dp4a(r[0], ones, l2))));
+    }
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1)
+    {
+        l1 += __shfl_xor_sync(0xffffffffull, l1, o);
+        l2 += __shfl_xor_sync(0xffffffffull, l2, o);
+    }
+    if ((t & 31) == 0) { sh_s1[t >> 5] = l1; sh_s2[t >> 5] = l2; }
+    __syncthreads();
+    if (t == 0)
+    {
+        int a1 = 0, a2 = 0;
+        #pragma unroll
+        for (int i = 0; i < THREADS / 32; ++i) { a1 += sh_s1[i]; a2 += sh_s2[i]; }
+        qsum[row] = a1;
+        qsum2[row] = a2;
+    }
+}
+
+// One warp per 16-column tile and k split, as in the fp16 HIP kernel: lane l covers columns
+// l / 4 and l / 4 + 8 at k rows 2 * (l % 4) + {0, 1, 8, 9} of the 16x16 tile, so its eight
+// trellis windows pair with exactly four activation values. ROWS is the row count the caller
+// compiled for (1, 2, 4 or 8), WK warps split k and a block covers 16 * WT columns.
+template <int bits, int ROWS, int WK, int WT, bool RESIDUAL>
+__global__ __launch_bounds__(32 * WK * WT)
+void exl3_gemv_int8_hip_kernel
+(
+    const uint16_t* __restrict__ B,
+    void* __restrict__ C,
+    const uint32_t* __restrict__ qa32,
+    const uint32_t* __restrict__ qb32,
+    const float* __restrict__ qscale,
+    const int* __restrict__ qsum,
+    const int* __restrict__ qsum2,
+    int size_m,
+    int size_k,
+    int size_n
+)
+{
+    constexpr int TWORDS = 8 * bits;
+    constexpr int COLS = 16 * WT;
+    constexpr int THREADS = 32 * WK * WT;
+    constexpr int PF = 2;
+    using namespace exl3_gemv_int8_hip_ns;
+
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const int ksplit = warp % WK;
+    const int tile = warp / WK;
+
+    const int ntiles = size_n / 16;
+    const int kslices = size_k / 16;
+    const int chunk = (kslices + WK - 1) / WK;
+    const int ks0 = ksplit * chunk;
+    const int ks1 = min(ks0 + chunk, kslices);
+    const bool full = size_m >= ROWS;
+    const int rows_out = full ? ROWS : size_m;
+    const int k4 = size_k >> 2;                                    // uint32 per activation row
+
+    const int q = lane & 3;
+    const int c0 = lane >> 2;
+
+    const uint32_t* B32 = reinterpret_cast<const uint32_t*>(B);
+    const size_t slice_stride = (size_t) ntiles * TWORDS;
+    const int ntile = blockIdx.x * WT + tile;
+    const uint32_t* bp = B32 + (size_t) ks0 * slice_stride + (size_t) ntile * TWORDS;
+
+    // Per-lane extraction constants, same derivation as the fp16 kernel
+    int x_src_a = 0, x_src_b = 0, x_s2 = 0;
+    if constexpr (bits == 2)
+    {
+        const int i1 = lane >> 1;
+        x_src_b = i1;
+        x_src_a = (i1 + 15) & 15;
+    }
+    else if constexpr (bits == 3)
+    {
+        const int t_offset = lane << 3;
+        const int b1 = (t_offset + 257) * 3;
+        const int b2 = b1 + 21;
+        const int i0 = (b1 - 16) / 32;
+        const int i2 = (b2 - 1) / 32;
+        x_s2 = (i2 + 1) * 32 - b2;
+        x_src_a = i0 % 24;
+        x_src_b = i2 % 24;
+    }
+
+    auto load = [&] (int ks) -> uint32_t
+    {
+        if (ks >= ks1) return 0u;
+        const uint32_t* tp = bp + (size_t) (ks - ks0) * slice_stride;
+        return lane < TWORDS ? tp[lane] : 0u;
+    };
+
+    uint32_t pf[PF];
+    #pragma unroll
+    for (int d = 0; d < PF; ++d) pf[d] = load(ks0 + d);
+
+    const uint32_t* ap[ROWS];
+    const uint32_t* aq[ROWS];
+    #pragma unroll
+    for (int r = 0; r < ROWS; ++r)
+    {
+        ap[r] = qa32 + (size_t) r * k4 + (size_t) ks0 * 4 + q;
+        if constexpr (RESIDUAL) aq[r] = qb32 + (size_t) r * k4 + (size_t) ks0 * 4 + q;
+    }
+
+    int acc[ROWS][2] = {};
+    int acc2[ROWS][2] = {};
+
+    for (int ks = ks0; ks < ks1; ++ks)
+    {
+        const uint32_t bw = pf[0];
+        pf[0] = pf[1];
+        pf[1] = load(ks + PF);
+
+        uint32_t w[8];
+        if constexpr (bits == 4)
+            exl3_gemv_hip_ns::ext8_regs_4bits(exl3_gemv_hip_ns::shfl32(bw, (lane + 31) & 31), bw, w);
+        else if constexpr (bits == 2)
+            exl3_gemv_hip_ns::ext8_regs_2bits(exl3_gemv_hip_ns::shfl32(bw, x_src_a),
+                                              exl3_gemv_hip_ns::shfl32(bw, x_src_b), lane << 3, w);
+        else
+            exl3_gemv_hip_ns::ext8_regs_3bits(exl3_gemv_hip_ns::shfl32(bw, x_src_a),
+                                              exl3_gemv_hip_ns::shfl32(bw, x_src_b), x_s2, w);
+
+        // state * 0x83DCD12D with the byte sign bits flipped (see the header comment)
+        uint32_t t[8];
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) t[i] = (w[i] * 0x83DCD12Du) ^ 0x80808080u;
+
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r)
+        {
+            if (!full && r >= rows_out) break;
+            const uint32_t av = ap[r][0];
+            ap[r] += 4;
+            const uint32_t s0 = splat<0>(av), s1 = splat<1>(av), s2 = splat<2>(av), s3 = splat<3>(av);
+            acc[r][0] = dp4a(t[0], s0, acc[r][0]);
+            acc[r][0] = dp4a(t[1], s1, acc[r][0]);
+            acc[r][0] = dp4a(t[2], s2, acc[r][0]);
+            acc[r][0] = dp4a(t[3], s3, acc[r][0]);
+            acc[r][1] = dp4a(t[4], s0, acc[r][1]);
+            acc[r][1] = dp4a(t[5], s1, acc[r][1]);
+            acc[r][1] = dp4a(t[6], s2, acc[r][1]);
+            acc[r][1] = dp4a(t[7], s3, acc[r][1]);
+            if constexpr (RESIDUAL)
+            {
+                const uint32_t bv = aq[r][0];
+                aq[r] += 4;
+                const uint32_t u0 = splat<0>(bv), u1 = splat<1>(bv), u2 = splat<2>(bv), u3 = splat<3>(bv);
+                acc2[r][0] = dp4a(t[0], u0, acc2[r][0]);
+                acc2[r][0] = dp4a(t[1], u1, acc2[r][0]);
+                acc2[r][0] = dp4a(t[2], u2, acc2[r][0]);
+                acc2[r][0] = dp4a(t[3], u3, acc2[r][0]);
+                acc2[r][1] = dp4a(t[4], u0, acc2[r][1]);
+                acc2[r][1] = dp4a(t[5], u1, acc2[r][1]);
+                acc2[r][1] = dp4a(t[6], u2, acc2[r][1]);
+                acc2[r][1] = dp4a(t[7], u3, acc2[r][1]);
+            }
+        }
+    }
+
+    // Fold the four k splits of a tile: lanes 4c + q are contiguous.
+    #pragma unroll
+    for (int r = 0; r < ROWS; ++r)
+    {
+        if (!full && r >= rows_out) break;
+        acc[r][0] += __shfl_xor_sync(0xffffffffull, acc[r][0], 1);
+        acc[r][0] += __shfl_xor_sync(0xffffffffull, acc[r][0], 2);
+        acc[r][1] += __shfl_xor_sync(0xffffffffull, acc[r][1], 1);
+        acc[r][1] += __shfl_xor_sync(0xffffffffull, acc[r][1], 2);
+        if constexpr (RESIDUAL)
+        {
+            acc2[r][0] += __shfl_xor_sync(0xffffffffull, acc2[r][0], 1);
+            acc2[r][0] += __shfl_xor_sync(0xffffffffull, acc2[r][0], 2);
+            acc2[r][1] += __shfl_xor_sync(0xffffffffull, acc2[r][1], 1);
+            acc2[r][1] += __shfl_xor_sync(0xffffffffull, acc2[r][1], 2);
+        }
+    }
+
+    const float k_inv = __half2float(__ushort_as_half(0x1eee));
+    const float k_bias = __half2float(__ushort_as_half(0xc931));
+    // 1024 * k_inv + k_bias is the CUDA affine term; the extra 512 * k_inv is the byte sign flip
+    const float aff = 1536.0f * k_inv + k_bias;
+
+    __shared__ float sh_red[WK][ROWS][COLS];
+    if (q == 0)
+    {
+        const int c = tile * 16 + c0;
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r)
+        {
+            if (!full && r >= rows_out) break;
+            const float qf = qscale[r];
+            const float q2f = qf * (1.0f / 254.0f);
+            const float s0 = qf * (float) acc[r][0] + (RESIDUAL ? q2f * (float) acc2[r][0] : 0.0f);
+            const float s1 = qf * (float) acc[r][1] + (RESIDUAL ? q2f * (float) acc2[r][1] : 0.0f);
+            sh_red[ksplit][r][c] = k_inv * s0;
+            sh_red[ksplit][r][c + 8] = k_inv * s1;
+        }
+    }
+    __syncthreads();
+
+    for (int idx = threadIdx.x; idx < COLS * rows_out; idx += THREADS)
+    {
+        const int r = idx / COLS;
+        const int c = idx - r * COLS;
+        float sum = sh_red[0][r][c];
+        #pragma unroll
+        for (int j = 1; j < WK; ++j) sum += sh_red[j][r][c];
+        const float qf = qscale[r];
+        const float q2f = qf * (1.0f / 254.0f);
+        const float suma = qf * (float) qsum[r] + (RESIDUAL ? q2f * (float) qsum2[r] : 0.0f);
+        const int col = blockIdx.x * COLS + c;
+        ((float*) C)[(size_t) r * size_n + col] = sum + aff * suma;
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Host side: launch selection and the four-stage pipeline.
+
+namespace exl3_gemv_int8_hip_host {
+
+// Per-device arch gate: gfx12xx (RDNA4) only. The kernel is tuned and validated there; RDNA3
+// has dp4a as well but is unmeasured, and everything older lacks it. 0 = unknown, 1 = yes,
+// 2 = no (idempotent, so the race between two first calls is benign).
+inline bool arch_ok(int device)
+{
+    static int8_t cached[MAX_DEVICES] = {};
+    if (device < 0 || device >= MAX_DEVICES) return false;
+    int8_t& slot = cached[device];
+    if (slot == 0)
+    {
+        cudaDeviceProp prop;
+        const bool ok = cudaGetDeviceProperties(&prop, device) == cudaSuccess
+                     && prop.major == 12 && prop.warpSize == 32;
+        if (!ok) (void) cudaGetLastError();
+        slot = ok ? 1 : 2;
+    }
+    return slot == 1;
+}
+
+struct Cfg
+{
+    int wk;
+    int wt;
+};
+
+template <int bits, int ROWS, bool RESIDUAL>
+inline void* select_cfg(int cfg)
+{
+    if (cfg == 0) return (void*) exl3_gemv_int8_hip_kernel<bits, ROWS, 8, 2, RESIDUAL>;
+    return (void*) exl3_gemv_int8_hip_kernel<bits, ROWS, 4, 4, RESIDUAL>;
+}
+
+template <int bits, bool RESIDUAL>
+inline void* select_rows(int rows, int cfg)
+{
+    if (rows <= 1) return select_cfg<bits, 1, RESIDUAL>(cfg);
+    if (rows == 2) return select_cfg<bits, 2, RESIDUAL>(cfg);
+    if (rows <= 4) return select_cfg<bits, 4, RESIDUAL>(cfg);
+    return select_cfg<bits, 8, RESIDUAL>(cfg);
+}
+
+inline void* select(int bits, int rows, bool residual, int cfg)
+{
+    if (residual)
+    {
+        switch (bits)
+        {
+            case 2: return select_rows<2, true>(rows, cfg);
+            case 3: return select_rows<3, true>(rows, cfg);
+            case 4: return select_rows<4, true>(rows, cfg);
+        }
+        return nullptr;
+    }
+    switch (bits)
+    {
+        case 2: return select_rows<2, false>(rows, cfg);
+        case 3: return select_rows<3, false>(rows, cfg);
+        case 4: return select_rows<4, false>(rows, cfg);
+    }
+    return nullptr;
+}
+
+// Benchmark-only override of the launch geometry.
+inline int cfg_override()
+{
+    static const int value = [] () -> int
+    {
+        const char* env = std::getenv("GPTQMODEL_EXL3_HIP_GEMV_INT8_CFG");
+        if (!env || !*env) return -1;
+        const int parsed = std::atoi(env);
+        return parsed == 0 || parsed == 1 ? parsed : -1;
+    }();
+    return value;
+}
+
+// Largest dynamic shared-memory request the device admits. The fused quantize launch keeps one
+// activation row (size_k halves) in shared memory, so longer rows decline to the fp16 GEMV.
+inline int shared_limit(int device)
+{
+    static int cached[MAX_DEVICES] = {};
+    if (device < 0 || device >= MAX_DEVICES) return 0;
+    int& slot = cached[device];
+    if (slot == 0)
+    {
+        cudaDeviceProp prop;
+        slot = cudaGetDeviceProperties(&prop, device) == cudaSuccess
+             ? (int) prop.sharedMemPerBlock : -1;
+        if (slot <= 0) { (void) cudaGetLastError(); slot = -1; }
+    }
+    return slot > 0 ? slot : 0;
+}
+
+typedef void (*gemv_int8_fn)
+(
+    const uint16_t*, void*, const uint32_t*, const uint32_t*, const float*, const int*, const int*,
+    int, int, int
+);
+
+}  // namespace exl3_gemv_int8_hip_host
+
+// Returns 1 when the three launches were submitted, 0 when the shape/rate/device is not
+// eligible (the caller keeps the fp16 HIP GEMV or the reconstruct path), -1 on a launch error
+// (the error is left for the caller to report).
+inline int exl3_gemv_int8_hip_launch
+(
+    const half* A,
+    const uint16_t* B,
+    void* C,
+    const half* suh,
+    const half* svh,
+    int8_t* qa,
+    int8_t* qb,
+    float* qscale,
+    int* qsum,
+    int* qsum2,
+    int size_m,
+    int size_k,
+    int size_n,
+    int bits,
+    bool residual,
+    int device,
+    cudaStream_t stream
+)
+{
+    using namespace exl3_gemv_int8_hip_host;
+    if (size_m < 1 || size_m > EXL3_GEMV_MAX_M) return 0;
+    if (size_k % 128 || size_n % 128) return 0;
+    if (bits < 2 || bits > 4) return 0;
+    if (!arch_ok(device)) return 0;
+    // 4 KiB of slack for the kernel's static shared state and the device's reserved LDS
+    if ((int64_t) size_k * (int64_t) sizeof(half) + 4096 > (int64_t) shared_limit(device)) return 0;
+    if (!qa || !qscale || !qsum || (residual && !qb)) return 0;
+
+    const int cfg = cfg_override() >= 0 ? cfg_override() : (size_n >= 8192 ? 1 : 0);
+    const Cfg geometry = cfg == 0 ? Cfg{8, 2} : Cfg{4, 4};
+    const int grid = (size_n / 16) / geometry.wt;
+    if (grid < 1) return 0;
+    void* kernel = select(bits, size_m, residual, cfg);
+    if (!kernel) return 0;
+
+    const int warps_out = size_m * size_n / 128;
+    constexpr float R_SCALE = 0.088388347648f;   // 1 / sqrt(128)
+    const size_t sh_bytes = (size_t) size_k * sizeof(half);
+
+    // 1. input Hadamard + suh (staged in shared memory), quantize, row max and exact int sums
+    if (residual)
+        exl3_gemv_int8_hip_quant_kernel<true><<<size_m, 512, sh_bytes, stream>>>
+        (
+            A, suh, qa, qb, qscale, qsum, qsum2, size_k
+        );
+    else
+        exl3_gemv_int8_hip_quant_kernel<false><<<size_m, 512, sh_bytes, stream>>>
+        (
+            A, suh, qa, qb, qscale, qsum, qsum2, size_k
+        );
+    if (cudaPeekAtLastError() != cudaSuccess) return -1;
+
+    // 2. GEMV + affine epilogue. The kernel is selected at run time, so it goes through the
+    // launch API with an argument array instead of a triple-chevron call (hipify rewrites a
+    // triple-chevron launch of a function pointer into an invalid hipLaunchKernelGGL).
+    const uint16_t* b_ptr = B;
+    void* c_ptr = C;
+    const uint32_t* qa_ptr = reinterpret_cast<const uint32_t*>(qa);
+    const uint32_t* qb_ptr = reinterpret_cast<const uint32_t*>(qb);
+    const float* qs_ptr = qscale;
+    const int* q1_ptr = qsum;
+    const int* q2_ptr = qsum2;
+    void* kernel_args[] =
+    {
+        (void*) &b_ptr, (void*) &c_ptr, (void*) &qa_ptr, (void*) &qb_ptr,
+        (void*) &qs_ptr, (void*) &q1_ptr, (void*) &q2_ptr,
+        (void*) &size_m, (void*) &size_k, (void*) &size_n
+    };
+    if (cudaLaunchKernel
+    (
+        kernel,
+        dim3(grid),
+        dim3(32 * geometry.wk * geometry.wt),
+        kernel_args,
+        0,
+        stream
+    ) != cudaSuccess) return -1;
+
+    // 3. output Hadamard + svh (the CUDA kernel's epilogue)
+    exl3_gemv_hip_had_out_kernel<true><<<(warps_out + 7) / 8, 256, 0, stream>>>
+    (
+        C, C, svh, size_n, warps_out * 128, R_SCALE
+    );
+    if (cudaPeekAtLastError() != cudaSuccess) return -1;
+    return 1;
+}
+
 #endif

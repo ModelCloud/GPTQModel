@@ -21,7 +21,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.python import has_gil_disabled
-from ...utils.torch import torch_compile
+from ...utils.torch import dynamo_is_compiling, torch_compile
 from ...utils.vptq import (
     unpack_vptq_indices,
     vptq_group_setting,
@@ -36,10 +36,20 @@ from ._numerics import (
     codebook_rounding_dtype,
     linear_fp32_reduce,
     linear_needs_wide_bias,
+    linear_wide_bias,
 )
+from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
+
+
+# FP16 is the only activation dtype this gate widens: a BF16 activation over
+# an FP16 checkpoint already has the range (#5609), and FP32/FP64 keep the
+# historical codebook-dtype rounding. The answer is computed eagerly so a
+# compiled forward reads it as a Python constant, the same contract as the
+# MacaQ decode-range cache (#5754).
+_RANGE_GATE_DTYPE = torch.float16
 
 
 def _as_pair(value: Any, name: str) -> List[int]:
@@ -104,6 +114,14 @@ class VPTQLinear(WeightOnlyQuantLinear):
     REQUIRES_FORMAT_V2 = False
 
     QUANT_TYPE = "vptq"
+
+    # The FP16 decode-range answer derived from the codebooks and norm
+    # buffers. The class defaults keep a module usable before the first
+    # refresh; `clear_weight_cache()` recomputes them on every load, move and
+    # state-dict copy (#5754).
+    _codebook_range_key = None
+    _codebook_range_fits = True
+    _codebook_range_fits_precomputed = None
 
     def __init__(
         self,
@@ -317,6 +335,7 @@ class VPTQLinear(WeightOnlyQuantLinear):
     def post_init(self):
         self._validate_loaded_state()
         super().post_init()
+        self._refresh_codebook_range_fits()
         self.optimize()
 
     def optimize(self, backend: str = None, mode: str = None, fullgraph: bool = False):
@@ -543,6 +562,115 @@ class VPTQLinear(WeightOnlyQuantLinear):
         self._clear_runtime_weight_cache()
 
     # ------------------------------------------------------------------
+    # codebook decode range
+    # ------------------------------------------------------------------
+    def _compute_codebook_range_fits(self) -> bool:
+        """Whether every decoded weight fits FP16 without overflowing.
+
+        ``dequantize`` sums the base and residual codebooks in FP32 and the
+        norm epilogue multiplies by ``weight_scale`` before adding
+        ``weight_bias``. A conservative absolute bound is enough to decide
+        whether rounding the reconstruction to FP16 can produce ``inf``:
+        the largest base magnitude plus the largest residual magnitude,
+        scaled by the largest norm scale and offset by the largest norm bias.
+        Outlier columns replace base+residual columns, so their bound is
+        compared rather than added. A non-finite input selects the wide path:
+        widening cannot make a NaN finite, but it stays correct.
+        """
+
+        dtype = _RANGE_GATE_DTYPE
+        centroids = getattr(self, "centroids", None)
+        if centroids is None:
+            return True
+        weight = centroids.weight
+        if weight.numel() == 0 or weight.device.type == "meta":
+            return True
+        with torch.no_grad():
+            bound = weight.detach().abs().max().double()
+            if self.enable_residual:
+                bound = bound + self.res_centroids.weight.detach().abs().max().double()
+            if self.enable_outlier:
+                outlier = self.outlier_centroids.weight.detach().abs().max().double()
+                bound = torch.maximum(bound, outlier)
+            if self.enable_norm:
+                scale = self.weight_scale.detach().abs().max().double()
+                offset = self.weight_bias.detach().abs().max().double()
+                bound = bound * scale + offset
+            if not bool(torch.isfinite(bound).item()):
+                return False
+            # Rounding the conservative bound is itself a valid upper bound:
+            # every dtype cast is monotone, and ``dequantize`` rounds to
+            # ``codebook_rounding_dtype`` before the activation dtype. A
+            # coarser intermediate -- a BF16 codebook with an FP16 activation
+            # -- can round a value below FP16's max up to 65536, so test the
+            # value after that intermediate rounding, not the raw bound.
+            rounded = bound.to(codebook_rounding_dtype(dtype, weight.dtype))
+            if not bool(torch.isfinite(rounded).item()):
+                return False
+            return bool(torch.isfinite(rounded.to(dtype)).item())
+
+    def _refresh_codebook_range_fits(self) -> None:
+        """Precompute the FP16 answer a compiled forward reads.
+
+        A host reduction is neither traceable nor legal during CUDA-graph
+        capture, so the compiled path reads a plain Python constant (dynamo
+        guards on it, and a change recompiles). This runs wherever the
+        codebooks or norm buffers can change: ``post_init()`` and every
+        ``clear_weight_cache()`` (load, move and state-dict copy).
+        """
+
+        self._codebook_range_key = None
+        self._codebook_range_fits_precomputed = self._compute_codebook_range_fits()
+
+    def clear_weight_cache(self) -> None:
+        """Drop the derived decode-range answer after a load, move or mutation."""
+
+        self._codebook_range_key = None
+        self._codebook_range_fits = True
+        # A module built with ``register_buffers=False`` has codebooks but no
+        # ``indices``/norm buffers until ``pack()`` allocates them; a move or
+        # state-dict copy before that must not read them.
+        if hasattr(self, "indices"):
+            self._refresh_codebook_range_fits()
+
+    def _codebook_range_fits_dtype(self, dtype: torch.dtype) -> bool:
+        """Whether the decoded weight rounds into ``dtype`` without overflow."""
+
+        if dtype is not _RANGE_GATE_DTYPE:
+            return True
+        centroids = getattr(self, "centroids", None)
+        if centroids is None or centroids.weight.device.type == "meta":
+            return True
+        if dynamo_is_compiling() or (
+            centroids.weight.device.type == "cuda"
+            and torch.cuda.is_current_stream_capturing()
+        ):
+            precomputed = self._codebook_range_fits_precomputed
+            if precomputed is None:
+                # A caller that skipped `post_init`: the wide decode is always
+                # correct, so do not guess from a host read here.
+                return False
+            return precomputed
+        key = (
+            tensor_cache_key(centroids.weight),
+            tensor_cache_key(self.res_centroids.weight) if self.enable_residual else None,
+            tensor_cache_key(self.outlier_centroids.weight) if self.enable_outlier else None,
+            tensor_cache_key(self.weight_scale) if self.enable_norm else None,
+            tensor_cache_key(self.weight_bias) if self.enable_norm else None,
+        )
+        if key == self._codebook_range_key:
+            return self._codebook_range_fits
+        fits = self._compute_codebook_range_fits()
+        self._codebook_range_key = key
+        self._codebook_range_fits = fits
+        # Keep the compiled-region answer in step with an eager recompute (a
+        # caller that mutates the codebooks in place and runs an eager forward
+        # before compiling).
+        if self._codebook_range_fits_precomputed is not None:
+            self._codebook_range_fits_precomputed = fits
+        return fits
+
+    # ------------------------------------------------------------------
     # runtime
     # ------------------------------------------------------------------
     @torch.no_grad()
@@ -650,11 +778,21 @@ class VPTQLinear(WeightOnlyQuantLinear):
         # An FP16 checkpoint whose two finite codebooks sum above 65504 must
         # not narrow to FP16 before a BF16 activation consumes it, while an
         # FP32 activation keeps the historical codebook-dtype rounding (#5609).
-        weight = self.dequantize(
-            dtype=codebook_rounding_dtype(x.dtype, self.centroids.weight.dtype)
-        ).to(dtype=x.dtype, device=x.device)
         bias = self._promote_stored_bias(x, bias)
-        out = linear_fp32_reduce(x, weight, bias)
+        if x.dtype == torch.float16 and not self._codebook_range_fits_dtype(
+            torch.float16
+        ):
+            # The reconstruction is outside FP16's finite range, so narrowing
+            # it before the dot turns every zero lane into ``0 * inf = NaN``
+            # (#5754). Keep the weight and the product wide, and round the
+            # visible result once instead.
+            weight = self.dequantize(dtype=torch.float32).to(device=x.device)
+            out = linear_wide_bias(x, weight, bias)
+        else:
+            weight = self.dequantize(
+                dtype=codebook_rounding_dtype(x.dtype, self.centroids.weight.dtype)
+            ).to(dtype=x.dtype, device=x.device)
+            out = linear_fp32_reduce(x, weight, bias)
         if self.adapter is not None:
             out = self.adapter.apply(x=x, out=out)
         return out

@@ -41,6 +41,17 @@ __device__ __forceinline__ int make_divisible(int c, int divisor){
   return (c + divisor - 1) / divisor;
 }
 
+// The native GEMV kernels accumulate in FP32. Keep the store explicit so a
+// caller that still has a bias to add can request FP32 output and pay a single
+// rounding after the bias join.
+__device__ __forceinline__ void store_gemv_output(half* ptr, float value) {
+  *ptr = __float2half(value);
+}
+
+__device__ __forceinline__ void store_gemv_output(float* ptr, float value) {
+  *ptr = value;
+}
+
 
 /*
 Computes GEMV (group_size = 64).
@@ -56,15 +67,16 @@ Notes:
   One cannot infer group_size from the shape of scaling factors.
   the second dimension is rounded up to a multiple of PACK_FACTOR.
 */
+template <typename output_t>
 __global__ void gemv_kernel_g64(
-  const float4* _inputs, const uint32_t* weight, const uint32_t* zeros, const half* scaling_factors, half* _outputs, 
+  const float4* _inputs, const uint32_t* weight, const uint32_t* zeros, const half* scaling_factors, output_t* _outputs, 
   const int IC, const int OC){
     const int group_size = 64;
     float psum = 0;
     const int batch_idx = blockIdx.z;
     const int oc_idx = blockIdx.y * blockDim.y + threadIdx.y; 
     const float4* inputs = _inputs + batch_idx * IC / PACK_FACTOR;
-    half* outputs = _outputs + batch_idx * OC;
+    output_t* outputs = _outputs + batch_idx * OC;
     // This is essentially zeros_w.
     const int num_groups_packed = make_divisible(make_divisible(IC / group_size, PACK_FACTOR), 2) * 2;
     const int weight_w = IC / PACK_FACTOR;
@@ -109,7 +121,7 @@ __global__ void gemv_kernel_g64(
     }
     psum = warp_reduce_sum(psum);
     if (threadIdx.x == 0) {
-     outputs[oc_idx] = __float2half(psum); 
+     store_gemv_output(outputs + oc_idx, psum);
     }
 }
 
@@ -128,15 +140,16 @@ Notes:
   One cannot infer group_size from the shape of scaling factors.
   the second dimension is rounded up to a multiple of PACK_FACTOR.
 */
+template <typename output_t>
 __global__ void gemv_kernel_g128(
-  const float4* _inputs, const uint32_t* weight, const uint32_t* zeros, const half* scaling_factors, half* _outputs, 
+  const float4* _inputs, const uint32_t* weight, const uint32_t* zeros, const half* scaling_factors, output_t* _outputs, 
   const int IC, const int OC){
     const int group_size = 128;
     float psum = 0;
     const int batch_idx = blockIdx.z;
     const int oc_idx = blockIdx.y * blockDim.y + threadIdx.y; 
     const float4* inputs = _inputs + batch_idx * IC / PACK_FACTOR;
-    half* outputs = _outputs + batch_idx * OC;
+    output_t* outputs = _outputs + batch_idx * OC;
     const int num_groups_packed = make_divisible(IC / group_size, PACK_FACTOR);
     const int weight_w = IC / PACK_FACTOR;
     // TODO (Haotian): zeros_w is incorrect, after fixing we got misaligned address
@@ -180,7 +193,7 @@ __global__ void gemv_kernel_g128(
     }
     psum = warp_reduce_sum(psum);
     if (threadIdx.x == 0) {
-     outputs[oc_idx] = __float2half(psum); 
+     store_gemv_output(outputs + oc_idx, psum);
     }
 }
 
@@ -199,12 +212,47 @@ Args:
 Returns:
   out_feats: tensor of shape [B, OC];
 */
+template <typename output_t>
+static void launch_gemv_forward(
+    int group_size,
+    dim3 num_blocks,
+    dim3 num_threads,
+    cudaStream_t stream,
+    const float4* in_feats,
+    const uint32_t* kernel,
+    const uint32_t* zeros,
+    const half* scaling_factors,
+    output_t* out_feats,
+    int num_in_channels,
+    int num_out_channels)
+{
+    if (group_size == 64)
+    {
+      gemv_kernel_g64<output_t><<<num_blocks, num_threads, 0, stream>>>(
+        // pointers
+        in_feats, kernel, zeros, scaling_factors, out_feats,
+        // constants
+        num_in_channels, num_out_channels
+      );
+    }
+    else
+    {
+      gemv_kernel_g128<output_t><<<num_blocks, num_threads, 0, stream>>>(
+        // pointers
+        in_feats, kernel, zeros, scaling_factors, out_feats,
+        // constants
+        num_in_channels, num_out_channels
+      );
+    }
+}
+
 torch::Tensor gemv_forward_cuda(
     torch::Tensor _in_feats,
     torch::Tensor _kernel,
     torch::Tensor _scaling_factors,
     torch::Tensor _zeros,
-    int group_size)
+    int group_size,
+    bool fp32_output)
 {
     // Validate the ABI before converting tensors to raw pointers. This turns
     // malformed layouts or cross-device buffers into actionable Python errors.
@@ -263,35 +311,34 @@ torch::Tensor gemv_forward_cuda(
     auto zeros = reinterpret_cast<uint32_t*>(_zeros.mutable_data_ptr<int>());
     auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.mutable_data_ptr<at::Half>());
     // auto out_in_map = _out_in_map.mutable_data_ptr<int>();
-    auto options =
-    torch::TensorOptions().dtype(_in_feats.scalar_type()).device(_in_feats.device());
+    // A caller with a bias to add asks for FP32 output so the bias joins the
+    // complete FP32 reduction and the result is rounded exactly once.
+    auto options = torch::TensorOptions()
+        .dtype(fp32_output ? at::kFloat : _in_feats.scalar_type())
+        .device(_in_feats.device());
     // kernel is [OC, IC]
     at::Tensor _out_feats = torch::empty({num_in_feats, _kernel.size(0)}, options);
     int num_out_feats = _out_feats.size(-2);
     num_out_channels = _out_feats.size(-1);
-    auto out_feats = reinterpret_cast<half*>(_out_feats.mutable_data_ptr<at::Half>());
     int blockDim_z = num_out_feats;
     dim3 num_blocks(1, num_out_channels / 4, num_out_feats);
     dim3 num_threads(32, 4);
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    if (group_size == 64)
+    if (fp32_output)
     {
-      gemv_kernel_g64<<<num_blocks, num_threads, 0, stream>>>(
-        // pointers
-        in_feats, kernel, zeros, scaling_factors, out_feats,
-        // constants
-        num_in_channels, num_out_channels
-      );
+      launch_gemv_forward<float>(
+        group_size, num_blocks, num_threads, stream,
+        in_feats, kernel, zeros, scaling_factors, _out_feats.mutable_data_ptr<float>(),
+        num_in_channels, num_out_channels);
     }
-    else if (group_size == 128)
+    else
     {
-      gemv_kernel_g128<<<num_blocks, num_threads, 0, stream>>>(
-        // pointers
-        in_feats, kernel, zeros, scaling_factors, out_feats,
-        // constants
-        num_in_channels, num_out_channels
-      );
+      launch_gemv_forward<half>(
+        group_size, num_blocks, num_threads, stream,
+        in_feats, kernel, zeros, scaling_factors,
+        reinterpret_cast<half*>(_out_feats.mutable_data_ptr<at::Half>()),
+        num_in_channels, num_out_channels);
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return _out_feats;
-;}
+}

@@ -20,6 +20,7 @@ oracle is a pure-Python bit writer and the reconstruction oracle walks the
 codebooks with explicit element indexing.
 """
 
+import copy
 import gc
 import math
 import sys
@@ -1562,11 +1563,6 @@ def test_vptq_forward_dequantizes_per_call_without_dense_cache(monkeypatch):
     assert not hasattr(module, "_dense_weight_cache")
     torch.testing.assert_close(second, first, rtol=0, atol=0)
 
-    module.to(dtype=torch.float16)
-    with torch.inference_mode():
-        output = module(x.to(torch.float16))
-    assert output.dtype == torch.float16
-
 
 VPTQ_ORACLE_VARIANTS = [
     ("baseline", {}),
@@ -2694,6 +2690,9 @@ def test_vptq_inference_matches_torch_oracle(dtype):
 
     module = build_module(qcfg, weight.shape[1], weight.shape[0], dtype=dtype)
     module.pack(linear=quantizer.layer, vptq_result=result)
+    # One activation dtype per module (contracts/kernel/forward-dtype.md):
+    # the FP32 arithmetic check below uses its own copy.
+    fp32_module = copy.deepcopy(module)
 
     generator = torch.Generator().manual_seed(7)
     activations = torch.randn(5, 64, generator=generator).to(dtype)
@@ -2707,7 +2706,7 @@ def test_vptq_inference_matches_torch_oracle(dtype):
     assert float(drift.max()) <= 2e-3
 
     # fp32 arithmetic comparison, separate from the mandatory output rounding
-    fp32_actual = module(activations.to(torch.float32))
+    fp32_actual = fp32_module(activations.to(torch.float32))
     assert fp32_actual.dtype == torch.float32
     fp32_oracle = activations.to(torch.float64) @ oracle_weight.t()
     fp32_drift = (fp32_actual.to(torch.float64) - fp32_oracle).abs()
@@ -3243,12 +3242,15 @@ def test_tiny_qwen3_vptq_cuda_smoke(tmp_path: Path):
 
     dense = module.dequantize()
     activations = torch.randn(2, module.in_features, dtype=torch.bfloat16, device=dense.device)
-    assert module(activations).dtype == torch.bfloat16
+    output = module(activations)
+    # The model runs in BF16, so the module serves BF16 only
+    # (contracts/kernel/forward-dtype.md); compare against the BF16-rounded oracle.
+    assert output.dtype == torch.bfloat16
     assert torch.allclose(
-        module(activations.float()),
-        activations.float() @ dense.float().t(),
-        atol=1e-4,
-        rtol=1e-4,
+        output.float(),
+        (activations.float() @ dense.float().t()).to(torch.bfloat16).float(),
+        atol=2e-2,
+        rtol=2e-2,
     )
 
 

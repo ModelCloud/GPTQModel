@@ -109,11 +109,11 @@ def test_fused_cpu_layer_restores_checkpoint_state_before_training(
     assert layer._fused_train_state is not None
     layer.__dict__.pop("_suspend_fused_train_restore")
 
-    layer.to(dtype=torch.bfloat16)
-    # A low-precision move re-finalizes from the checkpoint snapshot because the
-    # affine offsets are scale-dtype coupled.
-    assert tuple(layer.qweight.shape) == original_shape
-    assert layer.scales.dtype == torch.bfloat16
+    # Weight dtypes are frozen after the first forward
+    # (contracts/kernel/forward-dtype.md); the cast is rejected untouched.
+    with pytest.raises(RuntimeError, match="frozen after the first forward"):
+        layer.to(dtype=torch.bfloat16)
+    assert layer.scales.dtype == torch.float16
 
     layer.train()
     assert tuple(layer.qweight.shape) == original_shape
@@ -138,19 +138,18 @@ def test_fused_cpu_layer_restores_checkpoint_state_before_training(
     ("source_dtype", "target_dtype"),
     ((torch.float16, torch.bfloat16), (torch.bfloat16, torch.float16)),
 )
-def test_cpu_layer_accepts_new_activation_dtype_after_move(
+def test_cpu_layer_rejects_dtype_change_after_forward(
     module_name,
     class_name,
     source_dtype,
     target_dtype,
 ):
-    """A low-precision move must re-finalize the fused affine layout.
+    """Weight dtypes are frozen after the first forward.
 
-    The runtime ``qzeros`` holds offsets computed from the pre-move scale
-    dtype, so keeping the packed runtime layout would pair the narrowed scales
-    with stale offsets. Compare the moved layer with a checkpoint-layout copy
-    that is moved before its first forward, which finalizes the same operands
-    for the target dtype.
+    contracts/kernel/forward-dtype.md: a post-forward ``to(dtype)`` is a
+    caller bug. It raises before touching the runtime layout, so the layer keeps
+    serving its locked dtype bit-identically. A cast before the first forward
+    stays allowed.
     """
 
     from tests.module_tree.test_fusion_kernel_backends import _projection
@@ -165,19 +164,20 @@ def test_cpu_layer_accepts_new_activation_dtype_after_move(
     fresh = copy.deepcopy(layer)
 
     layer.eval()
+    activation = torch.randn(2, 5, 256, dtype=source_dtype)
     with torch.no_grad():
-        layer(torch.randn(2, 5, 256, dtype=source_dtype))
-    layer.to(dtype=target_dtype)
+        before = layer(activation)
+    dtypes = {name: tensor.dtype for name, tensor in layer.state_dict(keep_vars=True).items()}
+    with pytest.raises(RuntimeError, match="frozen after the first forward"):
+        layer.to(dtype=target_dtype)
+    assert {name: tensor.dtype for name, tensor in layer.state_dict(keep_vars=True).items()} == dtypes
+    with torch.no_grad():
+        torch.testing.assert_close(layer(activation), before, rtol=0, atol=0)
 
     fresh.to(dtype=target_dtype)
     fresh.eval()
-    activation = torch.randn(2, 5, 256, dtype=target_dtype)
     with torch.no_grad():
-        actual = layer(activation)
-        expected = fresh(activation)
-
-    assert actual.dtype == target_dtype
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert fresh(activation.to(target_dtype)).dtype == target_dtype
 
 
 @pytest.mark.parametrize(
@@ -674,13 +674,22 @@ def test_exllamav3_wide_inputs_route_to_torch_reconstruction():
     assert out.dtype == torch.bfloat16
     assert torch.isfinite(out).all()
 
-    # FP16 keeps the FP16 native kernel with an explicit out_dtype.
+    # FP16 keeps the native kernel behind the same input-range guard as BF16
+    # and asks it for an FP32 result, so an in-range input cannot overflow the
+    # GEMM output (#5331, #5838). One activation dtype per module
+    # (contracts/kernel/forward-dtype.md), so the FP16 case uses its own layer.
     seen.clear()
-    layer._ensure_torch_inner = lambda: pytest.fail("FP16 must keep the native path")
-    layer._ensure_inner = lambda: NativeInner()
+    layer = SimpleNamespace(
+        _needs_torch_fallback=lambda: False,
+        _ensure_torch_inner=lambda: pytest.fail("FP16 must keep the native path"),
+        _ensure_inner=lambda: NativeInner(),
+        _native_bf16_input=lambda x: (x.to(torch.float16), torch.ones(x.shape[:-1] + (1,))),
+        _rescale_native_output=lambda result, scale: result.float() * scale,
+        out_features=4,
+    )
     out = ExllamaV3Linear.forward(layer, torch.ones((1, 2), dtype=torch.float16))
 
-    assert seen == {"native": (torch.float16, torch.float16)}
+    assert seen == {"native": (torch.float16, torch.float32)}
     assert out.dtype == torch.float16
 
 

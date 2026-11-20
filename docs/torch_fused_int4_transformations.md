@@ -320,25 +320,29 @@ Two of them used to keep the full clone (#5013):
 ### Cache invalidation is not a checkpoint restore
 
 `clear_weight_cache()` is called from three different lifecycle events:
-explicit cache invalidation, `nn.Module._apply` device/dtype moves, and the
-post-load hook. The clear itself only drops derived state (`ret_idx`,
+explicit cache invalidation, `nn.Module._apply` device moves, and the
+post-load hook. A dtype cast after the first forward never reaches it: the
+runtime layout only exists after a forward, and `BaseQuantLinear` rejects
+post-forward dtype changes
+([forward dtype contract](../contracts/kernel/forward-dtype.md)). The clear itself only drops derived state (`ret_idx`,
 `scales_and_zeros`, `torch_fused_op`) and rebuilds it from the live packed
 buffers; it deliberately keeps the runtime-layout flags (`linear_mode`,
 `_cpu_transformed`, `_cpu_transform_dtype`) live. The checkpoint snapshot is
-restored only by an explicit checkpoint load, export, `train()` resume, or an
-invalidating move (decided by `_apply`, not by the clear).
+restored only by an explicit checkpoint load, export, `train()` resume, or a
+cross-device move (decided by `_apply`, not by the clear).
 
 ```mermaid
 flowchart TD
     A["checkpoint layout<br/>qweight int32, snapshot present"] -->|"first eval forward<br/>capture_fused_train_state + transform"| B["runtime layout<br/>qweight int4pack uint8"]
     B -->|"clear_weight_cache<br/>explicit clear or same-device move"| B
-    B -->|"low-precision dtype move<br/>restore_fused_train_state"| A
+    B -. "dtype cast after forward" .-> D["BaseQuantLinear raises RuntimeError<br/>before any tensor changes"]
     B -->|"cross-device move<br/>restore_fused_train_state"| A
     B -->|"train / checkpoint load / export<br/>restore_fused_train_state"| A
     A -->|"clear_weight_cache<br/>invalidate derived state"| A
     B -. "modified runtime state" .-> X["export raises RuntimeError"]
     classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
     class X failure;
+    class D failure;
 ```
 
 The old clear path ran `restore_fused_train_state()` unconditionally. Clearing

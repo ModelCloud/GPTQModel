@@ -131,7 +131,12 @@ from ..utils.model import (
 from ..utils.model_dequant import infer_block_shape
 from ..utils.p2p import safe_module_to
 from ..utils.quant_metadata import UnsupportedMetadata, describe_unsupported_metadata, find_unsupported_metadata
-from ..utils.resource_budget import DeviceBudget, ResourceBudget, device_memory_bytes
+from ..utils.resource_budget import (
+    DeviceBudget,
+    ResourceBudget,
+    RuntimeAllocationUnavailable,
+    device_memory_bytes,
+)
 from ..utils.rocm import IS_ROCM, quant_blas_backend
 from ..utils.structure import (
     LazyTurtle,
@@ -416,12 +421,101 @@ def _log_quantize_summary(
 
 
 
+def _device_index(tensor: object) -> int:
+    device = getattr(tensor, "device", None)
+    return device.index if getattr(device, "type", None) == "cuda" and device.index is not None else -1
+
+
+def _runtime_weight_tensors(inner: object):
+    """Yield weight tensors a backend keeps outside the parameter registry.
+
+    The hook is looked up on the class, not the instance: a bound-method
+    lookup for every module in a large model costs more than the walk itself,
+    and this runs on the resource-reporting path.
+    """
+
+    modules = getattr(inner, "modules", None)
+    if not callable(modules):
+        return
+    try:
+        walker = modules()
+    except Exception:  # pragma: no cover - exotic module trees
+        return
+    for module in walker:
+        hook = getattr(type(module), "iter_runtime_weight_tensors", None)
+        if hook is None:
+            continue
+        try:
+            yield from hook(module)
+        except Exception:  # pragma: no cover - backend bookkeeping
+            continue
+
+
+def _runtime_device_allocations(inner: object) -> Tuple[Dict[Tuple[str, int], int], Tuple[str, ...]]:
+    """(measured) Accelerator weight storage a backend keeps outside Torch.
+
+    A native runtime can hold packed weights in its own allocator: TTNN keeps
+    them as ``ttnn.Tensor`` device tensors, which neither ``parameters()`` nor
+    ``iter_runtime_weight_tensors`` can see (#5810). Each module publishes them
+    through ``iter_runtime_device_allocations``; the entry names the backend and
+    that backend's own device ordinal, so TTNN chips never collide with CUDA
+    devices or the host.
+
+    A backend that owns storage but cannot measure it is returned as unmeasured,
+    never as zero: an unreadable allocator is unknown memory, not free memory.
+    """
+
+    allocations: Dict[Tuple[str, int], int] = {}
+    unmeasured = []
+    modules = getattr(inner, "modules", None)
+    if not callable(modules):
+        return allocations, ()
+    try:
+        walker = modules()
+    except Exception:  # pragma: no cover - exotic module trees
+        return allocations, ()
+    for module in walker:
+        hook = getattr(type(module), "iter_runtime_device_allocations", None)
+        if hook is None:
+            continue
+        try:
+            entries = tuple(hook(module))
+        except RuntimeAllocationUnavailable as exc:
+            unmeasured.append(exc.backend)
+            continue
+        except Exception:  # pragma: no cover - backend bookkeeping
+            unmeasured.append("unknown")
+            continue
+        for entry in entries:
+            backend = getattr(entry, "backend", None)
+            index = getattr(entry, "index", None)
+            nbytes = getattr(entry, "weights_bytes", None)
+            if (
+                not isinstance(backend, str) or not backend
+                or not isinstance(index, int) or index < 0
+                or not isinstance(nbytes, int) or nbytes < 0
+            ):
+                # A malformed entry is coverage we cannot trust; say so rather
+                # than silently dropping the storage it was meant to describe.
+                unmeasured.append(backend if isinstance(backend, str) and backend else "unknown")
+                continue
+            key = (backend, index)
+            allocations[key] = allocations.get(key, 0) + nbytes
+    return allocations, tuple(dict.fromkeys(unmeasured))
+
+
 def _parameter_devices(inner: object) -> Dict[int, int]:
     """(measured) Weight bytes per device index, meta tensors skipped.
 
     Parameters and buffers whose storage does not live on a CUDA device are
     reported under ``-1`` so a CPU or meta-only model still has a measured
     weight total.
+
+    Quantized kernels can move their weight out of the parameter/buffer
+    registry into a derived packed cache (QQQ's AVX512 operands, #4856). Each
+    module is asked for those tensors too; they are counted by storage so an
+    alias of a registered tensor or of another cache entry is counted once
+    (#5810).
     """
 
     per_device: Dict[int, int] = {}
@@ -429,12 +523,32 @@ def _parameter_devices(inner: object) -> Dict[int, int]:
         tensors = list(inner.parameters()) + list(inner.buffers())
     except Exception:  # pragma: no cover - exotic module trees
         return per_device
+    seen_storages = set()
     for tensor in tensors:
         if getattr(tensor, "is_meta", False):
             continue
-        device = getattr(tensor, "device", None)
-        index = device.index if getattr(device, "type", None) == "cuda" and device.index is not None else -1
+        index = _device_index(tensor)
         per_device[index] = per_device.get(index, 0) + tensor.numel() * tensor.element_size()
+        try:
+            seen_storages.add((index, tensor.untyped_storage().data_ptr()))
+        except Exception:  # pragma: no cover - non-torch stand-ins
+            pass
+    for tensor in _runtime_weight_tensors(inner):
+        if getattr(tensor, "is_meta", False):
+            continue
+        index = _device_index(tensor)
+        try:
+            storage = tensor.untyped_storage()
+            key = (index, storage.data_ptr())
+            nbytes = storage.nbytes()
+        except Exception:  # pragma: no cover - non-torch stand-ins
+            continue
+        # A view adds nothing of its own: the storage it aliases is already
+        # resident under its source tensor, so count that storage once.
+        if nbytes == 0 or key in seen_storages:
+            continue
+        seen_storages.add(key)
+        per_device[index] = per_device.get(index, 0) + nbytes
     return per_device
 
 
@@ -514,16 +628,23 @@ def _budget_for(inner: object, *, wrapper: object = None, reserve: float = 0.1,
     """Resource budget for a decoder module: measured per-device numbers + estimates."""
 
     per_device = _parameter_devices(inner)
+    allocations, unmeasured_backends = _runtime_device_allocations(inner)
     estimate = _kv_cache_estimate_for(inner, dtype=dtype)
     layer_devices = None
     if estimate is not None:
         layer_devices = _layer_device_indices(wrapper if wrapper is not None else inner,
                                               inner, len(estimate.layers))
+    devices = list(_device_budgets(per_device))
+    for (backend, index), weights in sorted(allocations.items()):
+        devices.append(
+            DeviceBudget(index=index, weights_bytes=weights, backend=backend)
+        )
     return ResourceBudget(
-        devices=_device_budgets(per_device),
+        devices=tuple(devices),
         kv_cache=estimate,
         layer_devices=layer_devices,
         reserve_fraction=reserve,
+        unmeasured_backends=unmeasured_backends,
     )
 
 
@@ -2740,10 +2861,16 @@ class BaseQModel(nn.Module):
         embed_quant_mode: Optional[QuantizeEmbed] = None,
         checkpoint: Optional["CheckpointConfig"] = None,
         fuse: Optional[bool] = None,
+        # Weight-only direct-pack methods (GGUF, BitsAndBytes, NF12) skip the
+        # logging-only weight-error MAE by default; requesting it reconstructs
+        # every dense weight. It never changes the packed payload.
+        measure_weight_error: bool = False,
     ) -> Dict[str, List[Dict[str, str]]]:
         """Quantize the model with the calibration data and policy in ``calibration``.
 
         ``calibration`` may be ``None`` only for a weight-only quantize config.
+        ``measure_weight_error`` requests the direct-pack weight-error MAE; it
+        reconstructs each dense weight and never changes the packed payload.
         """
         run_started = time.perf_counter()
         if calibration is None:
@@ -3235,6 +3362,7 @@ class BaseQModel(nn.Module):
                     calibration=calibration,
                     backend=backend,
                     embed_quant_config=embed_quant_config,
+                    measure_weight_error=measure_weight_error,
                 )
             else:
                 if calibration.dataset is None:
@@ -3312,9 +3440,10 @@ class BaseQModel(nn.Module):
             run_started=run_started,
             vram_devices=vram_devices,
         )
-        # Quantization offloads every layer through pinned host staging. Those
-        # copies are gone once the loop returns, but PyTorch keeps the pinned
-        # blocks cached (non-swappable ``RssShmem``) for the process lifetime.
+        # Layer offload stages every device-to-host copy through a bounded
+        # pinned buffer. Those buffers are gone once the loop returns, but
+        # PyTorch keeps the pinned blocks cached (non-swappable ``RssShmem``)
+        # for the process lifetime.
         release_pinned_host_cache()
         self.log_budget()
         return result
@@ -3940,6 +4069,7 @@ class BaseQModel(nn.Module):
         backend: Optional[BACKEND],
         embed_quant_config: Optional[QuantizeEmbedConfig],
         run_plan: Optional[QuantizationRunPlan] = None,
+        measure_weight_error: bool = False,
     ):
         from ..looper.loop_processor import release_failed_run_processors
         from ..looper.weight_only_looper import WeightOnlyLooper
@@ -3966,6 +4096,7 @@ class BaseQModel(nn.Module):
             processor = processor_class(ProcessorStep.WEIGHT_ONLY)(
                 tokenizer=self.tokenizer,
                 qcfg=self.quantize_config,
+                measure_weight_error=measure_weight_error,
             )
 
             gc_context = (
@@ -4912,15 +5043,33 @@ class BaseQModel(nn.Module):
 
         Returns ``True`` when a Tenstorrent device was actually released, and
         ``False`` for every other backend so the call is safe to make
-        unconditionally.
+        unconditionally.  The mesh is process-wide and may serve several
+        wrappers, so this releases only the leases held by this wrapper's own
+        native kernels and closes the shared handle once none remain.
         """
 
-        from ..utils.ttnn_runtime import close_mesh, current_mesh
-
-        if current_mesh() is None:
+        native_backends = {BACKEND.GPTQ_TTNN, BACKEND.GPTQ_TT_BF8}
+        model = getattr(self, "model", None)
+        modules = getattr(model, "modules", None)
+        if modules is None:
             return False
-        close_mesh()
-        return True
+        owned = [
+            module
+            for module in modules()
+            if native_backends.intersection(
+                getattr(module, "SUPPORTS_BACKENDS", ()) or ()
+            )
+        ]
+        if not owned:
+            # A CPU (or any non-native) wrapper must not tear down a mesh that
+            # another model in this process is still using.
+            return False
+        released = False
+        for module in owned:
+            release = getattr(module, "release_device", None)
+            if release is not None:
+                released = bool(release()) or released
+        return released
 
     def pre_quantize_generate_hook_start(self):
         pass
@@ -5647,31 +5796,9 @@ class BaseQModel(nn.Module):
         #return self.offload_to_disk(module=module)
         if self.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
             # GB10 can stall in the pageable CUDA device-to-host copy used by
-            # Module.to('cpu') during post-quant layer offload. Stage each copy
-            # through a small pinned host buffer before placing it in ordinary
-            # CPU storage. Module._apply retains normal parameter handling.
-            chunk_bytes = 1024 * 1024
-
-            def to_cpu_bounded(tensor: torch.Tensor) -> torch.Tensor:
-                if tensor.device.type != "cuda":
-                    return tensor
-                if not tensor.is_contiguous():
-                    tensor = tensor.contiguous()
-                result = torch.empty(tensor.shape, dtype=tensor.dtype, device=CPU)
-                source = tensor.view(-1)
-                destination = result.view(-1)
-                chunk_elements = max(1, chunk_bytes // tensor.element_size())
-                staging = torch.empty(min(chunk_elements, tensor.numel()), dtype=tensor.dtype, device=CPU, pin_memory=True)
-                stream = torch.cuda.current_stream(tensor.device)
-                for start in range(0, tensor.numel(), chunk_elements):
-                    end = min(start + chunk_elements, tensor.numel())
-                    count = end - start
-                    staging[:count].copy_(source[start:end], non_blocking=True)
-                    stream.synchronize()
-                    destination[start:end].copy_(staging[:count])
-                return result
-
-            return module._apply(to_cpu_bounded)
+            # Module.to('cpu') during post-quant layer offload. Keep its staged
+            # copies small; the default path uses a larger pinned chunk.
+            return move_module_to_cpu_pinned(module, chunk_bytes=1024 * 1024)
         return move_module_to_cpu_pinned(module)
 
     def after_quantize(self) -> None:

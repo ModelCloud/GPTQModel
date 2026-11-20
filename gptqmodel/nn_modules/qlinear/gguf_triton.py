@@ -2005,6 +2005,21 @@ class GGUFTritonKernel(GGUFTorchLinear):
             self._gguf_triton_cache.clear()
         return super().clear_weight_cache()
 
+    def iter_runtime_weight_tensors(self):
+        """Yield the fused-kernel metadata tensors this module owns (#5810).
+
+        ``_gguf_triton_cache`` is a plain dict, so a budget walk that only
+        reads ``parameters()`` and ``buffers()`` misses the derived scale and
+        min planes the kernels read. The packed code bytes in each entry are
+        strided views of ``qweight``; the budget counts their storage once
+        through the registered buffer.
+        """
+
+        for entry in tuple(self._gguf_triton_cache.values()):
+            for value in entry.values():
+                if isinstance(value, torch.Tensor):
+                    yield value
+
     def _packed_weight_is_permuted(self) -> bool:
         """True when ``qweight`` holds the transposed runtime storage (#4811)."""
         qweight = self.qweight
@@ -2112,8 +2127,11 @@ class GGUFTritonKernel(GGUFTorchLinear):
             error_msgs,
         )
 
-    def _triton_cache_key(self, device: torch.device, wide_dot: bool = False) -> tuple[int, str, bool]:
-        return (device.index if device.index is not None else -1, self.gguf_tensor_qtype, wide_dot)
+    def _triton_cache_key(self, device: torch.device, wide_dot: bool = False) -> tuple[int, str]:
+        # ``wide_dot`` is fixed by the module's locked activation dtype
+        # (contracts/kernel/forward-dtype.md), so one entry per device suffices.
+        del wide_dot
+        return (device.index if device.index is not None else -1, self.gguf_tensor_qtype)
 
     def _build_triton_cache(self, device: torch.device, wide_dot: bool = False) -> dict[str, Any]:
         self._permute_packed_weight()
@@ -2279,10 +2297,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
         else:
             x_work = x_flat.contiguous()
 
-        cache = (
-            self._get_triton_cache(x_work.device, wide_dot=True)
-            if wide_dot else self._get_triton_cache(x_work.device)
-        )
+        cache = self._get_triton_cache(x_work.device, wide_dot=wide_dot)
         output_kwargs = {} if output_dtype is None else {"output_dtype": output_dtype}
 
         if self.gguf_tensor_qtype in {"Q1_0", "Q1_0_g128"}:

@@ -67,20 +67,23 @@ E8M0_MAX_EXPONENT = 127
 
 # Signed E2M1 grid: 15 distinct levels (0 is shared by both signs), matching
 # the OCP MXFP4 element set.  Index 7 is the zero level.
-E2M1_VALUES = torch.tensor(
-    [-6.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
-    dtype=torch.float32,
-)
-# Index into the unsigned magnitude code (0..7) for each signed-grid index.
-E2M1_MAGNITUDE_INDEX = torch.tensor(
-    [7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6, 7], dtype=torch.uint8
-)
-# Sign bit for each signed-grid index.
-E2M1_SIGN_BIT = torch.tensor(
-    [1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0], dtype=torch.uint8
-)
+E2M1_GRID_VALUES = (-6.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 # E2M1 magnitude for the 8 unsigned codes.
-E2M1_MAGNITUDES = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
+E2M1_MAGNITUDE_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+# Import-time range consumers need Python scalars.  Deriving them from the
+# lookup tensors below is data-dependent and raises on the meta device (#5776).
+E2M1_MIN_NONZERO_MAGNITUDE = min(value for value in E2M1_MAGNITUDE_VALUES if value > 0.0)
+E2M1_MAX_MAGNITUDE = max(E2M1_MAGNITUDE_VALUES)
+
+# These are process-wide static codebooks, not module state: build them on CPU
+# explicitly so importing this module inside `torch.device("meta")` leaves the
+# tables real instead of meta tensors (#5776).
+E2M1_VALUES = torch.tensor(E2M1_GRID_VALUES, dtype=torch.float32, device="cpu")
+# Index into the unsigned magnitude code (0..7) for each signed-grid index.
+E2M1_MAGNITUDE_INDEX = torch.tensor([7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6, 7], dtype=torch.uint8, device="cpu")
+# Sign bit for each signed-grid index.
+E2M1_SIGN_BIT = torch.tensor([1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0], dtype=torch.uint8, device="cpu")
+E2M1_MAGNITUDES = torch.tensor(E2M1_MAGNITUDE_VALUES, dtype=torch.float32, device="cpu")
 
 
 def _device_const(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
@@ -619,9 +622,15 @@ def macaq_quantize_weight(
 
     pre_scale = None
     if pre_mode != "none":
-        pre_scale = balance_pre_scale(weight, hessian, n_tokens, alpha=pre_alpha)
-        weight = weight / pre_scale.unsqueeze(0)
-        hessian = hessian * pre_scale.unsqueeze(0) * pre_scale.unsqueeze(1)
+        # Round once to the stored BF16 pre-scale before building the
+        # transformed weight and Hessian. Inference applies the stored BF16
+        # value, so quantizing against a different FP32 value changes the codes
+        # (and the reported loss) relative to the transform the layer ships
+        # with (#5840).
+        pre_scale = balance_pre_scale(weight, hessian, n_tokens, alpha=pre_alpha).to(torch.bfloat16)
+        pre_scale_work = pre_scale.float()
+        weight = weight / pre_scale_work.unsqueeze(0)
+        hessian = hessian * pre_scale_work.unsqueeze(0) * pre_scale_work.unsqueeze(1)
 
     if rotation == "hadamard":
         bh_bf16 = make_hadamard(had_block, device=device, dtype=torch.float32).to(torch.bfloat16)
@@ -672,7 +681,7 @@ def macaq_quantize_weight(
         in_features=in_features,
         out_features=out_features,
         block_size=block_size,
-        pre_scale=None if pre_scale is None else pre_scale.to(torch.bfloat16),
+        pre_scale=pre_scale,
     )
     if return_dequantized:
         grid = _device_const(E2M1_VALUES, device)

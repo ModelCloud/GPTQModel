@@ -375,12 +375,10 @@ def test_state_load_mutation_dtype_and_no_retained_dense_weights(monkeypatch, me
     with torch.no_grad():
         model.model(ids)
     assert group.packed is not changed
-    changed = group.packed
-    model.to(torch.bfloat16)
-    with torch.no_grad():
-        model.model(ids)
-    assert group.packed is not changed
-    assert group.packed.scales.dtype == torch.bfloat16
+    # Weight dtypes are frozen after the first forward
+    # (contracts/kernel/forward-dtype.md).
+    with pytest.raises(RuntimeError, match="frozen after the first forward"):
+        model.to(torch.bfloat16)
 
 
 def test_awq_mha_qkv_remains_eligible():

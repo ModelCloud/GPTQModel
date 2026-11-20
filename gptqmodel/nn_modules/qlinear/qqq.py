@@ -1082,10 +1082,35 @@ class QQQTorchLinear(QQQLinear):
                 self._torch_packed_cache_key = self._torch_weight_state_key()
             return True
 
-    def materialize_checkpoint_layout_for_export(self) -> bool:
-        """Publish the dropped checkpoint buffers so an export can see them."""
+    def iter_runtime_weight_tensors(self):
+        """Yield the packed CPU operands that replaced the checkpoint buffers.
 
-        return self._materialize_dropped_checkpoint()
+        ``_torch_packed_cache`` is a plain tuple, so a budget walk that only
+        reads ``parameters()`` and ``buffers()`` misses almost all of the
+        projection's weight bytes once the first forward has dropped
+        ``B``/``s_group``/``s_channel`` (#5810).
+        """
+
+        yield from self._torch_packed_cache or ()
+
+    def materialize_checkpoint_layout_for_export(self) -> bool:
+        """Publish the dropped checkpoint buffers so an export can see them.
+
+        The packed cache is released in the same critical section. The rebuilt
+        checkpoint buffers hold the exact same weight, so keeping both would
+        leave two full copies resident after a save; the refreshed cache key
+        would then make the next forward take the cache hit and never run the
+        rebuild-and-verify drop (#5804). The next native forward rebuilds the
+        packed terms and ``_maybe_drop_checkpoint_tensors()`` drops the
+        checkpoint buffers again only after proving the inverse exact.
+        """
+
+        with self._cpu_transform_lock:
+            materialized = self._materialize_dropped_checkpoint()
+            if materialized:
+                self._torch_packed_cache = None
+                self._torch_packed_cache_key = None
+            return materialized
 
     def _maybe_drop_checkpoint_tensors(self) -> bool:
         """Release the checkpoint copy once the cache proves it is rebuildable.
@@ -1225,9 +1250,10 @@ class QQQTorchLinear(QQQLinear):
         return kernel(quant_A.contiguous(), packed, s_group, self.group_size), s_channel
 
     def _apply(self, fn, recurse=True):
-        # A move changes the device/dtype the cache was built for, so restore
-        # the checkpoint layout before it is transformed. ``super()._apply``
-        # then clears the derived cache.
+        # A device move invalidates the cache's placement, so restore the
+        # checkpoint layout before it is moved. ``super()._apply`` then clears
+        # the derived cache. Post-forward dtype casts are rejected before this
+        # runs (contracts/kernel/forward-dtype.md).
         self._materialize_dropped_checkpoint()
         return super()._apply(fn, recurse=recurse)
 

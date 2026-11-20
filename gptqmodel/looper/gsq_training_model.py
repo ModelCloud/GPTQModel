@@ -553,7 +553,9 @@ def prepare_llama_gsq_export(model, run, *, blocks=None):
 
     Returns its matching quantization configuration. A public lifecycle caller
     can retain its existing wrapper and install this configuration only after
-    successful preparation. This converts floating runtime tensors to FP16.
+    successful preparation. The model keeps its dtype: the packed blocks have
+    already run forwards in it, and weight dtypes are frozen after the first
+    forward (contracts/kernel/forward-dtype.md).
     """
     from ..nn_modules.qlinear.torch import TorchLinear
     from ..quantization.config import FORMAT, GPTQConfig
@@ -608,14 +610,6 @@ def prepare_llama_gsq_export(model, run, *, blocks=None):
         qcfg.meta['gsq_projection_bits'] = dict(sorted(projection_bits.items()))
     qcfg.meta['gsq_training'] = run['gsq_training']
     qcfg.meta['gsq_training_recipe'] = 'experimental_staged_llama_v1'
-    model.half()
-    # RoPE inverse frequencies are nonpersistent. Casting their FP32 values to
-    # FP16 would change the live runtime while reload reconstructs them from
-    # config in FP32. Rebuild the same canonical rotary state as a fresh load.
-    # The public loader constructs these frequencies on CPU before transfer;
-    # constructing directly on CUDA can differ by FP32 ulps in pow/division.
-    model.model.rotary_emb = type(model.model.rotary_emb)(model.config).to(
-        model.model.embed_tokens.weight.device).eval()
     return qcfg
 
 

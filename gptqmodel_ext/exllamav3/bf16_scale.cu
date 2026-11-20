@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-License-Identifier: Apache-2.0
 //
-// One-launch BF16 -> FP16 pre-scale and FP16/FP32 -> BF16 re-scale for EXL3.
+// One-launch FP16/BF16 input protection and output re-scale for EXL3.
 //
 // The eager torch sequence (per row: amax -> frexp(amax / bound) ->
 // power-of-two scale -> x / scale -> fp16, then GEMM, then fp32 -> * scale ->
@@ -19,6 +19,16 @@
 // The division by a power of two is exact, so the fused results are
 // bit-identical to the eager reference.  Everything stays on the device; no
 // value is read back to the host.
+//
+// PERF FOLLOW-UP (maintainer request, #5898): these two launches run on every
+// FP16/BF16 native forward although an out-of-range row is rare. Fold the
+// row bound into the input Hadamard and the rescale into the GEMM epilogue in
+// future kernel work, and use FP64 only for rows whose FP32 product overflows,
+// so the common case does not pay for the guard. See ExllamaV3Linear.forward.
+//
+// With BF16 inputs and checkpoint suh, the
+// bound, scale and epilogue use FP64 to cover products beyond FP32's range;
+// the native GEMM still consumes FP16 and accumulates in FP32.
 
 #if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
 // ROCm builds the same extension; map the CUDA spellings onto HIP's, as
@@ -87,35 +97,53 @@ __device__ __forceinline__ float result_to_float<float>(float value)
     return value;
 }
 
+// Preserve separate IEEE rounding in both the ordinary and wide BF16 path.
+__device__ __forceinline__ float scale_mul(float a, float b) { return __fmul_rn(a, b); }
+__device__ __forceinline__ double scale_mul(double a, double b) { return __dmul_rn(a, b); }
+__device__ __forceinline__ float scale_add(float a, float b) { return __fadd_rn(a, b); }
+__device__ __forceinline__ double scale_add(double a, double b) { return __dadd_rn(a, b); }
+__device__ __forceinline__ float scale_sub(float a, float b) { return __fsub_rn(a, b); }
+__device__ __forceinline__ double scale_sub(double a, double b) { return __dsub_rn(a, b); }
+__device__ __forceinline__ float scale_div(float a, float b) { return __fdiv_rn(a, b); }
+__device__ __forceinline__ double scale_div(double a, double b) { return __ddiv_rn(a, b); }
+
+template <typename InputT, typename ScaleT>
 __global__ __launch_bounds__(kThreads)
 void bf16_prescale_kernel
 (
-    const __nv_bfloat16* __restrict__ x,
+    const InputT* __restrict__ x,
+    const __half* __restrict__ suh,
     __half* __restrict__ out,
-    float* __restrict__ scale_out,
+    ScaleT* __restrict__ scale_out,
     int64_t n_cols,
-    float bound
+    ScaleT bound
 )
 {
     const int64_t row = blockIdx.x;
-    const __nv_bfloat16* __restrict__ x_row = x + row * n_cols;
+    const InputT* __restrict__ x_row = x + row * n_cols;
     __half* __restrict__ out_row = out + row * n_cols;
     const int t = threadIdx.x;
 
-    float local_amax = 0.0f;
+    ScaleT local_amax = 0;
     int local_nan = 0;
     for (int64_t col = t; col < n_cols; col += kThreads)
     {
-        const float value = __bfloat162float(x_row[col]);
+        const float value = bias_to_float<InputT>(x_row[col]);
         // fmaxf drops NaN; torch's inf-norm returns NaN for such a row, so
         // track it separately and restore it before the scale decision.
         local_nan |= static_cast<int>(isnan(value));
-        local_amax = fmaxf(local_amax, fabsf(value));
+        local_amax = fmax(local_amax, static_cast<ScaleT>(fabsf(value)));
+        if (suh)
+        {
+            const ScaleT scaled = scale_mul(static_cast<ScaleT>(value), static_cast<ScaleT>(__half2float(suh[col])));
+            local_nan |= static_cast<int>(isnan(scaled));
+            local_amax = fmax(local_amax, fabs(scaled));
+        }
     }
 
-    __shared__ float s_amax[kThreads];
+    __shared__ ScaleT s_amax[kThreads];
     __shared__ int s_nan[kThreads];
-    __shared__ float s_inv_scale;
+    __shared__ ScaleT s_inv_scale;
     s_amax[t] = local_amax;
     s_nan[t] = local_nan;
     __syncthreads();
@@ -123,7 +151,7 @@ void bf16_prescale_kernel
     {
         if (t < stride)
         {
-            s_amax[t] = fmaxf(s_amax[t], s_amax[t + stride]);
+            s_amax[t] = fmax(s_amax[t], s_amax[t + stride]);
             s_nan[t] |= s_nan[t + stride];
         }
         __syncthreads();
@@ -131,46 +159,44 @@ void bf16_prescale_kernel
 
     if (t == 0)
     {
-        float amax = s_amax[0];
+        ScaleT amax = s_amax[0];
         if (s_nan[0])
         {
             amax = __int_as_float(0x7fc00000);  // quiet NaN
         }
-        // ``frexp(amax / bound)``: for the normal quotient of a wide row the
-        // exponent is the unbiased exponent field minus 126.  Rows inside the
-        // bound (and non-finite rows, matching torch.frexp's exponent 0) keep
-        // an exact scale of 1.0.
-        const bool wide = (amax > bound) && (amax < __int_as_float(0x7f800000));
-        float scale = 1.0f;
-        float inv_scale = 1.0f;
+        // BF16 checkpoint products and their power-of-two scales may exceed
+        // FP32 even though cancellation leaves a finite final projection.
+        const bool wide = (amax > bound) && isfinite(amax);
+        ScaleT scale = 1;
+        ScaleT inv_scale = 1;
         if (wide)
         {
-            const float quotient = __fdiv_rn(amax, bound);
-            const int exponent = (__float_as_int(quotient) >> 23 & 0xFF) - 126;
-            scale = __int_as_float((exponent + 127) << 23);
-            inv_scale = __int_as_float((127 - exponent) << 23);
+            int exponent = 0;
+            frexp(scale_div(amax, bound), &exponent);
+            scale = ldexp(static_cast<ScaleT>(1), exponent);
+            inv_scale = ldexp(static_cast<ScaleT>(1), -exponent);
         }
         scale_out[row] = scale;
         s_inv_scale = inv_scale;
     }
     __syncthreads();
 
-    const float inv_scale = s_inv_scale;
+    const ScaleT inv_scale = s_inv_scale;
     for (int64_t col = t; col < n_cols; col += kThreads)
     {
-        const float value = __bfloat162float(x_row[col]);
-        out_row[col] = __float2half_rn(__fmul_rn(value, inv_scale));
+        const float value = bias_to_float<InputT>(x_row[col]);
+        out_row[col] = __float2half_rn(static_cast<float>(scale_mul(static_cast<ScaleT>(value), inv_scale)));
     }
 }
 
-template <typename ResultT, typename BiasT>
+template <typename ResultT, typename BiasT, typename OutputT, typename ScaleT>
 __global__ __launch_bounds__(kThreads)
 void bf16_rescale_kernel
 (
     const ResultT* __restrict__ result,
-    const float* __restrict__ scale,
+    const ScaleT* __restrict__ scale,
     const BiasT* __restrict__ bias,
-    __nv_bfloat16* __restrict__ out,
+    OutputT* __restrict__ out,
     int64_t n_cols,
     int64_t result_stride,
     int64_t out_stride,
@@ -183,20 +209,20 @@ void bf16_rescale_kernel
     {
         return;
     }
-    const float row_scale = scale[row];
-    float value = result_to_float<ResultT>(result[row * result_stride + col]);
+    const ScaleT row_scale = scale[row];
+    ScaleT value = result_to_float<ResultT>(result[row * result_stride + col]);
     if (bias)
     {
-        const float bias_value = bias_to_float<BiasT>(bias[col]);
+        const ScaleT bias_value = bias_to_float<BiasT>(bias[col]);
         if (result_has_bias)
-            value = __fsub_rn(value, bias_value);
-        value = __fadd_rn(__fmul_rn(value, row_scale), bias_value);
+            value = scale_sub(value, bias_value);
+        value = scale_add(scale_mul(value, row_scale), bias_value);
     }
     else
     {
-        value = __fmul_rn(value, row_scale);
+        value = scale_mul(value, row_scale);
     }
-    out[row * out_stride + col] = __float2bfloat16_rn(value);
+    out[row * out_stride + col] = static_cast<OutputT>(value);
 }
 
 }  // namespace
@@ -204,8 +230,8 @@ void bf16_rescale_kernel
 namespace
 {
 
-template <typename ResultT>
-void launch_bf16_rescale(
+template <typename ResultT, typename OutputT, typename ScaleT>
+void launch_bf16_rescale_typed(
     const at::Tensor& result,
     const at::Tensor& scale,
     const std::optional<at::Tensor>& bias,
@@ -217,13 +243,13 @@ void launch_bf16_rescale(
     cudaStream_t stream)
 {
     const ResultT* result_ptr = reinterpret_cast<const ResultT*>(result.const_data_ptr());
-    const float* scale_ptr = scale.const_data_ptr<float>();
-    __nv_bfloat16* out_ptr = reinterpret_cast<__nv_bfloat16*>(out.mutable_data_ptr<at::BFloat16>());
+    const ScaleT* scale_ptr = scale.const_data_ptr<ScaleT>();
+    OutputT* out_ptr = out.mutable_data_ptr<OutputT>();
     const dim3 grid(rows, (n_cols + kThreads - 1) / kThreads);
 
     if (!bias.has_value())
     {
-        bf16_rescale_kernel<ResultT, float><<<grid, kThreads, 0, stream>>>(
+        bf16_rescale_kernel<ResultT, float, OutputT, ScaleT><<<grid, kThreads, 0, stream>>>(
             result_ptr, scale_ptr, nullptr, out_ptr, n_cols, result_stride, n_cols, false);
         return;
     }
@@ -232,15 +258,15 @@ void launch_bf16_rescale(
     switch (b.scalar_type())
     {
         case at::kHalf:
-            bf16_rescale_kernel<ResultT, at::Half><<<grid, kThreads, 0, stream>>>(
+            bf16_rescale_kernel<ResultT, at::Half, OutputT, ScaleT><<<grid, kThreads, 0, stream>>>(
                 result_ptr, scale_ptr, b.const_data_ptr<at::Half>(), out_ptr, n_cols, result_stride, n_cols, result_has_bias);
             break;
         case at::kBFloat16:
-            bf16_rescale_kernel<ResultT, at::BFloat16><<<grid, kThreads, 0, stream>>>(
+            bf16_rescale_kernel<ResultT, at::BFloat16, OutputT, ScaleT><<<grid, kThreads, 0, stream>>>(
                 result_ptr, scale_ptr, b.const_data_ptr<at::BFloat16>(), out_ptr, n_cols, result_stride, n_cols, result_has_bias);
             break;
         case at::kFloat:
-            bf16_rescale_kernel<ResultT, float><<<grid, kThreads, 0, stream>>>(
+            bf16_rescale_kernel<ResultT, float, OutputT, ScaleT><<<grid, kThreads, 0, stream>>>(
                 result_ptr, scale_ptr, b.const_data_ptr<float>(), out_ptr, n_cols, result_stride, n_cols, result_has_bias);
             break;
         default:
@@ -248,29 +274,76 @@ void launch_bf16_rescale(
     }
 }
 
+template <typename ResultT, typename OutputT>
+void launch_bf16_rescale(
+    const at::Tensor& result, const at::Tensor& scale, const std::optional<at::Tensor>& bias,
+    at::Tensor& out, int64_t n_cols, int64_t rows, int64_t result_stride,
+    bool result_has_bias, cudaStream_t stream)
+{
+    if (scale.scalar_type() == at::kDouble)
+        launch_bf16_rescale_typed<ResultT, OutputT, double>(
+            result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
+    else
+        launch_bf16_rescale_typed<ResultT, OutputT, float>(
+            result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
+}
+
 }  // namespace
 
-std::tuple<at::Tensor, at::Tensor> bf16_prescale(const at::Tensor& x, double bound)
+std::tuple<at::Tensor, at::Tensor> bf16_prescale(
+    const at::Tensor& x, double bound, const std::optional<at::Tensor>& suh)
 {
     TORCH_CHECK(x.is_cuda(), "bf16_prescale requires a CUDA tensor");
-    TORCH_CHECK(x.scalar_type() == at::kBFloat16, "bf16_prescale requires bfloat16");
+    TORCH_CHECK(x.scalar_type() == at::kBFloat16 || x.scalar_type() == at::kHalf,
+                "bf16_prescale requires float16 or bfloat16");
     TORCH_CHECK(x.dim() >= 1 && x.numel() > 0, "bf16_prescale requires a non-empty tensor");
     TORCH_CHECK(x.is_contiguous(), "bf16_prescale requires a contiguous tensor");
 
     const int64_t n_cols = x.size(-1);
+    if (suh.has_value())
+    {
+        TORCH_CHECK(suh->device() == x.device(), "bf16_prescale suh is on the wrong device");
+        TORCH_CHECK(suh->scalar_type() == at::kHalf && suh->is_contiguous(),
+                    "bf16_prescale requires contiguous float16 suh");
+        TORCH_CHECK(suh->dim() == 1 && suh->numel() >= n_cols, "bf16_prescale suh width mismatch");
+    }
     const int64_t rows = x.numel() / n_cols;
     at::Tensor out = at::empty(x.sizes(),
                               at::TensorOptions().dtype(at::kHalf).device(x.device()));
+    const bool wide_scale = x.scalar_type() == at::kBFloat16 && suh.has_value();
     at::Tensor scale = at::empty({rows, 1},
-                               at::TensorOptions().dtype(at::kFloat).device(x.device()));
+                               at::TensorOptions()
+                                   .dtype(wide_scale ? at::kDouble : at::kFloat)
+                                   .device(x.device()));
 
     const c10::cuda::CUDAGuard guard(x.device());
-    bf16_prescale_kernel<<<rows, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
-        reinterpret_cast<const __nv_bfloat16*>(x.const_data_ptr<at::BFloat16>()),
-        reinterpret_cast<__half*>(out.mutable_data_ptr<at::Half>()),
-        scale.mutable_data_ptr<float>(),
-        n_cols,
-        static_cast<float>(bound));
+    const __half* suh_ptr = suh.has_value()
+        ? reinterpret_cast<const __half*>(suh->const_data_ptr<at::Half>()) : nullptr;
+    // The stable-ABI surface does not ship ATen/Dispatch.h, so the two
+    // supported input dtypes are dispatched with a plain switch.
+    switch (x.scalar_type())
+    {
+    case at::kHalf:
+        bf16_prescale_kernel<at::Half, float><<<rows, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+            x.const_data_ptr<at::Half>(), suh_ptr,
+            reinterpret_cast<__half*>(out.mutable_data_ptr<at::Half>()),
+            scale.mutable_data_ptr<float>(), n_cols, static_cast<float>(bound));
+        break;
+    case at::kBFloat16:
+        if (wide_scale)
+            bf16_prescale_kernel<at::BFloat16, double><<<rows, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+                x.const_data_ptr<at::BFloat16>(), suh_ptr,
+                reinterpret_cast<__half*>(out.mutable_data_ptr<at::Half>()),
+                scale.mutable_data_ptr<double>(), n_cols, bound);
+        else
+            bf16_prescale_kernel<at::BFloat16, float><<<rows, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+                x.const_data_ptr<at::BFloat16>(), suh_ptr,
+                reinterpret_cast<__half*>(out.mutable_data_ptr<at::Half>()),
+                scale.mutable_data_ptr<float>(), n_cols, static_cast<float>(bound));
+        break;
+    default:
+        TORCH_CHECK(false, "bf16_prescale requires float16 or bfloat16");
+    }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return {out, scale};
 }
@@ -280,7 +353,8 @@ at::Tensor bf16_rescale(
     const at::Tensor& scale,
     const std::optional<at::Tensor>& bias,
     int64_t n_cols,
-    bool result_has_bias)
+    bool result_has_bias,
+    at::ScalarType output_dtype)
 {
     TORCH_CHECK(result.is_cuda(), "bf16_rescale requires a CUDA tensor");
     TORCH_CHECK(
@@ -290,7 +364,8 @@ at::Tensor bf16_rescale(
     TORCH_CHECK(result.is_contiguous(), "bf16_rescale requires a contiguous result");
     TORCH_CHECK(n_cols > 0 && result.size(-1) >= n_cols, "bf16_rescale output width is out of range");
     TORCH_CHECK(scale.is_cuda() && scale.device() == result.device(), "bf16_rescale scale is on the wrong device");
-    TORCH_CHECK(scale.scalar_type() == at::kFloat && scale.is_contiguous(), "bf16_rescale requires a contiguous float32 scale");
+    TORCH_CHECK((scale.scalar_type() == at::kFloat || scale.scalar_type() == at::kDouble) && scale.is_contiguous(),
+                "bf16_rescale requires a contiguous float32 or float64 scale");
     TORCH_CHECK(scale.numel() == result.numel() / result.size(-1), "bf16_rescale scale row count mismatch");
     if (bias.has_value())
     {
@@ -302,23 +377,33 @@ at::Tensor bf16_rescale(
 
     std::vector<int64_t> out_shape(result.sizes().begin(), result.sizes().end() - 1);
     out_shape.push_back(n_cols);
+    TORCH_CHECK(output_dtype == at::kHalf || output_dtype == at::kBFloat16,
+                "bf16_rescale requires float16 or bfloat16 output");
     at::Tensor out = at::empty(
-        out_shape, at::TensorOptions().dtype(at::kBFloat16).device(result.device()));
+        out_shape, at::TensorOptions().dtype(output_dtype).device(result.device()));
 
     const int64_t rows = result.numel() / result.size(-1);
     const int64_t result_stride = result.size(-1);
 
     const c10::cuda::CUDAGuard guard(result.device());
     const auto stream = at::cuda::getCurrentCUDAStream();
-    if (result.scalar_type() == at::kHalf)
+    // Plain switch: the stable-ABI surface does not provide AT_DISPATCH_CASE.
+    switch (output_dtype)
     {
-        launch_bf16_rescale<at::Half>(
-            result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
-    }
-    else
-    {
-        launch_bf16_rescale<float>(
-            result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
+    case at::kHalf:
+        if (result.scalar_type() == at::kHalf)
+            launch_bf16_rescale<at::Half, at::Half>(result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
+        else
+            launch_bf16_rescale<float, at::Half>(result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
+        break;
+    case at::kBFloat16:
+        if (result.scalar_type() == at::kHalf)
+            launch_bf16_rescale<at::Half, at::BFloat16>(result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
+        else
+            launch_bf16_rescale<float, at::BFloat16>(result, scale, bias, out, n_cols, rows, result_stride, result_has_bias, stream);
+        break;
+    default:
+        TORCH_CHECK(false, "bf16_rescale requires float16 or bfloat16 output");
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;

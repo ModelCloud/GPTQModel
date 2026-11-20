@@ -55,7 +55,7 @@ table instead of a single module-level constant set.
 | GGUF | ✅ `GGUF_TRITON` (AUTO) or `GGUF_TORCH` | ✅ measured | ✅ (family table) | `GGUF_TRITON` now declares `DEVICE.ROCM` and validates there; on ROCm `_cuda_device_capability()` returns `None`, so only the generic launch configs run (no SM80/SM89 specialization). Measured 5.0-13.1x faster than `GGUF_TORCH` at decode **and** prefill, so AUTO (priority 45) selects it; `GGUF_TORCH` stays available via `BACKEND.GGUF_TORCH` |
 | FP8 Torch | ✅ (family table) | ✅ measured | ✅ (family table) | `_scaled_mm` accepts `float8_e4m3fn`/`e5m2` and rejects the `fnuz` encodings on gfx1201; a rejected dtype is logged once and falls back to dequantize + matmul |
 | VPTQ | ✅ via `VPTQ_TORCH` (`vptq_cuda` is CUDA-only and rejects ROCm explicitly) | ✅ | ✅ | `VPTQCudaLinear` ranks above `VPTQLinear` (110 vs 100) so AUTO loads the fused kernel on NVIDIA; `validate_once` rejects ROCm before any build, so AUTO still lands on `VPTQ_TORCH` here |
-| EXL3 | ✅ `EXL3_TORCH` only | ✅ | ✅ | tensor-core GEMM tables are `nullptr` on ROCm; AUTO selects `EXL3_TORCH`, while `LinearEXL3.forward` is reconstruct + hgemm + Hadamard on hipBLAS. Parity harness and baseline in *EXL3 on RDNA4* |
+| EXL3 | ✅ `EXL3_EXLLAMA_V3` (AUTO) or `EXL3_TORCH` | ✅ `EXL3_EXLLAMA_V3` (AUTO), measured | ✅ `EXL3_TORCH` only | tensor-core GEMM tables are `nullptr` on ROCm, but the native HIP GEMV and WMMA GEMM cover `gfx1200`/`gfx1201`. AUTO selects `EXL3_EXLLAMA_V3` when every selected ordinal is gfx120x and the extension is loadable or buildable; `gfx1250`, CDNA, other ROCm targets and hosts without the HIP ops keep `EXL3_TORCH`. Parity harness and baseline in *EXL3 on RDNA4* |
 | Marlin / Machete / Swordfish / BitBLAS / W4A-NVFP4 | ❌ | ❌ | ❌ | deliberately unsupported: NVIDIA-only kernels (Marlin `mma.sync`/`cp.async` with tile permutes, Hopper/Blackwell CUTLASS for Machete/Swordfish, BitBLAS TensorCore IR, SM12.1 FP4 tensor cores for W4A-NVFP4) with no HIP lowering. None lists `DEVICE.ROCM`, so the AUTO candidate list filters them out before validation; an explicit selection fails with an actionable error naming the portable backend. See *Deliberately unsupported backends* below |
 
 ### AWQ GEMV-family AUTO resolution
@@ -666,19 +666,42 @@ Ada keeps bitsandbytes' cublas-backed kernels, which are measured faster than
 the Triton tile on every shape tested; the `ada` launch entry exists for the
 parity contract and for forced A/B runs (`KernelConfig(bitsandbytes_triton=True)`).
 
-### EXL3 on RDNA4 (reconstruct + hipBLAS baseline)
+### EXL3 on RDNA4 (native HIP GEMV, WMMA GEMM and hipBLAS baseline)
 
-EXL3 exposes two forward paths on ROCm, and they are not the same code:
+EXL3 exposes three forward paths on ROCm:
 
-- `EXL3_TORCH` (`ExllamaV3TorchLinear`, what AUTO selects) decodes the packed
-  trellis in portable Torch and runs a hipBLAS matmul. It is the correctness
-  reference and the slow path.
-- `LinearEXL3.forward` runs `ext.reconstruct` (dense FP16 weight),
-  `ext.hgemm` (hipBLAS) and the output `ext.had_r_128`. The packed
-  tensor-core GEMM (`bc_linear_exl3_run` / `exl3_gemm`) still has no HIP
-  kernel, so the module never reaches it; the benchmark's `native` backend
-  probes that entry point and skips with
-  `ExLlamaV3 tensor-core GEMM is not available in this build (ROCm/HIP)`.
+- `EXL3_TORCH` (`ExllamaV3TorchLinear`, the AUTO fallback on CDNA, other ROCm
+  targets and hosts without the HIP extension) decodes the packed trellis in
+  portable Torch and runs a hipBLAS matmul. It is the correctness reference
+  and the slow path.
+- `LinearEXL3.forward` dispatches to the native HIP kernels when they cover
+  the shape: the native GEMV for `bsz <= 8` and the native RDNA4 WMMA GEMM for
+  up to 512 rows with K and N multiples of 128. AUTO selects this path on
+  gfx120x when the extension is loadable or buildable (#5836). Everything else
+  runs `ext.reconstruct` (dense FP16 weight), `ext.hgemm` (hipBLAS) and the
+  output `ext.had_r_128`. See
+  [RDNA4 HIP dispatch](exl3-native-decode.md#rdna4-hip-dispatch).
+- The packed tensor-core entry point (`bc_linear_exl3_run` / `exl3_gemm`)
+  reports `EXL3_HIP_DISPATCH_NATIVE` (93) or `EXL3_HIP_DISPATCH_FALLBACK` (94);
+  the benchmark's `native` backend times it directly.
+
+A public-load regression on gfx1201 (R9700, one 256->512 EXL3 3.0 bpw `mul1`
+projection, FP16, median of 100 forwards) measures the selection end to end
+through `GPTQModel.load`:
+
+| M | `EXL3_TORCH` ms | AUTO (`EXL3_EXLLAMA_V3`) ms | speedup | max abs drift vs FP64 oracle |
+|---:|---:|---:|---:|---:|
+| 1 | 0.533 | 0.046 | 11.5x | 3.5e-05 |
+| 8 | 0.527 | 0.047 | 11.3x | 4.6e-05 |
+| 9 | 0.557 | 0.047 | 11.8x | 5.3e-05 |
+
+The decode batches (M=1/8) call `bc_linear_exl3_run_hip_gemv`; M=9 takes the
+fused WMMA GEMM. Peak transient GPU allocation for the M=1 forward is 3.4 KiB
+native versus 80.5 MiB for the portable decode, while both retain the same
+50,688-byte packed payload (49,152-byte trellis). The native output stays
+within 3.7e-04 relative Frobenius error of the independent FP64 oracle.
+`tests/kernels/test_exl3_public_load_hip_5836.py` pins the selection, the
+GEMV/GEMM split and the numerics.
 
 `tests/kernels/test_exl3_rocm_parity.py` pins both paths against the
 independent bitstream oracle in `tests/test_exllamav3_torch_padding.py`
@@ -730,6 +753,13 @@ path materializes a dense FP16 weight, so these numbers are a
 memory-bandwidth-bound lower bound for a packed native kernel, not a
 packed-kernel measurement.
 
+The native RDNA4 WMMA GEMM now beats that baseline on the GEMM rows: across 60
+2.0 bpw shapes (`m` 16-256, `k` 2048-8192, `n` 2048-16384) it is 1.14x-5.48x
+faster than reconstruct+hgemm (median 2.88x, geomean 2.66x, no regressions),
+and 1.2x-3.9x on a 3.0/4.0 bpw sample. Its maximum relative error against the
+reconstruct oracle is 2.6e-05 for an FP32 destination (4.4e-04 for FP16).
+Decode-sized batches use the native GEMV instead.
+
 Both the parity result and the table were measured with the local
 `#include <cuda_bf16.h>` workaround for the HIP JIT build break tracked in
 #5760. On the unpatched tree the extension cannot build, and the parity module
@@ -738,13 +768,14 @@ synthetic-trellis cases still run).
 
 ## Known limitations
 
-- **EXL3:** the tensor-core GEMM implementation has no ROCm kernel (all entries
-  are `nullptr` and the loader already raises a clear `TORCH_CHECK`). Loading
-  EXL3 on ROCm uses `EXL3_TORCH`; AUTO now does the same instead of selecting
-  `EXL3_EXLLAMA_V3`. The in-module forward (`LinearEXL3.forward`) is
-  reconstruct + hgemm + Hadamard on hipBLAS; `tests/kernels/test_exl3_rocm_parity.py`
-  pins its numerics and `tests/benchmark_exl3_rocm_rdna4.py` records the
-  baseline a native kernel must beat.
+- **EXL3:** the CUDA tensor-core tables are still `nullptr` on ROCm. AUTO
+  loads `EXL3_EXLLAMA_V3` on RDNA4 (gfx120x) when every selected ordinal is
+  covered and the extension is loadable or buildable; CDNA, other ROCm targets
+  and hosts without the HIP ops keep `EXL3_TORCH`. On RDNA4 the in-module
+  forward (`LinearEXL3.forward`) reaches the native HIP GEMV and WMMA GEMM,
+  which reconstruct + hgemm internally when the shape is out of range.
+  `tests/kernels/test_exl3_rocm_parity.py` pins the numerics and
+  `tests/benchmark_exl3_rocm_rdna4.py` records the baseline.
 - **hipBLASLt:** libraries are shipped but not tuned for RDNA4; rocBLAS
   forwarding to hipBLASLt is disabled by default (`ROCBLAS_USE_HIPBLASLT=0`)
   because it picks a different kernel per process.

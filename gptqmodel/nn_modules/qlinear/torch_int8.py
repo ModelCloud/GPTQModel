@@ -28,6 +28,7 @@ from ._runtime_cache import tensor_cache_key
 INT8_WEIGHT_BUFFER_NAME = "int8_weight_gnk"
 INT8_GROUP_SCALE_BUFFER_NAME = "int8_group_scale"
 INT8_GROUP_OFFSET_BUFFER_NAME = "int8_group_offset"
+INT8_GROUP_OFFSETS_BUFFER_NAME = "int8_group_offsets"
 INT8_INPUT_PERM_BUFFER_NAME = "int8_input_perm"
 # Legacy alias kept so external integrations importing the old name resolve to
 # the group-scale buffer rather than silently reading different semantics.
@@ -36,6 +37,10 @@ _INT8_REBUILD_LOCK = threading.Lock()
 # Output channels decoded at once on the asymmetric path. The decoded tile is
 # transient scratch: it is released before the next tile or group is processed.
 _INT8_ASYMMETRIC_DECODE_TILE = 256
+# Transient budget for one output-column slice of the checkpoint release
+# verification. The inverse widens every stored code to INT32; slicing keeps
+# that scratch bounded instead of materializing the whole layer at once.
+_INT8_REBUILD_TILE_BYTES = 8 * 1024 * 1024
 
 # `aten::_weight_int8pack_mm` reduces the contraction axis in 8-wide chunks and
 # is only defined for `K % 8 == 0`: with a narrower or misaligned width it reads
@@ -103,6 +108,65 @@ def _group_layout(g_idx: torch.Tensor, num_groups: int) -> tuple[tuple[int, ...]
     return tuple(int(count) for count in counts), int(max(counts) if counts else 0)
 
 
+def _group_panel_widths(group_lengths: tuple[int, ...]) -> tuple[int, ...]:
+    """Return each nonempty group's kernel-aligned panel width (0 if empty)."""
+    return tuple(_align_int8_group_width(length) if length else 0 for length in group_lengths)
+
+
+def _group_panels(
+    int8_weight: torch.Tensor,
+    *,
+    group_offsets: Optional[torch.Tensor],
+    group_widths: Optional[tuple[int, ...]],
+    group_lengths: Optional[tuple[int, ...]],
+    out_features: int,
+) -> list[tuple[int, int, int, int, torch.Tensor]]:
+    """Return ``(group, channel_start, length, width, panel)`` for nonempty groups.
+
+    A balanced layout is one dense ``[groups, out_features, width]`` tensor.
+    A ragged or empty-group layout is a flat byte buffer plus per-group
+    element offsets and aligned widths; an empty group has width 0 and no
+    panel, so it never reaches the kernel (#5824).
+    """
+
+    if int8_weight.dim() == 3:
+        num_groups, out_features_3d, width = (int(value) for value in int8_weight.shape)
+        if out_features_3d != out_features:
+            raise ValueError(
+                f"Group codes have {out_features_3d} output features, expected {out_features}"
+            )
+        lengths = tuple(group_lengths or (width,) * num_groups)
+        if len(lengths) != num_groups:
+            raise ValueError(
+                f"Group length metadata has {len(lengths)} entries for {num_groups} groups"
+            )
+        panels = []
+        start = 0
+        for group, length in enumerate(lengths):
+            panels.append((group, start, int(length), width, int8_weight[group]))
+            start += int(length)
+        return panels
+
+    if int8_weight.dim() != 1:
+        raise ValueError(f"Expected a flat or 3D INT8 layout, got shape={tuple(int8_weight.shape)}")
+    if group_offsets is None or group_widths is None or group_lengths is None:
+        raise ValueError("A flat INT8 layout requires per-group offsets, widths and lengths")
+    offsets = group_offsets.to(torch.int64).tolist()
+    if len(offsets) != len(group_widths) + 1 or len(group_lengths) != len(group_widths):
+        raise ValueError("Flat INT8 group metadata does not match the group count")
+    panels = []
+    start = 0
+    for group, (width, length) in enumerate(zip(group_widths, group_lengths)):
+        width, length = int(width), int(length)
+        if width == 0:
+            continue
+        begin = int(offsets[group])
+        panel = int8_weight[begin:begin + out_features * width].view(out_features, width)
+        panels.append((group, start, length, width, panel))
+        start += length
+    return panels
+
+
 def _dequantize_group_layout(
     *,
     int8_weight: torch.Tensor,
@@ -111,39 +175,71 @@ def _dequantize_group_layout(
     input_perm: Optional[torch.Tensor],
     group_lengths: Optional[tuple[int, ...]],
     in_features: Optional[int],
+    group_offsets: Optional[torch.Tensor] = None,
+    group_widths: Optional[tuple[int, ...]] = None,
+    out_features: Optional[int] = None,
 ) -> torch.Tensor:
     """Reconstruct the checkpoint ``[K, N]`` matrix from group-preserving codes.
 
     Codes stay in the checkpoint's own ``w - zero`` integer space, so this is a
     storage repack rather than a second quantization: every reconstructed
-    weight equals the checkpoint decode exactly.
+    weight equals the checkpoint decode exactly. A dense ``[G, N, W]`` layout
+    and a flat per-group-width layout both decode through the same panels, so
+    a group stores only its own aligned width and empty groups contribute
+    nothing (#5824).
     """
-    if int8_weight.dim() != 3:
-        raise ValueError(f"Expected 3D group codes, got shape={tuple(int8_weight.shape)}")
-    num_groups, out_features, group_width = int8_weight.shape
-    lengths = tuple(group_lengths or (group_width,) * num_groups)
-    if len(lengths) != num_groups:
-        raise ValueError(f"Group length metadata has {len(lengths)} entries for {num_groups} groups")
+    scale = group_scale.to(torch.float32)
+    offset = None if group_offset is None else group_offset.to(torch.float32)
 
-    weight = int8_weight.to(torch.float32) * group_scale.to(torch.float32).unsqueeze(-1)
-    if group_offset is not None:
-        weight = weight + group_offset.to(torch.float32).unsqueeze(-1)
+    if int8_weight.dim() == 3:
+        num_groups, dense_out_features, group_width = (int(value) for value in int8_weight.shape)
+        lengths = tuple(group_lengths or (group_width,) * num_groups)
+        if len(lengths) != num_groups:
+            raise ValueError(f"Group length metadata has {len(lengths)} entries for {num_groups} groups")
 
-    rows = weight.permute(0, 2, 1).reshape(num_groups * group_width, out_features)
-    if any(length != group_width for length in lengths[:-1]):
-        # A short/empty non-trailing group leaves padding rows inside the flat
-        # layout. Gathering each group's exact rows is required; truncating the
-        # tail would keep padding rows from earlier groups and drop valid rows
-        # from later ones. A ragged final group is already handled by the
-        # trailing truncation below.
-        index = torch.cat([
-            torch.arange(group * group_width, group * group_width + length, device=rows.device)
-            for group, length in enumerate(lengths)
-        ])
-        rows = rows.index_select(0, index)
-    keep = sum(lengths)
+        weight = int8_weight.to(torch.float32) * scale.unsqueeze(-1)
+        if offset is not None:
+            weight = weight + offset.unsqueeze(-1)
+
+        rows = weight.permute(0, 2, 1).reshape(num_groups * group_width, dense_out_features)
+        if any(length != group_width for length in lengths[:-1]):
+            # A short/empty non-trailing group leaves padding rows inside the
+            # dense layout. Gathering each group's exact rows is required;
+            # truncating the tail would keep padding rows from earlier groups
+            # and drop valid rows from later ones. A ragged final group is
+            # already handled by the trailing truncation below.
+            index = torch.cat([
+                torch.arange(group * group_width, group * group_width + length, device=rows.device)
+                for group, length in enumerate(lengths)
+            ])
+            rows = rows.index_select(0, index)
+        keep = sum(lengths)
+    elif int8_weight.dim() == 1:
+        if out_features is None:
+            raise ValueError("A flat INT8 layout requires out_features")
+        pieces = []
+        for group, _, length, _, panel in _group_panels(
+            int8_weight,
+            group_offsets=group_offsets,
+            group_widths=group_widths,
+            group_lengths=group_lengths,
+            out_features=int(out_features),
+        ):
+            decoded = panel.to(torch.float32) * scale[group].unsqueeze(-1)
+            if offset is not None:
+                decoded = decoded + offset[group].unsqueeze(-1)
+            pieces.append(decoded.t()[:length])
+        rows = (
+            torch.cat(pieces, dim=0)
+            if pieces
+            else torch.zeros((0, int(out_features)), dtype=torch.float32, device=int8_weight.device)
+        )
+        keep = rows.shape[0]
+    else:
+        raise ValueError(f"Expected flat or 3D group codes, got shape={tuple(int8_weight.shape)}")
+
     if in_features is not None:
-        keep = min(keep, in_features)
+        keep = min(keep, int(in_features))
     rows = rows[:keep]
     if input_perm is not None:
         if input_perm.numel() != rows.shape[0]:
@@ -168,6 +264,9 @@ def _cached_int8_dequantize(module: nn.Module) -> Optional[torch.Tensor]:
         input_perm=getattr(module, INT8_INPUT_PERM_BUFFER_NAME, None),
         group_lengths=getattr(module, "_int8_group_lengths", None),
         in_features=getattr(module, "in_features", None),
+        group_offsets=getattr(module, INT8_GROUP_OFFSETS_BUFFER_NAME, None),
+        group_widths=getattr(module, "_int8_group_widths", None),
+        out_features=getattr(module, "out_features", None),
     )
 
 
@@ -180,6 +279,8 @@ def _write_group_buffers(
     input_perm: Optional[torch.Tensor],
     group_lengths: tuple[int, ...],
     dtype: torch.dtype,
+    group_offsets: Optional[torch.Tensor] = None,
+    group_widths: Optional[tuple[int, ...]] = None,
 ) -> None:
     _require_native_int8(getattr(module, "bits", None))
     buffers = {
@@ -187,6 +288,9 @@ def _write_group_buffers(
         INT8_GROUP_SCALE_BUFFER_NAME: group_scale.to(torch.float32).contiguous(),
         INT8_GROUP_OFFSET_BUFFER_NAME: (
             None if group_offset is None else group_offset.to(torch.float32).contiguous()
+        ),
+        INT8_GROUP_OFFSETS_BUFFER_NAME: (
+            None if group_offsets is None else group_offsets.to(torch.int64).contiguous()
         ),
         INT8_INPUT_PERM_BUFFER_NAME: (
             None if input_perm is None else input_perm.to(torch.int64).contiguous()
@@ -198,7 +302,40 @@ def _write_group_buffers(
         else:
             setattr(module, name, tensor)
     module._int8_group_lengths = tuple(int(length) for length in group_lengths)
+    module._int8_group_widths = (
+        None if group_widths is None else tuple(int(width) for width in group_widths)
+    )
     module._int8_transform_dtype = dtype
+
+
+def _live_group_affine(module: nn.Module) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Return the affine terms implied by the live checkpoint metadata.
+
+    ``transform_cpu`` copies the checkpoint's scales into a derived FP32 buffer
+    and folds the zero point into an offset. The eager refresh detects a
+    checkpoint edit through a versioned source signature, which a traced graph
+    cannot read. A compiled forward therefore recomputes the small
+    ``[groups, out_features]`` affine terms from the current checkpoint tensors
+    instead of the installed copy, so an in-place scale edit is visible without
+    a recompile. The INT8 codes stay in the derived layout.
+    """
+    scales = module.scales.float().contiguous()
+    if getattr(module, INT8_GROUP_OFFSET_BUFFER_NAME, None) is None:
+        return scales, None
+    shifts = torch.arange(
+        0, module.pack_dtype_bits, module.bits, dtype=torch.int32, device=module.qzeros.device
+    )
+    # Shared decode crops the padding lanes of a non-aligned output width, so
+    # the result always matches ``scales`` instead of ``ceil(n / pack) * pack``.
+    zeros = unpack_qzero_lanes(
+        module.qzeros,
+        shifts,
+        pack_factor=module.pack_factor,
+        maxq=module.maxq,
+        dtype=module.dequant_dtype,
+        out_features=module.out_features,
+    )
+    return scales, (128.0 - zeros.float()) * scales
 
 
 class Int8PackedModule(torch.nn.Module):
@@ -212,8 +349,11 @@ class Int8PackedModule(torch.nn.Module):
     then not stored at all. Symmetric groups take the native INT8 op; asymmetric
     groups decode a bounded tile first so the zero-point subtraction happens
     before the reduction instead of relying on two large FP32 terms to cancel.
-    Groups with unequal lengths are padded to the widest group and
-    left-multiplied by an augmented activation whose pad columns are zero.
+
+    A common group width uses one dense ``[groups, out_features, width]``
+    tensor. Unequal group widths use a flat buffer plus per-group element
+    offsets and widths, so every group stores only its own kernel-aligned
+    width; an empty group has no panel and never launches the kernel (#5824).
     """
 
     def __init__(
@@ -223,30 +363,93 @@ class Int8PackedModule(torch.nn.Module):
         group_offset: Optional[torch.Tensor] = None,
         input_perm: Optional[torch.Tensor] = None,
         group_lengths: Optional[tuple[int, ...]] = None,
+        group_offsets: Optional[torch.Tensor] = None,
+        group_widths: Optional[tuple[int, ...]] = None,
+        out_features: Optional[int] = None,
     ):
         super().__init__()
-        # The contraction axis must be kernel-aligned. Production tensors are
-        # already padded by `transform_cpu`; a directly constructed module pads
-        # its own copy so it cannot silently miscompute.
-        self.source_group_width = int(int8_weight_gnk.shape[-1])
-        aligned_width = _align_int8_group_width(self.source_group_width)
-        if aligned_width != self.source_group_width:
-            int8_weight_gnk = F.pad(int8_weight_gnk, (0, aligned_width - self.source_group_width))
+        lengths = (
+            tuple(int(length) for length in group_lengths)
+            if group_lengths is not None
+            else None
+        )
+        if int8_weight_gnk.dim() == 3:
+            if group_offsets is not None or group_widths is not None:
+                raise ValueError("A dense INT8 layout does not take per-group offsets or widths")
+            # The contraction axis must be kernel-aligned. Production tensors
+            # are already padded by `transform_cpu`; a directly constructed
+            # module pads its own copy so it cannot silently miscompute.
+            self.source_group_width = int(int8_weight_gnk.shape[-1])
+            aligned_width = _align_int8_group_width(self.source_group_width)
+            if aligned_width != self.source_group_width:
+                int8_weight_gnk = F.pad(
+                    int8_weight_gnk, (0, aligned_width - self.source_group_width)
+                )
+            self._out_features = int(int8_weight_gnk.shape[1])
+            num_groups = int(int8_weight_gnk.shape[0])
+            if lengths is not None and len(lengths) != num_groups:
+                raise ValueError(
+                    f"Group length metadata has {len(lengths)} entries for {num_groups} groups"
+                )
+            self._group_plan = None
+            self._int8_group_widths = None
+        elif int8_weight_gnk.dim() == 1:
+            if group_offsets is None or group_widths is None or out_features is None:
+                raise ValueError(
+                    "A flat INT8 layout requires per-group offsets, widths and out_features"
+                )
+            if lengths is None:
+                raise ValueError("A flat INT8 layout requires per-group lengths")
+            widths = tuple(int(width) for width in group_widths)
+            if len(widths) != len(lengths):
+                raise ValueError(
+                    f"Group width metadata has {len(widths)} entries for {len(lengths)} groups"
+                )
+            offsets = group_offsets.to(torch.int64).tolist()
+            if len(offsets) != len(widths) + 1:
+                raise ValueError("Flat INT8 group offsets do not match the group count")
+            self._out_features = int(out_features)
+            plan = []
+            start = 0
+            for group, (length, width) in enumerate(zip(lengths, widths)):
+                if width == 0:
+                    if length != 0:
+                        raise ValueError("An empty INT8 group cannot have channels")
+                    continue
+                if length <= 0 or width < length:
+                    raise ValueError("INT8 group widths must cover every group channel")
+                begin = int(offsets[group])
+                if begin + self._out_features * width > int(int8_weight_gnk.numel()):
+                    raise ValueError("Flat INT8 group offsets exceed the stored codes")
+                plan.append((group, start, length, width, begin))
+                start += length
+            if int(offsets[-1]) != int(int8_weight_gnk.numel()):
+                raise ValueError("Flat INT8 group offsets do not cover the stored codes")
+            self._group_plan = tuple(plan)
+            self._int8_group_widths = widths
+            self.source_group_width = max(widths) if widths else 0
+        else:
+            raise ValueError(
+                f"Expected a flat or 3D INT8 layout, got shape={tuple(int8_weight_gnk.shape)}"
+            )
         self.register_buffer(INT8_WEIGHT_BUFFER_NAME, int8_weight_gnk, persistent=False)
         self.register_buffer(INT8_GROUP_SCALE_BUFFER_NAME, group_scale, persistent=False)
         self.register_buffer(INT8_GROUP_OFFSET_BUFFER_NAME, group_offset, persistent=False)
         self.register_buffer(INT8_INPUT_PERM_BUFFER_NAME, input_perm, persistent=False)
-        self.group_lengths = tuple(group_lengths) if group_lengths is not None else None
+        self.register_buffer(INT8_GROUP_OFFSETS_BUFFER_NAME, group_offsets, persistent=False)
+        self.group_lengths = lengths
 
     @property
     def group_width(self) -> int:
-        return int(self.int8_weight_gnk.shape[-1])
+        if self._group_plan is None:
+            return int(self.int8_weight_gnk.shape[-1])
+        return max((entry[3] for entry in self._group_plan), default=0)
 
     @property
     def out_features(self) -> int:
-        return int(self.int8_weight_gnk.shape[1])
+        return self._out_features
 
-    def _activations(self, x: torch.Tensor) -> torch.Tensor:
+    def _dense_activations(self, x: torch.Tensor) -> torch.Tensor:
         """Return FP32 ``[..., G, W]`` group-ordered activations, zero padded.
 
         FP32 is required by the kernel (activations and scales must share a
@@ -272,7 +475,13 @@ class Int8PackedModule(torch.nn.Module):
             pieces.append(piece)
         return torch.stack(pieces, dim=-2)
 
-    def _asymmetric_group_output(self, flat: torch.Tensor, group: int) -> torch.Tensor:
+    def _asymmetric_group_output(
+        self,
+        activations: torch.Tensor,
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+        offset: torch.Tensor,
+    ) -> torch.Tensor:
         """Reduce one asymmetric group with its zero point applied first.
 
         The native INT8 op only accumulates ``scale * (code - 128)``; the
@@ -284,10 +493,6 @@ class Int8PackedModule(torch.nn.Module):
         ``[tile, width]`` scratch is bounded by ``_INT8_ASYMMETRIC_DECODE_TILE``
         and dropped before the next tile is built.
         """
-        weight = self.int8_weight_gnk[group]
-        scale = self.int8_group_scale[group].float()
-        offset = self.int8_group_offset[group].float()
-        activations = flat[:, group, :]
         output = torch.empty(
             activations.shape[0], weight.shape[0], dtype=torch.float32, device=activations.device
         )
@@ -299,8 +504,15 @@ class Int8PackedModule(torch.nn.Module):
         return output
 
     def forward(
-        self, x: torch.Tensor, bias: torch.Tensor | None = None
+        self,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        group_scale: torch.Tensor | None = None,
+        group_offset: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # ``group_scale``/``group_offset`` let a traced caller pass the affine
+        # terms derived from the live checkpoint instead of the copy installed
+        # at bind time (see ``_live_group_affine``).
         # The op requires matching activation/scale dtypes and only accepts 2D
         # activations. FP32 preserves tiny group scales and delays output
         # rounding until after the group reduction and the bias epilogue. An
@@ -308,26 +520,58 @@ class Int8PackedModule(torch.nn.Module):
         # the autocast dtype before that rounding, so the FP32 contract is
         # enforced locally and the caller's context is restored afterwards.
         with _fp32_decode_context(x.device.type):
-            activations = self._activations(x)
-            groups = activations.shape[-2]
-            width = activations.shape[-1]
-            flat = activations.reshape(-1, groups, width)
+            scale = self.int8_group_scale.float() if group_scale is None else group_scale.float()
+            offset = self.int8_group_offset if group_offset is None else group_offset
+            out_shape = x.shape[:-1] + (self.out_features,)
             output = None
-            if self.int8_group_offset is None:
-                group_scale = self.int8_group_scale.float()
+            if self._group_plan is None:
+                activations = self._dense_activations(x)
+                groups = int(activations.shape[-2])
+                width = int(activations.shape[-1])
+                flat = activations.reshape(-1, groups, width)
+                lengths = self.group_lengths or (self.source_group_width,) * groups
                 for group in range(groups):
-                    part = torch.ops.aten._weight_int8pack_mm(
-                        flat[:, group, :], self.int8_weight_gnk[group], group_scale[group]
-                    )
+                    if lengths[group] == 0:
+                        # An empty group has no channels; it contributes zero
+                        # and must not launch the kernel (#5824).
+                        continue
+                    if offset is None:
+                        part = torch.ops.aten._weight_int8pack_mm(
+                            flat[:, group, :], self.int8_weight_gnk[group], scale[group]
+                        )
+                    else:
+                        part = self._asymmetric_group_output(
+                            flat[:, group, :],
+                            self.int8_weight_gnk[group],
+                            scale[group],
+                            offset[group],
+                        )
                     output = part if output is None else output.add_(part)
             else:
-                # Asymmetric zero points must be subtracted before the reduction.
-                # Splitting them into a residual reduction plus an offset reduction
-                # lets FP32 rounding survive the cancellation of two large terms.
-                for group in range(groups):
-                    part = self._asymmetric_group_output(flat, group)
+                ordered = (
+                    x if self.int8_input_perm is None else x.index_select(-1, self.int8_input_perm)
+                )
+                ordered = ordered.float().reshape(-1, ordered.shape[-1])
+                for group, start, length, width, begin in self._group_plan:
+                    panel = self.int8_weight_gnk[
+                        begin:begin + self.out_features * width
+                    ].view(self.out_features, width)
+                    activations = ordered[:, start:start + length]
+                    if length != width:
+                        activations = F.pad(activations, (0, width - length))
+                    if offset is None:
+                        part = torch.ops.aten._weight_int8pack_mm(
+                            activations, panel, scale[group]
+                        )
+                    else:
+                        part = self._asymmetric_group_output(
+                            activations, panel, scale[group], offset[group]
+                        )
                     output = part if output is None else output.add_(part)
-            output = output.reshape(activations.shape[:-2] + (self.out_features,))
+            if output is None:
+                output = torch.zeros(out_shape, dtype=torch.float32, device=x.device)
+            else:
+                output = output.reshape(out_shape)
             if bias is not None:
                 output = output + bias.float()
             return output.to(x.dtype)
@@ -451,6 +695,7 @@ class TorchInt8Linear(GPTQQuantLinear):
                     INT8_WEIGHT_BUFFER_NAME,
                     INT8_GROUP_SCALE_BUFFER_NAME,
                     INT8_GROUP_OFFSET_BUFFER_NAME,
+                    INT8_GROUP_OFFSETS_BUFFER_NAME,
                     INT8_INPUT_PERM_BUFFER_NAME,
                     "scales",
                     "qzeros",
@@ -488,12 +733,23 @@ class TorchInt8Linear(GPTQQuantLinear):
             signature = self._source_signature()
             if self.int8_module is not None and signature == self._int8_source_signature:
                 return self.int8_module
-            if self._checkpoint_qweight() is None:
-                self._materialize_checkpoint_qweight()
-            if not self._has_all_gptq_buffers():
-                raise RuntimeError("TorchInt8Linear missing GPTQ checkpoint buffers for native INT8 conversion.")
-            self.transform_cpu(dtype=torch.float32)
+            self._publish_int8_runtime()
             return self.int8_module
+
+    def _publish_int8_runtime(self):
+        """Repack the current checkpoint into the derived INT8 runtime.
+
+        Must run at an eager boundary: the caller holds ``_INT8_REBUILD_LOCK``
+        (or the re-entrant ``_cpu_transform_lock``) because a traced graph
+        cannot rewrite module state. Publishing here keeps the binding current
+        across load/move transitions so a compiled caller never observes the
+        empty ``clear_weight_cache()`` window.
+        """
+        if self._checkpoint_qweight() is None:
+            self._materialize_checkpoint_qweight()
+        if not self._has_all_gptq_buffers():
+            raise RuntimeError("TorchInt8Linear missing GPTQ checkpoint buffers for native INT8 conversion.")
+        self.transform_cpu(dtype=torch.float32)
 
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         if self.optimized:
@@ -515,69 +771,81 @@ class TorchInt8Linear(GPTQQuantLinear):
         weight = self._buffers.get("qweight")
         return weight if isinstance(weight, torch.Tensor) else None
 
-    def _rebuild_checkpoint_qweight(self, descriptor=None) -> torch.Tensor:
-        """Rebuild the checkpoint ``qweight`` words from the INT8 runtime layout.
-
-        The group layout is a pure storage repack: each stored byte is the
-        checkpoint's own code minus 128, permuted into group order and padded
-        to the kernel's contraction alignment. Inverting it therefore
-        reproduces the checkpoint words exactly. ``_maybe_drop_checkpoint_qweight``
-        verifies that against the live tensor before releasing it, so an
-        unexpected layout keeps its resident copy instead of exporting garbage.
-        """
-        descriptor = descriptor or getattr(self, "_int8_dropped_qweight", None)
-        if descriptor is None:
-            raise RuntimeError(
-                "TorchInt8Linear has no released qweight and no INT8 layout to rebuild it from."
-            )
+    def _int8_rebuild_plan(self) -> dict:
+        """Validate the runtime INT8 layout and return shared inverse metadata."""
         int8_weight = getattr(self, INT8_WEIGHT_BUFFER_NAME, None)
         group_scale = getattr(self, INT8_GROUP_SCALE_BUFFER_NAME, None)
         if int8_weight is None or group_scale is None:
             raise RuntimeError(
                 "TorchInt8Linear cannot rebuild qweight without its INT8 group layout."
             )
-        if int8_weight.dim() != 3:
-            raise RuntimeError(f"Expected 3D group codes, got shape={tuple(int8_weight.shape)}")
-
-        num_groups, _, width = int8_weight.shape
-        lengths = tuple(getattr(self, "_int8_group_lengths", None) or (width,) * num_groups)
-        if len(lengths) != num_groups:
-            raise RuntimeError(
-                f"Group length metadata has {len(lengths)} entries for {num_groups} groups"
-            )
-
-        # Stored codes are ``code - 128``; add the residual zero back so the
-        # words hold the checkpoint's unsigned 8-bit values.
-        codes = int8_weight.to(torch.int32).add(128)
-        rows = codes.permute(0, 2, 1).reshape(num_groups * width, self.out_features)
-        if any(length != width for length in lengths[:-1]):
-            # A short/empty non-trailing group leaves padding rows inside the
-            # flat layout; gather each group's exact rows before un-permuting.
-            index = torch.cat([
-                torch.arange(group * width, group * width + length, device=rows.device)
-                for group, length in enumerate(lengths)
-            ])
-            rows = rows.index_select(0, index)
-        keep = sum(lengths)
+        panels = _group_panels(
+            int8_weight,
+            group_offsets=getattr(self, INT8_GROUP_OFFSETS_BUFFER_NAME, None),
+            group_widths=getattr(self, "_int8_group_widths", None),
+            group_lengths=getattr(self, "_int8_group_lengths", None),
+            out_features=self.out_features,
+        )
+        keep = sum(length for _, _, length, _, _ in panels)
         if self.in_features is not None:
             keep = min(keep, self.in_features)
-        rows = rows[:keep]
         input_perm = getattr(self, INT8_INPUT_PERM_BUFFER_NAME, None)
-        if input_perm is not None:
-            rows = rows.index_select(0, torch.argsort(input_perm.long()))
+        inverse_input_perm = None if input_perm is None else torch.argsort(input_perm.long())
+        return {
+            "panels": panels,
+            "keep": keep,
+            "inverse_input_perm": inverse_input_perm,
+        }
 
+    def _rebuild_qweight_columns(
+        self,
+        column_start: int,
+        column_stop: int,
+        *,
+        plan: dict,
+        descriptor,
+    ) -> torch.Tensor:
+        """Rebuild one output-column slice of the checkpoint ``qweight`` words.
+
+        The slice is a pure storage inverse, so every packed byte is compared
+        exactly. Widening only this slice's codes bounds the transient memory
+        of the release verification (#5835).
+        """
+        int8_weight = getattr(self, INT8_WEIGHT_BUFFER_NAME, None)
         shape, dtype = descriptor
         word_rows, out_features = int(shape[0]), int(shape[1])
-        if tuple(rows.shape[1:]) != (out_features,):
+        if self.out_features != out_features:
             raise RuntimeError(
-                f"INT8 layout has {rows.shape[1]} output features, qweight expects {out_features}"
+                f"INT8 layout has {self.out_features} output features, qweight expects {out_features}"
             )
-        words = torch.zeros((word_rows, out_features), dtype=dtype, device=rows.device)
+
+        column_count = column_stop - column_start
+        # Stored codes are ``code - 128``; add the residual zero back so the
+        # words hold the checkpoint's unsigned 8-bit values. Each group's
+        # panel is ``[width, output]``; only its real ``length`` rows are
+        # logical, and empty groups have no panel at all (#5824).
+        pieces = []
+        for _, _, length, _, panel in plan["panels"]:
+            # ``panel`` is ``[output, width]``; slice the requested output
+            # columns, then transpose so contraction rows lead the checkpoint
+            # word order, and keep only the group's real rows.
+            codes = panel[column_start:column_stop, :].t().to(torch.int32).add(128)
+            pieces.append(codes[:length])
+        rows = (
+            torch.cat(pieces, dim=0)
+            if pieces
+            else torch.zeros((0, column_count), dtype=torch.int32, device=int8_weight.device)
+        )
+        rows = rows[: plan["keep"]]
+        if plan["inverse_input_perm"] is not None:
+            rows = rows.index_select(0, plan["inverse_input_perm"])
+
+        words = torch.zeros((word_rows, column_count), dtype=dtype, device=rows.device)
         pack_factor = int(self.pack_factor)
         full_words = min(rows.shape[0] // pack_factor, word_rows)
         if full_words:
             grouped = rows[: full_words * pack_factor].reshape(
-                full_words, pack_factor, out_features
+                full_words, pack_factor, column_count
             )
             for lane in range(pack_factor):
                 words[:full_words].bitwise_or_(grouped[:, lane, :] << (self.bits * lane))
@@ -587,10 +855,45 @@ class TorchInt8Linear(GPTQQuantLinear):
                 raise RuntimeError(
                     "INT8 layout has more input channels than the checkpoint qweight can hold"
                 )
-            packed_tail = torch.zeros(out_features, dtype=dtype, device=rows.device)
+            packed_tail = torch.zeros(column_count, dtype=dtype, device=rows.device)
             for lane in range(tail.shape[0]):
                 packed_tail.bitwise_or_(tail[lane] << (self.bits * lane))
             words[full_words] = packed_tail
+        return words
+
+    def _rebuild_tile_columns(self, plan: dict, out_features: int) -> int:
+        """Output columns to rebuild at once under the transient-memory budget."""
+        rows = max(1, int(plan["keep"]))
+        columns = _INT8_REBUILD_TILE_BYTES // (rows * 4)
+        return max(1, min(int(out_features), columns))
+
+    def _rebuild_checkpoint_qweight(self, descriptor=None) -> torch.Tensor:
+        """Rebuild the checkpoint ``qweight`` words from the INT8 runtime layout.
+
+        The group layout is a pure storage repack: each stored byte is the
+        checkpoint's own code minus 128, permuted into group order and padded
+        to the kernel's contraction alignment. Inverting it therefore
+        reproduces the checkpoint words exactly. ``_maybe_drop_checkpoint_qweight``
+        verifies that against the live tensor before releasing it, so an
+        unexpected layout keeps its resident copy instead of exporting garbage.
+        The inverse is assembled one bounded output-column slice at a time.
+        """
+        descriptor = descriptor or getattr(self, "_int8_dropped_qweight", None)
+        if descriptor is None:
+            raise RuntimeError(
+                "TorchInt8Linear has no released qweight and no INT8 layout to rebuild it from."
+            )
+        plan = self._int8_rebuild_plan()
+        int8_weight = getattr(self, INT8_WEIGHT_BUFFER_NAME, None)
+        shape, dtype = descriptor
+        word_rows, out_features = int(shape[0]), int(shape[1])
+        words = torch.zeros((word_rows, out_features), dtype=dtype, device=int8_weight.device)
+        tile = self._rebuild_tile_columns(plan, out_features)
+        for start in range(0, out_features, tile):
+            stop = min(start + tile, out_features)
+            words[:, start:stop] = self._rebuild_qweight_columns(
+                start, stop, plan=plan, descriptor=descriptor
+            )
         return words
 
     def _materialize_checkpoint_qweight(self) -> bool:
@@ -609,17 +912,25 @@ class TorchInt8Linear(GPTQQuantLinear):
         """Release the checkpoint words once the INT8 layout rebuilds them exactly.
 
         Fails closed: any shape/value mismatch keeps both copies, so a layout
-        this build cannot invert is never what a save emits.
+        this build cannot invert is never what a save emits. Verification walks
+        bounded output-column slices so a wide layer never needs the whole
+        widened inverse resident at once (#5835).
         """
         weight = self._checkpoint_qweight()
         if weight is None:
             return False
         descriptor = (tuple(weight.shape), weight.dtype)
         try:
-            rebuilt = self._rebuild_checkpoint_qweight(descriptor=descriptor)
+            plan = self._int8_rebuild_plan()
+            tile = self._rebuild_tile_columns(plan, weight.shape[1])
+            for start in range(0, weight.shape[1], tile):
+                stop = min(start + tile, weight.shape[1])
+                rebuilt = self._rebuild_qweight_columns(
+                    start, stop, plan=plan, descriptor=descriptor
+                )
+                if not torch.equal(rebuilt, weight[:, start:stop]):
+                    return False
         except Exception:
-            return False
-        if not torch.equal(rebuilt, weight):
             return False
         # Publish the descriptor before dropping the buffer so a concurrent
         # reader never sees a missing tensor without a rebuild recipe.
@@ -654,7 +965,15 @@ class TorchInt8Linear(GPTQQuantLinear):
         # derived runtime cache after the copy.
         with self._cpu_transform_lock:
             self._materialize_checkpoint_qweight()
-            return super()._load_from_state_dict(*args, **kwargs)
+            bound = self.int8_module is not None and not getattr(self, "_int8_fusion_view", False)
+            result = super()._load_from_state_dict(*args, **kwargs)
+            if bound:
+                # Republish at this eager boundary. A compiled forward cannot
+                # run the signature refresh, so leaving the binding empty would
+                # make the next compiled call raise after a strict reload.
+                with _INT8_REBUILD_LOCK:
+                    self._publish_int8_runtime()
+            return result
 
     def _delete_attr_if_exists(self, attr_name: str):
         if hasattr(self, attr_name):
@@ -822,24 +1141,53 @@ class TorchInt8Linear(GPTQQuantLinear):
         # invertible for dequantization and export.
         input_perm = torch.argsort(groups, stable=True)
         ordered_codes = codes.index_select(0, input_perm)
-        # Pad the widest group up to the INT8 kernel's contraction alignment so
-        # the runtime module never has to copy the codes again.
-        kernel_width = _align_int8_group_width(max(group_lengths))
-        if all(length == kernel_width for length in group_lengths):
-            # [K, N] -> [G, W, N] -> [G, N, W]
-            grouped_codes = ordered_codes.reshape(num_groups, kernel_width, self.out_features).permute(0, 2, 1)
+        # Each group only stores its own kernel-aligned width. A common width
+        # keeps the single dense ``[G, N, W]`` tensor; unequal widths use one
+        # flat buffer with per-group element offsets, so a short or empty group
+        # cannot inflate every other group (#5824).
+        group_widths = _group_panel_widths(group_lengths)
+        group_offsets = None
+        pieces = None
+        if len(set(group_widths)) == 1:
+            kernel_width = group_widths[0]
+            if all(length == kernel_width for length in group_lengths):
+                # [K, N] -> [G, W, N] -> [G, N, W]
+                grouped_codes = ordered_codes.reshape(
+                    num_groups, kernel_width, self.out_features
+                ).permute(0, 2, 1)
+            else:
+                pieces = []
+                start = 0
+                for length in group_lengths:
+                    piece = ordered_codes[start:start + length]
+                    start += length
+                    if length != kernel_width:
+                        piece = torch.cat(
+                            (piece, piece.new_zeros(kernel_width - length, self.out_features)),
+                            dim=0,
+                        )
+                    pieces.append(piece)
+                grouped_codes = torch.stack(pieces, dim=0).permute(0, 2, 1)
         else:
-            pieces = []
+            panels = []
             start = 0
-            for length in group_lengths:
+            for length, width in zip(group_lengths, group_widths):
+                if width == 0:
+                    # An empty group owns no channels and no kernel panel.
+                    continue
                 piece = ordered_codes[start:start + length]
                 start += length
-                if length != kernel_width:
+                if length != width:
                     piece = torch.cat(
-                        (piece, piece.new_zeros(kernel_width - length, self.out_features)), dim=0
+                        (piece, piece.new_zeros(width - length, self.out_features)), dim=0
                     )
-                pieces.append(piece)
-            grouped_codes = torch.stack(pieces, dim=0).permute(0, 2, 1)
+                # [width, N] -> [N, width] row-major flat panel.
+                panels.append(piece.permute(1, 0).reshape(-1))
+            grouped_codes = torch.cat(panels, dim=0)
+            element_offsets = [0]
+            for width in group_widths:
+                element_offsets.append(element_offsets[-1] + self.out_features * width)
+            group_offsets = torch.tensor(element_offsets, dtype=torch.int64)
 
         # Store the signed residual ``code - 128`` so every 8-bit checkpoint
         # code (``0..255``) maps into the signed INT8 kernel range. The residual
@@ -859,8 +1207,13 @@ class TorchInt8Linear(GPTQQuantLinear):
             input_perm=input_perm,
             group_lengths=group_lengths,
             dtype=dtype,
+            group_offsets=group_offsets,
+            group_widths=None if group_offsets is None else group_widths,
         )
         self._drop_unpack_buffers()
+        # The grouping scratch is dead once the group buffers are written;
+        # release it before the inverse verification allocates its own tiles.
+        del codes, ordered_codes, grouped_codes, pieces
         # Release the full-size checkpoint copy only after its inverse has been
         # proven against the live bytes (#5718). ``_bind_int8_runtime`` records
         # the post-release source signature so steady-state forwards hit.
@@ -869,12 +1222,17 @@ class TorchInt8Linear(GPTQQuantLinear):
 
     def _bind_int8_runtime(self):
         """Bind the executor to the current derived group buffers."""
+        group_offsets = getattr(self, INT8_GROUP_OFFSETS_BUFFER_NAME, None)
+        group_widths = getattr(self, "_int8_group_widths", None)
         self.int8_module = Int8PackedModule(
             self.int8_weight_gnk,
             self.int8_group_scale,
             self.int8_group_offset,
             self.int8_input_perm,
             getattr(self, "_int8_group_lengths", None),
+            group_offsets=group_offsets,
+            group_widths=None if group_offsets is None else group_widths,
+            out_features=self.out_features,
         ).eval()
         self._int8_source_signature = self._source_signature()
         return self.int8_module
@@ -913,6 +1271,16 @@ class TorchInt8Linear(GPTQQuantLinear):
         int8_module = self._refresh_int8_runtime()
         if int8_module is None:
             raise RuntimeError("TorchInt8Linear int8 module is not initialized.")
+        if dynamo_is_compiling() and not getattr(self, "_int8_fusion_view", False):
+            # The eager signature check cannot run in a traced graph. Use the
+            # live checkpoint affine terms so edited scales/zero points take
+            # effect without a rebuild, while the codes stay in the derived
+            # layout. A fusion view's copied checkpoint buffers describe only
+            # the first source leaf, so it keeps the bound operands.
+            group_scale, group_offset = _live_group_affine(self)
+            return int8_module(
+                x.contiguous(), bias=bias, group_scale=group_scale, group_offset=group_offset
+            )
         return int8_module(x.contiguous(), bias=bias)
 
 

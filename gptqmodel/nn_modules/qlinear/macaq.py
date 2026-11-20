@@ -35,7 +35,7 @@ from ...utils.macaq_triton import (
 from ...utils.torch import dynamo_is_compiling
 from . import WeightOnlyQuantLinear
 from ._compile_support import COMPILE_LEVEL
-from ._numerics import linear_fp32_reduce
+from ._numerics import fp32_epilogue_context, linear_fp32_reduce
 from ._runtime_cache import tensor_cache_key
 
 
@@ -43,9 +43,10 @@ log = setup_logger()
 
 
 # Extreme decoded MXFP4 magnitudes: every decoded weight is one of
-# `E2M1_MAGNITUDES` times a power-of-two E8M0 scale.
-_E2M1_MIN_NONZERO = float(macaq_core.E2M1_MAGNITUDES[macaq_core.E2M1_MAGNITUDES > 0].min())
-_E2M1_MAX = float(macaq_core.E2M1_MAGNITUDES.max())
+# `E2M1_MAGNITUDES` times a power-of-two E8M0 scale.  Use the codebook's Python
+# constants so this module also imports under `torch.device("meta")` (#5776).
+_E2M1_MIN_NONZERO = macaq_core.E2M1_MIN_NONZERO_MAGNITUDE
+_E2M1_MAX = macaq_core.E2M1_MAX_MAGNITUDE
 
 # The activation dtypes the Torch fallback decodes a weight for. The answers
 # are computed eagerly so a compiled graph reads them as Python constants
@@ -473,8 +474,12 @@ class MacaqLinear(WeightOnlyQuantLinear):
                 xb = macaq_core.rotate_blocks(xb, bh)
         if wide:
             # The activation transform above stays at the activation dtype;
-            # only the dot's operands widen.
+            # only the dot's operands widen. Ambient autocast would narrow the
+            # FP32 decode back to the activation dtype (turning a finite value
+            # into `inf`), so keep the consuming reduction out of it (#5771).
             xb = xb.to(torch.float32)
+            with fp32_epilogue_context(xb.device.type):
+                return linear_fp32_reduce(xb, weight, self.bias)
         # Pass the stored bias unchanged; `linear_fp32_reduce` keeps a wider
         # bias out of the low-precision operands and adds it in FP32 (#5632).
         return linear_fp32_reduce(xb, weight, self.bias)

@@ -169,10 +169,18 @@ class _HessianAccumulatorState:
 # released tensor. The actual reusable slots live in ``_WORKSPACE_SLOTS``;
 # a slot is reusable from another CUDA stream only after that stream waits
 # on the release event.
+#
+# A slot is only reusable at its exact column width, so a worker that visits
+# different projection widths could retain one slot per width ever seen and
+# never reuse any of them (#5758). Idle storage is therefore bounded in bytes:
+# the shape just released stays resident for the next layer and concurrent
+# workers, and other shapes are evicted least-recently-released first.
 _WORKSPACE_CACHE: Dict[Tuple[str, Optional[int]], torch.Tensor] = {}
 _WORKSPACE_SLOTS: Dict[Tuple[Tuple[str, Optional[int]], torch.dtype], list["_WorkspaceSlot"]] = {}
 _WORKSPACE_LOCKS: Dict[Tuple[str, Optional[int]], threading.Lock] = {}
 _WORKSPACE_GENERATION = 0
+_WORKSPACE_SEQUENCE = 0
+_WORKSPACE_IDLE_SHAPE_FACTOR = 2
 _BF16_SUPPORT_CACHE: Dict[Tuple[str, Optional[int]], bool] = {}
 
 
@@ -180,6 +188,8 @@ _BF16_SUPPORT_CACHE: Dict[Tuple[str, Optional[int]], bool] = {}
 class _WorkspaceSlot:
     tensor: torch.Tensor
     ready_event: Optional[torch.cuda.Event] = None
+    #: Release order, used to evict the least recently idle shape first.
+    seq: int = 0
 
 
 class SharedHessianFactorCache:
@@ -271,6 +281,73 @@ def _workspace_lock(key: Tuple[str, Optional[int]]) -> threading.Lock:
     return lock
 
 
+def _next_workspace_sequence() -> int:
+    """Monotonic release order for idle slots; only the LRU policy reads it."""
+
+    global _WORKSPACE_SEQUENCE
+    with _WORKSPACE_LOCKS_GUARD:
+        _WORKSPACE_SEQUENCE += 1
+        return _WORKSPACE_SEQUENCE
+
+
+def _workspace_slot_bytes(slot: "_WorkspaceSlot") -> int:
+    tensor = slot.tensor
+    return tensor.numel() * tensor.element_size()
+
+
+def _prune_workspace_slots(
+    key: Tuple[str, Optional[int]],
+    keep_shape: Tuple[int, ...],
+) -> None:
+    """Bound idle staging storage for one device (#5758).
+
+    Called with the device lock held, after the released slot is back in the
+    pool. Slots of ``keep_shape`` -- the shape just released -- stay resident,
+    so concurrent workers and the next projection of that width still reuse
+    them. The remaining shapes are evicted least-recently-released first until
+    idle storage is at most ``_WORKSPACE_IDLE_SHAPE_FACTOR`` working sets of
+    the retained shape. ``_WORKSPACE_CACHE`` always points at a retained slot,
+    so evicting a slot releases its allocation.
+    """
+
+    # Other devices prune their own entries concurrently: take the pool guard
+    # so this scan cannot observe a dict that changed size mid-iteration.
+    with _WORKSPACE_LOCKS_GUARD:
+        keep_bytes = 0
+        idle_bytes = 0
+        victims = []
+        for slot_key, slots in _WORKSPACE_SLOTS.items():
+            if slot_key[0] != key:
+                continue
+            for slot in slots:
+                size = _workspace_slot_bytes(slot)
+                idle_bytes += size
+                if tuple(slot.tensor.shape) == keep_shape:
+                    keep_bytes += size
+                else:
+                    victims.append((slot.seq, id(slot), slot))
+        if keep_bytes <= 0 or idle_bytes <= _WORKSPACE_IDLE_SHAPE_FACTOR * keep_bytes:
+            return
+
+        budget = _WORKSPACE_IDLE_SHAPE_FACTOR * keep_bytes
+        evicted = set()
+        for _, identity, slot in sorted(victims, key=lambda item: item[0]):
+            if idle_bytes <= budget:
+                break
+            evicted.add(identity)
+            idle_bytes -= _workspace_slot_bytes(slot)
+        if not evicted:
+            return
+        for slot_key in list(_WORKSPACE_SLOTS):
+            if slot_key[0] != key:
+                continue
+            kept = [slot for slot in _WORKSPACE_SLOTS[slot_key] if id(slot) not in evicted]
+            if kept:
+                _WORKSPACE_SLOTS[slot_key] = kept
+            else:
+                del _WORKSPACE_SLOTS[slot_key]
+
+
 def _needs_workspace_resize(
     workspace: Optional[torch.Tensor],
     dtype: torch.dtype,
@@ -348,6 +425,7 @@ def _lease_workspace(
                 released_while_leased = _WORKSPACE_GENERATION != generation
             if not released_while_leased:
                 slots = _WORKSPACE_SLOTS.setdefault(slot_key, [])
+                slot.seq = _next_workspace_sequence()
                 slots.append(slot)
                 # Keep a small bounded pool (the default CUDA worker pool is four
                 # workers/GPU) while allowing concurrent leases without a host
@@ -355,6 +433,9 @@ def _lease_workspace(
                 if len(slots) > 8:
                     del slots[:-8]
                 _WORKSPACE_CACHE[key] = workspace
+                # The alias above keeps the released tensor alive, so pruning
+                # here always drops the allocation of the shapes it evicts.
+                _prune_workspace_slots(key, tuple(workspace.shape))
 
 
 def release_workspace_cache() -> None:
@@ -560,6 +641,290 @@ def _move_static_groups(groups, device: torch.device):
         [group_quantizer.scale for group_quantizer in groups],
         [group_quantizer.zero for group_quantizer in groups],
     )
+
+
+def recover_damped_hessian_factor(
+    H: torch.Tensor,
+    *,
+    damp_percent: float,
+    damp_auto_increment: float,
+    name: str = "",
+    npu_block_size: Optional[int] = None,
+) -> Tuple[Optional[torch.Tensor], float]:
+    """Damp ``H``'s diagonal and return its inverse-Cholesky factor.
+
+    Shared by every quantizer that solves a layer Hessian: the configured
+    ``damp_percent`` is probed first on the untouched diagonal, then the
+    additive ``damp_auto_increment`` grid, then a diagonal floor. The
+    diagonal is restored between attempts, so the selected candidate is
+    reproducible from the original matrix. ``damp_auto_increment == 0`` is
+    the explicit no-recovery control: one attempt, then ``None``.
+
+    Returns ``(factor, used_damp)``; ``(None, 1.0)`` when no candidate works.
+    ``H`` is mutated in place, ending on the last diagonal floor tried.
+    """
+
+    # Capture a writable view of the Hessian diagonal so we can restore it between attempts.
+    diag_view = H.diagonal()
+    orig_diag = diag_view.clone()
+    max_floor_attempts = 6
+    last_error = None
+    damp_candidates = None
+    damp_grid_skipped = False
+    floor_base = None
+
+    def try_damp(current_diag: torch.Tensor, mean: torch.Tensor, damp: float):
+        """Return a Cholesky result for one grid value, restoring ``H``."""
+
+        nonlocal last_error
+        diag_view.add_(damp * mean)
+        try:
+            if H.device.type == "npu":
+                return npu_inverse_cholesky_factor(
+                    H,
+                    block_size=npu_block_size,
+                )
+
+            # ``cholesky_ex`` reports a non positive-definite input through
+            # ``info`` instead of raising, so failed probes stay cheap.
+            H2, info = torch.linalg.cholesky_ex(H, check_errors=False)
+            info_value = int(info.item())
+            if info_value != 0:
+                last_error = f"torch.linalg.cholesky_ex info={info_value}"
+                del H2
+                return None
+            return H2
+        except torch._C._LinAlgError as exc:
+            last_error = exc
+            return None
+        finally:
+            diag_view.copy_(current_diag)
+
+    def inverse_factor(cholesky_result: torch.Tensor) -> torch.Tensor:
+        """Finish only the selected successful candidate."""
+
+        if H.device.type == "npu":
+            return cholesky_result
+        if H.device.type in ("cpu", "cuda"):
+            # cholesky_inverse permits the factor as its output.
+            # Reuse that buffer while keeping H intact for damp retries.
+            torch.cholesky_inverse(cholesky_result, out=cholesky_result)
+            return torch.linalg.cholesky(cholesky_result, upper=True)
+        return torch.linalg.cholesky(
+            torch.cholesky_inverse(cholesky_result),
+            upper=True,
+        )
+
+    def try_factor(current_diag: torch.Tensor, mean: torch.Tensor, damp: float):
+        """Return the finished inverse factor for one grid value, or ``None``.
+
+        The cheap probe only proves the Cholesky factor exists. The legacy
+        linear walk also required the inverse step to succeed, which can
+        fail for Hessians with an extreme dynamic range even when the
+        factorization itself reports success, so both steps must agree.
+        """
+
+        nonlocal last_error
+        cholesky_result = try_damp(current_diag, mean, damp)
+        if cholesky_result is None:
+            return None
+        try:
+            return inverse_factor(cholesky_result)
+        except torch._C._LinAlgError as exc:
+            last_error = exc
+            return None
+
+    def legacy_damp_candidates() -> Optional[list[float]]:
+        """Materialize the old additive grid without changing float rounding.
+
+        Returns ``None`` when the increment needs more candidates than the
+        work budget allows, so a misconfigured increment cannot allocate an
+        unbounded list before the first probe.
+        """
+
+        # Repeated addition (not one multiply-add) keeps the selected damp
+        # bit-identical to the former linear walk.
+        values = [float(damp_percent)]
+        increment = float(damp_auto_increment)
+        if increment == 0.0:
+            return values
+        while True:
+            next_damp = values[-1] + increment
+            # The progress guard also makes malformed/non-finite increments
+            # terminate instead of spinning forever.
+            if not (values[-1] < next_damp < 1.0):
+                return values
+            if len(values) >= _DAMP_GRID_WORK_BUDGET:
+                return None
+            values.append(next_damp)
+
+    def finish_damped_candidate(first_success: int, first_cholesky: torch.Tensor):
+        """Finish the first grid value whose Cholesky factor also inverts.
+
+        Bisection only checks the cheap factorization probe. If the selected
+        factor still fails the inverse step, keep walking the legacy grid so
+        the chosen ``damp`` stays identical to the former linear scan.
+        """
+
+        nonlocal last_error
+        index = first_success
+        cholesky_result = first_cholesky
+        while index < len(damp_candidates):
+            if cholesky_result is None:
+                cholesky_result = try_damp(current_diag, mean, damp_candidates[index])
+            if cholesky_result is None:
+                index += 1
+                continue
+            try:
+                return inverse_factor(cholesky_result), damp_candidates[index]
+            except torch._C._LinAlgError as exc:
+                last_error = exc
+                cholesky_result = None
+            index += 1
+        return None
+
+    def log_failure_diagnostics() -> float:
+        """Run full-matrix diagnostics only after the healthy path failed.
+
+        Healthy layers therefore never pay for these matrix-wide scans.
+        """
+
+        finite = bool(torch.isfinite(H).all().item())
+        if not finite:
+            log.error(
+                f"Quantization: Module `{name}` -> Hessian contains non-finite values."
+            )
+        elif not torch.equal(H, H.mT):
+            log.warn(
+                f"Quantization: Module `{name}` -> Hessian is not exactly symmetric; "
+                "recovery will not modify or symmetrize it."
+            )
+
+        base_abs_max = torch.max(orig_diag.abs()).item()
+        if not math.isfinite(base_abs_max) or base_abs_max == 0.0:
+            log.warn(
+                f"Quantization: Module `{name}` -> Hessian diagonal is degenerate; "
+                "using the minimum diagonal-floor scale."
+            )
+            return 1.0
+        return base_abs_max
+
+    attempt = 0
+    while attempt <= max_floor_attempts:
+        if attempt == 0:
+            current_diag = orig_diag
+        else:
+            assert floor_base is not None
+            floor_increment = floor_base * math.pow(10.0, attempt - 1)
+            current_diag = torch.clamp(orig_diag + floor_increment, min=floor_increment)
+            if attempt == 1:
+                log.warn(
+                    f"Quantization: Module `{name}` -> Applying Hessian diagonal floor (+{floor_increment:.2e}) to recover positive definiteness.")
+            else:
+                log.warn(
+                    f"Quantization: Module `{name}` -> Increasing Hessian diagonal floor to +{floor_increment:.2e}.")
+
+        diag_view.copy_(current_diag)
+        mean = torch.mean(current_diag)
+        initial_damp = float(damp_percent)
+        # Probe the configured damp first, on the untouched diagonal.
+        initial_factor = try_factor(current_diag, mean, initial_damp)
+        if initial_factor is not None:
+            return initial_factor, initial_damp
+
+        if attempt == 0:
+            # Defer matrix-wide scans and their host decisions until the
+            # first Cholesky failure. The healthy path stays untouched.
+            floor_base = log_failure_diagnostics() * 1e-6
+
+        if float(damp_auto_increment) == 0.0:
+            log.warn(
+                f"Quantization: Module `{name}` -> Hessian Cholesky failed with "
+                f"`damp_percent={initial_damp:.5f}` and no auto increment configured."
+            )
+        else:
+            increment = float(damp_auto_increment)
+            log.warn(
+                f"Quantization: Module `{name}` -> Starting compatible damp recovery at "
+                f"`damp_percent={initial_damp:.5f}`, increment step "
+                f"`{float(damp_auto_increment):.5f}`."
+            )
+
+            # Recovery normally succeeds on the very next candidate, so
+            # probe it before materializing the additive grid (#5790).
+            next_damp = initial_damp + increment
+            if initial_damp < next_damp < 1.0:
+                next_factor = try_factor(current_diag, mean, next_damp)
+                if next_factor is not None:
+                    log.warn(
+                        f"Quantization: Module `{name}` -> Damp recovery succeeded at "
+                        f"`damp_percent={next_damp:.5f}` (started at {initial_damp:.5f})."
+                    )
+                    return next_factor, next_damp
+
+            if damp_candidates is None and not damp_grid_skipped:
+                damp_candidates = legacy_damp_candidates()
+                if damp_candidates is None:
+                    # The grid depends only on the configured damp and
+                    # increment, so decide once instead of re-walking and
+                    # re-logging for every diagonal-floor attempt.
+                    damp_grid_skipped = True
+                    minimum_increment = (1.0 - initial_damp) / (
+                        _DAMP_GRID_WORK_BUDGET - 1
+                    )
+                    log.error(
+                        f"Quantization: Module `{name}` -> Skipping damp recovery: "
+                        f"`damp_auto_increment={increment:g}` needs more than "
+                        f"{_DAMP_GRID_WORK_BUDGET} candidates before reaching 1.0. "
+                        f"Use an increment of at least {minimum_increment:.3e} or a larger "
+                        f"`damp_percent`."
+                    )
+
+            if damp_grid_skipped:
+                attempt += 1
+                continue
+
+            if len(damp_candidates) > 1:
+                # Cholesky success is monotone on this grid when the
+                # diagonal mean is positive. Test the endpoint first,
+                # then find the first successful legacy candidate.
+                high = len(damp_candidates) - 1
+                high_cholesky = try_damp(current_diag, mean, damp_candidates[high])
+                if high_cholesky is not None:
+                    low = 0  # The initial candidate already failed.
+                    while high - low > 1:
+                        middle = (low + high) // 2
+                        middle_cholesky = try_damp(current_diag, mean, damp_candidates[middle])
+                        if middle_cholesky is None:
+                            low = middle
+                        else:
+                            high = middle
+                            high_cholesky = middle_cholesky
+
+                    selected = finish_damped_candidate(high, high_cholesky)
+                    if selected is not None:
+                        factor, used_damp = selected
+                        log.warn(
+                            f"Quantization: Module `{name}` -> Damp recovery succeeded at "
+                            f"`damp_percent={used_damp:.5f}` (started at {initial_damp:.5f})."
+                        )
+                        return factor, used_damp
+
+            log.warn(
+                f"Quantization: Module `{name}` -> Damp recovery failed after reaching "
+                f"`damp_percent={damp_candidates[-1]:.5f}`."
+            )
+
+        attempt += 1
+
+    log.error(
+        f"Quantization: Module `{name}` -> Hessian remained non positive-definite after diagonal floor attempts. "
+        f"Last `damp_percent` tried = "
+        f"{(damp_candidates[-1] if damp_candidates else float(damp_percent)):.5f}."
+    )
+    if last_error is not None:
+        log.debug(f"Hessian failure detail: {last_error}")
+    return None, 1.0
 
 
 class GPTQ:
@@ -998,6 +1363,20 @@ class GPTQ:
 
         return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
 
+    def pad_tp_features(self, inp: torch.Tensor) -> torch.Tensor:
+        """Append the planned TP columns to a ``[features, tokens]`` batch.
+
+        Plain GPTQ pads the feature axis while reshaping ``[tokens, features]``.
+        GPTAQ and FOEM transpose first, so their accumulator receives
+        ``[features, tokens]``; pad dimension 0 there instead, otherwise the
+        batch cannot be added to the expanded ``self.columns`` Hessian (#5823).
+        """
+
+        if not self._tp_pad_cols:
+            return inp
+        pad = inp.new_zeros((self._tp_pad_cols, inp.shape[1]))
+        return torch.cat((inp, pad), dim=0)
+
     def add_batch(self, inp: torch.Tensor, out: Optional[torch.Tensor], batch_index: Optional[int] = None):
         if not self._hessian_capture_enabled:
             return
@@ -1022,39 +1401,131 @@ class GPTQ:
                 self._hessian_dirty = True
             return
 
-        batch_token_size, xtx, device = self.process_batch(inp, batch_index=batch_index)
-        if batch_token_size == 0 or xtx is None:
-            return
+        # The partial is keyed by its capture source (see ``process_batch``).
+        # Resolving it before the capture lets an existing same-device partial
+        # absorb this batch in place (#5731).
+        dev = torch.device(get_device(inp))
 
-        # The partial is keyed by its capture source, which can differ from
-        # the device that holds ``xtx`` when a Hessian owner is configured.
-        dev = torch.device(device)
-        partial_device = xtx.device
+        with self._inplace_accumulation(dev) as target:
+            batch_token_size, xtx, device = self.process_batch(
+                inp, batch_index=batch_index, out=target,
+            )
+            if batch_token_size == 0 or xtx is None:
+                return
 
-        with self.lock:
-            self.fwd_counter += 1
+            partial_device = xtx.device
+            # ``process_batch`` detaches the product, which returns a new view
+            # of the same allocation, so identity alone cannot tell whether the
+            # batch was already accumulated into the partial.
+            accumulated_in_place = self._same_storage(xtx, target)
 
+            with self.lock:
+                self.fwd_counter += 1
+
+                if not accumulated_in_place:
+                    existing = self._device_hessian_partials.get(dev)
+                    if existing is None:
+                        self._device_hessian_partials[dev] = xtx
+                    else:
+                        if existing.device != partial_device:
+                            # The compute device can move between batches (for
+                            # example after a CPU allocation fallback). Keep a
+                            # single running sum per capture source instead of
+                            # splitting it.
+                            existing = safe_move_to(
+                                existing, partial_device, dtype=torch.float32
+                            )
+                            self._device_hessian_partials[dev] = existing
+                        self._wait_partial_ready(dev, on=partial_device)
+                        existing.add_(xtx)
+                        del xtx
+
+                self._record_partial_ready(dev, on=partial_device)
+
+                self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
+                self.nsamples += batch_token_size
+                self._hessian_dirty = True
+
+    @staticmethod
+    def _same_storage(left: object, right: object) -> bool:
+        """True when two tensor objects are views of one allocation."""
+
+        if not torch.is_tensor(left) or not torch.is_tensor(right):
+            return False
+        if left.device != right.device or tuple(left.shape) != tuple(right.shape):
+            return False
+        try:
+            return left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr()
+        except Exception:  # pragma: no cover - non-torch stand-ins
+            return False
+
+    def _can_accumulate_into(self, out: object, device: torch.device) -> bool:
+        """True when ``out`` can receive this capture's GEMM in place (#5731)."""
+
+        return (
+            torch.is_tensor(out)
+            and out.dtype == torch.float32
+            and out.device == torch.device(device)
+            and tuple(out.shape) == (self.columns, self.columns)
+        )
+
+    def _planned_partial_device(self, source: torch.device) -> torch.device:
+        """Device ``process_batch`` will compute this source's product on."""
+
+        accumulator = self._hessian_accumulator_device
+        return torch.device(accumulator) if accumulator is not None else torch.device(source)
+
+    def _prepare_inplace_partial(
+        self,
+        dev: torch.device,
+        existing: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        """Return the partial this batch may accumulate into, else ``None``.
+
+        Called with ``self.lock`` held. The returned tensor is the live
+        per-device partial, so the caller must keep the lock until its GEMM has
+        been enqueued: two concurrent ``addmm_`` writes into one accumulator
+        would interleave. The previous writer's completion event is waited on
+        before the write, mirroring the out-of-place merge.
+        """
+
+        if existing is None or existing.dtype != torch.float32:
+            return None
+        planned = self._planned_partial_device(dev)
+        if existing.device != planned:
+            # Same rule as the merge path: one running sum per capture source,
+            # moved to wherever this batch is computed.
+            existing = safe_move_to(existing, planned, dtype=torch.float32)
+            self._device_hessian_partials[dev] = existing
+        if not self._can_accumulate_into(existing, planned):
+            return None
+        self._wait_partial_ready(dev, on=existing.device)
+        return existing
+
+    @contextlib.contextmanager
+    def _inplace_accumulation(self, dev: torch.device):
+        """Yield the partial to accumulate into, holding the lock while it runs.
+
+        ``None`` means this batch must allocate its own ``X^T X``; the lock is
+        then released before the capture so a first batch keeps the previous
+        concurrency.
+        """
+
+        self.lock.acquire()
+        try:
             existing = self._device_hessian_partials.get(dev)
-            if existing is None:
-                self._device_hessian_partials[dev] = xtx
-            else:
-                if existing.device != partial_device:
-                    # The compute device can move between batches (for example
-                    # after a CPU allocation fallback). Keep a single running
-                    # sum per capture source instead of splitting it.
-                    existing = safe_move_to(
-                        existing, partial_device, dtype=torch.float32
-                    )
-                    self._device_hessian_partials[dev] = existing
-                self._wait_partial_ready(dev, on=partial_device)
-                existing.add_(xtx)
-                del xtx
-
-            self._record_partial_ready(dev, on=partial_device)
-
-            self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
-            self.nsamples += batch_token_size
-            self._hessian_dirty = True
+            target = self._prepare_inplace_partial(dev, existing)
+        except BaseException:
+            self.lock.release()
+            raise
+        if target is None:
+            self.lock.release()
+            yield None
+            return
+        try:
+            yield target
+        finally:
+            self.lock.release()
 
     @staticmethod
     def _cuda_event_for(device: torch.device) -> Optional[torch.cuda.Event]:
@@ -1217,7 +1688,7 @@ class GPTQ:
                 stats["staging_misses"] += 1
 
             staging_view = staging_workspace[:rows, :]
-            staging_view.copy_(chunk.to(dtype=stage_dtype))
+            staging_view.copy_(chunk)
 
             if stage_dtype == torch.float32:
                 stats["materialized_requests"] += 1
@@ -1250,7 +1721,7 @@ class GPTQ:
 
                     try:
                         fp32_view = fp32_workspace[:rows, :]
-                        fp32_view.copy_(staging_view.to(torch.float32))
+                        fp32_view.copy_(staging_view)
                         yield fp32_view
                     finally:
                         pass
@@ -1414,9 +1885,28 @@ class GPTQ:
             matrix, threshold, chunk_size, feature_dim=feature_dim
         )
 
-    def compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
+    def compute_hessian_xtx(
+        self,
+        matrix: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Return this batch's ``X^T X``, accumulating into ``out`` when given.
+
+        ``out`` is an existing fp32 accumulator of the module's shape on the
+        capture device -- the per-device partial. The GEMM then writes straight
+        into it instead of materializing a second ``columns ** 2`` product that
+        the caller adds afterwards, so a capture peaks at one Hessian instead
+        of two (#5731). ``out`` is ignored when it does not match the capture,
+        and the caller keeps merging the returned product as before.
+        """
+
+        if out is not None and not self._can_accumulate_into(out, matrix.device):
+            out = None
+
         rows = matrix.shape[0]
         if rows == 0:
+            if out is not None:
+                return out
             return torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
 
         stage_dtype = self.preferred_staging_dtype(matrix.dtype, matrix.device)
@@ -1452,11 +1942,21 @@ class GPTQ:
             # context keeps a direct Hessian computation on the deterministic
             # path too, and is a reference-counted no-op when nested.
             with quant_blas_backend(matrix.device):
-                xtx = torch.matmul(mat32.T, mat32)
+                if out is not None:
+                    # ``C += A^T A`` in the BLAS epilogue: no transient product
+                    # and no second read-modify-write pass over the Hessian.
+                    out.addmm_(mat32.T, mat32)
+                    xtx = out
+                else:
+                    xtx = torch.matmul(mat32.T, mat32)
             del mat32
             return xtx
 
-        xtx_accum = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
+        xtx_accum = (
+            out
+            if out is not None
+            else torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
+        )
 
         for start in range(0, rows, chunk_size):
             rows_this = min(chunk_size, rows - start)
@@ -1468,12 +1968,17 @@ class GPTQ:
                     # in-place clamp never touches the caller's activations.
                     materialized32.mul_(cap_scale[start:start + rows_this].unsqueeze(1))
                 with quant_blas_backend(matrix.device):
-                    xtx_accum.add_(torch.matmul(materialized32.T, materialized32))
+                    # Local accumulator: accumulate the chunk in place so the
+                    # chunk's product never materializes (#5731).
+                    xtx_accum.addmm_(materialized32.T, materialized32)
 
         return xtx_accum
 
     def process_batch(
-        self, inp: torch.Tensor, batch_index: Optional[int] = None
+        self,
+        inp: torch.Tensor,
+        batch_index: Optional[int] = None,
+        out: Optional[torch.Tensor] = None,
     ) -> Tuple[int, Optional[torch.Tensor], torch.device]:
         """Return ``(token_count, xtx_or_counts, partial_key_device)`` for one batch.
 
@@ -1484,7 +1989,8 @@ class GPTQ:
         instead of following worker-thread arrival order (#5518).
 
         ``batch_index`` is the native-input pairing hook used by GPTAQ/FOEM;
-        plain GPTQ does not use it.
+        plain GPTQ does not use it. ``out`` is an existing accumulator the
+        Hessian may be written into in place (#5731).
         """
         del batch_index
         inp_device = get_device(inp)
@@ -1542,7 +2048,7 @@ class GPTQ:
             return 0, None, canonical_device
 
         try:
-            xtx = self.compute_hessian_xtx(reshaped_inp).to(dtype=torch.float32)
+            xtx = self.compute_hessian_xtx(reshaped_inp, out=out).to(dtype=torch.float32)
         except RuntimeError as exc:
             if (
                 torch.device(inp_device).type == "cuda"
@@ -1557,6 +2063,8 @@ class GPTQ:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 canonical_device = torch.device("cpu")
+                # ``out`` lives on the device that just failed; the retry has to
+                # allocate its own product and be merged like a first batch.
                 xtx = self.compute_hessian_xtx(reshaped_inp_cpu).to(dtype=torch.float32)
                 xtx = xtx.detach()
                 del reshaped_inp_cpu
@@ -2144,12 +2652,13 @@ class GPTQ:
 
         if target_device is None:
             target_device = self.H.device if self.H is not None else self.module.weight.device
-        W = self.clone_module(device=target_device)
         # When the Hessian exists its diagonal is the exact input-channel
         # importance for the layer's output error, so weight the SmoothMSE
         # objective with it instead of averaging every channel equally. A
         # fallback without captured activations uses the weight-magnitude
-        # proxy instead of the harmful uniform mean.
+        # proxy instead of the harmful uniform mean. Resolve the diagonal
+        # before cloning so the full matrix is released before the weight
+        # clone and output buffers overlap it (#5778).
         col_weights = None
         if search_mse:
             col_weights = hessian_column_weights(
@@ -2159,6 +2668,8 @@ class GPTQ:
                 col_weights = hessian_column_weights(
                     self.H, self.columns, device=target_device
                 )
+        self.H = None
+        W = self.clone_module(device=target_device)
         Q = torch.empty_like(W)
         scale_chunks = []
         zero_chunks = []
@@ -2298,7 +2809,6 @@ class GPTQ:
         avg_loss = f"fallback({strategy.value}): {mean_abs_err:.7f}"
         damp = 0.0
 
-        self.H = None
         return Q, scale, zero, g_idx, duration, avg_loss, damp, self.nsamples
 
     def _rtn_fallback_after_hessian_failure(self, blocksize: int):
@@ -2369,267 +2879,18 @@ class GPTQ:
             if _log_hessian_verbose():
                 log.info(f"GPTQ: hessian_inverse begin {self.name} shape={tuple(H.shape)}")
             try:
-                # Capture a writable view of the Hessian diagonal so we can restore it between attempts.
-                diag_view = H.diagonal()
-                orig_diag = diag_view.clone()
-                max_floor_attempts = 6
-                last_error = None
-                damp_candidates = None
-                damp_grid_skipped = False
-                floor_base = None
-
-                def try_damp(current_diag: torch.Tensor, mean: torch.Tensor, damp: float):
-                    """Return a Cholesky result for one grid value, restoring ``H``."""
-
-                    nonlocal last_error
-                    diag_view.add_(damp * mean)
-                    try:
-                        if H.device.type == "npu":
-                            return npu_inverse_cholesky_factor(
-                                H,
-                                block_size=resolve_kernel_config(self.qcfg).npu_cholesky_block_size,
-                            )
-
-                        # ``cholesky_ex`` reports a non positive-definite input through
-                        # ``info`` instead of raising, so failed probes stay cheap.
-                        H2, info = torch.linalg.cholesky_ex(H, check_errors=False)
-                        info_value = int(info.item())
-                        if info_value != 0:
-                            last_error = f"torch.linalg.cholesky_ex info={info_value}"
-                            del H2
-                            return None
-                        return H2
-                    except torch._C._LinAlgError as exc:
-                        last_error = exc
-                        return None
-                    finally:
-                        diag_view.copy_(current_diag)
-
-                def inverse_factor(cholesky_result: torch.Tensor) -> torch.Tensor:
-                    """Finish only the selected successful candidate."""
-
-                    if H.device.type == "npu":
-                        return cholesky_result
-                    if H.device.type in ("cpu", "cuda"):
-                        # cholesky_inverse permits the factor as its output.
-                        # Reuse that buffer while keeping H intact for damp retries.
-                        torch.cholesky_inverse(cholesky_result, out=cholesky_result)
-                        return torch.linalg.cholesky(cholesky_result, upper=True)
-                    return torch.linalg.cholesky(
-                        torch.cholesky_inverse(cholesky_result),
-                        upper=True,
-                    )
-
-                def try_factor(current_diag: torch.Tensor, mean: torch.Tensor, damp: float):
-                    """Return the finished inverse factor for one grid value, or ``None``.
-
-                    The cheap probe only proves the Cholesky factor exists. The legacy
-                    linear walk also required the inverse step to succeed, which can
-                    fail for Hessians with an extreme dynamic range even when the
-                    factorization itself reports success, so both steps must agree.
-                    """
-
-                    nonlocal last_error
-                    cholesky_result = try_damp(current_diag, mean, damp)
-                    if cholesky_result is None:
-                        return None
-                    try:
-                        return inverse_factor(cholesky_result)
-                    except torch._C._LinAlgError as exc:
-                        last_error = exc
-                        return None
-
-                def legacy_damp_candidates() -> Optional[list[float]]:
-                    """Materialize the old additive grid without changing float rounding.
-
-                    Returns ``None`` when the increment needs more candidates than the
-                    work budget allows, so a misconfigured increment cannot allocate an
-                    unbounded list before the first probe.
-                    """
-
-                    # Repeated addition (not one multiply-add) keeps the selected damp
-                    # bit-identical to the former linear walk.
-                    values = [float(self.qcfg.damp_percent)]
-                    increment = float(self.qcfg.damp_auto_increment)
-                    if increment == 0.0:
-                        return values
-                    while True:
-                        next_damp = values[-1] + increment
-                        # The progress guard also makes malformed/non-finite increments
-                        # terminate instead of spinning forever.
-                        if not (values[-1] < next_damp < 1.0):
-                            return values
-                        if len(values) >= _DAMP_GRID_WORK_BUDGET:
-                            return None
-                        values.append(next_damp)
-
-                def finish_damped_candidate(first_success: int, first_cholesky: torch.Tensor):
-                    """Finish the first grid value whose Cholesky factor also inverts.
-
-                    Bisection only checks the cheap factorization probe. If the selected
-                    factor still fails the inverse step, keep walking the legacy grid so
-                    the chosen ``damp`` stays identical to the former linear scan.
-                    """
-
-                    nonlocal last_error
-                    index = first_success
-                    cholesky_result = first_cholesky
-                    while index < len(damp_candidates):
-                        if cholesky_result is None:
-                            cholesky_result = try_damp(current_diag, mean, damp_candidates[index])
-                        if cholesky_result is None:
-                            index += 1
-                            continue
-                        try:
-                            return inverse_factor(cholesky_result), damp_candidates[index]
-                        except torch._C._LinAlgError as exc:
-                            last_error = exc
-                            cholesky_result = None
-                        index += 1
-                    return None
-
-                def log_failure_diagnostics() -> float:
-                    """Run full-matrix diagnostics only after the healthy path failed.
-
-                    Healthy layers therefore never pay for these matrix-wide scans.
-                    """
-
-                    finite = bool(torch.isfinite(H).all().item())
-                    if not finite:
-                        log.error(
-                            f"Quantization: Module `{self.name}` -> Hessian contains non-finite values."
-                        )
-                    elif not torch.equal(H, H.mT):
-                        log.warn(
-                            f"Quantization: Module `{self.name}` -> Hessian is not exactly symmetric; "
-                            "recovery will not modify or symmetrize it."
-                        )
-
-                    base_abs_max = torch.max(orig_diag.abs()).item()
-                    if not math.isfinite(base_abs_max) or base_abs_max == 0.0:
-                        log.warn(
-                            f"Quantization: Module `{self.name}` -> Hessian diagonal is degenerate; "
-                            "using the minimum diagonal-floor scale."
-                        )
-                        return 1.0
-                    return base_abs_max
-
-                attempt = 0
-                while attempt <= max_floor_attempts:
-                    if attempt == 0:
-                        current_diag = orig_diag
-                    else:
-                        assert floor_base is not None
-                        floor_increment = floor_base * math.pow(10.0, attempt - 1)
-                        current_diag = torch.clamp(orig_diag + floor_increment, min=floor_increment)
-                        if attempt == 1:
-                            log.warn(
-                                f"Quantization: Module `{self.name}` -> Applying Hessian diagonal floor (+{floor_increment:.2e}) to recover positive definiteness.")
-                        else:
-                            log.warn(
-                                f"Quantization: Module `{self.name}` -> Increasing Hessian diagonal floor to +{floor_increment:.2e}.")
-
-                    diag_view.copy_(current_diag)
-                    mean = torch.mean(current_diag)
-                    initial_damp = float(self.qcfg.damp_percent)
-                    # Probe the configured damp first, on the untouched diagonal.
-                    initial_factor = try_factor(current_diag, mean, initial_damp)
-                    if initial_factor is not None:
-                        return initial_factor, initial_damp
-
-                    if attempt == 0:
-                        # Defer matrix-wide scans and their host decisions until the
-                        # first Cholesky failure. The healthy path stays untouched.
-                        floor_base = log_failure_diagnostics() * 1e-6
-
-                    if self.qcfg.damp_auto_increment == 0:
-                        log.warn(
-                            f"Quantization: Module `{self.name}` -> Hessian Cholesky failed with "
-                            f"`damp_percent={initial_damp:.5f}` and no auto increment configured."
-                        )
-                    else:
-                        increment = float(self.qcfg.damp_auto_increment)
-                        log.warn(
-                            f"Quantization: Module `{self.name}` -> Starting compatible damp recovery at "
-                            f"`damp_percent={initial_damp:.5f}`, increment step "
-                            f"`{self.qcfg.damp_auto_increment:.5f}`."
-                        )
-
-                        # Recovery normally succeeds on the very next candidate, so
-                        # probe it before materializing the additive grid (#5790).
-                        next_damp = initial_damp + increment
-                        if initial_damp < next_damp < 1.0:
-                            next_factor = try_factor(current_diag, mean, next_damp)
-                            if next_factor is not None:
-                                log.warn(
-                                    f"Quantization: Module `{self.name}` -> Damp recovery succeeded at "
-                                    f"`damp_percent={next_damp:.5f}` (started at {initial_damp:.5f})."
-                                )
-                                return next_factor, next_damp
-
-                        if damp_candidates is None and not damp_grid_skipped:
-                            damp_candidates = legacy_damp_candidates()
-                            if damp_candidates is None:
-                                # The grid depends only on the configured damp and
-                                # increment, so decide once instead of re-walking and
-                                # re-logging for every diagonal-floor attempt.
-                                damp_grid_skipped = True
-                                minimum_increment = (1.0 - initial_damp) / (
-                                    _DAMP_GRID_WORK_BUDGET - 1
-                                )
-                                log.error(
-                                    f"Quantization: Module `{self.name}` -> Skipping damp recovery: "
-                                    f"`damp_auto_increment={increment:g}` needs more than "
-                                    f"{_DAMP_GRID_WORK_BUDGET} candidates before reaching 1.0. "
-                                    f"Use an increment of at least {minimum_increment:.3e} or a larger "
-                                    f"`damp_percent`."
-                                )
-
-                        if damp_grid_skipped:
-                            attempt += 1
-                            continue
-
-                        if len(damp_candidates) > 1:
-                            # Cholesky success is monotone on this grid when the
-                            # diagonal mean is positive. Test the endpoint first,
-                            # then find the first successful legacy candidate.
-                            high = len(damp_candidates) - 1
-                            high_cholesky = try_damp(current_diag, mean, damp_candidates[high])
-                            if high_cholesky is not None:
-                                low = 0  # The initial candidate already failed.
-                                while high - low > 1:
-                                    middle = (low + high) // 2
-                                    middle_cholesky = try_damp(current_diag, mean, damp_candidates[middle])
-                                    if middle_cholesky is None:
-                                        low = middle
-                                    else:
-                                        high = middle
-                                        high_cholesky = middle_cholesky
-
-                                selected = finish_damped_candidate(high, high_cholesky)
-                                if selected is not None:
-                                    factor, used_damp = selected
-                                    log.warn(
-                                        f"Quantization: Module `{self.name}` -> Damp recovery succeeded at "
-                                        f"`damp_percent={used_damp:.5f}` (started at {initial_damp:.5f})."
-                                    )
-                                    return factor, used_damp
-
-                        log.warn(
-                            f"Quantization: Module `{self.name}` -> Damp recovery failed after reaching "
-                            f"`damp_percent={damp_candidates[-1]:.5f}`."
-                        )
-
-                    attempt += 1
-
-                log.error(
-                    f"Quantization: Module `{self.name}` -> Hessian remained non positive-definite after diagonal floor attempts. "
-                    f"Last `damp_percent` tried = "
-                    f"{(damp_candidates[-1] if damp_candidates else self.qcfg.damp_percent):.5f}."
+                npu_block_size = (
+                    resolve_kernel_config(self.qcfg).npu_cholesky_block_size
+                    if H.device.type == "npu"
+                    else None
                 )
-                if last_error is not None:
-                    log.debug(f"Hessian failure detail: {last_error}")
-                return None, 1.0
+                return recover_damped_hessian_factor(
+                    H,
+                    damp_percent=float(self.qcfg.damp_percent),
+                    damp_auto_increment=float(self.qcfg.damp_auto_increment),
+                    name=self.name,
+                    npu_block_size=npu_block_size,
+                )
             finally:
                 if _log_hessian_verbose():
                     log.info(f"GPTQ: hessian_inverse end {self.name}")
@@ -2929,8 +3190,12 @@ class GPTQ:
         # Fit the whole-row grid after dead-column masking: a channel absent
         # from every calibration sample carries no signal, so its weight must
         # not set the per-channel scale that every live column is quantized
-        # with (#5611).
-        self.quantizer.find_params(W, weight=True)
+        # with (#5611). Only the ungrouped solve reads this grid: static
+        # groups fit every group on a deep-copied quantizer and dynamic groups
+        # refit at each group boundary, so a grouped whole-projection range
+        # search would be discarded after its shrink search ran (#5830).
+        if self.qcfg.group_size == -1:
+            self.quantizer.find_params(W, weight=True)
 
         # g_idx = []
         scale = []
@@ -2978,6 +3243,10 @@ class GPTQ:
             else:
                 W = W_permuted
                 self.H = H_permuted
+                # ``self.H`` owns the tensor now; the locals would otherwise
+                # keep the full fp32 Hessian resident through the block pass
+                # (#5717).
+                del H_permuted, W_permuted
             invperm = torch.argsort(perm)
 
         elif self.qcfg.act_group_aware and use_hessian:
@@ -3016,6 +3285,9 @@ class GPTQ:
             else:
                 W = W_permuted
                 self.H = H_permuted
+                # See the desc_act branch: drop the locals so only ``self.H``
+                # references the Hessian (#5717).
+                del H_permuted, W_permuted
 
         # Column order the block pass sees, for rebuilding ``W`` on retry.
         block_column_perm = None

@@ -201,3 +201,56 @@ would have held (leader statistic plus the follower's private copy), so peak
 allocated memory does not grow with the group size. CUDA peak measured on the
 same fixture stayed within 0.02% of `origin/main` for every method (allocator
 noise; no directional regression).
+
+## Hessian release before the block pass
+
+`GPTQ.quantize` needs the full fp32 `columns x columns` Hessian only to build
+`Hinv` and `P`. The column loop that follows reads neither `H` nor the
+permuted weight copy, but three paths kept a second reference alive for the
+whole module (issue #5717):
+
+- `desc_act` and `act_group_aware` reorder into a local `H_permuted`, assign it
+  to `self.H`, and then never rebind the local, so the same storage had two
+  owners through the block pass.
+- `GPTAQ` and `FOEM` pass their local `H` to `hessian_inverse`; the inverse
+  closures (retry, delta correction) capture that cell, so the local must be
+  rebound after the inverse for the tensor to become unreachable.
+
+```mermaid
+flowchart TD
+    A["materialize H: columns x columns fp32"] --> B{"desc_act or act_group_aware?"}
+    B -- Yes --> C["H_permuted = reorder(H)"]
+    C --> D["self.H = H_permuted"]
+    D --> E["del H_permuted, W_permuted"]
+    B -- No --> F["self.H = H"]
+    E --> G["hessian_inverse(H) -> Hinv, P"]
+    F --> G
+    G --> H{"GPTAQ / FOEM?"}
+    H -- Yes --> I["H = None after the inverse"]
+    H -- No --> J["block pass reads Hinv/P only"]
+    I --> J
+    J --> K["Hessian unreachable before the first column"]
+    classDef ok fill:#dfd,stroke:#060
+    class E,I,K ok
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| `desc_act` ordering | `gptqmodel/quantization/gptq.py:3247` kept `H_permuted` bound next to `self.H` | `del H_permuted, W_permuted` after the assignment (`gptq.py:3249`) |
+| `act_group_aware` ordering | `gptqmodel/quantization/gptq.py:3285` kept the same local | same release (`gptq.py:3290`) |
+| GPTAQ local Hessian | `gptqmodel/quantization/gptaq.py:635` stayed captured by the inverse closures | rebind `H = None` after the inverse |
+| FOEM local Hessian | `gptqmodel/quantization/foem.py:696` stayed captured by the inverse closures | rebind `H = None` after the inverse |
+
+The release changes lifetime only. On the synthetic `512x64` module in
+`tests/test_hessian_block_pass_release_5717.py`, the weakref spy saw the
+Hessian alive during 512/512 per-column `Quantizer.quantize` calls before and
+0/512 after for `desc_act`, `act_group_aware`, GPTAQ, and FOEM; natural GPTQ
+was already 0/512. That second buffer is `columns ** 2 x 4` bytes: 1 MiB at
+512 columns, 64 MiB at 4096, 784 MiB at 14336, and 3.06 GiB at 28672. The
+packed outputs are bitwise identical to `origin/main` for all five orderings
+(same fixture, same seed), because the same tensors feed the inverse and only
+their lifetime changes; CUDA peak VRAM was not measured on this host.
+
+The regression is `tests/test_hessian_block_pass_release_5717.py`. The
+`desc_act` and `act_group_aware` branches also release the permuted weight
+local: `W = W_permuted` is the only surviving reference the block pass needs.

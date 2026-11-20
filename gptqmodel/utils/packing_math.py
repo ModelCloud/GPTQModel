@@ -39,6 +39,61 @@ def scaled_zero_offset(scales: torch.Tensor, zeros: torch.Tensor) -> torch.Tenso
     return offset.contiguous()
 
 
+def zero_points_in_scale_dtype(
+    scales: torch.Tensor, zeros: torch.Tensor
+) -> torch.Tensor:
+    """Store logical zero points in the narrow scale dtype a kernel consumes.
+
+    The asymmetric Machete mainloop subtracts the zero point from the upcast
+    integer code *before* multiplying by the scale.  Zero points are small
+    integers, so the subtraction is exact in FP16/BF16 and the scale multiply is
+    the only rounding step: ``round((code - zero) * scale)``.  A zero point that
+    would change when stored in the scale dtype must fail instead of silently
+    perturbing the affine term.
+    """
+    converted = zeros.to(scales.dtype)
+    exact = converted.to(torch.float64) == zeros.to(torch.float64)
+    if not bool(torch.isfinite(converted).all()) or not bool(exact.all()):
+        raise ValueError(
+            f"Zero points cannot be stored exactly in {scales.dtype}; "
+            "Machete subtracts them from the integer code before scaling."
+        )
+    return converted.contiguous()
+
+
+def validate_narrow_affine_products(
+    codes: torch.Tensor,
+    zeros: torch.Tensor,
+    scales: torch.Tensor,
+    group_size: int,
+) -> None:
+    """Reject ``(code - zero) * scale`` products that overflow the scale dtype.
+
+    The asymmetric Machete mainloop dequantizes each weight as
+    ``round((code - zero) * scale)`` in the scale dtype.  A product outside that
+    dtype's finite range is not representable by the kernel, so fail before the
+    packed runtime layout replaces the checkpoint tensors.  The per-group
+    maximum is evaluated with the same narrow subtraction and multiply the
+    kernel performs, so the boundary matches the operand that would overflow.
+    """
+    if group_size <= 0:
+        raise ValueError(f"group_size must be positive, got {group_size}.")
+    for group in range(zeros.shape[0]):
+        start = group * group_size
+        if start >= codes.shape[0]:
+            break
+        block = codes[start:start + group_size]
+        # Codes and zero points are small integers: the difference is exact in
+        # the narrow scale dtype, and the multiply below is the only rounding.
+        max_difference = (block - zeros[group]).abs().amax(dim=0)
+        products = max_difference.to(scales.dtype) * scales[group]
+        if not bool(torch.isfinite(products).all()):
+            raise ValueError(
+                f"Scaled zero-point product is not finite in {scales.dtype}; "
+                "the dequantized weight cannot be represented by the kernel."
+            )
+
+
 def awq_storage_dtype(scale_dtype: torch.dtype, *, gemm: bool) -> torch.dtype:
     """Resolve the checkpoint scale dtype exactly as the AWQ packers store it.
 

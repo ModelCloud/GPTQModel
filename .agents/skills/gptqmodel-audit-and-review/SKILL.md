@@ -7,6 +7,12 @@ description: Audit GPT-QModel quantization pipeline and math, packing, and infer
 
 # GPT-QModel audits and reviews
 
+> **Contracts first.** Read and honour [`contracts/`](../../../contracts/README.md)
+> before acting. In particular, read the
+> [kernel forward dtype contract](../../../contracts/kernel/forward-dtype.md):
+> one activation dtype per module, and output dtype equals input dtype. A
+> different dtype on a later call is a bug. Contracts outrank this skill.
+
 ## Audit the full path
 
 Start from the public entry points. Follow values and metadata across Python

@@ -139,7 +139,8 @@ def test_descact_cap_decision_tracks_the_current_batch(monkeypatch):
 
     # ``main`` accumulates raw per-batch ``X^T X`` and normalizes once at
     # finalize (``2 / total_samples``), so the reference must do the same to
-    # stay bitwise.
+    # stay bitwise. The capture accumulates in the GEMM epilogue (#5731), so
+    # the reference uses ``addmm_`` for the same fp32 rounding.
     expected = torch.zeros_like(actual)
     for batch, threshold in zip(batches, seen):
         norms = torch.linalg.vector_norm(batch.to(torch.float32), dim=1)
@@ -147,7 +148,7 @@ def test_descact_cap_decision_tracks_the_current_batch(monkeypatch):
             threshold / norms.clamp_min(torch.finfo(torch.float32).tiny), max=1.0
         )
         clamped = batch.to(torch.float32) * scale.unsqueeze(1)
-        expected.add_(clamped.T @ clamped)
+        expected.addmm_(clamped.T, clamped)
     expected.mul_(2.0 / float(len(batches) * ROWS))
 
     assert torch.equal(actual, expected), (

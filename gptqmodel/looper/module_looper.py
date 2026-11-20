@@ -15,6 +15,7 @@ thread pool.
 
 from __future__ import annotations
 
+import copy
 import os
 import threading
 import time
@@ -37,6 +38,7 @@ from ..looper.loop_processor import (
 )
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.named_module import NamedModule
+from ..looper.native_processor import NativeProcessor
 from ..looper.run_exit_recovery import RunExitRecovery
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
@@ -56,6 +58,7 @@ from ..utils.disk import estimate_disk_io_speed
 from ..utils.kernel import configure_kernel, resolve_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
+    bind_processor_masks,
     clone_module_for_devices,
     find_last_quantized_layer_index,
     forward_batch_worker,
@@ -102,6 +105,22 @@ from .paro_processor import ParoProcessor
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
 
+
+# Model-level hooks that decide what the initial calibration capture records.
+# A model that overrides any of them needs its own qualification before the
+# GPTAQ/FOEM native capture can stand in for the GPTQ capture (#5831).
+_CAPTURE_REUSE_GUARDED_HOOKS = (
+    "run_input_capture",
+    "pre_quantize_generate_hook_start",
+    "pre_quantize_generate_hook_end",
+    "move_input_capture_example",
+    "begin_input_capture_example",
+    "end_input_capture_example",
+    "capture_first_layer_positional_inputs",
+    "capture_first_layer_input_kwargs",
+    "capture_layer_type_replay_kwargs",
+    "build_quantization_input_cache",
+)
 
 log = setup_logger()
 
@@ -924,27 +943,7 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
 
         if padding_mask is _SAME_MASK:
             padding_mask = mask
-        tls = self._processor_mask_tls(processor)
-        tls.value = mask
-        tls.padding_value = padding_mask
-        # ``mask`` is [batch, seq] on the execution device. Derive the
-        # per-sample emptiness flags once per batch here; every module's
-        # forward hook would otherwise synchronize once per sample.
-        tls.sample_has_tokens = (
-            mask.any(dim=1).tolist()
-            if torch.is_tensor(mask) and mask.ndim == 2
-            else None
-        )
-        # Routed-expert hooks need to know whether this batch contains padding
-        # before they scan a `[routed_rows, H]` activation for all-zero rows.
-        # Resolve it here, once per batch, instead of synchronizing per expert.
-        if torch.is_tensor(padding_mask) and padding_mask.ndim == 2:
-            tls.mask_has_padding = not bool(padding_mask.all())
-        elif padding_mask is None and torch.is_tensor(mask):
-            # Only sink tokens are masked; there is no padding to scan for.
-            tls.mask_has_padding = False
-        else:
-            tls.mask_has_padding = None
+        bind_processor_masks(processor, mask, padding_mask=padding_mask)
 
     def _get_processor_mask(self, processor: LoopProcessor):
         """Return the sequence mask bound to the current worker thread."""
@@ -1607,6 +1606,7 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
         force_serial: bool = False,
         preserve_module_devices: bool = False,
         apply_moe_config: bool = True,
+        consume_inputs: bool = False,
     ) -> List[List[torch.Tensor]]:
         """Run cached batches through the module using serial or parallel execution."""
 
@@ -1633,6 +1633,7 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
             force_serial=force_serial,
             preserve_module_devices=preserve_module_devices,
             apply_moe_config=apply_moe_config,
+            consume_inputs=consume_inputs,
             select_forward_devices_fn=select_forward_devices,
         )
 
@@ -2067,6 +2068,67 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
             )
             self._check_loop_stop()
 
+    def _model_initial_capture_is_generic(self) -> bool:
+        """Whether the model keeps every initial-capture hook at its base form.
+
+        Model-specific capture hooks (vision-tower staging, looped-decoder
+        capture, custom positional inputs) can change what the first forward
+        records. Only the generic path is qualified to hand its capture to the
+        next processor; a model that overrides a hook must be audited first.
+        """
+
+        model_cls = type(self.gptq_model)
+        for name in _CAPTURE_REUSE_GUARDED_HOOKS:
+            base = getattr(BaseQModel, name, None)
+            override = getattr(model_cls, name, None)
+            if base is None:
+                # Hooks outside the base class (e.g. the looped-decoder lazy
+                # capture) are opt-in; a model that defines one is not generic.
+                if override is not None:
+                    return False
+                continue
+            if override is not base:
+                return False
+        return True
+
+    def _reusable_initial_capture(
+        self,
+        processor: LoopProcessor,
+        previous_processor: Optional[LoopProcessor],
+    ) -> Optional[InputCache]:
+        """Returns the completed first-layer capture GPTQ may replay.
+
+        GPTAQ/FOEM pair the native and quantized captures of the same prepared
+        batches (#4869). Both used to run the model-level capture forward, which
+        repeated the identical deterministic pass before the first decoder
+        block was quantized (#5831). The caller clones the returned cache so
+        each processor keeps private replay state as the two streams diverge.
+        """
+
+        if previous_processor is None or not isinstance(previous_processor, NativeProcessor):
+            return None
+        if not isinstance(processor, GPTQProcessor):
+            return None
+        qcfg = self.gptq_model.quantize_config
+        if getattr(qcfg, "gptaq", None) is None and getattr(qcfg, "foem", None) is None:
+            return None
+        # A distinct adapter/rotation dataset must run its own capture; only the
+        # shared prepared object can stand in for the second pass.
+        if processor.calibration_dataset is not previous_processor.calibration_dataset:
+            return None
+        if not self._model_initial_capture_is_generic():
+            return None
+
+        cache = previous_processor.inputs_cache
+        unwrap = getattr(cache, "unwrap", None)
+        if callable(unwrap):
+            cache = unwrap()
+        # Lazy/looped captures own per-layer state outside the cache and keep
+        # their own replay path; only a plain completed capture is reusable.
+        if type(cache) is not InputCache or not cache.layer_inputs:
+            return None
+        return cache
+
     @torch.inference_mode()
     def _loop_impl(self, fallback=None, **kwargs):
         """Execute the full layer-by-layer quantization workflow."""
@@ -2154,11 +2216,26 @@ class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignm
 
                 continue
 
+            previous_processor = self.processors[p_index - 1] if p_index else None
+            reusable_capture = self._reusable_initial_capture(processor, previous_processor)
+            if reusable_capture is not None:
+                # Private copy: per-layer kwargs and hidden frontiers diverge
+                # between the native and quantized streams (#5831).
+                processor.receive_input_cache(copy.deepcopy(reusable_capture))
+                # The processor owns the copy; do not keep the source capture
+                # alive through the run if its owner later replaces it.
+                del reusable_capture
+                continue
+
             input_cache = self.cache_inputs(layers=layers,
                                             layer_names=layer_names,
                                             calibration_data=processor.calibration_dataset,
                                             use_cache=False)
             processor.receive_input_cache(input_cache)
+            # The processor owns the capture now. A checkpoint restore replaces
+            # its backing cache, so a lingering local would keep the discarded
+            # first-layer replay frontier alive for the rest of the run (#5829).
+            del input_cache
 
         # release calibration_dataset
         for processor in self.processors:

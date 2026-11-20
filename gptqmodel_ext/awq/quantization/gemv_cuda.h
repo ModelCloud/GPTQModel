@@ -6,4 +6,5 @@ torch::Tensor gemv_forward_cuda(
     torch::Tensor _kernel,
     torch::Tensor _scaling_factors,
     torch::Tensor _zeros,
-    int group_size);
+    int group_size,
+    bool fp32_output);

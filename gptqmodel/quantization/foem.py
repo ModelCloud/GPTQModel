@@ -281,6 +281,12 @@ class FOEM(GPTQ):
         device = inp.device
         use_native = self.gptaq
 
+        # ``process_batch`` hands over ``[features, tokens]``; pad the feature
+        # axis so the outer product matches the expanded TP Hessian (#5823).
+        inp = self.pad_tp_features(inp)
+        if use_native:
+            native_inp = self.pad_tp_features(native_inp)
+
         if self._foem_active_device is not None and device != self._foem_active_device:
             self._foem_device_hessian[self._foem_active_device] = self.H
             if use_native:
@@ -687,6 +693,9 @@ class FOEM(GPTQ):
             self.H = None
             self.dXXT = None
             return self._rtn_fallback_after_hessian_failure(blocksize)
+        # The block pass reads only Hinv/P. Rebinding the cell releases the
+        # full fp32 Hessian captured by the inverse closures (#5717).
+        H = None
         if self.gptaq:
             del self.dXXT
 
@@ -714,9 +723,7 @@ class FOEM(GPTQ):
                 dtype=torch.int32,
                 device=Q.device,
             ) // self.qcfg.group_size
-            if isinstance(self.module, transformers.Conv1D):
-                Q = Q.t()
-            Q = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
+            Q = self._narrow_reconstruction(Q)
             scale, zero = self._sanitize_scale_and_log(scale, zero)
             return (
                 Q,
@@ -845,13 +852,7 @@ class FOEM(GPTQ):
             Q = Q[:, :valid_cols]
             g_idx = g_idx[:valid_cols]
 
-        if isinstance(self.module, transformers.Conv1D):
-            Q = Q.t()
-
-        if Q.shape != self.module.weight.shape:
-            Q = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
-        else:
-            Q = Q.type_as(self.module.weight.data)
+        Q = self._narrow_reconstruction(Q)
 
         # Q = Q.to(device=DEVICE_1)
 

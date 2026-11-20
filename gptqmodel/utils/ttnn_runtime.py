@@ -23,8 +23,9 @@ from __future__ import annotations
 import importlib
 import sys
 import threading
+import weakref
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 from .logger import setup_logger
 from .tt_thermal import after_device_close, before_device_open, park_idle_clock
@@ -34,6 +35,12 @@ log = setup_logger()
 
 _LOCK = threading.RLock()
 _MESH: Optional["TTNNMesh"] = None
+_MESH_GENERATION = 0
+# Live users of the open mesh.  Layers register when they upload their packed
+# tensors and drop the lease in ``release_device``; the mesh closes only after
+# the last lease is gone.  A plain module attribute would keep released layers
+# alive, so the registry holds weak references.
+_LEASES: "weakref.WeakSet[Any]" = weakref.WeakSet()
 
 
 class TTNNUnavailable(RuntimeError):
@@ -57,6 +64,10 @@ class TTNNMesh:
     owner: str
     device_id: int = 0
     trace_region_size: int = 0
+    #: Monotonic per-process open counter. Device-resident caches include it so
+    #: a buffer built for a closed mesh can never match a later handle, even if
+    #: Python recycles the device object's address.
+    generation: int = 0
 
     @property
     def num_devices(self) -> int:
@@ -190,7 +201,7 @@ def open_mesh(
     explicit :func:`close_mesh` first.
     """
 
-    global _MESH
+    global _MESH, _MESH_GENERATION
 
     ttnn = import_ttnn()
     if device_count < 1:
@@ -268,6 +279,7 @@ def open_mesh(
                     log.debug(f"TTNN: fabric reset failed during cleanup: {cleanup_exc}")
             raise _translate_open_failure(exc) from exc
 
+        _MESH_GENERATION += 1
         _MESH = TTNNMesh(
             device=device,
             mesh_shape=mesh_shape,
@@ -275,6 +287,7 @@ def open_mesh(
             owner=owner,
             device_id=device_id,
             trace_region_size=trace_region_size,
+            generation=_MESH_GENERATION,
         )
         log.info(
             f"TTNN: opened "
@@ -298,6 +311,7 @@ def close_mesh(*, owner: Optional[str] = None) -> None:
                 f"from {owner!r}"
             )
         mesh, _MESH = _MESH, None
+        _LEASES.clear()
         mesh.close()
         # Every cached grid operand is device-resident, so it died with this
         # device. Dropping the entries here also keeps a recycled object id from
@@ -329,6 +343,36 @@ def current_mesh() -> Optional[TTNNMesh]:
         return _MESH
 
 
+def hold_mesh_lease(owner: Any) -> None:
+    """Record that ``owner`` (normally a kernel module) is using the mesh.
+
+    Every upload path calls this after ``open_mesh`` succeeds, so the model
+    wrapper can release only devices its own kernels hold.  A repeated call is
+    a no-op, which keeps a cache rebuild from inflating the lease count.
+    """
+
+    with _LOCK:
+        if _MESH is None:
+            raise TTNNUnavailable("cannot hold a lease on a closed TTNN mesh")
+        _LEASES.add(owner)
+
+
+def release_mesh_lease(owner: Any) -> bool:
+    """Drop ``owner``'s mesh lease.
+
+    Returns ``True`` only when ``owner`` held the last live lease, which is the
+    caller's signal to close the shared mesh.  Releasing an owner that never
+    acquired one returns ``False`` so an unleased or already-released handle is
+    left untouched.
+    """
+
+    with _LOCK:
+        if owner not in _LEASES:
+            return False
+        _LEASES.discard(owner)
+        return not _LEASES
+
+
 def _reject_pjrt_owner() -> None:
     """Detect an already-initialized PJRT runtime without initializing one.
 
@@ -358,6 +402,39 @@ def _reject_pjrt_owner() -> None:
         )
 
 
+def mesh_device_ids(mesh: TTNNMesh) -> Tuple[int, ...]:
+    """Chip ordinals this mesh occupies.
+
+    A single-chip handle records the requested ordinal itself; a multi-chip
+    mesh exposes the physical chip ids it was opened on (for example ``(0, 3)``
+    for two chips in a four-chip cluster).
+    """
+
+    if int(getattr(mesh, "num_devices", 1) or 1) <= 1:
+        return (int(getattr(mesh, "device_id", 0) or 0),)
+    device = getattr(mesh, "device", None)
+    ids = device.get_device_ids() if device is not None else ()
+    return tuple(int(index) for index in ids)
+
+
+def dram_allocated_bytes(device) -> int:
+    """(measured) DRAM bytes one chip's allocator currently holds.
+
+    ``get_memory_view`` reports per-bank totals, so the chip total is
+    ``num_banks * total_bytes_allocated_per_bank``. On a mesh the view is per
+    chip, not summed across chips: a replicated tensor reports the full tensor
+    on each chip and a shard reports only its own slice.
+
+    Reading the allocator includes what the tensor payload alone hides: tile
+    padding, per-page rounding and replicated operands (#5810).
+    """
+
+    ttnn = import_ttnn()
+    ttnn.synchronize_device(device)
+    view = ttnn.get_memory_view(device, ttnn.BufferType.DRAM)
+    return int(view.num_banks) * int(view.total_bytes_allocated_per_bank)
+
+
 def to_host_replica(ttnn, tensor, mesh):
     """Copy a mesh tensor to host memory, keeping one replica.
 
@@ -384,9 +461,13 @@ __all__ = [
     "TTNNUnavailable",
     "close_mesh",
     "current_mesh",
+    "dram_allocated_bytes",
+    "hold_mesh_lease",
     "import_ttnn",
     "is_ttnn_available",
+    "mesh_device_ids",
     "open_mesh",
+    "release_mesh_lease",
     "to_host_replica",
     "ttnn_device_count",
 ]

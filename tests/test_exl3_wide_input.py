@@ -122,7 +122,9 @@ def test_exllamav3_half_inputs_keep_native_dispatch(rows):
 
     assert output.shape == (rows, 4)
     assert output.dtype == torch.float16
-    assert calls == [(torch.float16, torch.float16, rows)]
+    # The native GEMM writes FP32 so an in-range FP16 input cannot overflow
+    # its output; the visible result is rounded to FP16 once (#5331, #5838).
+    assert calls == [(torch.float16, torch.float32, rows)]
 
 
 @requires_cuda
