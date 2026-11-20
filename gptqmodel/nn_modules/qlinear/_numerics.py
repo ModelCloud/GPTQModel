@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
+
 import torch
 
 from ...utils.rocm import IS_ROCM
@@ -39,6 +41,20 @@ def autocast_active(device_type: str) -> bool:
         return torch.is_autocast_enabled(device_type)
     except TypeError:  # torch < 2.4 takes no device argument (CUDA only)
         return torch.is_autocast_enabled()
+
+
+def fp32_epilogue_context(device_type: str):
+    """Keep an explicit FP32 epilogue out of an ambient autocast context.
+
+    A module that promises one wide reduction and a single output rounding
+    performs its matmul on explicit FP32 operands. Autocast still narrows an
+    eligible ``matmul``, so the product is rounded *before* a stored bias
+    cancels it (an exact 1 can become 0). Entering this context disables
+    autocast only for the epilogue; leaving it restores the caller's state.
+    """
+    if not autocast_active(device_type):
+        return contextlib.nullcontext()
+    return torch.autocast(device_type=device_type, enabled=False)
 
 
 def _can_fuse_hip_bias(
