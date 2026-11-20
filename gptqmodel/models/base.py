@@ -4785,7 +4785,12 @@ class BaseQModel(nn.Module):
             model_dtype = next((param.dtype for param in self.model.parameters()), None)
         if isinstance(model_dtype, torch.dtype):
             for module in modules.values():
-                if getattr(module, "linear_mode", "unsupported") is not None:
+                if (
+                    getattr(module, "linear_mode", "unsupported") is not None
+                    and not callable(
+                        getattr(module, "_prepare_cpu_inference_layout", None)
+                    )
+                ):
                     continue
                 try:
                     ensure_cpu_inference_layout(module, model_dtype)
