@@ -1231,7 +1231,7 @@ class GPTQ:
                 stats["staging_misses"] += 1
 
             staging_view = staging_workspace[:rows, :]
-            staging_view.copy_(chunk.to(dtype=stage_dtype))
+            staging_view.copy_(chunk)
 
             if stage_dtype == torch.float32:
                 stats["materialized_requests"] += 1
@@ -1264,7 +1264,7 @@ class GPTQ:
 
                     try:
                         fp32_view = fp32_workspace[:rows, :]
-                        fp32_view.copy_(staging_view.to(torch.float32))
+                        fp32_view.copy_(staging_view)
                         yield fp32_view
                     finally:
                         pass
