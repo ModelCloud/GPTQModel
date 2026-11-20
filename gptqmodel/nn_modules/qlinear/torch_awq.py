@@ -4,6 +4,8 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 # AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
 
+from typing import Optional
+
 import torch
 
 from ...adapter.adapter import Adapter, Lora
@@ -205,6 +207,8 @@ class AwqTorchLinear(AwqDecodeRangeMixin, AWQuantLinear):
         x_flat: torch.Tensor,
         *,
         dtype: torch.dtype,
+        qweight: Optional[torch.Tensor] = None,
+        qzeros: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # `dequantize_gemm` multiplies the integer codes by the scales, so the
         # weight follows the temporary scale dtype. The Torch AWQ forward uses
@@ -212,8 +216,8 @@ class AwqTorchLinear(AwqDecodeRangeMixin, AWQuantLinear):
         # Keep FP32 scales in FP32 there: a half intermediate could underflow
         # or overflow before the finished weight is widened again.
         weight = dequantize_gemm(
-            qweight=self.qweight,
-            qzeros=self.qzeros,
+            qweight=self.qweight if qweight is None else qweight,
+            qzeros=self.qzeros if qzeros is None else qzeros,
             scales=self._scales_for_compute(device=x_flat.device, dtype=dtype),
             bits=self.bits,
             group_size=self.group_size,
@@ -226,19 +230,25 @@ class AwqTorchLinear(AwqDecodeRangeMixin, AWQuantLinear):
             weight = weight.to(device=x_flat.device, dtype=dtype).contiguous()
         return weight
 
-    def _cpu_avx512_eligible(self, x_flat: torch.Tensor) -> bool:
+    def _cpu_avx512_shape_supported(self) -> bool:
+        """Whether the packed shape fits the AVX512 int4 GEMM."""
         return (
-            x_flat.device.type == "cpu"
-            and not self.training
-            and not x_flat.requires_grad
-            and self.bits == 4
+            self.bits == 4
             and self.group_size > 0
             and self.group_size <= 512
             and self.in_features % 2 == 0
             and self.in_features % self.group_size == 0
             and self.out_features % 32 == 0
+        )
+
+    def _cpu_avx512_eligible(self, x_flat: torch.Tensor) -> bool:
+        return (
+            x_flat.device.type == "cpu"
+            and not self.training
+            and not x_flat.requires_grad
             and x_flat.shape[-1] == self.in_features
             and x_flat.dtype == torch.bfloat16
+            and self._cpu_avx512_shape_supported()
         )
 
     def _ensure_cpu_packed(self) -> bool:
