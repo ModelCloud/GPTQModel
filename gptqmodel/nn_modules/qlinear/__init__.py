@@ -2193,7 +2193,24 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         except RuntimeError:
             return False
 
-    def _restore_qzeros_format(self, incoming_format: int) -> None:
+    def _own_assigned_qzeros(self) -> None:
+        """Give an assign-loaded ``qzeros`` buffer its own storage.
+
+        ``load_state_dict(assign=True)`` rebinds ``self.qzeros`` to the caller's
+        tensor. Both layout converters rewrite those words in place, so without
+        this copy they mutate the caller's payload and a reused checkpoint gets
+        converted a second time (#5805).
+        """
+
+        qzeros = getattr(self, "qzeros", None)
+        if isinstance(qzeros, nn.Parameter):
+            self.qzeros = nn.Parameter(
+                qzeros.detach().clone(), requires_grad=qzeros.requires_grad,
+            )
+        elif isinstance(qzeros, t.Tensor):
+            self.qzeros = qzeros.clone()
+
+    def _restore_qzeros_format(self, incoming_format: int, *, assign: bool = False) -> None:
         """Convert the copied qzeros words to this kernel's runtime layout."""
 
         logical_layout = getattr(self, "REQUIRES_FORMAT_V2", False) or (
@@ -2206,6 +2223,8 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
                 # this kernel decodes logical (v2) words. Convert the loaded
                 # words in place so a `load_state_dict(state_dict())` round
                 # trip keeps the same zero points.
+                if assign:
+                    self._own_assigned_qzeros()
                 from ...utils.model import convert_gptq_v1_to_v2_format_module
 
                 convert_gptq_v1_to_v2_format_module(
@@ -2222,6 +2241,8 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             # A v2 source copied into a kernel that decodes v1 words. Marlin
             # drops qzeros during post_init, so only convert real words.
             if getattr(self, "qzeros", None) is not None and self.qzeros.numel() > 0:
+                if assign:
+                    self._own_assigned_qzeros()
                 from ...quantization import QuantizeConfig
                 from ...utils.model import convert_gptq_v2_to_v1_format_module
 
@@ -2237,6 +2258,11 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         local_metadata = args[2] if len(args) > 2 else kwargs.get("local_metadata", {})
 
         layout_code = self._incoming_layout_code(state_dict, prefix, local_metadata)
+        assign = bool(kwargs.get("assign", False))
+        if not assign and isinstance(local_metadata, dict):
+            # Torch >= 2.5 forwards ``assign`` through ``local_metadata`` rather
+            # than as a keyword argument to this hook.
+            assign = bool(local_metadata.get("assign_to_params_buffers", False))
         # Decide before the copy whether the incoming words are the module's own
         # live buffer. ``assign=True`` rebinds ``self.qzeros`` to the incoming
         # tensor, so asking afterwards would label every genuine checkpoint
@@ -2245,6 +2271,15 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         # ``PackedGroupedQuantLinear`` rejects a runtime-layout payload and
         # tolerates a missing layout marker before the copy.
         super()._load_from_state_dict(*args, **kwargs)
+
+        if assign and state_dict is not None:
+            # The same assignment aliases the layout marker. ``qzero_format()``
+            # fills it in place during conversion, so own it before writing.
+            marker_key = prefix + QZEROS_FORMAT_BUFFER
+            if marker_key in state_dict:
+                marker = self._buffers.get(QZEROS_FORMAT_BUFFER)
+                if isinstance(marker, t.Tensor):
+                    self._buffers[QZEROS_FORMAT_BUFFER] = marker.clone()
 
         # A partial load (for example a PEFT adapter) carries no qzeros. Leave
         # the runtime layout alone: relabelling the live v2 words as v1 would
@@ -2261,7 +2296,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
                     layout_code != self._load_target_qzeros_format()
                     or not getattr(self, "_qzeros_format_established", False)
                 ):
-                    self._restore_qzeros_format(layout_code)
+                    self._restore_qzeros_format(layout_code, assign=assign)
             elif layout_code == 0:
                 # A runtime-layout payload; the receiver is in the same layout
                 # or ``PackedGroupedQuantLinear`` already refused it above.
@@ -2269,7 +2304,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             elif not incoming_qzeros_is_live:
                 incoming_format = self._incoming_qzeros_format(local_metadata)
                 if incoming_format is not None:
-                    self._restore_qzeros_format(incoming_format)
+                    self._restore_qzeros_format(incoming_format, assign=assign)
         # Derived packed layouts depend on both the loaded words and the
         # checkpoint format. Invalidate only after the format has been restored.
         self._clear_runtime_weight_cache()
