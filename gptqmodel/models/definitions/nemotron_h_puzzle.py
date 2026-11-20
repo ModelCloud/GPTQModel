@@ -36,6 +36,7 @@ class NemotronHPuzzleQModel(NemotronHQModel):
                 "norm": ("norm:!",),
                 "gate": ("gate:!",),
                 "fc1_latent_proj:2": ("fc1_latent_proj:0",),
+                # A scale cannot move across the experts' squared ReLU (#5739).
                 "experts": {"#": ("up_proj:0:nosrc", "down_proj:1")},
                 "fc2_latent_proj:3": ("fc2_latent_proj:0",),
                 "shared_experts": ("up_proj:0:nosrc", "down_proj:1"),

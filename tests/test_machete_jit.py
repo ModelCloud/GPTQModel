@@ -286,15 +286,13 @@ def test_machete_post_init_transforms_loaded_qzeros_for_asymmetric_gptq(machete_
         module.scales.copy_(torch.rand_like(module.scales) + 0.25)
         module.qzeros.copy_(torch.randint(0, 16, module.qzeros.shape, dtype=torch.int32))
 
-    expected_qzeros = (
-        -1.0
-        * module.scales.detach().clone()
-        * machete_utils.unpack_quantized_values_into_int32(
-            module.qzeros.detach().clone(),
-            module.weight_type,
-            packed_dim=1,
-        ).to(module.scales.dtype)
-    ).contiguous()
+    # The runtime table keeps the logical zero point; the native mainloop
+    # subtracts it from the code before the scale multiply (#5800).
+    expected_qzeros = machete_utils.unpack_quantized_values_into_int32(
+        module.qzeros.detach().clone(),
+        module.weight_type,
+        packed_dim=1,
+    ).to(module.scales.dtype).contiguous()
 
     monkeypatch.setattr(
         machete_linear_module,

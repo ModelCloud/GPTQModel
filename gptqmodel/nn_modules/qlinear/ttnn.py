@@ -52,9 +52,11 @@ from ...utils.ttnn_runtime import (
     TTNNUnavailable,
     close_mesh,
     current_mesh,
+    hold_mesh_lease,
     import_ttnn,
     is_ttnn_available,
     open_mesh,
+    release_mesh_lease,
     ttnn_device_count,
 )
 from ._compile_support import COMPILE_LEVEL
@@ -277,6 +279,10 @@ class TTNNLinear(GPTQQuantLinear):
         )
 
         mesh = self._mesh()
+        # Own a lease for as long as this layer keeps device tensors, so a
+        # model's release_device closes the shared mesh only after its last
+        # kernel lets go of it.
+        hold_mesh_lease(self)
         dev = mesh.device
         device_count = mesh.num_devices
 
@@ -394,13 +400,21 @@ class TTNNLinear(GPTQQuantLinear):
                 except Exception:  # pragma: no cover - best-effort release
                     pass
 
-    def release_device(self) -> None:
-        """Close the mesh this layer opened, if it still owns it."""
+    def release_device(self) -> bool:
+        """Drop this layer's mesh lease and close the mesh when it is last.
+
+        Returns ``True`` only when this call closed the shared mesh.  Another
+        model's kernels can hold the same process-wide handle, so clearing this
+        layer's tensors is not on its own a reason to tear the device down.
+        """
 
         self.clear_weight_cache()
+        if not release_mesh_lease(self):
+            return False
         mesh = current_mesh()
         if mesh is not None:
             close_mesh(owner=mesh.owner)
+        return True
 
     def pack(self, linear, scales, zeros, g_idx, **kwargs):
         self.clear_weight_cache()

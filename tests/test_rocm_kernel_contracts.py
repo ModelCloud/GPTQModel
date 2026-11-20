@@ -155,7 +155,7 @@ def test_platform_restricted_kernels_declare_reachable_families():
 
 
 @pytest.mark.parametrize("cls,devices", [
-    (ExllamaV3Linear, [model_const.DEVICE.CUDA]),
+    (ExllamaV3Linear, [model_const.DEVICE.CUDA, model_const.DEVICE.ROCM]),
     (ExllamaV3TorchLinear, [model_const.DEVICE.ALL]),
     (TorchFP4Linear, [model_const.DEVICE.CPU, model_const.DEVICE.CUDA]),
 ])

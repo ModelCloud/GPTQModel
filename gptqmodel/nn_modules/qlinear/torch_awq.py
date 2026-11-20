@@ -17,7 +17,7 @@ from ...utils.logger import setup_logger
 from . import AWQuantLinear
 from ._awq_decode import AwqDecodeRangeMixin
 from ._compile_support import COMPILE_LEVEL
-from ._numerics import linear_wide_bias, matmul_fp32_reduce
+from ._numerics import autocast_active, linear_wide_bias, matmul_fp32_reduce
 from ._runtime_cache import tensor_cache_key
 
 
@@ -353,7 +353,18 @@ class AwqTorchLinear(AwqDecodeRangeMixin, AWQuantLinear):
         decode_dtype = self._decode_dtype_for_activation(compute_dtype)
         weight = self._dequantize_weight_for_inference(x_flat, dtype=decode_dtype)
         bias = self._bias_for_compute(device=device)
-        if weight.dtype == x_flat.dtype:
+        # An ambient autocast context disables the fused ``addmm`` epilogue
+        # inside ``matmul_fp32_reduce``, because autocast would narrow its
+        # operands. What remains is a plain matmul, which rounds the product
+        # before the stored bias cancels it: an exact 1 comes back as 0. The
+        # wide epilogue disables autocast for this call only and restores the
+        # caller's context (#5753).
+        wide_autocast_bias = (
+            bias is not None
+            and x_flat.dtype in (torch.float16, torch.bfloat16)
+            and autocast_active(x_flat.device.type)
+        )
+        if weight.dtype == x_flat.dtype and not wide_autocast_bias:
             output = matmul_fp32_reduce(x_flat, weight, bias=bias)
         else:
             # Wide decode: promote the activation for this call, accumulate in

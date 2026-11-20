@@ -546,10 +546,22 @@ class TorchAtenLinear(PackableQuantLinear):
         return self.dequantize_weight(num_itr=num_itr, dtype=dtype)
 
     def _runtime_dense_weight(
-        self, activation_dtype: torch.dtype | None = None
+        self,
+        activation_dtype: torch.dtype | None = None,
+        *,
+        use_zero_codes: bool = False,
     ) -> torch.Tensor:
-        """Decode the live CPU int4pack layout to a dense ``[in, out]`` weight."""
-        return runtime_int4pack_dense_weight(self, activation_dtype=activation_dtype)
+        """Decode the live CPU int4pack layout to a dense ``[in, out]`` weight.
+
+        This is the single dispatch point for the dense runtime fallback: a
+        kernel with its own live layout (the AVX512 extension) overrides it
+        instead of the shared forward calling an ATen-specific helper.
+        """
+        return runtime_int4pack_dense_weight(
+            self,
+            activation_dtype=activation_dtype,
+            use_zero_codes=use_zero_codes,
+        )
 
     def _dense_matmul(self, x, dense_weight, bias):
         """Matmul a dense decode without narrowing an already-wide weight."""
@@ -583,9 +595,12 @@ class TorchAtenLinear(PackableQuantLinear):
             if runtime_dense:
                 # The eager refresh below cannot run inside a trace, so decode
                 # the offsets from the checkpoint zero codes and the current
-                # scales instead of the installed stale pair (#5571).
-                dense_weight = runtime_int4pack_dense_weight(
-                    self, use_zero_codes=True, activation_dtype=x.dtype
+                # scales instead of the installed stale pair (#5571). Route
+                # through the module's own decoder: the AVX512 kernel keeps a
+                # distinct live layout that the ATen helper cannot invert
+                # (#5759).
+                dense_weight = self._runtime_dense_weight(
+                    x.dtype, use_zero_codes=True
                 )
             if (
                 not runtime_dense
@@ -657,9 +672,7 @@ class TorchAtenLinear(PackableQuantLinear):
 
         if runtime_dense:
             if dense_weight is None:
-                dense_weight = runtime_int4pack_dense_weight(
-                    self, activation_dtype=x.dtype
-                )
+                dense_weight = self._runtime_dense_weight(x.dtype)
             dense_x = x
             if (
                 not self._runtime_dense_weight_is_checkpoint_order

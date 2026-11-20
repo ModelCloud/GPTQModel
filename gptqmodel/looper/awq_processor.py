@@ -4391,6 +4391,7 @@ class AWQProcessor(LoopProcessor):
             try:
                 scales_list.append(self._search_best_scale(
                     layer_module_ref,
+                    named_childs=named_childs,
                     scale_consumers=scale_consumers,
                     allow_partial_replay=allow_partial_replay,
                     allow_outside_fold=allow_outside_fold,
@@ -4478,7 +4479,7 @@ class AWQProcessor(LoopProcessor):
         if self.apply_clip:
             clip_list = self._search_best_clip(
                 layer_module_ref,
-                {name: named.module for name, named in named_childs.items() if name not in fallback_names},
+                {name: named for name, named in named_childs.items() if name not in fallback_names},
                 input_feat,
             )
             apply_clip(layer_module_ref, clip_list)
@@ -4810,6 +4811,7 @@ class AWQProcessor(LoopProcessor):
             fold_layers: Optional[List[nn.Linear]] = None,
             allow_partial_replay: bool = False,
             allow_outside_fold: bool = False,
+            named_childs: Optional[Dict[str, NamedModule]] = None,
     ):
         """Searches the best per-channel AWQ scale for a module group.
 
@@ -4857,19 +4859,50 @@ class AWQProcessor(LoopProcessor):
         # previous cat()+view pipeline while keeping peak memory low: for every group we normalise
         # |w| by its per-group max so the values land on a [0, 1] scale, then accumulate the totals
         # per output channel so the mean can be computed without allocating the combined tensor.
-        group_sizes = [
-            self._group_size_for(module, layer) for layer in layers
-        ]
+        #
+        # The layer's named-child map already carries every member's model-level
+        # name. Resolve one snapshot per member here instead of asking the
+        # identity lookup for the name four times; that lookup walked the whole
+        # model tree and the layer subtree for each option (#5792).
+        full_names = {
+            id(named.module if isinstance(named, NamedModule) else named): (
+                getattr(named, "full_name", None) or name
+            )
+            for name, named in (named_childs or {}).items()
+        }
+
+        def member_name(member):
+            return full_names.get(id(member)) or self._full_module_name(module, member)
+
+        def resolve_members(members):
+            names = [member_name(member) for member in members]
+            resolved = [
+                self.qcfg.resolve_module_config(name) if name is not None else None
+                for name in names
+            ]
+            sizes = [
+                self._module_group_size(name, resolved_cfg=cfg)
+                for name, cfg in zip(names, resolved)
+            ]
+            member_formats = [
+                self._module_format(name, resolved_cfg=cfg)
+                for name, cfg in zip(names, resolved)
+            ]
+            return names, resolved, sizes, member_formats
+
+        member_names, resolved_cfgs, group_sizes, formats = resolve_members(layers)
         default_format = self._module_format(None)
-        formats = [self._format_for(module, layer) for layer in layers]
         w_mean = _compute_awq_weight_mean(layers, group_sizes)
 
         # [STEP 2]: Compute per-channel mean of the input activation with chunking
         # Stream directly on the source device to avoid creating full CPU copies while still enforcing
-        # a predictable memory bound derived from max_chunk_memory.
-        inp_flat = inp.abs().view(-1, inp.shape[-1])
+        # a predictable memory bound derived from max_chunk_memory. Flatten the capture once (a view
+        # when it is contiguous) and take the magnitude per chunk: an activation-sized ``abs()``
+        # bound to this frame would stay live through the FP reference and every candidate replay
+        # (#5765).
+        num_channels = inp.shape[-1]
+        inp_flat = inp.reshape(-1, num_channels)
         num_elements = inp_flat.size(0)
-        num_channels = inp_flat.size(1)
         float32_size = torch.tensor([], dtype=torch.float32).element_size()
         element_size_bytes = float32_size  # accumulation happens in FP32
 
@@ -4883,13 +4916,14 @@ class AWQProcessor(LoopProcessor):
 
         for i in range(0, num_elements, chunk_size):
             end = min(i + chunk_size, num_elements)
-            chunk = inp_flat[i:end]
-            # Accumulate each chunk in FP32 to balance precision and memory usage.
-            chunk_sum = chunk.to(torch.float32).sum(dim=0)
+            # Accumulate each chunk in FP32 to balance precision and memory usage. The magnitude is
+            # materialized for the current chunk only, so the peak stays at the chunk bound.
+            chunk_sum = inp_flat[i:end].abs().to(torch.float32).sum(dim=0)
             x_sum += chunk_sum
 
         x_mean = (x_sum / num_elements).to(inp.dtype)
-        del x_sum
+        # Release the reduction scaffolding before the reference and candidate replays run.
+        del x_sum, inp_flat
 
         # [STEP 3]: Compute output of module
         module_kwargs = self._sanitize_kwargs(kwargs, module2inspect)
@@ -4977,17 +5011,26 @@ class AWQProcessor(LoopProcessor):
                     unobserved[:6],
                 )
                 layers = executed_layers
-                group_sizes = [self._group_size_for(module, layer) for layer in layers]
-                formats = [self._format_for(module, layer) for layer in layers]
+                member_names, resolved_cfgs, group_sizes, formats = resolve_members(layers)
                 w_mean = _compute_awq_weight_mean(layers, group_sizes)
 
             # [STEP 4]: Compute loss
             best_scale_kwargs = {
                 "replay_batch_size": replay_batch_size,
                 "prepared_forward": prepared_forward,
-                "bits": [self._bits_for(module, layer) for layer in layers] if bits is None else bits,
+                "bits": (
+                    [
+                        self._module_bits(name, resolved_cfg=cfg)
+                        for name, cfg in zip(member_names, resolved_cfgs)
+                    ]
+                    if bits is None
+                    else bits
+                ),
                 "group_sizes": group_sizes,
-                "syms": [self._sym_for(module, layer) for layer in layers],
+                "syms": [
+                    self._module_sym(name, resolved_cfg=cfg)
+                    for name, cfg in zip(member_names, resolved_cfgs)
+                ],
             }
             if any(module_format != default_format for module_format in formats):
                 best_scale_kwargs["formats"] = formats
@@ -5040,10 +5083,23 @@ class AWQProcessor(LoopProcessor):
                 )
                 continue
 
-            linear = named_linears[name]
+            named = named_linears[name]
+            linear = named.module if isinstance(named, NamedModule) else named
             original_device = get_device(linear)
             target_device = _resolve_module_exec_device(linear)
             move_to(linear, device=target_device)
+
+            # The caller already knows each projection's model-level name
+            # (``NamedModule.full_name``). Resolving it again walked the whole
+            # model tree and the layer subtree for every option (#5792). Only
+            # an unnamed caller falls back to the identity lookup.
+            module_name = (
+                getattr(named, "full_name", None)
+                if isinstance(named, NamedModule)
+                else None
+            )
+            if module_name is None:
+                module_name = self._full_module_name(layer, linear)
 
             # The clip grid is sized from the resolved projection's MSE
             # snapshot, not the top-level default: a dynamic rule may lower
@@ -5051,7 +5107,6 @@ class AWQProcessor(LoopProcessor):
             # where larger tiles are faster). ``_normalize_mse`` keeps the
             # inherited top-level budget when the rule omits it and preserves
             # an explicit zero override (#5791).
-            module_name = self._full_module_name(layer, linear)
             resolved_cfg = (
                 self.qcfg.resolve_module_config(module_name)
                 if module_name is not None
@@ -5062,13 +5117,16 @@ class AWQProcessor(LoopProcessor):
                 base=self.qcfg.mse,
             )
 
+            # One resolved snapshot feeds every option so a dynamic rule cannot
+            # be matched at a different time for bits, group size, format, or
+            # symmetry.
             max_val = self._compute_best_clip(
                 linear.weight,
                 features,
-                bits=self._bits_for(layer, linear),
-                group_size=self._group_size_for(layer, linear),
-                format=self._format_for(layer, linear),
-                sym=self._sym_for(layer, linear),
+                bits=self._module_bits(module_name, resolved_cfg=resolved_cfg),
+                group_size=self._module_group_size(module_name, resolved_cfg=resolved_cfg),
+                format=self._module_format(module_name, resolved_cfg=resolved_cfg),
+                sym=self._module_sym(module_name, resolved_cfg=resolved_cfg),
                 clip_grid_budget=mse.clip_grid_budget,
             )
             clip_list.append((name, max_val))
@@ -5138,7 +5196,19 @@ class AWQProcessor(LoopProcessor):
         n_group, group_w = w_all.shape[2], w_all.shape[3]
         n_tokens = input_feat.shape[1]
         steps = int(max_shrink * n_grid)
-        input_feat = input_feat.to(device)
+        # Score in FP32 for a half-precision checkpoint. The dot product, the
+        # residual, the square and the mean all happen before the comparison,
+        # and in FP16 several distinct positive losses round to the same value
+        # (usually zero), so the first-minimum tie break keeps an arbitrarily
+        # early grid step (#5752). Only the score is widened: the clamped
+        # weights, the quantized candidates and the stored bounds keep the
+        # checkpoint dtype.
+        score_dtype = (
+            torch.float32
+            if w_all.dtype in (torch.float16, torch.bfloat16)
+            else w_all.dtype
+        )
+        input_feat = input_feat.to(device=device, dtype=score_dtype)
 
         # Batch the shrink candidates so each grid step no longer launches its
         # own clamp/quantize/error kernel chain. Candidate order and the
@@ -5251,7 +5321,13 @@ class AWQProcessor(LoopProcessor):
             # an all-NaN/all-infinite grid retained `org_max_val`. Stacking the
             # errors and selecting once preserves that behavior while replacing two
             # `where` launches per grid step with one `argmin` per output batch.
-            err_chunks = [torch.full_like(org_max_val, float("inf")).unsqueeze(0)]
+            # The sentinel follows the score dtype, not the weight dtype: an
+            # FP16 ``inf`` beside FP32 candidate errors would fail the concat.
+            err_chunks = [
+                torch.full(
+                    org_max_val.shape, float("inf"), dtype=out_dtype, device=device
+                ).unsqueeze(0)
+            ]
             max_val_chunks = [org_max_val.unsqueeze(0)]
 
             for t0 in range(0, n_tokens, token_chunk):

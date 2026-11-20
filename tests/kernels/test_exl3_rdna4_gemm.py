@@ -170,9 +170,16 @@ def test_capability_probe_matches_the_device():
     assert exl3_native_hip_gemm_available(torch.cuda.current_device())
 
 
-def test_auto_backend_stays_portable_on_rocm():
+def test_auto_backend_selects_native_on_rdna4(monkeypatch):
     _require_rdna4()
-    # The fused kernel is opt-in on ROCm; AUTO keeps the portable kernel.
+    # #5836: a covered device with a usable extension is the AUTO default.
+    assert _resolve_exl3_auto_backend(torch.device("cuda:0")) == BACKEND.EXL3_EXLLAMA_V3
+
+    # A host whose build has no HIP ops keeps the portable kernel.
+    monkeypatch.setattr(
+        "gptqmodel.exllamav3.ext.exl3_native_hip_gemm_usable",
+        lambda _device=None: False,
+    )
     assert _resolve_exl3_auto_backend(torch.device("cuda:0")) == BACKEND.EXL3_TORCH
 
 

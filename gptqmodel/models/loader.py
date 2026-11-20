@@ -2515,19 +2515,27 @@ def _load_quantized_gguf_checkpoint_into_model(
 def _resolve_exl3_auto_backend(device, *, cuda_available: Optional[bool] = None) -> "BACKEND":
     """Pick the EXL3 kernel for ``backend=AUTO``.
 
-    Only the CUDA family gets ``EXL3_EXLLAMA_V3`` by default.  On ROCm
-    ``exl3_gemm.cu`` now forwards to ``exl3_gemm_hip.cu``, which runs a native
-    wave32 WMMA kernel on RDNA4 (gfx120x) and reconstruct + hgemm everywhere
-    else, but the fused kernel stays opt-in there: AUTO keeps resolving to the
-    portable ``EXL3_TORCH`` kernel for CDNA and RDNA4 alike.  Load an RDNA4
-    model with an explicit ``EXL3_EXLLAMA_V3`` to use the fused kernel.
+    The CUDA family keeps the native tensor-core kernel. On ROCm
+    ``exl3_gemm.cu`` forwards to ``exl3_gemm_hip.cu``, which runs a native
+    wave32 WMMA GEMM and the packed HIP GEMV on RDNA4 (gfx120x) and reconstruct
+    + hgemm everywhere else. AUTO selects that native wrapper only when every
+    selected device is a supported RDNA4 target and the EXL3 extension is
+    usable; CDNA, other ROCm targets and hosts whose build has no HIP ops keep
+    the portable ``EXL3_TORCH`` kernel instead of selecting a path that cannot
+    load.
     """
 
     if cuda_available is None:
         cuda_available = torch.cuda.is_available()
+    if not cuda_available:
+        return BACKEND.EXL3_TORCH
     device_family = selector_device_family(device)
-    if cuda_available and device_family in ExllamaV3Linear.SUPPORTS_DEVICES:
+    if device_family == DEVICE.CUDA:
         return BACKEND.EXL3_EXLLAMA_V3
+    if device_family == DEVICE.ROCM:
+        targets = _selector_devices(device) or ()
+        if targets and all(ExllamaV3Linear.supports_device(target) for target in targets):
+            return BACKEND.EXL3_EXLLAMA_V3
     return BACKEND.EXL3_TORCH
 
 
@@ -3400,7 +3408,7 @@ def ModelLoader(cls):
             if backend == BACKEND.EXL3_EXLLAMA_V3:
                 if not torch.cuda.is_available():
                     raise ValueError("EXL3_EXLLAMA_V3 loading requires CUDA or ROCm; use EXL3_TORCH instead.")
-                ExllamaV3Linear.validate_device(selector_device_family(device))
+                ExllamaV3Linear.validate_device(device)
         elif format_code == FORMAT.BITSANDBYTES:
             if backend not in (BACKEND.AUTO, BACKEND.BITSANDBYTES, BACKEND.MLX):
                 raise TypeError("FORMAT.BITSANDBYTES requires AUTO, BITSANDBYTES, or MLX backend.")

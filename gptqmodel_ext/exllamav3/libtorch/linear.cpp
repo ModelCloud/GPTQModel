@@ -89,7 +89,8 @@ int64_t bc_linear_exl3_run_hip_gemv
     bool mul1,
     const at::Tensor& x,
     at::Tensor& y,
-    bool q4nx
+    bool q4nx,
+    int64_t int8_gemv
 )
 {
 #if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
@@ -98,6 +99,7 @@ int64_t bc_linear_exl3_run_hip_gemv
                 "K does not match packed trellis width");
     TORCH_CHECK(int(mcg) + int(mul1) + int(q4nx) <= 1, "conflicting EXL3 codebooks");
     TORCH_CHECK(!bits.half || mul1 || q4nx, "EXL3 half-integer bitrates require mul1 or Q4NX");
+    TORCH_CHECK(int8_gemv >= 0 && int8_gemv <= 2, "EXL3 INT8 mode must be 0, 1 or 2");
     TORCH_CHECK(x.is_contiguous(), "bc_linear_exl3_run_hip_gemv requires a contiguous input");
     TORCH_CHECK(y.is_contiguous(), "bc_linear_exl3_run_hip_gemv requires a contiguous output");
     TORCH_CHECK_DIM(suh, 1);
@@ -144,6 +146,20 @@ int64_t bc_linear_exl3_run_hip_gemv
         (void*)&A_ptr, (void*)&B_ptr, (void*)&C_ptr, (void*)&size_m, (void*)&size_k,
         (void*)&size_n, (void*)&locks, (void*)&su, (void*)&xh_ptr, (void*)&sv
     };
+
+    // The int8-activation GEMV shares the CUDA path's opt-in gate and row limits. It declines
+    // (before touching accum) on any shape, rate or device it does not cover, including every
+    // codebook but mul1.
+    if (int8_gemv && mul1 && !mcg && !q4nx
+        && size_m <= (int8_gemv == 1 ? 1 : 2)
+        && exl3_gemv_int8(x, trellis, accum, suh, xh, svh, int(int8_gemv), stream))
+    {
+        if (bias)
+            accum.add_(bias.value());
+        y.view({size_m, size_n}).copy_(accum);
+        return 2;
+    }
+
     if (!exl3_gemv_try_launch(args, size_m, size_k, size_n, bits.bits, bits.half, cb,
                               /*output_fp32=*/true, x.get_device(), stream))
         return 0;

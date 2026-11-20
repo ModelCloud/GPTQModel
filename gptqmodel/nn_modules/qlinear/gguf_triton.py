@@ -2015,6 +2015,21 @@ class GGUFTritonKernel(GGUFTorchLinear):
             self._gguf_triton_cache.clear()
         return super().clear_weight_cache()
 
+    def iter_runtime_weight_tensors(self):
+        """Yield the fused-kernel metadata tensors this module owns (#5810).
+
+        ``_gguf_triton_cache`` is a plain dict, so a budget walk that only
+        reads ``parameters()`` and ``buffers()`` misses the derived scale and
+        min planes the kernels read. The packed code bytes in each entry are
+        strided views of ``qweight``; the budget counts their storage once
+        through the registered buffer.
+        """
+
+        for entry in tuple(self._gguf_triton_cache.values()):
+            for value in entry.values():
+                if isinstance(value, torch.Tensor):
+                    yield value
+
     def _packed_weight_is_permuted(self) -> bool:
         """True when ``qweight`` holds the transposed runtime storage (#4811)."""
         qweight = self.qweight

@@ -422,12 +422,48 @@ def _log_quantize_summary(
 
 
 
+def _device_index(tensor: object) -> int:
+    device = getattr(tensor, "device", None)
+    return device.index if getattr(device, "type", None) == "cuda" and device.index is not None else -1
+
+
+def _runtime_weight_tensors(inner: object):
+    """Yield weight tensors a backend keeps outside the parameter registry.
+
+    The hook is looked up on the class, not the instance: a bound-method
+    lookup for every module in a large model costs more than the walk itself,
+    and this runs on the resource-reporting path.
+    """
+
+    modules = getattr(inner, "modules", None)
+    if not callable(modules):
+        return
+    try:
+        walker = modules()
+    except Exception:  # pragma: no cover - exotic module trees
+        return
+    for module in walker:
+        hook = getattr(type(module), "iter_runtime_weight_tensors", None)
+        if hook is None:
+            continue
+        try:
+            yield from hook(module)
+        except Exception:  # pragma: no cover - backend bookkeeping
+            continue
+
+
 def _parameter_devices(inner: object) -> Dict[int, int]:
     """(measured) Weight bytes per device index, meta tensors skipped.
 
     Parameters and buffers whose storage does not live on a CUDA device are
     reported under ``-1`` so a CPU or meta-only model still has a measured
     weight total.
+
+    Quantized kernels can move their weight out of the parameter/buffer
+    registry into a derived packed cache (QQQ's AVX512 operands, #4856). Each
+    module is asked for those tensors too; they are counted by storage so an
+    alias of a registered tensor or of another cache entry is counted once
+    (#5810).
     """
 
     per_device: Dict[int, int] = {}
@@ -435,12 +471,32 @@ def _parameter_devices(inner: object) -> Dict[int, int]:
         tensors = list(inner.parameters()) + list(inner.buffers())
     except Exception:  # pragma: no cover - exotic module trees
         return per_device
+    seen_storages = set()
     for tensor in tensors:
         if getattr(tensor, "is_meta", False):
             continue
-        device = getattr(tensor, "device", None)
-        index = device.index if getattr(device, "type", None) == "cuda" and device.index is not None else -1
+        index = _device_index(tensor)
         per_device[index] = per_device.get(index, 0) + tensor.numel() * tensor.element_size()
+        try:
+            seen_storages.add((index, tensor.untyped_storage().data_ptr()))
+        except Exception:  # pragma: no cover - non-torch stand-ins
+            pass
+    for tensor in _runtime_weight_tensors(inner):
+        if getattr(tensor, "is_meta", False):
+            continue
+        index = _device_index(tensor)
+        try:
+            storage = tensor.untyped_storage()
+            key = (index, storage.data_ptr())
+            nbytes = storage.nbytes()
+        except Exception:  # pragma: no cover - non-torch stand-ins
+            continue
+        # A view adds nothing of its own: the storage it aliases is already
+        # resident under its source tensor, so count that storage once.
+        if nbytes == 0 or key in seen_storages:
+            continue
+        seen_storages.add(key)
+        per_device[index] = per_device.get(index, 0) + nbytes
     return per_device
 
 
@@ -4947,15 +5003,33 @@ class BaseQModel(nn.Module):
 
         Returns ``True`` when a Tenstorrent device was actually released, and
         ``False`` for every other backend so the call is safe to make
-        unconditionally.
+        unconditionally.  The mesh is process-wide and may serve several
+        wrappers, so this releases only the leases held by this wrapper's own
+        native kernels and closes the shared handle once none remain.
         """
 
-        from ..utils.ttnn_runtime import close_mesh, current_mesh
-
-        if current_mesh() is None:
+        native_backends = {BACKEND.GPTQ_TTNN, BACKEND.GPTQ_TT_BF8}
+        model = getattr(self, "model", None)
+        modules = getattr(model, "modules", None)
+        if modules is None:
             return False
-        close_mesh()
-        return True
+        owned = [
+            module
+            for module in modules()
+            if native_backends.intersection(
+                getattr(module, "SUPPORTS_BACKENDS", ()) or ()
+            )
+        ]
+        if not owned:
+            # A CPU (or any non-native) wrapper must not tear down a mesh that
+            # another model in this process is still using.
+            return False
+        released = False
+        for module in owned:
+            release = getattr(module, "release_device", None)
+            if release is not None:
+                released = bool(release()) or released
+        return released
 
     def pre_quantize_generate_hook_start(self):
         pass

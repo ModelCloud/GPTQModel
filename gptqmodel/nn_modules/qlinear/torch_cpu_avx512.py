@@ -16,6 +16,7 @@ from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
 from . import detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
+from ._cpu_int4pack_layout import int4pack_decode_dtype
 from ._fused_train_state import finalize_fused_train_state
 from .torch_aten_kernel import TorchAtenLinear
 
@@ -206,9 +207,27 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
     #: ``dequantize_weight`` already restores the checkpoint input order.
     _runtime_dense_weight_is_checkpoint_order = True
 
-    def _runtime_dense_weight(self):
-        """Decode the live AVX512 layout without restoring the checkpoint layout."""
-        return self.dequantize_weight()
+    def _runtime_dense_weight(
+        self,
+        activation_dtype: torch.dtype | None = None,
+        *,
+        use_zero_codes: bool = False,
+    ):
+        """Decode the live AVX512 layout without restoring the checkpoint layout.
+
+        ``transform_cpu`` rewrites ``qzeros`` to the checkpoint's integer zero
+        codes, not the ATen affine offsets, so ``use_zero_codes`` already
+        describes the installed form and reads the same tensor.
+
+        ``activation_dtype`` selects a decode dtype that holds every stored
+        weight for a grad-requiring fallback. ``None`` keeps the export
+        behavior and the checkpoint scale dtype.
+        """
+        if activation_dtype is None:
+            return self.dequantize_weight()
+        return self.dequantize_weight(
+            dtype=int4pack_decode_dtype(self, activation_dtype)
+        )
 
     gemm_int4_qzero_group_scaled_cpu_kernel = None
     pack_gptq_int4_kernel = None
@@ -315,14 +334,25 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         # this build cannot invert keeps it (#4783).
         finalize_fused_train_state(self)
 
-    def dequantize_weight(self, num_itr: int = 1):
+    def dequantize_weight(
+        self, num_itr: int = 1, dtype: torch.dtype | None = None
+    ):
         if not self._cpu_transformed:
-            return super().dequantize_weight(num_itr=num_itr)
+            # The checkpoint layout shares the base decoder, including the
+            # range-safe ``dtype`` selection a half-precision fallback needs.
+            return super().dequantize_weight(num_itr=num_itr, dtype=dtype)
         if num_itr != 1:
             raise NotImplementedError(
                 f"{self.__class__.__name__}.dequantize_weight only supports num_itr=1"
             )
 
+        # ``transform_cpu`` installs the extension's packed nibbles and the
+        # checkpoint's integer zero codes, so the live affine identity is
+        # ``(code - zero) * scale``. Apply the requested dtype before the
+        # arithmetic: a half fallback asks for a dtype that holds every
+        # decoded weight, while ``None`` keeps the export behavior (FP32
+        # arithmetic, checkpoint scale dtype on return).
+        compute_dtype = torch.float32 if dtype is None else dtype
         codes = unpack_hf_int4(
             self.qweight,
             out_features=self.out_features,
@@ -332,7 +362,7 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         groups = torch.arange(self.in_features, device=codes.device) // group_size
         zeros = self.qzeros.index_select(0, groups).t()
         scales = self.scales.index_select(0, groups).t()
-        weight = (codes.to(torch.float32) - zeros.to(torch.float32)) * scales.to(torch.float32)
+        weight = (codes.to(compute_dtype) - zeros.to(compute_dtype)) * scales.to(compute_dtype)
 
         # ``transform_cpu`` sorts input channels by GPTQ group before packing.
         # Restore the checkpoint's original channel order for nn.Linear users.
@@ -341,7 +371,8 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
             restored = torch.empty_like(weight)
             restored[:, ret_idx] = weight
             weight = restored
-        return weight.t().contiguous().to(self._dequant_scales_dtype)
+        out_dtype = self._dequant_scales_dtype if dtype is None else dtype
+        return weight.t().contiguous().to(out_dtype)
 
     @torch.no_grad
     def _fused_op_forward(self, x):
