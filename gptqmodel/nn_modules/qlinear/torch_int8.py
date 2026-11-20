@@ -205,6 +205,36 @@ def _write_group_buffers(
     module._int8_transform_dtype = dtype
 
 
+def _live_group_affine(module: nn.Module) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Return the affine terms implied by the live checkpoint metadata.
+
+    ``transform_cpu`` copies the checkpoint's scales into a derived FP32 buffer
+    and folds the zero point into an offset. The eager refresh detects a
+    checkpoint edit through a versioned source signature, which a traced graph
+    cannot read. A compiled forward therefore recomputes the small
+    ``[groups, out_features]`` affine terms from the current checkpoint tensors
+    instead of the installed copy, so an in-place scale edit is visible without
+    a recompile. The INT8 codes stay in the derived layout.
+    """
+    scales = module.scales.float().contiguous()
+    if getattr(module, INT8_GROUP_OFFSET_BUFFER_NAME, None) is None:
+        return scales, None
+    shifts = torch.arange(
+        0, module.pack_dtype_bits, module.bits, dtype=torch.int32, device=module.qzeros.device
+    )
+    # Shared decode crops the padding lanes of a non-aligned output width, so
+    # the result always matches ``scales`` instead of ``ceil(n / pack) * pack``.
+    zeros = unpack_qzero_lanes(
+        module.qzeros,
+        shifts,
+        pack_factor=module.pack_factor,
+        maxq=module.maxq,
+        dtype=module.dequant_dtype,
+        out_features=module.out_features,
+    )
+    return scales, (128.0 - zeros.float()) * scales
+
+
 class Int8PackedModule(torch.nn.Module):
     """CPU grouped INT8 matmul around ``aten::_weight_int8pack_mm``.
 
@@ -276,7 +306,13 @@ class Int8PackedModule(torch.nn.Module):
             pieces.append(piece)
         return torch.stack(pieces, dim=-2)
 
-    def _asymmetric_group_output(self, flat: torch.Tensor, group: int) -> torch.Tensor:
+    def _asymmetric_group_output(
+        self,
+        flat: torch.Tensor,
+        group: int,
+        group_scale: torch.Tensor,
+        group_offset: torch.Tensor,
+    ) -> torch.Tensor:
         """Reduce one asymmetric group with its zero point applied first.
 
         The native INT8 op only accumulates ``scale * (code - 128)``; the
@@ -289,8 +325,8 @@ class Int8PackedModule(torch.nn.Module):
         and dropped before the next tile is built.
         """
         weight = self.int8_weight_gnk[group]
-        scale = self.int8_group_scale[group].float()
-        offset = self.int8_group_offset[group].float()
+        scale = group_scale[group].float()
+        offset = group_offset[group].float()
         activations = flat[:, group, :]
         output = torch.empty(
             activations.shape[0], weight.shape[0], dtype=torch.float32, device=activations.device
@@ -303,8 +339,15 @@ class Int8PackedModule(torch.nn.Module):
         return output
 
     def forward(
-        self, x: torch.Tensor, bias: torch.Tensor | None = None
+        self,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        group_scale: torch.Tensor | None = None,
+        group_offset: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # ``group_scale``/``group_offset`` let a traced caller pass the affine
+        # terms derived from the live checkpoint instead of the copy installed
+        # at bind time (see ``_live_group_affine``).
         # The op requires matching activation/scale dtypes and only accepts 2D
         # activations. FP32 preserves tiny group scales and delays output
         # rounding until after the group reduction and the bias epilogue. An
@@ -317,11 +360,12 @@ class Int8PackedModule(torch.nn.Module):
             width = activations.shape[-1]
             flat = activations.reshape(-1, groups, width)
             output = None
-            if self.int8_group_offset is None:
-                group_scale = self.int8_group_scale.float()
+            scale = self.int8_group_scale.float() if group_scale is None else group_scale.float()
+            offset = self.int8_group_offset if group_offset is None else group_offset
+            if offset is None:
                 for group in range(groups):
                     part = torch.ops.aten._weight_int8pack_mm(
-                        flat[:, group, :], self.int8_weight_gnk[group], group_scale[group]
+                        flat[:, group, :], self.int8_weight_gnk[group], scale[group]
                     )
                     output = part if output is None else output.add_(part)
             else:
@@ -329,7 +373,7 @@ class Int8PackedModule(torch.nn.Module):
                 # Splitting them into a residual reduction plus an offset reduction
                 # lets FP32 rounding survive the cancellation of two large terms.
                 for group in range(groups):
-                    part = self._asymmetric_group_output(flat, group)
+                    part = self._asymmetric_group_output(flat, group, scale, offset)
                     output = part if output is None else output.add_(part)
             output = output.reshape(activations.shape[:-2] + (self.out_features,))
             if bias is not None:
@@ -492,12 +536,23 @@ class TorchInt8Linear(GPTQQuantLinear):
             signature = self._source_signature()
             if self.int8_module is not None and signature == self._int8_source_signature:
                 return self.int8_module
-            if self._checkpoint_qweight() is None:
-                self._materialize_checkpoint_qweight()
-            if not self._has_all_gptq_buffers():
-                raise RuntimeError("TorchInt8Linear missing GPTQ checkpoint buffers for native INT8 conversion.")
-            self.transform_cpu(dtype=torch.float32)
+            self._publish_int8_runtime()
             return self.int8_module
+
+    def _publish_int8_runtime(self):
+        """Repack the current checkpoint into the derived INT8 runtime.
+
+        Must run at an eager boundary: the caller holds ``_INT8_REBUILD_LOCK``
+        (or the re-entrant ``_cpu_transform_lock``) because a traced graph
+        cannot rewrite module state. Publishing here keeps the binding current
+        across load/move transitions so a compiled caller never observes the
+        empty ``clear_weight_cache()`` window.
+        """
+        if self._checkpoint_qweight() is None:
+            self._materialize_checkpoint_qweight()
+        if not self._has_all_gptq_buffers():
+            raise RuntimeError("TorchInt8Linear missing GPTQ checkpoint buffers for native INT8 conversion.")
+        self.transform_cpu(dtype=torch.float32)
 
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         if self.optimized:
@@ -718,7 +773,15 @@ class TorchInt8Linear(GPTQQuantLinear):
         # derived runtime cache after the copy.
         with self._cpu_transform_lock:
             self._materialize_checkpoint_qweight()
-            return super()._load_from_state_dict(*args, **kwargs)
+            bound = self.int8_module is not None and not getattr(self, "_int8_fusion_view", False)
+            result = super()._load_from_state_dict(*args, **kwargs)
+            if bound:
+                # Republish at this eager boundary. A compiled forward cannot
+                # run the signature refresh, so leaving the binding empty would
+                # make the next compiled call raise after a strict reload.
+                with _INT8_REBUILD_LOCK:
+                    self._publish_int8_runtime()
+            return result
 
     def _delete_attr_if_exists(self, attr_name: str):
         if hasattr(self, attr_name):
@@ -981,6 +1044,16 @@ class TorchInt8Linear(GPTQQuantLinear):
         int8_module = self._refresh_int8_runtime()
         if int8_module is None:
             raise RuntimeError("TorchInt8Linear int8 module is not initialized.")
+        if dynamo_is_compiling() and not getattr(self, "_int8_fusion_view", False):
+            # The eager signature check cannot run in a traced graph. Use the
+            # live checkpoint affine terms so edited scales/zero points take
+            # effect without a rebuild, while the codes stay in the derived
+            # layout. A fusion view's copied checkpoint buffers describe only
+            # the first source leaf, so it keeps the bound operands.
+            group_scale, group_offset = _live_group_affine(self)
+            return int8_module(
+                x.contiguous(), bias=bias, group_scale=group_scale, group_offset=group_offset
+            )
         return int8_module(x.contiguous(), bias=bias)
 
 
