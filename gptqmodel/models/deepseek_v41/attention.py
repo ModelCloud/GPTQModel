@@ -64,6 +64,9 @@ class DeepSeekV41FlashCache:
         self.layers = [_LayerHistory() for _ in range(num_layers)]
         self.length = 0
         self.batch_size = None
+        self.engram_tail = None
+        self.draft_windows = ()
+        self.draft_length = 0
 
     def stage(self):
         # Appends can use spare capacity, but a failed forward must leave the
@@ -79,6 +82,9 @@ class DeepSeekV41FlashCache:
     def reorder_cache(self, beam_idx):
         for layer in self.layers:
             layer.reorder(beam_idx)
+        if self.engram_tail is not None:
+            self.engram_tail = self.engram_tail.index_select(0, beam_idx.to(self.engram_tail.device))
+        self.draft_windows = tuple(window.index_select(0, beam_idx.to(window.device)) for window in self.draft_windows)
         self.batch_size = beam_idx.numel()
 
 
@@ -318,5 +324,30 @@ class V41Attention(nn.Module):
             else:
                 state.selected = state.selected.to(hidden.device)
         attended = self._attend(query, window, history_length, state)
-        grouped = _rotate(attended, coefficients, inverse=True).reshape(*hidden.shape[:2], self.groups, -1)
+        return self._project_output(attended, coefficients)
+
+    def _project_output(self, attended, coefficients):
+        grouped = _rotate(attended, coefficients, inverse=True).reshape(*attended.shape[:2], self.groups, -1)
         return self.wo_b(self.wo_a(grouped).flatten(-2))
+
+
+class V41DraftAttention(V41Attention):
+    """A draft block attends to accepted KV and jointly to its draft positions."""
+
+    def accepted_kv(self, main, positions, previous):
+        kv = fp8_roundtrip(_rotate(self.kv_norm(self.wkv(main)), self.rotary(positions)))
+        if previous is not None:
+            kv = torch.cat((previous, kv), dim=1)
+        return kv[:, -self.window:].clone()
+
+    def forward(self, hidden, positions, accepted, state):
+        coefficients = self.rotary(positions)
+        residual = self.q_norm(self.wq_a(hidden))
+        query = _rotate(self.wq_b(residual).unflatten(-1, (self.heads, self.head_dim)), coefficients)
+        draft = fp8_roundtrip(_rotate(self.kv_norm(self.wkv(hidden)), coefficients))
+        bank = torch.cat((accepted, draft), dim=1).float()
+        scores = torch.einsum("bqhd,bkd->bqhk", query.float(), bank) * self.head_dim**-0.5
+        sink = self.attn_sink.expand(*scores.shape[:2], self.heads).unsqueeze(-1)
+        probabilities = torch.cat((scores, sink), dim=-1).softmax(dim=-1)[..., :-1]
+        attended = torch.einsum("bqhk,bkd->bqhd", probabilities, bank).to(hidden.dtype)
+        return self._project_output(attended, coefficients)

@@ -1,10 +1,10 @@
 # DeepSeek V4.1 Flash checkpoint layout and loading
 
 `GPTQModel.load()` accepts the published block-32 FP8 and FP4 checkpoints for
-DeepSeek V4.1 Flash and Flash-1017. GPT-QModel runs the text backbone, vision
-tower, and aligner with its own Torch implementation. The loader uses the
-checkpoint's quantization settings and omits the Engram tables and dSpark/MTP
-layers.
+DeepSeek V4.1 Flash and Flash-1017. GPT-QModel runs the text backbone, Engram,
+vision tower, and aligner. It loads the published dSpark weights under
+`mtp.*`. The two Engram tables are mapped from safetensors, and the model
+reads and decodes only the hashed rows needed by each request.
 
 ```python
 from gptqmodel import GPTQModel
@@ -44,6 +44,51 @@ Text inputs use unpadded sequences. For images, pass flattened RGB patches as
 `image_grid_thw`, and the checkpoint's image placeholder tokens in
 `input_ids`. Each image requires a start token, an aligned grid with a newline
 after each row, and an end token.
+
+## Engram and draft execution
+
+Engram runs before attention at the configured decoder layers. The tokenizer
+supplies normalized IDs for hashing. Each request stores only the last
+`engram_max_ngram_size - 1` compressed tokens, so a split prefill or decode
+continues the same n-grams. An image span stops the look-back and masks the
+Engram contribution at its own positions. When passing `inputs_embeds`,
+provide the matching `engram_input_ids`.
+
+For dSpark, call the backbone with `output_mtp_features=True` and
+`use_cache=True`. The result contains `mtp_features` and the request cache.
+`model.model.forward_spec(input_ids, main_hidden, cache=cache)` seeds the
+draft window from the prefill features. A continuation passes the accepted
+features, the next draft input token per batch element, and `start_pos` equal
+to the number of accepted tokens already added to the draft cache. It returns
+the proposal IDs, logits, and confidence scores.
+
+## Selected-projection GPTQ
+
+Pass a GPTQ quantization config when loading the published checkpoint.
+Projection names identify the matrices to calibrate and pack.
+
+```python
+from gptqmodel import GPTQModel
+from gptqmodel.quantization.config import CalibrationConfig, QuantizeConfig
+
+model = GPTQModel.load(
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    device_map="auto",
+    quantize_config=QuantizeConfig(bits=4, group_size=128),
+)
+model.quantize(
+    CalibrationConfig(dataset=calibration_rows),
+    projections=["layers.1.attn.wq_a", "layers.14.attn.indexer.wq_b"],
+)
+model.save("deepseek-v41-flash-gptq")
+```
+
+Calibration runs the backbone with Engram and keeps dSpark disabled. The save
+streams unchanged checkpoint tensors from their original byte ranges and
+overlays the selected GPTQ projections. This preserves the Engram tables,
+their projections and gates, and all MTP tensors in the exported checkpoint.
+The exported index also works when a mapped table and its scale land in
+different shards. Load the export with `GPTQModel.load()`.
 
 ## Pinned evidence
 
@@ -171,18 +216,19 @@ and Engram even if all its attention and expert projections resolve.
 | Stage | Before this integration | Current path |
 | --- | --- | --- |
 | Dispatch | `deepseek_v41` failed config detection on Transformers releases without V4.1. | GPT-QModel recognizes the config and selects `DeepSeekV41FlashQModel`. |
-| Load | `V41Source` provided an explicit calibration API. | `load_checkpoint` validates the required checkpoint keys and opens only the shards needed by the backbone and vision tower. |
-| Forward | The public loader had no V4.1 runtime. | `V41DecoderLayer` carries the hyper-connection mix forward, and `V41AttentionState` shares compressed KV and selections between blocks. |
+| Load | `V41Source` provided an explicit calibration API. | `load_checkpoint` validates the backbone, mapped Engram tables, vision, and dSpark keys before binding the runtime. |
+| Forward | The public loader had no V4.1 runtime. | Engram updates the residual before the decoder block. `V41AttentionState` shares compressed KV and selections between blocks. |
+| Quantization and save | The initial loader recognized the published weight formats. | `quantize_projections` captures the backbone with Engram active. `save_checkpoint` streams untouched weights and writes the GPTQ overlay. |
 | Packed projections | The initial V4.1 runtime decoded each FP4 or FP8 projection into a temporary BF16 matrix. | `V41NativeMXLinear` uses hardware block-scaled MMA on Blackwell. `V41MarlinLinear` supplies the packed fallback on older NVIDIA GPUs, and `V41PackedLinear` provides the Torch path. |
 
 ```mermaid
 flowchart TD
     LOAD["GPTQModel.load"] --> DEF["DeepSeekV41FlashQModel"]
     DEF --> IDX["load_checkpoint reads the index"]
-    IDX --> FILTER["Skip dSpark and Engram entries"]
-    FILTER --> MATCH{"Checkpoint matches the model?"}
+    IDX --> MATCH{"Checkpoint matches the model?"}
     MATCH -->|"Yes"| SELECT["_configure_projection_backends checks devices and geometry"]
     MATCH -->|"No"| ERROR["Raise with the missing or unexpected tensor"]
+    MATCH -->|"Mapped tables"| TABLE["Bind read-only Engram table and scale files"]
     SELECT -->|"Native MX"| MX["Keep the original bytes in V41NativeMXLinear"]
     SELECT -->|"Marlin"| PACK["Repack each loaded projection into V41MarlinLinear"]
     SELECT -->|"Torch"| TORCH["Keep the source layout in V41PackedLinear"]
@@ -190,18 +236,24 @@ flowchart TD
     MX --> STATE
     PACK --> STATE["DeepSeekV41FlashCache owns per-request history"]
     TORCH --> STATE
-    STATE --> LAYER["V41DecoderLayer runs attention and MoE"]
+    TABLE --> ENGRAM["V41Engram gathers rows for this request"]
+    STATE --> ENGRAM
+    ENGRAM --> LAYER["V41DecoderLayer runs attention and MoE"]
     LAYER --> KV["Pass source banks and index selections to later layers"]
     KV --> OUT["Commit cache and return logits"]
+    OUT -->|"Explicit draft call"| DRAFT["forward_spec runs the published dSpark blocks"]
+    DEF -->|"GPTQ"| CAL["Calibrate selected projections with Engram"]
+    CAL --> SAVE["Stream original Engram and MTP tensors with the GPTQ overlay"]
     style ERROR fill:#fee,stroke:#b22
     style KERNEL_ERROR fill:#fee,stroke:#b22
 ```
 
 Source names map directly to runtime paths except for the six `hc_*`
 parameters. The loader attaches them to `attn_hc` and `ffn_hc` so the
-module plan can name their owners. The plan marks every loaded decoder
-weight owner with `:!`. The router owns the text and image correction biases
-and the attention module owns the sink.
+module plan can name their owners. The plan marks Engram and other preserved
+backbone weights with `:!`. MTP lives outside the backbone projection plan.
+The router owns the text and image correction biases, and the attention
+module owns the sink.
 
 The focused tests use six reduced decoder blocks patterned on published
 layers 1, 14, 15, 20, 21, and 24. Together they exercise sliding-window

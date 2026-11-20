@@ -4,8 +4,11 @@
 """Indexed loading of the original FP8/FP4 DeepSeek V4.1 shards."""
 
 import json
+import math
 from collections import defaultdict
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 from accelerate import infer_auto_device_map
@@ -16,20 +19,18 @@ from ...quantization.dtype import is_fp4_packed_dtype
 from ...utils.backend import BACKEND
 from ...utils.macaq_triton import TRITON_AVAILABLE
 from ...utils.marlin import marlin_runtime_available, marlin_runtime_error
+from ...utils.offload import _read_safetensors_header
 from ...utils.torch import as_torch_device
 from .._const import DEVICE, normalize_device
+from ..writer import _torch_dtype_from_safetensors_name
 from .configuration import DeepSeekV41FlashConfig
 from .layers import V41MarlinLinear, V41NativeMXLinear, V41PackedLinear
 from .modeling import DeepSeekV41FlashForCausalLM
 
 
 def _runtime_key(name):
-    if name.startswith("mtp."):
-        return None
-    if name.startswith("layers."):
+    if name.startswith(("layers.", "mtp.")):
         layer, index, leaf = name.split(".", 2)
-        if leaf.startswith("engram."):
-            return None
         for branch in ("attn", "ffn"):
             prefix = f"hc_{branch}_"
             if leaf.startswith(prefix):
@@ -42,15 +43,13 @@ def _checkpoint_tensors(index, expected):
     mapped = set()
     for source, shard in index["weight_map"].items():
         target = _runtime_key(source)
-        if target is None:
-            continue
         if Path(shard).name != shard or "\\" in shard or not shard.endswith(".safetensors"):
             raise ValueError(f"Invalid DeepSeek V4.1 shard name {shard!r}")
         if target in mapped or target not in expected:
             raise ValueError(f"Unexpected DeepSeek V4.1 checkpoint tensor {source}")
         shards[shard][source] = target
         mapped.add(target)
-    missing = expected.keys() - mapped
+    missing = set(expected) - mapped
     if missing:
         raise ValueError(f"Missing DeepSeek V4.1 checkpoint tensor {min(missing)} ({len(missing)} missing)")
     return shards
@@ -107,7 +106,7 @@ def _get_placements(model, expected, device, device_map, max_memory, backend):
         target = as_torch_device(target)
         placement[name] = target
         parts = name.split(".")
-        unit = ".".join(parts[:2]) if parts[0] == "layers" else parts[0]
+        unit = ".".join(parts[:2]) if parts[0] in ("layers", "mtp") else parts[0]
         if layer_devices.setdefault(unit, target) != target:
             raise ValueError(f"DeepSeek V4.1 requires a single device for {unit}")
     return device_map, placement
@@ -127,6 +126,29 @@ def _read_tensor(shard, source, template, device):
     ):
         raise ValueError(f"DeepSeek V4.1 tensor {source} has dtype {value.dtype}, expected {target_dtype}")
     return value.to(device=device, dtype=target_dtype)
+
+
+@contextmanager
+def _read_engram_shard_ranges(path):
+    """Read the resident tensors beside an Engram table without read-ahead over the table."""
+    base, header = _read_safetensors_header(path)
+    with open(path, "rb") as stream:
+        def get_tensor(name):
+            entry = header[name]
+            dtype = _torch_dtype_from_safetensors_name(entry["dtype"])
+            shape = tuple(entry["shape"])
+            start, end = entry["data_offsets"]
+            if start < 0 or end - start != math.prod(shape) * dtype.itemsize:
+                raise ValueError(f"Invalid DeepSeek V4.1 checkpoint extent for {name}")
+            if end == start:
+                return torch.empty(shape, dtype=dtype)
+            stream.seek(base + start)
+            payload = bytearray(end - start)
+            if stream.readinto(payload) != len(payload):
+                raise ValueError(f"Truncated DeepSeek V4.1 checkpoint tensor {name}")
+            return torch.frombuffer(payload, dtype=dtype).reshape(shape)
+
+        yield SimpleNamespace(get_tensor=get_tensor)
 
 
 def _configure_projection_backends(model, placements, backend):
@@ -165,7 +187,12 @@ def load_checkpoint(checkpoint, *, selection, dtype, device, device_map, max_mem
     if revision is not None:
         selection = {**selection, "revision": revision}
     config = DeepSeekV41FlashConfig.from_pretrained(checkpoint, **selection)
-    format_config = getattr(config, "quantization_config", {})
+    specs = config.gptqmodel_v41_projections or {}
+    quantization = getattr(config, "quantization_config", {})
+    if specs and quantization.get("quant_method") != "gptq":
+        raise ValueError("DeepSeek V4.1 GPTQ projections require the GPTQ checkpoint configuration")
+    format_config = config.gptqmodel_v41_source_quantization if specs else quantization
+    format_config = format_config or {}
     if (
         format_config.get("quant_method") != "fp8"
         or format_config.get("expert_dtype") != "fp4"
@@ -180,21 +207,44 @@ def load_checkpoint(checkpoint, *, selection, dtype, device, device_map, max_mem
     if dtype != torch.bfloat16:
         raise ValueError("DeepSeek V4.1 Flash uses the checkpoint's bfloat16 compute dtype")
     config.dtype = dtype
-    config.text_config.engram_layer_ids = []
-    config.text_config.engram_num_embeddings = []
-    config.text_config.num_nextn_predict_layers = 0
-    config.text_config.dspark_target_layer_ids = []
 
     with torch.device("meta"):
         model = DeepSeekV41FlashForCausalLM(config, dtype=dtype)
+        if specs:
+            from .gptq import _SOURCE_LINEAR_TYPES, _quantizable_path, make_gptq_projection
+
+            for path, spec in specs.items():
+                if not _quantizable_path(path):
+                    raise ValueError(f"DeepSeek V4.1 GPTQ checkpoint cannot replace {path}")
+                source = model.get_submodule(path)
+                if not isinstance(source, _SOURCE_LINEAR_TYPES):
+                    raise ValueError(f"DeepSeek V4.1 cannot load GPTQ projection {path}")
+                model.set_submodule(path, make_gptq_projection(source, spec))
     expected = model.state_dict(keep_vars=True)
-    shards = _checkpoint_tensors(json.loads(index_path.read_text(encoding="utf-8")), expected)
+    mapped_tables = {
+        f"layers.{index}.engram.embed": model.layers[index].engram.embed
+        for index in config.text_config.engram_layer_ids
+    }
+    mapped_keys = {f"{prefix}.{leaf}" for prefix in mapped_tables for leaf in ("weight", "scale")}
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    shards = _checkpoint_tensors(index, expected.keys() | mapped_keys)
     device_map, placements = _get_placements(model, expected, device, device_map, max_memory, backend)
     projection_classes = _configure_projection_backends(model, placements, backend)
-    filenames = cached_files(checkpoint, list(shards), **selection)
-    for filename in filenames:
-        with safe_open(filename, framework="pt", device="cpu") as shard:
-            for source, target in shards[Path(filename).name].items():
+    files = {Path(path).name: path for path in cached_files(checkpoint, list(shards), **selection)}
+    weight_map = index["weight_map"]
+    table_shards = {weight_map[name] for name in mapped_keys}
+    for prefix, table in mapped_tables.items():
+        table.bind(files[weight_map[prefix + ".weight"]], files[weight_map[prefix + ".scale"]], prefix)
+    for name, tensors in shards.items():
+        resident = {source: target for source, target in tensors.items() if target not in mapped_keys}
+        if not resident:
+            continue
+        filename = files[name]
+        reader = _read_engram_shard_ranges(filename) if name in table_shards else safe_open(
+            filename, framework="pt", device="cpu",
+        )
+        with reader as shard:
+            for source, target in resident.items():
                 value = _read_tensor(shard, source, expected[target], placements[target])
                 parent, _, leaf = target.rpartition(".")
                 module = model.get_submodule(parent)
@@ -205,4 +255,8 @@ def load_checkpoint(checkpoint, *, selection, dtype, device, device_map, max_mem
                 if projection_class is not None and not (module.weight.is_meta or module.scale.is_meta):
                     model.set_submodule(parent, projection_class(module))
     model.hf_device_map = device_map
+    model.source_weight_map = weight_map
+    model.source_shards = files
+    for path in specs:
+        model.get_submodule(path).post_init()
     return model.eval(), str(index_path.parent), selection

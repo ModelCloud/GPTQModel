@@ -13,6 +13,21 @@ class DeepSeekV41TextConfig(PreTrainedConfig):
     candidate_source_layer_id: int | None = None
     candidate_topk_blocks: int = 0
     candidate_block_size: int = 1
+    engram_layer_ids: list[int] | tuple[int, ...] = ()
+    engram_num_embeddings: list[int] | tuple[int, ...] = ()
+    engram_max_ngram_size: int = 1
+    engram_vocab_size: int = 0
+    engram_n_heads: int = 0
+    engram_head_dim: int = 0
+    engram_pad_token_id: int = 2
+    engram_compressed_vocab_size: int = 0
+    num_nextn_predict_layers: int = 0
+    dspark_target_layer_ids: list[int] | tuple[int, ...] = ()
+    dspark_block_size: int = 0
+    dspark_noise_token_id: int = 0
+    dspark_markov_rank: int = 256
+    dspark_n_routed_experts: int = 0
+    dspark_num_experts_per_tok: int = 0
 
     def __post_init__(self, **kwargs):
         if self.candidate_source_layer_id == -1:
@@ -31,6 +46,8 @@ class DeepSeekV41FlashConfig(PreTrainedConfig):
     vision_config: DeepSeekV41VisionConfig | dict | None = None
     image_token_id: int | None = None
     tie_word_embeddings: bool = False
+    gptqmodel_v41_projections: dict | None = None
+    gptqmodel_v41_source_quantization: dict | None = None
 
     def __post_init__(self, **kwargs):
         if isinstance(self.text_config, dict):

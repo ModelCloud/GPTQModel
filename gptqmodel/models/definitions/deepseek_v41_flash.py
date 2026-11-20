@@ -6,9 +6,11 @@ from os import fspath
 from transformers import AutoConfig
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
+from ...quantization.config import METHOD, QuantizeConfig
 from ...utils.backend import BACKEND, PROFILE, normalize_backend
 from ...utils.hf import get_config_selection_kwargs, load_hf_tokenizer, normalize_torch_dtype_kwarg
 from ...utils.model import MODALITY
+from .._const import DEFAULT_MAX_SHARD_SIZE
 from ..base import BaseQModel
 from ..deepseek_v41.configuration import DeepSeekV41FlashConfig
 from ..fusable import require_fusable_config
@@ -20,11 +22,6 @@ if "deepseek_v41" not in CONFIG_MAPPING:
     AutoConfig.register("deepseek_v41", DeepSeekV41FlashConfig)
 
 
-_PUBLISHED_CHECKPOINT_REQUIRED = (
-    "Load the published DeepSeek V4.1 Flash FP8/FP4 checkpoint with GPTQModel.load() without a quantization config."
-)
-
-
 class DeepSeekV41FlashQModel(BaseQModel):
     require_trust_remote_code = False
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
@@ -34,29 +31,35 @@ class DeepSeekV41FlashQModel(BaseQModel):
     dynamic_expert_index = "n_routed_experts"
 
     module_tree = ["layers", "#", {
+        "engram:!": {"": ("embed:!", "wkv:!")},
         "attn_hc:!": (),
         "attn_norm:!": (),
         "attn:!": {
-            "": ("wq_a:!", "q_norm:!", "wq_b:!", "wkv:!", "kv_norm:!", "wo_a:!", "wo_b:!"),
-            "compressor": ("wkv:!", "wgate:!", "norm:!"),
-            "indexer": ("wq_b:!", "weights_proj:!", "wk:!", "k_norm:!"),
+            "": ("wq_a", "q_norm:!", "wq_b", "wkv", "kv_norm:!", "wo_a", "wo_b"),
+            "compressor": ("wkv", "wgate", "norm:!"),
+            "indexer": ("wq_b", "weights_proj", "wk", "k_norm:!"),
         },
         "ffn_hc:!": (),
         "ffn_norm:!": (),
         "ffn:moe": {
             "gate:!": (),
-            "experts": {"#": ("w1:!", "w3:!", "w2:!")},
-            "shared_experts": ("w1:!", "w3:!", "w2:!"),
+            "experts": {"#": ("w1", "w3", "w2")},
+            "shared_experts": ("w1", "w3", "w2"),
         },
     }]
 
     @classmethod
     def from_pretrained(cls, pretrained_model_id_or_path, quantize_config=None, profile=PROFILE.AUTO, **kwargs):
-        if quantize_config is not None:
-            raise NotImplementedError(_PUBLISHED_CHECKPOINT_REQUIRED)
+        if quantize_config is not None and quantize_config.method != METHOD.GPTQ:
+            raise ValueError("DeepSeek V4.1 projection quantization uses GPTQ")
         if profile != PROFILE.AUTO:
             raise ValueError("DeepSeek V4.1 Flash supports the default load profile")
-        return cls.from_quantized(pretrained_model_id_or_path, **kwargs)
+        loaded = cls.from_quantized(pretrained_model_id_or_path, **kwargs)
+        if quantize_config is not None:
+            if loaded.quantized:
+                raise ValueError("DeepSeek V4.1 GPTQ requires a published source checkpoint")
+            loaded.quantize_config = quantize_config
+        return loaded
 
     @classmethod
     def from_quantized(
@@ -102,9 +105,35 @@ class DeepSeekV41FlashQModel(BaseQModel):
         tokenizer = load_hf_tokenizer(
             model_id_or_path, model_config=model.config, trust_remote_code=tokenizer_trust, **selection,
         )
+        model.initialize_engram(tokenizer)
+        quantized = bool(model.config.gptqmodel_v41_projections)
+        quantize_config = QuantizeConfig.from_quant_config(model.config.quantization_config) if quantized else None
         return cls(
-            model, quantized=False, quantize_config=None, tokenizer=tokenizer, model_local_path=local_path,
+            model, quantized=quantized, quantize_config=quantize_config, tokenizer=tokenizer, model_local_path=local_path,
         ).eval()
 
-    def quantize(self, *args, **kwargs):
-        raise NotImplementedError(_PUBLISHED_CHECKPOINT_REQUIRED)
+    def quantize(self, calibration=None, *, projections=None):
+        from ..deepseek_v41.gptq import quantize_projections
+
+        with self.model.calibration():
+            return quantize_projections(self, calibration, projections)
+
+    def save(
+        self, save_dir, safetensors_metadata=None, max_shard_size=DEFAULT_MAX_SHARD_SIZE,
+        meta_quantizer=None, eora_path=None, split_by=None,
+    ):
+        from ..deepseek_v41.writer import save_checkpoint
+
+        if eora_path is not None or split_by is not None:
+            raise ValueError("DeepSeek V4.1 checkpoint save uses a single indexed model with all its components")
+        return save_checkpoint(
+            self, save_dir, safetensors_metadata=safetensors_metadata,
+            max_shard_size=max_shard_size, meta_quantizer=meta_quantizer,
+        )
+
+    def save_quantized(self, save_dir, **kwargs):
+        if not self.quantized:
+            raise ValueError("Call quantize() before saving a DeepSeek V4.1 GPTQ checkpoint")
+        return self.save(save_dir, **kwargs)
+
+    save_pretrained = save

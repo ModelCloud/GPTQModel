@@ -4,8 +4,10 @@
 import json
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
+from safetensors import safe_open
 from safetensors.torch import save_file
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
@@ -32,8 +34,12 @@ def v41_checkpoint(tmp_path, request):
         "compress_rope_theta": 160000, "index_n_heads": 2, "index_head_dim": 32, "index_topk": 3,
         "candidate_source_layer_id": 3, "candidate_topk_blocks": 1, "candidate_block_size": 2,
         "hc_mult": 2, "hc_sinkhorn_iters": 4, "hc_eps": 1e-6,
-        "engram_layer_ids": [0, 1], "engram_num_embeddings": [384006168, 384016682],
+        "engram_layer_ids": [0, 1], "engram_num_embeddings": [48, 102],
+        "engram_max_ngram_size": 3, "engram_vocab_size": 7, "engram_n_heads": 2, "engram_head_dim": 32,
+        "engram_pad_token_id": 2, "engram_compressed_vocab_size": 32,
         "num_nextn_predict_layers": 2, "dspark_target_layer_ids": [4, 5],
+        "dspark_block_size": 3, "dspark_noise_token_id": 30, "dspark_markov_rank": 8,
+        "dspark_n_routed_experts": 2, "dspark_num_experts_per_tok": 1,
     }
     config = {
         "architectures": ["DeepseekV41ForCausalLM"], "model_type": "deepseek_v41", "dtype": "bfloat16",
@@ -69,8 +75,7 @@ def v41_checkpoint(tmp_path, request):
     dense("embed.weight", (32, width))
     dense("head.weight", (32, width))
     dense("norm.weight", (width,), offset=1)
-    for layer in range(6):
-        prefix = f"layers.{layer}."
+    def decoder(prefix, experts):
         for name in ("attn_norm", "ffn_norm", "attn.q_norm", "attn.kv_norm"):
             dense(prefix + name + ".weight", (width,), offset=1)
         for branch in ("attn", "ffn"):
@@ -81,6 +86,17 @@ def v41_checkpoint(tmp_path, request):
         for name, rows, cols in (("wq_a", width, width), ("wq_b", 2 * width, width), ("wkv", width, width),
                                  ("wo_a", 2 * width, width), ("wo_b", width, 2 * width)):
             packed(prefix + "attn." + name, rows, cols)
+        dense(prefix + "ffn.gate.weight", (experts, width))
+        tensors[prefix + "ffn.gate.bias"] = torch.tensor([1.0, 0.0, -1.0])[:experts].clone()
+        tensors[prefix + "ffn.gate.bias_vl"] = torch.tensor([-1.0, 0.0, 1.0])[:experts].clone()
+        for projection in ("w1", "w2", "w3"):
+            packed(prefix + "ffn.shared_experts." + projection, width, width)
+            for expert in range(experts):
+                packed(prefix + f"ffn.experts.{expert}.{projection}", width, width, fp4=True)
+
+    for layer in range(6):
+        prefix = f"layers.{layer}."
+        decoder(prefix, 3)
         if layer in (1, 3, 5):
             packed(prefix + "attn.indexer.wq_b", 64, width)
             dense(prefix + "attn.indexer.weights_proj.weight", (2, width))
@@ -92,13 +108,23 @@ def v41_checkpoint(tmp_path, request):
         if layer == 1:
             dense(prefix + "attn.compressor.wgate.weight", (width, width))
 
-        dense(prefix + "ffn.gate.weight", (3, width))
-        tensors[prefix + "ffn.gate.bias"] = torch.tensor([1.0, 0.0, -1.0])
-        tensors[prefix + "ffn.gate.bias_vl"] = torch.tensor([-1.0, 0.0, 1.0])
-        for projection in ("w1", "w2", "w3"):
-            packed(prefix + "ffn.shared_experts." + projection, width, width)
-            for expert in range(3):
-                packed(prefix + f"ffn.experts.{expert}.{projection}", width, width, fp4=True)
+    for layer, rows in enumerate(text["engram_num_embeddings"]):
+        prefix = f"layers.{layer}.engram."
+        table = torch.randn((rows, 32), generator=generator).to(torch.float8_e4m3fn)
+        tensors[prefix + "embed.weight"] = table
+        tensors[prefix + "embed.scale"] = torch.full((rows, 1), 0.0625).to(torch.float8_e8m0fnu)
+        for name in ("q_weight", "k_weight"):
+            dense(prefix + name, (2, width), offset=1)
+        packed(prefix + "wkv", 3 * width, 128)
+
+    for layer in range(2):
+        decoder(f"mtp.{layer}.", 2)
+    packed("mtp.0.main_proj", width, width * 2)
+    dense("mtp.0.main_norm.weight", (width,), offset=1)
+    dense("mtp.1.norm.weight", (width,), offset=1)
+    dense("mtp.1.markov_head.embed.weight", (32, 8))
+    dense("mtp.1.markov_head.head.weight", (32, 8))
+    dense("mtp.1.confidence_head.proj.weight", (1, width + 8))
 
     for name in ("image_start", "image_end", "image_newline"):
         dense(name, (width,))
@@ -115,14 +141,12 @@ def v41_checkpoint(tmp_path, request):
 
     shard = "main.safetensors"
     weight_map = dict.fromkeys(tensors, shard)
-    # Missing auxiliary-only shards must not be requested. A mixed shard may
-    # also contain auxiliary keys; even their tensor payload is skipped.
-    weight_map.update({
-        "mtp.0.attn.wq_a.weight": "draft.safetensors",
-        "layers.0.engram.embed.weight": "embeddings.safetensors",
-        "layers.1.engram.q_weight": shard,
-    })
-    tensors["layers.1.engram.q_weight"] = torch.full((1,), float("nan"))
+    for filename, names in (
+        ("draft.safetensors", [name for name in tensors if name.startswith("mtp.") and "mtp.1.norm" not in name]),
+        ("embeddings.safetensors", ["layers.0.engram.embed.weight", "layers.1.engram.embed.weight"]),
+    ):
+        save_file({name: tensors.pop(name) for name in names}, tmp_path / filename)
+        weight_map.update(dict.fromkeys(names, filename))
     # Exercise repacking when only one operand is available from the first shard.
     if width != 32:
         separate = "additional.safetensors"
@@ -134,7 +158,9 @@ def v41_checkpoint(tmp_path, request):
         json.dumps({"weight_map": weight_map}), encoding="utf-8",
     )
 
-    tokenizer = Tokenizer(WordLevel({"<s>": 0, "</s>": 1, "<pad>": 2, "<unk>": 3}, unk_token="<unk>"))
+    vocab = {"<s>": 0, "</s>": 1, "<pad>": 2, "<unk>": 3}
+    vocab.update({f"t{i}": i for i in range(4, 32)})
+    tokenizer = Tokenizer(WordLevel(vocab, unk_token="<unk>"))
     PreTrainedTokenizerFast(
         tokenizer_object=tokenizer, bos_token="<s>", eos_token="</s>", pad_token="<pad>", unk_token="<unk>",
     ).save_pretrained(tmp_path)
@@ -150,25 +176,25 @@ def test_v41_module_plan_accounts_for_loaded_decoder_weights(model):
     assert isinstance(model, DeepSeekV41FlashQModel)
     plan = model.module_plan()
     assert model.extract_layers_node() == ["layers"]
-    assert not hasattr(model.model, "mtp")
-    assert model.model.config.text_config.num_nextn_predict_layers == 0
-    assert model.model.config.text_config.engram_layer_ids == []
+    assert len(model.model.mtp) == model.model.config.text_config.num_nextn_predict_layers == 2
+    assert model.model.config.text_config.engram_layer_ids == [0, 1]
     for layer in model.model.layers:
         for key, value in layer.state_dict().items():
             owner = key.rsplit(".", 1)[0]
             spec = plan.find(owner)
-            assert spec is not None and "!" in spec.flags, key
+            assert spec is not None, key
             assert not value.is_meta
-        assert not hasattr(layer, "engram")
+    for path in ("engram.embed", "engram.wkv", "engram"):
+        assert "!" in plan.find(path).flags
+    assert all(not value.is_meta for value in model.model.mtp.state_dict().values())
 
     assert plan.expert_root("ffn.experts.2.w1") == "ffn.experts.2"
+    assert "!" not in plan.find("attn.wq_a").flags
     assert plan.shared_expert_containers() == ("ffn.shared_experts",)
     assert plan.find("ffn.experts.2.w1.undeclared") is None
     assert plan.find("attn.compressor_extra.wkv") is None
     assert model.model.layers[0].ffn.experts[0].w1.weight.dtype == torch.int8
     assert model.model.layers[0].attn.wq_a.weight.dtype == torch.float8_e4m3fn
-    with pytest.raises(NotImplementedError, match="published DeepSeek V4.1 Flash FP8/FP4 checkpoint"):
-        model.quantize(None)
 
 
 def test_v41_attention_variants_and_chunked_cache(model):
@@ -205,6 +231,80 @@ def test_v41_attention_variants_and_chunked_cache(model):
     # A different request gets independent storage and cannot expose future inputs.
     prefix = model(tokens[:, :4]).logits
     torch.testing.assert_close(prefix, full[:, :4], atol=0.012, rtol=0.015)
+
+
+def test_v41_engram_hash_uses_request_history_and_stops_at_images(model):
+    net = model.model
+    ids = torch.tensor([[4, 7, 31, 9, 13, 16]])
+    image_mask = ids == 31
+    digest = net.engram_hash
+    context, _ = digest.prepare(ids, None, image_mask)
+    row = ids.flatten().tolist()
+    for layer, primes in ((0, (7, 11, 13, 17)), (1, (19, 23, 29, 31))):
+        limit = (torch.iinfo(torch.int64).max // 32) // 2
+        factors = (np.random.default_rng(layer * 10007).integers(limit, size=3) * 2 + 1).tolist()
+        expected = []
+        for index in range(len(row)):
+            history = []
+            for previous in reversed(row[:index + 1]):
+                if previous == 31 or len(history) == 3:
+                    break
+                history.append(previous)
+            history += [2] * (3 - len(history))
+            one, two, three = [token_id * factor for token_id, factor in zip(history, factors)]
+            offsets = [0, *np.cumsum(primes[:-1]).tolist()]
+            expected.append([
+                value % prime + offset
+                for value, prime, offset in zip((one ^ two,) * 2 + (one ^ two ^ three,) * 2, primes, offsets)
+            ])
+        assert digest(context, layer).tolist() == [expected]
+        prefix, tail = digest.prepare(ids[:, :4], None, image_mask[:, :4])
+        suffix, _ = digest.prepare(ids[:, 4:], tail, None)
+        torch.testing.assert_close(torch.cat((digest(prefix, layer), digest(suffix, layer)), dim=1), digest(context, layer))
+
+    hidden = net.embed(ids).unsqueeze(-2).expand(-1, -1, 2, -1)
+    engram = net.layers[0].engram
+    output = engram(hidden, digest(context, 0), image_mask)
+    torch.testing.assert_close(output[image_mask], hidden[image_mask], atol=0, rtol=0)
+    assert not torch.equal(output[~image_mask], hidden[~image_mask])
+
+    tokens = torch.tensor([[4, 7, 9]])
+    result = net(tokens)
+    tail = result.past_key_values.engram_tail
+    assert tail.tolist() == [[7, 9]]
+    assert not list(engram.embed.parameters()) and not list(engram.embed.buffers())
+    torch.testing.assert_close(
+        net(inputs_embeds=net.embed(tokens), engram_input_ids=tokens).logits, result.logits, atol=0, rtol=0,
+    )
+
+
+def test_v41_mtp_forward_is_explicit_and_disabled_during_calibration(model):
+    net = model.model
+    prefix = torch.tensor([[4, 7, 9]])
+    next_token = torch.tensor([[11]])
+    plain = net(prefix)
+    assert plain.mtp_features is None
+    assert plain.past_key_values.draft_windows == ()
+    prompt = net(prefix, output_mtp_features=True)
+    cache = prompt.past_key_values
+    assert prompt.mtp_features.shape == (1, 3, 64)
+    assert net.forward_spec(next_token[:, 0], prompt.mtp_features, cache=cache) is None
+    assert cache.draft_length == 3 and len(cache.draft_windows) == len(net.mtp)
+    continuation = net(next_token, past_key_values=cache, output_mtp_features=True)
+    with net.calibration():
+        assert net(prefix, output_mtp_features=True).mtp_features is None
+        with pytest.raises(RuntimeError, match="draft execution is disabled"):
+            net.forward_spec(next_token[:, 0], continuation.mtp_features, start_pos=3, cache=cache)
+    assert cache.draft_length == 3
+
+    tokens, logits, confidence = net.forward_spec(
+        next_token[:, 0], continuation.mtp_features, start_pos=3, cache=cache,
+    )
+    assert cache.draft_length == 4 and all(window.size(1) == 4 for window in cache.draft_windows)
+    assert tokens.shape == (1, 4) and logits.shape == (1, 3, 32) and confidence.shape == (1, 3)
+    assert torch.isfinite(logits).all() and torch.isfinite(confidence).all()
+    torch.testing.assert_close(tokens[:, :1], next_token)
+    torch.testing.assert_close(tokens[:, 1:], logits.argmax(dim=-1))
 
 
 def test_v41_sparse_attention_uses_only_the_window_and_selected_values(model):
@@ -256,6 +356,7 @@ def test_v41_load_reports_missing_source_projection(v41_checkpoint):
 def test_v41_partial_forward_does_not_advance_cache(model):
     tokens = torch.tensor([[4, 7, 9, 13, 16, 5]])
     cache = model(tokens[:, :3]).past_key_values
+    tail = cache.engram_tail.clone()
 
     def fail(*args):
         raise RuntimeError("after compression")
@@ -270,6 +371,7 @@ def test_v41_partial_forward_does_not_advance_cache(model):
     assert cache.layers[1].compressed.length == 1
     assert cache.layers[1].pool_tail.size(1) == 1
     assert cache.layers[3].compressed.length == 3
+    torch.testing.assert_close(cache.engram_tail, tail)
 
     retried = model(tokens[:, 3:], past_key_values=cache).logits
     fresh_cache = model(tokens[:, :3]).past_key_values
@@ -391,9 +493,53 @@ def test_v41_candidate_order_does_not_depend_on_masked_tail():
     torch.testing.assert_close(blocks, torch.tensor([[[2, 0]]], dtype=torch.int32))
 
 
-def test_v41_public_load_rejects_quantization(v41_checkpoint):
-    with pytest.raises(NotImplementedError, match="published DeepSeek V4.1 Flash FP8/FP4 checkpoint"):
-        GPTQModel.load(v41_checkpoint, device="cpu", quantize_config={"bits": 4, "group_size": 32})
+def test_v41_gptq_export_preserves_engram_and_mtp(v41_checkpoint, tmp_path):
+    from gptqmodel.quantization.config import CalibrationConfig, QuantizeConfig
+
+    wrapped = GPTQModel.load(
+        v41_checkpoint, device="cpu",
+        quantize_config=QuantizeConfig(bits=4, group_size=32, desc_act=False, act_group_aware=False),
+    )
+    calibration = CalibrationConfig(dataset=[[4, 7, 8, 9, 11, 12], [21, 20, 16, 15, 10, 13]], min_length=0)
+    for projection in ("layers.0.engram.wkv", "mtp.0.attn.wq_a"):
+        with pytest.raises(ValueError, match="preserves the published weights"):
+            wrapped.quantize(calibration, projections=[projection])
+
+    seen = []
+    def observe_engram(*_):
+        seen.append(True)
+    def fail_mtp(*_):
+        pytest.fail("The draft path ran during calibration")
+    handles = [wrapped.model.layers[0].engram.register_forward_pre_hook(observe_engram)]
+    handles.extend(block.register_forward_pre_hook(fail_mtp) for block in wrapped.model.mtp)
+    try:
+        report = wrapped.quantize(calibration, projections=["layers.0.attn.wq_a", "layers.1.attn.wo_a"])
+    finally:
+        for handle in handles:
+            handle.remove()
+    assert seen
+    assert wrapped.quantized and len(report["gptq"]) == 3
+
+    output = tmp_path / "gptq"
+    wrapped.save(output, max_shard_size=11000)
+    source_map = json.loads((v41_checkpoint / "model.safetensors.index.json").read_text())["weight_map"]
+    saved_map = json.loads((output / "model.safetensors.index.json").read_text())["weight_map"]
+    for name in source_map:
+        if not (name.startswith("mtp.") or ".engram." in name):
+            continue
+        with safe_open(v41_checkpoint / source_map[name], framework="pt") as src, safe_open(
+            output / saved_map[name], framework="pt",
+        ) as dst:
+            a, b = src.get_tensor(name), dst.get_tensor(name)
+            assert (a.dtype, a.shape) == (b.dtype, b.shape)
+            assert torch.equal(a.reshape(-1).view(torch.uint8), b.reshape(-1).view(torch.uint8)), name
+    assert "layers.0.attn.wq_a.weight" not in saved_map
+    assert "layers.0.attn.wq_a.projections.0.qweight" in saved_map
+    reloaded = GPTQModel.load(output, device="cpu")
+    tokens = torch.tensor([[4, 11, 9]])
+    assert reloaded.quantized and len(reloaded.model.mtp) == 2
+    assert reloaded.model.config.text_config.engram_layer_ids == [0, 1]
+    torch.testing.assert_close(reloaded(tokens).logits, wrapped(tokens).logits, atol=0, rtol=0)
 
 
 def test_v41_marlin_backend_requires_cuda(v41_checkpoint):
