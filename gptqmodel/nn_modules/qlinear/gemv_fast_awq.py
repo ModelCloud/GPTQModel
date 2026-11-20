@@ -209,6 +209,9 @@ class AwqGEMVFastLinear(AWQuantLinear):
 
         zeros = self._runtime_zeros().contiguous()
         scales = self.scales.contiguous()
+        # A biased layer asks the kernel to keep the complete reduction in FP32
+        # so the bias joins it before the single cast to the activation dtype.
+        wide_bias = self.bias is not None
         if inputs_dim == 3 and batch_size < 8 and n_tokens == 1:
             out = awq_fast_gemv_forward_decode(
                 inputs,
@@ -219,21 +222,17 @@ class AwqGEMVFastLinear(AWQuantLinear):
                 self.out_features,
                 self.in_features,
                 self.group_size,
+                fp32_output=wide_bias,
             )
         else:
             out = awq_fast_gemm_forward_prefill(
-                inputs, self.qweight, scales, zeros
+                inputs, self.qweight, scales, zeros, fp32_output=wide_bias
             )
 
         if self.bias is not None:
-            # A CUDA FP16 add already accumulates in FP32 and rounds once, so
-            # the single kernel is bitwise identical to widening both operands.
-            # Keep the wide path for BF16 and mixed dtypes: rounding either
-            # operand to BF16 before the add changes the result.
-            if input_dtype == torch.float16 and self.bias.dtype == torch.float16:
-                out = torch.add(out, self.bias)
-            else:
-                out = out.float() + self.bias.float()
+            # ``out`` is the wide kernel result; add the stored bias
+            # in place so only one allocation (the final cast) remains.
+            out.add_(self.bias)
         out = out.to(dtype=input_dtype)
 
         if self.adapter:

@@ -175,20 +175,52 @@ def awq_dequantize_weights(qweight, scales, qzeros, split_k_iters, thx, thy, dbg
     return _awq_op("dequantize_weights")(qweight, scales, qzeros, split_k_iters, thx, thy, dbg)
 
 
-def awq_gemmv2_forward(input, qweight, scales, qzeros, group_size, split_k_iters):
-    return _awq_op("gemmv2_forward")(input, qweight, scales, qzeros, group_size, split_k_iters)
+def awq_gemmv2_forward(
+    input,
+    qweight,
+    scales,
+    qzeros,
+    group_size,
+    split_k_iters,
+    fp32_output: bool = False,
+):
+    """Split-K GEMV-format GEMM whose split-K partials stay in float32.
+
+    ``fp32_output`` keeps the reduced result in float32 so a caller can add a
+    stored bias to the complete reduction and round exactly once. Without it
+    the kernel still accumulates every split in float32 and rounds the final
+    sum once, instead of rounding each partial before the reduction.
+    """
+
+    return _awq_op("gemmv2_forward")(
+        input, qweight, scales, qzeros, group_size, split_k_iters, fp32_output
+    )
 
 
-def awq_gemv_forward(input, qweight, scales, qzeros, group_size):
-    return _awq_op("gemv_forward")(input, qweight, scales, qzeros, group_size)
+def awq_gemv_forward(input, qweight, scales, qzeros, group_size, fp32_output: bool = False):
+    """FP16 GEMV whose output stays float32 when ``fp32_output`` is set.
+
+    A biased layer requests the wide result so the bias joins the complete
+    FP32 reduction before the single cast to the activation dtype.
+    """
+
+    return _awq_op("gemv_forward")(input, qweight, scales, qzeros, group_size, fp32_output)
 
 
-def awq_fast_gemm_forward_prefill(input, qweight, scales, qzeros):
-    return _awq_op("gemm_fast_forward_prefill")(input, qweight, scales, qzeros)
+def awq_fast_gemm_forward_prefill(input, qweight, scales, qzeros, fp32_output: bool = False):
+    """GEMV_FAST prefill GEMM with an optional float32 (bias-ready) output."""
+
+    return _awq_op("gemm_fast_forward_prefill")(input, qweight, scales, qzeros, fp32_output)
 
 
-def awq_fast_gemv_forward_decode(input, qweight, scales, qzeros, m, n, k, group_size):
-    return _awq_op("gemv_fast_forward_decode")(input, qweight, scales, qzeros, m, n, k, group_size)
+def awq_fast_gemv_forward_decode(
+    input, qweight, scales, qzeros, m, n, k, group_size, fp32_output: bool = False
+):
+    """GEMV_FAST decode GEMV with an optional float32 (bias-ready) output."""
+
+    return _awq_op("gemv_fast_forward_decode")(
+        input, qweight, scales, qzeros, m, n, k, group_size, fp32_output
+    )
 
 
 __all__ = [

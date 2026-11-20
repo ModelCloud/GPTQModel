@@ -227,6 +227,11 @@ class AwqGEMVLinear(AWQuantLinear):
         if input_dtype != torch.float16:
             inputs = inputs.half()
 
+        # A biased layer asks the kernel to keep the complete reduction (and
+        # every split-K partial) in FP32. The bias then joins the wide sum and
+        # the result is rounded once, instead of rounding the product first and
+        # adding the bias to that already-rounded value.
+        wide_bias = self.bias is not None
         if inputs.shape[0] > 8:
             out = awq_gemmv2_forward(
                 inputs,
@@ -235,21 +240,22 @@ class AwqGEMVLinear(AWQuantLinear):
                 self.qzeros,
                 self.group_size,
                 self.split_k_iters,
+                fp32_output=wide_bias,
             )
         else:
             out = awq_gemv_forward(
-                inputs, self.qweight, self.scales, self.qzeros, self.group_size
+                inputs,
+                self.qweight,
+                self.scales,
+                self.qzeros,
+                self.group_size,
+                fp32_output=wide_bias,
             )
 
         if self.bias is not None:
-            # A CUDA FP16 add already accumulates in FP32 and rounds once, so
-            # the single kernel is bitwise identical to widening both operands.
-            # Keep the wide path for BF16 and mixed dtypes: rounding either
-            # operand to BF16 before the add changes the result.
-            if input_dtype == torch.float16 and self.bias.dtype == torch.float16:
-                out = torch.add(out, self.bias)
-            else:
-                out = out.float() + self.bias.float()
+            # ``out`` is the wide kernel result; add the stored bias
+            # in place so only one allocation (the final cast) remains.
+            out.add_(self.bias)
         out = out.to(dtype=input_dtype)
 
         if self.adapter:
@@ -486,7 +492,9 @@ class AwqGEMVTritonLinear(AwqGEMVLinear):
                 output_dtype=output_dtype,
             )
         if self.bias is not None:
-            out = out + self.bias.float()
+            # ``out`` is the wide kernel result; add the stored bias
+            # in place so only one allocation (the final cast) remains.
+            out.add_(self.bias)
         if out.dtype != input_dtype:
             out = out.to(dtype=input_dtype)
         if self.adapter:
