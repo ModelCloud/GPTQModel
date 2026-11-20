@@ -89,10 +89,24 @@ class TTNNPackedLayer:
     shard_out_features: int
     device_count: int
     compute_config: object
+    # A checkpoint bias that BF16 cannot represent is uploaded as FP32 and
+    # added to the FP32 accumulator after the GEMM (#5808).
+    wide_bias: bool = False
 
 
 def _ceil_div(value: int, divisor: int) -> int:
     return (value + divisor - 1) // divisor
+
+
+def _bias_fits_bf16(bias: torch.Tensor) -> bool:
+    """Whether a checkpoint bias survives a BF16 round trip exactly (#5808).
+
+    The fused launch operand is BF16, so a wider FP16 checkpoint value would
+    be rounded before the GEMM epilogue sees it. Values that round-trip are
+    kept on the cheap fused path; the rest take the FP32 add.
+    """
+
+    return bool(torch.equal(bias.to(torch.bfloat16).to(bias.dtype), bias))
 
 
 def _shard_zero_words(
@@ -376,6 +390,19 @@ class TTNNLinear(GPTQQuantLinear):
         # unpadded on the device.
         indices_layout = ttnn.ROW_MAJOR_LAYOUT
 
+        bias_cpu = None
+        bias_dtype = None
+        wide_bias = False
+        if self.bias is not None:
+            bias_cpu = self.bias.detach().to("cpu").reshape(1, -1).contiguous()
+            wide_bias = not _bias_fits_bf16(bias_cpu)
+            if wide_bias:
+                bias_dtype = ttnn.float32
+                bias_cpu = bias_cpu.to(torch.float32)
+            else:
+                bias_dtype = ttnn.bfloat16
+                bias_cpu = bias_cpu.to(torch.bfloat16)
+
         if device_count == 1:
             weight = _upload(weight_words, ttnn.uint32)
             zeros = _upload(zero_words, ttnn.uint32)
@@ -386,11 +413,8 @@ class TTNNLinear(GPTQQuantLinear):
                 layout=indices_layout,
             )
             bias = None
-            if self.bias is not None:
-                bias = _upload(
-                    self.bias.detach().to("cpu", torch.bfloat16).reshape(1, -1).contiguous(),
-                    ttnn.bfloat16,
-                )
+            if bias_cpu is not None:
+                bias = _upload(bias_cpu, bias_dtype)
         else:
             shard_rows = ttnn.shard_tensor_to_mesh_mapper(dev, 0)
             shard_cols = ttnn.shard_tensor_to_mesh_mapper(dev, 1)
@@ -408,11 +432,8 @@ class TTNNLinear(GPTQQuantLinear):
                 layout=indices_layout,
             )
             bias = None
-            if self.bias is not None:
-                bias = _upload(
-                    self.bias.detach().to("cpu", torch.bfloat16).reshape(1, -1).contiguous(),
-                    ttnn.bfloat16, shard_cols,
-                )
+            if bias_cpu is not None:
+                bias = _upload(bias_cpu, bias_dtype, shard_cols)
 
         device_bytes = None
         if allocated_before is not None:
@@ -464,6 +485,7 @@ class TTNNLinear(GPTQQuantLinear):
             shard_out_features=shard_out,
             device_count=device_count,
             compute_config=compute_config,
+            wide_bias=wide_bias,
         )
         self._ttnn_key = key
         self._ttnn_device_ids = device_ids
@@ -601,10 +623,25 @@ class TTNNLinear(GPTQQuantLinear):
 
         weights = self._dequantize(ttnn, layer)
         try:
-            output = ttnn.linear(
-                activation, weights, bias=layer.bias,
-                compute_kernel_config=layer.compute_config,
-            )
+            if layer.wide_bias:
+                # The checkpoint bias needs more bits than BF16 carries. Add it
+                # to the FP32 GEMM result and round the public output once, so
+                # the fused BF16 operand cannot erase a finite residual.
+                wide = ttnn.linear(
+                    activation, weights, dtype=ttnn.float32,
+                    compute_kernel_config=layer.compute_config,
+                )
+                biased = ttnn.add(wide, layer.bias)
+                ttnn.deallocate(wide)
+                try:
+                    output = ttnn.typecast(biased, ttnn.bfloat16)
+                finally:
+                    ttnn.deallocate(biased)
+            else:
+                output = ttnn.linear(
+                    activation, weights, bias=layer.bias,
+                    compute_kernel_config=layer.compute_config,
+                )
         finally:
             ttnn.deallocate(weights)
 
