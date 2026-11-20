@@ -12,7 +12,6 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import transformers
 
 from ..looper.named_module import NamedModule
@@ -21,7 +20,6 @@ from ..utils.fallback import resolve_fallback_strategy, should_use_fallback
 from ..utils.logger import setup_logger
 from ..utils.p2p import safe_move_to
 from ..utils.torch import torch_sync
-from .conv_padding import conv_padding_pairs, pad_mode
 from .gar import (
     compose_final_perm,
     compute_global_perm,
@@ -29,7 +27,13 @@ from .gar import (
     extend_perm_with_tail,
     invert_perm,
 )
-from .gptq import GPTQ, _device_reduction_key, _move_static_groups, _static_group_of_column
+from .gptq import (
+    GPTQ,
+    _device_reduction_key,
+    _move_static_groups,
+    _static_group_of_column,
+    conv_patch_matrix,
+)
 from .quantizer import _neutralize_dead_columns
 
 
@@ -165,26 +169,15 @@ class GPTAQ(GPTQ):
             if self._use_native_delta:
                 native_inp = native_inp.t()
 
-        if isinstance(self.module, nn.Conv2d):
-            # `nn.Unfold` only accepts integer zero padding, so apply the
-            # layer's own padding (including its mode) and unfold the
-            # already-padded input. This keeps the Hessian on the operator
-            # that will actually run, matching GPTQ's capture (#3917, #5646).
-            (top, bottom), (left, right) = conv_padding_pairs(self.module)
-            pad = (left, right, top, bottom)
-            mode = pad_mode(self.module.padding_mode)
-            unfold = nn.Unfold(
-                self.module.kernel_size,
-                dilation=self.module.dilation,
-                padding=0,
-                stride=self.module.stride,
-            )
-            inp = unfold(F.pad(inp, pad, mode=mode))
-            inp = inp.permute([1, 0, 2])
-            inp = inp.flatten(1)
+        if isinstance(self.module, (nn.Conv1d, nn.Conv2d)):
+            # Share GPTQ's grouped im2col geometry: it applies the layer's own
+            # padding mode and folds groups the same way for every solver
+            # (#3917, #5646, #5763).
+            inp = conv_patch_matrix(self.module, inp, columns_first=True)
             if self._use_native_delta:
-                native_inp = unfold(F.pad(native_inp, pad, mode=mode))
-                native_inp = native_inp.permute([1, 0, 2]).flatten(1)
+                native_inp = conv_patch_matrix(
+                    self.module, native_inp, columns_first=True
+                )
 
         self._accumulate_device_batch(inp, native_inp, batch_request_count)
         self._gptaq_batch_request_count += batch_request_count

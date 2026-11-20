@@ -416,6 +416,55 @@ def get_number_of_rows_and_cols(layer: nn.Module):
         return layer.weight.shape[0], math.prod(layer.weight.shape[1:])
 
 
+def conv_patch_matrix(
+    module: _ConvNd, inp: torch.Tensor, *, columns_first: bool = False
+) -> torch.Tensor:
+    """Return ``[patches, columns]`` im2col activations for a conv module.
+
+    ``nn.Unfold`` only accepts integer zero padding, so the layer's own padding
+    (including its mode) is applied first and the already-padded input is
+    unfolded. That keeps the calibration on the operator that will actually
+    run (#5646). Groups are folded into the batch axis, matching the packed
+    weight layout ``(out_channels, in_channels // groups, *kernel)``; without
+    that fold a grouped Conv2d produced ``in_channels * kernel`` columns for a
+    weight that has ``in_channels // groups * kernel`` (#5763).
+
+    Every solver must use this helper: plain GPTQ, GPTAQ, and FOEM have to
+    calibrate the same patches or their Hessians describe different operators.
+    ``columns_first`` returns the contiguous ``[columns, patches]`` layout the
+    correction accumulators consume; transposing a ``[patches, columns]`` result
+    instead leaves a strided view that their GEMM has to copy.
+    """
+
+    groups = module.groups
+    if isinstance(module, nn.Conv1d):
+        batch, channels, length = inp.shape
+        padded = inp.reshape(batch * groups, channels // groups, length, 1)
+        (left, right), = conv_padding_pairs(module)
+        padded = F.pad(
+            padded, (0, 0, left, right), mode=pad_mode(module.padding_mode)
+        )
+        kernel = module.kernel_size + (1,)
+        dilation = module.dilation + (1,)
+        stride = module.stride + (1,)
+    else:
+        batch, channels, height, width = inp.shape
+        padded = inp.reshape(batch * groups, channels // groups, height, width)
+        # ``conv_padding_pairs`` reports pairs in the module's spatial order
+        # (height, width); ``F.pad`` wants the last dimension first.
+        (top, bottom), (left, right) = conv_padding_pairs(module)
+        padded = F.pad(
+            padded, (left, right, top, bottom), mode=pad_mode(module.padding_mode)
+        )
+        kernel, dilation, stride = module.kernel_size, module.dilation, module.stride
+    patches = F.unfold(padded, kernel, dilation=dilation, padding=0, stride=stride)
+    if columns_first:
+        # (batch_size, columns, num_patches) -> (columns, batch_size * num_patches)
+        return patches.permute(1, 0, 2).flatten(1)
+    # (batch_size, columns, num_patches) -> (batch_size * num_patches, columns)
+    return patches.transpose(1, 2).flatten(0, 1)
+
+
 def _uniform_column_group_stream(device: torch.device):
     """Identify the stream whose ordering makes a cached zero-fill visible.
 
@@ -1457,55 +1506,7 @@ class GPTQ:
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
             reshaped_inp = inp.reshape(-1, inp.shape[-1])
         else:
-            if isinstance(self.module, nn.Conv1d):
-                reshaped_inp = inp.reshape(
-                    inp.size(0) * self.module.groups,
-                    inp.size(1) // self.module.groups,
-                    inp.shape[2],
-                    1,
-                )
-                # `nn.Unfold` only accepts integer zero padding, so apply the
-                # layer's own padding (including its mode) and unfold the
-                # already-padded input. `padding="same"` is resolved to
-                # PyTorch's asymmetric split by `conv_padding_pairs`.
-                (left, right), = conv_padding_pairs(self.module)
-                reshaped_inp = F.pad(
-                    reshaped_inp,
-                    (0, 0, left, right),
-                    mode=pad_mode(self.module.padding_mode),
-                )
-                unfold = nn.Unfold(
-                    self.module.kernel_size + (1,),
-                    dilation=self.module.dilation + (1,),
-                    padding=0,
-                    stride=self.module.stride + (1,),
-                )
-                # output size (batch_size, channels * \prod kernel_size, num_patches)
-                reshaped_inp = unfold(reshaped_inp)
-            else:
-                reshaped_inp = inp.reshape(
-                    inp.size(0) * self.module.groups,
-                    inp.size(1) // self.module.groups,
-                    inp.shape[2],
-                    inp.shape[3],
-                )
-                # `conv_padding_pairs` reports pairs in the module's spatial
-                # order (height, width); `F.pad` wants the last dimension first.
-                (top, bottom), (left, right) = conv_padding_pairs(self.module)
-                reshaped_inp = F.pad(
-                    reshaped_inp,
-                    (left, right, top, bottom),
-                    mode=pad_mode(self.module.padding_mode),
-                )
-                unfold = nn.Unfold(
-                    self.module.kernel_size,
-                    dilation=self.module.dilation,
-                    padding=0,
-                    stride=self.module.stride,
-                )
-                # output size (batch_size, channels * \prod kernel_size, num_patches)
-                reshaped_inp = unfold(reshaped_inp)
-            reshaped_inp = reshaped_inp.transpose(1, 2).flatten(0, 1)
+            reshaped_inp = conv_patch_matrix(self.module, inp)
 
         # Delay dtype conversion until we materialize Hessian chunks to avoid unnecessary temporaries
         reshaped_inp = reshaped_inp.contiguous()
