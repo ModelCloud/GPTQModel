@@ -609,9 +609,17 @@ class GPTAQ(GPTQ):
             Losses1 = torch.zeros_like(W1)
             Hinv1 = Hinv[i1:i2, i1:i2]
             P1 = P[i1:i2, i1:i2] if P is not None else None
+            # The in-block updates below mutate ``W1``. The deferred native
+            # delta product must see each column's pre-update working value,
+            # exactly like the in-block ``P1`` term does; reading ``W1`` after
+            # the loop would apply the correction to the post-update weight
+            # (#5647).
+            W1_pre = torch.empty_like(W1) if P is not None else None
 
             for i in range(count):
                 w = W1[:, i]
+                if W1_pre is not None:
+                    W1_pre[:, i] = w
                 d = Hinv1[i, i]
 
                 if self.qcfg.group_size != -1:
@@ -648,7 +656,7 @@ class GPTAQ(GPTQ):
             if P is None:
                 W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
             else:
-                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:]) - W1.matmul(P[i1:i2, i2:])
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:]) - W1_pre.matmul(P[i1:i2, i2:])
 
         del Hinv
         del P

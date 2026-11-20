@@ -705,9 +705,17 @@ class FOEM(GPTQ):
             Hinv1 = Hinv[i1:i2, i1:i2]
             if self.gptaq:
                 P1 = P[i1:i2, i1:i2]
+                # The in-block updates below mutate ``W1``. The deferred
+                # native delta product must see each column's pre-update
+                # working value, exactly like the in-block ``P1`` term does;
+                # reading ``W1`` after the loop would apply the correction to
+                # the post-update weight (#5647).
+                W1_pre = torch.empty_like(W1)
 
             for i in range(count):
                 w = W1[:, i]
+                if self.gptaq:
+                    W1_pre[:, i] = w
                 w_raw = W1_raw[:, i]
                 d = Hinv1[i, i]
 
@@ -745,7 +753,7 @@ class FOEM(GPTQ):
             Losses[:, i1:i2] = Losses1 / 2
 
             if self.gptaq:
-                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:]) - W1.matmul(P[i1:i2, i2:])
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:]) - W1_pre.matmul(P[i1:i2, i2:])
             else:
                 W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
             # The in-block correction above pulls the next column back toward
