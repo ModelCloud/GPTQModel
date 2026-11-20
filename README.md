@@ -101,6 +101,8 @@ Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kerne
 
 EXL3 supports packed 1.5, 2.5 and 3.5 bits per weight with the `mul1` codebook. [Native half-bit EXL3 rates](docs/exl3-runtime-weights.md#native-mul1-half-bit-rates)
 
+AlexBrandes's Q4NX codebook supports EXL3 at 2.5 and 3.0 bits per weight. [Q4NX layout and CUDA dispatch](docs/exl3-native-decode.md#q4nx-at-25-and-30-bits-per-weight)
+
 ### Control, scale, and quality ⚙️
 
 - **Choose where to spend precision.** Mix bit widths, keep sensitive modules

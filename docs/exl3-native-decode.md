@@ -5,11 +5,71 @@ GEMV and GEMM kernels come from ExLlamaV3 v1.6.7, with the GPT-QModel Torch
 operator boundary, packed launch-selection table, and per-call scratch.
 The source revision is [8c593e4](https://github.com/turboderp-org/exllamav3/tree/8c593e4e5c88da76a4aaf8f1b1838bb7c1fce4e0).
 
-The codebooks are `3inst`, `mcg` and `mul1`. All three handle integer
+The `3inst`, `mcg` and `mul1` codebooks handle integer
 rates from 1 to 8 bits per weight. The `mul1` codebook also handles
 1.5, 2.5 and 3.5 bits per weight, with 24, 40 and 56 16-bit words per
 16×16 tile. The half-bit tiles alternate widths and use the same codebook
 values as their integer relatives.
+
+## Q4NX at 2.5 and 3.0 bits per weight
+
+AlexBrandes (Alex Brandes) developed Q4NX for routed MoE experts. GPT-QModel
+adapts his beam search from ExLlamaV3 and the fragment decoder from his vLLM
+fork. [Q4NX format specification](https://github.com/AlexBrandes/exllamav3/blob/41ef7819945fe421626da3c40c678053d240d051/doc/q4nx.md) · [CUDA fragment decoder](https://github.com/AlexBrandes/vllm/blob/ff413b2df19718342e02d9763f161d69afce7b4a/csrc/exl3/codec_q4n.cuh)
+
+Set `EXL3Config(bits=2.5, codebook="q4nx")` for all selected projections,
+or assign both the rate and codebook to a subset through `dynamic`.
+
+```python
+from gptqmodel.quantization import EXL3Config
+
+qcfg = EXL3Config(
+    bits=4,
+    codebook="mcg",
+    dynamic={
+        r"^model\.layers\.\d+\.mlp\.experts\.\d+\.(gate|up|down)_proj$": {
+            "bits": 2.5,
+            "codebook": "q4nx",
+        },
+    },
+)
+```
+
+| Tile property | `3inst`, `mcg`, `mul1` | `q4nx` |
+| --- | --- | --- |
+| 16×16 payload at 2.5 and 3.0 bpw | 40 and 48 int16 words, respectively. Only `mul1` supports 2.5 bpw. | 40 and 48 int16 words, respectively |
+| State | 256 scalar steps with overlapping 16-bit states | 64 steps with four weights per state and 22 or 20 state bits |
+| Tile boundary | Window wraps to the end of the same tile | Bits before the start are zero |
+| Checkpoint selection | `.mcg`, `.mul1` or no marker | A scalar int32 `.q4nx` marker with multiplier `0x83DCD12D` |
+
+Each step adds a 10- or 12-bit suffix, most significant bit first. Safetensors
+stores each 32-bit word as its low and then high 16-bit halfword. The nibble
+sums of the low 32 bits of `state * 0x83DCD12D` give four
+integers in `[-15, 15]`. The decoder divides them by `sqrt(42.5)`. NVIDIA
+CUDA kernels feed the integer values into FP16 tensor-core operands and
+apply the normalization in FP32 after accumulation. The scale search uses
+a 16-state beam and the final encoder uses a 128-state beam.
+
+```mermaid
+flowchart LR
+    C["EXL3Config and dynamic rules"] --> R{"Supported rate?"}
+    R -->|yes| V["quantize_tiles_q4nx"]
+    R -->|no| E["ValueError"]
+    V --> P["pack_trellis_q4nx"]
+    P --> S["Safetensors trellis, scales and q4nx marker"]
+    S --> G["Packed CUDA GEMM or explicit routed decode"]
+    S --> T["Chunked EXL3_TORCH reconstruction"]
+```
+
+Quantization requires NVIDIA CUDA. Inference uses packed CUDA GEMM for FP16
+and BF16 on NVIDIA, or `BACKEND.EXL3_TORCH` for portable reconstruction.
+The optional FP16 and INT8 GEMV policies apply to their original codebooks.
+Q4NX weights also work with the explicit [routed decode operator](exl3-routed-decode.md).
+The saved quantization config keeps the default `codebook` and the
+`dynamic` recipe. Its `tensor_storage` entry lists each projection's
+`.q4nx` tensor and its dtype and shape. The loader selects the decoder
+from the per-projection marker, so a checkpoint can mix Q4NX and other EXL3
+codebooks.
 
 ## Runtime policy
 

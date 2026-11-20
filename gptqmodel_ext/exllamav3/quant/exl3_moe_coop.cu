@@ -27,10 +27,30 @@ void exl3_moe_coop_empty_kernel(const MoeCoopParams p)
     exl3_moe_coop_ns::write_empty_row_chunk(p, blockIdx.x, blockIdx.y, threadIdx.x);
 }
 
+template <int K, bool half_k>
+static MoeCoopKernel q4nx_kernel_a(int Hi, bool wide)
+{
+    using namespace exl3_moe_coop_ns;
+    auto kernel = wide ? exl3_moe_coop_a_kernel<K, EXL3_Q4NX_CODEBOOK, true, half_k>
+                       : exl3_moe_coop_a_kernel<K, EXL3_Q4NX_CODEBOOK, false, half_k>;
+    return {reinterpret_cast<void*>(kernel), smem_a_bytes<K, half_k>(Hi)};
+}
+
+template <int K, bool half_k>
+static MoeCoopKernel q4nx_kernel_b(bool wide)
+{
+    using namespace exl3_moe_coop_ns;
+    auto kernel = wide ? exl3_moe_coop_b_kernel<K, EXL3_Q4NX_CODEBOOK, true, half_k>
+                       : exl3_moe_coop_b_kernel<K, EXL3_Q4NX_CODEBOOK, false, half_k>;
+    return {reinterpret_cast<void*>(kernel), smem_b_bytes<K, half_k>()};
+}
+
 static MoeCoopKernel moe_coop_kernel_a(float K_, int cb, int Hi, bool wide)
 {
     const BitsK bk = bits_from_K(K_);
     const int K = bk.bits;
+    if (cb == EXL3_Q4NX_CODEBOOK)
+        return bk.half ? q4nx_kernel_a<2, true>(Hi, wide) : q4nx_kernel_a<3, false>(Hi, wide);
     if (bk.half)
     {
         TORCH_CHECK(cb == 2, "exl3_moe_coop: half-integer bitrates require the mul1 codebook");
@@ -58,6 +78,8 @@ static MoeCoopKernel moe_coop_kernel_b(float K_, int cb, bool wide)
 {
     const BitsK bk = bits_from_K(K_);
     const int K = bk.bits;
+    if (cb == EXL3_Q4NX_CODEBOOK)
+        return bk.half ? q4nx_kernel_b<2, true>(wide) : q4nx_kernel_b<3, false>(wide);
     if (bk.half)
     {
         TORCH_CHECK(cb == 2, "exl3_moe_coop: half-integer bitrates require the mul1 codebook");
@@ -166,7 +188,7 @@ MoeCoopParams exl3_moe_coop_prepare
     const c10::optional<at::Tensor>& u_bias,
     const c10::optional<at::Tensor>& d_bias,
     float Kg, float Ku, float Kd,
-    bool mcg, bool mul1,
+    bool mcg, bool mul1, bool q4nx,
     int act,
     float act_limit,
     bool gated,
@@ -194,9 +216,11 @@ MoeCoopParams exl3_moe_coop_prepare
         check_table(*t);
     for (const auto* t : { &g_bias, &u_bias, &d_bias })
         if (*t) check_table(t->value());
-    TORCH_CHECK(!(mcg && mul1), "exl3_moe_coop: specified both mcg and mul1");
+    TORCH_CHECK(int(mcg) + int(mul1) + int(q4nx) <= 1, "exl3_moe_coop: conflicting codebooks");
     TORCH_CHECK(Kg >= 1 && Kg <= 8 && Ku >= 1 && Ku <= 8 && Kd >= 1 && Kd <= 8, "exl3_moe_coop: K out of range");
     TORCH_CHECK(!gated || Kg == Ku, "exl3_moe_coop: gate and up must share a bit width");
+    TORCH_CHECK(!q4nx || ((Ku == 2.5f || Ku == 3.f) && (Kd == 2.5f || Kd == 3.f)),
+                "exl3_moe_coop: Q4NX requires 2.5 or 3.0 bpw");
     TORCH_CHECK(act >= 0 && act <= 3, "exl3_moe_coop: unknown activation");
 
     MoeCoopParams p = {};
@@ -279,7 +303,7 @@ MoeCoopParams exl3_moe_coop_prepare
 
     K_gu = gated ? Kg : Ku;
     K_d = Kd;
-    cb = mcg ? 1 : (mul1 ? 2 : 0);
+    cb = q4nx ? EXL3_Q4NX_CODEBOOK : mcg ? 1 : mul1 ? 2 : 0;
     return p;
 }
 
@@ -347,7 +371,8 @@ void exl3_moe_coop
     at::Tensor& ctr,
     at::Tensor& out,
     const c10::optional<at::Tensor>& sh_out,
-    const c10::optional<at::Tensor>& sh_gate_w
+    const c10::optional<at::Tensor>& sh_gate_w,
+    bool q4nx
 )
 {
     TORCH_CHECK_DTYPE(x, kHalf);
@@ -373,7 +398,7 @@ void exl3_moe_coop
     }
     float K_gu, K_d; int cb;
     MoeCoopParams p = exl3_moe_coop_prepare(Hi, g_trellis, g_suh, g_svh, u_trellis, u_suh, u_svh, d_trellis, d_suh, d_svh,
-                                            g_bias, u_bias, d_bias, Kg, Ku, Kd, mcg, mul1, act, act_limit, gated,
+                                            g_bias, u_bias, d_bias, Kg, Ku, Kd, mcg, mul1, q4nx, act, act_limit, gated,
                                             had_g, had_u, gu_g, gu_u, act_out, d_out, ctr, out, sh_gate_w, K_gu, K_d, cb);
     p.min_expert = min_expert;
     p.max_expert = max_expert;
